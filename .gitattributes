@@ -1,0 +1,9 @@
+# Keep line endings as LF on every system (Windows checkouts too): the engine's runtime is staged and
+# provisioned into WSL from these files, and shell scripts with CRLF fail there.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.tar.gz binary

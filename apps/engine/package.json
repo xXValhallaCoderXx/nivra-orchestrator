@@ -1,0 +1,23 @@
+{
+  "name": "@nivra/engine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Nivra engine: a Node process that speaks JSON-RPC over stdio and runs Mastra workflows.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "probe:tokenfactory": "node scripts/probe-tokenfactory.ts",
+    "rpc": "node scripts/rpc.ts"
+  },
+  "dependencies": {
+    "@mastra/core": "1.75.0",
+    "@mastra/libsql": "1.25.1",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@nivra/domain": "workspace:*",
+    "@types/node": "24.19.1",
+    "typescript": "5.9.3"
+  }
+}

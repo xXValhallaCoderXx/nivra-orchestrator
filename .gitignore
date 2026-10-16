@@ -1,0 +1,23 @@
+# Dependencies
+node_modules
+
+# Build output
+out
+dist
+release
+*.tsbuildinfo
+
+# Test output
+test-results
+playwright-report
+
+# Local caches
+.cache
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# The runtime staged for installers (apps/desktop/scripts/stage-runtime.ts)
+apps/desktop/build/stage

@@ -1,0 +1,23 @@
+{
+  "name": "nivra-orchestrator",
+  "private": true,
+  "packageManager": "pnpm@10.4.1",
+  "engines": {
+    "node": "24.21.0"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "verify": "pnpm typecheck && pnpm test",
+    "probe:tokenfactory": "pnpm --filter @nivra/engine --fail-if-no-match probe:tokenfactory",
+    "rpc": "pnpm --filter @nivra/engine --fail-if-no-match rpc"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ],
+    "ignoredBuiltDependencies": [
+      "electron-winstaller"
+    ]
+  }
+}
