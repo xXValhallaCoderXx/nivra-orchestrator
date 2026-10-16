@@ -1,23 +1,24 @@
-import type { DoctorReport, EngineInfo, ProviderCheck, RunEventsPage, RunList, RunStatus, RunSummary } from "@nivra/domain";
+import type { DoctorReport, EngineInfo, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
  * Electron security rules). Every new call is added here first. The renderer imports domain types only (zod at
  * runtime would trip the CSP), and it never sends a filesystem path: folders come from the native picker in main (D1).
+ * There is no target to choose: each project's folder decides which engine it uses (D17), so calls name a project.
  */
 
 export const IPC = {
   getAppInfo: "app:info",
-  listTargets: "targets:list",
-  selectTarget: "targets:select",
-  engineStatus: "engine:status",
+  listEngines: "engines:list",
+  openProject: "projects:open",
   restartEngine: "engine:restart",
   runDoctor: "engine:doctor",
+  getWsl: "wsl:get",
+  checkWsl: "wsl:check",
   listProjects: "projects:list",
   addProject: "projects:add",
   removeProject: "projects:remove",
   startHello: "runs:hello",
-  listRuns: "runs:list",
   runEvents: "runs:events",
   cancelRun: "runs:cancel",
   getSettings: "settings:get",
@@ -35,19 +36,17 @@ export interface AppInfo {
   packaged: boolean;
 }
 
-export interface TargetView {
-  id: string;
-  kind: "local" | "wsl";
-  /** "Ubuntu · WSL", "Windows · Local", … (D1). */
-  label: string;
-  platform: string;
-}
-
-export interface TargetsView {
-  targets: TargetView[];
-  selectedId: string;
-  /** What WSL discovery found; null off Windows. `message` says what to do when WSL cannot be used. */
-  wsl: { status: "ready" | "missing" | "inbox-only" | "broken"; message: string | null } | null;
+/**
+ * What WSL can offer on this Windows host (D17), with what to do when it offers nothing. `checking` until the first
+ * discovery has finished; the whole view is null off Windows.
+ */
+export interface WslView {
+  status: "checking" | "ready" | "missing" | "inbox-only" | "broken" | "no-usable-distribution";
+  /** What happened and what to do; null when at least one distribution can be used. */
+  message: string | null;
+  /** WSL's own `WSL_E_*` code, when it gave one. */
+  code: string | null;
+  distros: Array<{ name: string; label: string; isDefault: boolean; problem: string | null }>;
 }
 
 export type EngineStateView =
@@ -66,10 +65,15 @@ export interface EngineView {
 
 export interface ProjectView {
   id: string;
+  /** The engine this project's folder belongs to (D17): "local" or "wsl:<distro>". */
   targetId: string;
+  /** "Ubuntu · WSL", "Windows · Local", … shown wherever work starts (D1). */
+  targetLabel: string;
   label: string;
   /** For display only: the renderer never sends a path back. */
   displayPath: string;
+  /** Something to tell the person about this project this session (it moved to another engine, say); null otherwise. */
+  notice: string | null;
 }
 
 export type AddProjectResult =
@@ -88,20 +92,24 @@ export interface SettingsView {
 
 export interface NivraApi {
   getAppInfo(): Promise<AppInfo>;
-  listTargets(): Promise<TargetsView>;
-  selectTarget(targetId: string): Promise<void>;
-  engineStatus(): Promise<EngineView>;
-  restartEngine(): Promise<void>;
-  runDoctor(): Promise<DoctorReport>;
+  /** One view per engine a project uses or that is running; nothing is started by asking. */
+  listEngines(): Promise<EngineView[]>;
+  /** Starts the engine of the project's folder if it isn't running yet, never another one (D17). */
+  openProject(projectId: string): Promise<EngineView>;
+  restartEngine(projectId: string): Promise<void>;
+  runDoctor(projectId: string): Promise<DoctorReport>;
+  getWsl(): Promise<WslView | null>;
+  /** Looks for WSL distributions again (after the person installed or fixed one). */
+  checkWsl(): Promise<WslView | null>;
   listProjects(): Promise<ProjectView[]>;
   addProject(): Promise<AddProjectResult>;
   removeProject(projectId: string): Promise<void>;
   startHello(projectId: string, holdMs: number): Promise<RunSummary>;
-  listRuns(): Promise<RunList>;
+  /** A run's events after a cursor, from the engine that runs it (main remembers which). */
   runEvents(runId: string, after: number): Promise<RunEventsPage>;
   cancelRun(runId: string): Promise<{ status: RunStatus; wasTerminal: boolean }>;
   getSettings(): Promise<SettingsView>;
   setNebiusKey(key: string | null): Promise<SettingsView>;
-  /** Token Factory from the current target's engine: its NVIDIA models and one Nemotron tool call (B7). */
-  checkTokenFactory(): Promise<ProviderCheck>;
+  /** Token Factory from the project's engine: its NVIDIA models and one Nemotron tool call (B7). */
+  checkTokenFactory(projectId: string): Promise<ProviderCheck>;
 }

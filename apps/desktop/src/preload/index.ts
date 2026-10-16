@@ -7,21 +7,21 @@ import { IPC, type NivraApi } from "../shared/ipc.ts";
  */
 const api = {
   getAppInfo: () => ipcRenderer.invoke(IPC.getAppInfo),
-  listTargets: () => ipcRenderer.invoke(IPC.listTargets),
-  selectTarget: (targetId) => ipcRenderer.invoke(IPC.selectTarget, targetId),
-  engineStatus: () => ipcRenderer.invoke(IPC.engineStatus),
-  restartEngine: () => ipcRenderer.invoke(IPC.restartEngine),
-  runDoctor: () => ipcRenderer.invoke(IPC.runDoctor),
+  listEngines: () => ipcRenderer.invoke(IPC.listEngines),
+  openProject: (projectId) => ipcRenderer.invoke(IPC.openProject, projectId),
+  restartEngine: (projectId) => ipcRenderer.invoke(IPC.restartEngine, projectId),
+  runDoctor: (projectId) => ipcRenderer.invoke(IPC.runDoctor, projectId),
+  getWsl: () => ipcRenderer.invoke(IPC.getWsl),
+  checkWsl: () => ipcRenderer.invoke(IPC.checkWsl),
   listProjects: () => ipcRenderer.invoke(IPC.listProjects),
   addProject: () => ipcRenderer.invoke(IPC.addProject),
   removeProject: (projectId) => ipcRenderer.invoke(IPC.removeProject, projectId),
   startHello: (projectId, holdMs) => ipcRenderer.invoke(IPC.startHello, projectId, holdMs),
-  listRuns: () => ipcRenderer.invoke(IPC.listRuns),
   runEvents: (runId, after) => ipcRenderer.invoke(IPC.runEvents, runId, after),
   cancelRun: (runId) => ipcRenderer.invoke(IPC.cancelRun, runId),
   getSettings: () => ipcRenderer.invoke(IPC.getSettings),
   setNebiusKey: (key) => ipcRenderer.invoke(IPC.setNebiusKey, key),
-  checkTokenFactory: () => ipcRenderer.invoke(IPC.checkTokenFactory),
+  checkTokenFactory: (projectId) => ipcRenderer.invoke(IPC.checkTokenFactory, projectId),
 } satisfies NivraApi;
 
 contextBridge.exposeInMainWorld("nivra", api);

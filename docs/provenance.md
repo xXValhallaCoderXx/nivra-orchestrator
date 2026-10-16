@@ -35,7 +35,7 @@ Status is `planned` until the file exists in Nivra; then it is `ported` (largely
 | `apps/engine/src/workflows/hello.ts`, `packages/domain/src/runs.ts`, `apps/engine/src/db/migrations.ts` | `apps/engine/src/workflows/hello.ts`, `packages/domain/src/runs.ts`, `apps/engine/src/db/migrations.ts` @ 45c0057 | rewritten | hello reports engine, repository and git instead of calling a model; migrations from v1 |
 | `apps/desktop/e2e/*.spec.ts`, `apps/desktop/playwright.config.ts` | `apps/desktop/e2e/smoke.spec.ts`, `apps/desktop/playwright.config.ts` @ 45c0057 | rewritten | real engine; isolation by switches; a Windows project driven from WSL |
 | `apps/desktop/src/renderer/src/app/theme.ts`, `fonts.css`, `assets/fonts/*` | `apps/desktop/src/renderer/src/app/theme.ts`, `fonts.css`, `assets/fonts/*` @ 45c0057 | ported | `--nivra-*` variables, privacy colours dropped; IBM Plex (OFL) vendored as in Hird |
-| Engine badge and banner | `apps/desktop/src/renderer/src/features/engine/` @ 45c0057 | rewritten | target selector beside the badge (D1) |
+| Engine badge and banner | `apps/desktop/src/renderer/src/features/engine/` @ 45c0057 | rewritten | the project's target label beside the badge (D1, D17); no selector |
 
 ## Third-party components
 

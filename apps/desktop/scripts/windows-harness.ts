@@ -170,6 +170,19 @@ async function main(): Promise<void> {
       await waitFor(() => !isAlive(nativePid), 10_000, `engine ${nativePid} to exit`);
       return `engine ${nativePid} exited`;
     });
+    // An engine ended from outside (Task Manager, an antivirus) is reported as stopped, never mislabelled, and Restart
+    // brings a fresh one up.
+    await check("native: an engine killed from outside is reported as stopped, and Restart starts it again", async () => {
+      const info = await native.start();
+      process.kill(info.pid);
+      await waitFor(() => native.state.status === "failed" || null, 15_000, "the supervisor to notice");
+      const reason = native.state.status === "failed" ? native.state.reason : "";
+      if (!/stopped unexpectedly/.test(reason)) throw new Error(`unexpected state: ${reason}`);
+      const again = await native.restart();
+      if (again.instanceId === info.instanceId) throw new Error("the same engine instance answered");
+      await native.stop();
+      return `engine ${info.pid} killed; "${reason}"; Restart started pid ${again.pid}`;
+    });
   }
   await check("native: an engine dies with its parent (job object)", () => orphanCheck("native"));
 
@@ -232,6 +245,21 @@ async function main(): Promise<void> {
         const ms = Math.round(performance.now() - started);
         await supervisor.stop();
         return `started in ${ms} ms on runtime ${String(info.runtimeHash)}`;
+      });
+      // Killed inside the distribution: the same failure the host shows for any unexpected exit (it doesn't guess at a
+      // cause), and Restart starts a fresh engine. Terminating the whole distribution isn't checked here: this harness
+      // is started from inside it.
+      await check("wsl: an engine killed inside the distribution is reported as stopped, and Restart starts it again", async () => {
+        const info = await supervisor.start();
+        const killed = await inDistro(["pkill", "-KILL", "-f", "--", instancePattern(info.instanceId)], 15_000);
+        if (killed.code !== 0) throw new Error(`pkill found no engine to stop (exit ${String(killed.code)})`);
+        await waitFor(() => supervisor.state.status === "failed" || null, 15_000, "the supervisor to notice");
+        const reason = supervisor.state.status === "failed" ? supervisor.state.reason : "";
+        if (!/stopped unexpectedly/.test(reason)) throw new Error(`unexpected state: ${reason}`);
+        const again = await supervisor.restart();
+        if (again.instanceId === info.instanceId) throw new Error("the same engine instance answered");
+        await supervisor.stop();
+        return `engine ${info.pid} killed in ${distro.name}; "${reason}"; Restart started pid ${again.pid}`;
       });
     }
     await check("wsl: an engine dies with its parent (job object, then EOF)", () => orphanCheck("wsl", inDistro));

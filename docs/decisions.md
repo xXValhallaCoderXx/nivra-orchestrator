@@ -299,3 +299,106 @@ D44). The cross-environment hazards silently break files unless the one writer c
 - Still open: on native Windows, the background descendants of a finished command cannot be found from its process
   id once it has exited. They die with the engine through libuv's job object (D4), which is one more reason agents'
   commands do not run unconfined on native Windows (D15).
+
+## D17. The folder decides where work runs; one engine per target for the session (2026-10-17)
+
+**Decision.** There is no target selector.
+- **The target is set once, when a folder is added**, by the operating system that owns the folder's filesystem:
+  - a folder on a Windows drive runs on the Windows engine (`local`);
+  - a folder inside a WSL distribution (`\\wsl.localhost\<distro>\…` or `\\wsl$\…`) runs on that distribution's engine;
+  - a Windows drive seen through WSL (`\\wsl.localhost\<distro>\mnt\c\…`) is still a Windows folder;
+  - on Linux and macOS, every folder runs locally.
+- **There are no automatic choices.** WSL is never chosen just because it is installed, and a project never falls back
+  to another target. A folder whose distribution is missing or unusable says why and what to do.
+- **The host keeps one engine per target.**
+  - An engine starts the first time a project on its target is opened, and runs until quit.
+  - Project calls go to the engine of the project's folder.
+  - Run calls go to the engine that started the run. Main keeps a map from run to target, so the renderer never decides
+    where a call goes.
+  - Quitting closes every engine in parallel, each in the D4 order. A closed supervisor never starts again.
+- **On Windows the app always says what WSL can offer**, with the command that fixes it and a Check again button:
+  - WSL missing;
+  - WSL outdated;
+  - WSL not answering;
+  - WSL with no distribution Nivra can use (none, only Docker Desktop's, or only WSL 1 ones).
+
+**Why.**
+- **The race.** The bootstrap's runtime switch existed to prove that both engines work, and it caused a race (external
+  review, 2026-10-17). A switch sent calls to the new engine before the old one had stopped, so a run's polling and its
+  Cancel could reach the wrong engine.
+- **One rule.** D1 and D15 already say a repository is worked on by the OS that owns its filesystem. Binding the target
+  when a folder is added makes that the only rule.
+- **Missing guidance.** A WSL with no usable distribution used to look like no WSL at all, with no guidance.
+
+**Consequences.**
+- **Supersedes:**
+  - D1's target choice and its picker conversion (`C:\…` through `wslpath -u` for a WSL target). A drive folder belongs
+    to the Windows engine, so Linux tools are no longer run on Windows drives.
+  - D7's stored target choice. Older files are still read, the key is dropped, and `/mnt/<x>` projects move to the
+    Windows engine, with a notice.
+  - D15's open item about running one engine at a time. Engines now stay up, so a long run survives looking at another
+    project.
+  - D16 #2. UI state follows the project, and run calls are routed in main.
+- **Cost:** several engines can run at once, each a Node and Mastra process. Stopping an idle engine is a possible
+  follow-up.
+- **Tests:**
+  - `host.test.ts`:
+    - routing by folder;
+    - a run kept on its own engine while another engine restarts slowly;
+    - no fallback for a missing distribution;
+    - every engine stopped on quit.
+  - `paths.test.ts`, the store migration and the WSL guidance.
+  - A Windows UI test that uses a WSL folder and a Windows folder in one session.
+
+## D18. An engine that stops answering is reported and stopped (2026-10-17)
+
+**Decision.** The host treats an engine that is alive but silent as failed.
+- **Detection.** The host pings each engine six times per heartbeat (30 s by default). If no ping has been answered
+  for longer than the heartbeat, the engine is marked failed with code `unresponsive`. Its reason says what to do:
+  restart the engine; if this keeps happening, its log may say why.
+- **Recovery.**
+  - The engine is then stopped in the D4 order, which releases its lock and processes.
+  - The failure stays on screen while it stops.
+  - Restart starts a fresh engine, and runs the old one left running end as `run.interrupted` (D4).
+- **After sleep.** After the machine wakes (Electron's `powerMonitor` resume), silence isn't counted for one heartbeat,
+  and the time spent asleep never counts.
+- **Unexpected exits** are reported as before, as "The engine stopped unexpectedly (exit code …)", with a Restart
+  control. The host doesn't guess at a cause: an exit it can't explain is never called a WSL shutdown.
+
+**Why.** External review, 2026-10-17. An engine that stayed alive but stopped answering only produced ping errors in
+the log, while the window kept showing it as online. Unexpected exits were already handled.
+
+**Consequences.**
+- Extends D4.
+- Tests:
+  - a fixture engine that answers `initialize` and then nothing: it is reported within bounds, stopped, and starts
+    afresh on Restart;
+  - after a resume, silence isn't counted until the grace period ends.
+- The Windows harness checks that a native engine killed from outside, and a WSL engine killed inside its
+  distribution, are both reported as stopped and start again on Restart.
+- Terminating a whole distribution (`wsl --terminate`) is not checked automatically, because the checks run from
+  inside that distribution.
+
+## D19. Hackathon requirements, as published (2026-10-17)
+
+**Decision.** This supersedes D13's statement that the coding workflow operates within Token Factory Sandboxes, and the
+reason D13 gave for it.
+- **What every entry needs.** The official rules' general platform requirement is runtime use of Nebius Token Factory
+  inference with an NVIDIA model. Nivra meets it through its model calls: `providers.check` today, and the planned
+  workflows. This is as checked by the 17 October review; Devpost blocks automated fetching, so the rules were not
+  re-read for this entry.
+- **What is still open.** The Coding and Agentic Engineering track's wording about operating within Token Factory
+  Sandboxes needs clarification from the organisers. That clarification has not been obtained. Until it is, no Nivra
+  document says Sandboxes is mandatory.
+- **No OpenShell bonus.** The rules publish no scoring bonus for NVIDIA OpenShell.
+- **Sandboxes isn't available yet.** Token Factory Sandboxes is a beta product that needs an access request. Access has
+  been requested and is not active, so it is not an available, zero-setup way to run code today.
+- **The architecture doesn't depend on the answer.** The execution design (D9, D15, D17) stands either way: the answer
+  only decides which sandbox the demonstration uses.
+
+**Why.** The external review of 17 October found the docs stated the Sandboxes requirement as settled.
+
+**Consequences.**
+- The track question is tracked in NIV-15, and kept out of the architecture description.
+- D13's 21 October gate becomes: ask the organisers, then choose the demonstration's way of running code from their
+  answer and the state of Sandboxes access.

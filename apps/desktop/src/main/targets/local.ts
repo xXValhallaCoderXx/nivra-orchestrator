@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { engineEnv } from "./process.ts";
-import { engineArgs, OS_LABEL, TargetUnavailableError, type EngineLaunch, type EnginePlatform, type ExecutionTarget, type LaunchRequest, type TargetProbe } from "./types.ts";
+import { engineArgs, labelFor, TargetUnavailableError, type EngineLaunch, type EnginePlatform, type ExecutionTarget, type LaunchRequest, type TargetProbe } from "./types.ts";
 
 /** Where a runtime's Node and engine entry are (D5): `<dir>/node/node.exe` or `<dir>/node/bin/node`, `<dir>/engine/main.mjs`. */
 export interface RuntimeLayout {
@@ -42,7 +42,7 @@ export class LocalTarget implements ExecutionTarget {
 
   constructor(options: LocalTargetOptions) {
     this.#options = options;
-    this.descriptor = { id: "local", kind: "local" as const, label: `${OS_LABEL[options.platform]} · Local`, platform: options.platform };
+    this.descriptor = { id: "local", kind: "local" as const, label: labelFor("local", options.platform), platform: options.platform };
   }
 
   async probe(): Promise<TargetProbe> {

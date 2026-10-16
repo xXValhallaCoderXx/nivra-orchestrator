@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import type { Readable } from "node:stream";
 import { engineEnv, runTool, wslErrorCode, type RunResult } from "./process.ts";
-import { engineArgs, TargetUnavailableError, type EngineLaunch, type ExecutionTarget, type LaunchRequest, type TargetProbe, type TargetProblem } from "./types.ts";
+import { engineArgs, labelFor, TargetUnavailableError, type EngineLaunch, type ExecutionTarget, type LaunchRequest, type TargetProbe, type TargetProblem } from "./types.ts";
 import type { WslDistro } from "./wsl-discovery.ts";
 
 /** The Linux runtime this app ships for WSL (D5): a deterministic tarball and its content hash. */
@@ -109,7 +109,8 @@ export class WslTarget implements ExecutionTarget {
   constructor(options: WslTargetOptions) {
     this.#options = options;
     this.#env = engineEnv(options.env ?? process.env, "win32", { WSL_UTF8: "1" });
-    this.descriptor = { id: `wsl:${options.distro.name}`, kind: "wsl" as const, label: `${options.distro.name} · WSL`, platform: "linux" as const, distro: options.distro.name };
+    const id = `wsl:${options.distro.name}`;
+    this.descriptor = { id, kind: "wsl" as const, label: labelFor(id, "win32"), platform: "linux" as const, distro: options.distro.name };
   }
 
   #run(args: readonly string[], options: { input?: Readable | null; timeoutMs: number }): Promise<RunResult> {
@@ -164,13 +165,6 @@ export class WslTarget implements ExecutionTarget {
         await this.#run(["-d", distro, "--cd", "/", "--exec", "pkill", "-f", "--", instancePattern(request.instanceId)], { timeoutMs: 15_000 }).catch(() => undefined);
       },
     };
-  }
-
-  /** A Windows folder as this distribution sees it (`wslpath -u`, which honours a custom automount root); null if it can't say. */
-  async toLinuxPath(windowsPath: string): Promise<string | null> {
-    const result = await this.#run(["-d", this.#options.distro.name, "--cd", "/", "--exec", "wslpath", "-u", windowsPath], { timeoutMs: 30_000 });
-    const path = result.stdout.trim();
-    return result.code === 0 && path.startsWith("/") ? path : null;
   }
 
   async #provision(runtime: WslRuntime, force: boolean): Promise<void> {

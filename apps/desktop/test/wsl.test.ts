@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { RunResult } from "../src/main/targets/process.ts";
 import { decodeToolText, engineEnv, wslErrorCode } from "../src/main/targets/process.ts";
 import { TargetUnavailableError } from "../src/main/targets/types.ts";
-import { discoverWsl, mergeDistros, parseListQuiet, parseLxssRegistry, type WslDistro } from "../src/main/targets/wsl-discovery.ts";
+import { discoverWsl, mergeDistros, parseListQuiet, parseLxssRegistry, wslGuidance, type WslDistro } from "../src/main/targets/wsl-discovery.ts";
 import { INSTALL_SCRIPT, instancePattern, parseProbe, problemsOf, PROBE_SCRIPT, WslTarget } from "../src/main/targets/wsl.ts";
 
 const ok = (stdout: string): RunResult => ({ code: 0, signal: null, stdout, stderr: "", timedOut: false });
@@ -73,6 +73,7 @@ describe("WSL discovery", () => {
     const ready = await discoverWsl({ env: {}, exists: () => true, run });
     assert.equal(ready.status, "ready");
     assert.deepEqual(ready.distros, [UBUNTU]);
+    assert.deepEqual(ready.status === "ready" ? ready.hidden : null, ["docker-desktop"]);
   });
 
   it("reports no distributions only when the registry confirms none are registered", async () => {
@@ -83,6 +84,20 @@ describe("WSL discovery", () => {
       run: async (command, args) => (args[0] === "--version" ? ok("") : command.endsWith("reg.exe") ? ok(EMPTY_LXSS) : failed(1, "Error code: Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND")),
     });
     assert.deepEqual([none.status, none.distros.length], ["ready", 0]);
+  });
+
+  it("reports a listing that couldn't even start as broken, instead of failing every call (the review's case)", async () => {
+    const thrown = await discoverWsl({
+      env: {},
+      exists: () => true,
+      run: async (command, args) => {
+        if (args[0] === "--version") return ok("");
+        if (command.endsWith("reg.exe")) return ok(REGISTRY);
+        throw new Error("spawn EACCES");
+      },
+    });
+    assert.equal(thrown.status, "broken");
+    assert.match(thrown.status === "broken" ? thrown.message : "", /couldn't list its distributions.*Check again/);
   });
 
   it("keeps a failed listing visible, with WSL's code and what to do, instead of calling it empty", async () => {
@@ -101,6 +116,35 @@ describe("WSL discovery", () => {
     });
     assert.equal(timeout.status, "broken");
     assert.match(timeout.status === "broken" ? timeout.message : "", /within 15 s/);
+  });
+});
+
+describe("what the person is told about WSL (D17)", () => {
+  const ready = (distros: WslDistro[], hidden: string[] = []) => ({ status: "ready" as const, wslExe: "wsl.exe", distros, hidden });
+
+  it("says nothing when a distribution can be used, but still names the ones that can't", () => {
+    const view = wslGuidance(ready([UBUNTU, { ...UBUNTU, name: "Legacy", version: 1, isDefault: false }]));
+    assert.deepEqual([view.status, view.message], ["ready", null]);
+    assert.deepEqual(view.distros.map((d) => [d.label, d.problem !== null]), [["Ubuntu · WSL", false], ["Legacy · WSL", true]]);
+  });
+
+  it("says how to get a distribution when WSL has none, or only Docker Desktop's (the review's case)", () => {
+    const none = wslGuidance(ready([]));
+    assert.equal(none.status, "no-usable-distribution");
+    assert.match(none.message ?? "", /no Linux distribution.*wsl --install -d Ubuntu/);
+    const dockerOnly = wslGuidance(ready([], ["docker-desktop"]));
+    assert.match(dockerOnly.message ?? "", /only Docker Desktop's own distributions.*wsl --install -d Ubuntu/);
+  });
+
+  it("says how to convert when every distribution runs on WSL 1", () => {
+    const view = wslGuidance(ready([{ ...UBUNTU, version: 1 }]));
+    assert.equal(view.status, "no-usable-distribution");
+    assert.match(view.message ?? "", /wsl --set-version/);
+  });
+
+  it("passes on what a missing or broken WSL said, with its code", () => {
+    const view = wslGuidance({ status: "broken", message: "WSL didn't answer (WSL_E_X).", code: "WSL_E_X", distros: [] });
+    assert.deepEqual([view.status, view.code, view.message], ["broken", "WSL_E_X", "WSL didn't answer (WSL_E_X)."]);
   });
 });
 

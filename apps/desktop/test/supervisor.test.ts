@@ -29,6 +29,17 @@ const isAlive = (pid: number) => {
   }
 };
 
+/** The state as it is now, read afresh (an earlier assertion would otherwise keep it narrowed). */
+const stateOf = (instance: EngineSupervisor): EngineState => instance.state;
+
+async function waitUntil(check: () => boolean, timeoutMs: number, what: string): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (!check()) {
+    if (performance.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 function supervisor(options: { entry?: string; home?: string; node?: string; overrides?: Partial<SupervisorOptions> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "nivra supervisor ü%# "));
   dirs.push(root);
@@ -105,6 +116,56 @@ describe("EngineSupervisor", () => {
     const { instance } = supervisor({ entry: fixture("silent-engine.mjs"), overrides: { startTimeoutMs: 500 } });
     await assert.rejects(instance.start(), (error: unknown) => error instanceof EngineStartError && error.code === "no-answer");
     assert.equal(instance.state.status, "failed");
+  });
+
+  it("names its target when it refuses a call, since several engines can run at once (D17)", async () => {
+    const { instance } = supervisor();
+    await assert.rejects(instance.call("ping", {}), (error: unknown) => error instanceof EngineOfflineError && /engine on Linux · Local isn't running/.test(error.message));
+  });
+
+  it("never starts again once closed, even when a restart races the close (D4)", async () => {
+    const { instance } = supervisor();
+    const first = await instance.start();
+    const restarting = instance.restart().catch((error: unknown) => error);
+    await instance.close();
+    const outcome = await restarting;
+    // Whichever engine the restart may have brought up, the close stops it, and nothing starts afterwards.
+    assert.equal(instance.state.status, "stopped");
+    assert.equal(isAlive(first.pid), false);
+    if (!(outcome instanceof Error)) assert.equal(isAlive((outcome as { pid: number }).pid), false);
+    await assert.rejects(instance.start(), (error: unknown) => error instanceof EngineOfflineError && /quitting/.test(error.message));
+  });
+
+  it("reports an engine that stays alive but stops answering, stops it, and lets Restart start a fresh one", async () => {
+    const { instance, states } = supervisor({ entry: fixture("unresponsive-engine.mjs"), overrides: { heartbeatMs: 1_200, shutdownGraceMs: 300, eofGraceMs: 300 } });
+    const first = await instance.start();
+    const started = performance.now();
+    await waitUntil(() => instance.state.status === "failed", 8_000, "the silence to be noticed");
+    const noticedAfter = performance.now() - started;
+    assert.equal(instance.state.status === "failed" ? instance.state.code : null, "unresponsive");
+    assert.match(instance.state.status === "failed" ? instance.state.reason : "", /stopped answering .* Restart the engine/);
+    assert.ok(noticedAfter >= 1_000 && noticedAfter < 6_000, `noticed within bounds (${Math.round(noticedAfter)} ms)`);
+    await waitUntil(() => !isAlive(first.pid), 8_000, "the hung engine to be stopped");
+    assert.equal(instance.state.status, "failed", "stopping it keeps the failure visible");
+    await assert.rejects(instance.call("doctor", {}), EngineOfflineError);
+
+    const second = await instance.restart();
+    assert.notEqual(second.instanceId, first.instanceId);
+    assert.equal(instance.state.status, "online");
+    assert.deepEqual(states.slice(0, 3), ["starting", "starting", "online"]);
+  });
+
+  it("gives a machine that just woke a grace period before calling its engine unresponsive", async () => {
+    const { instance } = supervisor({ entry: fixture("unresponsive-engine.mjs"), overrides: { heartbeatMs: 1_200, resumeGraceMs: 4_000, shutdownGraceMs: 300, eofGraceMs: 300 } });
+    await instance.start();
+    const woke = performance.now();
+    instance.resumed();
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    assert.equal(instance.state.status, "online", "silence during the grace period isn't counted");
+    await waitUntil(() => instance.state.status === "failed", 8_000, "the silence to be noticed after the grace period");
+    assert.ok(performance.now() - woke >= 4_000, "not before the grace period ended");
+    const after = stateOf(instance);
+    assert.equal(after.status === "failed" ? after.code : null, "unresponsive");
   });
 
   it("forces down an engine that ignores shutdown and the end of its input", async () => {

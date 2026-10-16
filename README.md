@@ -25,17 +25,25 @@ The target demonstration:
 
 - *Planned:* model calls use **NVIDIA Nemotron** models through **Nebius Token Factory** (OpenAI-compatible API at
   `https://api.tokenfactory.nebius.com/v1`).
-- *Planned:* scaffolding, dependency installs and verification run inside **Nebius Token Factory Sandboxes**.
-- *Planned, optional:* **NVIDIA OpenShell** as a local execution boundary on Linux and WSL2, when it is installed.
+- *Planned:* coding work runs in a sandbox. Nemotron only proposes actions; the engine carries them out:
+  - a local Docker or Podman container by default;
+  - **Nebius Token Factory Sandboxes** as a cloud option (in beta; access requested);
+  - **NVIDIA OpenShell** as an optional, stricter local sandbox.
+  
+  Only the `Local` backend exists today. It provides no isolation and runs only the built-in hello check and Doctor's
+  git check.
 
 ## Platforms
 
 | Host | Engine runs | Status |
 |---|---|---|
-| Windows 10/11 x64 | inside a WSL2 distribution (Ubuntu or another glibc distribution) | works (primary target) |
-| Windows 10/11 x64 | natively on Windows | works (the bootstrap's hello run; coding work comes later) |
+| Windows 10/11 x64 | in the WSL2 distribution that holds the folder (`\\wsl.localhost\…`; Ubuntu or another glibc distribution) | works (primary target) |
+| Windows 10/11 x64 | natively on Windows, for folders on a Windows drive | works for the hello run and Doctor; coding work comes later |
 | Linux x64 | locally | works |
 | macOS | locally | later |
+
+There is no target to choose: adding a folder decides where its work runs, by which system holds it, and each project
+keeps that engine.
 
 ## Install a test build
 
@@ -54,8 +62,8 @@ pnpm package:linux          # deb and AppImage in apps/desktop/release
 pnpm package:win            # Windows zip, built from WSL
 ```
 
-On Windows, Nivra installs its own engine runtime into the WSL distribution you choose (under `~/.nivra`) the first
-time you use it; it does not need Node in WSL.
+On Windows, Nivra installs its own engine runtime into a WSL distribution (under `~/.nivra`) the first time you add a
+folder from it; it does not need Node in WSL.
 
 To check Token Factory access (lists the models, then makes one Nemotron tool call):
 

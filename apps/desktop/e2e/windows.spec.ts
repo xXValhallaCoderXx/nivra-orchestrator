@@ -3,10 +3,11 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 
 /**
- * The packaged Windows app, run on Windows from WSL through interop (D14: no CI), as copied by `pnpm dev:win`. It
- * drives both targets through the real UI: the native engine on a repository made by Git for Windows, then a switch to
- * the WSL distribution (provisioned from the shipped tarball), a folder picked as \\wsl.localhost\… and converted to a
- * Linux path, a hello run and a cancelled run there, and quitting with no engine left on either side.
+ * The packaged Windows app, run on Windows from WSL through interop (D14: no CI), as copied by `pnpm dev:win`. One
+ * session drives both engines through the real UI, each chosen by its folder (D17): a folder picked as
+ * \\wsl.localhost\… runs in the distribution (provisioned from the shipped tarball), a folder made by Git for Windows
+ * runs on the native engine, a run held on WSL keeps going and cancels on its own engine while the native one starts and
+ * works, and quitting leaves no engine on either side.
  */
 test.skip(process.platform !== "linux" || !existsSync("/mnt/c/Windows/System32/cmd.exe"), "runs from WSL on a Windows machine");
 
@@ -24,7 +25,7 @@ let devWin: string;
 let nativeRepoWin: string;
 let wslRepo: string;
 let distro: string;
-const enginePids: { native: number | null; wslInstance: string | null } = { native: null, wslInstance: null };
+const engines: { native: number | null; wslInstance: string | null; wslRun: string | null } = { native: null, wslInstance: null, wslRun: null };
 
 test.beforeAll(async () => {
   devWin = `${windows("/mnt/c/Windows/System32/cmd.exe", ["/d", "/c", "echo %LOCALAPPDATA%"])}\\nivra-dev`;
@@ -51,11 +52,13 @@ test.afterAll(async () => {
   await app?.close().catch(() => undefined);
 });
 
-const engineInfo = () =>
-  page.evaluate(async () => {
-    const view = await window.nivra.engineStatus();
-    return view.state.status === "online" ? view.state.info : null;
-  });
+const engineInfo = (targetId: string) =>
+  page.evaluate(async (id) => {
+    const view = (await window.nivra.listEngines()).find((e) => e.targetId === id);
+    return view?.state.status === "online" ? view.state.info : null;
+  }, targetId);
+
+const wslEngineAlive = (instanceId: string) => spawnSync("pgrep", ["-af", "--", `--instance [${instanceId[0]}]${instanceId.slice(1)}`]).status === 0;
 
 async function pick(path: string) {
   await app.evaluate(async ({ dialog }, picked) => {
@@ -64,55 +67,70 @@ async function pick(path: string) {
   await page.getByTestId("project-add").click();
 }
 
-test("a fresh profile starts on WSL's default distribution, provisions it, and runs hello on a \\\\wsl.localhost folder", async () => {
-  await expect(page.getByTestId("target-select")).toHaveValue(`${distro} · WSL`);
-  await expect(page.getByTestId("engine-badge")).toHaveText("Engine online", { timeout: 120_000 });
-  const info = (await engineInfo())!;
-  expect(info.platform).toBe("linux");
-  enginePids.wslInstance = info.instanceId;
+async function choose(targetLabel: string) {
+  await page.getByTestId("project-select").click();
+  await page.getByRole("option", { name: new RegExp(targetLabel) }).click();
+  await expect(page.getByTestId("project-target")).toHaveText(targetLabel);
+}
+
+test("a fresh profile offers no target to choose, starts no engine, and has nothing to say about a working WSL", async () => {
+  await expect(page.getByTestId("engine-badge")).toHaveText("No folder chosen");
+  await expect(page.getByTestId("target-select")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(async () => (await window.nivra.getWsl())?.status)).toBe("ready");
+  await expect(page.getByTestId("wsl-guidance")).toHaveCount(0);
+  expect(await page.evaluate(async () => (await window.nivra.listEngines()).length)).toBe(0);
+});
+
+test("a \\\\wsl.localhost folder runs in its distribution, provisioned on first use", async () => {
   await pick(`\\\\wsl.localhost\\${distro}${wslRepo.replace(/\//g, "\\")}`);
-  await expect(page.getByTestId("project-select")).toHaveValue("repo ü%#");
+  await expect(page.getByTestId("project-target")).toHaveText(`${distro} · WSL`);
+  await expect(page.getByTestId("engine-badge")).toHaveText("Engine online", { timeout: 120_000 });
+  const info = (await engineInfo(`wsl:${distro}`))!;
+  expect(info.platform).toBe("linux");
+  engines.wslInstance = info.instanceId;
   await page.getByTestId("hello-start").click();
   await expect(page.getByTestId("hello-status")).toHaveText("succeeded");
   await expect(page.getByTestId("hello-timeline")).toContainText(wslRepo);
-
-  await page.getByText("60 s", { exact: true }).click();
-  await page.getByTestId("hello-start").click();
-  await expect(page.getByTestId("hello-timeline")).toContainText("Holding a child process");
-  await page.getByTestId("hello-cancel").click();
-  await expect(page.getByTestId("hello-status")).toHaveText("cancelled");
 });
 
-test("switching to Windows · Local in the middle of a run stops the WSL engine, and the native engine runs hello on a repository made by Git for Windows", async () => {
-  // The review's case: a run still going when the target changes must not leave the page polling or blocked.
+test("a run held on WSL keeps going on its own engine while a Windows folder starts and works on the native engine (the review's race)", async () => {
   await page.getByText("60 s", { exact: true }).click();
   await page.getByTestId("hello-start").click();
   await expect(page.getByTestId("hello-timeline")).toContainText("Holding a child process");
-  await page.getByTestId("target-select").click();
-  await page.getByRole("option", { name: "Windows · Local" }).click();
-  await expect(page.getByTestId("target-select")).toHaveValue("Windows · Local");
-  await expect(page.getByTestId("engine-badge")).toHaveText("Engine online", { timeout: 60_000 });
-  const id = enginePids.wslInstance!;
-  await expect.poll(() => spawnSync("pgrep", ["-af", "--", `--instance [${id[0]}]${id.slice(1)}`]).status, { timeout: 15_000 }).toBe(1);
-  const info = (await engineInfo())!;
-  expect(info.platform).toBe("win32");
-  enginePids.native = info.pid;
-  // Nothing of the WSL run is left: no status, no timeline, and the run button is not held back by it.
-  await expect(page.getByTestId("hello-status")).toHaveCount(0);
-  await expect(page.getByTestId("hello-timeline")).toHaveCount(0);
-  await page.getByText("0 s", { exact: true }).click();
+  engines.wslRun = await page.getByTestId("hello-status").getAttribute("data-run-id");
+
   await pick(nativeRepoWin);
-  await expect(page.getByTestId("project-select")).toHaveValue("repo ü%#");
+  await expect(page.getByTestId("project-target")).toHaveText("Windows · Local");
+  await expect(page.getByTestId("engine-badge")).toHaveText("Engine online", { timeout: 60_000 });
+  const native = (await engineInfo("local"))!;
+  expect(native.platform).toBe("win32");
+  engines.native = native.pid;
+  await page.getByText("0 s", { exact: true }).click();
   await page.getByTestId("hello-start").click();
   await expect(page.getByTestId("hello-status")).toHaveText("succeeded");
   await expect(page.getByTestId("hello-timeline")).toContainText("on main");
+
+  // Back on the WSL folder: the same run, on the same engine, is still holding; Cancel reaches that engine.
+  await choose(`${distro} · WSL`);
+  await expect(page.getByTestId("hello-status")).toHaveText("running");
+  await expect(page.getByTestId("hello-status")).toHaveAttribute("data-run-id", engines.wslRun!);
+  expect((await engineInfo(`wsl:${distro}`))?.instanceId).toBe(engines.wslInstance);
+  await page.getByTestId("hello-cancel").click();
+  await expect(page.getByTestId("hello-status")).toHaveText("cancelled");
+  expect((await engineInfo("local"))?.pid).toBe(engines.native);
+});
+
+test("the same Windows folder picked through WSL is the Windows project, with a note saying why", async () => {
+  const throughWsl = `\\\\wsl.localhost\\${distro}\\mnt\\${nativeRepoWin[0]!.toLowerCase()}${nativeRepoWin.slice(2)}`;
+  await pick(throughWsl);
+  await expect(page.getByTestId("project-target")).toHaveText("Windows · Local");
+  await expect(page.getByTestId("project-add-notice")).toContainText(`drive ${nativeRepoWin[0]!.toUpperCase()}:`);
+  expect(await page.evaluate(async () => (await window.nivra.listProjects()).length)).toBe(2);
 });
 
 test("quitting leaves no engine on Windows or in the distribution", async () => {
   await app.close();
-  const nativeGone = () => !windows("/mnt/c/Windows/System32/tasklist.exe", ["/FI", `PID eq ${enginePids.native}`, "/NH"]).includes(String(enginePids.native));
+  const nativeGone = () => !windows("/mnt/c/Windows/System32/tasklist.exe", ["/FI", `PID eq ${engines.native}`, "/NH"]).includes(String(engines.native));
   await expect.poll(nativeGone, { timeout: 15_000 }).toBe(true);
-  const id = enginePids.wslInstance!;
-  const wslGone = () => spawnSync("pgrep", ["-af", "--", `--instance [${id[0]}]${id.slice(1)}`]).status === 1;
-  await expect.poll(wslGone, { timeout: 15_000 }).toBe(true);
+  await expect.poll(() => wslEngineAlive(engines.wslInstance!), { timeout: 15_000 }).toBe(false);
 });

@@ -1,6 +1,6 @@
-import { Alert, Box, Button, Code, Group, Select, Stack, Text, Tooltip } from "@mantine/core";
+import { Alert, Badge, Box, Button, Code, Group, Stack, Text, Tooltip } from "@mantine/core";
 import { useState } from "react";
-import type { EngineView, TargetsView } from "../../../shared/ipc";
+import type { EngineView, ProjectView } from "../../../shared/ipc";
 import { errorMessage } from "../shared/ui";
 
 const LOOK = {
@@ -10,10 +10,18 @@ const LOOK = {
   failed: { dot: "var(--nivra-error-icon)", label: "Engine stopped" },
 } as const;
 
-/** The target the engine runs on (D1: always visible where work starts) and the engine's state at a glance. */
-export function TargetBar({ targets, engine, onSelected }: { targets: TargetsView | null; engine: EngineView | null; onSelected(): void }) {
-  const [switching, setSwitching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+/**
+ * Where the chosen project's work runs (D1: always visible where work starts) and its engine's state at a glance.
+ * There is nothing to choose: the folder decides (D17).
+ */
+export function EngineBadge({ project, engine }: { project: ProjectView | null; engine: EngineView | null }) {
+  if (!project) {
+    return (
+      <Text size="xs" c="var(--nivra-text-3)" data-testid="engine-badge">
+        No folder chosen
+      </Text>
+    );
+  }
   const state = engine?.state;
   const look = state ? LOOK[state.status] : { dot: "var(--nivra-text-3)", label: "Engine…" };
   const detail = !state
@@ -25,35 +33,12 @@ export function TargetBar({ targets, engine, onSelected }: { targets: TargetsVie
         : state.status === "failed"
           ? state.reason
           : "The engine isn't running.";
-
-  async function select(id: string | null) {
-    if (!id || id === targets?.selectedId) return;
-    setSwitching(true);
-    setError(null);
-    try {
-      await window.nivra.selectTarget(id);
-      onSelected();
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setSwitching(false);
-    }
-  }
-
   return (
     <Group gap="sm" wrap="nowrap">
-      <Select
-        aria-label="Where the engine runs"
-        size="xs"
-        w={210}
-        data={targets?.targets.map((t) => ({ value: t.id, label: t.label })) ?? []}
-        value={targets?.selectedId ?? null}
-        onChange={(id) => void select(id)}
-        disabled={!targets || switching}
-        allowDeselect={false}
-        data-testid="target-select"
-      />
-      <Tooltip label={error ?? detail} multiline maw={460} withArrow>
+      <Badge variant="light" color="gray" data-testid="engine-target">
+        {project.targetLabel}
+      </Badge>
+      <Tooltip label={detail} multiline maw={460} withArrow>
         <Group gap={6} wrap="nowrap">
           <Box w={8} h={8} bg={look.dot} style={{ borderRadius: "50%", flex: "none" }} />
           <Text size="xs" c="var(--nivra-text-2)" style={{ whiteSpace: "nowrap" }} data-testid="engine-badge">
@@ -65,16 +50,19 @@ export function TargetBar({ targets, engine, onSelected }: { targets: TargetsVie
   );
 }
 
-/** What is wrong with the engine or its target, and what to do: shown above the page while it matters. */
-export function EngineNotices({ engine, targets }: { engine: EngineView | null; targets: TargetsView | null }) {
+/** What is wrong with the chosen project's engine, and what to do: shown above the page while it matters. */
+export function EngineNotices({ projectId, engine }: { projectId: string; engine: EngineView | null }) {
   const [restarting, setRestarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const state = engine?.state;
-  const wslNote = targets?.wsl && targets.wsl.status !== "ready" ? targets.wsl.message : null;
 
   async function restart() {
     setRestarting(true);
+    setError(null);
     try {
-      await window.nivra.restartEngine();
+      await window.nivra.restartEngine(projectId);
+    } catch (reason) {
+      setError(errorMessage(reason));
     } finally {
       setRestarting(false);
     }
@@ -83,7 +71,7 @@ export function EngineNotices({ engine, targets }: { engine: EngineView | null; 
   return (
     <Stack gap="sm">
       {state?.status === "failed" && (
-        <Alert color="red" title={`The engine on ${engine!.label} stopped`} data-testid="engine-failed">
+        <Alert color="red" title={`The engine on ${engine!.label} isn't running`} data-testid="engine-failed">
           <Stack gap={6}>
             <Text size="sm">{state.reason}</Text>
             {state.logPath && (
@@ -91,9 +79,15 @@ export function EngineNotices({ engine, targets }: { engine: EngineView | null; 
                 Its log: <Code fz="xs">{state.logPath}</Code>
               </Text>
             )}
+            {error && (
+              <Text size="sm" c="var(--nivra-error)">
+                {error}
+              </Text>
+            )}
             <Group>
+              {/* No log means the engine never got as far as starting (a distribution that can't run it): look again. */}
               <Button size="xs" variant="default" loading={restarting} onClick={() => void restart()} data-testid="engine-restart">
-                Restart engine
+                {state.logPath ? "Restart engine" : "Check again"}
               </Button>
             </Group>
           </Stack>
@@ -109,11 +103,6 @@ export function EngineNotices({ engine, targets }: { engine: EngineView | null; 
           <Text size="sm">{warning}</Text>
         </Alert>
       ))}
-      {wslNote && (
-        <Alert color="gray" variant="light" title="WSL isn't available">
-          <Text size="sm">{wslNote}</Text>
-        </Alert>
-      )}
     </Stack>
   );
 }

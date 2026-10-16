@@ -36,19 +36,41 @@ The cross-platform foundation is done when all of these were seen to pass:
 - **Engine targets, verified locally (D14):** on Linux (`pnpm verify`), and on native Windows and in WSL from a real
   Windows parent (`pnpm verify:windows`), the engine starts, streams the `hello` run, cancels it with no surviving
   child, and exits cleanly, with the engine home and the repository in paths containing spaces, non-ASCII characters,
-  `%` and `#`; an engine also dies with a parent that was killed. *Seen passing 2026-10-16: 15/15.*
+  `%` and `#`.
+  - An engine also dies with a parent that was killed.
+  - An engine killed from outside (a native one, or a WSL one killed inside its distribution) is reported as stopped,
+    and Restart starts it again (D18).
+  
+  *Seen passing 2026-10-17: 17/17.*
+- **Unresponsive engine (D18):** an engine that stays alive but stops answering is reported as `unresponsive` within
+  bounds, then stopped, and Restart starts a fresh one. Silence after a resume from sleep is not counted for one
+  heartbeat. *Covered by `supervisor.test.ts` with a fixture engine; seen passing 2026-10-17.*
+- **WSL distribution terminated while the app runs:** *not yet run.* The checks run from inside the only
+  distribution.
 - **Stdout purity:** every line the engine writes to stdout parses as JSON-RPC, through hello, cancel and a provider
   check.
 - **Secrets canary:** a fake key never appears in `nivra.db*`, `mastra.db*` or the logs.
 - **Restart:** a run still marked running when the engine starts again ends as failed with `run.interrupted` and is
   not replayed. A second engine on the same home is refused.
-- **Packaged Windows app**, on the WSL and the native target: finds and provisions Ubuntu, runs hello on a repository
-  whose path has spaces, streams, cancels, and quits with no engine left running (`pgrep` in WSL, `tasklist` on
-  Windows). *Seen passing 2026-10-17 through the real UI (`test:windows`, 3/3); the zip carries both runtimes.*
+- **Packaged Windows app**, one session with both engines (D17):
+  - a `\\wsl.localhost` folder provisions Ubuntu and runs hello on a path with spaces, `ü`, `%` and `#`;
+  - a run held on WSL keeps going while a Windows folder starts and runs hello on the native engine;
+  - the WSL run then cancels on its own engine;
+  - the same Windows folder picked through WSL is recognised as the Windows project;
+  - quitting leaves no engine running (`pgrep` in WSL, `tasklist` on Windows).
+  
+  *Seen passing 2026-10-17 through the real UI (`test:windows`, 5/5).* The zip carries both runtimes.
 - **Packaged Linux app** (`electron-builder --dir`): the same flow on the local target through the real UI
   (`test:packaged`, 5/5). *Seen passing 2026-10-17.*
-- **Actionable refusals** for: no WSL, WSL1, `docker-desktop`, a musl distribution, ARM64, a distribution never
-  opened, and missing git. *Covered by unit tests with captured tool output; not yet seen on a machine that has them.*
+- **Actionable refusals and guidance** for:
+  - no WSL, or an outdated WSL;
+  - WSL with no distribution, or only Docker Desktop's, or only WSL 1 ones;
+  - a WSL listing that fails;
+  - WSL1, `docker-desktop`, a musl distribution, ARM64, a distribution never opened;
+  - a network share;
+  - missing git.
+  
+  *Covered by unit tests with captured tool output; not yet seen on a machine that has them.*
 - **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target. *Not yet
   run: installing needs sudo.*
 - **Token Factory** reached from both the WSL and the native engine: models listed and one Nemotron call made
@@ -61,6 +83,8 @@ The cross-platform foundation is done when all of these were seen to pass:
 - [ ] Public repository with the MIT licence and a README covering NVIDIA model use, Nebius use, setup and testing.
 - [ ] A test build at a URL (GitHub Release with the Windows installer and the Linux deb).
 - [ ] A demo video under three minutes on YouTube, showing the demonstration above.
-- [ ] Track: Coding and Agentic Engineering; the coding workflow operates within Token Factory Sandboxes.
+- [ ] Runtime use of Nebius Token Factory inference with an NVIDIA model (the rules' general requirement, D19).
+- [ ] Track: Coding and Agentic Engineering. Whether the coding workflow must run in Token Factory Sandboxes still
+  needs the organisers' answer (D19). Sandboxes is in beta, and access has been requested but is not active.
 - [ ] Feedback on Nebius Token Factory and the NVIDIA models and tools used.
 - [ ] Explanation of pre-existing components ([provenance.md](provenance.md)).

@@ -38,6 +38,10 @@ export interface SupervisorOptions {
   credentials: () => Promise<Partial<Record<SecretName, string>>>;
   /** How long the engine waits for the host before stopping (D4); the supervisor pings six times as often. */
   heartbeatMs?: number;
+  /** How long an engine may go without answering a ping before it counts as unresponsive. Defaults to `heartbeatMs`. */
+  unresponsiveMs?: number;
+  /** After the machine wakes, how long silence is not counted against the engine. Defaults to `heartbeatMs`. */
+  resumeGraceMs?: number;
   startTimeoutMs?: number;
   /** The quit order's waits (D4): after `shutdown`, then after closing stdin. */
   shutdownGraceMs?: number;
@@ -98,6 +102,11 @@ export class EngineSupervisor {
   #starting: Promise<EngineInfo> | null = null;
   #stopping: Promise<void> | null = null;
   #pinger: ReturnType<typeof setInterval> | null = null;
+  #closed = false;
+  /** When the engine last answered a ping (performance.now(): WSL2's wall clock steps). */
+  #lastAnswer = 0;
+  /** Until when silence is not counted, after the machine woke. */
+  #graceUntil = 0;
 
   constructor(options: SupervisorOptions) {
     this.#options = options;
@@ -123,6 +132,7 @@ export class EngineSupervisor {
 
   /** Starts the engine, or joins a start in progress. Resolves with what `initialize` answered. */
   start(): Promise<EngineInfo> {
+    if (this.#closed) return Promise.reject(new EngineOfflineError(`Nivra is quitting, so the engine on ${this.#label} won't start again.`));
     if (this.#state.status === "online") return Promise.resolve(this.#state.info);
     this.#starting ??= this.#start().finally(() => (this.#starting = null));
     return this.#starting;
@@ -133,19 +143,51 @@ export class EngineSupervisor {
     return this.start();
   }
 
+  /**
+   * Stops the engine for good: a start asked for afterwards (a restart racing quit, say) is refused, so nothing can be
+   * left running once quitting has stopped it (D4).
+   */
+  close(): Promise<void> {
+    this.#closed = true;
+    return this.stop();
+  }
+
   /** Sends one request to the running engine. */
   call<M extends MethodName>(method: M, params: ParamsOf<M>, options: { timeoutMs?: number } = {}): Promise<ResultOf<M>> {
     const running = this.#running;
     if (this.#state.status !== "online" || !running) {
-      const why = this.#state.status === "failed" ? this.#state.reason : this.#state.status === "starting" ? "The engine is still starting." : "The engine isn't running.";
+      // Several engines can run at once (D17), so every refusal names the one it is about.
+      const why =
+        this.#state.status === "failed"
+          ? this.#state.reason
+          : this.#state.status === "starting"
+            ? `The engine on ${this.#label} is still starting.`
+            : `The engine on ${this.#label} isn't running.`;
       return Promise.reject(new EngineOfflineError(why));
     }
     return running.client.call(method, params, options);
   }
 
-  /** The machine woke up: show the engine the host is still here before its watchdog counts a silent tick (D4). */
+  get #label(): string {
+    return this.#options.target.descriptor.label;
+  }
+
+  /**
+   * The machine woke up: show the engine the host is still here before its watchdog counts a silent tick (D4), and
+   * give it a grace period. Time asleep is not silence, and a distribution that was suspended can take a moment to
+   * answer again.
+   */
   resumed(): void {
-    if (this.#state.status === "online") void this.#running?.client.call("ping", {}).catch(() => undefined);
+    const now = performance.now();
+    this.#lastAnswer = now;
+    this.#graceUntil = now + (this.#options.resumeGraceMs ?? this.#options.heartbeatMs ?? 30_000);
+    const running = this.#running;
+    if (this.#state.status === "online" && running) {
+      void running.client.call("ping", {}).then(
+        () => (this.#lastAnswer = performance.now()),
+        () => undefined,
+      );
+    }
   }
 
   /** Stops the engine in the D4 order: `shutdown`, then closing its input, then force. */
@@ -173,6 +215,7 @@ export class EngineSupervisor {
 
   async #start(): Promise<EngineInfo> {
     await this.#stopping;
+    if (this.#closed) throw new EngineOfflineError(`Nivra is quitting, so the engine on ${this.#label} won't start again.`);
     try {
       try {
         return await this.#attempt(false);
@@ -284,13 +327,43 @@ export class EngineSupervisor {
     this.#set({ status: "failed", reason, code: running.fatal?.code ?? "exited", logPath: this.#logPath });
   }
 
+  /**
+   * Pings the engine six times per heartbeat. An engine that stays alive but stops answering for longer than
+   * `unresponsiveMs` is reported as unresponsive and stopped, so its Restart starts a fresh one; an engine that exits is
+   * handled in `#onExit` instead.
+   */
   #startPinging(running: Running, heartbeatMs: number): void {
     this.#stopPinging();
     if (heartbeatMs <= 0) return;
+    const limit = this.#options.unresponsiveMs ?? heartbeatMs;
+    this.#lastAnswer = performance.now();
     this.#pinger = setInterval(() => {
-      void running.client.call("ping", {}, { timeoutMs: Math.max(1_000, heartbeatMs / 2) }).catch((error: unknown) => this.#log(`ping failed: ${error instanceof Error ? error.message : String(error)}`));
+      void running.client.call("ping", {}, { timeoutMs: Math.max(1_000, heartbeatMs / 2) }).then(
+        () => (this.#lastAnswer = performance.now()),
+        (error: unknown) => {
+          this.#log(`ping failed: ${error instanceof Error ? error.message : String(error)}`);
+          const now = performance.now();
+          if (running.expectExit || this.#running !== running || now < this.#graceUntil) return;
+          if (now - this.#lastAnswer >= limit) this.#onUnresponsive(running, now - this.#lastAnswer);
+        },
+      );
     }, Math.max(1_000, Math.floor(heartbeatMs / 6)));
     this.#pinger.unref?.();
+  }
+
+  /** Reports an engine that is still running but no longer answers, then stops it in the D4 order. */
+  #onUnresponsive(running: Running, silentMs: number): void {
+    if (this.#state.status !== "online" || this.#running !== running) return;
+    this.#stopPinging();
+    this.#set({
+      status: "failed",
+      reason: `The engine on ${this.#label} stopped answering (no reply for ${Math.round(silentMs / 1000)} s), so Nivra stopped it. Restart the engine; if this keeps happening, its log may say why.`,
+      code: "unresponsive",
+      logPath: this.#logPath,
+    });
+    this.#log(`stopped answering for ${Math.round(silentMs)} ms; stopping it`);
+    // The failure stays visible: halting does not mark the engine as simply stopped.
+    this.#stopping ??= this.#halt(running).finally(() => (this.#stopping = null));
   }
 
   #stopPinging(): void {
@@ -305,6 +378,12 @@ export class EngineSupervisor {
       if (this.#state.status !== "failed") this.#set({ status: "stopped" });
       return;
     }
+    await this.#halt(running);
+    this.#set({ status: "stopped" });
+  }
+
+  /** The D4 quit order for one engine: `shutdown`, then closing its input, then force. Leaves the state to the caller. */
+  async #halt(running: Running): Promise<void> {
     running.expectExit = true;
     this.#stopPinging();
     const shutdownGrace = this.#options.shutdownGraceMs ?? 5_000;
@@ -316,7 +395,6 @@ export class EngineSupervisor {
     }
     await running.launch.cleanup?.();
     if (this.#running === running) this.#running = null;
-    this.#set({ status: "stopped" });
   }
 
   /** The quit order's last step (D4), also used when a start fails. */

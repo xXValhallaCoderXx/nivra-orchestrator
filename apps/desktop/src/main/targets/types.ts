@@ -80,3 +80,10 @@ export function engineArgs(entry: string, home: string, request: Pick<LaunchRequ
 }
 
 export const OS_LABEL: Record<EnginePlatform, string> = { win32: "Windows", linux: "Linux", darwin: "macOS" };
+
+/** What a target is called wherever work starts (D1), also for one this machine doesn't have (any more). */
+export function labelFor(targetId: string, hostPlatform: NodeJS.Platform): string {
+  if (targetId === "local") return `${OS_LABEL[hostPlatform as EnginePlatform] ?? hostPlatform} · Local`;
+  if (targetId.startsWith("wsl:")) return `${targetId.slice(4)} · WSL`;
+  return targetId;
+}

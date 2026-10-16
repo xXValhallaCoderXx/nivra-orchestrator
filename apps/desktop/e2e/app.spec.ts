@@ -6,26 +6,27 @@ import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 
 /**
- * The built app, driven like a person would (B4): the sandboxed window, the typed bridge, the engine coming online on
- * the local target, a repository added through the native picker (stubbed in main), a hello run, a cancelled run,
- * Doctor, and quitting with no engine left behind. Isolated with --user-data-dir and --nivra-engine-home.
+ * The built app, driven like a person would (B4, D17): the sandboxed window, the typed bridge, no engine until a
+ * repository is added through the native picker (stubbed in main), its folder deciding where it runs, a hello run, a
+ * cancelled run, Doctor, and quitting with no engine left behind. Isolated with --user-data-dir and
+ * --nivra-engine-home.
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_API = [
   "addProject",
   "cancelRun",
   "checkTokenFactory",
-  "engineStatus",
+  "checkWsl",
   "getAppInfo",
   "getSettings",
+  "getWsl",
+  "listEngines",
   "listProjects",
-  "listRuns",
-  "listTargets",
+  "openProject",
   "removeProject",
   "restartEngine",
   "runDoctor",
   "runEvents",
-  "selectTarget",
   "setNebiusKey",
   "startHello",
 ];
@@ -67,17 +68,22 @@ test("the window is sandboxed and sees only the typed bridge", async () => {
   expect(surface).toEqual({ api: EXPECTED_API, require: "undefined", process: "undefined" });
 });
 
-test("the engine comes online on the local target", async () => {
-  await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
-  await expect(page.getByTestId("target-select")).toHaveValue(/· Local$/);
+test("a fresh profile has no target to choose and starts no engine", async () => {
+  await expect(page.getByTestId("engine-badge")).toHaveText("No folder chosen");
+  const state = await page.evaluate(async () => ({ engines: await window.nivra.listEngines(), wsl: await window.nivra.getWsl() }));
+  expect(state).toEqual({ engines: [], wsl: null });
+  await expect(page.getByTestId("target-select")).toHaveCount(0);
 });
 
-test("a repository picked in the native dialog runs hello, and a held run cancels", async () => {
+test("a repository picked in the native dialog runs on its folder's engine, runs hello, and a held run cancels", async () => {
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, repo);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("project-select")).toHaveValue("repo ü%#");
+  await expect(page.getByTestId("project-target")).toHaveText(/· Local$/);
+  await expect(page.getByTestId("engine-target")).toHaveText(/· Local$/);
+  await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 
   await page.getByTestId("hello-start").click();
   await expect(page.getByTestId("hello-status")).toHaveText("succeeded");
@@ -98,8 +104,8 @@ test("Doctor reports git and the execution boundaries", async () => {
 
 test("quitting stops the engine", async () => {
   const pid = await page.evaluate(async () => {
-    const view = await window.nivra.engineStatus();
-    return view.state.status === "online" ? view.state.info.pid : null;
+    const view = (await window.nivra.listEngines()).find((e) => e.targetId === "local");
+    return view?.state.status === "online" ? view.state.info.pid : null;
   });
   expect(pid).not.toBeNull();
   await app.close();

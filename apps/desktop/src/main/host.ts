@@ -1,223 +1,361 @@
 import { randomUUID } from "node:crypto";
-import type { DoctorReport, ProviderCheck, RunEventsPage, RunList, RunStatus, RunSummary, SecretName } from "@nivra/domain";
-import type { AddProjectResult, EngineView, ProjectView, TargetsView } from "../shared/ipc.ts";
-import type { HostStore, ProjectRecord } from "./host-store.ts";
-import { folderLabel, uncHome, windowsPickProblem, wslPick } from "./paths.ts";
-import { EngineSupervisor } from "./supervisor.ts";
-import { listTargets, type TargetList, type TargetSources } from "./targets/registry.ts";
-import type { ExecutionTarget } from "./targets/types.ts";
-import { WslTarget } from "./targets/wsl.ts";
+import { realpathSync } from "node:fs";
+import type { DoctorReport, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
+import type { AddProjectResult, EngineView, ProjectView, WslView } from "../shared/ipc.ts";
+import { migrateHostData, type HostStore, type ProjectRecord } from "./host-store.ts";
+import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
+import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
+import type { TargetFactory, WslTargets } from "./targets/registry.ts";
+import { labelFor, type ExecutionTarget } from "./targets/types.ts";
+import { isHiddenDistro, wslGuidance } from "./targets/wsl-discovery.ts";
 
 export interface HostOptions {
-  sources: TargetSources;
+  targets: TargetFactory;
   store: HostStore;
   logsDir: string;
   client: { name: string; version: string };
   credentials: () => Promise<Partial<Record<SecretName, string>>>;
   /** The host's own OS, which decides how a picked folder is read. */
   platform: NodeJS.Platform;
+  /** The Linux app running inside a WSL distribution (WSLg), where `/mnt/<drive>` folders are slow. */
+  insideWsl?: boolean;
+  /** Resolves a picked drive folder to its real path (mapped and SUBST drives, short names); tests replace it. */
+  realpath?: (path: string) => string;
+  /** Supervisor timings; tests shorten them. */
+  supervisor?: Pick<SupervisorOptions, "heartbeatMs" | "shutdownGraceMs" | "eofGraceMs" | "startTimeoutMs">;
   log: (line: string) => void;
 }
 
-const SLOW_DRIVE =
-  "This folder is on a Windows drive, which is slow from WSL: git and builds will run noticeably slower. For speed, keep the repository inside the distribution.";
+interface Engine {
+  readonly target: ExecutionTarget;
+  readonly supervisor: EngineSupervisor;
+  warnings: string[];
+}
+
+type WslLookup = { target: ExecutionTarget } | { notReady: string } | { notFound: true };
 
 /**
- * The host's core (D1, D7), without Electron: the targets this machine offers, one engine at a time on the chosen one,
- * the project registry, and the calls the window makes. Electron's main process is a thin shell over it (D12), so the
- * window, dialogs and IPC are all it adds.
+ * The host's core, without Electron (D12): the project registry, one engine per target, and the calls the window
+ * makes. Each project's folder decides which engine it uses (D17), so there is no target to choose and nothing ever
+ * stops a healthy engine mid-session: a run keeps its engine, and every call about it goes there. Electron's main
+ * process is a thin shell over this class, adding the window, dialogs and IPC.
  */
 export class Host {
   readonly #options: HostOptions;
-  #list: TargetList | null = null;
-  #target: ExecutionTarget | null = null;
-  #supervisor: EngineSupervisor | null = null;
-  #warnings: string[] = [];
-  #home: string | null = null;
+  /** One engine per target, started on first use and kept for the session (D17). */
+  readonly #engines = new Map<string, Engine>();
+  /** Why a target a project needs can't run an engine, until it can. */
+  readonly #unavailable = new Map<string, string>();
+  readonly #opening = new Set<string>();
+  /** The engine of every run started this session, so a run's calls never reach another engine. */
+  readonly #runs = new Map<string, string>();
+  readonly #notices = new Map<string, string>();
+  #wsl: WslTargets | null = null;
+  #wslChecked = false;
+  #discovering: Promise<WslTargets | null> | null = null;
+  #closing: Promise<void> | null = null;
 
   constructor(options: HostOptions) {
     this.#options = options;
   }
 
-  /** Finds the targets and starts the engine on the chosen one (or the preferred one). */
-  async init(): Promise<void> {
-    this.#list = await listTargets(this.#options.sources);
-    const saved = this.#options.store.data.selectedTargetId;
-    const id = saved && this.#list.targets.some((t) => t.descriptor.id === saved) ? saved : this.#list.preferred;
-    this.#activate(id);
+  /** Brings older records in line (D17) and starts looking for WSL in the background. Starts no engine. */
+  init(): void {
+    const migrated = migrateHostData(this.#options.store.data, this.#options.platform);
+    if (migrated.changed) this.#options.store.update(() => migrated.data);
+    for (const [id, notice] of migrated.notices) this.#notices.set(id, notice);
+    void this.#discover();
   }
 
-  targets(): TargetsView {
-    const list = this.#requireList();
-    const wsl = list.wsl ? { status: list.wsl.status, message: list.wsl.status === "ready" ? null : list.wsl.message } : null;
-    return {
-      targets: list.targets.map((t) => ({ id: t.descriptor.id, kind: t.descriptor.kind, label: t.descriptor.label, platform: t.descriptor.platform })),
-      selectedId: this.#requireTarget().descriptor.id,
-      wsl,
-    };
+  /** What WSL offers on a Windows host, and what to do when it offers nothing; null elsewhere. */
+  wsl(): WslView | null {
+    if (this.#options.platform !== "win32") return null;
+    if (!this.#wslChecked || !this.#wsl) return { status: "checking", message: null, code: null, distros: [] };
+    return wslGuidance(this.#wsl.discovery);
   }
 
-  /** Switches the engine to another target: the old one stops, the new one starts (one engine at a time). */
-  async select(targetId: string): Promise<void> {
-    if (this.#target?.descriptor.id === targetId) return;
-    if (!this.#requireList().targets.some((t) => t.descriptor.id === targetId)) throw new Error(`There is no target ${targetId} on this machine.`);
-    this.#options.store.update((data) => ({ ...data, selectedTargetId: targetId }));
-    const previous = this.#supervisor;
-    this.#activate(targetId);
-    await previous?.stop();
-  }
-
-  engine(): EngineView {
-    const target = this.#requireTarget();
-    return { targetId: target.descriptor.id, label: target.descriptor.label, state: this.#requireSupervisor().state, warnings: this.#warnings };
-  }
-
-  /** Restarts the engine; a failure shows in the engine's state rather than here. */
-  async restart(): Promise<void> {
-    await this.#requireSupervisor().restart().catch(() => undefined);
-    void this.#refreshWarnings();
-  }
-
-  doctor(): Promise<DoctorReport> {
-    return this.#requireSupervisor().call("doctor", {});
-  }
-
-  checkTokenFactory(): Promise<ProviderCheck> {
-    return this.#requireSupervisor().call("providers.check", {}, { timeoutMs: 180_000 });
+  async checkWsl(): Promise<WslView | null> {
+    await this.#discover(true);
+    return this.wsl();
   }
 
   projects(): ProjectView[] {
-    const targetId = this.#requireTarget().descriptor.id;
-    return this.#options.store.data.projects.filter((p) => p.targetId === targetId).map(view);
+    return this.#options.store.data.projects.map((record) => this.#view(record));
   }
 
-  /** Where the folder picker should open: the distribution's home for a WSL target. */
-  pickerDefault(): string | undefined {
-    const target = this.#requireTarget();
-    return target instanceof WslTarget && this.#home ? uncHome(target.descriptor.distro!, this.#home) : undefined;
+  /** Every engine a project uses or that is running. Asking starts nothing. */
+  engines(): EngineView[] {
+    const ids = new Set([...this.#engines.keys(), ...this.#options.store.data.projects.map((p) => p.targetId)]);
+    return [...ids].map((id) => this.#engineView(id));
   }
 
-  /** Records a folder picked in the native dialog for the current target, converting its path once, here (D1). */
-  async addPicked(picked: string): Promise<AddProjectResult> {
-    const target = this.#requireTarget();
-    let nativePath: string;
-    let warning: string | null = null;
-    if (target instanceof WslTarget) {
-      const pick = wslPick(picked, target.descriptor.distro!);
-      if (pick.kind === "refused") return { status: "refused", reason: pick.reason };
-      if (pick.kind === "drive") {
-        const linux = await target.toLinuxPath(pick.windowsPath);
-        if (!linux) return { status: "refused", reason: `${target.descriptor.label} couldn't find ${pick.windowsPath}. Check the drive is mounted in WSL.` };
-        nativePath = linux;
-        warning = SLOW_DRIVE;
-      } else {
-        nativePath = pick.path;
-      }
-    } else {
-      const problem = this.#options.platform === "win32" ? windowsPickProblem(picked) : null;
-      if (problem) return { status: "refused", reason: problem };
-      nativePath = picked;
+  /** Starts the engine of the project's folder if it isn't running yet. A target that can't run one says why (D17). */
+  async open(projectId: string): Promise<EngineView> {
+    const project = this.#project(projectId);
+    await this.#ensure(project.targetId).catch(() => undefined);
+    return this.#engineView(project.targetId);
+  }
+
+  /** Restarts the project's engine; a failure shows in the engine's state rather than here. */
+  async restart(projectId: string): Promise<void> {
+    const { targetId } = this.#project(projectId);
+    const engine = this.#engines.get(targetId);
+    if (engine && targetId === "local") {
+      await engine.supervisor.restart().catch(() => undefined);
+      await this.#refreshWarnings(engine);
+      return;
     }
-    const targetId = target.descriptor.id;
-    const existing = this.#options.store.data.projects.find((p) => p.targetId === targetId && p.nativePath === nativePath);
-    if (existing) return { status: "added", project: view(existing), warning };
-    const record: ProjectRecord = { id: randomUUID(), targetId, nativePath, label: folderLabel(nativePath), addedAt: new Date().toISOString() };
+    // A distribution can change while Nivra runs (installed, converted to WSL 2, removed): look again, start afresh.
+    if (targetId.startsWith("wsl:")) await this.#discover(true);
+    if (engine) {
+      await engine.supervisor.close();
+      if (this.#engines.get(targetId) === engine) this.#engines.delete(targetId);
+    }
+    this.#unavailable.delete(targetId);
+    await this.#ensure(targetId).catch(() => undefined);
+  }
+
+  doctor(projectId: string): Promise<DoctorReport> {
+    return this.#onProjectEngine(projectId, (engine) => engine.supervisor.call("doctor", {}));
+  }
+
+  checkTokenFactory(projectId: string): Promise<ProviderCheck> {
+    return this.#onProjectEngine(projectId, (engine) => engine.supervisor.call("providers.check", {}, { timeoutMs: 180_000 }));
+  }
+
+  async startHello(projectId: string, holdMs: number): Promise<RunSummary> {
+    const project = this.#project(projectId);
+    const engine = await this.#ensure(project.targetId);
+    // Main mints the request id, so a retry never starts a second run (from Hird).
+    const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: project.nativePath, holdMs } });
+    this.#runs.set(run.id, project.targetId);
+    return run;
+  }
+
+  async runEvents(runId: string, after: number): Promise<RunEventsPage> {
+    return this.#runEngine(runId).supervisor.call("runs.events", { runId, after, limit: 500 });
+  }
+
+  async cancelRun(runId: string): Promise<{ status: RunStatus; wasTerminal: boolean }> {
+    return this.#runEngine(runId).supervisor.call("runs.cancel", { runId });
+  }
+
+  /** Records a folder picked in the native dialog for the engine that owns it, converting its path once, here (D17). */
+  async addPicked(picked: string): Promise<AddProjectResult> {
+    const { platform } = this.#options;
+    const path = platform === "win32" && /^[A-Za-z]:[\\/]/.test(picked) ? this.#realpath(picked) : picked;
+    const folder = classifyPicked(path, { platform, insideWsl: this.#options.insideWsl ?? false });
+    if (folder.kind === "refused") return { status: "refused", reason: folder.reason };
+    let targetId = "local";
+    let warning: string | null = null;
+    if (folder.kind === "local") {
+      warning = folder.notice;
+    } else {
+      const checked = await this.#checkWslFolder(folder.distro);
+      if ("refused" in checked) return { status: "refused", reason: checked.refused };
+      targetId = checked.target.descriptor.id;
+      warning = checked.warning;
+    }
+    // Read the records again: checking a distribution can take a while.
+    const windowsFolder = targetId === "local" && platform === "win32";
+    const existing = this.#options.store.data.projects.find((p) => p.targetId === targetId && sameFolder(p.nativePath, folder.nativePath, windowsFolder));
+    if (existing) return { status: "added", project: this.#view(existing), warning };
+    const record: ProjectRecord = { id: randomUUID(), targetId, nativePath: folder.nativePath, label: folderLabel(folder.nativePath), addedAt: new Date().toISOString() };
     this.#options.store.update((data) => ({ ...data, projects: [...data.projects, record] }));
-    return { status: "added", project: view(record), warning };
+    return { status: "added", project: this.#view(record), warning };
   }
 
   removeProject(projectId: string): void {
+    this.#notices.delete(projectId);
     this.#options.store.update((data) => ({ ...data, projects: data.projects.filter((p) => p.id !== projectId) }));
   }
 
-  startHello(projectId: string, holdMs: number): Promise<RunSummary> {
-    const project = this.#options.store.data.projects.find((p) => p.id === projectId);
-    if (!project) return Promise.reject(new Error("That project is no longer in the list."));
-    const target = this.#requireTarget();
-    if (project.targetId !== target.descriptor.id) {
-      const owner = this.#list?.targets.find((t) => t.descriptor.id === project.targetId)?.descriptor.label ?? project.targetId;
-      return Promise.reject(new Error(`That project belongs to ${owner}. Choose that target to run it.`));
-    }
-    // Main mints the request id, so a retry never starts a second run (from Hird).
-    return this.#requireSupervisor().call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: project.nativePath, holdMs } });
-  }
-
-  listRuns(): Promise<RunList> {
-    return this.#requireSupervisor().call("runs.list", { limit: 20, cursor: null });
-  }
-
-  runEvents(runId: string, after: number): Promise<RunEventsPage> {
-    return this.#requireSupervisor().call("runs.events", { runId, after, limit: 500 });
-  }
-
-  cancelRun(runId: string): Promise<{ status: RunStatus; wasTerminal: boolean }> {
-    return this.#requireSupervisor().call("runs.cancel", { runId });
-  }
-
-  /** Hands a running engine the keys as they are now (D8). */
+  /** Hands every engine the keys as they are now (D8), including one that was still starting when they changed. */
   async secretsChanged(): Promise<void> {
-    const supervisor = this.#requireSupervisor();
-    if (supervisor.state.status !== "online") return;
     const secrets = await this.#options.credentials();
     const remove = (["NEBIUS_API_KEY"] as const).filter((name) => !secrets[name]);
-    await supervisor.call("secrets.update", { set: secrets, remove: [...remove] });
+    const results = await Promise.allSettled(
+      [...this.#engines.values()].map(async (engine) => {
+        if (engine.supervisor.state.status === "starting") await engine.supervisor.start().catch(() => undefined);
+        if (engine.supervisor.state.status !== "online") return;
+        await engine.supervisor.call("secrets.update", { set: secrets, remove: [...remove] });
+      }),
+    );
+    for (const result of results) {
+      if (result.status === "rejected") this.#options.log(`Could not hand an engine the new key: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+    }
   }
 
   resumed(): void {
-    this.#supervisor?.resumed();
+    for (const engine of this.#engines.values()) engine.supervisor.resumed();
   }
 
-  async shutdown(): Promise<void> {
-    await this.#supervisor?.stop();
+  /** Stops every engine in parallel, each in the D4 order; none can start afterwards. */
+  shutdown(): Promise<void> {
+    this.#closing ??= Promise.allSettled([...this.#engines.values()].map((engine) => engine.supervisor.close())).then(() => undefined);
+    return this.#closing;
   }
 
   // ---- internals ------------------------------------------------------------------------------------------------
 
-  #activate(targetId: string): void {
-    const target = this.#requireList().targets.find((t) => t.descriptor.id === targetId)!;
-    this.#target = target;
-    this.#warnings = [];
-    this.#home = null;
-    this.#supervisor = new EngineSupervisor({
-      target,
-      logsDir: this.#options.logsDir,
-      client: this.#options.client,
-      credentials: this.#options.credentials,
-      log: this.#options.log,
-    });
-    void this.#supervisor.start().catch((error: unknown) => this.#options.log(`[${targetId}] did not start: ${error instanceof Error ? error.message : String(error)}`));
-    void this.#refreshWarnings();
+  #project(projectId: string): ProjectRecord {
+    const project = this.#options.store.data.projects.find((p) => p.id === projectId);
+    if (!project) throw new Error("That project is no longer in the list.");
+    return project;
   }
 
-  async #refreshWarnings(): Promise<void> {
-    const target = this.#target;
-    if (!target) return;
+  async #onProjectEngine<T>(projectId: string, body: (engine: Engine) => Promise<T>): Promise<T> {
+    const project = this.#project(projectId);
+    return body(await this.#ensure(project.targetId));
+  }
+
+  #runEngine(runId: string): Engine {
+    const targetId = this.#runs.get(runId);
+    if (!targetId) throw new Error("Nivra has no record of that run in this session. Start it again.");
+    const engine = this.#engines.get(targetId);
+    if (!engine) throw new Error(`The engine on ${this.#labelOf(targetId)} isn't running.`);
+    return engine;
+  }
+
+  /** The engine for a target, created and started on first use. Never another target's instead (D17). */
+  async #ensure(targetId: string): Promise<Engine> {
+    const existing = this.#engines.get(targetId);
+    if (existing) return existing;
+    if (this.#closing) throw new Error("Nivra is quitting.");
+    this.#opening.add(targetId);
     try {
-      const probe = await target.probe();
-      if (this.#target !== target) return;
-      this.#warnings = probe.problems.filter((p) => p.severity === "warning").map((p) => p.message);
-      this.#home = typeof probe.facts["home"] === "string" ? probe.facts["home"] : null;
-    } catch {
-      // A probe that fails shows in the engine's own start failure.
+      const target = await this.#resolve(targetId);
+      // Another call may have created it while this one waited.
+      const raced = this.#engines.get(targetId);
+      if (raced) return raced;
+      if (this.#closing) throw new Error("Nivra is quitting.");
+      const engine: Engine = {
+        target,
+        warnings: [],
+        supervisor: new EngineSupervisor({
+          target,
+          logsDir: this.#options.logsDir,
+          client: this.#options.client,
+          credentials: this.#options.credentials,
+          log: this.#options.log,
+          ...this.#options.supervisor,
+        }),
+      };
+      this.#engines.set(targetId, engine);
+      this.#unavailable.delete(targetId);
+      void this.#startEngine(engine);
+      return engine;
+    } catch (error) {
+      this.#unavailable.set(targetId, error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      this.#opening.delete(targetId);
     }
   }
 
-  #requireList(): TargetList {
-    if (!this.#list) throw new Error("The host has not finished starting.");
-    return this.#list;
+  async #startEngine(engine: Engine): Promise<void> {
+    try {
+      await engine.supervisor.start();
+    } catch (error) {
+      this.#options.log(`[${engine.target.descriptor.id}] did not start: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    await this.#refreshWarnings(engine);
   }
 
-  #requireTarget(): ExecutionTarget {
-    if (!this.#target) throw new Error("The host has not finished starting.");
-    return this.#target;
+  async #refreshWarnings(engine: Engine): Promise<void> {
+    try {
+      const probe = await engine.target.probe();
+      engine.warnings = probe.problems.filter((p) => p.severity === "warning").map((p) => p.message);
+    } catch {
+      // A probe that fails shows in the engine's own state.
+    }
   }
 
-  #requireSupervisor(): EngineSupervisor {
-    if (!this.#supervisor) throw new Error("The host has not finished starting.");
-    return this.#supervisor;
+  async #resolve(targetId: string): Promise<ExecutionTarget> {
+    if (targetId === "local") return this.#options.targets.local;
+    if (!targetId.startsWith("wsl:")) throw new Error(`Nivra doesn't know where "${targetId}" runs. Remove this folder from the list and add it again.`);
+    const name = targetId.slice(4);
+    if (this.#options.platform !== "win32") throw new Error(`This folder is inside WSL (${name}), which only Nivra on Windows can reach. Remove it from the list.`);
+    const found = await this.#findWsl(name);
+    if ("target" in found) return found.target;
+    if ("notReady" in found) throw new Error(found.notReady);
+    throw new Error(`${name} isn't a WSL distribution on this computer any more. Run \`wsl --list\` in a terminal to check, reinstall it, or remove this folder from the list.`);
   }
-}
 
-function view(record: ProjectRecord): ProjectView {
-  return { id: record.id, targetId: record.targetId, label: record.label, displayPath: record.nativePath };
+  /** A distribution by name (as WSL spells it), looking again once when it isn't in what Nivra found before. */
+  async #findWsl(name: string): Promise<WslLookup> {
+    const lookup = (found: WslTargets | null): WslLookup => {
+      if (!found) return { notReady: "WSL isn't available on this computer." };
+      if (found.discovery.status !== "ready") return { notReady: found.discovery.message };
+      const target = found.targets.find((t) => t.descriptor.distro?.toLowerCase() === name.toLowerCase());
+      return target ? { target } : { notFound: true };
+    };
+    const first = lookup(await this.#discover());
+    return "notFound" in first ? lookup(await this.#discover(true)) : first;
+  }
+
+  async #checkWslFolder(distro: string): Promise<{ target: ExecutionTarget; warning: string | null } | { refused: string }> {
+    if (isHiddenDistro(distro)) {
+      return { refused: `${distro} is Docker Desktop's own distribution, not one for your work. Keep the repository in Ubuntu or another distribution, then add it from there.` };
+    }
+    const found = await this.#findWsl(distro);
+    if ("notReady" in found) return { refused: found.notReady };
+    if ("notFound" in found) return { refused: `Nivra can't find a WSL distribution named ${distro}. Run \`wsl --list\` in a terminal to see yours, then add the folder again.` };
+    const probe = await found.target.probe();
+    const blocking = probe.problems.filter((p) => p.severity === "blocking");
+    if (blocking.length) return { refused: blocking.map((p) => p.message).join(" ") };
+    const warnings = probe.problems.filter((p) => p.severity === "warning").map((p) => p.message);
+    return { target: found.target, warning: warnings.length ? warnings.join(" ") : null };
+  }
+
+  #discover(force = false): Promise<WslTargets | null> {
+    if (this.#options.platform !== "win32") return Promise.resolve(null);
+    if (this.#discovering) return this.#discovering;
+    if (this.#wslChecked && !force) return Promise.resolve(this.#wsl);
+    const started = performance.now();
+    this.#discovering = this.#options.targets
+      .discoverWsl()
+      .then((found) => {
+        this.#wsl = found;
+        this.#wslChecked = true;
+        this.#options.log(`WSL discovery: ${found?.discovery.status ?? "not on this host"} in ${Math.round(performance.now() - started)} ms`);
+        return found;
+      })
+      .finally(() => (this.#discovering = null));
+    return this.#discovering;
+  }
+
+  #realpath(path: string): string {
+    try {
+      return (this.#options.realpath ?? realpathSync.native)(path);
+    } catch {
+      return path;
+    }
+  }
+
+  #labelOf(targetId: string): string {
+    return this.#engines.get(targetId)?.target.descriptor.label ?? labelFor(targetId, this.#options.platform);
+  }
+
+  #view(record: ProjectRecord): ProjectView {
+    return {
+      id: record.id,
+      targetId: record.targetId,
+      targetLabel: this.#labelOf(record.targetId),
+      label: record.label,
+      displayPath: record.nativePath,
+      notice: this.#notices.get(record.id) ?? null,
+    };
+  }
+
+  #engineView(targetId: string): EngineView {
+    const label = this.#labelOf(targetId);
+    const engine = this.#engines.get(targetId);
+    if (engine) return { targetId, label, state: engine.supervisor.state, warnings: engine.warnings };
+    if (this.#opening.has(targetId)) return { targetId, label, state: { status: "starting", detail: targetId === "local" ? "Starting the engine…" : "Looking for WSL distributions…" }, warnings: [] };
+    const reason = this.#unavailable.get(targetId);
+    if (reason) return { targetId, label, state: { status: "failed", reason, code: "target-unavailable", logPath: null }, warnings: [] };
+    return { targetId, label, state: { status: "stopped" }, warnings: [] };
+  }
 }

@@ -5,17 +5,18 @@ import { errorMessage, Section } from "../shared/ui";
 
 const COLOR = { ok: "green", warn: "yellow", fail: "red" } as const;
 
-/** What works on this target, and what to do about what doesn't. Checks only detect; nothing is changed. */
-export function Doctor({ online }: { online: boolean }) {
+/** What works where the chosen project runs, and what to do about what doesn't. Checks only detect; nothing is changed. */
+export function Doctor({ projectId, online, targetLabel }: { projectId: string | null; online: boolean; targetLabel: string | null }) {
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function run() {
+    if (!projectId) return;
     setBusy(true);
     setError(null);
     try {
-      setReport(await window.nivra.runDoctor());
+      setReport(await window.nivra.runDoctor(projectId));
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -26,9 +27,13 @@ export function Doctor({ online }: { online: boolean }) {
   return (
     <Section
       title="Doctor"
-      description="Git, the engine's data folder, and the execution boundaries this target can offer."
+      description={
+        targetLabel
+          ? `Git, the engine's data folder, and the execution boundaries ${targetLabel} can offer.`
+          : "Git, the engine's data folder, and the execution boundaries. Choose a folder first."
+      }
       actions={
-        <Button size="xs" variant="default" onClick={() => void run()} loading={busy} disabled={!online} data-testid="doctor-run">
+        <Button size="xs" variant="default" onClick={() => void run()} loading={busy} disabled={!projectId || !online} data-testid="doctor-run">
           Run checks
         </Button>
       }

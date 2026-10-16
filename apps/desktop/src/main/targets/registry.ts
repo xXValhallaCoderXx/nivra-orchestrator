@@ -13,27 +13,40 @@ export interface TargetSources {
   discover?: () => Promise<WslDiscovery>;
 }
 
-export interface TargetList {
+/** What WSL discovery found, and a target for each distribution it lists. */
+export interface WslTargets {
+  discovery: WslDiscovery;
   targets: ExecutionTarget[];
-  /** What WSL discovery found on a Windows host; null elsewhere. */
-  wsl: WslDiscovery | null;
-  /** The target to preselect: WSL's default distribution when there is one, else the host itself. */
-  preferred: string;
 }
 
-/** Every target this host offers: itself, plus each usable WSL distribution on Windows (D1, D10). */
-export async function listTargets(sources: TargetSources): Promise<TargetList> {
-  const local = new LocalTarget({ platform: sources.platform, runtime: sources.local.runtime, home: sources.local.home, ...(sources.env ? { env: sources.env } : {}) });
-  if (sources.platform !== "win32") return { targets: [local], wsl: null, preferred: local.descriptor.id };
-  const wsl = await (sources.discover ?? (() => discoverWsl(sources.env ? { env: sources.env } : {})))();
-  const targets: ExecutionTarget[] = [local];
-  let preferred = local.descriptor.id;
-  if (wsl.status === "ready") {
-    for (const distro of wsl.distros) {
-      const target = new WslTarget({ distro, wslExe: wsl.wslExe, runtime: sources.wslRuntime, ...(sources.env ? { env: sources.env } : {}) });
-      targets.push(target);
-      if (distro.isDefault && distro.version !== 1) preferred = target.descriptor.id;
-    }
-  }
-  return { targets, wsl, preferred };
+/**
+ * Where engines can run on this host (D17). There is no preferred target: a project's folder decides which one it
+ * uses, so the factory only builds them. The host's own OS is always there; WSL's distributions are found on demand.
+ */
+export interface TargetFactory {
+  readonly local: ExecutionTarget;
+  /** WSL's distributions as targets, from a fresh discovery. Null off Windows; never rejects. */
+  discoverWsl(): Promise<WslTargets | null>;
+}
+
+export function targetFactory(sources: TargetSources): TargetFactory {
+  const env = sources.env ? { env: sources.env } : {};
+  const local = new LocalTarget({ platform: sources.platform, runtime: sources.local.runtime, home: sources.local.home, ...env });
+  return {
+    local,
+    async discoverWsl() {
+      if (sources.platform !== "win32") return null;
+      let discovery: WslDiscovery;
+      try {
+        discovery = await (sources.discover ?? (() => discoverWsl(env)))();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        discovery = { status: "broken", code: null, message: `Nivra couldn't check WSL (${detail}). Press Check again; if it keeps failing, run \`wsl --update\` in a terminal.`, distros: [] };
+      }
+      if (discovery.status !== "ready") return { discovery, targets: [] };
+      // WSL 1 distributions get a target too: its probe refuses them with the fix, rather than hiding them.
+      const { wslExe } = discovery;
+      return { discovery, targets: discovery.distros.map((distro) => new WslTarget({ distro, wslExe, runtime: sources.wslRuntime, ...env })) };
+    },
+  };
 }

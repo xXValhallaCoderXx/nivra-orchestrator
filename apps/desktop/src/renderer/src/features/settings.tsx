@@ -12,7 +12,7 @@ const KEY_LOOK = {
 } as const;
 
 /** The Nebius key, kept by the app (D8): encrypted by the OS where it can be, and handed to the engine in memory only. */
-export function Settings({ online, targetLabel }: { online: boolean; targetLabel: string }) {
+export function Settings({ projectId, online, targetLabel }: { projectId: string | null; online: boolean; targetLabel: string | null }) {
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [check, setCheck] = useState<ProviderCheck | null>(null);
   const [checking, setChecking] = useState(false);
@@ -25,11 +25,12 @@ export function Settings({ online, targetLabel }: { online: boolean; targetLabel
   }, []);
 
   async function runCheck() {
+    if (!projectId) return;
     setChecking(true);
     setError(null);
     setCheck(null);
     try {
-      setCheck(await window.nivra.checkTokenFactory());
+      setCheck(await window.nivra.checkTokenFactory(projectId));
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -76,8 +77,14 @@ export function Settings({ online, targetLabel }: { online: boolean; targetLabel
         )}
       </Group>
       <Group gap="sm">
-        <Button variant="default" onClick={() => void runCheck()} loading={checking} disabled={!online || !settings || (settings.nebiusKey !== "encrypted" && settings.nebiusKey !== "unencrypted")} data-testid="tokenfactory-check">
-          Check Token Factory from {targetLabel}
+        <Button
+          variant="default"
+          onClick={() => void runCheck()}
+          loading={checking}
+          disabled={!projectId || !online || !settings || (settings.nebiusKey !== "encrypted" && settings.nebiusKey !== "unencrypted")}
+          data-testid="tokenfactory-check"
+        >
+          {targetLabel ? `Check Token Factory from ${targetLabel}` : "Check Token Factory (choose a folder first)"}
         </Button>
       </Group>
       {check && (

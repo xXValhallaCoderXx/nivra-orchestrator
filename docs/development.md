@@ -23,7 +23,7 @@ The desktop app:
 
 ```bash
 pnpm dev                    # Linux Electron under WSLg, hot reload; the local engine runs from source on ~/.nivra-dev
-pnpm dev:win                # from WSL: build the real Windows app and start it on Windows (both targets)
+pnpm dev:win                # from WSL: build the real Windows app and start it on Windows (WSL and Windows folders)
 pnpm --filter @nivra/desktop test:e2e        # build, then drive the app through its UI (Playwright, needs a display or xvfb-run -a)
 pnpm --filter @nivra/desktop test:packaged   # the same against the electron-builder --dir output (package it first)
 pnpm --filter @nivra/desktop test:windows    # from WSL: drive the Windows build `pnpm dev:win --no-launch` copied
@@ -74,6 +74,4 @@ A Node installed with nvm is invisible to `wsl.exe --exec`; that is expected, an
 - Capturing the login shell's PATH for tools the engine starts. Until then, tools are looked up in the engine's own
   PATH, with WSL's leaked Windows folders removed. **Required before agents run builds (D15)**: nvm and similar are
   invisible to `wsl.exe --exec`.
-- One engine per target kept running: the host runs one engine at a time, and switching targets stops the other,
-  which would cancel a long agent run (D15, open).
 - Workspaces, patch checks and approved apply for agent writes (D15).

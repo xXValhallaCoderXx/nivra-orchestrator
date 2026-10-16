@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, release } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -9,6 +9,7 @@ import { Host } from "./host.ts";
 import { HostStore } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
 import { runtimeIn, type RuntimeLayout } from "./targets/local.ts";
+import { targetFactory } from "./targets/registry.ts";
 import type { EnginePlatform } from "./targets/types.ts";
 import type { WslRuntime } from "./targets/wsl.ts";
 import { defaultZoom, restoreBounds, stepZoom } from "./window-state.ts";
@@ -40,12 +41,14 @@ function start(): void {
   const store = new HostStore(join(app.getPath("userData"), "nivra.json"));
   const secrets = new SecretStore(join(app.getPath("userData"), "secrets.json"), electronKeyCrypto());
   const host = new Host({
-    sources: { platform, ...runtimeSources(platform) },
+    targets: targetFactory({ platform, ...runtimeSources(platform) }),
     store,
     logsDir: app.getPath("logs"),
     client: { name: "Nivra", version: app.getVersion() },
     credentials: () => secrets.all(),
     platform: process.platform,
+    // The Linux app under WSLg, where a /mnt/<drive> folder is slow (as the engine's own insideWsl reads it).
+    insideWsl: process.platform === "linux" && (Boolean(process.env["WSL_DISTRO_NAME"] || process.env["WSL_INTEROP"]) || /microsoft/i.test(release())),
     log: (line) => console.error(line),
   });
   let ready: Promise<void> | null = null;
@@ -83,6 +86,7 @@ function start(): void {
 
   const none = z.tuple([]);
   const RunId = z.uuid();
+  const project = z.tuple([z.uuid()]);
   const settings = async (): Promise<SettingsView> => {
     const state = await secrets.state("NEBIUS_API_KEY");
     return { nebiusKey: state, keychain: secrets.keychain(), note: secrets.note(state) };
@@ -97,27 +101,26 @@ function start(): void {
     platform: process.platform,
     packaged: app.isPackaged,
   }));
-  handle(IPC.listTargets, none, () => host.targets());
-  handle(IPC.selectTarget, z.tuple([z.string().regex(/^(local|wsl:[A-Za-z0-9._-]{1,64})$/)]), (_event, id) => host.select(id));
-  handle(IPC.engineStatus, none, () => host.engine());
-  handle(IPC.restartEngine, none, () => host.restart());
-  handle(IPC.runDoctor, none, () => host.doctor());
+  handle(IPC.listEngines, none, () => host.engines());
+  handle(IPC.openProject, project, (_event, id) => host.open(id));
+  handle(IPC.restartEngine, project, (_event, id) => host.restart(id));
+  handle(IPC.runDoctor, project, (_event, id) => host.doctor(id));
+  handle(IPC.getWsl, none, () => host.wsl());
+  handle(IPC.checkWsl, none, () => host.checkWsl());
   handle(IPC.listProjects, none, () => host.projects());
   handle(IPC.addProject, none, async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
-    const defaultPath = host.pickerDefault();
-    const options = { title: "Choose a repository folder", properties: ["openDirectory" as const], ...(defaultPath ? { defaultPath } : {}) };
+    const options = { title: "Choose a repository folder", properties: ["openDirectory" as const] };
     const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
     const picked = result.filePaths[0];
     return result.canceled || !picked ? { status: "cancelled" as const } : host.addPicked(picked);
   });
-  handle(IPC.removeProject, z.tuple([z.uuid()]), (_event, id) => host.removeProject(id));
+  handle(IPC.removeProject, project, (_event, id) => host.removeProject(id));
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));
-  handle(IPC.listRuns, none, () => host.listRuns());
   handle(IPC.runEvents, z.tuple([RunId, z.number().int().nonnegative()]), (_event, id, after) => host.runEvents(id, after));
   handle(IPC.cancelRun, z.tuple([RunId]), (_event, id) => host.cancelRun(id));
   handle(IPC.getSettings, none, () => settings());
-  handle(IPC.checkTokenFactory, none, () => host.checkTokenFactory());
+  handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {
     await secrets.set("NEBIUS_API_KEY", key);
     await host.secretsChanged().catch((error: unknown) => console.error("Could not hand the engine the new key", error));
@@ -183,7 +186,7 @@ function start(): void {
     });
   });
 
-  // Quitting stops the engine in the D4 order first, then the quit goes on.
+  // Quitting stops every engine, each in the D4 order, first; then the quit goes on.
   app.on("before-quit", (event) => {
     if (quitting === "done") return;
     event.preventDefault();
@@ -191,7 +194,7 @@ function start(): void {
     quitting = "stopping";
     void host
       .shutdown()
-      .catch((error: unknown) => console.error("Stopping the engine failed", error))
+      .catch((error: unknown) => console.error("Stopping the engines failed", error))
       .finally(() => {
         quitting = "done";
         app.quit();

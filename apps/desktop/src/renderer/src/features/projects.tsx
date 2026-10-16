@@ -1,25 +1,35 @@
-import { Alert, Button, Code, Group, Select, Stack, Text } from "@mantine/core";
+import { Alert, Badge, Button, Code, Group, Select, Stack, Text } from "@mantine/core";
 import { useState } from "react";
-import type { ProjectView } from "../../../shared/ipc";
+import type { ProjectView, WslView } from "../../../shared/ipc";
 import { errorMessage, Section } from "../shared/ui";
+import { WslGuidance } from "./wsl";
 
-/** The repositories on the current target. Folders come from the native picker in main; the renderer never names a path (D1). */
+/**
+ * Every repository, each on the engine its folder belongs to (D17). Folders come from the native picker in main; the
+ * renderer never names a path (D1).
+ */
 export function Projects({
   projects,
   selectedId,
   onSelect,
   onChanged,
-  targetLabel,
+  busyIds,
+  wsl,
+  onWslChecked,
 }: {
   projects: ProjectView[];
   selectedId: string | null;
   onSelect(id: string | null): void;
   onChanged(): void;
-  targetLabel: string;
+  /** Projects with a run going, which can't be removed until it ends. */
+  busyIds: readonly string[];
+  wsl: WslView | null;
+  onWslChecked(): void;
 }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ color: "yellow" | "red"; text: string } | null>(null);
   const selected = projects.find((p) => p.id === selectedId) ?? null;
+  const running = selected ? busyIds.includes(selected.id) : false;
 
   async function add() {
     setBusy(true);
@@ -41,29 +51,49 @@ export function Projects({
   }
 
   async function remove() {
-    if (!selected) return;
-    await window.nivra.removeProject(selected.id);
-    onSelect(null);
-    onChanged();
+    if (!selected || running) return;
+    try {
+      await window.nivra.removeProject(selected.id);
+      onSelect(null);
+      onChanged();
+    } catch (reason) {
+      setNotice({ color: "red", text: errorMessage(reason) });
+    }
   }
 
   return (
-    <Section title="Repository" description={`Folders on ${targetLabel}. The engine reads them where they are; nothing is copied.`}>
+    <Section
+      title="Repositories"
+      description="Each folder runs where it is kept: a folder inside a WSL distribution runs there, one on a Windows drive runs on Windows. Nothing is copied."
+    >
       <Group gap="sm" align="flex-end">
         <Select
           label="Project"
-          placeholder={projects.length ? "Choose a repository" : "No repositories on this target yet"}
+          placeholder={projects.length ? "Choose a repository" : "No repositories yet"}
           data={projects.map((p) => ({ value: p.id, label: p.label }))}
-          value={selectedId}
+          value={selected?.id ?? null}
           onChange={onSelect}
+          renderOption={({ option }) => (
+            <Group justify="space-between" w="100%" wrap="nowrap" gap="md">
+              <Text size="sm">{option.label}</Text>
+              <Text size="xs" c="var(--nivra-text-3)">
+                {projects.find((p) => p.id === option.value)?.targetLabel}
+              </Text>
+            </Group>
+          )}
           w={320}
           data-testid="project-select"
         />
+        {selected && (
+          <Badge variant="light" color="gray" mb={6} data-testid="project-target">
+            {selected.targetLabel}
+          </Badge>
+        )}
         <Button variant="default" onClick={() => void add()} loading={busy} data-testid="project-add">
           Add folder…
         </Button>
         {selected && (
-          <Button variant="subtle" color="red" onClick={() => void remove()}>
+          <Button variant="subtle" color="red" onClick={() => void remove()} disabled={running} data-testid="project-remove">
             Remove
           </Button>
         )}
@@ -71,15 +101,22 @@ export function Projects({
       {selected && (
         <Text size="xs" c="var(--nivra-text-3)">
           <Code fz="xs">{selected.displayPath}</Code>
+          {running ? " · cancel its run before removing it" : ""}
         </Text>
       )}
+      {selected?.notice && (
+        <Alert color="yellow" variant="light" data-testid="project-notice">
+          <Text size="sm">{selected.notice}</Text>
+        </Alert>
+      )}
       {notice && (
-        <Alert color={notice.color} variant="light">
+        <Alert color={notice.color} variant="light" data-testid="project-add-notice">
           <Stack gap={0}>
             <Text size="sm">{notice.text}</Text>
           </Stack>
         </Alert>
       )}
+      {wsl && <WslGuidance wsl={wsl} onChecked={onWslChecked} />}
     </Section>
   );
 }

@@ -1,36 +1,49 @@
-import { AppShell, Container, Group, Stack, Text } from "@mantine/core";
-import { useState } from "react";
-import type { EngineView, ProjectView, TargetsView } from "../../../shared/ipc";
+import { Alert, AppShell, Container, Group, Stack, Text } from "@mantine/core";
+import { useEffect, useState } from "react";
+import type { EngineView, ProjectView, WslView } from "../../../shared/ipc";
 import { Doctor } from "../features/doctor";
-import { EngineNotices, TargetBar } from "../features/engine";
-import { HelloRun } from "../features/hello";
+import { EngineBadge, EngineNotices } from "../features/engine";
+import { HelloRun, TERMINAL, type RunRef } from "../features/hello";
 import { Projects } from "../features/projects";
 import { Settings } from "../features/settings";
 import { usePoll } from "../shared/ui";
 
-/** One page for the bootstrap: where the engine runs, the repository, a hello run, Doctor and the key (B4). */
+/**
+ * One page for the proof of concept: the repositories, each on the engine its folder belongs to (D17), a hello run,
+ * Doctor and the key. There is no target to choose: adding a folder decides where its work runs, and every engine a
+ * project uses keeps running, so a run is never cut off by looking at another project.
+ */
 export function App() {
-  const [targetsVersion, setTargetsVersion] = useState(0);
   const [projectsVersion, setProjectsVersion] = useState(0);
   const [projectId, setProjectId] = useState<string | null>(null);
+  const [runs, setRuns] = useState<Record<string, RunRef>>({});
 
-  const targets = usePoll<TargetsView>(() => window.nivra.listTargets(), () => null, [targetsVersion]);
-  const engine = usePoll<EngineView>(
-    () => window.nivra.engineStatus(),
-    (view) => (view?.state.status === "starting" || view === null ? 700 : 2_500),
-    [targetsVersion],
+  const projects = usePoll<ProjectView[]>(() => window.nivra.listProjects(), () => null, [projectsVersion]);
+  const engines = usePoll<EngineView[]>(
+    () => window.nivra.listEngines(),
+    (list) => (list === null || list.some((e) => e.state.status === "starting") ? 700 : 2_500),
+    [],
   );
-  const projects = usePoll<ProjectView[]>(() => window.nivra.listProjects(), () => null, [targetsVersion, projectsVersion]);
+  const wsl = usePoll<WslView | null>(() => window.nivra.getWsl(), (view) => (view?.status === "checking" ? 700 : null), []);
 
-  // A project belongs to one target: the choice counts only while it is in the current target's list (which may still
-  // be loading right after a folder was added, so the choice is kept rather than cleared).
-  const selectedProjectId = projects.value?.some((p) => p.id === projectId) ? projectId : null;
+  const list = projects.value ?? [];
+  // The chosen project, or the only one there is.
+  const selected = list.find((p) => p.id === projectId) ?? (list.length === 1 ? list[0]! : null);
 
-  const selected = targets.value?.targets.find((t) => t.id === targets.value?.selectedId);
-  // Runs, Doctor reports and provider checks belong to one target's engine: keyed by the target, they start fresh on a
-  // switch, so nothing polls or cancels a run on an engine that never had it.
-  const targetKey = targets.value?.selectedId ?? "none";
-  const online = engine.value?.state.status === "online" && engine.value.targetId === targetKey;
+  // Opening a project starts its own engine if it isn't running yet, and never another one.
+  useEffect(() => {
+    if (!selected) return;
+    const refresh = () => engines.refresh();
+    void window.nivra.openProject(selected.id).then(refresh, refresh);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
+
+  const engine = selected ? (engines.value?.find((e) => e.targetId === selected.targetId) ?? null) : null;
+  const online = engine?.state.status === "online";
+  const busyIds = Object.entries(runs)
+    .filter(([, ref]) => ref.status !== null && !TERMINAL.includes(ref.status))
+    .map(([id]) => id);
+  const hostError = projects.error ?? engines.error ?? wsl.error;
 
   return (
     <AppShell header={{ height: 56 }} padding="md">
@@ -45,31 +58,37 @@ export function App() {
               Nivra
             </Text>
           </Group>
-          <TargetBar
-            targets={targets.value}
-            engine={engine.value}
-            onSelected={() => {
-              setProjectId(null);
-              setTargetsVersion((n) => n + 1);
-            }}
-          />
+          <EngineBadge project={selected} engine={engine} />
         </Group>
       </AppShell.Header>
       <AppShell.Main>
         <Container size={960} py="md">
           <Stack gap="md">
-            <EngineNotices engine={engine.value} targets={targets.value} />
+            {hostError && (
+              <Alert color="red" title="Nivra couldn't load its state" data-testid="host-error">
+                <Text size="sm">{hostError} It tries again by itself; if this keeps happening, quit and open Nivra again.</Text>
+              </Alert>
+            )}
+            {selected && <EngineNotices projectId={selected.id} engine={engine} />}
             <Projects
-              key={`projects:${targetKey}`}
-              projects={projects.value ?? []}
-              selectedId={selectedProjectId}
+              projects={list}
+              selectedId={selected?.id ?? null}
               onSelect={setProjectId}
               onChanged={() => setProjectsVersion((n) => n + 1)}
-              targetLabel={selected?.label ?? "this target"}
+              busyIds={busyIds}
+              wsl={wsl.value}
+              onWslChecked={() => wsl.refresh()}
             />
-            <HelloRun key={`hello:${targetKey}`} projectId={selectedProjectId} online={online} />
-            <Doctor key={`doctor:${targetKey}`} online={online} />
-            <Settings key={`settings:${targetKey}`} online={online} targetLabel={selected?.label ?? "this target"} />
+            <HelloRun
+              key={`hello:${selected?.id ?? "none"}`}
+              project={selected}
+              online={online}
+              run={selected ? (runs[selected.id] ?? null) : null}
+              onRun={(id, ref) => setRuns((current) => (current[id]?.runId === ref.runId && current[id]?.status === ref.status ? current : { ...current, [id]: ref }))}
+            />
+            {/* Doctor reports and provider checks belong to one engine: they start fresh when the engine changes. */}
+            <Doctor key={`doctor:${selected?.targetId ?? "none"}`} projectId={selected?.id ?? null} online={online} targetLabel={selected?.targetLabel ?? null} />
+            <Settings key={`settings:${selected?.targetId ?? "none"}`} projectId={selected?.id ?? null} online={online} targetLabel={selected?.targetLabel ?? null} />
           </Stack>
         </Container>
       </AppShell.Main>

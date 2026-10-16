@@ -47,8 +47,11 @@ list.
 
 ## Platform rules
 
-- The window is native; the engine runs on the target where the repository lives (D1). A project is
-  `{targetId, nativePath}` in main. The renderer only ever sends a `projectId`, never a path.
+- The window is native; the engine runs on the target where the repository lives (D1).
+  - A project is `{targetId, nativePath}` in main, and its folder's owner sets the target once, when it is added (D17).
+  - There is no target selector and no fallback between targets.
+  - Each target keeps its own engine for the session, and run calls go to the engine that started the run.
+  - The renderer only ever sends a `projectId`, never a path.
 - The engine's stdout carries JSON-RPC and nothing else (D2). Never spawn with `stdio: 'inherit'`, never write to fd 1
   outside the protocol writer, and keep Mastra's logger off or on stderr. The purity test must stay green.
 - Configuration crosses process boundaries as arguments or RPC, never as environment variables (D3): they do not

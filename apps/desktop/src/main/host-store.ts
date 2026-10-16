@@ -1,11 +1,13 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
+import { driveFromMount, folderLabel, sameFolder } from "./paths.ts";
 
 /**
- * The host's own records (D7): the chosen target, the project registry and window placement, as one JSON file in
- * Electron's user-data folder. The host is their only owner; engines get what they need with each request. Writes
- * are atomic (temp file, then rename, retried on Windows sharing errors), as in Hird's preferences.ts.
+ * The host's own records (D7): the project registry and window placement, as one JSON file in Electron's user-data
+ * folder. The host is their only owner; engines get what they need with each request. Writes are atomic (temp file,
+ * then rename, retried on Windows sharing errors), as in Hird's preferences.ts. There is no chosen target any more:
+ * each project's folder decides where it runs (D17).
  */
 
 const Rect = z.object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() });
@@ -21,14 +23,45 @@ export const ProjectRecord = z.strictObject({
 });
 export type ProjectRecord = z.infer<typeof ProjectRecord>;
 
+// Not strict: a key an older version wrote (`selectedTargetId`) is dropped on the next write, not a reason to set the
+// whole file aside.
 const HostData = z.object({
   version: z.literal(1).default(1),
-  selectedTargetId: z.string().min(1).max(80).optional(),
   projects: z.array(ProjectRecord).default([]),
   zoom: z.number().min(0.5).max(3).optional(),
   window: z.object({ bounds: Rect, maximized: z.boolean() }).optional(),
 });
 export type HostData = z.infer<typeof HostData>;
+
+/**
+ * Brings records an older version wrote in line with D17. On Windows, a folder on a drive that was added for a WSL
+ * target (stored as `/mnt/<drive>/…`) belongs to Windows, so it moves to the Windows engine, keeping its id, label and
+ * date; when that folder is also listed for Windows already, the two become one. Nothing is dropped silently: each
+ * record that changed gets a notice for this session.
+ */
+export function migrateHostData(data: HostData, platform: NodeJS.Platform): { data: HostData; changed: boolean; notices: Map<string, string> } {
+  const notices = new Map<string, string>();
+  if (platform !== "win32") return { data, changed: false, notices };
+  const projects: ProjectRecord[] = [];
+  let changed = false;
+  for (const record of data.projects) {
+    const drive = record.targetId.startsWith("wsl:") ? driveFromMount(record.nativePath) : null;
+    if (!drive) {
+      projects.push(record);
+      continue;
+    }
+    changed = true;
+    const notice = `This folder is on drive ${drive[0]}:, so it now runs on Windows, which owns that drive.`;
+    const twin = data.projects.find((p) => p.targetId === "local" && sameFolder(p.nativePath, drive, true));
+    if (twin) {
+      notices.set(twin.id, notice);
+      continue;
+    }
+    projects.push({ ...record, targetId: "local", nativePath: drive, label: record.label || folderLabel(drive) });
+    notices.set(record.id, notice);
+  }
+  return { data: changed ? { ...data, projects } : data, changed, notices };
+}
 
 export class HostStore {
   readonly path: string;
