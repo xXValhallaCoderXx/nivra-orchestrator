@@ -33,7 +33,14 @@ pnpm install --frozen-lockfile
 pnpm verify                 # typecheck + every test; what CI runs
 pnpm probe:tokenfactory     # live: lists Token Factory models and makes one Nemotron tool call (needs NEBIUS_API_KEY)
 pnpm rpc <method> [json]    # drives a real engine over stdio on ~/.nivra-dev (add --follow to runs.start)
+pnpm stage:runtime all      # stages the engine runtimes (linux-x64 smoke-tested, win-x64 cross-staged)
+pnpm verify:windows         # from WSL: native-Windows and WSL engines driven by a real Windows process (D14)
+pnpm dev / pnpm dev:win     # the app on WSLg / the real Windows build started on Windows
 ```
+
+UI checks (Playwright, `apps/desktop`): `test:e2e` (built app), `test:packaged` (electron-builder --dir output),
+`test:windows` (from WSL, the Windows build `pnpm dev:win --no-launch` copied). Run them under `xvfb-run -a` on
+Linux.
 
 More commands arrive with the steps that need them; [docs/development.md](docs/development.md) keeps the current
 list.
@@ -96,6 +103,18 @@ list.
 - Snapshots sent into a boundary never include the engine home, the preferences store or files on the secrets deny
   list. An allowed endpoint can still carry data out, so send the minimum context.
 
+## Agent write rules (D15)
+
+- A coding agent writes only into a workspace the engine made for its run (a copy of one commit), never into the
+  person's checkout or a git worktree.
+- Its changes reach the checkout only as a patch that the engine has checked, the person has approved by hash, and the
+  engine applies with git after recording the intent.
+- Checks and dependency installs run inside an execution boundary, against the workspace. Never run them unconfined
+  as a fallback.
+- The engine on the OS that owns a checkout's filesystem is the only thing that writes it; the host and the renderer
+  never write repository files.
+- Move intent (patches, reports) between environments, never built artefacts.
+
 ## Engineering rules
 
 - Keep main thin and the renderer free of Node APIs.
@@ -141,8 +160,10 @@ change.
 A task is ready for review only when:
 
 1. The requested acceptance criteria are satisfied and supported by evidence.
-2. `pnpm verify` passes (it is what CI runs), plus the packaged tests when packaging, main-process or preload
-   behaviour changed. Engine changes are also checked against a real engine through `apps/engine/scripts/rpc.ts`.
+2. `pnpm verify` passes, plus `pnpm verify:windows` when targets, the supervisor or staging changed, and the packaged
+   checks when packaging, main-process or preload behaviour changed (`test:packaged`, and `test:windows` after
+   `pnpm dev:win --no-launch`; there is no CI: D14). Engine changes are also
+   checked against a real engine through `apps/engine/scripts/rpc.ts`.
 3. New behaviour has appropriate tests where practical; missing coverage is disclosed.
 4. The full diff and untracked files have been inspected for scope, regressions, credentials and generated files.
 5. A concise summary names the changes, the verification results and the remaining risks.

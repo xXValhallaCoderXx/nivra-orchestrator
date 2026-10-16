@@ -21,3 +21,6 @@ playwright-report
 
 # The runtime staged for installers (apps/desktop/scripts/stage-runtime.ts)
 apps/desktop/build/stage
+
+# The bundled Windows harness (apps/desktop/scripts/verify-windows.ts)
+apps/desktop/build/verify

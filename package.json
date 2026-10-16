@@ -10,7 +10,13 @@
     "test": "pnpm -r run test",
     "verify": "pnpm typecheck && pnpm test",
     "probe:tokenfactory": "pnpm --filter @nivra/engine --fail-if-no-match probe:tokenfactory",
-    "rpc": "pnpm --filter @nivra/engine --fail-if-no-match rpc"
+    "rpc": "pnpm --filter @nivra/engine --fail-if-no-match rpc",
+    "stage:runtime": "pnpm --filter @nivra/desktop --fail-if-no-match stage:runtime",
+    "verify:windows": "pnpm --filter @nivra/desktop --fail-if-no-match verify:windows",
+    "dev": "pnpm --filter @nivra/desktop --fail-if-no-match dev",
+    "dev:win": "pnpm --filter @nivra/desktop --fail-if-no-match dev:win",
+    "package:linux": "pnpm --filter @nivra/desktop --fail-if-no-match package:linux",
+    "package:win": "pnpm --filter @nivra/desktop --fail-if-no-match package:win"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

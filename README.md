@@ -4,8 +4,9 @@ A desktop workspace for engineers that explains a repository with evidence, reme
 preferences across projects, and runs coding work inside an execution boundary that enforces its limits instead of
 just asking for approval.
 
-> **Status:** bootstrap in progress for the Nebius × NVIDIA Global AI Hackathon (Coding and Agentic Engineering
-> track). Sections marked *planned* describe work that is not built yet.
+> **Status:** the cross-platform foundation is built and verified (Windows with a WSL or native engine, and Linux);
+> the AI features are next. Built for the Nebius × NVIDIA Global AI Hackathon (Coding and Agentic Engineering track).
+> Sections marked *planned* describe work that is not built yet.
 
 ## What it does
 
@@ -31,9 +32,9 @@ The target demonstration:
 
 | Host | Engine runs | Status |
 |---|---|---|
-| Windows 10/11 x64 | inside a WSL2 distribution (Ubuntu or another glibc distribution) | *planned* — primary target |
-| Windows 10/11 x64 | natively on Windows | *planned* |
-| Linux x64 | locally | *planned* |
+| Windows 10/11 x64 | inside a WSL2 distribution (Ubuntu or another glibc distribution) | works (primary target) |
+| Windows 10/11 x64 | natively on Windows | works (the bootstrap's hello run; coding work comes later) |
+| Linux x64 | locally | works |
 | macOS | locally | later |
 
 ## Install a test build
@@ -47,8 +48,14 @@ Requirements: Node 24.21.0 and pnpm 10.4.1.
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm verify
+pnpm verify                 # typecheck and every test
+pnpm dev                    # run the app (Linux, or WSLg on Windows)
+pnpm package:linux          # deb and AppImage in apps/desktop/release
+pnpm package:win            # Windows zip, built from WSL
 ```
+
+On Windows, Nivra installs its own engine runtime into the WSL distribution you choose (under `~/.nivra`) the first
+time you use it; it does not need Node in WSL.
 
 To check Token Factory access (lists the models, then makes one Nemotron tool call):
 

@@ -1,0 +1,11 @@
+{
+  "extends": "../../packages/tsconfig/base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["src/main/**/*", "src/shared/**/*", "scripts/**/*", "test/**/*"]
+}

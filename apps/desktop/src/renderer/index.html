@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Keep the policy as a meta tag: in development Vite puts the React refresh preamble ahead of it (from Hird).
+      'unsafe-inline' styles are for Mantine's injected CSS variables; scripts stay 'self' only, and the renderer never
+      connects anywhere: it talks to the app through window.nivra alone (D2).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'"
+    />
+    <title>Nivra</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,11 +1,29 @@
 {
   "name": "@nivra/desktop",
   "productName": "Nivra",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Nivra desktop app: the native window over an engine that runs where the repository lives.",
   "author": "Renate Gouveia",
+  "homepage": "https://github.com/xXValhallaCoderXx",
+  "desktopName": "nivra.desktop",
   "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.e2e.json",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "stage:runtime": "node scripts/stage-runtime.ts",
+    "verify:windows": "node scripts/verify-windows.ts",
+    "test:e2e": "electron-vite build && playwright test --project=built",
+    "package:dir": "electron-vite build && electron-builder --dir",
+    "package:linux": "node scripts/stage-runtime.ts linux-x64 && electron-vite build && electron-builder --linux deb AppImage --x64",
+    "package:win": "node scripts/stage-runtime.ts all && electron-vite build && electron-builder --win zip --x64",
+    "dev:win": "node scripts/dev-win.ts",
+    "test:packaged": "playwright test --project=packaged",
+    "test:windows": "playwright test --project=windows"
+  },
   "devDependencies": {
     "@mantine/core": "9.7.1",
     "@mantine/hooks": "9.7.1",
@@ -18,12 +36,14 @@
     "electron": "44.7.0",
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
+    "esbuild": "0.28.2",
     "postcss": "8.5.29",
     "postcss-preset-mantine": "1.18.0",
     "postcss-simple-vars": "7.0.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "typescript": "5.9.3",
-    "vite": "7.3.7"
+    "vite": "7.3.7",
+    "zod": "4.6.5"
   }
 }

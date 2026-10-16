@@ -75,9 +75,9 @@ starts is failed with a `run.interrupted` event and never replayed.
 ## D5. Nivra ships its own Node and engine for every target (2026-10-16)
 
 **Decision.** Installers carry Node 24.21.0 (SHA-checked against `SHASUMS256.txt`) and the engine — our code bundled
-with esbuild plus a pruned production `node_modules` — for each target. Each runtime is staged on its own OS:
-`linux-x64` on Linux as a deterministic tarball (`--sort=name --mtime=@0 --owner=0 --group=0`), `win-x64` on
-Windows. The Windows installer embeds the Linux tarball. A WSL target is provisioned by streaming that tarball
+with esbuild plus a pruned production `node_modules` — for each target. `linux-x64` is always staged on Linux, as a
+deterministic tarball (`--sort=name --mtime=@0 --owner=0 --group=0`, gzip without a timestamp); `win-x64` may be staged
+from Linux, since nothing in it depends on file modes (see D14). The Windows installer embeds the Linux tarball. A WSL target is provisioned by streaming that tarball
 through `wsl.exe` stdin into `<home>/.nivra/runtime/<contentHash>/`: extract into a temporary folder, `chmod 0755`
 the Node binary, load `node:sqlite` and libsql inside the distro, then rename. An existing hash means the runtime is
 already there. The engine is spawned with absolute paths built from the distro's `$HOME`.
@@ -208,3 +208,65 @@ Nivra. The rules ask for an open-source licence, disclosure of pre-existing comp
 **Consequences.** Token Factory Sandboxes is in beta and access has to be requested. If it has not arrived by
 2026-10-21, decide whether to stay in the track or make OpenShell the boundary and enter Best Apps and Agents instead; the session seam (D9) makes
 either a change of backend. The default install and demo must not require Docker Desktop.
+
+## D14. Cross-platform checks run on this machine, not in CI (2026-10-16)
+
+**Decision.** There is no CI or CD. The checks a CI matrix would have run happen locally:
+- `pnpm verify` on Linux (WSL): typecheck and every test, including the supervisor driving a real engine.
+- `pnpm stage:runtime all`: stages `linux-x64` (smoke-tested: self-check, then initialize and shutdown over stdio) and
+  `win-x64`, with a content-hashed manifest and the WSL tarball. Staging twice gives identical hashes.
+- `pnpm verify:windows`, from WSL: copies the Windows runtime and a bundled harness to
+  `%LOCALAPPDATA%\nivra-dev\verify` and runs the harness with the staged `node.exe`. That is a real Windows parent
+  driving the native engine and a WSL engine through the same target and supervisor modules Electron uses: start,
+  `hello` on paths with "ü", "%" and "#", cancel, a clean stop, and the engine dying with a parent that was killed.
+- Installers and the test build are built on this machine and uploaded by hand.
+
+**Why.** The person building Nivra works on Windows with WSL2 and wants nothing downloaded from a cloud build. A
+harness run as a Windows process proves the same Windows-parent behaviour a hosted Windows runner would.
+
+**Consequences.** Run `pnpm verify:windows` whenever targets, the supervisor or staging change. The packaged Windows
+app is also driven through its real UI from WSL: `pnpm dev:win --no-launch` copies the build to
+`%LOCALAPPDATA%\nivra-dev\app`, and `pnpm --filter @nivra/desktop test:windows` runs Playwright against it through
+interop (it reaches the app's debugging port over localhost, which works here because this machine uses WSL's mirrored
+networking; the product itself never depends on that, D2). First run, 2026-10-16:
+15 of 15 checks passed (native engine start 0.8 s; WSL provisioning 3.0 s; a second WSL start 0.75 s). A Windows NSIS
+installer cannot be built from Linux (Wine fails on Ubuntu 24.04), so the Windows test build is a zip until there is a
+Windows-side build step.
+
+## D15. Agents write in a workspace the engine owns; changes reach a checkout only as an approved patch (2026-10-17)
+
+**Decision.** When a coding agent changes code:
+- It runs on the target that owns the repository's filesystem, inside an execution boundary (D9) that declares what it
+  enforces. Native Windows has no local boundary Nivra can enforce and test yet, so agent writes there go to a remote
+  sandbox or are refused, never run unconfined.
+- It writes only into a workspace the engine makes for the run: a copy of one commit, in the engine's home on the
+  target or inside a sandbox. Never the person's checkout, never a git worktree (Hird D39, D43).
+- What it changed comes back as a patch. The engine checks it before anyone sees it:
+  - every path stays inside the repository;
+  - no two paths differ only in case where the checkout's filesystem ignores case;
+  - line endings follow `.gitattributes`;
+  - no symlink or mode change the target cannot hold;
+  - nothing on the secrets deny list.
+- The person approves that exact patch, identified by its hash. Then the engine applies it in the checkout with git,
+  recording the intent first so that a retry never applies it twice.
+- Checks (tests, builds) run inside the boundary against the workspace, never against the checkout. Dependency installs
+  run only inside a boundary that enforces network rules, or in a disposable sandbox.
+- A checkout is written by the engine on the OS that owns its filesystem: a repository on a Windows drive by the
+  Windows engine, one inside WSL by the WSL engine. Neither the host nor the renderer ever writes repository files.
+- Only intent crosses environments (patches, reports), never built artefacts (`node_modules`, binaries), which belong
+  to one OS.
+
+**Why.** An approval dialogue is not a boundary (D9), and Hird's change runs proved the copy, judge, patch shape (Hird
+D44). The cross-environment hazards silently break files unless the one writer checks for them:
+- Windows filesystems that ignore case;
+- CRLF line endings;
+- executable bits and symlinks;
+- dependencies built for another OS.
+
+**Consequences.**
+- The engine gets workspace, patch-check and apply modules. Runs use `waiting_for_approval`, with approve and reject
+  calls bound to the patch hash.
+- Before agents run builds, the engine must capture the login shell's PATH: nvm and similar are invisible to
+  `wsl.exe --exec` (development.md, "Not built yet").
+- Open: the host runs one engine at a time, and switching targets stops the other. Long agent runs need one engine per
+  target kept running, with a warning before stopping one that has work in progress.

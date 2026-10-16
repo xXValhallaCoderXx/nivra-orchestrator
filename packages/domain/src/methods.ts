@@ -62,12 +62,32 @@ export const StartRunParams = z.strictObject({
 });
 export type StartRunParams = z.input<typeof StartRunParams>;
 
+/** What `providers.check` found (B7): Token Factory reached from this engine, its NVIDIA models, and one tool call. */
+export const ProviderCheck = z.strictObject({
+  models: z.strictObject({ total: z.number().int().nonnegative(), nvidia: z.array(z.string()) }),
+  call: z
+    .strictObject({
+      model: z.string(),
+      toolCalled: z.boolean(),
+      answer: z.string(),
+      servedModel: z.string().nullable(),
+      inputTokens: z.number().int().nonnegative().nullable(),
+      outputTokens: z.number().int().nonnegative().nullable(),
+      elapsedMs: z.number().int().nonnegative(),
+    })
+    .nullable(),
+  /** Why the call was not made or failed; null when it worked. */
+  problem: z.string().nullable(),
+});
+export type ProviderCheck = z.infer<typeof ProviderCheck>;
+
 export const Methods = {
   initialize: { params: InitializeParams, result: EngineInfo },
   "secrets.update": { params: SecretsUpdateParams, result: Ok },
   shutdown: { params: Empty, result: Ok },
   ping: { params: Empty, result: z.strictObject({ instanceId: z.uuid() }) },
   doctor: { params: Empty, result: DoctorReport },
+  "providers.check": { params: z.strictObject({ model: z.string().min(1).max(200).optional() }), result: ProviderCheck },
   "runs.start": { params: StartRunParams, result: RunSummary },
   "runs.get": { params: z.strictObject({ runId: RunId }), result: RunSummary },
   "runs.list": {
@@ -96,3 +116,14 @@ export const EngineFatal = z.strictObject({
   message: z.string(),
 });
 export type EngineFatal = z.infer<typeof EngineFatal>;
+
+/** What `main.mjs --self-check` prints when the whole runtime loaded, native storage driver included (D5). */
+export const EngineSelfCheck = z.strictObject({
+  ok: z.literal(true),
+  engineVersion: z.string(),
+  node: z.string(),
+  platform: z.string(),
+  arch: z.string(),
+  runtimeHash: z.string().nullable(),
+});
+export type EngineSelfCheck = z.infer<typeof EngineSelfCheck>;

@@ -1,0 +1,75 @@
+appId: dev.nivra.desktop
+productName: Nivra
+directories:
+  output: release
+  buildResources: build
+# Main, preload and renderer are fully bundled into out/, so nothing from node_modules ships (Hird D1).
+files:
+  - out/**
+  - package.json
+npmRebuild: false
+
+# The engine runtime and the Node it runs on, staged by scripts/stage-runtime.ts (D5), under resources/runtime/
+# <os>-<arch>, which is where main looks. Outside the asar archive, which the engine's own Node cannot read. One entry
+# for the whole stage folder, filtered: an entry rooted at a folder that holds node_modules would silently leave
+# node_modules out (Hird).
+extraResources:
+  - from: build/stage/${os}-${arch}
+    to: runtime/${os}-${arch}
+    filter:
+      - engine/**
+      - node/**
+
+electronFuses:
+  # Nothing needs Electron to act as Node: the engine runs on its own Node (D5).
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  # Playwright drives the packaged app through the inspector, so this one stays on (Hird).
+  enableNodeCliInspectArguments: true
+  onlyLoadAppFromAsar: true
+  # The fuses change the Electron binary; an unsigned macOS arm64 build must be re-signed (ad hoc) or it will not start.
+  resetAdHocDarwinSignature: true
+
+linux:
+  # The deb is the primary Linux artifact: the AppImage needs libfuse2 and trips AppArmor's user-namespace rule on a
+  # stock Ubuntu 24.04 (D10).
+  target: [deb, AppImage]
+  executableName: nivra
+  syncDesktopName: true
+  maintainer: Renate Gouveia
+  category: Development
+  artifactName: ${productName}-${version}-${arch}.${ext}
+deb:
+  # A list replaces electron-builder's defaults, so they are repeated; git is Nivra's own (hello and Doctor use it).
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+    - git
+
+win:
+  # From Linux this builds a zip (or --dir): NSIS's uninstaller step needs Wine, which fails on Ubuntu 24.04 (D14).
+  target: zip
+  # Unsigned, and no exe resource editing (that also needs Wine off Windows).
+  signAndEditExecutable: false
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  # The Linux runtime, streamed into WSL distributions on first use (D5).
+  extraResources:
+    - from: build/stage
+      to: runtime
+      filter:
+        - runtime-linux-x64.tar.gz
+        - runtime-linux-x64.json
+
+mac:
+  target: dmg
+  category: public.app-category.developer-tools
+  # Unsigned for now (macOS is deferred, D10); the fuse reset above re-signs the app ad hoc.
+  identity: null
+  artifactName: ${productName}-${version}-${arch}.${ext}

@@ -1,0 +1,11 @@
+{
+  "extends": "../../packages/tsconfig/base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["src/renderer/src/**/*", "src/shared/**/*"]
+}

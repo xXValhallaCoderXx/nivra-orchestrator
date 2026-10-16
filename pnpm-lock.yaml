@@ -43,6 +43,9 @@ importers:
       electron-vite:
         specifier: 5.0.0
         version: 5.0.0(vite@7.3.7(@types/node@24.19.1)(jiti@2.7.0)(sugarss@5.0.2(postcss@8.5.29)))
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
       postcss:
         specifier: 8.5.29
         version: 8.5.29
@@ -64,6 +67,9 @@ importers:
       vite:
         specifier: 7.3.7
         version: 7.3.7(@types/node@24.19.1)(jiti@2.7.0)(sugarss@5.0.2(postcss@8.5.29))
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
 
   apps/engine:
     dependencies:
@@ -1816,7 +1822,6 @@ packages:
 
   libsql@0.5.29:
     resolution: {integrity: sha512-8lMP8iMgiBzzoNbAPQ59qdVcj6UaE/Vnm+fiwX4doX4Narook0a4GPKWBEv+CR8a1OwbfkgL18uBfBjWdF0Fzg==}
-    cpu: [x64, arm64, wasm32, arm]
     os: [darwin, linux, win32]
 
   lodash@4.18.1:

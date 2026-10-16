@@ -171,6 +171,17 @@ describe("engine over stdio", () => {
     assert.equal((engine.notifications[0]?.params as { code?: string } | undefined)?.code, "bad-arguments");
   });
 
+  it("refuses providers.check without a key, by code, before any network call", async () => {
+    const { engine } = setup();
+    await engine.initialize();
+    await assert.rejects(engine.client.call("providers.check", {}), (error: unknown) => {
+      assert.ok(error instanceof RpcCallError);
+      assert.equal(error.code, ErrorCode.InvalidParams);
+      assert.match(error.message, /No Nebius key is set/);
+      return true;
+    });
+  });
+
   it("never writes a secret to its databases or logs", async () => {
     const { root, home, engine } = setup();
     const repo = makeRepo(root);

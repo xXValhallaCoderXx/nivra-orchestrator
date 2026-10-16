@@ -33,24 +33,28 @@ macOS is deferred.
 
 The cross-platform foundation is done when all of these were seen to pass:
 
-- **Engine-only CI** (`node --test` driving the real targets): on Linux, on native Windows and in WSL from a Windows
-  parent, the engine starts, streams the `hello` run, cancels it with no surviving child, and exits cleanly, with the
-  engine home and the repository in paths containing spaces, non-ASCII characters, `%` and `#`. The WSL job runs
-  once as root and once as a normal user.
+- **Engine targets, verified locally (D14):** on Linux (`pnpm verify`), and on native Windows and in WSL from a real
+  Windows parent (`pnpm verify:windows`), the engine starts, streams the `hello` run, cancels it with no surviving
+  child, and exits cleanly, with the engine home and the repository in paths containing spaces, non-ASCII characters,
+  `%` and `#`; an engine also dies with a parent that was killed. *Seen passing 2026-10-16: 15/15.*
 - **Stdout purity:** every line the engine writes to stdout parses as JSON-RPC, through hello, cancel and a provider
   check.
 - **Secrets canary:** a fake key never appears in `nivra.db*`, `mastra.db*` or the logs.
 - **Restart:** a run still marked running when the engine starts again ends as failed with `run.interrupted` and is
   not replayed. A second engine on the same home is refused.
-- **Installed Windows app** (silent NSIS install), on the WSL and the native target: finds and provisions Ubuntu, runs
-  hello on a repository whose path has spaces, streams, cancels, and quits with no engine left running
-  (`pgrep -af '[n]ivra-engine'` in WSL; a CIM query on Windows).
+- **Packaged Windows app**, on the WSL and the native target: finds and provisions Ubuntu, runs hello on a repository
+  whose path has spaces, streams, cancels, and quits with no engine left running (`pgrep` in WSL, `tasklist` on
+  Windows). *Seen passing 2026-10-17 through the real UI (`test:windows`, 3/3); the zip carries both runtimes.*
+- **Packaged Linux app** (`electron-builder --dir`): the same flow on the local target through the real UI
+  (`test:packaged`, 5/5). *Seen passing 2026-10-17.*
 - **Actionable refusals** for: no WSL, WSL1, `docker-desktop`, a musl distribution, ARM64, a distribution never
-  opened, and missing git.
-- **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target.
-- **Token Factory** reached from both the WSL and the native engine: models listed and one Nemotron call made.
-- **Clean machine:** the Windows installer runs native hello on a VM or Windows Sandbox with no Visual C++
-  redistributable installed.
+  opened, and missing git. *Covered by unit tests with captured tool output; not yet seen on a machine that has them.*
+- **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target. *Not yet
+  run: installing needs sudo.*
+- **Token Factory** reached from both the WSL and the native engine: models listed and one Nemotron call made
+  (Settings → Check Token Factory, on each target). *Waiting for an API key.*
+- **Clean machine:** the Windows zip runs native hello on a VM or Windows Sandbox with no Visual C++ redistributable
+  installed. *Not yet run.*
 
 ## Hackathon submission checklist
 

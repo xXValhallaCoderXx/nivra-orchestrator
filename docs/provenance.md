@@ -21,20 +21,21 @@ Status is `planned` until the file exists in Nivra; then it is `ported` (largely
 | `packages/tsconfig/base.json` | `packages/tsconfig/base.json` @ 45c0057 | ported | none |
 | `AGENTS.md` (security rules, engineering rules, safety, Definition of Done) | `AGENTS.md` @ 45c0057 | rewritten | adapted to stdio, targets and execution boundaries |
 | `docs/decisions.md` format | `docs/decisions.md` @ 45c0057 | rewritten | Nivra's own decisions |
-| Electron security guards, quit flow, single instance | `apps/desktop/src/main/index.ts` @ 45c0057 | planned | RPC supervisor in place of the HTTP client |
-| IPC contract and preload pattern | `apps/desktop/src/shared/ipc.ts`, `apps/desktop/src/preload/index.ts` @ 45c0057 | planned | `window.nivra`; no discovery, token or retry |
-| Supervisor state, coalescing start, log rotation, env sanitising | `apps/desktop/src/main/engine-process.ts` @ 45c0057 | planned | Electron-free; no port, pid file or adoption |
-| Atomic JSON writes, WSLg zoom and window placement | `apps/desktop/src/main/preferences.ts`, `apps/desktop/src/main/window-state.ts` @ 45c0057 | planned | — |
-| Runtime staging, Node download and SHA check, prebuilds | `apps/desktop/scripts/stage-engine.ts` @ 45c0057 | planned | esbuild, staging per OS, WSL tarball, MAX_PATH guard, VC++ DLLs |
-| Packaging fuses and `extraResources` | `apps/desktop/electron-builder.yml` @ 45c0057 | planned | icon, deb first, Windows built on Windows |
+| `apps/desktop/src/main/index.ts` | `apps/desktop/src/main/index.ts` @ 45c0057 | rewritten | same guards (trusted sender, navigation, pop-ups, permissions, single instance, zoom); a thin shell over `host.ts`; zod-checked IPC |
+| `apps/desktop/src/shared/ipc.ts`, `apps/desktop/src/preload/index.ts` | same files @ 45c0057 | rewritten | the pattern kept (named invoke-only calls, `satisfies` the API); Nivra's own calls |
+| `apps/desktop/src/main/supervisor.ts` | `apps/desktop/src/main/engine-process.ts` @ 45c0057 | rewritten | stdio JSON-RPC instead of HTTP; Electron-free; no port, pid file or adoption; D4 quit order |
+| `apps/desktop/src/main/host-store.ts`, `apps/desktop/src/main/window-state.ts` | `apps/desktop/src/main/preferences.ts`, `apps/desktop/src/main/window-state.ts` @ 45c0057 | ported | atomic writes with Windows rename retries; zoom and placement rules (swarm defaults dropped) |
+| `apps/desktop/scripts/stage-runtime.ts` | `apps/desktop/scripts/stage-engine.ts` @ 45c0057 | ported | esbuild instead of `mastra build`; pnpm metadata pruned; content hash; WSL tarball; MAX_PATH guard; VC++ DLLs; stdio smoke test |
+| `apps/desktop/electron-builder.yml` | `apps/desktop/electron-builder.yml` @ 45c0057 | ported | runtimes under `resources/runtime`; deb first; Windows zip from Linux; git instead of bubblewrap |
 | `apps/engine/src/exec/find-executable.ts` (`findOnPath`, `findGit`) | `apps/engine/src/projects/repo.ts` (`findGit`) @ 45c0057 | ported | generalised to any program; `.exe` only on Windows |
 | `isInside`, hardened git runner | `apps/engine/src/projects/repo.ts` @ 45c0057 | planned | — |
 | `apps/engine/src/db/database.ts` | `apps/engine/src/db/database.ts` @ 45c0057 | ported | exclusive lock (D7); refuses a newer schema |
 | `apps/engine/src/runs/scheduler.ts` | `apps/engine/src/runs/scheduler.ts` @ 45c0057 | ported | workflows map instead of registry; `stop()` for shutdown; recovery gated on the lock |
 | `apps/engine/src/runs/store.ts` | `apps/engine/src/runs/store.ts` @ 45c0057 | rewritten | no artifacts, spend or call pairing yet; same transitions, caps and masking |
 | `apps/engine/src/workflows/hello.ts`, `packages/domain/src/runs.ts`, `apps/engine/src/db/migrations.ts` | `apps/engine/src/workflows/hello.ts`, `packages/domain/src/runs.ts`, `apps/engine/src/db/migrations.ts` @ 45c0057 | rewritten | hello reports engine, repository and git instead of calling a model; migrations from v1 |
-| Playwright Electron fixtures, preload smoke test | `apps/desktop/e2e/fixtures.ts`, `apps/desktop/e2e/smoke.spec.ts` @ 45c0057 | planned | real engine; `--home` instead of environment |
-| Theme, fonts, app shell, engine badge and banner | `apps/desktop/src/renderer/src/app/`, `apps/desktop/src/renderer/src/features/engine/` @ 45c0057 | planned | — |
+| `apps/desktop/e2e/*.spec.ts`, `apps/desktop/playwright.config.ts` | `apps/desktop/e2e/smoke.spec.ts`, `apps/desktop/playwright.config.ts` @ 45c0057 | rewritten | real engine; isolation by switches; a Windows project driven from WSL |
+| `apps/desktop/src/renderer/src/app/theme.ts`, `fonts.css`, `assets/fonts/*` | `apps/desktop/src/renderer/src/app/theme.ts`, `fonts.css`, `assets/fonts/*` @ 45c0057 | ported | `--nivra-*` variables, privacy colours dropped; IBM Plex (OFL) vendored as in Hird |
+| Engine badge and banner | `apps/desktop/src/renderer/src/features/engine/` @ 45c0057 | rewritten | target selector beside the badge (D1) |
 
 ## Third-party components
 

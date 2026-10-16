@@ -1,0 +1,28 @@
+/*
+ * IBM Plex Sans and Mono, bundled with the app (SIL Open Font License 1.1, see ../assets/fonts/OFL.txt), as in Hird:
+ * Google Fonts' latin subsets. Served from the app itself, so the CSP's font-src 'self' covers them.
+ */
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: swap;
+  src: url("../assets/fonts/IBMPlexSans-Variable-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../assets/fonts/IBMPlexMono-Regular-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("../assets/fonts/IBMPlexMono-Medium-latin.woff2") format("woff2");
+}

@@ -19,6 +19,7 @@ import { findGit } from "./exec/find-executable.ts";
 import { createLocalBackend } from "./exec/local.ts";
 import { launcherWrite, ProtocolOutput, type RawWrite } from "./rpc/output.ts";
 import { RpcFailure, RpcServer } from "./rpc/server.ts";
+import { isNvidiaModel, listModels, pickNemotron, TokenFactoryError } from "./providers/tokenfactory.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
@@ -159,6 +160,27 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       },
       ping: () => ({ instanceId }),
       doctor: () => runDoctor({ home, platform: process.platform, arch: process.arch, toolEnv, findGit: locateGit, backend, vault }),
+      "providers.check": async ({ model }) => {
+        // B7: Token Factory reached from wherever this engine runs, with the key held in memory (D8).
+        const key = vault.get("NEBIUS_API_KEY");
+        if (!key) throw new RpcFailure(ErrorCode.InvalidParams, "No Nebius key is set. Add it in Settings, then check again.");
+        let ids: string[];
+        try {
+          ids = (await listModels(key, { signal: AbortSignal.timeout(30_000) })).map((entry) => entry.id);
+        } catch (error) {
+          throw new RpcFailure(ErrorCode.InternalError, error instanceof TokenFactoryError ? error.message : `Token Factory couldn't be reached from this engine: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const models = { total: ids.length, nvidia: ids.filter(isNvidiaModel) };
+        const chosen = model ?? pickNemotron(ids);
+        if (!chosen) return { models, call: null, problem: "This key can't use any NVIDIA model." };
+        try {
+          const { nemotronToolCall } = await import("./providers/tool-call.ts");
+          const call = await nemotronToolCall(key, chosen, AbortSignal.timeout(120_000));
+          return { models, call, problem: call.toolCalled ? null : "The model answered without calling the tool, so tool calling on it is unproven." };
+        } catch (error) {
+          return { models, call: null, problem: vault.mask(`The call to ${chosen} failed: ${error instanceof Error ? error.message : String(error)}`) };
+        }
+      },
       "runs.start": (params) => store.summary(scheduler.submit(params)) ?? notFound("just created"),
       "runs.get": ({ runId }) => store.summary(runId) ?? notFound(runId),
       "runs.list": ({ limit, cursor }) => store.list({ limit, cursor }),
@@ -210,6 +232,28 @@ export function startWatchdog(heartbeatMs: number, received: () => number, onSil
   return () => clearInterval(timer);
 }
 
+/**
+ * Loads everything a run needs, without a home: `node:sqlite`, Mastra, the workflows and libsql's native driver. Used
+ * by staging and by WSL provisioning to prove a runtime works before it is used (D5). Prints `engine.selfCheck`.
+ */
+export async function selfCheck(output: ProtocolOutput, log: (line: string) => void, moduleUrl: string): Promise<number> {
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    new DatabaseSync(":memory:").close();
+    const [, { LibSQLStore }] = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts")]);
+    await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
+  } catch (error) {
+    await fatal(output, log, "runtime-broken", new RuntimeBrokenError("runtime", error).message);
+    return 5;
+  }
+  await output.send({
+    jsonrpc: "2.0",
+    method: "engine.selfCheck",
+    params: { ok: true, engineVersion: ENGINE_VERSION, node: process.versions.node, platform: process.platform, arch: process.arch, runtimeHash: readRuntimeHash(moduleUrl) },
+  });
+  return 0;
+}
+
 async function fatal(output: ProtocolOutput, log: (line: string) => void, code: EngineFatal["code"], message: string): Promise<void> {
   log(`fatal (${code}): ${message}`);
   await output.send({ jsonrpc: "2.0", method: "engine.fatal", params: { code, message } });
@@ -225,6 +269,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     void engine?.shutdown("the app closed the connection");
   });
   process.stdout.on("error", (error) => output.fail(error));
+  if (argv.includes("--self-check")) return selfCheck(output, log, import.meta.url);
 
   let args: EngineArgs;
   try {
