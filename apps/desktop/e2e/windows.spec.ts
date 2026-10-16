@@ -83,7 +83,11 @@ test("a fresh profile starts on WSL's default distribution, provisions it, and r
   await expect(page.getByTestId("hello-status")).toHaveText("cancelled");
 });
 
-test("switching to Windows · Local stops the WSL engine and runs hello natively on a repository made by Git for Windows", async () => {
+test("switching to Windows · Local in the middle of a run stops the WSL engine, and the native engine runs hello on a repository made by Git for Windows", async () => {
+  // The review's case: a run still going when the target changes must not leave the page polling or blocked.
+  await page.getByText("60 s", { exact: true }).click();
+  await page.getByTestId("hello-start").click();
+  await expect(page.getByTestId("hello-timeline")).toContainText("Holding a child process");
   await page.getByTestId("target-select").click();
   await page.getByRole("option", { name: "Windows · Local" }).click();
   await expect(page.getByTestId("target-select")).toHaveValue("Windows · Local");
@@ -93,6 +97,9 @@ test("switching to Windows · Local stops the WSL engine and runs hello natively
   const info = (await engineInfo())!;
   expect(info.platform).toBe("win32");
   enginePids.native = info.pid;
+  // Nothing of the WSL run is left: no status, no timeline, and the run button is not held back by it.
+  await expect(page.getByTestId("hello-status")).toHaveCount(0);
+  await expect(page.getByTestId("hello-timeline")).toHaveCount(0);
   await page.getByText("0 s", { exact: true }).click();
   await pick(nativeRepoWin);
   await expect(page.getByTestId("project-select")).toHaveValue("repo ü%#");

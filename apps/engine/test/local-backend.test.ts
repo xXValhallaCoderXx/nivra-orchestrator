@@ -90,6 +90,29 @@ function sessionContract(name: string, makeBackend: () => ExecutionBackend) {
       }
     });
 
+    it(
+      "closing the session stops background processes a finished command left behind",
+      // Windows cannot find a finished command's descendants by its process id; they die with the engine (D4, D15).
+      { skip: process.platform === "win32" ? "POSIX process groups only; Windows relies on the engine's job object" : false },
+      async () => {
+        const session = await open();
+        const leftBehind: number[] = [];
+        for (const argv of [
+          ["/bin/sh", "-c", "sleep 60 & echo $!"],
+          node("const c = require('node:child_process').spawn('sleep', ['60'], { stdio: 'ignore' }); c.unref(); console.log(c.pid);"),
+        ] as const) {
+          const result = await session.exec({ argv, cwd: workspace, timeoutMs: 10_000, maxOutputBytes: 1_024 });
+          assert.equal(result.exitCode, 0);
+          const pid = Number(result.stdout.trim());
+          pids.push(pid);
+          leftBehind.push(pid);
+          assert.equal(isAlive(pid), true, "the background process outlived its command");
+        }
+        await session.close();
+        await waitFor(() => leftBehind.every((pid) => !isAlive(pid)), { timeoutMs: 8_000, what: "the background processes to stop" });
+      },
+    );
+
     it("keeps output to its cap and says it was cut", async () => {
       const session = await open();
       try {

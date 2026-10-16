@@ -14,7 +14,8 @@ export interface WslDistro {
 
 export type WslDiscovery =
   | { status: "ready"; wslExe: string; distros: WslDistro[] }
-  | { status: "missing" | "inbox-only" | "broken"; message: string; distros: [] };
+  /** `code` is WSL's own `WSL_E_*` code when it gave one. */
+  | { status: "missing" | "inbox-only" | "broken"; message: string; code?: string | null; distros: [] };
 
 /** Names from `wsl --list --quiet`: one per line, already decoded. */
 export function parseListQuiet(text: string): string[] {
@@ -114,12 +115,23 @@ export async function discoverWsl(options: DiscoverOptions = {}): Promise<WslDis
     return { status: "broken", message: `WSL didn't answer${code ? ` (${code})` : ""}. Run \`wsl --update\` in a terminal, then try again.`, distros: [] };
   }
   const list = await run(wslExe, ["--list", "--quiet"]);
-  if (list.code !== 0) {
-    // No distributions makes `--list` fail with a code rather than print an empty list.
-    return { status: "ready", wslExe, distros: [] };
-  }
   const registry = await run(join(systemRoot, "System32", "reg.exe"), ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss", "/s"]).catch(
     () => ({ code: 1, signal: null, stdout: "", stderr: "", timedOut: false }) as RunResult,
   );
-  return { status: "ready", wslExe, distros: mergeDistros(parseListQuiet(list.stdout), parseLxssRegistry(registry.code === 0 ? registry.stdout : "")) };
+  const lxss = registry.code === 0 ? parseLxssRegistry(registry.stdout) : null;
+  if (list.code !== 0) {
+    // No distributions makes `--list` fail rather than print an empty list. Only the registry can tell that apart
+    // from a service error or a timeout, so "none" is reported only when it confirms nothing is registered.
+    if (!list.timedOut && lxss !== null && lxss.entries.size === 0) return { status: "ready", wslExe, distros: [] };
+    const code = wslErrorCode(`${list.stdout}\n${list.stderr}`);
+    return {
+      status: "broken",
+      code,
+      message: list.timedOut
+        ? "WSL didn't list its distributions within 15 s. Run `wsl --shutdown` in a terminal, then try again."
+        : `WSL couldn't list its distributions${code ? ` (${code})` : ""}. Run \`wsl --shutdown\` in a terminal and try again; if it keeps failing, run \`wsl --update\`.`,
+      distros: [],
+    };
+  }
+  return { status: "ready", wslExe, distros: mergeDistros(parseListQuiet(list.stdout), lxss ?? parseLxssRegistry("")) };
 }

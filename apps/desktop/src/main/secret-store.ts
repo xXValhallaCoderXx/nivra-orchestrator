@@ -1,38 +1,41 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { safeStorage } from "electron";
 import type { SecretName } from "@nivra/domain";
 import { renameRetrying } from "./host-store.ts";
 
 /**
- * API keys, owned by the host (D8): encrypted with Electron's `safeStorage` (DPAPI on Windows, the Keychain on macOS,
- * libsecret on Linux) in `<userData>/secrets.json`, and handed to the engine in `initialize` and `secrets.update`,
- * never through the environment or a file the engine reads. On Linux, the `basic_text` and `unknown` backends
- * protect nothing (WSLg and Xvfb report `basic_text`): such keys are recorded as unencrypted and the UI says so.
+ * API keys, owned by the host (D8), in `<userData>/secrets.json`, and handed to the engine in `initialize` and
+ * `secrets.update`, never through the environment or a file the engine reads. Encryption comes from `KeyCrypto`
+ * (Electron's `safeStorage` in the app; a stand-in in tests), so this module does not import Electron.
+ *
+ * What the person is told follows how each key is actually stored, not what the system could do now: a key saved
+ * while no keychain was available stays unencrypted until it is re-encrypted, which happens as soon as a keychain
+ * protects new data (`migrate`, and on every read).
  */
+
+/** Electron's `safeStorage`, reduced to what the store needs. */
+export interface KeyCrypto {
+  /** Whether what is encrypted now is really protected. Linux's `basic_text` and `unknown` backends protect nothing. */
+  protects(): boolean;
+  encrypt(text: string): Promise<Buffer>;
+  decrypt(data: Buffer): Promise<{ result: string; shouldReEncrypt: boolean }>;
+}
+
+/** How a saved key is kept: not at all, encrypted by the keychain, unencrypted, or encrypted by a keychain this session cannot reach. */
+export type KeyState = "none" | "encrypted" | "unencrypted" | "unreadable";
 
 type Stored = { scheme: "safeStorage" | "plain"; value: string };
 
 export class SecretStore {
   readonly #path: string;
+  readonly #crypto: KeyCrypto;
 
-  constructor(path: string) {
+  constructor(path: string, crypto: KeyCrypto) {
     this.#path = path;
+    this.#crypto = crypto;
   }
 
-  /** Whether keys are really encrypted on this machine. Call only once the app is ready. */
-  encryption(): "encrypted" | "unencrypted" {
-    if (!safeStorage.isEncryptionAvailable()) return "unencrypted";
-    if (process.platform === "linux") {
-      const backend = safeStorage.getSelectedStorageBackend();
-      if (backend === "basic_text" || backend === "unknown") return "unencrypted";
-    }
-    return "encrypted";
-  }
-
-  note(): string | null {
-    return this.encryption() === "encrypted"
-      ? null
-      : `This system has no keychain Nivra can use, so keys are stored unencrypted in ${this.#path}. Anyone who can read your files can read them.`;
+  keychain(): "available" | "unavailable" {
+    return this.#crypto.protects() ? "available" : "unavailable";
   }
 
   #read(): Partial<Record<SecretName, Stored>> {
@@ -49,17 +52,44 @@ export class SecretStore {
     renameRetrying(temp, this.#path);
   }
 
-  has(name: SecretName): boolean {
-    return Boolean(this.#read()[name]);
+  /** Re-encrypts every unencrypted key once a keychain protects new data. Call when the app is ready. */
+  async migrate(): Promise<void> {
+    if (!this.#crypto.protects()) return;
+    for (const [name, stored] of Object.entries(this.#read()) as Array<[SecretName, Stored]>) {
+      if (stored.scheme === "plain") await this.set(name, Buffer.from(stored.value, "base64").toString("utf8"));
+    }
+  }
+
+  async state(name: SecretName): Promise<KeyState> {
+    const stored = this.#read()[name];
+    if (!stored) return "none";
+    if (stored.scheme === "plain") return "unencrypted";
+    return (await this.get(name)) === null ? "unreadable" : "encrypted";
+  }
+
+  /** What to tell the person about how their key is kept, or null when there is nothing to say. */
+  note(state: KeyState): string | null {
+    if (state === "unencrypted") {
+      return `Your key is stored unencrypted in ${this.#path}, because this system has no keychain Nivra can use. Anyone who can read your files can read it.`;
+    }
+    if (state === "unreadable") return "Your saved key can't be read here: it was encrypted by a keychain this session can't reach. Enter it again.";
+    if (state === "none" && !this.#crypto.protects()) {
+      return `This system has no keychain Nivra can use, so a key you save will be stored unencrypted in ${this.#path}.`;
+    }
+    return null;
   }
 
   /** The key, or null when it is not set or can no longer be decrypted (then it must be entered again). */
   async get(name: SecretName): Promise<string | null> {
     const stored = this.#read()[name];
     if (!stored) return null;
-    if (stored.scheme === "plain") return Buffer.from(stored.value, "base64").toString("utf8");
+    if (stored.scheme === "plain") {
+      const value = Buffer.from(stored.value, "base64").toString("utf8");
+      if (this.#crypto.protects()) await this.set(name, value);
+      return value;
+    }
     try {
-      const result = await safeStorage.decryptStringAsync(Buffer.from(stored.value, "base64"));
+      const result = await this.#crypto.decrypt(Buffer.from(stored.value, "base64"));
       if (result.shouldReEncrypt) await this.set(name, result.result);
       return result.result;
     } catch {
@@ -70,7 +100,7 @@ export class SecretStore {
   async set(name: SecretName, value: string | null): Promise<void> {
     const data = this.#read();
     if (value === null) delete data[name];
-    else if (this.encryption() === "encrypted") data[name] = { scheme: "safeStorage", value: (await safeStorage.encryptStringAsync(value)).toString("base64") };
+    else if (this.#crypto.protects()) data[name] = { scheme: "safeStorage", value: (await this.#crypto.encrypt(value)).toString("base64") };
     else data[name] = { scheme: "plain", value: Buffer.from(value, "utf8").toString("base64") };
     this.#write(data);
   }

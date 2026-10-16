@@ -74,6 +74,12 @@ class LocalSession implements ExecutionSession {
   readonly capabilities = LOCAL_CAPABILITIES;
   readonly #options: LocalBackendOptions;
   readonly #running = new Set<ChildProcess>();
+  /**
+   * Every process group this session started (POSIX), kept for the session's whole life: a command that started a
+   * background child and then exited is no longer running, but its child still sits in the command's group, and
+   * closing the session must stop it too.
+   */
+  readonly #groups = new Set<number>();
   #closed = false;
 
   constructor(options: LocalBackendOptions) {
@@ -108,6 +114,7 @@ class LocalSession implements ExecutionSession {
         return;
       }
       this.#running.add(child);
+      if (platform !== "win32" && child.pid !== undefined) this.#groups.add(child.pid);
       const stdout = new Capped(request.maxOutputBytes);
       const stderr = new Capped(request.maxOutputBytes);
       let timedOut = false;
@@ -166,9 +173,31 @@ class LocalSession implements ExecutionSession {
     });
   }
 
+  /**
+   * Stops everything the session started. On POSIX every process group it created is signalled, including groups whose
+   * leader already exited (SIGTERM, then SIGKILL after the grace period). On Windows a finished command's background
+   * descendants cannot be found from its process id once it has exited; they sit in libuv's kill-on-close job object
+   * and die with the engine (D4). That is why general coding commands do not run unconfined on native Windows (D15).
+   */
   async close(): Promise<void> {
     this.#closed = true;
     const platform = this.#options.platform ?? process.platform;
     await Promise.all([...this.#running].map((child) => killTree(child, { platform })));
+    if (platform === "win32") return;
+    const signal = (signalName: NodeJS.Signals) =>
+      [...this.#groups].filter((group) => {
+        try {
+          process.kill(-group, signalName);
+          return true;
+        } catch {
+          return false; // ESRCH: nothing left in that group
+        }
+      });
+    const remaining = signal("SIGTERM");
+    if (remaining.length > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.#options.graceMs ?? 2_000));
+      signal("SIGKILL");
+    }
+    this.#groups.clear();
   }
 }

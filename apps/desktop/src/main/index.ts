@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, screen, session, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,7 +7,7 @@ import { z } from "zod";
 import { IPC, type AppInfo, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore } from "./host-store.ts";
-import { SecretStore } from "./secret-store.ts";
+import { SecretStore, type KeyCrypto } from "./secret-store.ts";
 import { runtimeIn, type RuntimeLayout } from "./targets/local.ts";
 import type { EnginePlatform } from "./targets/types.ts";
 import type { WslRuntime } from "./targets/wsl.ts";
@@ -38,7 +38,7 @@ function start(): void {
 
   const platform = process.platform as EnginePlatform;
   const store = new HostStore(join(app.getPath("userData"), "nivra.json"));
-  const secrets = new SecretStore(join(app.getPath("userData"), "secrets.json"));
+  const secrets = new SecretStore(join(app.getPath("userData"), "secrets.json"), electronKeyCrypto());
   const host = new Host({
     sources: { platform, ...runtimeSources(platform) },
     store,
@@ -83,7 +83,10 @@ function start(): void {
 
   const none = z.tuple([]);
   const RunId = z.uuid();
-  const settings = (): SettingsView => ({ nebiusKey: { set: secrets.has("NEBIUS_API_KEY") }, keyStorage: secrets.encryption(), keyStorageNote: secrets.note() });
+  const settings = async (): Promise<SettingsView> => {
+    const state = await secrets.state("NEBIUS_API_KEY");
+    return { nebiusKey: state, keychain: secrets.keychain(), note: secrets.note(state) };
+  };
 
   handle(IPC.getAppInfo, none, (): AppInfo => ({
     name: app.getName(),
@@ -169,7 +172,11 @@ function start(): void {
     if (app.isPackaged) Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }]) : null);
     // The engine's watchdog counts silent ticks; a ping on wake shows it the host is still here (D4).
     powerMonitor.on("resume", () => host.resumed());
-    ready = host.init();
+    // A key saved while no keychain was available is re-encrypted as soon as one is (D8).
+    ready = secrets
+      .migrate()
+      .catch((error: unknown) => console.error("Could not re-encrypt a saved key", error))
+      .then(() => host.init());
     createWindow();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -194,6 +201,20 @@ function start(): void {
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
   });
+}
+
+/** Electron's safeStorage as the secret store needs it. Linux's basic_text and unknown backends protect nothing (D8). */
+function electronKeyCrypto(): KeyCrypto {
+  return {
+    protects: () => {
+      if (!safeStorage.isEncryptionAvailable()) return false;
+      if (process.platform !== "linux") return true;
+      const backend = safeStorage.getSelectedStorageBackend();
+      return backend !== "basic_text" && backend !== "unknown";
+    },
+    encrypt: (text) => safeStorage.encryptStringAsync(text),
+    decrypt: (data) => safeStorage.decryptStringAsync(data),
+  };
 }
 
 function withoutHash(url: string): string {

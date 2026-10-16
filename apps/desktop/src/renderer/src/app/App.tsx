@@ -27,7 +27,10 @@ export function App() {
   const selectedProjectId = projects.value?.some((p) => p.id === projectId) ? projectId : null;
 
   const selected = targets.value?.targets.find((t) => t.id === targets.value?.selectedId);
-  const online = engine.value?.state.status === "online";
+  // Runs, Doctor reports and provider checks belong to one target's engine: keyed by the target, they start fresh on a
+  // switch, so nothing polls or cancels a run on an engine that never had it.
+  const targetKey = targets.value?.selectedId ?? "none";
+  const online = engine.value?.state.status === "online" && engine.value.targetId === targetKey;
 
   return (
     <AppShell header={{ height: 56 }} padding="md">
@@ -57,15 +60,16 @@ export function App() {
           <Stack gap="md">
             <EngineNotices engine={engine.value} targets={targets.value} />
             <Projects
+              key={`projects:${targetKey}`}
               projects={projects.value ?? []}
               selectedId={selectedProjectId}
               onSelect={setProjectId}
               onChanged={() => setProjectsVersion((n) => n + 1)}
               targetLabel={selected?.label ?? "this target"}
             />
-            <HelloRun projectId={selectedProjectId} online={online} />
-            <Doctor online={online} />
-            <Settings online={online} targetLabel={selected?.label ?? "this target"} />
+            <HelloRun key={`hello:${targetKey}`} projectId={selectedProjectId} online={online} />
+            <Doctor key={`doctor:${targetKey}`} online={online} />
+            <Settings key={`settings:${targetKey}`} online={online} targetLabel={selected?.label ?? "this target"} />
           </Stack>
         </Container>
       </AppShell.Main>

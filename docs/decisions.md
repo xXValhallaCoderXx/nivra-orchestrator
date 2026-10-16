@@ -270,3 +270,32 @@ D44). The cross-environment hazards silently break files unless the one writer c
   `wsl.exe --exec` (development.md, "Not built yet").
 - Open: the host runs one engine at a time, and switching targets stops the other. Long agent runs need one engine per
   target kept running, with a warning before stopping one that has work in progress.
+
+## D16. What the first code review changed (2026-10-17)
+
+**Decision.** Five findings from the first review were confirmed against the code and fixed:
+1. **Session cleanup (D4, D9).** A local session keeps every process group it started for its whole life, and
+   closing it stops them all, including groups whose leader already exited (SIGTERM, then SIGKILL). Before, a
+   command that left a background child (`sleep 60 &`, an unref'd child) dropped out of tracking, and its child
+   outlived the session; this was reproduced on Linux.
+2. **Target-scoped UI state (D1).** The run, Doctor and provider sections are keyed by the selected target, so a
+   switch starts them fresh. Before, a run still going during a switch kept its id: polling and Cancel went to the
+   new engine, which never had it, and "Run hello" stayed disabled.
+3. **Key storage is reported as it is (D8).** Settings show how the saved key is actually kept: encrypted,
+   unencrypted, or unreadable here. An unencrypted key is re-encrypted as soon as a keychain protects new data (at
+   start and on every read). Before, the warning followed whether a keychain was available now, so it could vanish
+   while the key stayed in plaintext.
+4. **Missing Visual C++ DLLs fail staging (D6).** Staging used to warn and continue. `--allow-missing-vc-runtime`
+   exists for development only, and the manifest records which DLLs shipped.
+5. **WSL listing failures stay visible (D10).** A failed `wsl --list` is reported as broken, with WSL's code and a
+   recovery step (`wsl --shutdown`, then `wsl --update`). It is "no distributions" only when the registry confirms
+   that none are registered. Before, every failure, timeouts included, looked like an empty WSL.
+
+**Why.** Each was a way for Nivra to show something other than the true state, which the acceptance suite forbids.
+
+**Consequences.**
+- New tests cover each finding: the session contract, the secret store with a stand-in for safeStorage, WSL
+  discovery, and a Windows UI test that switches targets mid-run.
+- Still open: on native Windows, the background descendants of a finished command cannot be found from its process
+  id once it has exited. They die with the engine through libuv's job object (D4), which is one more reason agents'
+  commands do not run unconfined on native Windows (D15).

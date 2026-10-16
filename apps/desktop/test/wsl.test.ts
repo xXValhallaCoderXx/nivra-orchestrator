@@ -67,14 +67,40 @@ describe("WSL discovery", () => {
     assert.match(broken.status === "broken" ? broken.message : "", /WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED/);
   });
 
-  it("lists the distributions of a working WSL, and none when --list fails for lack of them", async () => {
+  it("lists the distributions of a working WSL", async () => {
     const run = async (command: string, args: readonly string[]) =>
       args[0] === "--version" ? ok("WSL version: 2.7.8.0") : args[0] === "--list" ? ok("Ubuntu\ndocker-desktop\n") : command.endsWith("reg.exe") ? ok(REGISTRY) : failed(1);
     const ready = await discoverWsl({ env: {}, exists: () => true, run });
     assert.equal(ready.status, "ready");
     assert.deepEqual(ready.distros, [UBUNTU]);
-    const none = await discoverWsl({ env: {}, exists: () => true, run: async (_c, args) => (args[0] === "--version" ? ok("") : failed(1)) });
+  });
+
+  it("reports no distributions only when the registry confirms none are registered", async () => {
+    const EMPTY_LXSS = "\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\n";
+    const none = await discoverWsl({
+      env: {},
+      exists: () => true,
+      run: async (command, args) => (args[0] === "--version" ? ok("") : command.endsWith("reg.exe") ? ok(EMPTY_LXSS) : failed(1, "Error code: Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND")),
+    });
     assert.deepEqual([none.status, none.distros.length], ["ready", 0]);
+  });
+
+  it("keeps a failed listing visible, with WSL's code and what to do, instead of calling it empty", async () => {
+    const serviceError = await discoverWsl({
+      env: {},
+      exists: () => true,
+      run: async (command, args) => (args[0] === "--version" ? ok("") : command.endsWith("reg.exe") ? ok(REGISTRY) : failed(1, "Error code: Wsl/Service/WSL_E_SERVICE_NOT_RUNNING")),
+    });
+    assert.equal(serviceError.status, "broken");
+    assert.equal(serviceError.status === "broken" ? serviceError.code : null, "WSL_E_SERVICE_NOT_RUNNING");
+    assert.match(serviceError.status === "broken" ? serviceError.message : "", /wsl --shutdown/);
+    const timeout = await discoverWsl({
+      env: {},
+      exists: () => true,
+      run: async (command, args) => (args[0] === "--version" ? ok("") : command.endsWith("reg.exe") ? ok("") : { code: null, signal: "SIGTERM", stdout: "", stderr: "", timedOut: true }),
+    });
+    assert.equal(timeout.status, "broken");
+    assert.match(timeout.status === "broken" ? timeout.message : "", /within 15 s/);
   });
 });
 

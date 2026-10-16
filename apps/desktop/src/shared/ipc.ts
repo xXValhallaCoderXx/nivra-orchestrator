@@ -78,10 +78,12 @@ export type AddProjectResult =
   | { status: "refused"; reason: string };
 
 export interface SettingsView {
-  nebiusKey: { set: boolean };
-  /** How keys are kept on this machine: "encrypted" by the OS keychain, or "unencrypted" where none is available. */
-  keyStorage: "encrypted" | "unencrypted";
-  keyStorageNote: string | null;
+  /** How the saved key is actually kept: none, encrypted by the OS keychain, unencrypted, or unreadable here. */
+  nebiusKey: "none" | "encrypted" | "unencrypted" | "unreadable";
+  /** Whether a key saved now would be encrypted by the OS keychain. */
+  keychain: "available" | "unavailable";
+  /** What to tell the person about how their key is kept; null when there is nothing to say. */
+  note: string | null;
 }
 
 export interface NivraApi {
