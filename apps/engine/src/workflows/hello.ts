@@ -1,6 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { HelloInput, type JsonObject } from "@nivra/domain";
+import { HelloInput, preferencesDigest, type JsonObject, type RunContext } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecResult, ExecutionBackend } from "../exec/backend.ts";
@@ -20,6 +20,8 @@ export interface HelloDeps {
   findGit: () => string | null;
   /** The engine's own platform, for the "install git" advice. */
   platform: NodeJS.Platform;
+  /** What the host sent with the run, held in memory by the scheduler (D21); null once the run has ended. */
+  context: (runId: string) => RunContext | null;
 }
 
 const GIT_CONFIG = ["-c", "color.ui=never", "-c", "core.quotePath=false", "-c", "core.fsmonitor=false"];
@@ -76,6 +78,28 @@ export function createHelloWorkflow(deps: HelloDeps) {
     execute: async ({ inputData, runId }) => {
       const info = deps.engineInfo();
       recorder.output(runId, "engine-info", `Engine ${String(info["engineVersion"])} on ${String(info["platform"])}/${String(info["arch"])}, Node ${String(info["node"])}`, info);
+      return inputData;
+    },
+  });
+
+  // The context never passes through Mastra: steps read it by run id, and only ids and a fingerprint are recorded.
+  const context = createStep({
+    id: "context",
+    description: "Report the context the app sent with the run, without its text",
+    inputSchema: HelloInput,
+    outputSchema: HelloInput,
+    execute: async ({ inputData, runId }) => {
+      const given = deps.context(runId);
+      if (!given) throw new Error("This run's context is missing, so it stopped. Start it again.");
+      const { revision, records } = given.preferences;
+      const digest = await preferencesDigest(records);
+      const what = records.length === 0 ? "No confirmed preferences" : `${records.length} confirmed ${records.length === 1 ? "preference" : "preferences"}`;
+      recorder.output(runId, "context", `${what} from the app (revision ${revision}), fingerprint ${digest.slice(0, 12)}`, {
+        revision,
+        count: records.length,
+        records: records.map((record) => ({ id: record.id, scope: record.scope, revision: record.revision })),
+        digest,
+      });
       return inputData;
     },
   });
@@ -182,6 +206,7 @@ export function createHelloWorkflow(deps: HelloDeps) {
     options: { autoRestartActiveRuns: false },
   })
     .then(engineInfo)
+    .then(context)
     .then(repository)
     .then(gitVersion)
     .then(gitStatus)

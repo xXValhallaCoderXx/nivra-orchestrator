@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import type { RunEventsPage, SecretName } from "@nivra/domain";
+import { isTerminal, type RunEventsPage, type SecretName } from "@nivra/domain";
 import { Host } from "../src/main/host.ts";
 import { HostStore } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
@@ -68,12 +68,17 @@ const BROKEN: WslDiscovery = { status: "broken", code: "WSL_E_TEST", message: "W
 function makeHost(options: { localEntry?: string; wsl?: "ready" | "broken"; projects?: Array<{ targetId: string; path: string }> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "nivra host ü%# "));
   dirs.push(root);
-  const store = new HostStore(join(root, "nivra.json"));
   const ids = (options.projects ?? []).map(() => randomUUID());
-  store.update((data) => ({
+  new HostStore(join(root, "nivra.json")).update((data) => ({
     ...data,
     projects: (options.projects ?? []).map((p, i) => ({ id: ids[i]!, targetId: p.targetId, nativePath: p.path, label: p.path.split("/").at(-1)!, addedAt: new Date().toISOString() })),
   }));
+  return { ...hostAt(root, options), root, ids };
+}
+
+/** A host on the records and engine homes under `root`, as a desktop launch would make it: a second one is a restart. */
+function hostAt(root: string, options: { localEntry?: string; wsl?: "ready" | "broken" } = {}) {
+  const store = new HostStore(join(root, "nivra.json"));
   const wslTarget = standInWsl("Test", localTarget(join(root, "wsl home")));
   const discovery: WslDiscovery =
     options.wsl === "broken" ? BROKEN : { status: "ready", wslExe: "wsl.exe", distros: [{ name: "Test", version: 2, isDefault: true, defaultUid: 1000, osVersion: null }], hidden: [] };
@@ -92,7 +97,31 @@ function makeHost(options: { localEntry?: string; wsl?: "ready" | "broken"; proj
   });
   host.init();
   hosts.push(host);
-  return { host, root, ids, keys };
+  return { host, keys };
+}
+
+/** What the engine recorded about the context it received, once the run has ended. */
+async function received(host: Host, runId: string) {
+  const page = await waitFor(async () => {
+    const events = await host.runEvents(runId, 0);
+    return isTerminal(events.status) ? events : null;
+  }, "the run to end");
+  assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
+  const data = page.events.find((e) => e.stepId === "context" && e.type === "step.output")?.data;
+  return data as { revision: number; count: number; records: Array<{ id: string; scope: string; revision: number }>; digest: string };
+}
+
+/** The fingerprint of these records, worked out here as D21 defines it, independently of the engine's code. */
+const digestOf = (records: ReadonlyArray<{ id: string; scope: string; revision: number; statement: string }>) =>
+  createHash("sha256")
+    .update(JSON.stringify([...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.revision, r.statement])))
+    .digest("hex");
+
+/** Files under `dir`, at any depth, whose bytes hold `text`. */
+function filesHolding(dir: string, text: string): string[] {
+  return readdirSync(dir, { withFileTypes: true, recursive: true })
+    .filter((entry) => entry.isFile() && readFileSync(join(entry.parentPath, entry.name)).includes(text))
+    .map((entry) => join(entry.parentPath, entry.name).slice(dir.length + 1));
 }
 
 const stateOf = (host: Host, targetId: string) => host.engines().find((e) => e.targetId === targetId)?.state;
@@ -215,6 +244,63 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     await host.open(ids[1]!);
     assert.equal(stateOf(host, "wsl:Test")?.status, "stopped");
     await assert.rejects(host.startHello(ids[1]!, 0), /isn't running|quitting/);
+  });
+
+  it("sends each run the confirmed preferences for its project, on its own engine, and never another project's own (D21)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    const { host, ids, root: hostRoot } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }, { targetId: "wsl:Test", path: makeRepo(join(root, "linux")) }] });
+    const [native, linux] = ids as [string, string];
+    const canary = `nivra-preference-canary-${randomUUID()}`;
+    const personal = host.addPreference({ statement: `Prefer named exports, ü%#, ${canary}`, scope: "personal", projectId: null });
+    const nativeOwn = host.addPreference({ statement: "Tests live in __tests__", scope: "project", projectId: native });
+    const linuxOwn = host.addPreference({ statement: "Tests sit next to the code", scope: "project", projectId: linux });
+    const statements = new Map(host.preferences().records.map((r) => [r.id, r]));
+    const expected = (...records: Array<{ id: string }>) => digestOf(records.map((r) => statements.get(r.id)!));
+
+    await Promise.all(ids.map((id) => host.open(id)));
+    await Promise.all([online(host, "local"), online(host, "wsl:Test")]);
+    const onNative = await received(host, (await host.startHello(native, 0)).id);
+    const onLinux = await received(host, (await host.startHello(linux, 0)).id);
+    assert.deepEqual(onNative.records.map((r) => r.id), [personal.id, nativeOwn.id]);
+    assert.deepEqual(onLinux.records.map((r) => r.id), [personal.id, linuxOwn.id]);
+    assert.deepEqual([onNative.digest, onLinux.digest], [expected(personal, nativeOwn), expected(personal, linuxOwn)], "every value arrived at each engine");
+    assert.deepEqual([onNative.revision, onLinux.revision], [3, 3]);
+
+    await host.shutdown();
+    for (const home of ["local home", "wsl home"]) assert.deepEqual(filesHolding(join(hostRoot, home), canary), [], `no preference text in ${home}`);
+    assert.deepEqual(filesHolding(hostRoot, canary), ["nivra.json"], "only the host's own store keeps it");
+  });
+
+  it("sends the edited preference to the next run and none once deleted, and keeps them across a restart (D21)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    const { host, ids, root: hostRoot } = makeHost({ projects: [{ targetId: "wsl:Test", path: makeRepo(join(root, "linux")) }] });
+    const linux = ids[0]!;
+    const portable = host.addPreference({ statement: "Prefer named exports", scope: "personal", projectId: null });
+    const own = host.addPreference({ statement: "Tests sit next to the code", scope: "project", projectId: linux });
+    await host.open(linux);
+    await online(host, "wsl:Test");
+    const first = await received(host, (await host.startHello(linux, 0)).id);
+
+    const edited = host.editPreference(portable.id, "Prefer default exports");
+    const afterEdit = await received(host, (await host.startHello(linux, 0)).id);
+    assert.deepEqual([edited.revision, afterEdit.revision], [2, first.revision + 1]);
+    assert.deepEqual(afterEdit.records.find((r) => r.id === portable.id)?.revision, 2);
+    assert.equal(afterEdit.digest, digestOf([{ ...portable, statement: "Prefer default exports", revision: 2 }, own]));
+
+    host.deletePreference(portable.id);
+    const afterDelete = await received(host, (await host.startHello(linux, 0)).id);
+    assert.deepEqual([afterDelete.records.map((r) => r.id), afterDelete.revision], [[own.id], first.revision + 2]);
+
+    // A desktop restart: a new host on the same records and engine homes.
+    await host.shutdown();
+    const { host: restarted } = hostAt(hostRoot);
+    assert.deepEqual(restarted.preferences().records.map((r) => [r.id, r.statement, r.revision]), [[own.id, "Tests sit next to the code", 1]]);
+    await restarted.open(linux);
+    await online(restarted, "wsl:Test");
+    const afterRestart = await received(restarted, (await restarted.startHello(linux, 0)).id);
+    assert.deepEqual([afterRestart.digest, afterRestart.revision], [afterDelete.digest, afterDelete.revision]);
   });
 
   it("adds each picked folder for the engine that owns it, and refuses what can't run, saying why", async () => {

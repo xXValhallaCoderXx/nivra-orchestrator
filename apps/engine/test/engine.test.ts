@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { ErrorCode, isTerminal, RpcCallError, type RunEvent } from "@nivra/domain";
+import { ErrorCode, isTerminal, preferencesDigest, PROTOCOL_VERSION, RpcCallError, type RunContext, type RunEvent } from "@nivra/domain";
+import { MAX_CONCURRENT_RUNS } from "../src/runs/scheduler.ts";
 import { impureLines, isAlive, makeRepo, removeDir, startEngine, tempDir, waitFor, type EngineProcess } from "./helpers.ts";
 
 const engines: EngineProcess[] = [];
@@ -33,8 +34,10 @@ const codeOf = async (promise: Promise<unknown>): Promise<number> => {
   }
 };
 
-const startHello = (engine: EngineProcess, repoPath: string, holdMs = 0) =>
-  engine.client.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath, holdMs } });
+const NO_PREFERENCES: RunContext = { preferences: { revision: 0, records: [] } };
+
+const startHello = (engine: EngineProcess, repoPath: string, holdMs = 0, context: RunContext = NO_PREFERENCES) =>
+  engine.client.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath, holdMs }, context });
 
 const holdPid = (events: readonly RunEvent[]): number | null => {
   const started = events.find((event) => event.type === "command.started");
@@ -46,7 +49,8 @@ describe("engine over stdio", () => {
   it("answers initialize with where it runs, and keeps stdout to JSON-RPC alone", async () => {
     const { home, engine } = setup();
     const info = await engine.initialize();
-    assert.equal(info.protocolVersion, 1);
+    assert.equal(info.protocolVersion, 2);
+    assert.equal(info.protocolVersion, PROTOCOL_VERSION);
     assert.equal(info.home, home);
     assert.equal(info.platform, process.platform);
     assert.equal(info.runtimeHash, null);
@@ -75,7 +79,7 @@ describe("engine over stdio", () => {
     const page = await engine.waitForRun(run.id, (p) => isTerminal(p.status));
     assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
     const steps = page.events.filter((e) => e.type === "step.succeeded").map((e) => e.stepId);
-    assert.deepEqual(steps, ["engine-info", "repository", "git-version", "git-status", "hold"]);
+    assert.deepEqual(steps, ["engine-info", "context", "repository", "git-version", "git-status", "hold"]);
     const status = page.events.find((e) => e.type === "step.output" && e.stepId === "git-status");
     assert.equal(status?.data?.["branch"], "main");
     assert.deepEqual(impureLines(engine.lines), []);
@@ -149,6 +153,30 @@ describe("engine over stdio", () => {
     assert.equal(page.events.filter((e) => e.type === "run.started").length, 1, "started once, never again");
   });
 
+  it("fails a run still queued when its engine died, without starting it: its context died with that engine (D21)", async () => {
+    const { root, home, engine } = setup();
+    const repo = makeRepo(root);
+    await engine.initialize();
+    // Held runs fill every slot, so the next one waits in the queue.
+    for (let slot = 0; slot < MAX_CONCURRENT_RUNS; slot++) {
+      const run = await startHello(engine, repo, 60_000);
+      holdPids.push(holdPid((await engine.waitForRun(run.id, (p) => holdPid(p.events) !== null)).events)!);
+    }
+    const queued = await startHello(engine, repo);
+    assert.equal(queued.status, "queued");
+    engine.kill();
+    await engine.exited;
+
+    const next = startEngine(home);
+    engines.push(next);
+    await next.initialize();
+    const summary = await next.client.call("runs.get", { runId: queued.id });
+    assert.equal(summary.status, "failed");
+    assert.equal(summary.error, "Interrupted by an engine restart before it started");
+    const page = await next.client.call("runs.events", { runId: queued.id, after: 0, limit: 500 });
+    assert.deepEqual(page.events.map((e) => e.type), ["run.queued", "run.interrupted"]);
+  });
+
   it("refuses a second engine on the same home, by an engine.fatal code", async () => {
     const { home, engine } = setup();
     await engine.initialize();
@@ -180,6 +208,57 @@ describe("engine over stdio", () => {
       assert.match(error.message, /No Nebius key is set/);
       return true;
     });
+  });
+
+  it("hands a run the preferences sent with it, and records their ids and fingerprint but never their text (D21)", async () => {
+    const { root, home, engine } = setup();
+    const marker = `nivra-input-marker-${randomUUID()}`;
+    const repo = makeRepo(root, `repo ${marker}`);
+    const canary = `nivra-preference-canary-${randomUUID()}`;
+    const records = [
+      { id: randomUUID(), statement: `Prefer named exports ${canary}`, scope: "personal" as const, revision: 3 },
+      { id: randomUUID(), statement: "Tests sit next to the code they test, ü%#", scope: "project" as const, revision: 1 },
+    ];
+    await engine.initialize();
+    const run = await startHello(engine, repo, 0, { preferences: { revision: 7, records } });
+    const page = await engine.waitForRun(run.id, (p) => isTerminal(p.status));
+    assert.equal(page.status, "succeeded");
+    const received = page.events.find((e) => e.type === "step.output" && e.stepId === "context");
+    assert.match(received?.message ?? "", /^2 confirmed preferences from the app \(revision 7\), fingerprint [0-9a-f]{12}$/);
+    assert.deepEqual(received?.data?.["records"], records.map(({ id, scope, revision }) => ({ id, scope, revision })));
+    // Worked out here from what was sent, independently of the engine's code: equal only if every value arrived.
+    const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.revision, r.statement]);
+    assert.equal(received?.data?.["digest"], createHash("sha256").update(JSON.stringify(sorted)).digest("hex"));
+    assert.equal(received?.data?.["digest"], await preferencesDigest(records));
+
+    await engine.client.call("shutdown", {});
+    await engine.exited;
+    const files = readdirSync(home);
+    // The scan can see what Mastra keeps: the run's input is in its step records.
+    assert.ok(files.some((file) => file.startsWith("mastra.db") && readFileSync(join(home, file)).includes(marker)), "Mastra's records hold the run's input");
+    const leaks = files.filter((file) => readFileSync(join(home, file)).includes(canary)).concat(engine.stderr().includes(canary) ? ["stderr"] : []);
+    assert.deepEqual(leaks, [], "no preference text in nivra.db, mastra.db or the log");
+  });
+
+  it("refuses a run without its context, or with a snapshot outside the protocol, and records nothing", async () => {
+    const { root, engine } = setup();
+    const repo = makeRepo(root);
+    await engine.initialize();
+    // Written as raw lines: the client would refuse these parameters before sending them.
+    const send = (id: number, context: unknown) =>
+      engine.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "runs.start", params: { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: repo }, ...(context === undefined ? {} : { context }) } })}\n`);
+    const answer = (id: number) =>
+      waitFor(() => engine.lines.map((line) => JSON.parse(line) as { id?: number; error?: { code: number; message: string } }).find((m) => m.id === id), { what: `the answer to request ${id}` });
+    const record = () => ({ id: randomUUID(), statement: "Use pnpm", scope: "personal", revision: 1 });
+    const twice = record();
+    send(901, undefined);
+    send(902, { preferences: { revision: 1, records: [twice, twice] } });
+    send(903, { preferences: { revision: 1, records: Array.from({ length: 51 }, record) } });
+    send(904, { preferences: { revision: 1, records: [{ ...record(), statement: "" }] } });
+    for (const id of [901, 902, 903, 904]) assert.equal((await answer(id)).error?.code, ErrorCode.InvalidParams, `request ${id}`);
+    assert.match((await answer(901)).error?.message ?? "", /context/);
+    assert.match((await answer(902)).error?.message ?? "", /Each preference appears once/);
+    assert.equal((await engine.client.call("runs.list", {})).runs.length, 0);
   });
 
   it("never writes a secret to its databases or logs", async () => {

@@ -45,8 +45,33 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 `verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`; the WSL
 engine uses `~/.nivra` inside the distribution, as the installed app will.
 
+Terminating a whole distribution while the app runs needs a distribution made for the purpose. **The check terminates
+it, with everything running in it**, and it refuses the distribution it runs in:
+
+```bash
+pnpm stage:runtime all && pnpm dev:win --no-launch   # the Windows build it drives
+pnpm --filter @nivra/desktop verify:interrupt --distro NivraTest
+```
+
+It works in `%LOCALAPPDATA%\nivra-dev\interrupt`:
+- the packaged app and an observer (Playwright on the staged `node.exe`) both run on Windows;
+- the observer writes `trace.log` there, and the app's logs go under `user data\logs`.
+
+One way to make a throwaway distribution, from the development distribution:
+
+```bash
+# Ubuntu's base image (about 30 MB); check it against SHA256SUMS in the same folder
+#   https://cdimage.ubuntu.com/ubuntu-base/releases/noble/release/
+wsl.exe --import NivraTest 'C:\…\nivratest\disk' 'C:\…\nivratest\ubuntu-base-24.04.5-base-amd64.tar.gz' --version 2
+wsl.exe -d NivraTest -u root --exec /bin/sh -c 'apt-get update && apt-get install -y --no-install-recommends git ca-certificates && useradd -m -s /bin/bash -u 1000 nivra'
+wsl.exe --manage NivraTest --set-default-user nivra
+# afterwards
+wsl.exe --unregister NivraTest   # deletes the distribution and its disk
+```
+
 `pnpm rpc` takes `--home <dir>` to use another engine home. It passes `NEBIUS_API_KEY`, when set, in `initialize`, as
-the app will.
+the app will. A `runs.start` without a `context` gets an empty preference snapshot from `pnpm rpc`. The app always
+sends its own (D21).
 
 `probe:tokenfactory` options (passed after `--`): `--model <id>` to pick the Nemotron model, `--list-only` to skip the
 model call.
@@ -57,7 +82,7 @@ model call.
 |---|---|
 | Engine home (installed app) | `~/.nivra` on Linux and inside WSL; `%LOCALAPPDATA%\Nivra\engine` on Windows |
 | Engine home (development) | `~/.nivra-dev`, or any folder passed with `--home` |
-| Profile, preferences, project registry | Electron's user-data folder (`%APPDATA%\Nivra`, `~/.config/Nivra`) |
+| Preferences, project registry | `nivra.json` in Electron's user-data folder (`%APPDATA%\Nivra`, `~/.config/Nivra`) |
 | Engine logs | Electron's logs folder, one file per target |
 | WSL runtime | `<home>/.nivra/runtime/<contentHash>/` inside the distribution |
 

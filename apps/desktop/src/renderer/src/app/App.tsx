@@ -1,20 +1,22 @@
 import { Alert, AppShell, Container, Group, Stack, Text } from "@mantine/core";
 import { useEffect, useState } from "react";
-import type { EngineView, ProjectView, WslView } from "../../../shared/ipc";
+import type { EngineView, PreferencesView, ProjectView, WslView } from "../../../shared/ipc";
 import { Doctor } from "../features/doctor";
 import { EngineBadge, EngineNotices } from "../features/engine";
 import { HelloRun, TERMINAL, type RunRef } from "../features/hello";
+import { Preferences } from "../features/preferences";
 import { Projects } from "../features/projects";
 import { Settings } from "../features/settings";
 import { usePoll } from "../shared/ui";
 
 /**
- * One page for the proof of concept: the repositories, each on the engine its folder belongs to (D17), a hello run,
- * Doctor and the key. There is no target to choose: adding a folder decides where its work runs, and every engine a
- * project uses keeps running, so a run is never cut off by looking at another project.
+ * One page for the proof of concept: the repositories, each on the engine its folder belongs to (D17), the engineer's
+ * preferences (D21), a hello run, Doctor and the key. There is no target to choose: adding a folder decides where its
+ * work runs, and every engine a project uses keeps running, so a run is never cut off by looking at another project.
  */
 export function App() {
   const [projectsVersion, setProjectsVersion] = useState(0);
+  const [preferencesVersion, setPreferencesVersion] = useState(0);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [runs, setRuns] = useState<Record<string, RunRef>>({});
 
@@ -25,6 +27,8 @@ export function App() {
     [],
   );
   const wsl = usePoll<WslView | null>(() => window.nivra.getWsl(), (view) => (view?.status === "checking" ? 700 : null), []);
+  // Preferences change only here, and a project's own go when it is removed: read them again after either.
+  const preferences = usePoll<PreferencesView>(() => window.nivra.listPreferences(), () => null, [preferencesVersion, projectsVersion]);
 
   const list = projects.value ?? [];
   // The chosen project, or the only one there is.
@@ -43,7 +47,7 @@ export function App() {
   const busyIds = Object.entries(runs)
     .filter(([, ref]) => ref.status !== null && !TERMINAL.includes(ref.status))
     .map(([id]) => id);
-  const hostError = projects.error ?? engines.error ?? wsl.error;
+  const hostError = projects.error ?? engines.error ?? wsl.error ?? preferences.error;
 
   return (
     <AppShell header={{ height: 56 }} padding="md">
@@ -79,6 +83,7 @@ export function App() {
               wsl={wsl.value}
               onWslChecked={() => wsl.refresh()}
             />
+            <Preferences project={selected} view={preferences.value} onChanged={() => setPreferencesVersion((n) => n + 1)} />
             <HelloRun
               key={`hello:${selected?.id ?? "none"}`}
               project={selected}

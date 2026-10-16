@@ -13,14 +13,18 @@ import { _electron as electron, expect, test, type ElectronApplication, type Pag
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_API = [
+  "addPreference",
   "addProject",
   "cancelRun",
   "checkTokenFactory",
   "checkWsl",
+  "deletePreference",
+  "editPreference",
   "getAppInfo",
   "getSettings",
   "getWsl",
   "listEngines",
+  "listPreferences",
   "listProjects",
   "openProject",
   "removeProject",

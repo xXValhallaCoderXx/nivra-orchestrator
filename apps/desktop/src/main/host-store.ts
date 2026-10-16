@@ -1,13 +1,14 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
 import { driveFromMount, folderLabel, sameFolder } from "./paths.ts";
 
 /**
- * The host's own records (D7): the project registry and window placement, as one JSON file in Electron's user-data
- * folder. The host is their only owner; engines get what they need with each request. Writes are atomic (temp file,
- * then rename, retried on Windows sharing errors), as in Hird's preferences.ts. There is no chosen target any more:
- * each project's folder decides where it runs (D17).
+ * The host's own records (D7): the project registry, the engineer's preferences and window placement, as one JSON file
+ * in Electron's user-data folder. The host is their only owner; engines get what they need with each request (D21).
+ * Writes are atomic (temp file, then rename, retried on Windows sharing errors), as in Hird's preferences.ts. There is
+ * no chosen target any more: each project's folder decides where it runs (D17).
  */
 
 const Rect = z.object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() });
@@ -23,11 +24,38 @@ export const ProjectRecord = z.strictObject({
 });
 export type ProjectRecord = z.infer<typeof ProjectRecord>;
 
+/**
+ * One preference, in the only canonical copy (D21). Only confirmed ones reach a run; suggestions drawn from a
+ * repository, which wait for the person to confirm them, arrive with NIV-10.
+ */
+export const PreferenceRecord = z
+  .strictObject({
+    id: z.uuid(),
+    statement: z.string().min(1).max(500),
+    scope: PreferenceScope,
+    /** The project a project preference belongs to; null for a personal one, which applies to every project. */
+    projectId: z.uuid().nullable(),
+    status: z.enum(["suggested", "confirmed"]),
+    /** Where it came from: typed in by the person. */
+    origin: z.enum(["entered"]),
+    /** 1 when created, raised by every edit. */
+    revision: z.number().int().positive(),
+    createdAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+    /** When the person confirmed this wording; null while it is a suggestion. */
+    confirmedAt: z.iso.datetime().nullable(),
+  })
+  .refine((record) => (record.scope === "project") === (record.projectId !== null), "A project preference names its project, and a personal one names none.");
+export type PreferenceRecord = z.infer<typeof PreferenceRecord>;
+
 // Not strict: a key an older version wrote (`selectedTargetId`) is dropped on the next write, not a reason to set the
 // whole file aside.
 const HostData = z.object({
   version: z.literal(1).default(1),
   projects: z.array(ProjectRecord).default([]),
+  preferences: z.array(PreferenceRecord).default([]),
+  /** Raised by every change to any preference, so a run can say which version of them it was given. */
+  preferencesRevision: z.number().int().nonnegative().default(0),
   zoom: z.number().min(0.5).max(3).optional(),
   window: z.object({ bounds: Rect, maximized: z.boolean() }).optional(),
 });

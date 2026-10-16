@@ -95,6 +95,8 @@ list.
 - Mastra never re-sends a model request: agents set `maxRetries: 0`, `errorProcessorDefaults: false` and
   `maxProcessorRetries: 0`. Keep calls under Mastra's 180-second limit.
 - Workflow steps pass ids, not content: Mastra stores step input and output unmasked.
+- A run's context (the preference snapshot, D21) arrives only with `runs.start` and stays in the scheduler's memory.
+  Steps read it by run id. Never put it in workflow input, step output or run events: record ids and a fingerprint.
 - A run still marked running when the engine starts is failed with `run.interrupted` and never replayed.
 - One engine per home: the engine holds SQLite's exclusive lock on `nivra.db` (D7).
 

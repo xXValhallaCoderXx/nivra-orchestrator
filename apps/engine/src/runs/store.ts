@@ -35,6 +35,8 @@ export interface NewRun {
   title: string;
   input: unknown;
   clientRequestId: string | null;
+  /** The engine instance that accepted the run: only its memory holds the run's context (D21). */
+  instanceId: string;
 }
 
 export interface RunStoreOptions {
@@ -64,9 +66,9 @@ export class RunStore {
       }
       const id = randomUUID();
       db.prepare(
-        `INSERT INTO runs (id, workflow_id, title, status, input, client_request_id, created_at)
-         VALUES (?, ?, ?, 'queued', ?, ?, ?)`,
-      ).run(id, run.workflowId, this.#text(run.title), this.#mask(JSON.stringify(run.input ?? null)), run.clientRequestId, this.#iso());
+        `INSERT INTO runs (id, workflow_id, title, status, input, client_request_id, instance_id, created_at)
+         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)`,
+      ).run(id, run.workflowId, this.#text(run.title), this.#mask(JSON.stringify(run.input ?? null)), run.clientRequestId, run.instanceId, this.#iso());
       this.#insertEvent(db, id, { type: "run.queued", message: "Queued" });
       return { id, created: true };
     });
@@ -104,22 +106,33 @@ export class RunStore {
   }
 
   /**
-   * After a start: runs another engine instance was executing cannot be resumed, so they fail as interrupted and are
-   * never replayed. Queued runs are left to start. Returns the interrupted ids.
+   * After a start: runs another engine instance accepted cannot go on here. Those it was executing fail as interrupted
+   * and are never replayed. Those still queued fail too, without starting: the context they were given lived only in
+   * that instance's memory (D21). Returns the interrupted ids.
    */
   reconcile(instanceId: string): string[] {
     const rows = this.#database
       .open()
-      .prepare("SELECT id FROM runs WHERE status IN ('running', 'waiting_for_approval') AND (instance_id IS NULL OR instance_id <> ?) ORDER BY rowid")
+      .prepare("SELECT id, status FROM runs WHERE status IN ('queued', 'running', 'waiting_for_approval') AND (instance_id IS NULL OR instance_id <> ?) ORDER BY rowid")
       .all(instanceId);
     const interrupted: string[] = [];
     for (const row of rows) {
       const id = str(row["id"]);
-      const done = this.transition(id, "failed", {
-        type: "run.interrupted",
-        message: "Interrupted: the engine stopped while this run was going. It was not started again.",
-        error: "Interrupted by an engine restart",
-      });
+      const done = this.transition(
+        id,
+        "failed",
+        str(row["status"]) === "queued"
+          ? {
+              type: "run.interrupted",
+              message: "Interrupted: the engine stopped before this run started, and what the run was given was lost with it. It was not started. Start it again.",
+              error: "Interrupted by an engine restart before it started",
+            }
+          : {
+              type: "run.interrupted",
+              message: "Interrupted: the engine stopped while this run was going. It was not started again.",
+              error: "Interrupted by an engine restart",
+            },
+      );
       if (done) interrupted.push(id);
     }
     return interrupted;

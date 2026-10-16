@@ -1,25 +1,29 @@
 # Nivra
 
-A desktop workspace for engineers that explains a repository with evidence, remembers the engineer's confirmed
-preferences across projects, and runs coding work inside an execution boundary that enforces its limits instead of
-just asking for approval.
+A desktop workspace for engineers. It explains a repository with evidence, and remembers the engineer's confirmed
+preferences across projects without letting them override a project's own conventions.
 
-> **Status:** the cross-platform foundation is built and verified (Windows with a WSL or native engine, and Linux);
-> the AI features are next. Built for the Nebius × NVIDIA Global AI Hackathon (Coding and Agentic Engineering track).
-> Sections marked *planned* describe work that is not built yet.
+> **Status:** the cross-platform foundation is built and verified: Windows with a WSL or native engine, and Linux. The
+> AI features are next, starting with the read-only milestone below. Built for the Nebius × NVIDIA Global AI Hackathon.
+> Sections marked *planned* describe work that isn't built yet.
 
 ## What it does
 
-The target demonstration:
+The target demonstration for the current milestone is read-only:
 
-> "Explain this repository using evidence. Remember my confirmed preference. Start a new small web app using my
-> relevant defaults. Show me the proposed choices before making changes."
+> "Explain this repository using evidence. Remember the preference I confirm. Show that it follows me to another
+> project without overriding that project's own conventions, and that editing or deleting it changes what happens
+> next."
 
 - *Planned:* repository explanations that cite the files and lines they rest on.
-- *Planned:* an inspectable store of confirmed engineer preferences, kept separate from each project's own
-  conventions and decisions.
-- *Planned:* a new-app workflow that proposes choices from those preferences, waits for approval, then scaffolds and
-  verifies inside a sandbox.
+- **Built:** preferences you confirm, kept by the app on this computer.
+  - Personal ones apply to every project; a project's own apply only to it.
+  - Each run gets a snapshot of the ones that apply when it starts, so an edit or a deletion reaches the next run.
+  - Nothing uses them yet: the explanation workflow that will is planned.
+- *Planned:* a project's own conventions taking precedence over personal preferences, and suggestions drawn from a
+  repository that only you can confirm.
+- *Planned:* per-project consent before any repository content is sent to a model.
+- *Deferred to a later milestone:* new-app creation and coding work inside a sandbox.
 
 ## How it uses NVIDIA and Nebius
 
@@ -73,7 +77,7 @@ NEBIUS_API_KEY=... pnpm probe:tokenfactory
 
 ## Testing instructions
 
-*Planned:* step-by-step instructions for judges, using the fixture repositories in `fixtures/`.
+*Planned:* step-by-step instructions for judges (NIV-16).
 
 ## How it is built
 

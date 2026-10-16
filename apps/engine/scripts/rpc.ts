@@ -5,6 +5,9 @@
 //   pnpm rpc doctor
 //   pnpm rpc runs.start '{"workflowId":"hello","input":{"repoPath":"/path/to/repo"}}' --follow
 //
+// A run without a "context" gets an empty preference snapshot here; the app always sends its own (D21), for example
+//   "context":{"preferences":{"revision":1,"records":[{"id":"<uuid>","statement":"Use pnpm","scope":"personal","revision":1}]}}
+//
 // The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, when set, is passed to the engine
 // in `initialize`, the way the app does it (D8).
 import { spawn } from "node:child_process";
@@ -32,6 +35,7 @@ try {
   process.exit(2);
 }
 if (method === "runs.start" && params["clientRequestId"] === undefined) params = { clientRequestId: randomUUID(), ...params };
+if (method === "runs.start" && params["context"] === undefined) params = { ...params, context: { preferences: { revision: 0, records: [] } } };
 
 const apiKey = process.env["NEBIUS_API_KEY"]?.trim();
 delete process.env["NEBIUS_API_KEY"];

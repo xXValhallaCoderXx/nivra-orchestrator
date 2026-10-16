@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RunContext } from "./context.ts";
 import { HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
 
 /**
@@ -59,6 +60,8 @@ export const StartRunParams = z.strictObject({
   clientRequestId: z.uuid(),
   workflowId: z.literal("hello"),
   input: HelloInput,
+  /** Held in the engine's memory for this run only, never stored with it (D21). */
+  context: RunContext,
 });
 export type StartRunParams = z.input<typeof StartRunParams>;
 

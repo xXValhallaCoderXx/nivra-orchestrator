@@ -52,8 +52,12 @@ export function Projects({
 
   async function remove() {
     if (!selected || running) return;
+    setNotice(null);
     try {
-      await window.nivra.removeProject(selected.id);
+      const { preferencesRemoved } = await window.nivra.removeProject(selected.id);
+      if (preferencesRemoved) {
+        setNotice({ color: "yellow", text: `Removed ${selected.label} from the list, with its ${preferencesRemoved} own ${preferencesRemoved === 1 ? "preference" : "preferences"}. Your personal preferences stay.` });
+      }
       onSelect(null);
       onChanged();
     } catch (reason) {

@@ -2,18 +2,21 @@
 
 *Status as of 17 October 2026.*
 
-This document describes the **foundation** change set:
+This document describes what is **built**:
 - the desktop host and its engines;
 - the protocol between them;
 - runs, packaging and local verification;
-- decisions D17 and D18.
+- decisions D17 and D18;
+- the preference store owned by the host, and the snapshot each run receives (D21).
 
-It also describes what is **planned** after it. **The planned features are not working yet:**
-- the AI worker;
-- the sandboxes that would enforce limits on it;
-- explanations;
-- preferences;
-- patch approval.
+It also describes what is **planned**, in two parts. **None of it is working yet.**
+- **The immediate milestone (D20):** explaining a repository with evidence, and using the preferences the person
+  confirms. It is read-only.
+- **A later milestone, deferred by D20:**
+  - new-app creation;
+  - the coding worker;
+  - the sandboxes that would enforce limits on it;
+  - patch approval.
 
 Each section says which parts are built and which are planned. Decisions are cited as D1, D2, … and are written up in
 [docs/decisions.md](docs/decisions.md). The questions about the hackathon's requirements are kept apart from the
@@ -24,10 +27,15 @@ architecture, in §17.
 ## 1. What Nivra is
 
 Nivra is a desktop workspace for software engineers. It is being built for the Nebius × NVIDIA Global AI Hackathon
-(submissions close 30 October 2026 at 10:00 PT). The proof of concept aims at one scenario, end to end:
+(submissions close 30 October 2026 at 10:00 PT). The immediate milestone (D20) aims at one read-only scenario, end to
+end:
 
-> "Explain this repository using evidence. Remember my confirmed preference. Start a new small web app using my
-> relevant defaults. Show me the proposed choices before making changes."
+> "Explain this repository using evidence. Remember the preference I confirm. Show that it follows me to another
+> project without overriding that project's own conventions, and that editing or deleting it changes what happens
+> next."
+
+New-app creation was part of the original scenario. It is deferred to a later milestone, with the coding work it needs
+(§11).
 
 Three design rules shape the architecture:
 
@@ -54,7 +62,7 @@ Three design rules shape the architecture:
 flowchart LR
   subgraph Host["Desktop host: Electron, native on Windows or Linux"]
     R["Renderer<br/>React + Mantine<br/>sandboxed, no Node"]
-    M["Main process<br/>project registry · secret store · engines"]
+    M["Main process<br/>project registry · preferences · secret store · engines"]
     R -- "window.nivra: 16 typed calls" --> M
   end
   subgraph W["Target: Windows (local)"]
@@ -72,8 +80,8 @@ flowchart LR
 
 | Layer | What it is | What it may do |
 |---|---|---|
-| **Renderer** | The window: React 19 + Mantine 9 | Call 16 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
-| **Main process** | Electron's main process, a thin shell over plain Node modules | Own the project list, the secret store and the engines. Translate the window's calls into engine calls. |
+| **Renderer** | The window: React 19 + Mantine 9 | Call 20 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
+| **Main process** | Electron's main process, a thin shell over plain Node modules | Own the project list, the preferences, the secret store and the engines. Translate the window's calls into engine calls, each run carrying its project's preference snapshot. |
 | **Engine** | One Node process per target in use, each with its own databases | Today: the hello run, Doctor, run records and a Token Factory check. Planned: model workflows and sandboxes. It speaks only JSON-RPC on stdin and stdout. |
 
 The engine is never part of Electron. It runs on its own Node, shipped with the app (D5), which is what lets it run
@@ -99,7 +107,8 @@ apps/engine/         the engine
   src/providers/       Nebius Token Factory client and the Nemotron probe
   src/doctor/ src/secrets/   environment checks; the in-memory key vault
 packages/domain/     zod contracts shared by host and engine: protocol, methods, runs, RpcClient
-docs/                decisions (D1–D19), acceptance, provenance (code reused from Hird), development
+docs/                decisions (D1–D20), acceptance, submission checklist, provenance (code reused from Hird),
+                     development
 ```
 
 **Toolchain** (exact pins, D11): Node 24.21.0, pnpm 10.4.1, Electron 44.7.0, React 19.3.0, Mantine 9.7.1, Mastra
@@ -128,24 +137,27 @@ source commit, marked ported or rewritten, in [docs/provenance.md](docs/provenan
   - every repository with its target label ("Ubuntu · WSL", "Windows · Local"), and Add/Remove;
   - the engine badge and notices for the chosen project;
   - WSL guidance (Windows only);
+  - Preferences: confirm a new one (for every project, or for the chosen project only), edit or delete one, and see
+    which ones the chosen project's runs get (D21);
   - a hello run with a live timeline and Cancel;
   - Doctor;
   - Settings: the Nebius key, and a Token Factory check.
 
 ### 4.2 The bridge
-`window.nivra` exposes 16 named functions, each invoking exactly one IPC channel. There is no generic "send any channel"
+`window.nivra` exposes 20 named functions, each invoking exactly one IPC channel. There is no generic "send any channel"
 helper. Every handler in main checks two things before acting:
 - the sender is the top frame of one of Nivra's windows, at the exact app URL;
 - the arguments pass zod validation.
 
 | Call | Purpose |
 |---|---|
-| `listProjects`, `addProject`, `removeProject` | The project registry. `addProject` opens the native folder dialog in main. |
+| `listProjects`, `addProject`, `removeProject` | The project registry. `addProject` opens the native folder dialog in main. `removeProject` also removes the project's own preferences, and says how many. |
+| `listPreferences`, `addPreference`, `editPreference`, `deletePreference` | The preference store (D21). A new preference is confirmed by being added; a project preference names its project by id. |
 | `openProject(projectId)` | Starts that project's engine if it isn't running yet. It never starts a different one. |
 | `listEngines` | The state of every engine a project uses. Asking starts nothing. |
 | `restartEngine(projectId)` | Restarts the project's engine, or checks its distribution again. |
 | `getWsl`, `checkWsl` | What WSL offers on this machine, and how to fix it (Windows only). |
-| `startHello(projectId, holdMs)`, `runEvents(runId, after)`, `cancelRun(runId)` | Runs. |
+| `startHello(projectId, holdMs)`, `runEvents(runId, after)`, `cancelRun(runId)` | Runs. `startHello` sends the project's preference snapshot with the run. |
 | `runDoctor(projectId)` | Environment checks on that project's engine. |
 | `getSettings`, `setNebiusKey` | How the saved key is stored; save or remove it. |
 | `checkTokenFactory(projectId)` | Lists the NVIDIA models and makes one Nemotron tool call, from that project's engine. |
@@ -159,12 +171,14 @@ helper. Every handler in main checks two things before acting:
 - **`EngineSupervisor`**: starts, watches and stops one engine. Its states are `stopped`, `starting`, `online` and
   `failed`, and a failure carries a code and a reason.
 - **Targets**: `LocalTarget`, `WslTarget`, WSL discovery, and a target factory.
-- **`HostStore`**: projects and window state, as JSON in Electron's user-data folder. Writes are atomic, with retries
-  for Windows renames.
+- **`HostStore`**: projects, preferences and window state, as JSON in Electron's user-data folder. Writes are atomic,
+  with retries for Windows renames.
+- **Preferences** (`preferences.ts`): pure changes to the store, and `snapshotFor(project)`, which chooses what a run on
+  that project receives (D21).
 - **`SecretStore`**: the Nebius key, saved in `secrets.json`. It is encrypted with Electron `safeStorage` where a
   keychain is available. Otherwise it is stored unencrypted, and the window says so.
 
-A source-rule test keeps `host.ts`, the targets, the supervisor and the stores free of Electron (D12). That lets
+A source-rule test keeps `host.ts`, `preferences.ts`, the targets, the supervisor and the stores free of Electron (D12). That lets
 `node --test` drive them on Linux and from a real Windows process.
 
 ---
@@ -289,7 +303,7 @@ sequenceDiagram
 ## 6. Host ↔ engine protocol *(built, D2)*
 
 - **Transport.** JSON-RPC 2.0 over the engine's stdin and stdout, one message per line (NDJSON). Lines are capped at
-  8 MiB, and `PROTOCOL_VERSION` is checked in `initialize`.
+  8 MiB, and `PROTOCOL_VERSION` (now 2) is checked in `initialize`.
 - **Stdout carries the protocol and nothing else.**
   - A small unbundled launcher keeps the real stdout writer for the protocol, and sends every other stdout write and
     every `console.log` to stderr.
@@ -306,7 +320,7 @@ sequenceDiagram
 | `shutdown` | The single stop path. |
 | `doctor` | Checks the engine, its data folder and git, and which execution boundaries this target could offer (detection only). |
 | `providers.check` | Token Factory: the NVIDIA models the key can see, then one Nemotron tool call. |
-| `runs.start`, `runs.get`, `runs.list`, `runs.events`, `runs.cancel` | Runs (§7). |
+| `runs.start`, `runs.get`, `runs.list`, `runs.events`, `runs.cancel` | Runs (§7). `runs.start` requires a `context`: the preference snapshot for the run's project (D21). |
 
 **Notifications.** The engine sends one notification, `engine.fatal`, as its last word before it exits on a startup
 failure. It carries a code: `locked`, `bad-arguments`, `home-unusable`, `runtime-broken` or `crashed`. The host reads
@@ -317,7 +331,8 @@ run progress by polling with a cursor.
 ## 7. Runs *(built)*
 
 - **States.**
-  - `queued → running → succeeded | failed | cancelled`, with checked transitions.
+  - `queued → running → succeeded | failed | cancelled`, with checked transitions. A queued run can also fail
+    without starting (below).
   - `waiting_for_approval` exists in the state machine, but nothing enters it yet (§11).
 - **Storage.**
   - Each engine keeps runs in its own `nivra.db` (`node:sqlite`): a `runs` table and an append-only `run_events`
@@ -335,13 +350,19 @@ run progress by polling with a cursor.
     - POSIX: SIGTERM, then SIGKILL, on the run's process groups;
     - Windows: a job object plus `taskkill /T /F`.
 - **Restart.** A run still marked running when its engine starts again is failed with `run.interrupted`. It is never
-  replayed: Mastra's automatic restart is off.
+  replayed: Mastra's automatic restart is off. A run still queued from an earlier instance fails the same way, without
+  starting, because its context lived only in that instance's memory (D21).
+- **Context (D21).** The scheduler holds each run's preference snapshot in memory from `runs.start` until the run ends.
+  Steps read it by run id. It never enters workflow input, step output or the run's record, so neither `nivra.db` nor
+  `mastra.db` keeps preference text.
 - **The `hello` workflow** proves the chain without changing anything. Its steps:
   1. engine information;
-  2. the repository's working directory and real path;
-  3. `git --version`;
-  4. `git status --porcelain=v2 --branch`;
-  5. optionally, a held child process, which shows that Cancel really stops work.
+  2. the context the app sent: how many preferences, their ids and revisions, and a SHA-256 fingerprint, never their
+     text;
+  3. the repository's working directory and real path;
+  4. `git --version`;
+  5. `git status --porcelain=v2 --branch`;
+  6. optionally, a held child process, which shows that Cancel really stops work.
 
 ---
 
@@ -355,6 +376,7 @@ run progress by polling with a cursor.
 | Child environments | Children get a filtered environment: provider key variables, `NODE_OPTIONS` and Electron's variables are removed, and exactly one PATH key is kept. This removes **known** variables; it is not an allow-list, so other secrets in the environment are passed on. |
 | Execution | Only the `Local` backend exists. It provides **no isolation** and is labelled "No isolation". It refuses sessions that need network rules, and Windows batch files. Today it runs only the hello check and git. The container, Token Factory Sandboxes and OpenShell backends are planned (§11). |
 | Databases | Each database has one owner, and none is ever opened across the Windows/WSL boundary. SQLite's exclusive lock refuses a second engine on the same data folder. |
+| Preferences | Only the host's `nivra.json` keeps their text. An engine gets a run's snapshot in `runs.start` and holds it in memory for that run; runs record ids and a fingerprint. A canary test checks that preference text never reaches `nivra.db*`, `mastra.db*` or the logs (D21). |
 
 **The API key's path (D8)**
 1. The person types the key into Settings. The renderer holds it until it is saved.
@@ -371,7 +393,7 @@ run progress by polling with a cursor.
 
 | Data | Owner | Where | Notes |
 |---|---|---|---|
-| Projects, window state | Host | `<userData>/nivra.json` | Atomic writes |
+| Projects, preferences, window state | Host | `<userData>/nivra.json` | Atomic writes. The only copy of the preferences (D21). |
 | Nebius key | Host | `<userData>/secrets.json` | Encrypted where a keychain is available, otherwise unencrypted with a warning; engines hold a copy in memory only |
 | Runs and events | Each engine | `<home>/nivra.db` | `node:sqlite`, exclusive lock; known key values masked |
 | Workflow snapshots | Each engine | `<home>/mastra.db` | libsql, through Mastra. **Not covered by the run store's masking**: Mastra stores workflow input and step results as they are. Today's only workflow, hello, stores a repository path and a hold time. Planned workflows must pass ids, never sensitive content. |
@@ -384,7 +406,7 @@ run progress by polling with a cursor.
 - Development: `~/.nivra-dev`.
 
 *Planned:*
-- the host gains preferences and per-project data-sharing flags;
+- the host gains per-project data-sharing flags;
 - the engine gains artifacts, patches, approvals, apply intents and sandbox sessions, through an additive migration.
 
 ---
@@ -410,17 +432,23 @@ run progress by polling with a cursor.
   - a time limit on every step;
   - usage recorded per call, as `null` when it isn't reported (never shown as 0);
   - errors mapped by status code or error class.
-- **Model tiers.** `reasoning` and `agent` use Ultra or Super; `fast` uses Nano or Lightning. The tier is recorded on
-  every call. The final choices depend on which models the key can see and which handle tools reliably.
+- **Model and route recorded on every call.** One suitable Nemotron model is enough for the first workflow.
+- **Model tiers are optional:** `reasoning` and `agent` on Ultra or Super, `fast` on Nano or Lightning. If they're used,
+  the choice follows which models the key can see and which handle tools reliably.
 - **Offline tests.** Tests never call real models. They use a mock model in-process, or a stub server reached through
   a test-only, loopback-only engine argument.
 
 ---
 
-## 11. Coding work *(planned; nothing in this section is implemented)*
+## 11. Coding work *(a later milestone, deferred by D20; nothing in this section is implemented)*
 
 Today the only execution backend is `Local`, which provides no isolation and runs nothing but the hello check and git.
-The design below follows D9 and D15. It will be recorded in new decisions as it is built.
+The design below follows D9 and D15, and is kept for when coding work is promoted again. The coding worker's first
+write task hasn't been chosen. Its open requirements are tracked in NIV-7 and NIV-8:
+- the patch captures new files explicitly;
+- approval is bound to the complete patch hash, the destination and its baseline;
+- the patch is checked again immediately before a serialised apply;
+- interrupted applies are reconciled, never replayed.
 
 ### 11.1 The agent loop
 The planned worker is a Mastra agent on Nemotron that runs inside the engine. The model proposes actions; the engine
@@ -437,7 +465,7 @@ sequenceDiagram
   S-->>E: stdout, stderr, exit code
   E->>M: tool result
   M-->>E: next tool call … final answer
-  E->>S: extract the change as a patch (git diff --binary)
+  E->>S: extract a complete patch, new files included
   E->>E: check the patch, store the proposal and its hash
   Note over E: the run waits for the person's approval
 ```
@@ -479,7 +507,7 @@ refused with what is missing. Installing the app needs no Docker; coding locally
 ```mermaid
 flowchart LR
   A["Workspace copy<br/>(empty for a new app)"] --> B["Worker edits files and runs checks<br/>inside the sandbox"]
-  B --> C["Patch<br/>git diff --binary"]
+  B --> C["Complete patch<br/>new files captured explicitly"]
   C --> D["Engine checks every rule:<br/>paths inside · case clashes · line endings<br/>links and modes · secrets · built artefacts"]
   D --> E["Proposal stored with its sha256<br/>run waits for approval"]
   E -->|"approve(hash)"| F["Record intent → git apply<br/>→ confirm with a reverse check"]
@@ -488,56 +516,73 @@ flowchart LR
 
 - **Who writes.** Only the engine on the operating system that owns the destination writes it. The host and the
   renderer never write repository files (D15).
-- **Approval.** The person approves the exact patch they were shown, identified by its hash. A different hash is
-  refused.
+- **Approval.** The person approves the exact patch they were shown, bound to:
+  - its complete hash;
+  - the destination and the engine that owns it;
+  - the destination's baseline.
+  
+  A different hash is refused, and everything is checked again immediately before a serialised apply.
 - **Restarts.**
-  - A proposal waiting for approval survives a restart, because nothing is running.
   - An apply that was interrupted is inspected and reported as applied, not applied or unknown. It is never applied
     twice.
-- **First version:** new-app scaffolds into an empty folder. Changes to existing repositories come later.
+  - Whether a proposal waiting for approval can survive a restart is undecided. It can't be claimed until recovery is
+    changed for it: today a restart fails runs that are waiting.
+- **First write task:** not chosen yet. The new-app scaffold is deferred (D20), and edits to existing repositories need
+  their own scope decision.
 
 ---
 
-## 12. Context, explanation and preferences *(planned; not implemented)*
+## 12. Context, explanation and preferences *(the immediate milestone, D20; the preference store and handoff are built, D21; the rest is planned)*
 
-- **Local repository map.**
+- **Explain with evidence (NIV-6, NIV-9).**
+  - The engine reads the repository in bounded, targeted reads, inside the repository and with a limited budget.
+  - The explanation cites `path:line`.
+  - The engine checks each citation against the snapshot it actually read. It reports a valid location as just that,
+    never as proof that the explanation is correct.
+  - Run records keep the model and route, the elapsed time (measured with a monotonic clock) and the usage the provider
+    reported, with `null` for anything unknown.
+- **Repository map.**
   - Contents:
-    - the file tree, with the secrets deny list applied;
+    - the file tree, with secrets and dependency or build output excluded;
     - manifests;
     - convention files;
     - an outline of exported symbols.
-  - It is cached by checkout (HEAD plus whether the tree is dirty), and needs no new dependencies.
-  - The model starts from this overview and fetches details with tools.
-- **Explain with evidence.**
-  - Answers cite `path:line`.
-  - The engine checks each citation against the lines it actually showed the model, and reports the result (for
-    example "11 of 12 citations verified").
-  - Tokens and latency are recorded per call.
-  - The stack and conventions are extracted as candidate preferences.
-- **Data sharing.**
-  - Each project gets two flags, both off until the person agrees:
-    - `modelContext`: repository excerpts may go to Token Factory;
-    - `cloudExecution`: a copy of the repository may go to Token Factory Sandboxes.
-  - The deny list (`.env` files, keys, and so on) and size caps always apply.
+  - It needs no new dependencies.
+  - Cached context is invalidated by the content revision of what was actually read. HEAD plus a dirty flag isn't
+    enough.
+- **Data sharing (D20, confirmed).**
+  - **Two separate opt-ins per project, both off at first:** `modelContext` and `cloudExecution`.
+  - **`modelContext`** governs every piece of repository-derived material sent to Token Factory, including read-tool
+    results and later requests, not just the first prompt.
+  - **`cloudExecution`** governs uploading a workspace.
+    - It stays off and unused while cloud execution isn't built.
+    - Turning on `modelContext` never turns it on.
+  - **Always excluded:** secrets, and dependency and build output.
+  - Reads stay inside the repository and are bounded, and output is capped.
   - Each run records which paths it sent and how many bytes, never the content.
-  - Repository text can never change these settings.
-- **Preferences.**
-  - Owned by the host.
-  - Scoped as personal or per project, and marked suggested or confirmed.
-  - Editable, replaceable by a newer preference, and deletable.
-  - Each run receives a scoped snapshot.
-- **Context assembly.**
-  - Precedence: an explicit task override first, then the repository's conventions (with evidence), then personal
-    defaults.
-  - One project's decisions never appear in another project.
-- **New-app flow.**
-  1. Plan preview: the stack, the preferences that shaped it and where each came from, the commands, the sandbox and
-     its network.
-  2. Start.
-  3. Proposal: the checks, the diff and the verification results.
-  4. Approve by hash.
-  5. The engine applies the patch.
-  6. Result view.
+  - Repository or model text can never grant consent, and can never promote private project information into the
+    global profile.
+  - A sandbox's network policy (later milestone) is a third, separate control.
+- **Preferences** *(built for NIV-5, D21; NIV-10 builds on them)*.
+  - **Storage.** One canonical store, owned by the host, in `nivra.json`.
+  - **What each record holds:** an id, the statement, a scope (personal, or one project), a status (confirmed or
+    suggested), an origin, a revision raised by every edit, and dates. The store has a revision of its own, raised by
+    every change.
+  - **How one is made.** The person types it and presses Confirm. Nothing else creates one.
+  - **What engines get.** With each run, main sends the project's own engine a validated snapshot: the confirmed
+    personal preferences, the project's own, and the store's revision. Engines never keep a copy of the profile, and
+    never open the host's store.
+  - **Persistence.** Preference contents stay out of Mastra's persisted step data and out of the run's record.
+  - *Planned (NIV-10):* suggestions drawn from repository observations, which only the person can confirm; supersession;
+    export and import.
+  - *Planned (NIV-11):* a workflow that uses them, under the precedence below. Until then, the hello run proves the
+    handoff.
+- **Context assembly (NIV-11).**
+  - Precedence: explicit task choices first, then the repository's own conventions (with evidence), then confirmed
+    personal defaults.
+  - Project A's records never reach project B.
+- **Fixtures.** User-supplied repositories A and B; references pending (D20).
+- **Deferred (later milestone):** new-app creation, with its plan preview, scaffold, proposal, approval and result view.
 
 ---
 
@@ -573,10 +618,11 @@ flowchart LR
 | Check | Coverage |
 |---|---|
 | `pnpm verify` | Typecheck and every unit and integration test, including real engines over stdio. See the list below. |
-| `pnpm verify:windows` | The target and supervisor modules, driven by a real Windows process: native and WSL engines; start, hello, cancel, stop; engines killed from outside and restarted; engines dying with their parent |
-| `test:packaged` | The packaged Linux app (`electron-builder --dir`), through its real UI |
-| `test:windows` | The packaged Windows app, driven from WSL: both engines in one session, a WSL run kept alive and cancelled while the native engine works, and quit leaving nothing running |
-| `test:e2e` | The built Linux app, through its real UI |
+| `pnpm verify:windows` | The target and supervisor modules, driven by a real Windows process: native and WSL engines; start, hello (with a preference snapshot that must arrive intact), cancel, stop; engines killed from outside and restarted; engines dying with their parent |
+| `test:packaged` | The packaged Linux app (`electron-builder --dir`), through its real UI, including the preference flow across an app restart |
+| `test:windows` | The packaged Windows app, driven from WSL: both engines in one session, a WSL run kept alive and cancelled while the native engine works, preferences reaching both engines with each project's own kept to it, and quit leaving nothing running |
+| `test:e2e` | The built Linux app, through its real UI, including the preference flow |
+| `verify:interrupt` | The packaged Windows app and an observer, both on Windows, while a dedicated test distribution is terminated from outside: the native run carries on, Restart works, the cut-off run ends interrupted without replay |
 
 The integration tests in `pnpm verify` include:
 - stdout purity;
@@ -592,7 +638,14 @@ The integration tests in `pnpm verify` include:
   - routing by folder;
   - a run kept on its own engine while another engine restarts slowly;
   - no fallback for a missing distribution;
-  - every engine stopped on quit.
+  - every engine stopped on quit;
+- preferences (D21):
+  - real values arriving at real engines, shown by fingerprints worked out independently;
+  - edits, deletions and a restart reaching the next run;
+  - one project's own preferences never reaching another's runs;
+  - the preference canary;
+  - runs refused without their context;
+  - queued runs failing, unstarted, after a restart.
 
 **Recorded results from earlier runs**, before the final changes:
 
@@ -601,46 +654,46 @@ The integration tests in `pnpm verify` include:
 | 16 Oct | `pnpm verify:windows` (bootstrap) | 15/15 |
 | 17 Oct | `pnpm verify` (D16 fixes) | 88/88 |
 | 17 Oct | `pnpm verify`, `test:e2e`, `test:packaged`, `verify:windows`, `test:windows` (D17, before D18) | 114/114 · 5/5 · 5/5 · 15/15 · 5/5 |
+| 17 Oct, 05:16–05:35 | The foundation as committed in `2556052`: `pnpm verify`, `verify:windows`, `test:packaged`, `test:windows`, `test:e2e`, RPC | 116/116 · 17/17 · 5/5 · 5/5 · 5/5 · ok |
 
 **Results against the final change set** (code and docs as they are to be committed):
 
-These were run on 17 October 2026 (05:16–05:35 +08:00) against the working tree with all code changes in place. The
-only edits made afterwards record these results, here and in `docs/acceptance.md`. Markdown is neither built nor
-tested.
+These were run on 17 October 2026 (07:36–07:42 +08:00) against the working tree with every code change of the D21
+change set in place. The only edits made afterwards record these results, here and in `docs/acceptance.md`. Markdown is
+neither built nor tested.
 
 | Check | Result |
 |---|---|
-| `pnpm verify` | Typecheck clean; tests 116/116 (domain 19, desktop 56, engine 41) |
-| `pnpm verify:windows` | 17/17. Runtimes staged afresh with unchanged content hashes: `linux-x64` `bfa3b1d6eef1f011`, `win-x64` `450da327920b7e9d`. |
-| `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 5/5 |
+| `pnpm verify` | Typecheck clean; tests 131/131 (domain 23, desktop 64, engine 44) |
+| `pnpm verify:windows` | 17/17, including a preference snapshot arriving intact at the native and the WSL engine. Runtimes staged afresh: `linux-x64` `261063cd91eac407`, `win-x64` `044882c828c6b992`. |
+| `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 11/11 |
 | `pnpm dev:win --no-launch`, then `test:windows` | 5/5 |
-| `test:e2e` | 5/5 |
-| Real engine over RPC: `pnpm rpc doctor`, then a hello run with `--follow` | Doctor: engine, home and git `ok`; boundaries `warn` (no sandbox yet). The hello run succeeded. The engine's own code is unchanged in this change set. |
+| `test:e2e` | 11/11 |
+| `verify:interrupt --distro NivraTest` | 9/9. `NivraTest` was made from the Ubuntu 24.04 base image for this check and unregistered afterwards. |
+| Real engine over RPC: a hello run with a one-preference snapshot and `--follow`, then `pnpm rpc doctor` | The run succeeded. Its `context` step recorded "1 confirmed preference from the app (revision 4)", and its stored input held only the path and the hold time. Doctor: engine, home and git `ok`; boundaries `warn` (no sandbox yet). |
 
 **Not yet run** (still pending):
 - the installed deb on a stock Ubuntu (an unpacked build test is not installation coverage);
 - the Windows zip on a clean machine without the Visual C++ redistributable;
 - a real Token Factory key;
 - Token Factory Sandboxes;
-- terminating a whole WSL distribution while the app runs (the checks run from inside that distribution);
 - macOS.
 
 ---
 
 ## 15. Status and roadmap
 
-| Area | Status | Linear | When |
-|---|---|---|---|
-| Desktop host, targets, protocol, engine core, runs, engine recovery, packaging, local checks | **Built**: the foundation change set | NIV-3 (In Review), NIV-5 (In Progress; sending preferences to engines waits for NIV-10) | Now |
-| Scope decisions: fixtures, the bounded scaffold, data sharing, out-of-scope list | Planned | NIV-2 | 19–20 Oct |
-| Engine core v2: protocol v2, storage v2, approvals | Planned | — | 20–21 Oct |
-| Explain with evidence, `ModelClient`, tiers, repository map | Planned | NIV-6, NIV-9 | 21–22 Oct |
-| Worker, sandboxes, patches, approvals, apply | Planned | NIV-7, NIV-8 | 22–25 Oct |
-| Preferences, context assembly, new-app flow, result view | Planned | NIV-10 – NIV-13, NIV-5 | 26–27 Oct |
-| Acceptance on packaged builds, release, video, submission | Planned | NIV-14 – NIV-17 | 28–30 Oct |
+| Area | Status | Linear |
+|---|---|---|
+| Desktop host, targets, protocol, engine core, runs, engine recovery, packaging, local checks | **Built**: the foundation, committed in `2556052` | NIV-3 (Done), NIV-5 |
+| Scope, data sharing, out-of-scope list (D20); fixtures | Decided. The fixtures are user-supplied, with references pending. | NIV-2 |
+| Preference store, and the scoped handoff to engines | **Built** (D21); the whole-distribution interruption check passed | NIV-5, reused by NIV-10 |
+| Explain with evidence, model client, repository map, the run lifecycle it needs | Planned (immediate milestone) | NIV-6, NIV-9, NIV-8 (read-only slice) |
+| Managing preferences, context assembly and isolation | Planned (immediate milestone) | NIV-10, NIV-11 |
+| Acceptance on packaged builds, release, video, submission | Planned | NIV-14 – NIV-17 |
+| New-app creation, coding worker, sandboxes, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
-A checkpoint on 22 October applies a fixed cut order if the schedule slips. None of the planned work is a precondition
-for committing the foundation.
+The estimates are not commitments. None of the planned work is a precondition for committing the foundation.
 
 ## 16. Decision index
 
@@ -665,24 +718,31 @@ for committing the foundation.
 | D17 | The folder decides where work runs; one engine per target for the session |
 | D18 | An engine that stops answering is reported and stopped |
 | D19 | Hackathon requirements, as published |
+| D20 | The immediate milestone: explain with evidence and confirmed preferences; new-app creation deferred |
+| D21 | Preferences: one store owned by the host, and a snapshot with every run |
 
-The planned work in §§10–12 will be recorded as new decisions as it is built.
+The planned work in §§10–12 will be recorded in new decisions as it is built.
 
 ## 17. Hackathon requirements *(kept separate from the architecture)*
 
-- **What every entry needs.** The published rules' general platform requirement is runtime use of Nebius Token Factory
-  inference with an NVIDIA model. Nivra meets it through its model calls: `providers.check` today, and the planned
-  workflows.
-- **Still open.** The Coding and Agentic Engineering track's wording about operating within Token Factory Sandboxes
-  needs clarification from the organisers. That clarification has **not** been obtained, and nothing here assumes the
-  answer.
+The dated checklist, with a source link for each requirement, is in [docs/submission.md](docs/submission.md) (NIV-15).
+In short:
+- **What every entry needs.** A runtime Token Factory inference call meets the general Nebius platform requirement, and
+  an NVIDIA open-source model is also required. Nivra plans to meet both through the explain workflow; the live proof
+  is pending.
+- **Track fit is open.** The Coding and Agentic Engineering track describes agents that "write, run, and test code in
+  Token Factory". It doesn't name the Sandboxes product. The immediate milestone is read-only (D20), so whether it fits
+  the track needs reassessing. The options and draft questions for the organisers are in the checklist. No answer has
+  been obtained or assumed.
 - **No OpenShell bonus.** The rules publish no scoring bonus for NVIDIA OpenShell.
-- **Sandboxes isn't available yet.** Token Factory Sandboxes is in beta and needs an access request. Access has been
-  requested and is not active, so it can't yet be described as an available, zero-setup way to run code.
-- **Effect on the design.** None either way. The answer only decides which sandbox the demonstration uses; it is
-  tracked in NIV-15 (D19).
+- **Sandboxes isn't available yet.** Token Factory Sandboxes is in beta and needs an access request. Access is
+  requested but not active.
+- **Judge access** must be free until judging ends (16 December, 04:00 SGT). How is undecided (NIV-16).
+- **Effect on the design:** none. The architecture doesn't depend on these answers (D19, D20).
 
 ## 18. Questions for reviewers
+
+Questions 1–3 apply to the later coding milestone.
 
 1. **Local isolation.** Is a hardened Docker or Podman container an adequate local boundary for commands a model
    proposes? The planned container has no network, a non-root user, no capabilities, no new privileges and resource
@@ -690,7 +750,8 @@ The planned work in §§10–12 will be recorded as new decisions as it is built
 2. **Network for installs.** Template and install steps get network access only with consent, only from the approved
    plan, and only when run by the engine. The model's own commands stay offline. Is that the right line?
 3. **Approvals across restarts.** Should a stored proposal stay approvable after the app restarts, or expire?
-4. **Scope.** Is new-app scaffolding enough for the first version, with changes to existing repositories later?
+4. **Evidence.** Is checking each citation against the snapshot actually read enough to support the claim "evidence
+   linked"? The explanation itself is never presented as verified.
 5. **Model tiers.** Ultra or Super for planning and tool loops, Nano or Lightning for small jobs: is that the right
    split?
 6. **Native Windows.** Windows-drive folders get the hello run and Doctor today. Coding on them would need Docker

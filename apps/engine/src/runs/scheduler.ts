@@ -1,10 +1,12 @@
-import { isTerminal, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { isTerminal, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
 import type { NewEvent, RunStore } from "./store.ts";
 
 /**
  * Starts queued runs within a concurrency cap, in submission order, and records how each one ends. It is the only way
  * runs start. Ported from Hird's scheduler (provenance.md): recovery is gated on holding the engine lock rather than on
- * a discovery file, since an engine that opened its database already holds it (D7).
+ * a discovery file, since an engine that opened its database already holds it (D7). Each run's context lives here, in
+ * memory, from submission until the run ends (D21): it is never stored, so a run starts only in the instance that
+ * accepted it.
  */
 
 export const MAX_CONCURRENT_RUNS = 2;
@@ -77,6 +79,7 @@ export class RunScheduler {
   readonly #maxConcurrent: number;
   readonly #log: SchedulerLog;
   readonly #slots = new Map<string, Slot>();
+  readonly #contexts = new Map<string, RunContext>();
   #source: WorkflowSource | null = null;
   #recovered = false;
   #stopping: string | null = null;
@@ -94,7 +97,7 @@ export class RunScheduler {
     this.pump();
   }
 
-  /** Call once this process holds the engine lock: runs another instance was executing fail as interrupted, then queued runs start. */
+  /** Call once this process holds the engine lock: runs another instance accepted fail as interrupted, then queued runs start. */
   recover(): string[] {
     const interrupted = this.#store.reconcile(this.#instanceId);
     if (interrupted.length) this.#log.warn(`Marked ${interrupted.length} interrupted run(s) as failed: ${interrupted.join(", ")}`);
@@ -103,18 +106,26 @@ export class RunScheduler {
     return interrupted;
   }
 
-  /** Records a queued run and starts it if there is capacity. */
+  /** Records a queued run, keeps its context for as long as the run lasts, and starts it if there is capacity. */
   submit(request: StartRunParams): string {
     const entry = this.#workflows.get(request.workflowId);
     if (!entry) throw new Error(`Unknown workflow ${request.workflowId}`);
-    const { id } = this.#store.create({
+    const { id, created } = this.#store.create({
       workflowId: request.workflowId,
       title: entry.title(request.input),
       input: request.input,
       clientRequestId: request.clientRequestId,
+      instanceId: this.#instanceId,
     });
+    // A repeated request returns the run it already created, which keeps the context it came with.
+    if (created) this.#contexts.set(id, request.context);
     this.pump();
     return id;
+  }
+
+  /** The context the host sent with a run, while the run lasts; null once it has ended. Steps read it by run id. */
+  contextOf(runId: string): RunContext | null {
+    return this.#contexts.get(runId) ?? null;
   }
 
   /**
@@ -132,6 +143,7 @@ export class RunScheduler {
     } else {
       // Queued, or running in no live process of ours: nothing is executing here, so record the cancellation.
       this.#store.transition(runId, "cancelled", { type: "run.cancelled", message: status === "queued" ? `${message} before it started` : message });
+      this.#contexts.delete(runId);
     }
     return { status: this.#store.status(runId) ?? status, wasTerminal: false };
   }
@@ -169,6 +181,7 @@ export class RunScheduler {
     try {
       const run = this.#store.summary(runId);
       if (!run) throw new Error(`Run ${runId} disappeared from the store`);
+      if (!this.#contexts.has(runId)) throw new Error("This run's context is missing, so it was not started. Start it again.");
       const handle = await this.#source!.getWorkflow(run.workflowId).createRun({ runId });
       slot.run = handle;
       unwatch = handle.watch((event) => this.#onWatch(runId, slot, event));
@@ -183,6 +196,7 @@ export class RunScheduler {
       this.#store.transition(runId, settled.status, { ...settled.event, error: settled.error });
     } finally {
       this.#slots.delete(runId);
+      this.#contexts.delete(runId);
       this.pump();
     }
   }

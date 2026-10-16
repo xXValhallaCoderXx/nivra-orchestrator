@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 
@@ -7,7 +8,8 @@ import { _electron as electron, expect, test, type ElectronApplication, type Pag
  * session drives both engines through the real UI, each chosen by its folder (D17): a folder picked as
  * \\wsl.localhost\… runs in the distribution (provisioned from the shipped tarball), a folder made by Git for Windows
  * runs on the native engine, a run held on WSL keeps going and cancels on its own engine while the native one starts and
- * works, and quitting leaves no engine on either side.
+ * works, and quitting leaves no engine on either side. Preferences confirmed in the window reach each engine with its
+ * runs (D21): every value intact, and one project's own never in the other's.
  */
 test.skip(process.platform !== "linux" || !existsSync("/mnt/c/Windows/System32/cmd.exe"), "runs from WSL on a Windows machine");
 
@@ -67,6 +69,35 @@ async function pick(path: string) {
   await page.getByTestId("project-add").click();
 }
 
+/** The fingerprint the next run on a target's project should receive, worked out here from the app's records (D21). */
+async function expectedFor(targetId: string): Promise<{ ids: string[]; digest: string }> {
+  const { projects, preferences } = await page.evaluate(async () => ({ projects: await window.nivra.listProjects(), preferences: await window.nivra.listPreferences() }));
+  const projectId = projects.find((p) => p.targetId === targetId)!.id;
+  const records = preferences.records.filter((r) => r.status === "confirmed" && (r.scope === "personal" || r.projectId === projectId));
+  const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.revision, r.statement]);
+  return { ids: records.map((r) => r.id), digest: createHash("sha256").update(JSON.stringify(sorted)).digest("hex") };
+}
+
+/** Runs hello on the chosen project and returns, once it has succeeded, what its engine recorded about the context it got. */
+async function helloContext(): Promise<{ ids: string[]; digest: string }> {
+  const status = page.getByTestId("hello-status");
+  const previous = (await status.count()) ? await status.getAttribute("data-run-id") : null;
+  await page.getByTestId("hello-start").click();
+  await expect.poll(async () => ((await status.count()) ? await status.getAttribute("data-run-id") : previous) !== previous).toBe(true);
+  const runId = (await status.getAttribute("data-run-id"))!;
+  await expect(status).toHaveText("succeeded");
+  const events = await page.evaluate(async (id) => (await window.nivra.runEvents(id, 0)).events, runId);
+  const data = events.find((e) => e.stepId === "context" && e.type === "step.output")!.data as { records: Array<{ id: string }>; digest: string };
+  return { ids: data.records.map((r) => r.id), digest: data.digest };
+}
+
+async function confirmPreference(statement: string, scope: string) {
+  await page.getByTestId("preference-scope").getByText(scope, { exact: true }).click();
+  await page.getByTestId("preference-input").fill(statement);
+  await page.getByTestId("preference-confirm").click();
+  await expect(page.getByTestId("preference-list")).toContainText(statement);
+}
+
 async function choose(targetLabel: string) {
   await page.getByTestId("project-select").click();
   await page.getByRole("option", { name: new RegExp(targetLabel) }).click();
@@ -88,9 +119,11 @@ test("a \\\\wsl.localhost folder runs in its distribution, provisioned on first 
   const info = (await engineInfo(`wsl:${distro}`))!;
   expect(info.platform).toBe("linux");
   engines.wslInstance = info.instanceId;
-  await page.getByTestId("hello-start").click();
-  await expect(page.getByTestId("hello-status")).toHaveText("succeeded");
+  await confirmPreference("Prefer named exports, “quoted”, ü%#, 日本語", "Every project");
+  const expected = await expectedFor(`wsl:${distro}`);
+  expect(await helloContext()).toEqual(expected);
   await expect(page.getByTestId("hello-timeline")).toContainText(wslRepo);
+  await expect(page.getByTestId("hello-timeline")).toContainText(`1 confirmed preference from the app (revision 1), fingerprint ${expected.digest.slice(0, 12)}`);
 });
 
 test("a run held on WSL keeps going on its own engine while a Windows folder starts and works on the native engine (the review's race)", async () => {
@@ -106,8 +139,10 @@ test("a run held on WSL keeps going on its own engine while a Windows folder sta
   expect(native.platform).toBe("win32");
   engines.native = native.pid;
   await page.getByText("0 s", { exact: true }).click();
-  await page.getByTestId("hello-start").click();
-  await expect(page.getByTestId("hello-status")).toHaveText("succeeded");
+  await confirmPreference("Windows checkouts keep CRLF line endings", "repo ü%# only");
+  const forNative = await expectedFor("local");
+  expect(forNative.ids).toHaveLength(2);
+  expect(await helloContext()).toEqual(forNative);
   await expect(page.getByTestId("hello-timeline")).toContainText("on main");
 
   // Back on the WSL folder: the same run, on the same engine, is still holding; Cancel reaches that engine.
@@ -118,6 +153,11 @@ test("a run held on WSL keeps going on its own engine while a Windows folder sta
   await page.getByTestId("hello-cancel").click();
   await expect(page.getByTestId("hello-status")).toHaveText("cancelled");
   expect((await engineInfo("local"))?.pid).toBe(engines.native);
+
+  // The next WSL run gets the personal preference and not the Windows project's own.
+  const forWsl = await expectedFor(`wsl:${distro}`);
+  expect(forWsl.ids).toHaveLength(1);
+  expect(await helloContext()).toEqual(forWsl);
 });
 
 test("the same Windows folder picked through WSL is the Windows project, with a note saying why", async () => {

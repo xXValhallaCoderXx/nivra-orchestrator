@@ -16,6 +16,7 @@
     "test": "node --test \"test/**/*.test.ts\"",
     "stage:runtime": "node scripts/stage-runtime.ts",
     "verify:windows": "node scripts/verify-windows.ts",
+    "verify:interrupt": "node scripts/verify-interrupt.ts",
     "test:e2e": "electron-vite build && playwright test --project=built",
     "package:dir": "electron-vite build && electron-builder --dir",
     "package:linux": "node scripts/stage-runtime.ts linux-x64 && electron-vite build && electron-builder --linux deb AppImage --x64",

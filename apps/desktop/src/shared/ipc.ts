@@ -1,4 +1,4 @@
-import type { DoctorReport, EngineInfo, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
+import type { DoctorReport, EngineInfo, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -18,6 +18,10 @@ export const IPC = {
   listProjects: "projects:list",
   addProject: "projects:add",
   removeProject: "projects:remove",
+  listPreferences: "preferences:list",
+  addPreference: "preferences:add",
+  editPreference: "preferences:edit",
+  deletePreference: "preferences:delete",
   startHello: "runs:hello",
   runEvents: "runs:events",
   cancelRun: "runs:cancel",
@@ -76,6 +80,30 @@ export interface ProjectView {
   notice: string | null;
 }
 
+/** One of the engineer's preferences, from the host's canonical store (D21). */
+export interface PreferenceView {
+  id: string;
+  statement: string;
+  /** `personal` applies to every project; `project` only to its own project's runs. */
+  scope: PreferenceScope;
+  /** The project a project preference belongs to, and its label; both null for a personal one. */
+  projectId: string | null;
+  projectLabel: string | null;
+  /** Only confirmed preferences reach a run. */
+  status: "suggested" | "confirmed";
+  origin: "entered";
+  /** 1 when created, raised by every edit. */
+  revision: number;
+  updatedAt: string;
+  confirmedAt: string | null;
+}
+
+export interface PreferencesView {
+  /** Raised by every change to any preference; each run records the revision it was given. */
+  revision: number;
+  records: PreferenceView[];
+}
+
 export type AddProjectResult =
   | { status: "added"; project: ProjectView; warning: string | null }
   | { status: "cancelled" }
@@ -103,7 +131,14 @@ export interface NivraApi {
   checkWsl(): Promise<WslView | null>;
   listProjects(): Promise<ProjectView[]>;
   addProject(): Promise<AddProjectResult>;
-  removeProject(projectId: string): Promise<void>;
+  /** Removes the folder from the list, with its own preferences; says how many of those went with it. */
+  removeProject(projectId: string): Promise<{ preferencesRemoved: number }>;
+  listPreferences(): Promise<PreferencesView>;
+  /** Saves a preference the person typed and confirmed. A project preference names its project; a personal one, null. */
+  addPreference(statement: string, scope: PreferenceScope, projectId: string | null): Promise<PreferenceView>;
+  editPreference(id: string, statement: string): Promise<PreferenceView>;
+  deletePreference(id: string): Promise<void>;
+  /** Runs hello on the project's engine, with a snapshot of the preferences that apply to the project (D21). */
   startHello(projectId: string, holdMs: number): Promise<RunSummary>;
   /** A run's events after a cursor, from the engine that runs it (main remembers which). */
   runEvents(runId: string, after: number): Promise<RunEventsPage>;

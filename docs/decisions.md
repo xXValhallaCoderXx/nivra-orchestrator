@@ -402,3 +402,125 @@ reason D13 gave for it.
 - The track question is tracked in NIV-15, and kept out of the architecture description.
 - D13's 21 October gate becomes: ask the organisers, then choose the demonstration's way of running code from their
   answer and the state of Sandboxes access.
+
+## D20. The immediate milestone: explain with evidence and confirmed preferences; new-app creation deferred (2026-10-17)
+
+**Decision.** Nate confirmed this scope in NIV-2. It supersedes:
+- the new-app parts of the plan;
+- the demonstration and acceptance suite in `docs/acceptance.md`;
+- NIV-2's scaffold and empty-destination items.
+
+**What the milestone delivers**
+- Repository explanation with source evidence. It is read-only: bounded reads, no writes, no code execution.
+- Engineering preferences that the person explicitly confirms, which persist and are reused with the correct project
+  scope.
+- Repository observations (frequently used stacks, say) may suggest a preference. They never silently become a
+  confirmed personal default.
+- **Precedence:** explicit task choices come first, then the repository's own conventions, then confirmed personal
+  defaults.
+
+**Acceptance sequence**
+1. Inspect and explain repository A, with source evidence.
+2. Explicitly confirm a portable preference.
+3. Inspect repository B, whose conventions contrast with A's.
+4. Show correct scope and precedence: B's conventions win over the personal default, and A's project-only records
+   never reach B.
+5. Edit, then delete, the preference, and show that later requests get fresh context.
+
+No scaffold generation and no repository writes are needed. Cancellation, restart, target ownership (D17), context
+isolation and accurate failure reporting stay in the contract unchanged.
+
+**Data sharing** (confirmed)
+- **Two separate opt-ins per project, both off at first:** `modelContext` and `cloudExecution`.
+- **`modelContext`** controls whether repository-derived material is sent to Token Factory. The consent covers the
+  whole workflow, including read-tool results and later requests.
+- **`cloudExecution`** controls uploading a workspace.
+  - It stays off and unused while cloud execution isn't built.
+  - Turning on `modelContext` never turns it on.
+- **Always excluded:** secrets, and dependency and build output.
+- **Limits on every read:** it stays inside the repository and is bounded, and output is capped.
+- **Text has no authority.** Repository or model text can never grant consent, and can never promote private project
+  information into the global profile.
+- **A third control.** A sandbox's network policy (later milestone) is separate from both opt-ins.
+
+**Preferences.** A minimal canonical store owned by the host, and a scoped handoff to engines, are built now with NIV-5.
+NIV-10 reuses them. There is no second, temporary store.
+
+**Fixtures:** user-supplied repository A/B, references pending.
+- Nate supplies the two repositories during development.
+- When they arrive, their identities, revisions and contrasting conventions are recorded.
+- Choosing a repository grants none of these: model-context consent, cloud-upload consent, or permission to publish its
+  contents.
+- Private material stays out of checked-in or public samples. Any public demonstration sample is resolved in NIV-16.
+- Acceptance that depends on the fixtures stays pending until they are supplied and tested.
+
+**Outside this milestone**, unless separately promoted:
+- new-app creation (scaffold and empty destination);
+- automatic editing of repositories;
+- voice input (NIV-19) and local acceleration (NIV-18);
+- more providers and workers (NIV-21);
+- councils (NIV-22);
+- profile synchronisation (NIV-23);
+- in-product Linear integration (NIV-24).
+
+The coding-work design (D9, D15, `system-architecture.md` §11) is kept for a later milestone, and none of it is
+claimed as done.
+
+**Why.** Nate's scope decision of 17 October 2026 concentrates the remaining time on the read-only workflow and on
+confirmed memory.
+
+**Consequences.**
+- The criteria in NIV-6, NIV-8, NIV-10, NIV-11, NIV-12, NIV-14, NIV-15, NIV-16 and NIV-17 are reconciled with this
+  scope. Deferred work stays visible.
+- Track fit is reassessed in NIV-15. Meeting the general platform requirement doesn't by itself show that a read-only
+  workflow fits the Coding track's "write, run, and test code" wording.
+- Judge access remains undecided (NIV-16).
+
+## D21. Preferences: one store owned by the host, and a snapshot with every run (2026-10-17)
+
+**Decision.** This builds D20's minimal canonical store and scoped handoff, for NIV-5 now and for NIV-10 to reuse.
+- **One canonical store.** The host keeps preferences in its own records file (`nivra.json` in Electron's user-data
+  folder, D7), beside the project registry. Each record holds:
+  - an id and the statement, in the person's words (at most 500 characters);
+  - a scope: `personal` applies to every project, `project` to one project, named by its id;
+  - a status: `confirmed`, or `suggested` for NIV-10's suggestions (none are made yet);
+  - an origin: `entered`, typed by the person;
+  - a revision, which is 1 when the record is created and rises with every edit, and its dates, including when it was
+    confirmed.
+
+  The store has its own revision too, raised by every change to any preference. It keeps at most 50 preferences.
+- **Confirming is explicit.** A preference exists only once the person types it and presses Confirm. Nothing else
+  creates one.
+- **A snapshot with every run.** `runs.start` now requires a `context`. Main takes it from the canonical store when the
+  run is requested: the confirmed personal preferences and the project's own, with the store's revision. Both sides
+  validate it. No engine receives the whole profile at `initialize`, or a path to the store.
+- **In the engine, memory only.** The scheduler holds a run's context from submission until the run ends. Steps read it
+  by run id, so it never enters workflow input, step output or the run's record. A run records only what it received:
+  - the count;
+  - each preference's id, scope and revision;
+  - the store's revision;
+  - a SHA-256 fingerprint of the records (`preferencesDigest` in `packages/domain`).
+- **A run starts only in the engine instance that accepted it.** At startup, queued runs that another instance accepted
+  now fail as `run.interrupted` without starting, as running ones already did. A queued run can therefore move to
+  `failed`.
+- **Protocol 2.** `PROTOCOL_VERSION` is now 2, since `runs.start` needs `context`. `initialize` refuses a mismatch, so
+  an engine on protocol 1 is installed again.
+- **Removing a project removes its own preferences.** Personal ones stay, and the window says how many went.
+
+**Why.**
+- NIV-5 and NIV-10 ask for one canonical store on this installation, with scoped snapshots for engines.
+  - Engines must not share a live database across operating systems (D7).
+  - Engines must not keep their own profiles, which would diverge.
+- Mastra stores step input and output unmasked. Keeping the context out of Mastra keeps preference text out of
+  `mastra.db`.
+- A fresh snapshot for every run makes an edit or a deletion reach the next run, with no cache to invalidate.
+- Main chooses the records, so project isolation rests on one tested function (`snapshotFor`).
+- Each side works out the fingerprint from what it holds, so a match shows the exact values arrived, with nothing
+  stored.
+
+**Consequences.**
+- A run already going keeps the snapshot it was given. An edit or a deletion reaches the next run.
+- Queued runs no longer survive an engine restart.
+- The hello run's `context` step proves the handoff until a workflow uses preferences (NIV-6, NIV-11).
+- NIV-10 builds on this store, with suggestions, supersession, export and import. NIV-11 orders precedence by scope.
+  There is no second store.

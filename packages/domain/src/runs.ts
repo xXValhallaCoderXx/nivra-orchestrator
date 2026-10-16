@@ -9,9 +9,12 @@ export const RunId = z.uuid();
 export const TERMINAL_STATUSES: readonly RunStatus[] = ["succeeded", "failed", "cancelled"];
 export const isTerminal = (status: RunStatus): boolean => TERMINAL_STATUSES.includes(status);
 
-/** Which status changes are legal. Terminal statuses never change: the first recorded outcome wins. */
+/**
+ * Which status changes are legal. Terminal statuses never change: the first recorded outcome wins. A queued run can
+ * fail without starting when the engine that accepted it stopped (D21).
+ */
 export const ALLOWED_TRANSITIONS: Readonly<Record<RunStatus, readonly RunStatus[]>> = {
-  queued: ["running", "cancelled"],
+  queued: ["running", "cancelled", "failed"],
   running: ["waiting_for_approval", "succeeded", "failed", "cancelled"],
   waiting_for_approval: ["running", "cancelled", "failed"],
   succeeded: [],

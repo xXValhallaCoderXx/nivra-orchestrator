@@ -99,6 +99,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         platform: process.platform,
         findGit: locateGit,
         engineInfo: () => info() as unknown as JsonObject,
+        // Called while a step runs, long after the scheduler below exists.
+        context: (runId) => scheduler.contextOf(runId),
         recorder: {
           output: (runId, stepId, message, data) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
           command: (runId, stepId, phase, message, data) =>

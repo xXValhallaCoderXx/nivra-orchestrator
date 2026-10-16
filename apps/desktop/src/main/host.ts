@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { DoctorReport, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
-import type { AddProjectResult, EngineView, ProjectView, WslView } from "../shared/ipc.ts";
-import { migrateHostData, type HostStore, type ProjectRecord } from "./host-store.ts";
+import type { AddProjectResult, EngineView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
+import { migrateHostData, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
+import { addPreference, deletePreference, editPreference, removeProjectPreferences, snapshotFor, type NewPreference } from "./preferences.ts";
 import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
 import { labelFor, type ExecutionTarget } from "./targets/types.ts";
@@ -126,8 +127,10 @@ export class Host {
   async startHello(projectId: string, holdMs: number): Promise<RunSummary> {
     const project = this.#project(projectId);
     const engine = await this.#ensure(project.targetId);
-    // Main mints the request id, so a retry never starts a second run (from Hird).
-    const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: project.nativePath, holdMs } });
+    // Main mints the request id, so a retry never starts a second run (from Hird). The snapshot is taken now, from the
+    // canonical store, so the run gets the preferences as they are when it is asked for (D21).
+    const context = { preferences: snapshotFor(this.#options.store.data, project.id) };
+    const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: project.nativePath, holdMs }, context });
     this.#runs.set(run.id, project.targetId);
     return run;
   }
@@ -165,9 +168,46 @@ export class Host {
     return { status: "added", project: this.#view(record), warning };
   }
 
-  removeProject(projectId: string): void {
+  /** Removes a folder from the list, with its own preferences (personal ones stay), and says how many went. */
+  removeProject(projectId: string): { preferencesRemoved: number } {
     this.#notices.delete(projectId);
-    this.#options.store.update((data) => ({ ...data, projects: data.projects.filter((p) => p.id !== projectId) }));
+    let preferencesRemoved = 0;
+    this.#options.store.update((data) => {
+      const { data: next, removed } = removeProjectPreferences(data, projectId);
+      preferencesRemoved = removed;
+      return { ...next, projects: next.projects.filter((p) => p.id !== projectId) };
+    });
+    return { preferencesRemoved };
+  }
+
+  /** Every preference in the canonical store, with the revision the next snapshot will carry (D21). */
+  preferences(): PreferencesView {
+    const { preferences, preferencesRevision } = this.#options.store.data;
+    return { revision: preferencesRevision, records: preferences.map((record) => this.#preferenceView(record)) };
+  }
+
+  addPreference(input: NewPreference): PreferenceView {
+    let saved: PreferenceRecord | undefined;
+    this.#options.store.update((data) => {
+      const result = addPreference(data, input, new Date());
+      saved = result.record;
+      return result.data;
+    });
+    return this.#preferenceView(saved!);
+  }
+
+  editPreference(id: string, statement: string): PreferenceView {
+    let saved: PreferenceRecord | undefined;
+    this.#options.store.update((data) => {
+      const result = editPreference(data, id, statement, new Date());
+      saved = result.record;
+      return result.data;
+    });
+    return this.#preferenceView(saved!);
+  }
+
+  deletePreference(id: string): void {
+    this.#options.store.update((data) => deletePreference(data, id));
   }
 
   /** Hands every engine the keys as they are now (D8), including one that was still starting when they changed. */
@@ -346,6 +386,22 @@ export class Host {
       label: record.label,
       displayPath: record.nativePath,
       notice: this.#notices.get(record.id) ?? null,
+    };
+  }
+
+  #preferenceView(record: PreferenceRecord): PreferenceView {
+    const project = record.projectId ? this.#options.store.data.projects.find((p) => p.id === record.projectId) : undefined;
+    return {
+      id: record.id,
+      statement: record.statement,
+      scope: record.scope,
+      projectId: record.projectId,
+      projectLabel: project?.label ?? null,
+      status: record.status,
+      origin: record.origin,
+      revision: record.revision,
+      updatedAt: record.updatedAt,
+      confirmedAt: record.confirmedAt,
     };
   }
 

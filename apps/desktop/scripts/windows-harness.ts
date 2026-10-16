@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { isTerminal, type RunEvent, type RunEventsPage } from "@nivra/domain";
+import { isTerminal, preferencesDigest, type RunContext, type RunEvent, type RunEventsPage } from "@nivra/domain";
 import { findGit } from "../../engine/src/exec/find-executable.ts";
 import { EngineSupervisor } from "../src/main/supervisor.ts";
 import { LocalTarget, runtimeIn } from "../src/main/targets/local.ts";
@@ -107,8 +107,25 @@ async function main(): Promise<void> {
     }
   };
 
+  // A real, non-empty snapshot with awkward text, sent with every run as the app does (D21).
+  const context: RunContext = {
+    preferences: {
+      revision: 3,
+      records: [
+        { id: randomUUID(), statement: `Prefer named exports, “quoted”, ${AWKWARD}, 日本語`, scope: "personal", revision: 2 },
+        { id: randomUUID(), statement: "Keep tests next to the code they test", scope: "project", revision: 1 },
+      ],
+    },
+  };
   const runHello = async (supervisor: EngineSupervisor, repoPath: string, holdMs = 0) =>
-    supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath, holdMs } });
+    supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath, holdMs }, context });
+  /** What the engine recorded about the context it received, checked against what was sent. */
+  const contextArrived = async (page: RunEventsPage): Promise<string> => {
+    const received = page.events.find((e) => e.stepId === "context" && e.type === "step.output");
+    const sent = await preferencesDigest(context.preferences.records);
+    if (received?.data?.["digest"] !== sent) throw new Error(`the engine received other preferences: ${received?.message ?? "no context step"}`);
+    return `${context.preferences.records.length} preferences arrived intact (fingerprint ${sent.slice(0, 12)})`;
+  };
   const waitRun = (supervisor: EngineSupervisor, runId: string, until: (page: RunEventsPage) => boolean, timeoutMs = 60_000) =>
     waitFor(async () => {
       const page = await supervisor.call("runs.events", { runId, after: 0, limit: 500 });
@@ -146,13 +163,13 @@ async function main(): Promise<void> {
       await runTool(git, ["init", "-q", "-b", "main"], { cwd: repo, timeoutMs: 30_000 });
       await runTool(git, ["-c", "user.name=Nivra Test", "-c", "user.email=test@nivra.invalid", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo, timeoutMs: 30_000 });
     }
-    await check("native: hello on a repository whose path has ü, % and #", async () => {
+    await check("native: hello on a repository whose path has ü, % and #, with the preferences sent along", async () => {
       if (!git) throw new Error("Git for Windows isn't installed, so no repository could be made");
       const run = await runHello(native, repo);
       const page = await waitRun(native, run.id, (p) => isTerminal(p.status));
       if (page.status !== "succeeded") throw new Error(page.events.map((e) => e.message).join(" | "));
       const status = page.events.find((e) => e.stepId === "git-status" && e.type === "step.output");
-      return `${status?.message ?? "?"}`;
+      return `${status?.message ?? "?"}; ${await contextArrived(page)}`;
     });
     await check("native: cancel stops the process the run started", async () => {
       const run = await runHello(native, git ? repo : work, 60_000);
@@ -215,12 +232,12 @@ async function main(): Promise<void> {
       await check("wsl: doctor", async () => (await supervisor.call("doctor", {})).checks.map((c) => `${c.id}=${c.status}`).join(", "));
       const made = await inDistro(["/bin/sh", "-c", 'set -e; d="$HOME/.nivra-verify/repo $1"; rm -rf "$d"; mkdir -p "$d"; cd "$d"; git init -q -b main; git -c user.name=t -c user.email=t@nivra.invalid commit -q --allow-empty -m init; pwd', "sh", AWKWARD]);
       const repo = made.stdout.trim().split("\n").at(-1) ?? "";
-      await check("wsl: hello on a repository inside the distribution, path with ü, % and #", async () => {
+      await check("wsl: hello on a repository inside the distribution, path with ü, % and #, with the preferences sent along", async () => {
         if (made.code !== 0 || !repo.startsWith("/")) throw new Error(`could not make the repository: ${made.stderr}`);
         const run = await runHello(supervisor, repo);
         const page = await waitRun(supervisor, run.id, (p) => isTerminal(p.status));
         if (page.status !== "succeeded") throw new Error(page.events.map((e) => e.message).join(" | "));
-        return `${page.events.find((e) => e.stepId === "git-status" && e.type === "step.output")?.message ?? "?"} (${repo})`;
+        return `${page.events.find((e) => e.stepId === "git-status" && e.type === "step.output")?.message ?? "?"} (${repo}); ${await contextArrived(page)}`;
       });
       await check("wsl: cancel stops the process the run started", async () => {
         const run = await runHello(supervisor, repo || "/", 60_000);
