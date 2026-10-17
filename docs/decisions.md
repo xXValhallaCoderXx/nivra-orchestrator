@@ -556,7 +556,9 @@ It builds on D20's scope and D21's snapshot, and amends D21 for text the model w
   Each message says what happened and what to do. A 429 says when to try again, from `Retry-After` or the token limit's
   reset. Nothing retries by itself.
 - **Every model call is recorded**, failed ones too, as a `model.call` event: the elapsed time, tokens or `null`, the
-  finish reason, and the kind when it failed. The kind is also in the `run.failed` data.
+  finish reason, and the kind when it failed. The kind is also in the `run.failed` data. Each request is recorded
+  once: a request that fails is one event, with its own step number and its own time. A failure inside Nivra made no
+  request, so it is the run's failure alone.
 - **A tool call whose input fails the tool's schema** never runs: Mastra tells the model what to fix. The run records
   it as a refused `tool.called` event, with each field path and rule, never the input. Live, Nemotron 3 Super sent a
   forced answer's lists as strings. With a single answer step the run failed; with three, the next attempt was
@@ -599,7 +601,7 @@ The key saw 28 models, five of them NVIDIA's.
   - Child processes no longer inherit `GIT_*` variables.
   - There is no `git status`, which can run filters a repository configures.
 - **Masking** covers Hird's secret patterns, private-key blocks and the values of the keys Nivra holds, and keeps the
-  line count. It is pattern-based, so it can't recognise every secret, and the consent dialog says so.
+  line count. The map's folder and file names are masked too, before the first request. It is pattern-based, so it can't recognise every secret, and the consent dialog says so.
 - **The map** is the model's starting point, at most 16 KB:
   - HEAD at run start;
   - file counts by folder and by extension, and hidden counts by reason;
@@ -662,6 +664,9 @@ The key saw 28 models, five of them NVIDIA's.
   - A run is cancelled at once if the epoch moved while its `runs.start` request was out.
 - Turning sharing off cancels the project's queued and running explain runs. A run that can't be stopped is reported,
   never passed over.
+- **Removing a project withdraws its consent first,** the same way. Its epoch moves and stays moved, so a submission
+  in flight stops itself, and its runs are cancelled. When one can't be stopped, the project stays in the list, and the
+  person is told why.
 - **The engine refuses** with `sharing-refused` or `no-key` before any request, judging from the run's own context.
 
 **Preference text in what the model writes (amends D21)**
@@ -718,3 +723,7 @@ The key saw 28 models, five of them NVIDIA's.
   `git status`, unchanged here.
 - An older Nivra on the same home or records degrades as described above, and never silently with consent on.
 - AGENTS.md's "Mastra's 180-second limit" is corrected: each call has its own deadline.
+- **Not handled yet:** a model that advertises a small context. The budget assumes at least 8,000 tokens for the
+  request, plus 4,000 for the answer, so a model with an 8,192-token context would be overrun. Nemotron 3 Super's
+  context is far larger. Respecting small contexts, or refusing them before any request, is a follow-up from the
+  review.

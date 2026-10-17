@@ -26,8 +26,13 @@ export class ModelFailure extends Error {
   readonly status: number | null;
   /** How long the call ran before it failed, when it got that far. */
   elapsedMs: number | null = null;
-  /** The steps that finished before it failed. */
+  /** Every request the call made, the failed one last when there was one. */
   steps: StepRecord[] = [];
+  /**
+   * The request that failed, reported once: Mastra's own error step, or one made here when Mastra reported none (a
+   * deadline, a cancel). Null when nothing failed at the provider, as when a tool inside Nivra did.
+   */
+  failedStep: StepRecord | null = null;
   /** On a 429: how long Token Factory asked us to wait (`Retry-After`), when it said. */
   readonly retryAfterSeconds: number | null;
 
@@ -207,8 +212,15 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       const steps: StepRecord[] = [];
       const started = performance.now();
       let mark = started;
+      // Mastra reports a request that failed as a step of its own; it is held back and reported with the failure.
+      let errorStep: StepRecord | null = null;
       const failed = (failure: ModelFailure): ModelFailure => {
-        failure.elapsedMs = Math.round(performance.now() - started);
+        const now = performance.now();
+        failure.elapsedMs = Math.round(now - started);
+        if (failure.kind !== "internal") {
+          failure.failedStep = errorStep ?? emptyStep(steps.length, Math.round(now - mark));
+          steps.push(failure.failedStep);
+        }
         failure.steps = steps;
         return failure;
       };
@@ -227,6 +239,10 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
               const now = performance.now();
               const record = stepRecord(steps.length, step, Math.round(now - mark));
               mark = now;
+              if (record.finishReason === "error" || record.finishReason === "aborted") {
+                errorStep = record;
+                return;
+              }
               steps.push(record);
               call.onStep?.(record);
             } catch (error) {
@@ -241,6 +257,11 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       }
       if (internal.failure) throw failed(internal.failure);
       if (output.finishReason === "aborted" || call.signal?.aborted) throw failed(new ModelFailure("cancelled", "Cancelled."));
+      // Mastra reported a failed request but finished anyway: it was a request all the same, so it is counted.
+      if (errorStep) {
+        steps.push(errorStep);
+        call.onStep?.(errorStep);
+      }
       return {
         text: (output.text ?? "").trim(),
         finishReason: output.finishReason ?? null,
@@ -295,6 +316,11 @@ function schemaProblems(result: unknown): string[] | null {
   if (value.error !== true || !("validationErrors" in value) || typeof value.message !== "string") return null;
   const listed = value.message.split("\n\nProvided arguments:")[0]!.split("\n").filter((line) => line.startsWith("- "));
   return listed.slice(0, 10).map((line) => line.slice(2, 202));
+}
+
+/** A request Mastra didn't report as a step, because it was cut off: its time, and nothing it didn't say. */
+function emptyStep(stepNumber: number, elapsedMs: number): StepRecord {
+  return { stepNumber, elapsedMs, inputTokens: null, outputTokens: null, finishReason: null, servedModel: null, toolNames: [], rejectedTools: [], rateLimit: rateLimitOf(undefined) };
 }
 
 /** Reads one header, whatever its case, as a number; null when it is absent or not a number. */

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -23,6 +23,7 @@ import { httpError, startStub, toolCall, type Reply, type StubRequest, type Stub
  */
 const ENGINE = fileURLToPath(new URL("../../engine/src/main.mjs", import.meta.url));
 const STUBBORN = fileURLToPath(new URL("./fixtures/stubborn-engine.mjs", import.meta.url));
+const GATED = fileURLToPath(new URL("./fixtures/gated-engine.mjs", import.meta.url));
 const dirs: string[] = [];
 const hosts: Host[] = [];
 const stubs: Stub[] = [];
@@ -447,6 +448,50 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     assert.equal((await ended(host, run.id)).status, "cancelled");
     await new Promise((resolve) => setTimeout(resolve, 3_500));
     assert.equal(stub.chats().length, 2);
+  });
+
+  it("stops a run whose project is removed while its submission is out, and keeps nothing of the project", async () => {
+    const { host, ids, root } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    const home = join(root, "local home");
+    const calls = () => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter((method) => method.startsWith("runs.")) : []);
+    await host.setSharing(ids[0]!, true);
+    await host.open(ids[0]!);
+    await online(host, "local");
+    const starting = host.startExplain(ids[0]!, "");
+    await waitFor(() => calls().includes("runs.start"), "the submission to reach the engine");
+    await host.removeProject(ids[0]!);
+    writeFileSync(join(home, "release"), "");
+    await assert.rejects(starting, /removed while its explanation was starting, so the run was stopped/);
+    assert.deepEqual([host.projects().length, calls()], [0, ["runs.start", "runs.cancel"]]);
+  });
+
+  it("keeps a project whose explanation can't be stopped, and says why", async () => {
+    const { host, ids, root } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "release"), "");
+    await host.setSharing(ids[0]!, true);
+    await host.open(ids[0]!);
+    await online(host, "local");
+    await host.startExplain(ids[0]!, "");
+    writeFileSync(join(home, "fail-cancel"), "");
+    await assert.rejects(host.removeProject(ids[0]!), /couldn't stop an explain run \(the run couldn't be stopped\), so the project is still in the list/);
+    assert.equal(host.projects().length, 1);
+  });
+
+  it("cancels a project's running explanation when the project is removed, and makes no further request", async () => {
+    const stub = await stubWith((_request, index) => (index === 0 ? toolCall("read_file", { path: "README.md" }, { id: "c0" }) : { ...toolCall("submit_answer", ANSWER, { id: "c1" }), delayMs: 3_000 }));
+    const { host, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "wsl:Test", path: makeRepo(join(reposRoot(), "linux"), { "README.md": "# Linux\n" }) }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    await host.open(ids[0]!);
+    await online(host, "wsl:Test");
+    await host.setSharing(ids[0]!, true);
+    const run = await host.startExplain(ids[0]!, "");
+    await waitFor(() => stub.chats().length === 2, "the second model call");
+    await host.removeProject(ids[0]!);
+    assert.equal((await ended(host, run.id)).status, "cancelled");
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    assert.deepEqual([host.projects().length, stub.chats().length], [0, 2]);
   });
 
   it("explains each project on its own engine with its own files and preferences, never another project's", async () => {

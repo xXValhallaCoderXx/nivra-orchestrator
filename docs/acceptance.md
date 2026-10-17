@@ -94,6 +94,7 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
   - A search, then an edit, then a read marks the file as changed during the run. A citation that runs past a clipped
     result is not checked.
   - The result is labelled "HEAD at run start", and a commit made during the run is reported.
+  - Search hits are listed in the context used, by file, line and hash, even for a file that was never read or cited.
   - An answer citing a file the model never read is turned down, naming the citation. Resubmitted without it, the
     answer is accepted. After two refusals, an answer is accepted as it is, with those citations labelled.
   - The built app's window shows checked and unchecked citations.
@@ -103,6 +104,7 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
   - A secret-shaped token and a private-key block in a tracked file reach the model masked. They never reach `nivra.db*`,
     `mastra.db*` or the logs.
   - The key appears only in the `Authorization` header.
+  - Folder names in the first request's map are masked: one named with the key, and one that looks like a secret.
   - A repository's own git settings (`grep.fullName`, `submodule.recurse`, with a submodule) change nothing that is listed
     or searched.
 - **Preferences.**
@@ -121,6 +123,9 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
   - The host refuses before starting any engine, and the engine refuses before any request.
   - Withdrawn while the engine was starting, the run was never submitted. Withdrawn while it was queued, it was cancelled
     before sending anything. Withdrawn after its first model call, it was cancelled, and no further request was made.
+  - Removing the project withdraws consent too. Removed while its explanation was being submitted, the run was
+    cancelled as soon as the engine answered. Removed while it ran, it was cancelled, and no further request was made.
+    When the run couldn't be stopped, the project stayed in the list, with the reason.
 - **Failures.** Each was named by kind, after one request:
   - 401 and 403: `auth`;
   - 404: `model-unavailable`;
@@ -130,7 +135,8 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
   - a dropped connection and a refused one: `network`;
   - no accepted answer: `malformed`.
 
-  No key, and consent off, made no request at all. The engine's log never held the question.
+  No key, and consent off, made no request at all. The engine's log never held the question. Each request is recorded
+  once: a first request that fails is one event, and a success followed by a failure is two.
 - **Budget and time.**
   - With a small context length, the answer was forced early.
   - Per-call and whole-run deadlines end as `timeout`, never as a quiet stop. This is shown in-process with short

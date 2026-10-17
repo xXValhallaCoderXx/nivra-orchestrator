@@ -144,9 +144,12 @@ export function createExplainWorkflow(deps: ExplainDeps) {
       try {
         const ledger = new Ledger();
         const map = await buildMap(reader, inputData.head);
+        // Folder and file names can carry a secret too, so the map is masked like every tool result, and the budget
+        // counts what is actually sent. The ledger keeps the true paths: they are what citations are checked against.
+        const mapText = deps.mask(map.text);
         // The map is delivered before the first step.
-        ledger.record(-1, "map", map.sources.map((source) => ({ path: source.path, startLine: 1, endLine: source.lines, sha256: source.sha256 })), map.text.length);
-        const prompt = explainPrompt(question, map.text, context.preferences);
+        ledger.record(-1, "map", map.sources.map((source) => ({ path: source.path, startLine: 1, endLine: source.lines, sha256: source.sha256 })), mapText.length);
+        const prompt = explainPrompt(question, mapText, context.preferences);
         const budget = new Budget(requestBudget(inputData.contextLength), INSTRUCTIONS.length + prompt.length + TOOL_DEFINITION_CHARS);
         const policy = policyFor(inputData.model);
         const internal = new InternalFailure();
@@ -216,16 +219,21 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           });
         } catch (error) {
           failed = error instanceof ModelFailure ? error : failure("internal", String(error));
-          // The call that failed is recorded too: elapsed time, no usage, and why (D22).
-          deps.recorder.event(runId, "model.call", "explain", `Model call failed: ${failed.message}`, {
-            step: steps.length,
-            model: inputData.model,
-            elapsedMs: failed.elapsedMs,
-            inputTokens: null,
-            outputTokens: null,
-            kind: failed.kind,
-            ...(failed.retryAfterSeconds !== null ? { retryAfterSeconds: failed.retryAfterSeconds } : {}),
-          });
+          // The request that failed is recorded once, as its own step: its own time, no usage, and why (D22). A failure
+          // inside Nivra made no request, so it is the run's failure alone.
+          const request = failed.failedStep;
+          if (request) {
+            steps.push(request);
+            deps.recorder.event(runId, "model.call", "explain", `Model call failed: ${failed.message}`, {
+              step: request.stepNumber,
+              model: inputData.model,
+              elapsedMs: request.elapsedMs,
+              inputTokens: null,
+              outputTokens: null,
+              kind: failed.kind,
+              ...(failed.retryAfterSeconds !== null ? { retryAfterSeconds: failed.retryAfterSeconds } : {}),
+            });
+          }
         }
         deps.setMeta(runId, { usage: usageOf(steps) });
         if (failed) throw failed;

@@ -401,7 +401,7 @@ run progress by polling with a cursor.
 | Starting programs | Programs start from argument lists, never through a shell, and a test bans `shell: true`. The one exception is probing and provisioning a WSL distribution: a fixed `/bin/sh -c` script runs inside it, with values passed as positional arguments, never spliced into the script. |
 | Child environments | Children get a filtered environment: provider key variables, `NODE_OPTIONS` and Electron's variables are removed, and exactly one PATH key is kept. This removes **known** variables; it is not an allow-list, so other secrets in the environment are passed on. |
 | Execution | Only the `Local` backend exists. It provides **no isolation** and is labelled "No isolation". It refuses sessions that need network rules, and Windows batch files. Today it runs only the hello check and git, which explain uses to read tracked files with its settings pinned. The container, Token Factory Sandboxes and OpenShell backends are planned (§11). |
-| Model requests | Explaining needs the project's consent, off by default, checked by the host and by the engine; nothing is sent without it or without a key (D22). The model gets excerpts of tracked files only: secret files and dependency or build output are never read, and text that looks like a key or token is masked. Masking is pattern-based and can't recognise every secret; the consent dialog says so. The key travels only in the `Authorization` header. |
+| Model requests | Explaining needs the project's consent, off by default, checked by the host and by the engine; nothing is sent without it or without a key (D22). Removing a project withdraws it and stops the project's runs. The model gets excerpts of tracked files only: secret files and dependency or build output are never read, and text that looks like a key or token is masked, in file names and folder names too. Masking is pattern-based and can't recognise every secret; the consent dialog says so. The key travels only in the `Authorization` header. |
 | Databases | Each database has one owner, and none is ever opened across the Windows/WSL boundary. SQLite's exclusive lock refuses a second engine on the same data folder. |
 | Preferences | The engine never writes a statement it was given: runs record ids, revisions and a fingerprint, and a canary test checks that preference text never reaches `nivra.db*`, `mastra.db*` or the logs (D21). Text the model writes may paraphrase a preference; it is kept only in the engine's `nivra.db`, masked, never in `mastra.db` or the logs (D22). |
 
@@ -721,20 +721,21 @@ The integration tests in `pnpm verify` include:
 
 **Results against the final change set** (explain with evidence, D22):
 
-Run on 17 October 2026, 21:43–21:48 +08:00, against the working tree with every code change of the D22 change set in
-place, including the fixes made after the live runs. Only docs changed afterwards. Markdown is neither built nor tested.
+Run on 17 October 2026, 22:39–22:44 +08:00, against the working tree with every code change of the D22 change set in
+place: the fixes made after the live runs, and the corrections from the review of `ffe215c`. Only docs changed
+afterwards. Markdown is neither built nor tested.
 
 | Check | Result |
 |---|---|
-| `pnpm verify` | Typecheck clean; tests 204/204 (domain 23, desktop 70, engine 111) |
-| `pnpm stage:runtime all` (run by `verify:windows`) | Staged afresh: `linux-x64` `90c61f1343fa7608` (smoke-tested), `win-x64` `2df7892cc4955df4` |
+| `pnpm verify` | Typecheck clean; tests 211/211 (domain 23, desktop 73, engine 115) |
+| `pnpm stage:runtime all` (run by `verify:windows`) | Staged afresh: `linux-x64` `3b2837328cf3c0e2` (smoke-tested), `win-x64` `5b08b62a56229a95` |
 | `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 12 passed, 3 skipped: the explain tests that need the test endpoint switch, which a packaged app ignores |
 | `test:e2e` | 14 passed, 1 skipped: the test only a packaged app runs |
-| Real engine through `apps/engine/scripts/rpc.ts` | Explain with no key, and with consent off: each refused before any request. Explain against the stub: succeeded, 2 of 2 citations checked, route `loopback-test`. Hello: succeeded. Doctor: "Nebius Token Factory" by default, and a test endpoint with `--token-factory-url`. |
+| Real engine through `apps/engine/scripts/rpc.ts` | Explain with no key, and with consent off: each refused before any request. Explain against the stub: succeeded, 2 of 2 citations checked, route `loopback-test`, and the search hit kept in the context used. Hello: succeeded. Doctor: "Nebius Token Factory" by default, and a test endpoint with `--token-factory-url`. |
 | `pnpm verify:windows` | 17/17, on the runtimes above |
 | Live, with Nate's key (the Windows app, the WSL engine), before the three fixes | Fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage; 6 of 21 citations shown to the model. Fixture B, which is private, also ran. No preference had been confirmed, so the preference contrast is still to run. |
 | Live, after the fixes | Fixture A, default question: 76.3 s, 77,514 tokens in and 2,420 out over 11 calls; one refusal, then 13 of 13 citations shown. "Where is the login component?": 25.5 s, 6 calls; one refusal, then 4 of 4. The preference contrast ran on fixture B, which is private: its result is recorded in NIV-6, not here. |
-| `pnpm dev:win --no-launch`, then `test:windows` | 6/6 at 21:46 +08:00, including explaining on the WSL and the native engine. Earlier, Windows Smart App Control, in enforcement mode, refused to start the unsigned `Nivra.exe` (Code Integrity event 3077, at 17:03 and 17:04); Nate turned it off on this machine. One test helper was corrected: it no longer picks the already chosen project again, which the project select treats as clearing the choice. |
+| `pnpm dev:win --no-launch`, then `test:windows` | 6/6 at 22:43 +08:00, including explaining on the WSL and the native engine. Earlier, Windows Smart App Control, in enforcement mode, refused to start the unsigned `Nivra.exe` (Code Integrity event 3077, at 17:03 and 17:04); Nate turned it off on this machine. One test helper was corrected: it no longer picks the already chosen project again, which the project select treats as clearing the choice. |
 
 **Not yet run** (still pending):
 - the installed deb on a stock Ubuntu (an unpacked build test is not installation coverage);

@@ -177,6 +177,24 @@ describe("explain over stdio, against a loopback stub (NIV-6, NIV-9, D22)", () =
     assert.deepEqual([chats[12]?.body?.tool_choice, chats.slice(13).map((chat) => chat.body?.tool_choice)], ["required", [forced, forced, forced]]);
   });
 
+  it("records each request once, with its own time: a first request that fails, and a success followed by a failure", async () => {
+    const repo = makeRepo();
+    const calls = (page: RunEventsPage) => page.events.filter((e) => e.type === "model.call").map((e) => [e.data?.["step"], e.data?.["kind"] ?? "ok"]);
+    const first = await setup(() => httpError(500, "upstream broke"));
+    const firstPage = await finished(first.engine, (await explain(first.engine, repo)).id);
+    assert.deepEqual([calls(firstPage), first.stub.chats().length], [[[0, "provider"]], 1]);
+
+    // The first reply is slow, so the failed call's own time can't be mistaken for the whole call's.
+    const later = await setup((_request, index) => (index === 0 ? { ...toolCall("read_file", { path: "README.md" }, { id: "c0" }), delayMs: 1_500 } : httpError(500, "upstream broke")));
+    const run = await explain(later.engine, repo);
+    const laterPage = await finished(later.engine, run.id);
+    assert.deepEqual([calls(laterPage), later.stub.chats().length], [[[0, "ok"], [1, "provider"]], 2]);
+    const failedCall = laterPage.events.filter((e) => e.type === "model.call").at(-1);
+    assert.ok((failedCall?.data?.["elapsedMs"] as number) < 1_000, `the failed request's own time (${String(failedCall?.data?.["elapsedMs"])} ms)`);
+    const summary = await later.engine.client.call("runs.get", { runId: run.id });
+    assert.deepEqual(summary.usage, { inputTokens: null, outputTokens: null, calls: 2, reportedCalls: 1 });
+  });
+
   it("gives a forced answer that fails the schema another step, and records why it was turned down", async () => {
     const repo = makeRepo();
     let forcedSeen = 0;
@@ -370,6 +388,32 @@ describe("explain over stdio: failures, canaries and evidence (D22)", () => {
     assert.notEqual(edited.head, first.head);
     assert.notEqual(edited.sha, first.sha);
     assert.deepEqual([switched.head, switched.sha], [first.head, first.sha], "back on the first commit's content");
+  });
+
+  it("keeps a search hit in the context used, by file, line and hash, though the file was never read or cited", async () => {
+    const repo = makeRepo();
+    const script = [toolCall("search_code", { query: "startTimer" }, { id: "c0" }), toolCall("read_file", { path: "README.md" }, { id: "c1" }), toolCall("submit_answer", ANSWER, { id: "c2" })];
+    const { engine } = await setup((_request, index) => script[index] ?? httpError(500, "done"));
+    const run = await explain(engine, repo);
+    assert.equal((await finished(engine, run.id)).status, "succeeded");
+    const result = await engine.client.call("runs.result", { runId: run.id });
+    assert.deepEqual(result?.context.hits.map((hit) => [hit.path, hit.ranges, hit.sha256.length]), [["src/timer.ts", [[3, 3]], 1]]);
+    assert.deepEqual([result?.context.reads.map((read) => read.path), JSON.stringify(result?.findings).includes("src/timer.ts")], [["README.md"], false]);
+  });
+
+  it("masks folder names in the first request's map, whether they hold the key or look like a secret", async () => {
+    const repo = makeRepo();
+    for (const folder of [KEY, SECRET_SHAPED]) {
+      mkdirSync(join(repo, folder));
+      writeFileSync(join(repo, folder, "a.ts"), "export const a = 1;\n");
+    }
+    spawnSync("git", ["add", "-A"], { cwd: repo });
+    spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "commit", "-q", "-m", "folders"], { cwd: repo });
+    const { stub, engine } = await setup(() => httpError(500, "only the first request matters"));
+    await finished(engine, (await explain(engine, repo)).id);
+    const first = stub.chats()[0]?.raw ?? "";
+    assert.deepEqual([first.includes(KEY), first.includes(SECRET_SHAPED)], [false, false]);
+    assert.deepEqual([first.includes("[secret:NEBIUS_API_KEY]"), first.includes("[redacted]")], [true, true], "both folders were in the map, masked");
   });
 
   it("forces the answer early when a small context leaves no budget for more reading", async () => {

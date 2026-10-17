@@ -71,6 +71,8 @@ describe("Ledger", () => {
     ledger.count(50);
     const context = ledger.context();
     assert.deepEqual([context.reads, context.searches, context.searchHits, context.chars], [[{ path: "a.ts", ranges: [[1, 20]], sha256: [A] }], 1, 1, 950]);
+    // A search-only hit keeps its file, line and hash, though the file was never read.
+    assert.deepEqual(context.hits, [{ path: "b.ts", ranges: [[3, 3]], sha256: [A] }]);
   });
 });
 

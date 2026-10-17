@@ -82,6 +82,8 @@ test("explaining asks for the project's consent first, then shows checked and un
   await expect(page.getByTestId("explain-citation").and(page.locator("[data-checked=no]"))).toContainText("file not read");
   await expect(page.getByTestId("explain-run-line")).toContainText("(test endpoint)");
   await expect(page.getByTestId("explain-head")).toContainText("HEAD at run start");
+  // The search hit is in the context used, though that line was never read.
+  await expect(page.getByTestId("explain-context")).toContainText("1 search with 1 hit (src/timer.ts 1)");
   await expect(page.getByTestId("explain-sharing")).toBeVisible();
   await expect(page.getByTestId("explain-timeline")).toContainText("No confirmed preferences from the app (revision 0)");
   await expect(page.getByTestId("explain-timeline")).toContainText("submit_answer refused: 1 citation of lines the model wasn't shown");

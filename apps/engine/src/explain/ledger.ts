@@ -20,6 +20,8 @@ export interface LedgerEntry {
 export interface ContextUsed {
   map: Array<{ path: string; sha256: string }>;
   reads: Array<{ path: string; ranges: Array<[number, number]>; sha256: string[] }>;
+  /** The lines search results showed, by file, whether or not the file was read or cited. */
+  hits: Array<{ path: string; ranges: Array<[number, number]>; sha256: string[] }>;
   searches: number;
   searchHits: number;
   /** Characters of tool results delivered, after masking. */
@@ -55,21 +57,27 @@ export class Ledger {
   }
 
   context(): ContextUsed {
-    const reads = new Map<string, { ranges: Array<[number, number]>; sha256: Set<string> }>();
-    for (const entry of this.entries.filter((e) => e.kind === "read")) {
-      const read = reads.get(entry.path) ?? { ranges: [], sha256: new Set<string>() };
-      read.ranges.push([entry.startLine, entry.endLine]);
-      read.sha256.add(entry.sha256);
-      reads.set(entry.path, read);
-    }
     return {
       map: this.entries.filter((e) => e.kind === "map").map((e) => ({ path: e.path, sha256: e.sha256 })),
-      reads: [...reads.entries()].map(([path, read]) => ({ path, ranges: mergeRanges(read.ranges), sha256: [...read.sha256] })),
+      reads: this.#byFile("read"),
+      hits: this.#byFile("search"),
       searches: this.#searches,
       searchHits: this.entries.filter((e) => e.kind === "search").length,
       chars: this.#chars,
       changedFiles: this.changedFiles(),
     };
+  }
+
+  /** What one kind of tool delivered, by file: the lines, joined into ranges, and every hash they came from. */
+  #byFile(kind: LedgerKind): Array<{ path: string; ranges: Array<[number, number]>; sha256: string[] }> {
+    const files = new Map<string, { ranges: Array<[number, number]>; sha256: Set<string> }>();
+    for (const entry of this.entries.filter((e) => e.kind === kind)) {
+      const file = files.get(entry.path) ?? { ranges: [], sha256: new Set<string>() };
+      file.ranges.push([entry.startLine, entry.endLine]);
+      file.sha256.add(entry.sha256);
+      files.set(entry.path, file);
+    }
+    return [...files.entries()].map(([path, file]) => ({ path, ranges: mergeRanges(file.ranges), sha256: [...file.sha256] }));
   }
 }
 

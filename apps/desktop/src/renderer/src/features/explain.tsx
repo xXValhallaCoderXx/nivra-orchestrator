@@ -34,6 +34,10 @@ function CitationChip({ citation }: { citation: CheckedCitation }) {
   );
 }
 
+/** Files and the lines delivered from each, as "README.md 1-50; src/a.ts 7, 9-10". */
+const linesByFile = (files: ExplainResult["context"]["reads"]): string =>
+  files.map((file) => `${file.path} ${file.ranges.map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(", ")}`).join("; ");
+
 function Result({ result, summary, preferences }: { result: ExplainResult; summary: RunSummary; preferences: PreferencesView | null }) {
   const headChanged = result.headAtEnd !== result.headAtStart;
   return (
@@ -109,8 +113,9 @@ function Result({ result, summary, preferences }: { result: ExplainResult; summa
         </Stack>
       )}
       <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-context">
-        Context used: {result.context.reads.length} {result.context.reads.length === 1 ? "file" : "files"} read ({result.context.reads.map((read) => `${read.path} ${read.ranges.map(([a, b]) => `${a}-${b}`).join(", ")}`).join("; ") || "none"}),{" "}
-        {result.context.searches} {result.context.searches === 1 ? "search" : "searches"} with {result.context.searchHits} {result.context.searchHits === 1 ? "hit" : "hits"}, the map from{" "}
+        Context used: {result.context.reads.length} {result.context.reads.length === 1 ? "file" : "files"} read ({linesByFile(result.context.reads) || "none"}),{" "}
+        {result.context.searches} {result.context.searches === 1 ? "search" : "searches"} with {result.context.searchHits} {result.context.searchHits === 1 ? "hit" : "hits"}
+        {result.context.hits.length > 0 ? ` (${linesByFile(result.context.hits)})` : ""}, the map from{" "}
         {result.context.map.map((m) => m.path).join(", ") || "file counts only"};{" "}
         {result.context.chars.toLocaleString()} characters of results. {result.checks.checked} of {result.checks.citations} citations point to lines the model was shown. Untracked files are never read.
       </Text>

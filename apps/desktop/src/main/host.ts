@@ -156,15 +156,20 @@ export class Host {
     const context = { preferences: snapshotFor(this.#options.store.data, current.id), sharing: { modelContext: true } };
     const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "explain", input: { repoPath: current.nativePath, question }, context });
     this.#runs.set(run.id, current.targetId);
-    const runs = this.#explainRuns.get(projectId) ?? new Set<string>();
-    runs.add(run.id);
-    this.#explainRuns.set(projectId, runs);
-    // Sharing turned off while the request was out: the run was submitted under old consent, so it stops now.
-    if (this.#epochOf(projectId) !== epoch) {
-      await this.cancelRun(run.id).catch((error: unknown) => {
-        throw new Error(`Sharing for this project was turned off while the run was starting, and Nivra couldn't stop it (${error instanceof Error ? error.message : String(error)}). Restart the project's engine to stop it.`);
-      });
+    if (this.#epochOf(projectId) === epoch) {
+      const runs = this.#explainRuns.get(projectId) ?? new Set<string>();
+      runs.add(run.id);
+      this.#explainRuns.set(projectId, runs);
+      return run;
     }
+    // Sharing was turned off, or the project removed, while the request was out: the run was submitted under consent
+    // that has since been withdrawn, so it stops now.
+    const removed = !this.#options.store.data.projects.some((p) => p.id === projectId);
+    const what = removed ? "The project was removed" : "Sharing for this project was turned off";
+    await this.cancelRun(run.id).catch((error: unknown) => {
+      throw new Error(`${what} while the run was starting, and Nivra couldn't stop it (${error instanceof Error ? error.message : String(error)}). Restart the project's engine to stop it.`);
+    });
+    if (removed) throw new Error("The project was removed while its explanation was starting, so the run was stopped.");
     return run;
   }
 
@@ -185,13 +190,7 @@ export class Host {
     this.#options.store.update((data) => ({ ...data, projects: data.projects.map((p) => (p.id === projectId ? { ...p, sharing: { ...p.sharing, modelContext } } : p)) }));
     if (!modelContext) {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
-      // A run whose engine isn't online isn't running any more.
-      const runs = [...(this.#explainRuns.get(projectId) ?? [])].filter((runId) => this.#engines.get(this.#runs.get(runId) ?? "")?.supervisor.state.status === "online");
-      const failed = (await Promise.allSettled(runs.map((runId) => this.cancelRun(runId)))).filter((result) => result.status === "rejected");
-      if (failed.length) {
-        const why = failed[0]!.reason instanceof Error ? failed[0]!.reason.message : String(failed[0]!.reason);
-        throw new Error(`Sharing for this project is off, but Nivra couldn't stop ${failed.length === 1 ? "an explain run" : `${failed.length} explain runs`} (${why}). Restart the project's engine to stop ${failed.length === 1 ? "it" : "them"}.`);
-      }
+      await this.#stopExplainRuns(projectId, (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`);
     }
     return this.#view(this.#project(projectId));
   }
@@ -229,10 +228,16 @@ export class Host {
     return { status: "added", project: this.#view(record), warning };
   }
 
-  /** Removes a folder from the list, with its own preferences (personal ones stay), and says how many went. */
-  removeProject(projectId: string): { preferencesRemoved: number } {
+  /**
+   * Removes a folder from the list, with its own preferences (personal ones stay), and says how many went. Removing a
+   * project withdraws its consent first: its epoch moves (and stays moved), so an explanation being submitted stops
+   * itself, and its queued and running explanations are cancelled. When one can't be stopped, the project stays.
+   */
+  async removeProject(projectId: string): Promise<{ preferencesRemoved: number }> {
+    this.#project(projectId);
+    this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
+    await this.#stopExplainRuns(projectId, (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
     this.#notices.delete(projectId);
-    this.#sharingEpochs.delete(projectId);
     this.#explainRuns.delete(projectId);
     let preferencesRemoved = 0;
     this.#options.store.update((data) => {
@@ -303,6 +308,16 @@ export class Host {
 
   #epochOf(projectId: string): number {
     return this.#sharingEpochs.get(projectId) ?? 0;
+  }
+
+  /** Cancels the project's queued and running explain runs; when one can't be stopped, says so through `refusal`. */
+  async #stopExplainRuns(projectId: string, refusal: (runs: string, why: string, them: "it" | "them") => string): Promise<void> {
+    // A run whose engine isn't online isn't running any more.
+    const runs = [...(this.#explainRuns.get(projectId) ?? [])].filter((runId) => this.#engines.get(this.#runs.get(runId) ?? "")?.supervisor.state.status === "online");
+    const failed = (await Promise.allSettled(runs.map((runId) => this.cancelRun(runId)))).filter((result) => result.status === "rejected");
+    if (failed.length === 0) return;
+    const why = failed[0]!.reason instanceof Error ? failed[0]!.reason.message : String(failed[0]!.reason);
+    throw new Error(refusal(failed.length === 1 ? "an explain run" : `${failed.length} explain runs`, why, failed.length === 1 ? "it" : "them"));
   }
 
   #project(projectId: string): ProjectRecord {

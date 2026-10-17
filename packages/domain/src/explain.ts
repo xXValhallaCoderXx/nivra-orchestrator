@@ -34,6 +34,8 @@ export const ExplainResult = z.strictObject({
   context: z.strictObject({
     map: z.array(z.strictObject({ path: z.string(), sha256: z.string() })),
     reads: z.array(z.strictObject({ path: z.string(), ranges: z.array(z.tuple([z.number().int(), z.number().int()])), sha256: z.array(z.string()) })),
+    /** The lines search results showed, by file: results stored before these were kept read as none. */
+    hits: z.array(z.strictObject({ path: z.string(), ranges: z.array(z.tuple([z.number().int(), z.number().int()])), sha256: z.array(z.string()) })).default([]),
     searches: z.number().int().nonnegative(),
     searchHits: z.number().int().nonnegative(),
     chars: z.number().int().nonnegative(),

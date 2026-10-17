@@ -53,6 +53,23 @@ describe("ModelClient (D22)", () => {
     }
   });
 
+  it("reports a failed request once, with the failure, never as a step of its own", async () => {
+    const tools = { probe: createTool({ id: "probe", description: "Probe", inputSchema: z.object({}), execute: async () => ({ ok: true }) }) };
+    for (const [label, script] of [["first request fails", [null]], ["a success, then a failure", [useTool("probe", {}), null]]] as const) {
+      let n = 0;
+      const seen: number[] = [];
+      const { model, call } = harness(async () => {
+        const reply = script[n++];
+        if (!reply) throw apiError(500);
+        return reply;
+      }, tools);
+      const error = await call({ onStep: (step) => seen.push(step.stepNumber) }).catch((e: unknown) => e);
+      assert.ok(error instanceof ModelFailure);
+      const succeeded = script.length - 1;
+      assert.deepEqual([label, model.doGenerateCalls.length, seen, error.failedStep?.stepNumber, error.steps.length], [label, script.length, succeeded ? [0] : [], succeeded, script.length]);
+    }
+  });
+
   it("records a call whose input failed the tool's schema by field and rule, never the input, and lets the model retry", async () => {
     let ran = 0;
     const tools = { probe: createTool({ id: "probe", description: "Probe", inputSchema: z.object({ n: z.number().max(3) }), execute: async () => ({ ok: ++ran }) }) };
