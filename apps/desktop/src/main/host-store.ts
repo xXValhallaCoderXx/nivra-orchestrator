@@ -13,6 +13,14 @@ import { driveFromMount, folderLabel, sameFolder } from "./paths.ts";
 
 const Rect = z.object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() });
 
+/**
+ * What a project allows to leave the machine (D20), both off until the person agrees. `modelContext` lets repository
+ * excerpts go to Token Factory; `cloudExecution` is kept but unused until cloud execution exists.
+ */
+export const ProjectSharing = z.strictObject({ modelContext: z.boolean(), cloudExecution: z.boolean() });
+export type ProjectSharing = z.infer<typeof ProjectSharing>;
+export const NO_SHARING: ProjectSharing = { modelContext: false, cloudExecution: false };
+
 export const ProjectRecord = z.strictObject({
   id: z.uuid(),
   /** "local" or "wsl:<distro>". */
@@ -21,6 +29,7 @@ export const ProjectRecord = z.strictObject({
   nativePath: z.string().min(1).max(4096),
   label: z.string().min(1).max(200),
   addedAt: z.iso.datetime(),
+  sharing: ProjectSharing.default({ modelContext: false, cloudExecution: false }),
 });
 export type ProjectRecord = z.infer<typeof ProjectRecord>;
 

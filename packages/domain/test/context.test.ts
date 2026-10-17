@@ -6,20 +6,24 @@ import { MAX_PREFERENCES, preferencesDigest, RunContext, type SnapshotPreference
 const record = (statement = "Use pnpm", revision = 1): SnapshotPreference => ({ id: randomUUID(), statement, scope: "personal", revision });
 
 describe("RunContext", () => {
+  const sharing = { modelContext: false };
+
   it("accepts an empty snapshot and one at the limit", () => {
-    assert.equal(RunContext.safeParse({ preferences: { revision: 0, records: [] } }).success, true);
-    assert.equal(RunContext.safeParse({ preferences: { revision: 9, records: Array.from({ length: MAX_PREFERENCES }, () => record()) } }).success, true);
+    assert.equal(RunContext.safeParse({ preferences: { revision: 0, records: [] }, sharing }).success, true);
+    assert.equal(RunContext.safeParse({ preferences: { revision: 9, records: Array.from({ length: MAX_PREFERENCES }, () => record()) }, sharing: { modelContext: true } }).success, true);
   });
 
-  it("refuses a missing snapshot, too many records, a record twice, an empty statement and unknown fields", () => {
+  it("refuses a missing snapshot or consent, too many records, a record twice, an empty statement and unknown fields", () => {
     const twice = record();
     const refused = [
-      {},
-      { preferences: { revision: 1, records: Array.from({ length: MAX_PREFERENCES + 1 }, () => record()) } },
-      { preferences: { revision: 1, records: [twice, twice] } },
-      { preferences: { revision: 1, records: [record("")] } },
-      { preferences: { revision: 1, records: [{ ...record(), projectId: randomUUID() }] } },
-      { preferences: { revision: 1, records: [] }, path: "/home/someone/.config/Nivra/nivra.json" },
+      { sharing },
+      { preferences: { revision: 1, records: [] } },
+      { preferences: { revision: 1, records: Array.from({ length: MAX_PREFERENCES + 1 }, () => record()) }, sharing },
+      { preferences: { revision: 1, records: [twice, twice] }, sharing },
+      { preferences: { revision: 1, records: [record("")] }, sharing },
+      { preferences: { revision: 1, records: [{ ...record(), projectId: randomUUID() }] }, sharing },
+      { preferences: { revision: 1, records: [] }, sharing, path: "/home/someone/.config/Nivra/nivra.json" },
+      { preferences: { revision: 1, records: [] }, sharing: { modelContext: "yes" } },
     ];
     assert.deepEqual(refused.map((context) => RunContext.safeParse(context).success), refused.map(() => false));
   });

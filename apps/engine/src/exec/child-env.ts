@@ -16,8 +16,10 @@ export function insideWsl(env: NodeJS.ProcessEnv = process.env, kernelRelease: s
 }
 
 /**
- * The environment a command starts with (D9): the engine's own, without provider keys, Electron's variables or
- * NODE_OPTIONS; exactly one PATH key (`Path` on Windows, `PATH` elsewhere); Windows' essentials never removed.
+ * The environment a command starts with (D9): the engine's own, without provider keys, Electron's variables,
+ * NODE_OPTIONS or inherited `GIT_*` variables (which could point git at another repository or configuration, D22);
+ * exactly one PATH key (`Path` on Windows, `PATH` elsewhere); Windows' essentials never removed. `extra` still applies,
+ * so the engine's own `GIT_*` settings reach git.
  */
 export function childEnv(base: NodeJS.ProcessEnv, extra: Readonly<Record<string, string>> = {}, options: ChildEnvOptions = {}): Record<string, string> {
   const platform = options.platform ?? process.platform;
@@ -29,7 +31,7 @@ export function childEnv(base: NodeJS.ProcessEnv, extra: Readonly<Record<string,
       path ??= value || undefined;
       continue;
     }
-    if (key === "NODE_OPTIONS" || key.startsWith("ELECTRON_") || (PROVIDER_ENV_VARS as readonly string[]).includes(key)) continue;
+    if (key === "NODE_OPTIONS" || key.startsWith("ELECTRON_") || key.toUpperCase().startsWith("GIT_") || (PROVIDER_ENV_VARS as readonly string[]).includes(key)) continue;
     env[key] = value;
   }
   for (const [key, value] of Object.entries(extra)) {

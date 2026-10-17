@@ -7,11 +7,14 @@ This document describes what is **built**:
 - the protocol between them;
 - runs, packaging and local verification;
 - decisions D17 and D18;
-- the preference store owned by the host, and the snapshot each run receives (D21).
+- the preference store owned by the host, and the snapshot each run receives (D21);
+- explaining a repository with evidence on NVIDIA Nemotron through Token Factory, with per-project consent and
+  citations checked against what the model was shown (D22). It is tested offline against a stub and has run live on
+  both fixtures; the live preference contrast is pending.
 
 It also describes what is **planned**, in two parts. **None of it is working yet.**
-- **The immediate milestone (D20):** explaining a repository with evidence, and using the preferences the person
-  confirms. It is read-only.
+- **The rest of the immediate milestone (D20):** managing preferences (NIV-10) and assembling context with overrides
+  and full precedence (NIV-11).
 - **A later milestone, deferred by D20:**
   - new-app creation;
   - the coding worker;
@@ -44,7 +47,8 @@ Three design rules shape the architecture:
      calls; it never runs code itself.
    - In the planned coding workflow, Nivra's engine on the person's machine carries out each tool call inside a sandbox
      and returns the result.
-   - Today the engine runs only a built-in check (the hello run), Doctor and a Token Factory check.
+   - Today the engine runs a built-in check (the hello run), the read-only explain run, Doctor and a Token Factory
+     check. Explaining reads the repository through fixed, read-only tools; the model never runs anything.
 2. **Work runs where the code lives.** A repository is read, built and changed by the operating system that owns its
    files:
    - a folder inside a WSL distribution by an engine in that distribution;
@@ -63,7 +67,7 @@ flowchart LR
   subgraph Host["Desktop host: Electron, native on Windows or Linux"]
     R["Renderer<br/>React + Mantine<br/>sandboxed, no Node"]
     M["Main process<br/>project registry · preferences · secret store · engines"]
-    R -- "window.nivra: 16 typed calls" --> M
+    R -- "window.nivra: 23 typed calls" --> M
   end
   subgraph W["Target: Windows (local)"]
     E1["Engine<br/>Node + Mastra<br/>own database"]
@@ -73,16 +77,16 @@ flowchart LR
   end
   M -- "JSON-RPC 2.0 over stdio" --> E1
   M -- "JSON-RPC 2.0 over stdio, through wsl.exe" --> E2
-  E1 -. "HTTPS (a check today)" .-> TF["Nebius Token Factory<br/>NVIDIA Nemotron"]
-  E2 -. "HTTPS (a check today)" .-> TF
+  E1 -. "HTTPS: explain runs, a check" .-> TF["Nebius Token Factory<br/>NVIDIA Nemotron"]
+  E2 -. "HTTPS: explain runs, a check" .-> TF
   E2 -. "planned: tool calls" .-> SB["Planned sandbox<br/>local container, or Token Factory Sandboxes"]
 ```
 
 | Layer | What it is | What it may do |
 |---|---|---|
-| **Renderer** | The window: React 19 + Mantine 9 | Call 20 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
-| **Main process** | Electron's main process, a thin shell over plain Node modules | Own the project list, the preferences, the secret store and the engines. Translate the window's calls into engine calls, each run carrying its project's preference snapshot. |
-| **Engine** | One Node process per target in use, each with its own databases | Today: the hello run, Doctor, run records and a Token Factory check. Planned: model workflows and sandboxes. It speaks only JSON-RPC on stdin and stdout. |
+| **Renderer** | The window: React 19 + Mantine 9 | Call 23 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
+| **Main process** | Electron's main process, a thin shell over plain Node modules | Own the project list, each project's consent, the preferences, the secret store and the engines. Translate the window's calls into engine calls, each run carrying its project's preference snapshot and consent. |
+| **Engine** | One Node process per target in use, each with its own databases | Today: the hello and explain runs, Doctor, run records and a Token Factory check. Planned: sandboxes and coding work. It speaks only JSON-RPC on stdin and stdout. |
 
 The engine is never part of Electron. It runs on its own Node, shipped with the app (D5), which is what lets it run
 inside a WSL distribution while the window stays native on Windows.
@@ -94,7 +98,7 @@ apps/desktop/        Electron host
   src/main/            index.ts (Electron shell) · host.ts (core) · supervisor.ts · host-store.ts · secret-store.ts
                        paths.ts · targets/ (local, wsl, wsl-discovery, registry, process)
   src/preload/         the typed bridge, window.nivra
-  src/renderer/        React + Mantine UI: projects, engine, wsl, hello, doctor, settings
+  src/renderer/        React + Mantine UI: projects, engine, wsl, explain, preferences, hello, doctor, settings
   src/shared/ipc.ts    the bridge contract (every call is added here first)
   scripts/             runtime staging, the Windows build loop, the Windows verification harness
   e2e/                 Playwright tests: built app, packaged app, packaged Windows app
@@ -102,12 +106,14 @@ apps/engine/         the engine
   src/main.mjs         unbundled launcher that keeps stdout for the protocol
   src/engine.ts        createEngine(): RPC router, run store, scheduler, Mastra, execution backend
   src/runs/ src/db/    run store and scheduler on node:sqlite, with migrations
-  src/workflows/       Mastra workflows (hello only, today)
+  src/workflows/       Mastra workflows: hello and explain
+  src/repo/            read-only repository access: tracked files, deny rules, git with pinned settings, the map
+  src/explain/         the explain run's tools, budget, ledger of what was delivered, citation checks, prompt
   src/exec/            the Local execution backend, child environment, process-tree kill
-  src/providers/       Nebius Token Factory client and the Nemotron probe
-  src/doctor/ src/secrets/   environment checks; the in-memory key vault
-packages/domain/     zod contracts shared by host and engine: protocol, methods, runs, RpcClient
-docs/                decisions (D1–D20), acceptance, submission checklist, provenance (code reused from Hird),
+  src/providers/       the model client, the model policy, the Token Factory listing and the provider check
+  src/doctor/ src/secrets/   environment checks; the in-memory key vault and secret patterns
+packages/domain/     zod contracts shared by host and engine: protocol, methods, runs, models, explain, RpcClient
+docs/                decisions (D1–D22), acceptance, submission checklist, provenance (code reused from Hird),
                      development
 ```
 
@@ -137,6 +143,10 @@ source commit, marked ported or rewritten, in [docs/provenance.md](docs/provenan
   - every repository with its target label ("Ubuntu · WSL", "Windows · Local"), and Add/Remove;
   - the engine badge and notices for the chosen project;
   - WSL guidance (Windows only);
+  - Explain (D22): a question, or the default; the consent dialog the first time; a "Sharing: on" badge with Turn off;
+    a live timeline with Cancel; and the result as plain text. The result shows HEAD at run start, the summary,
+    findings with citation chips ("shown to the model" or why not), differences from preferences, gaps, the context
+    used, and the model, time and tokens ("not reported" when the provider didn't say);
   - Preferences: confirm a new one (for every project, or for the chosen project only), edit or delete one, and see
     which ones the chosen project's runs get (D21);
   - a hello run with a live timeline and Cancel;
@@ -144,7 +154,7 @@ source commit, marked ported or rewritten, in [docs/provenance.md](docs/provenan
   - Settings: the Nebius key, and a Token Factory check.
 
 ### 4.2 The bridge
-`window.nivra` exposes 20 named functions, each invoking exactly one IPC channel. There is no generic "send any channel"
+`window.nivra` exposes 23 named functions, each invoking exactly one IPC channel. There is no generic "send any channel"
 helper. Every handler in main checks two things before acting:
 - the sender is the top frame of one of Nivra's windows, at the exact app URL;
 - the arguments pass zod validation.
@@ -158,21 +168,24 @@ helper. Every handler in main checks two things before acting:
 | `restartEngine(projectId)` | Restarts the project's engine, or checks its distribution again. |
 | `getWsl`, `checkWsl` | What WSL offers on this machine, and how to fix it (Windows only). |
 | `startHello(projectId, holdMs)`, `runEvents(runId, after)`, `cancelRun(runId)` | Runs. `startHello` sends the project's preference snapshot with the run. |
+| `setSharing(projectId, modelContext)` | The project's consent to send its content to Token Factory (D20, D22). Turning it off cancels the project's explain runs. |
+| `startExplain(projectId, question)`, `runResult(runId)` | Explain the project's repository; refused while sharing is off. `runResult` returns the run's summary and stored result from the engine that ran it. |
 | `runDoctor(projectId)` | Environment checks on that project's engine. |
 | `getSettings`, `setNebiusKey` | How the saved key is stored; save or remove it. |
-| `checkTokenFactory(projectId)` | Lists the NVIDIA models and makes one Nemotron tool call, from that project's engine. |
+| `checkTokenFactory(projectId)` | From that project's engine: lists the NVIDIA models, makes one Nemotron tool call, then probes required and forced tool choice and the answer schema. |
 | `getAppInfo` | Versions. |
 
 ### 4.3 Main process
 - **`index.ts`**: the Electron shell. It owns the window, the security guards, single-instance handling, dialogs, the
   IPC handlers and the quit flow.
 - **`Host`** (`host.ts`): the core, with no Electron in it. It holds the project registry, keeps one engine per target,
-  routes calls, and produces the WSL guidance (D17).
+  routes calls, and produces the WSL guidance (D17). It checks each project's consent before an explain run, and again
+  immediately before submitting it (D22).
 - **`EngineSupervisor`**: starts, watches and stops one engine. Its states are `stopped`, `starting`, `online` and
   `failed`, and a failure carries a code and a reason.
 - **Targets**: `LocalTarget`, `WslTarget`, WSL discovery, and a target factory.
-- **`HostStore`**: projects, preferences and window state, as JSON in Electron's user-data folder. Writes are atomic,
-  with retries for Windows renames.
+- **`HostStore`**: projects (with each one's sharing flags), preferences and window state, as JSON in Electron's
+  user-data folder. Writes are atomic, with retries for Windows renames.
 - **Preferences** (`preferences.ts`): pure changes to the store, and `snapshotFor(project)`, which chooses what a run on
   that project receives (D21).
 - **`SecretStore`**: the Nebius key, saved in `secrets.json`. It is encrypted with Electron `safeStorage` where a
@@ -303,7 +316,7 @@ sequenceDiagram
 ## 6. Host ↔ engine protocol *(built, D2)*
 
 - **Transport.** JSON-RPC 2.0 over the engine's stdin and stdout, one message per line (NDJSON). Lines are capped at
-  8 MiB, and `PROTOCOL_VERSION` (now 2) is checked in `initialize`.
+  8 MiB, and `PROTOCOL_VERSION` (now 3) is checked in `initialize`.
 - **Stdout carries the protocol and nothing else.**
   - A small unbundled launcher keeps the real stdout writer for the protocol, and sends every other stdout write and
     every `console.log` to stderr.
@@ -319,8 +332,9 @@ sequenceDiagram
 | `ping` | Heartbeat. |
 | `shutdown` | The single stop path. |
 | `doctor` | Checks the engine, its data folder and git, and which execution boundaries this target could offer (detection only). |
-| `providers.check` | Token Factory: the NVIDIA models the key can see, then one Nemotron tool call. |
-| `runs.start`, `runs.get`, `runs.list`, `runs.events`, `runs.cancel` | Runs (§7). `runs.start` requires a `context`: the preference snapshot for the run's project (D21). |
+| `providers.check` | Token Factory: the NVIDIA models the key can see, one Nemotron tool call, then the tool-choice probes, the rate-limit values and the context length (D22). |
+| `runs.start`, `runs.get`, `runs.list`, `runs.events`, `runs.cancel` | Runs (§7). `runs.start` names a workflow (`hello` or `explain`) and requires a `context`: the preference snapshot for the run's project (D21) and its consent (D22). |
+| `runs.result` | An explain run's stored result (D22). |
 
 **Notifications.** The engine sends one notification, `engine.fatal`, as its last word before it exits on a startup
 failure. It carries a code: `locked`, `bad-arguments`, `home-unusable`, `runtime-broken` or `crashed`. The host reads
@@ -337,9 +351,13 @@ run progress by polling with a cursor.
 - **Storage.**
   - Each engine keeps runs in its own `nivra.db` (`node:sqlite`): a `runs` table and an append-only `run_events`
     timeline, numbered per run.
+  - A run records its duration (measured with `performance.now()`), the usage the provider reported (`null` totals
+    unless every call reported them) and its route: provider, endpoint and model (D22).
+  - An explain run's result is kept in an `artifacts` table, masked, at most 256 KB.
   - Clients read Nivra's tables, never Mastra's.
 - **Events.**
-  - Types: `run.*`, `step.*`, `step.output`, `command.started`, `command.finished`.
+  - Types: `run.*`, `step.*`, `step.output`, `command.started`, `command.finished`, and for explain `model.call` (each
+    model call, failed ones too) and `tool.called` (each tool call).
   - Data is capped at 8 KiB per event and messages at 2,000 characters.
   - Before anything is stored, the run store replaces the values of the keys Nivra holds. That is masking of known
     values only: it is not a general secret detector.
@@ -363,6 +381,14 @@ run progress by polling with a cursor.
   4. `git --version`;
   5. `git status --porcelain=v2 --branch`;
   6. optionally, a held child process, which shows that Cancel really stops work.
+- **The `explain` workflow** (D22) reads the repository with the model and checks the answer's citations (§12). Its
+  steps:
+  1. `context`: record the preferences the app sent, as hello does: ids, revisions and a fingerprint, never text;
+  2. `prepare`: refuse without consent or a key, before any request; read HEAD; pick the model;
+  3. `explain`: build the map, run the model with four fixed read-only tools, check the citations, store the result.
+
+  Only the repository path passes through Mastra. The question is read from the run store, and the answer is stored
+  there.
 
 ---
 
@@ -374,9 +400,10 @@ run progress by polling with a cursor.
 | IPC | A trusted-sender check and zod validation on every handler. The renderer sends ids; the paths it shows are for display only. |
 | Starting programs | Programs start from argument lists, never through a shell, and a test bans `shell: true`. The one exception is probing and provisioning a WSL distribution: a fixed `/bin/sh -c` script runs inside it, with values passed as positional arguments, never spliced into the script. |
 | Child environments | Children get a filtered environment: provider key variables, `NODE_OPTIONS` and Electron's variables are removed, and exactly one PATH key is kept. This removes **known** variables; it is not an allow-list, so other secrets in the environment are passed on. |
-| Execution | Only the `Local` backend exists. It provides **no isolation** and is labelled "No isolation". It refuses sessions that need network rules, and Windows batch files. Today it runs only the hello check and git. The container, Token Factory Sandboxes and OpenShell backends are planned (§11). |
+| Execution | Only the `Local` backend exists. It provides **no isolation** and is labelled "No isolation". It refuses sessions that need network rules, and Windows batch files. Today it runs only the hello check and git, which explain uses to read tracked files with its settings pinned. The container, Token Factory Sandboxes and OpenShell backends are planned (§11). |
+| Model requests | Explaining needs the project's consent, off by default, checked by the host and by the engine; nothing is sent without it or without a key (D22). The model gets excerpts of tracked files only: secret files and dependency or build output are never read, and text that looks like a key or token is masked. Masking is pattern-based and can't recognise every secret; the consent dialog says so. The key travels only in the `Authorization` header. |
 | Databases | Each database has one owner, and none is ever opened across the Windows/WSL boundary. SQLite's exclusive lock refuses a second engine on the same data folder. |
-| Preferences | Only the host's `nivra.json` keeps their text. An engine gets a run's snapshot in `runs.start` and holds it in memory for that run; runs record ids and a fingerprint. A canary test checks that preference text never reaches `nivra.db*`, `mastra.db*` or the logs (D21). |
+| Preferences | The engine never writes a statement it was given: runs record ids, revisions and a fingerprint, and a canary test checks that preference text never reaches `nivra.db*`, `mastra.db*` or the logs (D21). Text the model writes may paraphrase a preference; it is kept only in the engine's `nivra.db`, masked, never in `mastra.db` or the logs (D22). |
 
 **The API key's path (D8)**
 1. The person types the key into Settings. The renderer holds it until it is saved.
@@ -393,10 +420,10 @@ run progress by polling with a cursor.
 
 | Data | Owner | Where | Notes |
 |---|---|---|---|
-| Projects, preferences, window state | Host | `<userData>/nivra.json` | Atomic writes. The only copy of the preferences (D21). |
+| Projects, sharing flags, preferences, window state | Host | `<userData>/nivra.json` | Atomic writes. The only copy of the preferences (D21). Each project's `modelContext` and `cloudExecution` flags, both off at first (D22). |
 | Nebius key | Host | `<userData>/secrets.json` | Encrypted where a keychain is available, otherwise unencrypted with a warning; engines hold a copy in memory only |
-| Runs and events | Each engine | `<home>/nivra.db` | `node:sqlite`, exclusive lock; known key values masked |
-| Workflow snapshots | Each engine | `<home>/mastra.db` | libsql, through Mastra. **Not covered by the run store's masking**: Mastra stores workflow input and step results as they are. Today's only workflow, hello, stores a repository path and a hold time. Planned workflows must pass ids, never sensitive content. |
+| Runs, events and results | Each engine | `<home>/nivra.db` | `node:sqlite`, exclusive lock; known key values and secret patterns masked. Holds explain questions, answers and model-written text (D22). |
+| Workflow snapshots | Each engine | `<home>/mastra.db` | libsql, through Mastra. **Not covered by the run store's masking**: Mastra stores workflow input and step results as they are. Hello stores a repository path and a hold time; explain stores the repository path, HEAD, the model id and counts. Workflows pass ids, never sensitive content. |
 | Engine logs | Host | `<logs>/<target>.log` | The engine's stderr; the previous log is kept |
 | WSL runtime | — | `~/.nivra/runtime/<hash>`, inside the distribution | The newest two are kept |
 
@@ -405,38 +432,48 @@ run progress by polling with a cursor.
 - Linux, and inside WSL: `~/.nivra`.
 - Development: `~/.nivra-dev`.
 
-*Planned:*
-- the host gains per-project data-sharing flags;
-- the engine gains artifacts, patches, approvals, apply intents and sandbox sessions, through an additive migration.
+*Planned:* the engine gains patches, approvals, apply intents and sandbox sessions, through an additive migration.
+Migration v2 (D22) added the run's duration, usage and route, and the `artifacts` table.
 
 ---
 
-## 10. Models: Nebius Token Factory
+## 10. Models: Nebius Token Factory *(built, D22)*
 
 **Built**
-- **`providers.check`** runs from any engine:
-  1. it lists `GET /v1/models`;
-  2. it picks a Nemotron model the key can see, preferring `nvidia/nemotron-3-super-120b-a12b`, then
-     `nvidia/Nemotron-3_5-Lightning`, then `nvidia/Nemotron-3-Ultra-550b-a55b`;
-  3. it makes one tool call through Mastra.
-  
-  There are no retries (`maxRetries: 0`). Listing the models has a 30 s limit and the call 120 s. Errors are mapped by
-  status: key refused (401/403), rate-limited (429), unreachable, no NVIDIA model. Token counts are shown when the
-  provider reports them.
-- **`pnpm probe:tokenfactory`** makes the same check from a terminal.
-- **Not yet run with a real key.**
+- **One `ModelClient`** (`providers/model.ts`) makes every model call:
+  - a standalone Mastra agent, never registered with Mastra, with its error logger silenced (it prints prompts);
+  - no retries: `maxRetries: 0`, no error processors and no fallback models;
+  - `generate()` only, so usage is reported;
+  - a deadline for each call and one for the whole run, either ending as `timeout`;
+  - one tool call at a time.
+- **Failures are named by class and status:** `auth`, `rate-limit` (with when to try again), `model-unavailable`,
+  `provider`, `bad-request`, `bad-response`, `network`, `timeout`, `cancelled`, `malformed` and `internal`, plus
+  `sharing-refused` and `no-key` before any request.
+- **Every call is recorded** as a `model.call` event, failed ones too. Usage is what the provider reported: a run's
+  totals are `null` when any call didn't say, never 0. Every run records its route: provider, endpoint
+  (`token-factory` or `loopback-test`) and model.
+- **Model choice.** The first preferred model the key can see: `nvidia/nemotron-3-super-120b-a12b`, then
+  `nvidia/Nemotron-3_5-Lightning`, then `nvidia/Nemotron-3-Ultra-550b-a55b`; otherwise any NVIDIA model. A policy table
+  sets the tool choice: Nemotron 3 Super explores with `required` and is forced to answer; other models use `auto`.
+- **`providers.check`** runs from any engine, within 150 s:
+  1. it lists `GET /v1/models?verbose=true`;
+  2. it makes one tool call;
+  3. it probes required tool choice, a forced choice between two tools, and the real answer schema.
+
+  It reports usage, the remaining-token and reset values, and whether the key is close to the threshold at which
+  Mastra pauses 10 s. **`pnpm probe:tokenfactory`** runs the same check from a terminal.
+- **Seen with a real key** (checkpoint 1, 17 October): 28 models, five of them NVIDIA's. Nemotron 3 Super made the tool
+  call in 2,249 ms. It honoured required tool choice, and a forced tool when it was the only one offered. The stronger
+  probes haven't been run with a real key yet.
+- **Live explanations** (17 October, the WSL engine): fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage. 6 of its 21 citations point to lines the model
+  was shown; the other 15 cite files it saw only named in the map. Once such answers were turned down, the same
+  question gave 13 of 13 (76.3 s, 11 calls), and "Where is the login component?" gave 4 of 4.
+- **Offline tests.** Tests never call real models. They use a mock model in-process, or a stub server reached through
+  the loopback-only `--token-factory-url` (§14).
 
 **Planned**
-- **One `ModelClient`** for every model call:
-  - no retries;
-  - a time limit on every step;
-  - usage recorded per call, as `null` when it isn't reported (never shown as 0);
-  - errors mapped by status code or error class.
-- **Model and route recorded on every call.** One suitable Nemotron model is enough for the first workflow.
 - **Model tiers are optional:** `reasoning` and `agent` on Ultra or Super, `fast` on Nano or Lightning. If they're used,
   the choice follows which models the key can see and which handle tools reliably.
-- **Offline tests.** Tests never call real models. They use a mock model in-process, or a stub server reached through
-  a test-only, loopback-only engine argument.
 
 ---
 
@@ -532,34 +569,46 @@ flowchart LR
 
 ---
 
-## 12. Context, explanation and preferences *(the immediate milestone, D20; the preference store and handoff are built, D21; the rest is planned)*
+## 12. Context, explanation and preferences *(the immediate milestone, D20: the preference store and handoff are built, D21; explaining with evidence is built, D22; managing preferences and context assembly are planned)*
 
-- **Explain with evidence (NIV-6, NIV-9).**
-  - The engine reads the repository in bounded, targeted reads, inside the repository and with a limited budget.
-  - The explanation cites `path:line`.
-  - The engine checks each citation against the snapshot it actually read. It reports a valid location as just that,
-    never as proof that the explanation is correct.
+- **Explain with evidence (NIV-6, NIV-9)** *(built, D22; tested offline and run live on both fixtures; the preference
+  contrast is pending)*.
+  - The engine reads the repository in bounded, targeted reads: the picked folder's tracked files only, as they are on
+    disk. A budget for the whole request is enforced inside each tool.
+  - The answer is structured: a summary, findings citing exact `path:line` ranges, differences from preferences, and
+    gaps.
+  - The engine checks each citation against the lines it delivered to the model before the answer. It reports a
+    checked citation as "shown to the model", never as proof that the explanation is correct.
+  - An answer citing lines the model wasn't shown is turned down, naming them, while there is time to read them. When
+    the answer is due, or after two refusals, it is accepted and those citations stay labelled.
+  - The last three steps are kept for the answer, so one that fails the answer's schema can be given again. Such
+    failures are recorded by field and rule, never their input.
+  - The result is labelled "HEAD at run start", and says when HEAD moved or a file changed during the run.
   - Run records keep the model and route, the elapsed time (measured with a monotonic clock) and the usage the provider
     reported, with `null` for anything unknown.
-- **Repository map.**
+- **Repository map** *(built)*.
   - Contents:
-    - the file tree, with secrets and dependency or build output excluded;
-    - manifests;
-    - convention files;
-    - an outline of exported symbols.
-  - It needs no new dependencies.
-  - Cached context is invalidated by the content revision of what was actually read. HEAD plus a dirty flag isn't
-    enough.
-- **Data sharing (D20, confirmed).**
+    - HEAD at run start;
+    - file counts by folder and by extension, with secrets and dependency or build output left out and counted by
+      reason;
+    - manifests and workspace files;
+    - the convention and configuration files that exist, by name and size.
+  - It needs no new dependencies. There is no outline of exported symbols: the model searches instead.
+  - There is no cache. Every run reads afresh and hashes what it read.
+- **Data sharing (D20, confirmed; built, D22).**
   - **Two separate opt-ins per project, both off at first:** `modelContext` and `cloudExecution`.
   - **`modelContext`** governs every piece of repository-derived material sent to Token Factory, including read-tool
     results and later requests, not just the first prompt.
+    - The host asks for it the first time, and checks it again immediately before submitting a run.
+    - Turning it off cancels the project's explain runs.
+    - The engine refuses a run whose context doesn't allow it.
   - **`cloudExecution`** governs uploading a workspace.
     - It stays off and unused while cloud execution isn't built.
     - Turning on `modelContext` never turns it on.
-  - **Always excluded:** secrets, and dependency and build output.
+  - **Always excluded:** secret files and dependency and build output. Text that looks like a key or token is masked.
+    The detection is pattern-based, so it can't recognise every secret.
   - Reads stay inside the repository and are bounded, and output is capped.
-  - Each run records which paths it sent and how many bytes, never the content.
+  - Each run records which paths and lines it sent, with their hashes and sizes, never the content.
   - Repository or model text can never grant consent, and can never promote private project information into the
     global profile.
   - A sandbox's network policy (later milestone) is a third, separate control.
@@ -575,8 +624,10 @@ flowchart LR
   - **Persistence.** Preference contents stay out of Mastra's persisted step data and out of the run's record.
   - *Planned (NIV-10):* suggestions drawn from repository observations, which only the person can confirm; supersession;
     export and import.
-  - *Planned (NIV-11):* a workflow that uses them, under the precedence below. Until then, the hello run proves the
-    handoff.
+  - **In explanations** (D22): the answer reports where the repository differs from a confirmed preference, by id,
+    citing the repository's convention, and the repository wins. An old result shows a preference's wording only while
+    its revision still matches.
+  - *Planned (NIV-11):* overrides and full precedence, below.
 - **Context assembly (NIV-11).**
   - Precedence: explicit task choices first, then the repository's own conventions (with evidence), then confirmed
     personal defaults.
@@ -609,7 +660,7 @@ flowchart LR
 |---|---|---|
 | Windows 10/11 x64 | Inside a WSL2 distribution (glibc 2.28+, x86-64) | Hello run, cancel and quit verified through the packaged app; the primary target |
 | Windows 10/11 x64 | On a Windows drive | Hello run and Doctor verified; coding work comes later |
-| Linux x64 | Local | Hello run, cancel and quit verified through the built and packaged app |
+| Linux x64 | Local | Hello run, cancel and quit verified through the built and packaged app; explain verified against a stub through both (D22) |
 | macOS | Local | Deferred (D10) |
 
 ## 14. Verification *(D14: no CI; every check runs on the developer's machine)*
@@ -620,9 +671,9 @@ flowchart LR
 |---|---|
 | `pnpm verify` | Typecheck and every unit and integration test, including real engines over stdio. See the list below. |
 | `pnpm verify:windows` | The target and supervisor modules, driven by a real Windows process: native and WSL engines; start, hello (with a preference snapshot that must arrive intact), cancel, stop; engines killed from outside and restarted; engines dying with their parent |
-| `test:packaged` | The packaged Linux app (`electron-builder --dir`), through its real UI, including the preference flow across an app restart |
-| `test:windows` | The packaged Windows app, driven from WSL: both engines in one session, a WSL run kept alive and cancelled while the native engine works, preferences reaching both engines with each project's own kept to it, and quit leaving nothing running |
-| `test:e2e` | The built Linux app, through its real UI, including the preference flow |
+| `test:packaged` | The packaged Linux app (`electron-builder --dir`), through its real UI, including the preference flow across an app restart. It ignores the test endpoint switch: Doctor shows Token Factory, and explaining without a key fails before any request. |
+| `test:windows` | The packaged Windows app, driven from WSL: both engines in one session, a WSL run kept alive and cancelled while the native engine works, preferences reaching both engines with each project's own kept to it, explaining on both engines failing before any request without a key, and quit leaving nothing running |
+| `test:e2e` | The built Linux app, through its real UI, including the preference flow, and explaining against a stub: consent, checked and unchecked citations, sharing turned off, a preference difference that says it changed after an edit |
 | `verify:interrupt` | The packaged Windows app and an observer, both on Windows, while a dedicated test distribution is terminated from outside: the native run carries on, Restart works, the cut-off run ends interrupted without replay |
 
 The integration tests in `pnpm verify` include:
@@ -646,7 +697,17 @@ The integration tests in `pnpm verify` include:
   - one project's own preferences never reaching another's runs;
   - the preference canary;
   - runs refused without their context;
-  - queued runs failing, unstarted, after a restart.
+  - queued runs failing, unstarted, after a restart;
+- explaining (D22), against a loopback stub of Token Factory:
+  - repository reading: deny rules, tracked files only, limits, masking, git settings pinned against a repository's
+    own configuration, cancel;
+  - citations, the ledger, the budget, and the answer forced in time;
+  - the model client: no retries, usage, deadlines, cancel versus internal failure, the silenced logger;
+  - every failure kind after one request, and no request without consent or a key;
+  - an engine killed mid-run, HEAD moving during a run, reading afresh after an edit and a branch switch;
+  - canaries for secrets, the key, the question and preference text;
+  - the host: consent off by default, consent withdrawn during start-up, while queued and between model calls, results
+    routed to the right engine, one project's files and preferences kept out of another's requests.
 
 **Recorded results from earlier runs**, before the final changes:
 
@@ -656,27 +717,31 @@ The integration tests in `pnpm verify` include:
 | 17 Oct | `pnpm verify` (D16 fixes) | 88/88 |
 | 17 Oct | `pnpm verify`, `test:e2e`, `test:packaged`, `verify:windows`, `test:windows` (D17, before D18) | 114/114 · 5/5 · 5/5 · 15/15 · 5/5 |
 | 17 Oct, 05:16–05:35 | The foundation as committed in `2556052`: `pnpm verify`, `verify:windows`, `test:packaged`, `test:windows`, `test:e2e`, RPC | 116/116 · 17/17 · 5/5 · 5/5 · 5/5 · ok |
+| 17 Oct, 07:36–07:42 | The preference change set (D21) as committed in `c39e204`: `pnpm verify`, `verify:windows`, `test:packaged`, `test:windows`, `test:e2e`, `verify:interrupt`, RPC | 131/131 · 17/17 · 11/11 · 5/5 · 11/11 · 9/9 · ok |
 
-**Results against the final change set** (code and docs as they are to be committed):
+**Results against the final change set** (explain with evidence, D22):
 
-These were run on 17 October 2026 (07:36–07:42 +08:00) against the working tree with every code change of the D21
-change set in place. The only edits made afterwards record these results, here and in `docs/acceptance.md`. Markdown is
-neither built nor tested.
+Run on 17 October 2026, 21:43–21:48 +08:00, against the working tree with every code change of the D22 change set in
+place, including the fixes made after the live runs. Only docs changed afterwards. Markdown is neither built nor tested.
 
 | Check | Result |
 |---|---|
-| `pnpm verify` | Typecheck clean; tests 131/131 (domain 23, desktop 64, engine 44) |
-| `pnpm verify:windows` | 17/17, including a preference snapshot arriving intact at the native and the WSL engine. Runtimes staged afresh: `linux-x64` `261063cd91eac407`, `win-x64` `044882c828c6b992`. |
-| `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 11/11 |
-| `pnpm dev:win --no-launch`, then `test:windows` | 5/5 |
-| `test:e2e` | 11/11 |
-| `verify:interrupt --distro NivraTest` | 9/9. `NivraTest` was made from the Ubuntu 24.04 base image for this check and unregistered afterwards. |
-| Real engine over RPC: a hello run with a one-preference snapshot and `--follow`, then `pnpm rpc doctor` | The run succeeded. Its `context` step recorded "1 confirmed preference from the app (revision 4)", and its stored input held only the path and the hold time. Doctor: engine, home and git `ok`; boundaries `warn` (no sandbox yet). |
+| `pnpm verify` | Typecheck clean; tests 204/204 (domain 23, desktop 70, engine 111) |
+| `pnpm stage:runtime all` (run by `verify:windows`) | Staged afresh: `linux-x64` `90c61f1343fa7608` (smoke-tested), `win-x64` `2df7892cc4955df4` |
+| `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 12 passed, 3 skipped: the explain tests that need the test endpoint switch, which a packaged app ignores |
+| `test:e2e` | 14 passed, 1 skipped: the test only a packaged app runs |
+| Real engine through `apps/engine/scripts/rpc.ts` | Explain with no key, and with consent off: each refused before any request. Explain against the stub: succeeded, 2 of 2 citations checked, route `loopback-test`. Hello: succeeded. Doctor: "Nebius Token Factory" by default, and a test endpoint with `--token-factory-url`. |
+| `pnpm verify:windows` | 17/17, on the runtimes above |
+| Live, with Nate's key (the Windows app, the WSL engine), before the three fixes | Fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage; 6 of 21 citations shown to the model. Fixture B, which is private, also ran. No preference had been confirmed, so the preference contrast is still to run. |
+| Live, after the fixes | Fixture A, default question: 76.3 s, 77,514 tokens in and 2,420 out over 11 calls; one refusal, then 13 of 13 citations shown. "Where is the login component?": 25.5 s, 6 calls; one refusal, then 4 of 4. The preference contrast ran on fixture B, which is private: its result is recorded in NIV-6, not here. |
+| `pnpm dev:win --no-launch`, then `test:windows` | 6/6 at 21:46 +08:00, including explaining on the WSL and the native engine. Earlier, Windows Smart App Control, in enforcement mode, refused to start the unsigned `Nivra.exe` (Code Integrity event 3077, at 17:03 and 17:04); Nate turned it off on this machine. One test helper was corrected: it no longer picks the already chosen project again, which the project select treats as clearing the choice. |
 
 **Not yet run** (still pending):
 - the installed deb on a stock Ubuntu (an unpacked build test is not installation coverage);
 - the Windows zip on a clean machine without the Visual C++ redistributable;
-- a real Token Factory key;
+- a public pair of repositories for showing the preference contrast in the demonstration (fixture B is private), and
+  the stronger provider probes;
+- Token Factory from both engines: checkpoint 1 didn't record which engine answered;
 - Token Factory Sandboxes;
 - macOS.
 
@@ -689,8 +754,8 @@ neither built nor tested.
 | Desktop host, targets, protocol, engine core, runs, engine recovery, packaging, local checks | **Built**: the foundation, committed in `2556052` | NIV-3 (Done), NIV-5 |
 | Scope, data sharing, out-of-scope list (D20); fixtures | Decided. The two user-supplied fixtures are recorded. | NIV-2 |
 | Preference store, and the scoped handoff to engines | **Built** (D21); the whole-distribution interruption check passed | NIV-5, reused by NIV-10 |
-| Explain with evidence, model client, repository map, the run lifecycle it needs | Planned (immediate milestone) | NIV-6, NIV-9, NIV-8 (read-only slice) |
-| Managing preferences, context assembly and isolation | Planned (immediate milestone) | NIV-10, NIV-11 |
+| Explain with evidence, model client, repository map, consent, the run lifecycle it needs | **Built** (D22), tested offline and run live on both fixtures; the preference contrast is pending | NIV-6, NIV-9, NIV-8 (read-only slice) |
+| Managing preferences, context assembly with overrides and full precedence | Planned (immediate milestone). Explanations already report differences from confirmed preferences (D22). | NIV-10, NIV-11 |
 | Acceptance on packaged builds, release, video, submission | Planned | NIV-14 – NIV-17 |
 | New-app creation, coding worker, sandboxes, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
@@ -721,6 +786,7 @@ The estimates are not commitments. None of the planned work is a precondition fo
 | D19 | Hackathon requirements, as published |
 | D20 | The immediate milestone: explain with evidence and confirmed preferences; new-app creation deferred |
 | D21 | Preferences: one store owned by the host, and a snapshot with every run |
+| D22 | Explain with evidence: the model client, repository reading, consent and checked citations |
 
 The planned work in §§10–12 will be recorded in new decisions as it is built.
 
@@ -729,8 +795,8 @@ The planned work in §§10–12 will be recorded in new decisions as it is built
 The dated checklist, with a source link for each requirement, is in [docs/submission.md](docs/submission.md) (NIV-15).
 In short:
 - **What every entry needs.** A runtime Token Factory inference call meets the general Nebius platform requirement, and
-  an NVIDIA open-source model is also required. Nivra plans to meet both through the explain workflow; the live proof
-  is pending.
+  an NVIDIA open-source model is also required. The explain workflow makes runtime calls to NVIDIA Nemotron through
+  Token Factory (D22). It has run live on both fixtures; fixture A's run is the public evidence.
 - **Track fit is open.** The Coding and Agentic Engineering track describes agents that "write, run, and test code in
   Token Factory". It doesn't name the Sandboxes product. The immediate milestone is read-only (D20), so whether it fits
   the track needs reassessing. The options and draft questions for the organisers are in the checklist. No answer has

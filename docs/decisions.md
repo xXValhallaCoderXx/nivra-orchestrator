@@ -524,3 +524,197 @@ confirmed memory.
 - The hello run's `context` step proves the handoff until a workflow uses preferences (NIV-6, NIV-11).
 - NIV-10 builds on this store, with suggestions, supersession, export and import. NIV-11 orders precedence by scope.
   There is no second store.
+
+## D22. Explain with evidence: the model client, repository reading, consent and checked citations (2026-10-17)
+
+**Decision.** NIV-6 and NIV-9 ship one read-only workflow, `explain`, on NVIDIA Nemotron through Nebius Token Factory.
+It builds on D20's scope and D21's snapshot, and amends D21 for text the model writes (below).
+
+**The model client** (`providers/model.ts`, the only place a source rule allows `new Agent(`)
+- **A standalone Mastra `Agent`**, never registered with Mastra, so nothing about a call is written to `mastra.db`.
+  Mastra's default error logger prints the prompt, so it is silenced through `__registerPrimitives({ logger })`: internal
+  API, watched by a stderr canary.
+- **Nothing is sent twice:** `maxRetries: 0`, `errorProcessorDefaults: false`, `maxProcessorRetries: 0`, and no
+  fallback models. Only `generate()` is used: it sends non-streaming requests, so usage is reported. Tools run one call
+  at a time (`toolCallConcurrency: 1`).
+- **Deadlines.** Each model call has one, and so does the whole run (`modelSettings.timeout`). Either ends the run as
+  `timeout`, never as a quiet stop.
+  - Explain: 150 s per call, 480 s for the run, at most 16 steps. Live answers ran at about 30 tokens a second, so a
+    long one needs more than 90 s.
+  - `providers.check`: 150 s in all, inside the host's 180 s limit for that request, with 60 s for the first call.
+  - Listing models: 30 s.
+  - Mastra sets no limit on agent calls. Its 180 s `server.timeout` belongs to its HTTP server, which Nivra doesn't run.
+- **Two ways to stop.** Cancel comes from the person. Anything that fails inside, such as a tool or a callback, is
+  recorded as an internal failure before the internal abort, so the run ends `failed`, never `cancelled`.
+- **Failures are named by class and status**, walking `cause`, never by their words:
+  - `auth`, `rate-limit`, `model-unavailable`, `provider`, `bad-request`;
+  - `bad-response`: a reply that couldn't be read, a 200 included;
+  - `network`, `timeout`, `cancelled`, `internal`;
+  - `malformed`: no accepted answer;
+  - `sharing-refused` and `no-key`, before any request.
+
+  Each message says what happened and what to do. A 429 says when to try again, from `Retry-After` or the token limit's
+  reset. Nothing retries by itself.
+- **Every model call is recorded**, failed ones too, as a `model.call` event: the elapsed time, tokens or `null`, the
+  finish reason, and the kind when it failed. The kind is also in the `run.failed` data.
+- **A tool call whose input fails the tool's schema** never runs: Mastra tells the model what to fix. The run records
+  it as a refused `tool.called` event, with each field path and rule, never the input. Live, Nemotron 3 Super sent a
+  forced answer's lists as strings. With a single answer step the run failed; with three, the next attempt was
+  accepted.
+- **Usage** is the provider's counts. A run's totals are `null` unless every call reported them, and `reportedCalls`
+  says how many did. Never 0, never an estimate.
+- **The route** records the endpoint, `token-factory` or `loopback-test`, so a stub run can never pass as live evidence.
+
+**Tool choice** (`providers/policy.ts`), from checkpoint 1: Settings → Check Token Factory, with Nate's key, 17 October.
+The key saw 28 models, five of them NVIDIA's.
+- Nemotron 3 Super honoured `toolChoice: "required"`, and a forced tool when it was the only one offered. So exploring
+  steps use `required`, and the answer tool is forced when the answer is due.
+- `providers.check` now also forces one tool out of two, then calls the real answer schema. Those stronger probes
+  haven't been run with a real key yet.
+- Any other model gets `auto`, with no forcing.
+- There is no plain-text fallback: a run with no accepted answer fails `malformed`.
+- Each model's `context_length` is read from `/models?verbose=true` when it is reported. Otherwise the app's cap applies.
+
+**Reading the repository (NIV-9)**, ported from Hird and adapted (`docs/provenance.md`)
+- **The root is the folder the person picked**, by real path, not the repository's top level. Paths are compared with
+  `relative()`.
+- **Tracked files only** (`git ls-files`), read as they are on disk. An edit to a tracked file is seen; an untracked
+  file never is. Every read and every search hit is hashed from the bytes it came from.
+- **Hidden, each for a stated reason.** One list drives both the code's own check and git's pathspecs.
+  - Files that may hold secrets: Hird's list, plus SSH and GPG material, keystores, `.htpasswd`, kube configs,
+    service-account JSON and `.mcp.json`. `.env.example` stays readable.
+  - Dependency and build output at any depth: `node_modules`, `dist`, `build`, `out`, `.next`, `.expo`, `.turbo`,
+    `coverage`, `vendor`, `target`.
+- **Limits.**
+  - A listing returns at most 300 paths.
+  - A search returns at most 50 lines, 5 per file, and skips files over 200 KB.
+  - A read takes at most 200 KB, 400 lines and 400 characters per line.
+  - No tool result is longer than 16,000 characters.
+  - A read refuses binary files, links that lead out of the root, and a mask that would change the line count.
+- **Git** runs through the run's `ExecutionSession`, which is closed when the run ends. The run's cancel reaches every
+  git command.
+  - Every call pins `color.ui=never`, `core.quotePath=false`, `core.fsmonitor=false`, `grep.fallbackToNoIndex=false`,
+    `grep.fullName=false` and `submodule.recurse=false`. A repository's own settings can't change the paths reported,
+    or reach into submodules.
+  - Child processes no longer inherit `GIT_*` variables.
+  - There is no `git status`, which can run filters a repository configures.
+- **Masking** covers Hird's secret patterns, private-key blocks and the values of the keys Nivra holds, and keeps the
+  line count. It is pattern-based, so it can't recognise every secret, and the consent dialog says so.
+- **The map** is the model's starting point, at most 16 KB:
+  - HEAD at run start;
+  - file counts by folder and by extension, and hidden counts by reason;
+  - up to 12 manifests and the workspace files;
+  - the convention files that exist.
+- **No cache.** Every run reads afresh.
+
+**The explain run** (`workflows/explain.ts`)
+- **Only ids pass through Mastra.** Mastra gets `{ repoPath }`. The question is stored masked in `nivra.db`, and the
+  step reads it from there. Step outputs are HEAD, the model id and counts.
+- **Three steps.**
+  1. `context` records the preferences the run was given, as hello does (D21): the count, their ids and revisions, the
+     store's revision and a fingerprint. It runs first, so a refused run records them too.
+  2. `prepare` refuses without consent or a key, before any request. Then it reads HEAD and picks the model.
+  3. `explain` builds the map and runs the model with four fixed tools: `list_files`, `search_code`, `read_file` and
+     `submit_answer`. Then it checks the citations and stores the result.
+- **Each tool enforces the budget.**
+  - The whole request counts: the instructions, the map, the preferences, the question, the tool definitions, every
+    result so far and the model's own arguments.
+  - Characters are counted at 3 per token, corrected by the input tokens each call reports.
+  - The budget is 64,000 tokens, or the model's context length if smaller, minus 4,000 held for the answer.
+  - A result that won't fit is cut to what does. Once the budget is spent, the tools say so and only `submit_answer`
+    is offered.
+- **Time is held back for the answer.** The next step is an answer step:
+  - once less than two per-call deadlines are left;
+  - in the last three of the 16 steps, so an answer that is turned down can be given again;
+  - once the budget is spent.
+
+  The prompt tells the model how many tool calls it has and that the last ones are kept for the answer.
+- **The answer is structured:**
+  - a summary;
+  - findings, each citing an exact path and lines;
+  - differences from the engineer's preferences, by id;
+  - gaps.
+
+  The first accepted answer is frozen. One that names a preference the run wasn't given is turned down.
+- **An answer citing lines the model wasn't shown is turned down** while there is time to read them. The refusal names
+  each citation, to be read or dropped. When the answer is due, or after two such refusals, the answer is accepted as
+  it is, and those citations stay labelled. Live, before this rule, the model cited files it had only seen named in
+  the map: 15 of 21 citations on fixture A.
+- **A citation says "shown to the model", never more.**
+  - It is checked only when every cited line was delivered, by a read or a search hit, in a step before the answer.
+  - Only lines actually delivered after truncation count.
+  - A file seen with two different hashes is reported as changed during the run.
+- **The result** is stored masked, at most 256 KB, in `artifacts`. It is labelled **HEAD at run start** and says
+  whether HEAD moved. It lists what was delivered (the map's sources, the search hits and the reads) by path, lines and
+  hash, never content.
+- **Preferences rank below the repository.** The prompt lists the run's confirmed preferences and asks where the
+  repository differs, citing its convention: the repository wins (D20). Overrides and full context assembly stay with
+  NIV-11.
+
+**Consent (D20), checked by the host and by the engine**
+- Each project has `sharing: { modelContext, cloudExecution }`, both off at first. `cloudExecution` is stored but
+  unused.
+- The first explanation asks in a dialog. It says what is sent, what is never sent, and that pattern-based masking
+  can't recognise every secret.
+- **The host refuses** without consent. Each project has a revocation epoch, raised when sharing is turned off.
+  - `startExplain` waits for any engine start already in progress. Then, immediately before `runs.start`, it checks
+    consent and the epoch again.
+  - A run is cancelled at once if the epoch moved while its `runs.start` request was out.
+- Turning sharing off cancels the project's queued and running explain runs. A run that can't be stopped is reported,
+  never passed over.
+- **The engine refuses** with `sharing-refused` or `no-key` before any request, judging from the run's own context.
+
+**Preference text in what the model writes (amends D21)**
+- The engine still never writes a statement it was given anywhere: not in Mastra's records, not in the events it
+  composes, not in the stored preference differences (ids and revisions only), not in the logs.
+- Text the model generates may paraphrase or quote a preference, or the repository. That covers the answer and the
+  search queries in `tool.called` events.
+  - It is stored only in the owning engine's `nivra.db`, masked for detected secrets and known keys.
+  - It is never stored in `mastra.db` or the logs.
+  - There is no exact-string scrubbing: it would imply a guarantee it can't give.
+- An old result shows a preference's current wording only while its revision still matches. Otherwise it says the
+  preference changed or was deleted since the run, and gives its id and revision.
+
+**Protocol and storage**
+- **Protocol 3.**
+  - `runs.start` is a union on `workflowId` (`hello`, `explain`), and the context carries `sharing`.
+  - `runs.result` is new.
+  - Events gain `model.call` and `tool.called`.
+  - `RunSummary` gains `durationMs`, `usage` and `route`, all nullable.
+  - `providers.check` reports the probes, the rate-limit values and the context length.
+- **Migration v2** is additive: run columns `duration_ms`, `usage` and `route`, and an `artifacts` table. Duration is
+  measured with `performance.now()`.
+- **The test endpoint.** The engine accepts `--token-factory-url` only for a loopback host, and Doctor names it as a
+  test endpoint. The app passes it only from `--nivra-token-factory-url`, and only when unpackaged.
+- **Downgrades.**
+  - An older engine refuses a v2 home, saying why: it already refused any newer schema.
+  - An older app reads the newer `nivra.json`, which is still version 1, and drops `sharing` on its next write. Consent
+    goes back to off.
+
+**Why.**
+- The hackathon requires a runtime Token Factory call on an NVIDIA open model (D19). Explaining with evidence is D20's
+  first step.
+- Mastra persists workflow input and step output unmasked, and its default logger prints prompts. Standalone agents,
+  steps that pass only ids and a silenced logger keep repository content and preference text out of `mastra.db` and the
+  logs.
+- One large result can overrun a budget that only a planning hook enforces. So each tool enforces it, one call at a
+  time.
+- A citation checked against what was delivered shows that the model saw those lines, not that the claim is right. The
+  result says only the former.
+- Working-tree edits are read, so the label is "HEAD at run start", never "describes commit X".
+- Consent checked once is a race: an engine can take a while to start, and a run can wait in the queue. The epoch and
+  cancel-on-revoke close the windows the host can see. The engine's own check covers a context that arrives without
+  consent.
+- Masking exact strings can't stop a model paraphrasing a preference, so the guarantee is stated as what is enforced.
+
+**Consequences.**
+- Every model call goes through `ModelClient`.
+- `__registerPrimitives` and `watch` are Mastra internals. The stderr canaries and the engine tests catch an upgrade
+  that changes them.
+- Mastra pauses 10 s after a step when `x-ratelimit-remaining-tokens` is below 2,000. The provider check reports when a
+  key is that close.
+- Adding a plain-text fallback, or forcing on another model, needs a new policy entry backed by a check.
+- Folders on Windows drives and in WSL are read the same way, by git on their own target (D17). Hello still runs
+  `git status`, unchanged here.
+- An older Nivra on the same home or records degrades as described above, and never silently with consent on.
+- AGENTS.md's "Mastra's 180-second limit" is corrected: each call has its own deadline.

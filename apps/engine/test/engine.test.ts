@@ -34,7 +34,7 @@ const codeOf = async (promise: Promise<unknown>): Promise<number> => {
   }
 };
 
-const NO_PREFERENCES: RunContext = { preferences: { revision: 0, records: [] } };
+const NO_PREFERENCES: RunContext = { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } };
 
 const startHello = (engine: EngineProcess, repoPath: string, holdMs = 0, context: RunContext = NO_PREFERENCES) =>
   engine.client.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath, holdMs }, context });
@@ -49,7 +49,7 @@ describe("engine over stdio", () => {
   it("answers initialize with where it runs, and keeps stdout to JSON-RPC alone", async () => {
     const { home, engine } = setup();
     const info = await engine.initialize();
-    assert.equal(info.protocolVersion, 2);
+    assert.equal(info.protocolVersion, 3);
     assert.equal(info.protocolVersion, PROTOCOL_VERSION);
     assert.equal(info.home, home);
     assert.equal(info.platform, process.platform);
@@ -220,7 +220,7 @@ describe("engine over stdio", () => {
       { id: randomUUID(), statement: "Tests sit next to the code they test, ü%#", scope: "project" as const, revision: 1 },
     ];
     await engine.initialize();
-    const run = await startHello(engine, repo, 0, { preferences: { revision: 7, records } });
+    const run = await startHello(engine, repo, 0, { preferences: { revision: 7, records }, sharing: { modelContext: false } });
     const page = await engine.waitForRun(run.id, (p) => isTerminal(p.status));
     assert.equal(page.status, "succeeded");
     const received = page.events.find((e) => e.type === "step.output" && e.stepId === "context");

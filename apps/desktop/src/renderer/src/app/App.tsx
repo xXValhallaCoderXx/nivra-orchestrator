@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { EngineView, PreferencesView, ProjectView, WslView } from "../../../shared/ipc";
 import { Doctor } from "../features/doctor";
 import { EngineBadge, EngineNotices } from "../features/engine";
+import { Explain } from "../features/explain";
 import { HelloRun, TERMINAL, type RunRef } from "../features/hello";
 import { Preferences } from "../features/preferences";
 import { Projects } from "../features/projects";
@@ -19,6 +20,7 @@ export function App() {
   const [preferencesVersion, setPreferencesVersion] = useState(0);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [runs, setRuns] = useState<Record<string, RunRef>>({});
+  const [explainRuns, setExplainRuns] = useState<Record<string, RunRef>>({});
 
   const projects = usePoll<ProjectView[]>(() => window.nivra.listProjects(), () => null, [projectsVersion]);
   const engines = usePoll<EngineView[]>(
@@ -44,7 +46,7 @@ export function App() {
 
   const engine = selected ? (engines.value?.find((e) => e.targetId === selected.targetId) ?? null) : null;
   const online = engine?.state.status === "online";
-  const busyIds = Object.entries(runs)
+  const busyIds = [...Object.entries(runs), ...Object.entries(explainRuns)]
     .filter(([, ref]) => ref.status !== null && !TERMINAL.includes(ref.status))
     .map(([id]) => id);
   const hostError = projects.error ?? engines.error ?? wsl.error ?? preferences.error;
@@ -82,6 +84,15 @@ export function App() {
               busyIds={busyIds}
               wsl={wsl.value}
               onWslChecked={() => wsl.refresh()}
+            />
+            <Explain
+              key={`explain:${selected?.id ?? "none"}`}
+              project={selected}
+              online={online}
+              preferences={preferences.value}
+              run={selected ? (explainRuns[selected.id] ?? null) : null}
+              onRun={(id, ref) => setExplainRuns((current) => (current[id]?.runId === ref.runId && current[id]?.status === ref.status ? current : { ...current, [id]: ref }))}
+              onSharingChanged={() => setProjectsVersion((n) => n + 1)}
             />
             <Preferences project={selected} view={preferences.value} onChanged={() => setPreferencesVersion((n) => n + 1)} />
             <HelloRun

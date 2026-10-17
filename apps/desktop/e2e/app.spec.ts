@@ -31,7 +31,10 @@ const EXPECTED_API = [
   "restartEngine",
   "runDoctor",
   "runEvents",
+  "runResult",
   "setNebiusKey",
+  "setSharing",
+  "startExplain",
   "startHello",
 ];
 

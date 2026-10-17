@@ -93,7 +93,9 @@ list.
   key in workflow input, `requestContext`, run input, run events or logs: Mastra persists the first three. Always
   pass `apiKey` explicitly; the engine deletes provider variables from `process.env` at start.
 - Mastra never re-sends a model request: agents set `maxRetries: 0`, `errorProcessorDefaults: false` and
-  `maxProcessorRetries: 0`. Keep calls under Mastra's 180-second limit.
+  `maxProcessorRetries: 0`. Every model call goes through `ModelClient` (`providers/model.ts`), with a deadline per
+  call and one for the whole run; Mastra sets none for agent calls (D22). A host request that waits on model calls
+  must end inside its own limit: `providers.check` takes at most 150 s of the host's 180 s.
 - Workflow steps pass ids, not content: Mastra stores step input and output unmasked.
 - A run's context (the preference snapshot, D21) arrives only with `runs.start` and stays in the scheduler's memory.
   Steps read it by run id. Never put it in workflow input, step output or run events: record ids and a fingerprint.

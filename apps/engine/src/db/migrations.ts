@@ -28,4 +28,15 @@ export const MIGRATIONS: readonly string[] = [
      data TEXT,
      PRIMARY KEY (run_id, seq)
    );`,
+  // v2 (D22): what a run cost and where its model requests went, and stored results (an explanation).
+  `ALTER TABLE runs ADD COLUMN duration_ms INTEGER;
+   ALTER TABLE runs ADD COLUMN usage TEXT;
+   ALTER TABLE runs ADD COLUMN route TEXT;
+   CREATE TABLE artifacts (
+     run_id TEXT NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+     kind TEXT NOT NULL,
+     content TEXT NOT NULL,
+     created_at TEXT NOT NULL,
+     PRIMARY KEY (run_id, kind)
+   );`,
 ];

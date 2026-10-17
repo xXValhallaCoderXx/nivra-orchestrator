@@ -1,0 +1,288 @@
+import { createStep, createWorkflow } from "@mastra/core/workflows";
+import type { ExplainResult, JsonObject, RunContext, RunRoute, RunUsage } from "@nivra/domain";
+import { z } from "zod";
+import { installGitAdvice } from "../advice.ts";
+import type { ExecutionBackend } from "../exec/backend.ts";
+import { Budget } from "../explain/budget.ts";
+import { checkCitation } from "../explain/citations.ts";
+import { Ledger } from "../explain/ledger.ts";
+import { EXPLAIN_LIMITS, mustAnswer } from "../explain/limits.ts";
+import { DEFAULT_QUESTION, explainPrompt, INSTRUCTIONS } from "../explain/prompt.ts";
+import { createExplainTools } from "../explain/tools.ts";
+import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
+import { createModelClient, failure, InternalFailure, ModelFailure, type Endpoint, type ModelClient, type StepRecord } from "../providers/model.ts";
+import { pickNemotron } from "../providers/tokenfactory.ts";
+import { RepoReader } from "../repo/files.ts";
+import { buildMap } from "../repo/map.ts";
+import { describePreferences } from "./preferences-record.ts";
+import { RepoError } from "../repo/paths.ts";
+import type { Mask } from "../secrets/patterns.ts";
+
+export const EXPLAIN_WORKFLOW_ID = "explain";
+/** Tool definitions, as the model receives them, estimated for the budget. */
+const TOOL_DEFINITION_CHARS = 4_000;
+
+export interface ExplainRecorder {
+  output(runId: string, stepId: string, message: string, data?: JsonObject): void;
+  event(runId: string, type: "model.call" | "tool.called", stepId: string, message: string, data: JsonObject): void;
+}
+
+export interface ExplainDeps {
+  backend: ExecutionBackend;
+  recorder: ExplainRecorder;
+  findGit: () => string | null;
+  platform: NodeJS.Platform;
+  /** What the host sent with the run, held in memory by the scheduler (D21). */
+  context: (runId: string) => RunContext | null;
+  /** The person's question, from the run store: it never passes through Mastra (D22). */
+  question: (runId: string) => string;
+  apiKey: () => string | null;
+  endpoint: Endpoint;
+  mask: Mask;
+  setMeta: (runId: string, meta: { usage?: RunUsage; route?: RunRoute }) => void;
+  saveResult: (runId: string, result: ExplainResult) => void;
+  /** Tests only, in-process: a client over a mock model. */
+  modelClient?: (apiKey: string, endpoint: Endpoint) => ModelClient;
+}
+
+const Input = z.strictObject({ repoPath: z.string() });
+const Prepared = z.strictObject({ root: z.string(), head: z.string().nullable(), model: z.string(), contextLength: z.number().nullable() });
+const Explained = z.strictObject({ citations: z.number().int(), checked: z.number().int() });
+
+/** The usage a run's calls reported: totals stay null once one call didn't say, never 0 (D22). */
+function usageOf(steps: readonly StepRecord[]): RunUsage {
+  const reported = steps.filter((step) => step.inputTokens !== null && step.outputTokens !== null);
+  const all = reported.length === steps.length && steps.length > 0;
+  return {
+    inputTokens: all ? reported.reduce((sum, step) => sum + step.inputTokens!, 0) : null,
+    outputTokens: all ? reported.reduce((sum, step) => sum + step.outputTokens!, 0) : null,
+    calls: steps.length,
+    reportedCalls: reported.length,
+  };
+}
+
+export function createExplainWorkflow(deps: ExplainDeps) {
+  const clientFor = (key: string) => (deps.modelClient ? deps.modelClient(key, deps.endpoint) : createModelClient({ apiKey: key, endpoint: deps.endpoint }));
+
+  /** The run's consent and key, checked before anything is sent anywhere. */
+  const allowed = (runId: string): { context: RunContext; key: string } => {
+    const context = deps.context(runId);
+    if (!context) throw failure("internal", "this run's context is missing");
+    if (!context.sharing.modelContext) throw failure("sharing-refused");
+    const key = deps.apiKey();
+    if (!key) throw failure("no-key");
+    return { context, key };
+  };
+
+  const openReader = async (root: string, signal: AbortSignal | undefined) => {
+    const git = deps.findGit();
+    if (!git) throw new RepoError(`Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
+    const session = await deps.backend.open({ workspace: root });
+    try {
+      return { reader: await RepoReader.open({ root, session, git, mask: deps.mask, signal }), session };
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
+  };
+
+  // What the run was given is recorded first, even when it is refused: ids, revisions and a fingerprint, never text.
+  const context = createStep({
+    id: "context",
+    description: "Record the preferences the app sent with the run, without their text",
+    inputSchema: Input,
+    outputSchema: Input,
+    execute: async ({ inputData, runId }) => {
+      const given = deps.context(runId);
+      if (!given) throw failure("internal", "this run's context is missing");
+      const { message, data } = await describePreferences(given.preferences);
+      deps.recorder.output(runId, "context", message, data);
+      return inputData;
+    },
+  });
+
+  const prepare = createStep({
+    id: "prepare",
+    description: "Check consent and the key, resolve the repository, read HEAD, and pick the model",
+    inputSchema: Input,
+    outputSchema: Prepared,
+    execute: async ({ inputData, runId, abortSignal }) => {
+      const { key } = allowed(runId);
+      const { reader, session } = await openReader(inputData.repoPath, abortSignal);
+      let head: string | null;
+      try {
+        head = await reader.head();
+      } finally {
+        await session.close();
+      }
+      const client = clientFor(key);
+      const models = await client.listModels({ signal: abortSignal, timeoutMs: 30_000 });
+      const model = pickNemotron(models.ids);
+      if (!model) throw failure("model-unavailable", "no NVIDIA model is listed for this key");
+      deps.setMeta(runId, { route: { provider: "nebius", endpoint: deps.endpoint.kind, model } });
+      deps.recorder.output(runId, "prepare", `Repository at ${head ? head.slice(0, 12) : "no commits yet"} (HEAD at run start); model ${model}`, {
+        root: reader.root,
+        head,
+        model,
+        contextLength: models.contextLengths.get(model) ?? null,
+        trackedFiles: reader.readable.size,
+        hiddenFiles: reader.hidden.size,
+      });
+      return { root: reader.root, head, model, contextLength: models.contextLengths.get(model) ?? null };
+    },
+  });
+
+  const explain = createStep({
+    id: "explain",
+    description: "Read the repository with the model and check its answer's citations",
+    inputSchema: Prepared,
+    outputSchema: Explained,
+    execute: async ({ inputData, runId, abortSignal }) => {
+      const { context, key } = allowed(runId);
+      const question = deps.question(runId).trim() || DEFAULT_QUESTION;
+      const { reader, session } = await openReader(inputData.root, abortSignal);
+      try {
+        const ledger = new Ledger();
+        const map = await buildMap(reader, inputData.head);
+        // The map is delivered before the first step.
+        ledger.record(-1, "map", map.sources.map((source) => ({ path: source.path, startLine: 1, endLine: source.lines, sha256: source.sha256 })), map.text.length);
+        const prompt = explainPrompt(question, map.text, context.preferences);
+        const budget = new Budget(requestBudget(inputData.contextLength), INSTRUCTIONS.length + prompt.length + TOOL_DEFINITION_CHARS);
+        const policy = policyFor(inputData.model);
+        const internal = new InternalFailure();
+        let finished = 0;
+        // Set before each step: whether it must give the answer, which is then accepted whatever it cites.
+        let answerDue = false;
+        // Answers Mastra turned down because they didn't match the schema: the tool never saw them.
+        let invalidAnswers = 0;
+        const { tools, state } = createExplainTools({
+          reader,
+          ledger,
+          budget,
+          mask: deps.mask,
+          internal,
+          step: () => finished,
+          answerDue: () => answerDue,
+          preferences: context.preferences,
+          signal: abortSignal,
+          onTool: (event) => deps.recorder.event(runId, "tool.called", "explain", event.message, event.data),
+        });
+        const client = clientFor(key);
+        const agent = client.agent({ id: "nivra-explain", name: "Nivra explain", modelId: inputData.model, instructions: INSTRUCTIONS, tools });
+        const started = performance.now();
+        const steps: StepRecord[] = [];
+        let failed: ModelFailure | null = null;
+        try {
+          await client.call(agent, prompt, {
+            maxSteps: EXPLAIN_LIMITS.maxSteps,
+            deadlines: { stepMs: EXPLAIN_LIMITS.stepMs, totalMs: EXPLAIN_LIMITS.totalMs },
+            maxOutputTokens: ANSWER_TOKENS,
+            toolChoice: policy.explore,
+            stopWhen: () => state.accepted !== null,
+            // An exploring step starts only with time left for it and for the answer after it (D22).
+            prepareStep: ({ stepNumber }) => {
+              answerDue = mustAnswer({ stepNumber, elapsedMs: performance.now() - started, budgetExhausted: budget.exhausted() });
+              if (!answerDue) return { toolChoice: policy.explore };
+              return { activeTools: ["submit_answer"], toolChoice: policy.forceAnswer ? { type: "tool", toolName: "submit_answer" } : "auto" };
+            },
+            internal,
+            ...(abortSignal ? { signal: abortSignal } : {}),
+            onStep: (step) => {
+              finished++;
+              steps.push(step);
+              budget.observe(step);
+              for (const rejected of step.rejectedTools) {
+                if (rejected.tool === "submit_answer") invalidAnswers++;
+                const count = rejected.problems.length;
+                deps.recorder.event(runId, "tool.called", "explain", `${rejected.tool} refused: its input didn't match the tool's schema (${count} ${count === 1 ? "problem" : "problems"})`, {
+                  tool: rejected.tool,
+                  step: step.stepNumber,
+                  refused: "invalid input",
+                  problems: rejected.problems,
+                });
+              }
+              const tokens = step.inputTokens !== null && step.outputTokens !== null ? `${step.inputTokens} in / ${step.outputTokens} out tokens` : "tokens not reported";
+              deps.recorder.event(runId, "model.call", "explain", `Model step ${step.stepNumber + 1}: ${tokens}, ${(step.elapsedMs / 1000).toFixed(1)} s${step.toolNames.length ? ` (${step.toolNames.join(", ")})` : ""}`, {
+                step: step.stepNumber,
+                model: inputData.model,
+                elapsedMs: step.elapsedMs,
+                inputTokens: step.inputTokens,
+                outputTokens: step.outputTokens,
+                finishReason: step.finishReason,
+                tools: step.toolNames,
+                remainingTokens: step.rateLimit.remainingTokens,
+              });
+            },
+          });
+        } catch (error) {
+          failed = error instanceof ModelFailure ? error : failure("internal", String(error));
+          // The call that failed is recorded too: elapsed time, no usage, and why (D22).
+          deps.recorder.event(runId, "model.call", "explain", `Model call failed: ${failed.message}`, {
+            step: steps.length,
+            model: inputData.model,
+            elapsedMs: failed.elapsedMs,
+            inputTokens: null,
+            outputTokens: null,
+            kind: failed.kind,
+            ...(failed.retryAfterSeconds !== null ? { retryAfterSeconds: failed.retryAfterSeconds } : {}),
+          });
+        }
+        deps.setMeta(runId, { usage: usageOf(steps) });
+        if (failed) throw failed;
+        if (!state.accepted || state.answerStep === null) {
+          const turnedDown = state.rejected + invalidAnswers;
+          throw failure("malformed", `no answer was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDown ? `; ${turnedDown} turned down` : ""}`);
+        }
+        const answer = state.accepted;
+        const answerStep = state.answerStep;
+        const check = (citations: typeof answer.findings[number]["citations"]) => citations.map((citation) => checkCitation(citation, ledger.entries, answerStep));
+        const revisions = new Map(context.preferences.records.map((record) => [record.id, record.revision]));
+        const findings = answer.findings.map((finding) => ({ statement: finding.statement, citations: check(finding.citations) }));
+        const preferenceDifferences = answer.preferenceDifferences.map((difference) => ({
+          preferenceId: difference.preferenceId,
+          revision: revisions.get(difference.preferenceId)!,
+          repositoryConvention: difference.repositoryConvention,
+          citations: check(difference.citations),
+        }));
+        const all = [...findings, ...preferenceDifferences].flatMap((item) => item.citations);
+        const checked = all.filter((citation) => citation.checked).length;
+        const result: ExplainResult = {
+          question,
+          headAtStart: inputData.head,
+          headAtEnd: await reader.head(),
+          summary: answer.summary,
+          findings,
+          preferenceDifferences,
+          gaps: answer.gaps,
+          context: ledger.context(),
+          checks: { citations: all.length, checked },
+          answeredAtStep: answerStep,
+          finishedAt: new Date().toISOString(),
+        };
+        deps.saveResult(runId, result);
+        deps.recorder.output(runId, "explain", `${checked} of ${all.length} citations point to lines the model was shown`, {
+          citations: all.length,
+          checked,
+          changedFiles: result.context.changedFiles,
+          headChanged: result.headAtEnd !== result.headAtStart,
+        });
+        return { citations: all.length, checked };
+      } finally {
+        await session.close();
+      }
+    },
+  });
+
+  return createWorkflow({
+    id: EXPLAIN_WORKFLOW_ID,
+    description: "Explains a repository with evidence, reading it read-only through fixed tools",
+    inputSchema: Input,
+    outputSchema: Explained,
+    // Recovery belongs to the run scheduler: a run interrupted by a restart is marked failed, never re-driven.
+    options: { autoRestartActiveRuns: false },
+  })
+    .then(context)
+    .then(prepare)
+    .then(explain)
+    .commit();
+}

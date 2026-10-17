@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { RunContext } from "./context.ts";
-import { HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
+import { ExplainResult } from "./explain.ts";
+import { ModelEndpoint, ModelFailureKind } from "./models.ts";
+import { ExplainInput, HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
 
 /**
  * Every request the host may send the engine, with its parameters and result as zod schemas. The engine validates
@@ -55,19 +57,39 @@ export type DoctorCheck = z.infer<typeof DoctorCheck>;
 export const DoctorReport = z.strictObject({ checks: z.array(DoctorCheck) });
 export type DoctorReport = z.infer<typeof DoctorReport>;
 
-export const StartRunParams = z.strictObject({
+const RunRequest = {
   /** Minted by main for each request, so a retry never starts a second run. */
   clientRequestId: z.uuid(),
-  workflowId: z.literal("hello"),
-  input: HelloInput,
   /** Held in the engine's memory for this run only, never stored with it (D21). */
   context: RunContext,
-});
+};
+export const StartRunParams = z.discriminatedUnion("workflowId", [
+  z.strictObject({ ...RunRequest, workflowId: z.literal("hello"), input: HelloInput }),
+  z.strictObject({ ...RunRequest, workflowId: z.literal("explain"), input: ExplainInput }),
+]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
-/** What `providers.check` found (B7): Token Factory reached from this engine, its NVIDIA models, and one tool call. */
+/** Whether the model did what a tool choice asked; `skipped` when there was no time or no working call to try it. */
+export const ToolChoiceProbe = z.enum(["honoured", "ignored", "failed", "skipped"]);
+export type ToolChoiceProbe = z.infer<typeof ToolChoiceProbe>;
+
+/** Whether the model, forced to submit an answer, filled in the explain workflow's real answer schema correctly. */
+export const AnswerSchemaProbe = z.enum(["valid", "invalid", "ignored", "failed", "skipped"]);
+export type AnswerSchemaProbe = z.infer<typeof AnswerSchemaProbe>;
+
+/**
+ * What `providers.check` found (B7, D22): Token Factory reached from this engine, its NVIDIA models, one call that has
+ * to use a tool, and what the explain workflow needs to know about the model: whether usage is reported, whether a
+ * required or forced tool choice is honoured, and its context length when `/models` says.
+ */
 export const ProviderCheck = z.strictObject({
-  models: z.strictObject({ total: z.number().int().nonnegative(), nvidia: z.array(z.string()) }),
+  endpoint: ModelEndpoint,
+  models: z.strictObject({
+    total: z.number().int().nonnegative(),
+    nvidia: z.array(z.string()),
+    /** Of the model that was called; null when `/models` doesn't say. */
+    contextLength: z.number().int().positive().nullable(),
+  }),
   call: z
     .strictObject({
       model: z.string(),
@@ -77,10 +99,30 @@ export const ProviderCheck = z.strictObject({
       inputTokens: z.number().int().nonnegative().nullable(),
       outputTokens: z.number().int().nonnegative().nullable(),
       elapsedMs: z.number().int().nonnegative(),
+      /** From the last response's documented rate-limit headers; each null when the provider didn't send it. */
+      rateLimit: z.strictObject({
+        remainingTokens: z.number().nonnegative().nullable(),
+        resetTokensSeconds: z.number().nonnegative().nullable(),
+        /** Below 2,000 remaining tokens, Mastra waits 10 s after each step. */
+        belowPauseThreshold: z.boolean().nullable(),
+      }),
+    })
+    .nullable(),
+  probes: z
+    .strictObject({
+      /** `toolChoice: "required"`, with a prompt that needs no tool. */
+      requiredToolChoice: ToolChoiceProbe,
+      /** A named tool forced, when the prompt points at the other of two tools. */
+      forcedToolChoice: ToolChoiceProbe,
+      /** `submit_answer` forced, with the explain workflow's real answer schema. One tiny case, not proof of reliability. */
+      answerSchema: AnswerSchemaProbe,
     })
     .nullable(),
   /** Why the call was not made or failed; null when it worked. */
   problem: z.string().nullable(),
+  problemKind: ModelFailureKind.nullable(),
+  /** On a 429: how long Token Factory asked to wait, when it said. */
+  retryAfterSeconds: z.number().int().positive().nullable(),
 });
 export type ProviderCheck = z.infer<typeof ProviderCheck>;
 
@@ -102,6 +144,8 @@ export const Methods = {
     result: RunEventsPage,
   },
   "runs.cancel": { params: z.strictObject({ runId: RunId }), result: z.strictObject({ status: RunStatus, wasTerminal: z.boolean() }) },
+  /** An explain run's stored result; null until it has one. */
+  "runs.result": { params: z.strictObject({ runId: RunId }), result: ExplainResult.nullable() },
 } as const satisfies Record<string, { params: z.ZodType; result: z.ZodType }>;
 
 export type MethodName = keyof typeof Methods;

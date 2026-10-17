@@ -14,11 +14,17 @@ describe("listModels", () => {
 
     const models = await listModels("test-key", { fetch: fetchStub });
 
-    assert.deepEqual(seen, { url: `${TOKEN_FACTORY_BASE_URL}/models`, authorization: "Bearer test-key" });
+    assert.deepEqual(seen, { url: `${TOKEN_FACTORY_BASE_URL}/models?verbose=true`, authorization: "Bearer test-key" });
     assert.deepEqual(models, [
-      { id: "nvidia/nemotron-3-super-120b-a12b", ownedBy: "nvidia" },
-      { id: "Qwen/Qwen3-30B", ownedBy: null },
+      { id: "nvidia/nemotron-3-super-120b-a12b", ownedBy: "nvidia", contextLength: null },
+      { id: "Qwen/Qwen3-30B", ownedBy: null, contextLength: null },
     ]);
+  });
+
+  it("reads a model's context length under the names providers use, and ignores one that isn't a count", async () => {
+    const body = { data: [{ id: "a", context_length: 131072 }, { id: "b", max_model_len: 32768 }, { id: "c", context_window: "lots" }] };
+    const models = await listModels("key", { fetch: respond(200, body) as typeof fetch });
+    assert.deepEqual(models.map((m) => [m.id, m.contextLength]), [["a", 131072], ["b", 32768], ["c", null]]);
   });
 
   it("says the key was refused on 401, by status rather than by the body's words", async () => {
@@ -30,8 +36,14 @@ describe("listModels", () => {
     });
   });
 
-  it("refuses a body it does not recognise", async () => {
-    await assert.rejects(listModels("key", { fetch: respond(200, { models: [] }) as typeof fetch }), /does not recognise/);
+  it("refuses a body it does not recognise or can't parse, keeping the status", async () => {
+    for (const body of [{ models: [] }, "this is not JSON"]) {
+      await assert.rejects(listModels("key", { fetch: respond(200, body) as typeof fetch }), (error: unknown) => {
+        assert.ok(error instanceof TokenFactoryError);
+        assert.deepEqual([error.status, /does not recognise/.test(error.message)], [200, true]);
+        return true;
+      });
+    }
   });
 });
 

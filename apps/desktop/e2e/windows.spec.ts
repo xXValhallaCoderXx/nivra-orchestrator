@@ -9,7 +9,8 @@ import { _electron as electron, expect, test, type ElectronApplication, type Pag
  * \\wsl.localhost\… runs in the distribution (provisioned from the shipped tarball), a folder made by Git for Windows
  * runs on the native engine, a run held on WSL keeps going and cancels on its own engine while the native one starts and
  * works, and quitting leaves no engine on either side. Preferences confirmed in the window reach each engine with its
- * runs (D21): every value intact, and one project's own never in the other's.
+ * runs (D21): every value intact, and one project's own never in the other's. Explaining asks for each project's
+ * consent and, with no key, fails on both engines before any request (D22).
  */
 test.skip(process.platform !== "linux" || !existsSync("/mnt/c/Windows/System32/cmd.exe"), "runs from WSL on a Windows machine");
 
@@ -99,9 +100,12 @@ async function confirmPreference(statement: string, scope: string) {
 }
 
 async function choose(targetLabel: string) {
+  // The select clears a project that is picked again, so one already chosen is left as it is.
+  const target = page.getByTestId("project-target");
+  if ((await target.count()) && (await target.textContent()) === targetLabel) return;
   await page.getByTestId("project-select").click();
   await page.getByRole("option", { name: new RegExp(targetLabel) }).click();
-  await expect(page.getByTestId("project-target")).toHaveText(targetLabel);
+  await expect(target).toHaveText(targetLabel);
 }
 
 test("a fresh profile offers no target to choose, starts no engine, and has nothing to say about a working WSL", async () => {
@@ -158,6 +162,24 @@ test("a run held on WSL keeps going on its own engine while a Windows folder sta
   const forWsl = await expectedFor(`wsl:${distro}`);
   expect(forWsl.ids).toHaveLength(1);
   expect(await helloContext()).toEqual(forWsl);
+});
+
+test("explaining on either engine asks for the project's consent, then fails before any request without a key", async () => {
+  // A fresh profile holds no key, so neither engine can send anything; the run says so, and no model was chosen.
+  expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");
+  for (const target of [`${distro} · WSL`, "Windows · Local"]) {
+    await choose(target);
+    const status = page.getByTestId("explain-status");
+    const previous = (await status.count()) ? await status.getAttribute("data-run-id") : null;
+    await page.getByTestId("explain-start").click();
+    await page.getByTestId("explain-consent-allow").click();
+    await expect.poll(async () => ((await status.count()) ? await status.getAttribute("data-run-id") : previous) !== previous).toBe(true);
+    await expect(status).toHaveText("failed");
+    await expect(page.getByTestId("explain-failure")).toContainText("No Nebius key is set");
+    const runId = (await status.getAttribute("data-run-id"))!;
+    const { summary } = await page.evaluate((id) => window.nivra.runResult(id), runId);
+    expect([target, summary.route, summary.usage]).toEqual([target, null, null]);
+  }
 });
 
 test("the same Windows folder picked through WSL is the Windows project, with a note saying why", async () => {

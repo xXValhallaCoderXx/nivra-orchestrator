@@ -1,4 +1,4 @@
-import type { DoctorReport, EngineInfo, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
+import type { DoctorReport, EngineInfo, ExplainResult, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -18,11 +18,14 @@ export const IPC = {
   listProjects: "projects:list",
   addProject: "projects:add",
   removeProject: "projects:remove",
+  setSharing: "projects:sharing",
   listPreferences: "preferences:list",
   addPreference: "preferences:add",
   editPreference: "preferences:edit",
   deletePreference: "preferences:delete",
   startHello: "runs:hello",
+  startExplain: "runs:explain",
+  runResult: "runs:result",
   runEvents: "runs:events",
   cancelRun: "runs:cancel",
   getSettings: "settings:get",
@@ -78,6 +81,8 @@ export interface ProjectView {
   displayPath: string;
   /** Something to tell the person about this project this session (it moved to another engine, say); null otherwise. */
   notice: string | null;
+  /** What the project allows to leave the machine (D20): off until the person agrees. */
+  sharing: { modelContext: boolean };
 }
 
 /** One of the engineer's preferences, from the host's canonical store (D21). */
@@ -140,6 +145,12 @@ export interface NivraApi {
   deletePreference(id: string): Promise<void>;
   /** Runs hello on the project's engine, with a snapshot of the preferences that apply to the project (D21). */
   startHello(projectId: string, holdMs: number): Promise<RunSummary>;
+  /** Allows or stops sending the project's content to Token Factory (D20); stopping cancels its explain runs. */
+  setSharing(projectId: string, modelContext: boolean): Promise<ProjectView>;
+  /** Explains the project's repository with evidence (NIV-6); refused while sharing is off. Empty means the default. */
+  startExplain(projectId: string, question: string): Promise<RunSummary>;
+  /** An explain run's summary and stored result, from the engine that ran it. */
+  runResult(runId: string): Promise<{ summary: RunSummary; result: ExplainResult | null }>;
   /** A run's events after a cursor, from the engine that runs it (main remembers which). */
   runEvents(runId: string, after: number): Promise<RunEventsPage>;
   cancelRun(runId: string): Promise<{ status: RunStatus; wasTerminal: boolean }>;

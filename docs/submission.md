@@ -14,8 +14,8 @@ A requirement counts as met only when its evidence exists. A plan or a design is
 |---|---|---|---|---|---|
 | 1 | Submit by **30 October 2026, 10:00 PDT**, which is **31 October, 01:00 SGT** | Rules §1 | The submission form | Nate | Open |
 | 2 | Judging runs 1–15 December 2026, ending 15 December at 12:00 Pacific (16 December, 04:00 SGT) | Rules §1 | — | — | Noted |
-| 3 | A runtime Token Factory inference call: this meets the general Nebius platform requirement | Rules §4, FAQ | The NIV-6 explain workflow, plus a recorded live run (model id, timing, usage) | Claude builds it; Nate supplies the key | **Pending.** The workflow isn't built and no live call has run. `providers.check` existing is not evidence. |
-| 4 | An NVIDIA open-source model is used | Rules §4 | The model id in the run record | Claude | Pending, as for #3 |
+| 3 | A runtime Token Factory inference call: this meets the general Nebius platform requirement | Rules §4, FAQ | The NIV-6 explain workflow, plus a recorded live run (model id, timing, usage) | Claude builds it; Nate supplies the key | **Evidence recorded** on 17 October: live explanations of fixture A with `nvidia/nemotron-3-super-120b-a12b`. The default question took 76.3 s, with 77,514 tokens in and 2,420 out over 11 calls, all reporting usage, and 13 of 13 citations shown to the model. The workflow (D22) is in the working tree, awaiting review and commit. |
+| 4 | An NVIDIA open-source model is used | Rules §4 | The model id in the run record | Claude | **Evidence recorded**, as for #3: the run records `nvidia/nemotron-3-super-120b-a12b` and the route `token-factory`. |
 | 5 | Track selection: Coding and Agentic Engineering, whose agents "write, run, and test code in Token Factory" (the Sandboxes product isn't named) | Rules §4 | See *Track fit* below | Nate | **Open**: fit to be reassessed |
 | 6 | A working demo or test-build URL | Rules §4 | A GitHub Release with the Windows zip, Linux deb and `SHA256SUMS` | Claude prepares; Nate publishes (NIV-16) | Pending |
 | 7 | A public open-source repository with setup instructions | Rules §4 | github.com/xXValhallaCoderXx/nivra-orchestrator (MIT) and its README | Claude | Repository public; setup instructions final at release |
@@ -35,8 +35,8 @@ execution or applying patches:
 4. Show scope and precedence: B's conventions win, and A's project-only records stay out of B.
 5. Edit, then delete, the preference, and show that the next request uses the fresh context.
 
-**How it uses NVIDIA and Nebius:** the explain workflow (NIV-6) calls an NVIDIA Nemotron model through Token Factory
-at runtime. The live proof is pending (#3, #4).
+**How it uses NVIDIA and Nebius:** the explain workflow (NIV-6, D22) calls an NVIDIA Nemotron model through Token
+Factory at runtime. Fixture A's live explanation is the recorded evidence (#3, #4).
 
 **Linked gaps**
 - Build and judge access: NIV-16.

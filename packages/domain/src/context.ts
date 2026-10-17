@@ -34,8 +34,15 @@ export const PreferenceSnapshot = z.strictObject({
 });
 export type PreferenceSnapshot = z.infer<typeof PreferenceSnapshot>;
 
-/** Sent with every `runs.start`, even when it holds no preferences: a run never guesses its context. */
-export const RunContext = z.strictObject({ preferences: PreferenceSnapshot });
+/**
+ * Sent with every `runs.start`, even when it holds no preferences: a run never guesses its context. `sharing` is the
+ * project's consent as the host held it when the run was asked for (D20, D22): without `modelContext`, the engine
+ * sends nothing derived from the repository to a model.
+ */
+export const RunContext = z.strictObject({
+  preferences: PreferenceSnapshot,
+  sharing: z.strictObject({ modelContext: z.boolean() }),
+});
 export type RunContext = z.infer<typeof RunContext>;
 
 /**
