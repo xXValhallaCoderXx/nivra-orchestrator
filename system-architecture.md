@@ -721,21 +721,21 @@ The integration tests in `pnpm verify` include:
 
 **Results against the final change set** (explain with evidence, D22):
 
-Run on 18 October 2026, 00:07–00:11 +08:00, against the working tree with every code change of the D22 change set in
-place: the fixes made after the live runs, and the corrections from the reviews of `ffe215c` and `200d5dc`. Only docs
-changed afterwards. Markdown is neither built nor tested.
+Run on 18 October 2026, 01:35–01:40 +08:00, against the working tree with every code change of the D22 change set in
+place: the fixes made after the live runs, and the corrections from the reviews of `ffe215c`, `200d5dc` and PR #1
+(`bb0e6e9`). Only docs changed afterwards. Markdown is neither built nor tested.
 
 | Check | Result |
 |---|---|
-| `pnpm verify` | Typecheck clean; tests 213/213 (domain 23, desktop 74, engine 116) |
-| `pnpm stage:runtime all` (run by `verify:windows`) | Staged afresh: `linux-x64` `c70fb91127ab8a60` (smoke-tested), `win-x64` `54048648cd7128c8` |
+| `pnpm verify` | Typecheck clean; tests 214/214 (domain 23, desktop 74, engine 117) |
+| `pnpm stage:runtime all` (run by `verify:windows`) | Staged afresh: `linux-x64` `389056556123ae0a` (smoke-tested), `win-x64` `0192afe8299cca96` |
 | `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 12 passed, 3 skipped: the explain tests that need the test endpoint switch, which a packaged app ignores |
 | `test:e2e` | 14 passed, 1 skipped: the test only a packaged app runs |
 | Real engine through `apps/engine/scripts/rpc.ts` | Explain with no key, and with consent off: each refused before any request. Explain against the stub: succeeded, 2 of 2 citations checked, route `loopback-test`, and the search hit kept in the context used. Hello: succeeded. Doctor: "Nebius Token Factory" by default, and a test endpoint with `--token-factory-url`. |
 | `pnpm verify:windows` | 17/17, on the runtimes above |
 | Live, with Nate's key (the Windows app, the WSL engine), before the three fixes | Fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage; 6 of 21 citations shown to the model. Fixture B, which is private, also ran. No preference had been confirmed, so the preference contrast is still to run. |
 | Live, after the fixes | Fixture A, default question: 76.3 s, 77,514 tokens in and 2,420 out over 11 calls; one refusal, then 13 of 13 citations shown. "Where is the login component?": 25.5 s, 6 calls; one refusal, then 4 of 4. The preference contrast ran on fixture B, which is private: its result is recorded in NIV-6, not here. |
-| `pnpm dev:win --no-launch`, then `test:windows` | 6/6 at 00:10 +08:00 on 18 October, including explaining on the WSL and the native engine. Earlier, Windows Smart App Control, in enforcement mode, refused to start the unsigned `Nivra.exe` (Code Integrity event 3077, at 17:03 and 17:04); Nate turned it off on this machine. One test helper was corrected: it no longer picks the already chosen project again, which the project select treats as clearing the choice. |
+| `pnpm dev:win --no-launch`, then `test:windows` | 6/6 at 01:39 +08:00 on 18 October, including explaining on the WSL and the native engine. Earlier, Windows Smart App Control, in enforcement mode, refused to start the unsigned `Nivra.exe` (Code Integrity event 3077, at 17:03 and 17:04); Nate turned it off on this machine. One test helper was corrected: it no longer picks the already chosen project again, which the project select treats as clearing the choice. |
 
 **Not yet run** (still pending):
 - the installed deb on a stock Ubuntu (an unpacked build test is not installation coverage);

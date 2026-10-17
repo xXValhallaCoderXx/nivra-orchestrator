@@ -284,6 +284,30 @@ describe("explain over stdio: failures, canaries and evidence (D22)", () => {
     }
   });
 
+  it("keeps provider error text out of every store and the log, even when it echoes the key, the question and the repository", async () => {
+    const repo = makeRepo();
+    const echo = `bad request for key ${KEY}: "${QUESTION_CANARY}" near ${CONTENT_CANARY}`;
+    // A model call: the model reads the file holding the content canary, then the provider fails, echoing everything.
+    const chat = await setup((_request, index) => (index === 0 ? toolCall("read_file", { path: "src/timer.ts" }, { id: "c0" }) : httpError(400, echo)));
+    const chatRun = await finished(chat.engine, (await explain(chat.engine, repo, `What is this? ${QUESTION_CANARY}`)).id);
+    // The model list: it fails before any model call, echoing the key.
+    const listing = await startStub({ modelsReply: httpError(500, `upstream broke for ${KEY}: ${QUESTION_CANARY}`) });
+    stubs.push(listing);
+    const listed = await engineAt(listing.url);
+    const listRun = await finished(listed.engine, (await explain(listed.engine, repo, `What is this? ${QUESTION_CANARY}`)).id);
+    assert.deepEqual([failureOf(chatRun), failureOf(listRun)], ["bad-request", "provider"]);
+    for (const { engine, home } of [chat, listed]) {
+      await engine.client.call("shutdown", {});
+      await engine.exited;
+      const files = readdirSync(home);
+      const holding = (needle: string, only: (file: string) => boolean = () => true) => files.filter((file) => only(file) && readFileSync(join(home, file)).includes(needle));
+      const mastra = (file: string) => file.startsWith("mastra.db");
+      assert.ok(holding(repo, mastra).length > 0, "the scan can see Mastra's records: the run's path is there");
+      assert.deepEqual([holding(KEY), holding(CONTENT_CANARY), holding(QUESTION_CANARY, mastra)], [[], [], []], `${files.join(", ")}: no key or repository text anywhere, and no question in Mastra's records`);
+      assert.deepEqual([engine.stderr().includes(KEY), engine.stderr().includes(QUESTION_CANARY), engine.stderr().includes(CONTENT_CANARY)], [false, false, false]);
+    }
+  });
+
   it("names an endpoint where nothing listens as a network failure", async () => {
     const repo = makeRepo();
     const closed = await startStub({});

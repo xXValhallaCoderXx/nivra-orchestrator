@@ -218,7 +218,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
             },
           });
         } catch (error) {
-          failed = error instanceof ModelFailure ? error : failure("internal", String(error));
+          failed = error instanceof ModelFailure ? error : failure("internal", error instanceof Error ? error.name : typeof error);
           // The request that failed is recorded once, as its own step: its own time, no usage, and why (D22). A failure
           // inside Nivra made no request, so it is the run's failure alone.
           const request = failed.failedStep;

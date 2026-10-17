@@ -118,7 +118,7 @@ export class InternalFailure {
 
   fail(error: unknown): void {
     if (this.#failure) return;
-    this.#failure = error instanceof ModelFailure ? error : new ModelFailure("internal", internalMessage(error));
+    this.#failure = error instanceof ModelFailure ? error : failure("internal", errorName(error));
     this.#controller.abort(this.#failure);
   }
 }
@@ -185,7 +185,8 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       } catch (error) {
         if (signal?.aborted) throw new ModelFailure("cancelled", "Cancelled.");
         if (timeout.aborted) throw new ModelFailure("timeout", `Token Factory didn't list its models within ${Math.round(timeoutMs / 1000)} s. Check the network on this target, then try again.`);
-        if (error instanceof TokenFactoryError) throw new ModelFailure(kindForStatus(error.status), error.message, error.status);
+        // The status names the failure; Token Factory's own words never enter it (they can quote the key or the request).
+        if (error instanceof TokenFactoryError) throw failure(kindForStatus(error.status), "", error.status);
         throw toModelFailure(error);
       }
       const contextLengths = new Map<string, number>();
@@ -449,12 +450,15 @@ const MESSAGES: Record<ModelFailureKind, (detail: string, status: number | null)
   timeout: (d) => `The model didn't answer in time${d ? ` (${d})` : ""}. Try again, or ask a narrower question.`,
   cancelled: () => "Cancelled.",
   malformed: (d) => `The model didn't give a usable answer${d ? ` (${d})` : ""}. Try again, or ask a narrower question.`,
-  internal: (d) => internalMessage(d),
+  internal: (d) => `Something inside Nivra failed${d ? ` (${d})` : ""}. Try again; if it keeps happening, report it with the engine log.`,
 };
 
-function internalMessage(error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return `Something inside Nivra failed: ${detail.slice(0, 300)}. Try again; if it keeps happening, report it with the engine log.`;
+/**
+ * An error that isn't one Nivra expects, named by its class only. Its own text can quote the provider, the model's output
+ * or the repository, and a failure's message is persisted (in Mastra's records too), so it never carries that text.
+ */
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name || "Error" : typeof error;
 }
 
 export function failure(kind: ModelFailureKind, detail = "", status: number | null = null, retryAfterSeconds: number | null = null): ModelFailure {
@@ -463,7 +467,8 @@ export function failure(kind: ModelFailureKind, detail = "", status: number | nu
 
 /**
  * Names what went wrong from the error's class and status, never its words, walking the `cause` chain: Mastra wraps
- * provider errors. `@ai-sdk/provider` isn't a dependency, so errors are recognised by name.
+ * provider errors. `@ai-sdk/provider` isn't a dependency, so errors are recognised by name. The message is Nivra's own:
+ * the provider's text can echo the key, the question or the repository, and a failure's message is persisted.
  */
 export function toModelFailure(error: unknown): ModelFailure {
   if (error instanceof ModelFailure) return error;
@@ -482,7 +487,7 @@ export function toModelFailure(error: unknown): ModelFailure {
         const seconds = wait === null ? null : Math.max(1, Math.ceil(wait));
         return failure("rate-limit", seconds === null ? "" : `${seconds} s`, 429, seconds);
       }
-      return failure(kindForStatus(e.statusCode), message, e.statusCode);
+      return failure(kindForStatus(e.statusCode), "", e.statusCode);
     }
     if (UNREADABLE.has(name)) return failure("bad-response", name.replace(/^AI_/, ""));
     if (typeof e.code === "string" && NETWORK_CODES.has(e.code)) return failure("network", e.code);
@@ -490,5 +495,5 @@ export function toModelFailure(error: unknown): ModelFailure {
     current = e.cause;
   }
   if (fetchFailed) return failure("network", "fetch failed");
-  return failure("internal", error instanceof Error ? error.message : String(error));
+  return failure("internal", errorName(error));
 }

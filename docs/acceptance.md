@@ -136,7 +136,11 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
   - a dropped connection and a refused one: `network`;
   - no accepted answer: `malformed`.
 
-  No key, and consent off, made no request at all. The engine's log never held the question. Each request is recorded
+  No key, and consent off, made no request at all. The engine's log never held the question.
+
+  A provider error that echoed the key, the question and repository text left none of them in Mastra's records,
+  including the WAL file, or in the log. Neither the key nor the repository text reached `nivra.db`, from a model call
+  or from the model list. Each request is recorded
   once: a first request that fails is one event, and a success followed by a failure is two. A cancel before any
   request, or between two, records none.
 - **Budget and time.**

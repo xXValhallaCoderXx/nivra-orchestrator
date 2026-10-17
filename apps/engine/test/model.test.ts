@@ -186,7 +186,8 @@ describe("ModelClient (D22)", () => {
     const failure = await call({ internal }).catch((error: unknown) => error);
     assert.ok(failure instanceof ModelFailure);
     assert.equal(failure.kind, "internal");
-    assert.match(failure.message, /the repository disappeared/);
+    // Named by its class, never its words: those can quote the repository, and a failure's message is persisted.
+    assert.deepEqual([/\(Error\)/.test(failure.message), failure.message.includes("the repository disappeared")], [true, false]);
   });
 
   it("prints nothing about a failed request, prompt included (Mastra's logger is silenced)", async () => {

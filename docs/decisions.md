@@ -555,6 +555,11 @@ It builds on D20's scope and D21's snapshot, and amends D21 for text the model w
 
   Each message says what happened and what to do. A 429 says when to try again, from `Retry-After` or the token limit's
   reset. Nothing retries by itself.
+
+  Messages are Nivra's own words, with the kind, the HTTP status and when to retry. A failure's message is persisted,
+  in Mastra's records too, and the provider's text can echo the key, the question or the repository. So that text
+  never enters one, from a model call or from the model list. An error Nivra doesn't expect is named by its class
+  only.
 - **Every model call is recorded**, failed ones too, as a `model.call` event: the elapsed time, tokens or `null`, the
   finish reason, and the kind when it failed. The kind is also in the `run.failed` data. Each request is recorded
   once: a request that fails is one event, with its own step number and its own time. A failure inside Nivra made no
@@ -700,8 +705,9 @@ The key saw 28 models, five of them NVIDIA's.
   test endpoint. The app passes it only from `--nivra-token-factory-url`, and only when unpackaged.
 - **Downgrades.**
   - An older engine refuses a v2 home, saying why: it already refused any newer schema.
-  - An older app reads the newer `nivra.json`, which is still version 1, and drops `sharing` on its next write. Consent
-    goes back to off.
+  - An older app can't read the newer `nivra.json`: its project records are strict, so `sharing` fails validation. It
+    keeps the file aside as `nivra.json.unreadable-<time>` and starts with no projects and no preferences, so it never
+    runs a project with consent on. The original stays in that file; nothing restores it automatically.
 
 **Why.**
 - The hackathon requires a runtime Token Factory call on an NVIDIA open model (D19). Explaining with evidence is D20's

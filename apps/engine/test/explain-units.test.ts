@@ -171,7 +171,8 @@ describe("explain tools (D22)", () => {
     const result = await call("read_file", { path: "a.ts" });
     assert.match(String(result["refused"]), /internal problem/);
     assert.equal(internal.failure?.kind, "internal");
-    assert.match(internal.failure?.message ?? "", /disk vanished/);
+    // Named by its class: an error's own words can quote the repository, and a failure's message is persisted.
+    assert.deepEqual([/TypeError/.test(internal.failure?.message ?? ""), (internal.failure?.message ?? "").includes("disk vanished")], [true, false]);
   });
 
   it("sends a refusal back to the model and records it", async () => {

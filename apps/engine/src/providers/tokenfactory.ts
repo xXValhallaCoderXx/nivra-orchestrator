@@ -34,7 +34,8 @@ const ModelsResponse = z.object({
 export class TokenFactoryError extends Error {
   readonly status: number;
 
-  constructor(status: number, detail: string) {
+  /** `detail` is Nivra's own words, used for a reply that couldn't be read; Token Factory's own text is never kept. */
+  constructor(status: number, detail = "") {
     super(statusMessage(status, detail));
     this.name = "TokenFactoryError";
     this.status = status;
@@ -47,7 +48,7 @@ function statusMessage(status: number, detail: string): string {
   }
   if (status === 429) return "Token Factory is rate-limiting this key (HTTP 429). Wait a minute, then try again.";
   if (status < 400) return detail;
-  return `Token Factory answered HTTP ${status}${detail ? `: ${detail}` : "."}`;
+  return `Token Factory answered HTTP ${status}.`;
 }
 
 export interface RequestOptions {
@@ -67,8 +68,9 @@ export async function listModels(apiKey: string, options: RequestOptions = {}): 
     ...(options.signal ? { signal: options.signal } : {}),
   });
   if (!response.ok) {
-    const detail = (await response.text().catch(() => "")).trim().slice(0, 300);
-    throw new TokenFactoryError(response.status, detail);
+    // The body is Token Factory's text, which can echo the key: it is discarded, and the status names the failure.
+    await response.body?.cancel().catch(() => undefined);
+    throw new TokenFactoryError(response.status);
   }
   const body = ModelsResponse.safeParse(await response.json().catch(() => undefined));
   // An unreadable answer keeps its status, so it is named as one (bad-response), never as Nivra failing.
