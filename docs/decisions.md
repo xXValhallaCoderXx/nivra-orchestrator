@@ -559,6 +559,10 @@ It builds on D20's scope and D21's snapshot, and amends D21 for text the model w
   finish reason, and the kind when it failed. The kind is also in the `run.failed` data. Each request is recorded
   once: a request that fails is one event, with its own step number and its own time. A failure inside Nivra made no
   request, so it is the run's failure alone.
+- **Requests are counted as the provider is called.** The model is resolved with Mastra's own `resolveModelConfig`
+  and watched through a proxy, which sees each request start and end. A cancel before the first request, or between
+  two, records none. A request that was answered before a cancel cut off its tools is recorded once, with the usage
+  it reported.
 - **A tool call whose input fails the tool's schema** never runs: Mastra tells the model what to fix. The run records
   it as a refused `tool.called` event, with each field path and rule, never the input. Live, Nemotron 3 Super sent a
   forced answer's lists as strings. With a single answer step the run failed; with three, the next attempt was
@@ -667,6 +671,9 @@ The key saw 28 models, five of them NVIDIA's.
 - **Removing a project withdraws its consent first,** the same way. Its epoch moves and stays moved, so a submission
   in flight stops itself, and its runs are cancelled. When one can't be stopped, the project stays in the list, and the
   person is told why.
+  - No explanation can start while a project is being removed.
+  - A late answer to `runs.start` is accepted only while the project still exists, still has consent, and isn't being
+    removed.
 - **The engine refuses** with `sharing-refused` or `no-key` before any request, judging from the run's own context.
 
 **Preference text in what the model writes (amends D21)**
@@ -714,8 +721,9 @@ The key saw 28 models, five of them NVIDIA's.
 
 **Consequences.**
 - Every model call goes through `ModelClient`.
-- `__registerPrimitives` and `watch` are Mastra internals. The stderr canaries and the engine tests catch an upgrade
-  that changes them.
+- `__registerPrimitives` and `watch` are Mastra internals, and so is the way Mastra calls its models, which the request
+  count relies on. The stderr canaries and the stub tests catch an upgrade that changes them. Mastra's models keep
+  private fields, so the proxy runs every method on the model itself.
 - Mastra pauses 10 s after a step when `x-ratelimit-remaining-tokens` is below 2,000. The provider check reports when a
   key is that close.
 - Adding a plain-text fallback, or forcing on another model, needs a new policy entry backed by a check.

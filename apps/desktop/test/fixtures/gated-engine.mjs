@@ -1,6 +1,7 @@
 // Stands in for an engine whose answer to runs.start is held until the test releases it (a `release` file in its
-// home), so a test can act while a submission is out. It writes every method it is asked for to `calls.log`, and turns
-// runs.cancel down while a `fail-cancel` file exists, as an engine that can't stop a run would.
+// home), so a test can act while a submission is out. It writes every method it is asked for to `calls.log`, turns
+// runs.cancel down while a `fail-cancel` file exists, as an engine that can't stop a run would, and holds its answer to
+// runs.cancel while a `hold-cancel` file exists, until a `release-cancel` file appears.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -32,8 +33,18 @@ process.stdin.on("data", (chunk) => {
         send({ id: request.id, result: summary("running") });
       }, 25);
     } else if (request.method === "runs.cancel") {
-      if (existsSync(join(home, "fail-cancel"))) send({ id: request.id, error: { code: -32000, message: "the run couldn't be stopped" } });
-      else send({ id: request.id, result: { status: "cancelled", wasTerminal: false } });
+      const answer = () => {
+        if (existsSync(join(home, "fail-cancel"))) send({ id: request.id, error: { code: -32000, message: "the run couldn't be stopped" } });
+        else send({ id: request.id, result: { status: "cancelled", wasTerminal: false } });
+      };
+      if (!existsSync(join(home, "hold-cancel"))) answer();
+      else {
+        const held = setInterval(() => {
+          if (!existsSync(join(home, "release-cancel"))) return;
+          clearInterval(held);
+          answer();
+        }, 25);
+      }
     } else if (request.method === "shutdown") {
       send({ id: request.id, result: { ok: true } });
       setTimeout(() => process.exit(0), 10);

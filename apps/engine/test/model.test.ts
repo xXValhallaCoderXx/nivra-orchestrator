@@ -124,6 +124,52 @@ describe("ModelClient (D22)", () => {
     assert.equal(await kindOf(call({ signal: cancel.signal })), "cancelled");
   });
 
+  it("records exactly the requests the provider received, whether cancelled before, during or between them", async () => {
+    const outcome = (error: unknown) => {
+      assert.ok(error instanceof ModelFailure);
+      return [error.kind, error.steps.length, error.failedStep?.stepNumber ?? null];
+    };
+    // Before any request: none is made, and none is recorded.
+    const before = new AbortController();
+    before.abort();
+    const idle = harness(async () => answer("never"));
+    const early = await idle.call({ signal: before.signal }).catch((e: unknown) => e);
+    assert.deepEqual([idle.model.doGenerateCalls.length, ...outcome(early)], [0, "cancelled", 0, null]);
+
+    // During a request: that request is the one that failed.
+    const during = new AbortController();
+    const slow = harness(async () => {
+      await sleep(300);
+      return answer("late");
+    });
+    setTimeout(() => during.abort(), 50);
+    const mid = await slow.call({ signal: during.signal }).catch((e: unknown) => e);
+    assert.deepEqual([slow.model.doGenerateCalls.length, ...outcome(mid)], [1, "cancelled", 1, 0]);
+
+    // Between requests, once the first was reported: one request, one step, nothing failed at the provider.
+    const between = new AbortController();
+    const tools = { probe: createTool({ id: "probe", description: "Probe", inputSchema: z.object({}), execute: async () => ({ ok: true }) }) };
+    let n = 0;
+    const two = harness(async () => (n++ === 0 ? useTool("probe", {}) : answer("never")), tools);
+    const afterStep = await two.call({ signal: between.signal, onStep: () => between.abort() }).catch((e: unknown) => e);
+    assert.deepEqual([two.model.doGenerateCalls.length, ...outcome(afterStep)], [1, "cancelled", 1, null]);
+
+    // Between requests, while the first one's tool ran: that request is recorded once, with the usage it reported.
+    const inTool = new AbortController();
+    const aborting = {
+      probe: createTool({ id: "probe", description: "Probe", inputSchema: z.object({}), execute: async () => {
+        inTool.abort();
+        await sleep(50);
+        return { ok: true };
+      } }),
+    };
+    let m = 0;
+    const seen: Array<[number, number | null]> = [];
+    const three = harness(async () => (m++ === 0 ? useTool("probe", {}) : answer("never")), aborting);
+    const cut = await three.call({ signal: inTool.signal, onStep: (step) => seen.push([step.stepNumber, step.inputTokens]) }).catch((e: unknown) => e);
+    assert.deepEqual([three.model.doGenerateCalls.length, ...outcome(cut), seen], [1, "cancelled", 1, null, [[0, 10]]]);
+  });
+
   it("keeps an internal failure a failure, never a cancellation", async () => {
     const internal = new InternalFailure();
     const broken = createTool({

@@ -465,6 +465,26 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     assert.deepEqual([host.projects().length, calls()], [0, ["runs.start", "runs.cancel"]]);
   });
 
+  it("refuses a new explanation once removal has begun, while it waits for the project's runs to stop", async () => {
+    const { host, ids, root } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    const home = join(root, "local home");
+    const calls = () => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter((method) => method.startsWith("runs.")) : []);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "release"), "");
+    await host.setSharing(ids[0]!, true);
+    await host.open(ids[0]!);
+    await online(host, "local");
+    await host.startExplain(ids[0]!, "");
+    // Removal stops the first run, and the engine holds its answer: removal is waiting.
+    writeFileSync(join(home, "hold-cancel"), "");
+    const removing = host.removeProject(ids[0]!);
+    await waitFor(() => calls().includes("runs.cancel"), "removal to ask for the run to stop");
+    await assert.rejects(host.startExplain(ids[0]!, ""), /being removed, so it can't be explained/);
+    writeFileSync(join(home, "release-cancel"), "");
+    await removing;
+    assert.deepEqual([host.projects().length, calls()], [0, ["runs.start", "runs.cancel"]]);
+  });
+
   it("keeps a project whose explanation can't be stopped, and says why", async () => {
     const { host, ids, root } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
     const home = join(root, "local home");

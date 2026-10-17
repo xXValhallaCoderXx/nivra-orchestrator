@@ -1,4 +1,5 @@
 import { Agent } from "@mastra/core/agent";
+import { resolveModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
 import { isMastraTimeoutError } from "@mastra/core/loop";
 import type { ModelEndpoint, ModelFailureKind } from "@nivra/domain";
@@ -169,6 +170,8 @@ export interface ModelClientOptions {
 
 export function createModelClient(options: ModelClientOptions): ModelClient {
   const endpoint = options.endpoint ?? TOKEN_FACTORY;
+  // Each agent's provider requests, as they start and end, for the call in progress (see `countAttempts`).
+  const slots = new WeakMap<object, AttemptSlot>();
   return {
     endpoint,
 
@@ -191,11 +194,14 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
     },
 
     agent(spec) {
+      const configured = options.model?.(spec.modelId) ?? { providerId: "nebius", modelId: spec.modelId, url: endpoint.url, apiKey: options.apiKey };
+      const slot: AttemptSlot = { listener: null };
       const agent = new Agent({
         id: spec.id,
         name: spec.name,
         instructions: spec.instructions,
-        model: (options.model?.(spec.modelId) ?? { providerId: "nebius", modelId: spec.modelId, url: endpoint.url, apiKey: options.apiKey }) as never,
+        // Resolved as the Agent would resolve it, then watched, so every provider request is known when it starts.
+        model: (async () => countAttempts((await resolveModelConfig(configured as never)) as object, slot)) as never,
         tools: spec.tools as never,
         maxRetries: 0,
         errorProcessorDefaults: false,
@@ -203,6 +209,7 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       });
       // Internal API (D11): reaches the loop's logger too, which __setLogger alone does not. Covered by stderr canaries.
       agent.__registerPrimitives({ logger: noopLogger });
+      slots.set(agent, slot);
       return agent as unknown as ModelAgent;
     },
 
@@ -214,13 +221,40 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       let mark = started;
       // Mastra reports a request that failed as a step of its own; it is held back and reported with the failure.
       let errorStep: StepRecord | null = null;
+      // Every provider request this call started, in order: one per step.
+      const attempts: Attempt[] = [];
+      const slot = slots.get(agent as object);
+      if (slot) {
+        slot.listener = (event) => {
+          if (event.type === "start") {
+            attempts.push({ startedAt: performance.now(), endedAt: null, result: undefined });
+            return;
+          }
+          const last = attempts.at(-1);
+          if (last) Object.assign(last, { endedAt: performance.now(), result: event.result });
+        };
+      }
       const failed = (failure: ModelFailure): ModelFailure => {
         const now = performance.now();
         failure.elapsedMs = Math.round(now - started);
-        if (failure.kind !== "internal") {
-          failure.failedStep = errorStep ?? emptyStep(steps.length, Math.round(now - mark));
-          steps.push(failure.failedStep);
+        // The request Mastra hadn't reported when the call stopped, if one had started: none when a cancel came before
+        // the first request or between two.
+        const unreported = attempts.length > steps.length ? attempts[steps.length]! : null;
+        if (errorStep) {
+          failure.failedStep = errorStep;
+        } else if (unreported?.result !== undefined) {
+          // It was answered, and its tools were cut off: a request that happened, reported with what it said.
+          const record = stepRecord(steps.length, unreported.result, Math.round((unreported.endedAt ?? now) - unreported.startedAt));
+          steps.push(record);
+          try {
+            call.onStep?.(record);
+          } catch {
+            // The failure being reported matters more than the step's record.
+          }
+        } else if (unreported && failure.kind !== "internal") {
+          failure.failedStep = emptyStep(steps.length, Math.round(now - unreported.startedAt));
         }
+        if (failure.failedStep) steps.push(failure.failedStep);
         failure.steps = steps;
         return failure;
       };
@@ -254,6 +288,8 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
         if (internal.failure) throw failed(internal.failure);
         if (call.signal?.aborted) throw failed(new ModelFailure("cancelled", "Cancelled."));
         throw failed(toModelFailure(error));
+      } finally {
+        if (slot) slot.listener = null;
       }
       if (internal.failure) throw failed(internal.failure);
       if (output.finishReason === "aborted" || call.signal?.aborted) throw failed(new ModelFailure("cancelled", "Cancelled."));
@@ -281,10 +317,14 @@ function stepRecord(stepNumber: number, raw: unknown, elapsedMs: number): StepRe
     response?: { modelId?: unknown; headers?: unknown };
     toolCalls?: unknown;
     toolResults?: unknown;
+    content?: unknown;
   };
   const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : null);
   // Mastra's steps carry tool calls either flat or as chunks, depending on the callback.
-  const calls = Array.isArray(step.toolCalls) ? (step.toolCalls as Array<{ toolName?: unknown; payload?: { toolName?: unknown } }>) : [];
+  // A provider's own result (a request reported here rather than by Mastra) lists its tool calls in `content`.
+  type Call = { type?: unknown; toolName?: unknown; payload?: { toolName?: unknown } };
+  const parts = Array.isArray(step.content) ? (step.content as Call[]).filter((part) => part?.type === "tool-call") : [];
+  const calls = Array.isArray(step.toolCalls) ? (step.toolCalls as Call[]) : parts;
   const toolNames = calls.map((call) => call.payload?.toolName ?? call.toolName).filter((name): name is string => typeof name === "string");
   const results = Array.isArray(step.toolResults) ? (step.toolResults as Array<{ toolName?: unknown; result?: unknown; payload?: { toolName?: unknown; result?: unknown } }>) : [];
   const rejectedTools = results.flatMap((entry) => {
@@ -316,6 +356,35 @@ function schemaProblems(result: unknown): string[] | null {
   if (value.error !== true || !("validationErrors" in value) || typeof value.message !== "string") return null;
   const listed = value.message.split("\n\nProvided arguments:")[0]!.split("\n").filter((line) => line.startsWith("- "));
   return listed.slice(0, 10).map((line) => line.slice(2, 202));
+}
+
+type AttemptSlot = { listener: ((event: { type: "start" } | { type: "end"; result: unknown }) => void) | null };
+type Attempt = { startedAt: number; endedAt: number | null; result: unknown };
+
+/**
+ * The model, with each provider request reported to the call in progress as it starts and ends, so a failure can be
+ * matched to the request it cut off, and a cancel before or between requests records none (D22). Methods run on the
+ * model itself, so its private state is untouched.
+ */
+function countAttempts<T extends object>(model: T, slot: AttemptSlot): T {
+  return new Proxy(model, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property);
+      if (typeof value !== "function") return value;
+      // Every method runs on the model itself: Mastra's models keep private fields a proxy can't reach.
+      if (property !== "doGenerate" && property !== "doStream") return (value as (...a: unknown[]) => unknown).bind(target);
+      return async (...args: unknown[]) => {
+        slot.listener?.({ type: "start" });
+        let result: unknown;
+        try {
+          result = await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+          return result;
+        } finally {
+          slot.listener?.({ type: "end", result });
+        }
+      };
+    },
+  });
 }
 
 /** A request Mastra didn't report as a step, because it was cut off: its time, and nothing it didn't say. */

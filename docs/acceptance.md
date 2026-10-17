@@ -125,7 +125,8 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
     before sending anything. Withdrawn after its first model call, it was cancelled, and no further request was made.
   - Removing the project withdraws consent too. Removed while its explanation was being submitted, the run was
     cancelled as soon as the engine answered. Removed while it ran, it was cancelled, and no further request was made.
-    When the run couldn't be stopped, the project stayed in the list, with the reason.
+    When the run couldn't be stopped, the project stayed in the list, with the reason. Once removal had begun, a new
+    explanation was refused.
 - **Failures.** Each was named by kind, after one request:
   - 401 and 403: `auth`;
   - 404: `model-unavailable`;
@@ -136,7 +137,8 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
   - no accepted answer: `malformed`.
 
   No key, and consent off, made no request at all. The engine's log never held the question. Each request is recorded
-  once: a first request that fails is one event, and a success followed by a failure is two.
+  once: a first request that fails is one event, and a success followed by a failure is two. A cancel before any
+  request, or between two, records none.
 - **Budget and time.**
   - With a small context length, the answer was forced early.
   - Per-call and whole-run deadlines end as `timeout`, never as a quiet stop. This is shown in-process with short
