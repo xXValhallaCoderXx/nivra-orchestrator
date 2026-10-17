@@ -19,12 +19,32 @@ run; a skipped check is reported as skipped.
 The whole sequence is read-only: no scaffold, no repository writes, no code execution. New-app creation is deferred
 (D20).
 
-**Fixtures: user-supplied repository A/B, references pending.**
-- Nate supplies both repositories during development. Their identities, revisions and contrasting conventions are
-  recorded here when they arrive.
-- Choosing a repository grants no model-context consent, no cloud-upload consent and no permission to publish its
-  contents.
-- Every acceptance result that depends on the fixtures stays pending until they are supplied and tested.
+**Fixtures: user-supplied repositories A and B**, recorded 17 October 2026 (NIV-2). Both are real projects of Nate's,
+used where they are and never copied into this repository.
+
+| | Repository A | Repository B |
+|---|---|---|
+| Identity | [`valhalla-fitness`](https://github.com/xXValhallaCoderXx/valhalla-fitness) (public) | A private repository of Nate's. Its name and location are recorded in NIV-2, not here. |
+| Revision | `develop` at `29c3a40a23dc2fb56774e1c3054339a4419349f0` (2026-09-19) | `develop` at `7a69f1f2a62ce71152dbde3e6b018aaa57b491fc` (2026-10-04) |
+| Shape | A pnpm monorepo: a web app, an Expo app and four shared packages, about 1,270 tracked files | One Expo / React Native app in feature folders, about 730 tracked files |
+| Component file names | PascalCase (423 of the 441 `.tsx` files outside routes and tests) | kebab-case (all 86) |
+| Tests | Vitest, in `tests/` folders, plus Playwright end-to-end tests for the web app | Jest (`jest-expo`), in `__tests__/` folders |
+| UI styling | Mantine 9 with Tailwind, in the web app | NativeWind classes and `StyleSheet` |
+
+Not a contrast, since both have them: TypeScript, Expo Router, Supabase, `AGENTS.md` and `CLAUDE.md`, and far more named
+exports than default ones.
+
+- **How the precedence tests use them.**
+  - A personal preference that matches A's habits loses to B's own conventions inside B. For example: component files in
+    PascalCase, tests with Vitest.
+  - A preference recorded only for A, such as its Mantine web UI, never reaches B.
+- **The checkouts are used as they are.** Both had uncommitted files when they were recorded: A, one modified file and two
+  untracked items; B, one untracked file. So evidence cites the content actually read, not only the commit.
+- **Consent.** Choosing a repository grants no model-context consent, no cloud-upload consent and no permission to
+  publish its contents.
+- **B is private.** Its contents stay out of public samples. Whether it may appear in the public demonstration video is
+  Nate's decision (NIV-16, NIV-17).
+- Every acceptance result that depends on the fixtures stays pending until it has been run against them.
 
 ## Proof-of-concept acceptance suite (immediate milestone)
 
@@ -33,7 +53,7 @@ Run on Windows with a WSL engine and on Linux. Native Windows results are report
 | Test | Required result | Status |
 |---|---|---|
 | Evidence | Explanations cite `path:line`. Each citation is checked against the content actually read, and a valid location is never presented as proof that the explanation is right. | Pending (NIV-6, NIV-9) |
-| Repository conventions vs personal defaults | Repository B's conventions win over a confirmed personal default. | Pending (fixtures) |
+| Repository conventions vs personal defaults | Repository B's conventions win over a confirmed personal default. | Pending (NIV-6, NIV-11; fixtures recorded) |
 | Explicit override | A task-specific choice wins without changing the stored profile. | Pending |
 | Context isolation | Project A's project-only records and files never reach project B's requests. | Preferences: passing for the run's context (D21; see below). Files: pending (NIV-6). |
 | Changed or deleted preference | The next request uses the edited preference, or none after deletion. | Passing for the run's context, including after an app restart (D21; see below). Pending where a model request uses them (NIV-6, NIV-11). |

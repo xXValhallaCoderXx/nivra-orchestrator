@@ -581,7 +581,8 @@ flowchart LR
   - Precedence: explicit task choices first, then the repository's own conventions (with evidence), then confirmed
     personal defaults.
   - Project A's records never reach project B.
-- **Fixtures.** User-supplied repositories A and B; references pending (D20).
+- **Fixtures.** User-supplied repositories A and B (D20), recorded with their revisions and contrasting conventions in
+  `docs/acceptance.md`. Repository B is private, so only its stack and revision appear there.
 - **Deferred (later milestone):** new-app creation, with its plan preview, scaffold, proposal, approval and result view.
 
 ---
@@ -686,7 +687,7 @@ neither built nor tested.
 | Area | Status | Linear |
 |---|---|---|
 | Desktop host, targets, protocol, engine core, runs, engine recovery, packaging, local checks | **Built**: the foundation, committed in `2556052` | NIV-3 (Done), NIV-5 |
-| Scope, data sharing, out-of-scope list (D20); fixtures | Decided. The fixtures are user-supplied, with references pending. | NIV-2 |
+| Scope, data sharing, out-of-scope list (D20); fixtures | Decided. The two user-supplied fixtures are recorded. | NIV-2 |
 | Preference store, and the scoped handoff to engines | **Built** (D21); the whole-distribution interruption check passed | NIV-5, reused by NIV-10 |
 | Explain with evidence, model client, repository map, the run lifecycle it needs | Planned (immediate milestone) | NIV-6, NIV-9, NIV-8 (read-only slice) |
 | Managing preferences, context assembly and isolation | Planned (immediate milestone) | NIV-10, NIV-11 |
