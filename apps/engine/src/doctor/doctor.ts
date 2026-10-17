@@ -1,4 +1,4 @@
-import type { DoctorCheck, DoctorReport } from "@nivra/domain";
+import type { DoctorCheck, DoctorReport, ModelEndpoint } from "@nivra/domain";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
 import { findOnPath } from "../exec/find-executable.ts";
@@ -14,6 +14,8 @@ export interface DoctorDeps {
   findGit: () => string | null;
   backend: ExecutionBackend;
   vault: SecretVault;
+  /** Where this engine sends model requests (D22). */
+  endpoint: { url: string; kind: ModelEndpoint };
 }
 
 /** What works on this target, and what to do about what doesn't. Checks only detect; nothing is changed. */
@@ -21,6 +23,15 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [
     { id: "engine", status: "ok", title: "Engine", detail: `Nivra engine ${ENGINE_VERSION} on ${deps.platform}/${deps.arch}, Node ${process.versions.node}`, fix: null },
     { id: "home", status: "ok", title: "Engine data", detail: `Stored in ${deps.home}`, fix: null },
+    deps.endpoint.kind === "token-factory"
+      ? { id: "models", status: "ok", title: "Model endpoint", detail: `Nebius Token Factory (${deps.endpoint.url})`, fix: null }
+      : {
+          id: "models",
+          status: "warn",
+          title: "Model endpoint",
+          detail: `A test endpoint on this machine (${deps.endpoint.url}), not Token Factory`,
+          fix: "This engine was started for testing. Start Nivra normally to use Token Factory.",
+        },
   ];
 
   const git = deps.findGit();

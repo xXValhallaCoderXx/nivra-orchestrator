@@ -12,17 +12,30 @@ export const PREFERRED_NEMOTRON = ["nvidia/nemotron-3-super-120b-a12b", "nvidia/
 export interface ModelEntry {
   id: string;
   ownedBy: string | null;
+  /** The context length, under whichever of the usual names `/models` gives it; null when it doesn't. */
+  contextLength: number | null;
 }
 
+const Length = z.number().int().positive().nullish();
 const ModelsResponse = z.object({
-  data: z.array(z.object({ id: z.string().min(1), owned_by: z.string().nullish() })),
+  data: z.array(
+    z.object({
+      id: z.string().min(1),
+      owned_by: z.string().nullish(),
+      context_length: Length.catch(null),
+      context_window: Length.catch(null),
+      max_model_len: Length.catch(null),
+      max_context_length: Length.catch(null),
+    }),
+  ),
 });
 
 /** Token Factory refused or failed a request. The message says what happened and what to do. */
 export class TokenFactoryError extends Error {
   readonly status: number;
 
-  constructor(status: number, detail: string) {
+  /** `detail` is Nivra's own words, used for a reply that couldn't be read; Token Factory's own text is never kept. */
+  constructor(status: number, detail = "") {
     super(statusMessage(status, detail));
     this.name = "TokenFactoryError";
     this.status = status;
@@ -34,7 +47,8 @@ function statusMessage(status: number, detail: string): string {
     return `Token Factory refused the API key (HTTP ${status}). Check the key, or create a new one in the Token Factory console.`;
   }
   if (status === 429) return "Token Factory is rate-limiting this key (HTTP 429). Wait a minute, then try again.";
-  return `Token Factory answered HTTP ${status}${detail ? `: ${detail}` : "."}`;
+  if (status < 400) return detail;
+  return `Token Factory answered HTTP ${status}.`;
 }
 
 export interface RequestOptions {
@@ -43,20 +57,29 @@ export interface RequestOptions {
   baseUrl?: string;
 }
 
-/** Lists the models the key can use. The key travels only in the Authorization header. */
+/**
+ * Lists the models the key can use, with `verbose=true`, which Token Factory documents as adding each model's
+ * `context_length`. The key travels only in the Authorization header.
+ */
 export async function listModels(apiKey: string, options: RequestOptions = {}): Promise<ModelEntry[]> {
   const doFetch = options.fetch ?? fetch;
-  const response = await doFetch(`${options.baseUrl ?? TOKEN_FACTORY_BASE_URL}/models`, {
+  const response = await doFetch(`${options.baseUrl ?? TOKEN_FACTORY_BASE_URL}/models?verbose=true`, {
     headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
     ...(options.signal ? { signal: options.signal } : {}),
   });
   if (!response.ok) {
-    const detail = (await response.text().catch(() => "")).trim().slice(0, 300);
-    throw new TokenFactoryError(response.status, detail);
+    // The body is Token Factory's text, which can echo the key: it is discarded, and the status names the failure.
+    await response.body?.cancel().catch(() => undefined);
+    throw new TokenFactoryError(response.status);
   }
-  const body = ModelsResponse.safeParse(await response.json());
-  if (!body.success) throw new Error("Token Factory answered /models with a shape Nivra does not recognise.");
-  return body.data.data.map((model) => ({ id: model.id, ownedBy: model.owned_by ?? null }));
+  const body = ModelsResponse.safeParse(await response.json().catch(() => undefined));
+  // An unreadable answer keeps its status, so it is named as one (bad-response), never as Nivra failing.
+  if (!body.success) throw new TokenFactoryError(response.status, "Token Factory answered /models with a shape Nivra does not recognise. Try again in a few minutes.");
+  return body.data.data.map((model) => ({
+    id: model.id,
+    ownedBy: model.owned_by ?? null,
+    contextLength: model.context_length ?? model.context_window ?? model.max_model_len ?? model.max_context_length ?? null,
+  }));
 }
 
 /** NVIDIA's open models, the ones the hackathon requires. */

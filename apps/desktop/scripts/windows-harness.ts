@@ -116,6 +116,7 @@ async function main(): Promise<void> {
         { id: randomUUID(), statement: "Keep tests next to the code they test", scope: "project", revision: 1 },
       ],
     },
+    sharing: { modelContext: false },
   };
   const runHello = async (supervisor: EngineSupervisor, repoPath: string, holdMs = 0) =>
     supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath, holdMs }, context });

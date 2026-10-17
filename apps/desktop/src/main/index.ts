@@ -125,6 +125,9 @@ function start(): void {
   handle(IPC.editPreference, z.tuple([z.uuid(), z.string().max(2_000)]), (_event, id, statement) => host.editPreference(id, statement));
   handle(IPC.deletePreference, z.tuple([z.uuid()]), (_event, id) => host.deletePreference(id));
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));
+  handle(IPC.setSharing, z.tuple([z.uuid(), z.boolean()]), (_event, id, modelContext) => host.setSharing(id, modelContext));
+  handle(IPC.startExplain, z.tuple([z.uuid(), z.string().max(2_000)]), (_event, id, question) => host.startExplain(id, question));
+  handle(IPC.runResult, z.tuple([RunId]), (_event, id) => host.runResult(id));
   handle(IPC.runEvents, z.tuple([RunId, z.number().int().nonnegative()]), (_event, id, after) => host.runEvents(id, after));
   handle(IPC.cancelRun, z.tuple([RunId]), (_event, id) => host.cancelRun(id));
   handle(IPC.getSettings, none, () => settings());
@@ -239,9 +242,12 @@ function withoutHash(url: string): string {
  * Linux tarball streamed into WSL. Development: the engine from source on the Node that started pnpm, and a staged
  * tarball for WSL when there is one (`pnpm stage:runtime linux-x64`).
  */
-function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLayout; home: string }; wslRuntime: WslRuntime | null } {
+function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLayout; home: string; extraArgs?: string[] }; wslRuntime: WslRuntime | null } {
   // Tests and side-by-side development give the local engine its own home; userData follows Chromium's --user-data-dir.
   const homeSwitch = app.commandLine.getSwitchValue("nivra-engine-home") || null;
+  // Tests only: a loopback stub of Token Factory, honoured only when unpackaged (D22); the engine refuses non-loopback.
+  const stubSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-token-factory-url") || null;
+  const extraArgs = stubSwitch ? { extraArgs: ["--token-factory-url", stubSwitch] } : {};
   const hostTarget = `${platform === "win32" ? "win" : platform === "darwin" ? "mac" : "linux"}-${process.arch}`;
   const readHash = (path: string): string | null => {
     try {
@@ -255,7 +261,7 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
     const root = join(process.resourcesPath, "runtime");
     const hash = platform === "win32" ? readHash(join(root, "runtime-linux-x64.json")) : null;
     const home = platform === "win32" ? join(process.env["LOCALAPPDATA"] ?? join(homedir(), "AppData", "Local"), "Nivra", "engine") : join(homedir(), ".nivra");
-    return { local: { runtime: runtimeIn(join(root, hostTarget), platform), home: homeSwitch ?? home }, wslRuntime: hash ? { tarball: join(root, "runtime-linux-x64.tar.gz"), contentHash: hash } : null };
+    return { local: { runtime: runtimeIn(join(root, hostTarget), platform), home: homeSwitch ?? home, ...extraArgs }, wslRuntime: hash ? { tarball: join(root, "runtime-linux-x64.tar.gz"), contentHash: hash } : null };
   }
   const appPath = app.getAppPath();
   const stage = join(appPath, "build", "stage");
@@ -264,6 +270,7 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
     local: {
       runtime: { node: process.env["npm_node_execpath"] ?? process.env["NODE"] ?? "node", entry: join(appPath, "..", "engine", "src", "main.mjs"), runtimeHash: null },
       home: homeSwitch ?? join(homedir(), ".nivra-dev"),
+      ...extraArgs,
     },
     wslRuntime: hash ? { tarball: join(stage, "runtime-linux-x64.tar.gz"), contentHash: hash } : null,
   };

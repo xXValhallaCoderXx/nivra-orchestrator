@@ -14,10 +14,15 @@ pnpm install --frozen-lockfile
 pnpm verify                 # typecheck + all tests (what CI runs)
 pnpm typecheck
 pnpm test
-pnpm probe:tokenfactory     # live: list Token Factory models, then one Nemotron tool call
+pnpm probe:tokenfactory     # live: list Token Factory models, one Nemotron tool call, then the tool-choice probes
 pnpm rpc doctor             # start a real engine on ~/.nivra-dev, send one request, print the answer
 pnpm rpc runs.start '{"workflowId":"hello","input":{"repoPath":"/path/to/repo","holdMs":0}}' --follow
+pnpm rpc runs.start '{"workflowId":"explain","input":{"repoPath":"/path/to/repo","question":""},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true}}}' --follow
+pnpm rpc runs.result '{"runId":"<id>"}'
 ```
+
+The explain example sends the repository's excerpts to Token Factory when `NEBIUS_API_KEY` is set, and uses tokens.
+Without a key it is refused before any request.
 
 The desktop app:
 
@@ -34,6 +39,12 @@ pnpm package:win            # Windows zip, from WSL (an NSIS installer needs Win
 Main is an ES module and the preload is CommonJS (a sandboxed preload must be). Two command-line switches isolate a
 run: Chromium's `--user-data-dir=<dir>` for the host's records, and `--nivra-engine-home=<dir>` for the local engine's
 data. Tests always pass both.
+
+A third switch, `--nivra-token-factory-url=<loopback url>`, points the local engine at a stub instead of Token Factory
+(D22). `test:e2e` uses it with the stub in `apps/engine/test/stub-token-factory.ts`, so no real model is called.
+- Only an unpackaged app honours it; a packaged app ignores it.
+- The engine accepts only `127.0.0.1`, `[::1]` or `localhost`.
+- Doctor then reports a test endpoint, and each run records its route as `loopback-test`.
 
 Cross-platform checks (D14; there is no CI):
 
@@ -69,12 +80,15 @@ wsl.exe --manage NivraTest --set-default-user nivra
 wsl.exe --unregister NivraTest   # deletes the distribution and its disk
 ```
 
-`pnpm rpc` takes `--home <dir>` to use another engine home. It passes `NEBIUS_API_KEY`, when set, in `initialize`, as
-the app will. A `runs.start` without a `context` gets an empty preference snapshot from `pnpm rpc`. The app always
-sends its own (D21).
+`pnpm rpc` options:
+- `--home <dir>` uses another engine home.
+- `--token-factory-url <loopback url>` passes the engine its test endpoint.
+- It passes `NEBIUS_API_KEY`, when set, in `initialize`, as the app does.
+- A `runs.start` without a `context` gets an empty preference snapshot, with sharing off. An explain run sent that way
+  is refused before any request; pass `"sharing":{"modelContext":true}` to allow it. The app always sends its own
+  context (D21, D22).
 
-`probe:tokenfactory` options (passed after `--`): `--model <id>` to pick the Nemotron model, `--list-only` to skip the
-model call.
+`probe:tokenfactory` takes `--model <id>`, passed after `--`, to pick the Nemotron model.
 
 ## Where things will live
 

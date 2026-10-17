@@ -1,6 +1,8 @@
 import { basename, join } from "node:path";
 import {
   ErrorCode,
+  ExplainInput,
+  ExplainResult,
   HelloInput,
   LineSplitter,
   PROTOCOL_VERSION,
@@ -19,9 +21,10 @@ import { findGit } from "./exec/find-executable.ts";
 import { createLocalBackend } from "./exec/local.ts";
 import { launcherWrite, ProtocolOutput, type RawWrite } from "./rpc/output.ts";
 import { RpcFailure, RpcServer } from "./rpc/server.ts";
-import { isNvidiaModel, listModels, pickNemotron, TokenFactoryError } from "./providers/tokenfactory.ts";
+import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
+import { combinedMask } from "./secrets/patterns.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
 
@@ -33,8 +36,17 @@ export class RuntimeBrokenError extends Error {
   }
 }
 
-const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map([
+const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, WorkflowEntry>([
   ["hello", { id: "hello", title: (input: unknown) => `Hello · ${basename(HelloInput.parse(input).repoPath) || "repository"}` }],
+  [
+    "explain",
+    {
+      id: "explain",
+      title: (input: unknown) => `Explain · ${basename(ExplainInput.parse(input).repoPath) || "repository"}`,
+      // Mastra stores step data as it is: it gets the path, never the question (D22).
+      mastraInput: (input: unknown) => ({ repoPath: ExplainInput.parse(input).repoPath }),
+    },
+  ],
 ]);
 
 export interface EngineOptions extends EngineArgs {
@@ -65,21 +77,25 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const database = new Database(join(home, "nivra.db"), { exclusive: true });
   database.open();
 
-  let mastraModules: [typeof import("@mastra/core/mastra"), typeof import("@mastra/libsql"), typeof import("./workflows/hello.ts")];
+  let mastraModules: [typeof import("@mastra/core/mastra"), typeof import("@mastra/libsql"), typeof import("./workflows/hello.ts"), typeof import("./workflows/explain.ts")];
   try {
-    mastraModules = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts")]);
+    mastraModules = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts")]);
   } catch (error) {
     database.close();
     throw new RuntimeBrokenError("workflow runtime", error);
   }
-  const [{ Mastra }, { LibSQLStore }, { createHelloWorkflow, HELLO_WORKFLOW_ID }] = mastraModules;
+  const [{ Mastra }, { LibSQLStore }, { createHelloWorkflow, HELLO_WORKFLOW_ID }, { createExplainWorkflow, EXPLAIN_WORKFLOW_ID }] = mastraModules;
 
   const vault = new SecretVault();
-  const store = new RunStore({ database, mask: vault.mask });
+  // Known key values and credential shapes are masked in everything stored (D8, D22).
+  const mask = combinedMask(vault.mask);
+  const store = new RunStore({ database, mask: (text) => mask(text) });
   const backend = createLocalBackend({ baseEnv: env });
   const toolEnv = childEnv(env, {}, { stripWindowsPaths: process.platform === "linux" && insideWsl(env) });
   const locateGit = () => findGit({ env: toolEnv });
   const runtimeHash = readRuntimeHash(options.moduleUrl);
+  // Token Factory, or a test stub on this machine when the loopback-only argument names one (D22).
+  const endpoint = options.tokenFactoryUrl ? { url: options.tokenFactoryUrl, kind: "loopback-test" as const } : { url: TOKEN_FACTORY_BASE_URL, kind: "token-factory" as const };
   const info = (): EngineInfo => ({
     protocolVersion: PROTOCOL_VERSION,
     engineVersion: ENGINE_VERSION,
@@ -105,6 +121,25 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
           output: (runId, stepId, message, data) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
           command: (runId, stepId, phase, message, data) =>
             void store.append(runId, { type: phase === "started" ? "command.started" : "command.finished", stepId, message, data: data ?? null }),
+        },
+      }),
+      [EXPLAIN_WORKFLOW_ID]: createExplainWorkflow({
+        backend,
+        platform: process.platform,
+        findGit: locateGit,
+        context: (runId) => scheduler.contextOf(runId),
+        question: (runId) => {
+          const input = ExplainInput.safeParse(store.summary(runId)?.input);
+          return input.success ? input.data.question : "";
+        },
+        apiKey: () => vault.get("NEBIUS_API_KEY"),
+        endpoint,
+        mask,
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        saveResult: (runId, result) => store.saveArtifact(runId, "explain", JSON.stringify(result)),
+        recorder: {
+          output: (runId, stepId, message, data) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
+          event: (runId, type, stepId, message, data) => void store.append(runId, { type, stepId, message, data }),
         },
       }),
     },
@@ -161,26 +196,23 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         return { ok: true as const };
       },
       ping: () => ({ instanceId }),
-      doctor: () => runDoctor({ home, platform: process.platform, arch: process.arch, toolEnv, findGit: locateGit, backend, vault }),
+      doctor: () => runDoctor({ home, platform: process.platform, arch: process.arch, toolEnv, findGit: locateGit, backend, vault, endpoint }),
       "providers.check": async ({ model }) => {
         // B7: Token Factory reached from wherever this engine runs, with the key held in memory (D8).
         const key = vault.get("NEBIUS_API_KEY");
         if (!key) throw new RpcFailure(ErrorCode.InvalidParams, "No Nebius key is set. Add it in Settings, then check again.");
-        let ids: string[];
+        const { runProviderCheck } = await import("./providers/tool-call.ts");
         try {
-          ids = (await listModels(key, { signal: AbortSignal.timeout(30_000) })).map((entry) => entry.id);
+          const result = await runProviderCheck({ apiKey: key, endpoint, ...(model ? { model } : {}) });
+          return {
+            ...result,
+            call: result.call ? { ...result.call, answer: vault.mask(result.call.answer) } : null,
+            problem: result.problem === null ? null : vault.mask(result.problem),
+          };
         } catch (error) {
-          throw new RpcFailure(ErrorCode.InternalError, error instanceof TokenFactoryError ? error.message : `Token Factory couldn't be reached from this engine: ${error instanceof Error ? error.message : String(error)}`);
-        }
-        const models = { total: ids.length, nvidia: ids.filter(isNvidiaModel) };
-        const chosen = model ?? pickNemotron(ids);
-        if (!chosen) return { models, call: null, problem: "This key can't use any NVIDIA model." };
-        try {
-          const { nemotronToolCall } = await import("./providers/tool-call.ts");
-          const call = await nemotronToolCall(key, chosen, AbortSignal.timeout(120_000));
-          return { models, call, problem: call.toolCalled ? null : "The model answered without calling the tool, so tool calling on it is unproven." };
-        } catch (error) {
-          return { models, call: null, problem: vault.mask(`The call to ${chosen} failed: ${error instanceof Error ? error.message : String(error)}`) };
+          // Only listing the models throws: everything after it is reported in the result.
+          const kind = error instanceof Error && "kind" in error ? String(error.kind) : "internal";
+          throw new RpcFailure(ErrorCode.InternalError, vault.mask(error instanceof Error ? error.message : String(error)), { kind });
         }
       },
       "runs.start": (params) => store.summary(scheduler.submit(params)) ?? notFound("just created"),
@@ -188,6 +220,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       "runs.list": ({ limit, cursor }) => store.list({ limit, cursor }),
       "runs.events": ({ runId, after, limit }) => store.events(runId, after, limit) ?? notFound(runId),
       "runs.cancel": ({ runId }) => scheduler.cancel(runId) ?? notFound(runId),
+      "runs.result": ({ runId }) => {
+        if (!store.status(runId)) notFound(runId);
+        const stored = store.artifact(runId, "explain");
+        return stored === null ? null : ExplainResult.parse(JSON.parse(stored));
+      },
     },
   });
 
@@ -242,7 +279,7 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
   try {
     const { DatabaseSync } = await import("node:sqlite");
     new DatabaseSync(":memory:").close();
-    const [, { LibSQLStore }] = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts")]);
+    const [, { LibSQLStore }] = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts")]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {
     await fatal(output, log, "runtime-broken", new RuntimeBrokenError("runtime", error).message);

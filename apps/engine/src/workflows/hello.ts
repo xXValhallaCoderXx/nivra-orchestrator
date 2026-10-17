@@ -1,9 +1,10 @@
 import { realpath, stat } from "node:fs/promises";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { HelloInput, preferencesDigest, type JsonObject, type RunContext } from "@nivra/domain";
+import { HelloInput, type JsonObject, type RunContext } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecResult, ExecutionBackend } from "../exec/backend.ts";
+import { describePreferences } from "./preferences-record.ts";
 
 export const HELLO_WORKFLOW_ID = "hello";
 
@@ -91,15 +92,8 @@ export function createHelloWorkflow(deps: HelloDeps) {
     execute: async ({ inputData, runId }) => {
       const given = deps.context(runId);
       if (!given) throw new Error("This run's context is missing, so it stopped. Start it again.");
-      const { revision, records } = given.preferences;
-      const digest = await preferencesDigest(records);
-      const what = records.length === 0 ? "No confirmed preferences" : `${records.length} confirmed ${records.length === 1 ? "preference" : "preferences"}`;
-      recorder.output(runId, "context", `${what} from the app (revision ${revision}), fingerprint ${digest.slice(0, 12)}`, {
-        revision,
-        count: records.length,
-        records: records.map((record) => ({ id: record.id, scope: record.scope, revision: record.revision })),
-        digest,
-      });
+      const { message, data } = await describePreferences(given.preferences);
+      recorder.output(runId, "context", message, data);
       return inputData;
     },
   });

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { MAX_PREFERENCES } from "@nivra/domain";
-import { HostStore, type HostData } from "../src/main/host-store.ts";
+import { HostStore, NO_SHARING, type HostData } from "../src/main/host-store.ts";
 import { addPreference, deletePreference, editPreference, removeProjectPreferences, snapshotFor } from "../src/main/preferences.ts";
 
 const dirs: string[] = [];
@@ -14,7 +14,7 @@ after(() => {
 
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
-const project = (id: string, nativePath: string) => ({ id, targetId: "local", nativePath, label: nativePath.split("/").at(-1)!, addedAt: "2026-10-17T10:00:00.000Z" });
+const project = (id: string, nativePath: string) => ({ id, targetId: "local", nativePath, label: nativePath.split("/").at(-1)!, addedAt: "2026-10-17T10:00:00.000Z", sharing: NO_SHARING });
 const empty = (): HostData => ({ version: 1, projects: [project(A, "/repos/a"), project(B, "/repos/b")], preferences: [], preferencesRevision: 0 });
 const now = new Date("2026-10-17T12:00:00.000Z");
 const later = new Date("2026-10-17T13:00:00.000Z");

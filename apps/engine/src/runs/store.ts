@@ -10,6 +10,8 @@ import {
   RunSummary,
   type JsonObject,
   type RunEventType,
+  type RunRoute,
+  type RunUsage,
   type WorkflowId,
 } from "@nivra/domain";
 import { Database, num, str, strOrNull, type Row } from "../db/database.ts";
@@ -20,6 +22,8 @@ import { Database, num, str, strOrNull, type Row } from "../db/database.ts";
  */
 
 const MAX_DATA_BYTES = 8_192;
+/** The largest stored result: an explanation is far smaller, and a larger one is refused rather than cut. */
+export const MAX_ARTIFACT_BYTES = 256_000;
 const MAX_MESSAGE_CHARS = 2_000;
 const PREVIEW_CHARS = 2_000;
 
@@ -138,6 +142,29 @@ export class RunStore {
     return interrupted;
   }
 
+  /** What a run cost and where its model requests went (D22). Each field is set as it becomes known. */
+  setMeta(runId: string, meta: { durationMs?: number; usage?: RunUsage; route?: RunRoute }): void {
+    const db = this.#database.open();
+    if (meta.durationMs !== undefined) db.prepare("UPDATE runs SET duration_ms = ? WHERE id = ?").run(Math.max(0, Math.round(meta.durationMs)), runId);
+    if (meta.usage !== undefined) db.prepare("UPDATE runs SET usage = ? WHERE id = ?").run(JSON.stringify(meta.usage), runId);
+    if (meta.route !== undefined) db.prepare("UPDATE runs SET route = ? WHERE id = ?").run(JSON.stringify(meta.route), runId);
+  }
+
+  /** Stores a run's result, masked. A result over `MAX_ARTIFACT_BYTES` is refused: a cut one would no longer parse. */
+  saveArtifact(runId: string, kind: string, content: string): void {
+    const masked = this.#mask(content);
+    if (Buffer.byteLength(masked) > MAX_ARTIFACT_BYTES) throw new Error(`The run's ${kind} result is ${Buffer.byteLength(masked)} bytes, over the ${MAX_ARTIFACT_BYTES} Nivra stores.`);
+    this.#database
+      .open()
+      .prepare("INSERT INTO artifacts (run_id, kind, content, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (run_id, kind) DO UPDATE SET content = excluded.content, created_at = excluded.created_at")
+      .run(runId, kind, masked, this.#iso());
+  }
+
+  artifact(runId: string, kind: string): string | null {
+    const row = this.#database.open().prepare("SELECT content FROM artifacts WHERE run_id = ? AND kind = ?").get(runId, kind);
+    return row ? str(row["content"]) : null;
+  }
+
   status(runId: string): RunStatus | null {
     const row = this.#database.open().prepare("SELECT status FROM runs WHERE id = ?").get(runId);
     return row ? RunStatus.parse(row["status"]) : null;
@@ -247,5 +274,8 @@ function toSummary(row: Row): RunSummary {
     startedAt: strOrNull(row["started_at"]),
     finishedAt: strOrNull(row["finished_at"]),
     error: strOrNull(row["error"]),
+    durationMs: row["duration_ms"] === null || row["duration_ms"] === undefined ? null : num(row["duration_ms"]),
+    usage: row["usage"] ? JSON.parse(str(row["usage"])) : null,
+    route: row["route"] ? JSON.parse(str(row["route"])) : null,
   });
 }

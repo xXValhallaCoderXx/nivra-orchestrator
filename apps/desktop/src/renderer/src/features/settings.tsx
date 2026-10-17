@@ -89,13 +89,33 @@ export function Settings({ projectId, online, targetLabel }: { projectId: string
       </Group>
       {check && (
         <Stack gap={4} data-testid="tokenfactory-result">
+          {check.endpoint === "loopback-test" && (
+            <Text size="sm" c="var(--nivra-warning)">
+              This engine sends model requests to a test endpoint on this machine, not Token Factory.
+            </Text>
+          )}
           <Text size="sm">
             {check.models.total} models for this key; NVIDIA: {check.models.nvidia.length ? check.models.nvidia.join(", ") : "none"}.
           </Text>
           {check.call && (
             <Text size="sm">
-              <Code fz="xs">{check.call.model}</Code> {check.call.toolCalled ? "called the tool and answered" : "answered without the tool"} in {check.call.elapsedMs} ms
-              {check.call.inputTokens !== null ? ` (${check.call.inputTokens} in, ${check.call.outputTokens ?? "?"} out tokens)` : ""}: “{check.call.answer}”
+              <Code fz="xs">{check.call.model}</Code> {check.call.toolCalled ? "called the tool and answered" : "answered without the tool"} in {check.call.elapsedMs} ms: “
+              {check.call.answer}”
+            </Text>
+          )}
+          {check.call && (
+            <Text size="sm" c="var(--nivra-text-2)" data-testid="tokenfactory-findings">
+              {check.call.inputTokens !== null && check.call.outputTokens !== null
+                ? `Usage reported: ${check.call.inputTokens} in, ${check.call.outputTokens} out tokens.`
+                : "Usage not reported."}{" "}
+              Context length: {check.models.contextLength !== null ? `${check.models.contextLength.toLocaleString()} tokens` : "not reported"}.
+              {check.probes
+                ? ` Required tool choice: ${check.probes.requiredToolChoice}. Forced choice between two tools: ${check.probes.forcedToolChoice}. Answer schema, forced: ${check.probes.answerSchema}.`
+                : ""}{" "}
+              Rate limit:{" "}
+              {check.call.rateLimit.remainingTokens !== null ? `${check.call.rateLimit.remainingTokens.toLocaleString()} tokens left` : "remaining tokens not reported"}
+              {check.call.rateLimit.resetTokensSeconds !== null ? `, resets in ${check.call.rateLimit.resetTokensSeconds} s` : ""}
+              {check.call.rateLimit.belowPauseThreshold ? " (low enough that each step will pause 10 s)" : ""}.
             </Text>
           )}
           {check.problem && (

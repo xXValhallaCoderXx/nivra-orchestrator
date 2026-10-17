@@ -7,7 +7,7 @@ export interface TargetSources {
   platform: EnginePlatform;
   env?: NodeJS.ProcessEnv;
   /** The runtime for the host's own OS, and the engine home it uses. */
-  local: { runtime: RuntimeLayout; home: string };
+  local: { runtime: RuntimeLayout; home: string; extraArgs?: readonly string[] };
   /** The Linux runtime streamed into WSL distributions (Windows hosts only). */
   wslRuntime: WslRuntime | null;
   discover?: () => Promise<WslDiscovery>;
@@ -31,7 +31,13 @@ export interface TargetFactory {
 
 export function targetFactory(sources: TargetSources): TargetFactory {
   const env = sources.env ? { env: sources.env } : {};
-  const local = new LocalTarget({ platform: sources.platform, runtime: sources.local.runtime, home: sources.local.home, ...env });
+  const local = new LocalTarget({
+    platform: sources.platform,
+    runtime: sources.local.runtime,
+    home: sources.local.home,
+    ...env,
+    ...(sources.local.extraArgs ? { extraArgs: sources.local.extraArgs } : {}),
+  });
   return {
     local,
     async discoverWsl() {

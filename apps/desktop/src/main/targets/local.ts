@@ -33,6 +33,8 @@ export interface LocalTargetOptions {
   home: string;
   env?: NodeJS.ProcessEnv;
   exists?: (path: string) => boolean;
+  /** Tests only: more engine arguments, such as a loopback stub of Token Factory (D22). */
+  extraArgs?: readonly string[];
 }
 
 /** The host's own OS as a target: the engine runs on the Node shipped with the app (D5). */
@@ -65,7 +67,7 @@ export class LocalTarget implements ExecutionTarget {
     mkdirSync(home, { recursive: true });
     return {
       command: runtime.node,
-      args: engineArgs(runtime.entry, home, request),
+      args: [...engineArgs(runtime.entry, home, request), ...(this.#options.extraArgs ?? [])],
       cwd: home,
       env: engineEnv(this.#options.env ?? process.env, platform),
       home,

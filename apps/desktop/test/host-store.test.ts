@@ -3,14 +3,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { HostStore, migrateHostData, type HostData } from "../src/main/host-store.ts";
+import { HostStore, migrateHostData, NO_SHARING, type HostData } from "../src/main/host-store.ts";
 
 const dirs: string[] = [];
 after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-const record = (id: string, targetId: string, nativePath: string) => ({ id, targetId, nativePath, label: nativePath.split(/[\\/]/).at(-1)!, addedAt: "2026-10-16T10:00:00.000Z" });
+const record = (id: string, targetId: string, nativePath: string) => ({ id, targetId, nativePath, label: nativePath.split(/[\\/]/).at(-1)!, addedAt: "2026-10-16T10:00:00.000Z", sharing: NO_SHARING });
 const hostData = (projects: HostData["projects"]): HostData => ({ version: 1, projects, preferences: [], preferencesRevision: 0 });
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";

@@ -1,4 +1,4 @@
-import { isTerminal, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { isTerminal, type JsonObject, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
 import type { NewEvent, RunStore } from "./store.ts";
 
 /**
@@ -32,6 +32,11 @@ export interface SchedulerLog {
 export interface WorkflowEntry {
   id: WorkflowId;
   title(input: unknown): string;
+  /**
+   * What Mastra is handed as the workflow's input, which it stores as it is: ids and paths only (D22). The whole input
+   * stays in the run store, masked, where steps read it. Defaults to the whole input.
+   */
+  mastraInput?(input: unknown): unknown;
 }
 
 export interface SchedulerOptions {
@@ -46,9 +51,20 @@ interface Slot {
   cancelRequested: boolean;
   run: RunHandle | null;
   done: Promise<void>;
+  /** When the run started, on the monotonic clock. */
+  startedAt: number;
 }
 
 type Settled = { status: Extract<RunStatus, "succeeded" | "failed" | "cancelled">; event: NewEvent; error: string | null };
+
+/** A failure's kind (D22), when the error carries one, wherever Mastra wrapped it. */
+function failureData(error: unknown): JsonObject | null {
+  for (let current = error, depth = 0; current && typeof current === "object" && depth < 6; current = (current as { cause?: unknown }).cause, depth++) {
+    const { kind, retryAfterSeconds } = current as { kind?: unknown; retryAfterSeconds?: unknown };
+    if (typeof kind === "string") return { kind, ...(typeof retryAfterSeconds === "number" ? { retryAfterSeconds } : {}) };
+  }
+  return null;
+}
 
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : typeof error === "object" && error && "message" in error ? String(error.message) : String(error);
@@ -69,7 +85,8 @@ export function settleOutcome(outcome: unknown, cancelRequested: boolean, cancel
         : result.status === "suspended"
           ? "Suspended runs are not supported yet"
           : `Run ended with status "${String(result.status)}"`;
-  return { status: "failed", event: { type: "run.failed", message: error }, error };
+  const data = result.status === "failed" ? failureData(result.error) : null;
+  return { status: "failed", event: { type: "run.failed", message: error, ...(data ? { data } : {}) }, error };
 }
 
 export class RunScheduler {
@@ -168,7 +185,7 @@ export class RunScheduler {
       const runId = this.#store.nextQueued();
       if (!runId) return;
       if (!this.#store.transition(runId, "running", { type: "run.started", message: "Started", instanceId: this.#instanceId })) return;
-      const slot: Slot = { cancelRequested: false, run: null, done: Promise.resolve() };
+      const slot: Slot = { cancelRequested: false, run: null, done: Promise.resolve(), startedAt: performance.now() };
       this.#slots.set(runId, slot);
       slot.done = this.#execute(runId, slot).catch((error: unknown) => this.#log.error(`Run ${runId} could not be recorded: ${errorMessage(error)}`));
     }
@@ -187,12 +204,13 @@ export class RunScheduler {
       unwatch = handle.watch((event) => this.#onWatch(runId, slot, event));
       settled = slot.cancelRequested
         ? settleOutcome({ status: "canceled" }, true, cancelMessage())
-        : settleOutcome(await handle.start({ inputData: run.input }), slot.cancelRequested, cancelMessage());
+        : settleOutcome(await handle.start({ inputData: this.#workflows.get(run.workflowId)?.mastraInput?.(run.input) ?? run.input }), slot.cancelRequested, cancelMessage());
     } catch (error) {
       settled = slot.cancelRequested ? settleOutcome({ status: "canceled" }, true, cancelMessage()) : settleOutcome({ status: "failed", error }, false);
     }
     try {
       unwatch();
+      this.#store.setMeta(runId, { durationMs: performance.now() - slot.startedAt });
       this.#store.transition(runId, settled.status, { ...settled.event, error: settled.error });
     } finally {
       this.#slots.delete(runId);

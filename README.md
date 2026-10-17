@@ -3,9 +3,10 @@
 A desktop workspace for engineers. It explains a repository with evidence, and remembers the engineer's confirmed
 preferences across projects without letting them override a project's own conventions.
 
-> **Status:** the cross-platform foundation is built and verified: Windows with a WSL or native engine, and Linux. The
-> AI features are next, starting with the read-only milestone below. Built for the Nebius × NVIDIA Global AI Hackathon.
-> Sections marked *planned* describe work that isn't built yet.
+> **Status:** the cross-platform foundation is built and verified: Windows with a WSL or native engine, and Linux.
+> Explaining a repository with evidence is built, tested offline, and has run live on NVIDIA Nemotron through Nebius
+> Token Factory. Built for the Nebius × NVIDIA Global AI Hackathon. Sections marked *planned* describe work that isn't
+> built yet.
 
 ## What it does
 
@@ -15,27 +16,32 @@ The target demonstration for the current milestone is read-only:
 > project without overriding that project's own conventions, and that editing or deleting it changes what happens
 > next."
 
-- *Planned:* repository explanations that cite the files and lines they rest on.
+- **Built:** repository explanations that cite the files and lines they rest on.
+  - Each citation is checked against the lines the model was actually shown, and is labelled as just that, never as
+    proof that the explanation is right.
+  - An explanation is labelled with the commit checked out when it started, and says when files changed during it.
 - **Built:** preferences you confirm, kept by the app on this computer.
   - Personal ones apply to every project; a project's own apply only to it.
   - Each run gets a snapshot of the ones that apply when it starts, so an edit or a deletion reaches the next run.
-  - Nothing uses them yet: the explanation workflow that will is planned.
-- *Planned:* a project's own conventions taking precedence over personal preferences, and suggestions drawn from a
-  repository that only you can confirm.
-- *Planned:* per-project consent before any repository content is sent to a model.
+  - Explanations report where a repository's conventions differ from them, and the repository wins.
+- **Built:** per-project consent before any repository content is sent to a model, off by default. Turning it off
+  stops that project's explanations.
+- *Planned:* overrides and full precedence between a task's own choices, a project's conventions and personal
+  preferences, and suggestions drawn from a repository that only you can confirm.
 - *Deferred to a later milestone:* new-app creation and coding work inside a sandbox.
 
 ## How it uses NVIDIA and Nebius
 
-- *Planned:* model calls use **NVIDIA Nemotron** models through **Nebius Token Factory** (OpenAI-compatible API at
-  `https://api.tokenfactory.nebius.com/v1`).
+- **Built:** explanations call **NVIDIA Nemotron** (Nemotron 3 Super by default) through **Nebius Token Factory**
+  (OpenAI-compatible API at `https://api.tokenfactory.nebius.com/v1`). Nemotron reads the repository only through
+  fixed, read-only tools that Nivra runs; it never runs anything itself.
 - *Planned:* coding work runs in a sandbox. Nemotron only proposes actions; the engine carries them out:
   - a local Docker or Podman container by default;
   - **Nebius Token Factory Sandboxes** as a cloud option (in beta; access requested);
   - **NVIDIA OpenShell** as an optional, stricter local sandbox.
   
-  Only the `Local` backend exists today. It provides no isolation and runs only the built-in hello check and Doctor's
-  git check.
+  Only the `Local` backend exists today. It provides no isolation and runs only the built-in hello check and git
+  (for Doctor and for reading a repository's tracked files).
 
 ## Platforms
 
@@ -52,7 +58,9 @@ keeps that engine.
 ## Install a test build
 
 *Planned:* installers will be attached to the repository's GitHub Releases. The Windows installer is not code-signed
-during the hackathon: Windows SmartScreen asks once — choose **More info → Run anyway**.
+during the hackathon: Windows SmartScreen asks once — choose **More info → Run anyway**. On a PC where Windows Smart
+App Control is on, Windows refuses to start an unsigned app, with no way to run it anyway; the Linux build is not
+affected.
 
 ## Build from source
 
@@ -69,7 +77,7 @@ pnpm package:win            # Windows zip, built from WSL
 On Windows, Nivra installs its own engine runtime into a WSL distribution (under `~/.nivra`) the first time you add a
 folder from it; it does not need Node in WSL.
 
-To check Token Factory access (lists the models, then makes one Nemotron tool call):
+To check Token Factory access (lists the models, makes one Nemotron tool call, then checks tool choice):
 
 ```bash
 NEBIUS_API_KEY=... pnpm probe:tokenfactory

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RunRoute, RunUsage } from "./models.ts";
 
 /** Stable application statuses for any run, independent of a workflow's own stages (from Hird's run model). */
 export const RunStatus = z.enum(["queued", "running", "waiting_for_approval", "succeeded", "failed", "cancelled"]);
@@ -41,6 +42,8 @@ export const RunEventType = z.enum([
   "step.output",
   "command.started",
   "command.finished",
+  "model.call",
+  "tool.called",
 ]);
 export type RunEventType = z.infer<typeof RunEventType>;
 
@@ -59,7 +62,7 @@ export const RunEvent = z.strictObject({
 });
 export type RunEvent = z.infer<typeof RunEvent>;
 
-export const WorkflowId = z.enum(["hello"]);
+export const WorkflowId = z.enum(["hello", "explain"]);
 export type WorkflowId = z.infer<typeof WorkflowId>;
 
 /**
@@ -72,6 +75,17 @@ export const HelloInput = z.strictObject({
 });
 export type HelloInput = z.infer<typeof HelloInput>;
 
+/**
+ * Explain a repository with evidence (NIV-6, NIV-9). The question is stored with the run, masked, but never handed to
+ * Mastra, which stores step data as it is (D22): its steps get only the path.
+ */
+export const ExplainInput = z.strictObject({
+  repoPath: z.string().min(1).max(4096),
+  /** Empty asks for the default: the repository's stack, structure and conventions. */
+  question: z.string().max(2_000).default(""),
+});
+export type ExplainInput = z.infer<typeof ExplainInput>;
+
 export const RunSummary = z.strictObject({
   id: z.uuid(),
   workflowId: WorkflowId,
@@ -82,6 +96,10 @@ export const RunSummary = z.strictObject({
   startedAt: z.iso.datetime().nullable(),
   finishedAt: z.iso.datetime().nullable(),
   error: z.string().nullable(),
+  /** Measured with a monotonic clock while the run was going; null until it ends. */
+  durationMs: z.number().int().nonnegative().nullable(),
+  usage: RunUsage.nullable(),
+  route: RunRoute.nullable(),
 });
 export type RunSummary = z.infer<typeof RunSummary>;
 

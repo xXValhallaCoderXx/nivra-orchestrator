@@ -32,4 +32,8 @@ describe("engine source rules", () => {
   it("exits only from the launcher, after the last reply is written (D4)", () => {
     assert.deepEqual(offenders(/process\.exit\(/, ["main.mjs"]), []);
   });
+
+  it("builds model agents in one place, where retries are off and the logger is silenced (D22)", () => {
+    assert.deepEqual(offenders(/new Agent\(/, ["providers/model.ts"]), []);
+  });
 });

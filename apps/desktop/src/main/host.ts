@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type { DoctorReport, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
+import type { DoctorReport, ExplainResult, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
 import type { AddProjectResult, EngineView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
-import { migrateHostData, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
+import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
 import { addPreference, deletePreference, editPreference, removeProjectPreferences, snapshotFor, type NewPreference } from "./preferences.ts";
 import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
@@ -51,6 +51,12 @@ export class Host {
   /** The engine of every run started this session, so a run's calls never reach another engine. */
   readonly #runs = new Map<string, string>();
   readonly #notices = new Map<string, string>();
+  /** Raised on every change to a project's sharing, so a run started under old consent can be caught (D22). */
+  readonly #sharingEpochs = new Map<string, number>();
+  /** Each project's explain runs this session, so turning sharing off can cancel them. */
+  readonly #explainRuns = new Map<string, Set<string>>();
+  /** Projects being removed: no explanation may start for them, and a late answer to one that did is not accepted. */
+  readonly #removing = new Set<string>();
   #wsl: WslTargets | null = null;
   #wslChecked = false;
   #discovering: Promise<WslTargets | null> | null = null;
@@ -129,10 +135,70 @@ export class Host {
     const engine = await this.#ensure(project.targetId);
     // Main mints the request id, so a retry never starts a second run (from Hird). The snapshot is taken now, from the
     // canonical store, so the run gets the preferences as they are when it is asked for (D21).
-    const context = { preferences: snapshotFor(this.#options.store.data, project.id) };
+    const context = { preferences: snapshotFor(this.#options.store.data, project.id), sharing: { modelContext: project.sharing.modelContext } };
     const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: project.nativePath, holdMs }, context });
     this.#runs.set(run.id, project.targetId);
     return run;
+  }
+
+  /**
+   * Explains the project's repository with evidence (NIV-6, NIV-9) on its own engine. Refused while the project
+   * doesn't allow sharing (D20). An engine can take a while to start, so this waits for a start in progress, then
+   * checks consent again immediately before submitting; a run submitted while sharing was being turned off is
+   * cancelled at once (D22).
+   */
+  async startExplain(projectId: string, question: string): Promise<RunSummary> {
+    const project = this.#project(projectId);
+    if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be explained.");
+    if (!project.sharing.modelContext) throw new Error("This project doesn't allow sending its content to Token Factory. Allow sharing for it, then explain again.");
+    const epoch = this.#epochOf(projectId);
+    const engine = await this.#ensure(project.targetId);
+    if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
+    const current = this.#project(projectId);
+    if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be explained.");
+    if (!current.sharing.modelContext || this.#epochOf(projectId) !== epoch) throw new Error("Sharing for this project was turned off, so the run wasn't started.");
+    const context = { preferences: snapshotFor(this.#options.store.data, current.id), sharing: { modelContext: true } };
+    const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "explain", input: { repoPath: current.nativePath, question }, context });
+    this.#runs.set(run.id, current.targetId);
+    // A late answer is accepted only while nothing about the project's consent has changed since it was checked.
+    const now = this.#options.store.data.projects.find((p) => p.id === projectId);
+    if (now?.sharing.modelContext && !this.#removing.has(projectId) && this.#epochOf(projectId) === epoch) {
+      const runs = this.#explainRuns.get(projectId) ?? new Set<string>();
+      runs.add(run.id);
+      this.#explainRuns.set(projectId, runs);
+      return run;
+    }
+    // Sharing was turned off, or the project removed, while the request was out: the run was submitted under consent
+    // that has since been withdrawn, so it stops now.
+    const removed = !now || this.#removing.has(projectId);
+    const what = removed ? "The project was removed" : "Sharing for this project was turned off";
+    await this.cancelRun(run.id).catch((error: unknown) => {
+      throw new Error(`${what} while the run was starting, and Nivra couldn't stop it (${error instanceof Error ? error.message : String(error)}). Restart the project's engine to stop it.`);
+    });
+    if (removed) throw new Error("The project was removed while its explanation was starting, so the run was stopped.");
+    return run;
+  }
+
+  /** An explain run's summary (model, time, tokens) and its stored result, from the engine that ran it. */
+  async runResult(runId: string): Promise<{ summary: RunSummary; result: ExplainResult | null }> {
+    const engine = this.#runEngine(runId);
+    const [summary, result] = await Promise.all([engine.supervisor.call("runs.get", { runId }), engine.supervisor.call("runs.result", { runId })]);
+    return { summary, result };
+  }
+
+  /**
+   * Turns sharing for a project on or off (D20). Turning it off raises the project's epoch, which an explain start in
+   * progress checks, and cancels its queued and running explain runs: a model call in progress is aborted, and no
+   * further request is made. A run that couldn't be stopped is reported, never passed over.
+   */
+  async setSharing(projectId: string, modelContext: boolean): Promise<ProjectView> {
+    this.#project(projectId);
+    this.#options.store.update((data) => ({ ...data, projects: data.projects.map((p) => (p.id === projectId ? { ...p, sharing: { ...p.sharing, modelContext } } : p)) }));
+    if (!modelContext) {
+      this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
+      await this.#stopExplainRuns(projectId, (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`);
+    }
+    return this.#view(this.#project(projectId));
   }
 
   async runEvents(runId: string, after: number): Promise<RunEventsPage> {
@@ -163,20 +229,37 @@ export class Host {
     const windowsFolder = targetId === "local" && platform === "win32";
     const existing = this.#options.store.data.projects.find((p) => p.targetId === targetId && sameFolder(p.nativePath, folder.nativePath, windowsFolder));
     if (existing) return { status: "added", project: this.#view(existing), warning };
-    const record: ProjectRecord = { id: randomUUID(), targetId, nativePath: folder.nativePath, label: folderLabel(folder.nativePath), addedAt: new Date().toISOString() };
+    const record: ProjectRecord = { id: randomUUID(), targetId, nativePath: folder.nativePath, label: folderLabel(folder.nativePath), addedAt: new Date().toISOString(), sharing: NO_SHARING };
     this.#options.store.update((data) => ({ ...data, projects: [...data.projects, record] }));
     return { status: "added", project: this.#view(record), warning };
   }
 
-  /** Removes a folder from the list, with its own preferences (personal ones stay), and says how many went. */
-  removeProject(projectId: string): { preferencesRemoved: number } {
+  /**
+   * Removes a folder from the list, with its own preferences (personal ones stay), and says how many went. Removing a
+   * project withdraws its consent first: its epoch moves (and stays moved), so an explanation being submitted stops
+   * itself, and its queued and running explanations are cancelled. When one can't be stopped, the project stays.
+   */
+  async removeProject(projectId: string): Promise<{ preferencesRemoved: number }> {
+    this.#project(projectId);
+    if (this.#removing.has(projectId)) throw new Error("This project is already being removed.");
+    // Marked before the first wait, so no explanation can start while its runs are being stopped.
+    this.#removing.add(projectId);
+    this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
+    try {
+      await this.#stopExplainRuns(projectId, (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
+    } catch (error) {
+      this.#removing.delete(projectId);
+      throw error;
+    }
     this.#notices.delete(projectId);
+    this.#explainRuns.delete(projectId);
     let preferencesRemoved = 0;
     this.#options.store.update((data) => {
       const { data: next, removed } = removeProjectPreferences(data, projectId);
       preferencesRemoved = removed;
       return { ...next, projects: next.projects.filter((p) => p.id !== projectId) };
     });
+    this.#removing.delete(projectId);
     return { preferencesRemoved };
   }
 
@@ -237,6 +320,20 @@ export class Host {
   }
 
   // ---- internals ------------------------------------------------------------------------------------------------
+
+  #epochOf(projectId: string): number {
+    return this.#sharingEpochs.get(projectId) ?? 0;
+  }
+
+  /** Cancels the project's queued and running explain runs; when one can't be stopped, says so through `refusal`. */
+  async #stopExplainRuns(projectId: string, refusal: (runs: string, why: string, them: "it" | "them") => string): Promise<void> {
+    // A run whose engine isn't online isn't running any more.
+    const runs = [...(this.#explainRuns.get(projectId) ?? [])].filter((runId) => this.#engines.get(this.#runs.get(runId) ?? "")?.supervisor.state.status === "online");
+    const failed = (await Promise.allSettled(runs.map((runId) => this.cancelRun(runId)))).filter((result) => result.status === "rejected");
+    if (failed.length === 0) return;
+    const why = failed[0]!.reason instanceof Error ? failed[0]!.reason.message : String(failed[0]!.reason);
+    throw new Error(refusal(failed.length === 1 ? "an explain run" : `${failed.length} explain runs`, why, failed.length === 1 ? "it" : "them"));
+  }
 
   #project(projectId: string): ProjectRecord {
     const project = this.#options.store.data.projects.find((p) => p.id === projectId);
@@ -386,6 +483,7 @@ export class Host {
       label: record.label,
       displayPath: record.nativePath,
       notice: this.#notices.get(record.id) ?? null,
+      sharing: { modelContext: record.sharing.modelContext },
     };
   }
 

@@ -1,12 +1,13 @@
 // Drives a real engine over stdio (AGENTS.md, Definition of Done): starts it on a development home, initializes it,
 // sends one request, prints the result as JSON, then shuts it down.
 //
-// Usage: pnpm rpc <method> [params-json] [--home <dir>] [--follow]
+// Usage: pnpm rpc <method> [params-json] [--home <dir>] [--follow] [--token-factory-url <loopback url>]
 //   pnpm rpc doctor
 //   pnpm rpc runs.start '{"workflowId":"hello","input":{"repoPath":"/path/to/repo"}}' --follow
 //
-// A run without a "context" gets an empty preference snapshot here; the app always sends its own (D21), for example
-//   "context":{"preferences":{"revision":1,"records":[{"id":"<uuid>","statement":"Use pnpm","scope":"personal","revision":1}]}}
+// A run without a "context" gets an empty preference snapshot and no consent to share here; the app always sends its
+// own (D21, D22), for example
+//   "context":{"preferences":{"revision":1,"records":[{"id":"<uuid>","statement":"Use pnpm","scope":"personal","revision":1}]},"sharing":{"modelContext":true}}
 //
 // The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, when set, is passed to the engine
 // in `initialize`, the way the app does it (D8).
@@ -20,11 +21,11 @@ import { isMethodName, isTerminal, LineSplitter, Methods, PROTOCOL_VERSION, RpcC
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
-  options: { home: { type: "string" }, follow: { type: "boolean", default: false } },
+  options: { home: { type: "string" }, follow: { type: "boolean", default: false }, "token-factory-url": { type: "string" } },
 });
 const [method, rawParams] = positionals;
 if (!method || !isMethodName(method)) {
-  console.error(`Usage: pnpm rpc <method> [params-json] [--home <dir>] [--follow]\nMethods: ${Object.keys(Methods).join(", ")}`);
+  console.error(`Usage: pnpm rpc <method> [params-json] [--home <dir>] [--follow] [--token-factory-url <loopback url>]\nMethods: ${Object.keys(Methods).join(", ")}`);
   process.exit(2);
 }
 let params: Record<string, unknown>;
@@ -35,13 +36,16 @@ try {
   process.exit(2);
 }
 if (method === "runs.start" && params["clientRequestId"] === undefined) params = { clientRequestId: randomUUID(), ...params };
-if (method === "runs.start" && params["context"] === undefined) params = { ...params, context: { preferences: { revision: 0, records: [] } } };
+// Without a context: no preferences, and no consent to send repository content to a model (D22).
+if (method === "runs.start" && params["context"] === undefined) params = { ...params, context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } } };
 
 const apiKey = process.env["NEBIUS_API_KEY"]?.trim();
 delete process.env["NEBIUS_API_KEY"];
 const home = values.home ?? join(homedir(), ".nivra-dev");
 const entry = fileURLToPath(new URL("../src/main.mjs", import.meta.url));
-const child = spawn(process.execPath, [entry, "--stdio", "--home", home, "--heartbeat-ms", "0", "--nivra-engine"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+// A stub of Token Factory on this machine, for checking a workflow without a real model (the engine refuses others).
+const stub = values["token-factory-url"] ? ["--token-factory-url", values["token-factory-url"]] : [];
+const child = spawn(process.execPath, [entry, "--stdio", "--home", home, "--heartbeat-ms", "0", "--nivra-engine", ...stub], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 
 const client = new RpcClient({
   send: (line) => void child.stdin.write(line),
