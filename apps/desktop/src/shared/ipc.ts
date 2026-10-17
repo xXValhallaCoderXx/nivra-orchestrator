@@ -1,4 +1,4 @@
-import type { DoctorReport, EngineInfo, ExplainResult, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
+import type { DoctorReport, EngineInfo, ExplainResult, PreferenceIntent, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -94,6 +94,8 @@ export interface PreferenceView {
   /** The project a project preference belongs to, and its label; both null for a personal one. */
   projectId: string | null;
   projectLabel: string | null;
+  /** A default, which the repository's conventions outrank, or a project's decision to change them (D23). */
+  intent: PreferenceIntent;
   /** Only confirmed preferences reach a run. */
   status: "suggested" | "confirmed";
   origin: "entered";
@@ -139,16 +141,24 @@ export interface NivraApi {
   /** Removes the folder from the list, with its own preferences; says how many of those went with it. */
   removeProject(projectId: string): Promise<{ preferencesRemoved: number }>;
   listPreferences(): Promise<PreferencesView>;
-  /** Saves a preference the person typed and confirmed. A project preference names its project; a personal one, null. */
-  addPreference(statement: string, scope: PreferenceScope, projectId: string | null): Promise<PreferenceView>;
-  editPreference(id: string, statement: string): Promise<PreferenceView>;
+  /**
+   * Saves a preference the person typed and confirmed. A project preference names its project; a personal one, null.
+   * Only a project's own preference can be a decision to change its conventions (`override`).
+   */
+  addPreference(statement: string, scope: PreferenceScope, projectId: string | null, intent: PreferenceIntent): Promise<PreferenceView>;
+  /** Fixes a preference's wording, or whether a project's own preference is a default or a decision. */
+  editPreference(id: string, statement: string, intent: PreferenceIntent): Promise<PreferenceView>;
   deletePreference(id: string): Promise<void>;
   /** Runs hello on the project's engine, with a snapshot of the preferences that apply to the project (D21). */
   startHello(projectId: string, holdMs: number): Promise<RunSummary>;
   /** Allows or stops sending the project's content to Token Factory (D20); stopping cancels its explain runs. */
   setSharing(projectId: string, modelContext: boolean): Promise<ProjectView>;
-  /** Explains the project's repository with evidence (NIV-6); refused while sharing is off. Empty means the default. */
-  startExplain(projectId: string, question: string): Promise<RunSummary>;
+  /**
+   * Explains the project's repository with evidence (NIV-6); refused while sharing is off. An empty question means the
+   * default. `choices` are this task's explicit decisions, up to five: they outrank everything for this run only and
+   * are never saved (D23).
+   */
+  startExplain(projectId: string, question: string, choices: string[]): Promise<RunSummary>;
   /** An explain run's summary and stored result, from the engine that ran it. */
   runResult(runId: string): Promise<{ summary: RunSummary; result: ExplainResult | null }>;
   /** A run's events after a cursor, from the engine that runs it (main remembers which). */

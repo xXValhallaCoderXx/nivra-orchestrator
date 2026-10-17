@@ -13,15 +13,26 @@ export const MAX_PREFERENCES = 50;
 export const PreferenceScope = z.enum(["personal", "project"]);
 export type PreferenceScope = z.infer<typeof PreferenceScope>;
 
+/**
+ * What a preference asks for (D23). A `default` applies where the repository has no convention of its own, so the
+ * repository's conventions outrank it. An `override` is a project's decision to change its existing conventions, so
+ * it outranks them; only a project's own preference can be one. Scope alone never makes a preference an override.
+ */
+export const PreferenceIntent = z.enum(["default", "override"]);
+export type PreferenceIntent = z.infer<typeof PreferenceIntent>;
+
 /** One confirmed preference as a run receives it. */
-export const SnapshotPreference = z.strictObject({
-  id: z.uuid(),
-  statement: z.string().min(1).max(500),
-  /** `personal` follows the engineer to every project; `project` applies to its own project's runs only. */
-  scope: PreferenceScope,
-  /** Raised by the host on every edit, so a run's record says which version it used. */
-  revision: z.number().int().positive(),
-});
+export const SnapshotPreference = z
+  .strictObject({
+    id: z.uuid(),
+    statement: z.string().min(1).max(500),
+    /** `personal` follows the engineer to every project; `project` applies to its own project's runs only. */
+    scope: PreferenceScope,
+    intent: PreferenceIntent,
+    /** Raised by the host on every edit, so a run's record says which version it used. */
+    revision: z.number().int().positive(),
+  })
+  .refine((record) => record.intent === "default" || record.scope === "project", "Only a project's own preference can override its conventions.");
 export type SnapshotPreference = z.infer<typeof SnapshotPreference>;
 
 export const PreferenceSnapshot = z.strictObject({
@@ -46,12 +57,12 @@ export const RunContext = z.strictObject({
 export type RunContext = z.infer<typeof RunContext>;
 
 /**
- * A fingerprint of a snapshot's records: SHA-256, in hex, of the JSON array of `[id, scope, revision, statement]`
- * sorted by id. Whoever holds the same records gets the same fingerprint, so a run can show that the exact values
- * arrived while its timeline keeps no preference text.
+ * A fingerprint of a snapshot's records: SHA-256, in hex, of the JSON array of `[id, scope, intent, revision,
+ * statement]` sorted by id. Whoever holds the same records gets the same fingerprint, so a run can show that the exact
+ * values arrived while its timeline keeps no preference text.
  */
 export async function preferencesDigest(records: readonly SnapshotPreference[]): Promise<string> {
-  const canonical = [...records].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((r) => [r.id, r.scope, r.revision, r.statement]);
+  const canonical = [...records].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((r) => [r.id, r.scope, r.intent, r.revision, r.statement]);
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(canonical)));
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

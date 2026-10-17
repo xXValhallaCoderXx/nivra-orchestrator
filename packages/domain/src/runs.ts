@@ -75,16 +75,39 @@ export const HelloInput = z.strictObject({
 });
 export type HelloInput = z.infer<typeof HelloInput>;
 
+/** The most choices one explanation can carry, and the longest each can be (NIV-11, D23). */
+export const MAX_CHOICES = 5;
+export const MAX_CHOICE_CHARS = 300;
+
 /**
  * Explain a repository with evidence (NIV-6, NIV-9). The question is stored with the run, masked, but never handed to
- * Mastra, which stores step data as it is (D22): its steps get only the path.
+ * Mastra, which stores step data as it is (D22): its steps get only the path. Choices are the person's explicit
+ * decisions for this task (NIV-11, D23): they outrank the repository and every preference, for this run only, and are
+ * never saved to the engineer's profile.
  */
 export const ExplainInput = z.strictObject({
   repoPath: z.string().min(1).max(4096),
   /** Empty asks for the default: the repository's stack, structure and conventions. */
   question: z.string().max(2_000).default(""),
+  choices: z
+    .array(z.string().trim().min(1).max(MAX_CHOICE_CHARS))
+    .max(MAX_CHOICES)
+    .refine((choices) => new Set(choices).size === choices.length, "Each choice appears once.")
+    .default([]),
 });
 export type ExplainInput = z.infer<typeof ExplainInput>;
+
+/**
+ * An explain run's input as the engine reads it back from its store (D23). The store keeps it masked, and masking can
+ * lengthen text (a key becomes `[secret:NEBIUS_API_KEY]`) or make two choices the same, so only its shape is checked:
+ * what `runs.start` accepted stays accepted.
+ */
+export const StoredExplainInput = z.object({
+  repoPath: z.string().min(1),
+  question: z.string().default(""),
+  choices: z.array(z.string()).max(MAX_CHOICES).default([]),
+});
+export type StoredExplainInput = z.infer<typeof StoredExplainInput>;
 
 export const RunSummary = z.strictObject({
   id: z.uuid(),

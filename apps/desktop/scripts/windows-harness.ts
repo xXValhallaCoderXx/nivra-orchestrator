@@ -112,8 +112,8 @@ async function main(): Promise<void> {
     preferences: {
       revision: 3,
       records: [
-        { id: randomUUID(), statement: `Prefer named exports, “quoted”, ${AWKWARD}, 日本語`, scope: "personal", revision: 2 },
-        { id: randomUUID(), statement: "Keep tests next to the code they test", scope: "project", revision: 1 },
+        { id: randomUUID(), statement: `Prefer named exports, “quoted”, ${AWKWARD}, 日本語`, scope: "personal", intent: "default", revision: 2 },
+        { id: randomUUID(), statement: "Keep tests next to the code they test", scope: "project", intent: "override", revision: 1 },
       ],
     },
     sharing: { modelContext: false },

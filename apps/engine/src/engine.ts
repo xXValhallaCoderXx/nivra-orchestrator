@@ -19,6 +19,7 @@ import { runDoctor } from "./doctor/doctor.ts";
 import { childEnv, insideWsl } from "./exec/child-env.ts";
 import { findGit } from "./exec/find-executable.ts";
 import { createLocalBackend } from "./exec/local.ts";
+import { readTask, TaskUnreadable } from "./explain/task.ts";
 import { launcherWrite, ProtocolOutput, type RawWrite } from "./rpc/output.ts";
 import { RpcFailure, RpcServer } from "./rpc/server.ts";
 import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
@@ -43,8 +44,13 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
     {
       id: "explain",
       title: (input: unknown) => `Explain · ${basename(ExplainInput.parse(input).repoPath) || "repository"}`,
-      // Mastra stores step data as it is: it gets the path, never the question (D22).
-      mastraInput: (input: unknown) => ({ repoPath: ExplainInput.parse(input).repoPath }),
+      // Mastra stores step data as it is: it gets the path, never the question or the choices (D22). This reads the
+      // stored copy, which is masked, so only its shape is checked (D23).
+      mastraInput: (input: unknown) => {
+        const task = readTask(input);
+        if (!task) throw new TaskUnreadable();
+        return { repoPath: task.repoPath };
+      },
     },
   ],
 ]);
@@ -128,10 +134,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         platform: process.platform,
         findGit: locateGit,
         context: (runId) => scheduler.contextOf(runId),
-        question: (runId) => {
-          const input = ExplainInput.safeParse(store.summary(runId)?.input);
-          return input.success ? input.data.question : "";
-        },
+        task: (runId) => readTask(store.summary(runId)?.input),
         apiKey: () => vault.get("NEBIUS_API_KEY"),
         endpoint,
         mask,

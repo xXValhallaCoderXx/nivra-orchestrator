@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -26,6 +26,34 @@ describe("host records", () => {
     assert.equal(store.data.projects.length, 1);
     store.update((data) => data);
     assert.equal(readFileSync(path, "utf8").includes("selectedTargetId"), false);
+  });
+
+  it("reads preferences written before intent existed as defaults, projects and all (D23)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nivra store "));
+    dirs.push(dir);
+    const path = join(dir, "nivra.json");
+    const at = "2026-10-17T12:00:00.000Z";
+    const older = { id: B, statement: "Tests sit next to the code", scope: "project", projectId: A, status: "confirmed", origin: "entered", revision: 2, createdAt: at, updatedAt: at, confirmedAt: at };
+    writeFileSync(path, JSON.stringify({ version: 1, projects: [record(A, "local", "/home/odin/repo")], preferences: [older], preferencesRevision: 4 }));
+    const store = new HostStore(path);
+    assert.deepEqual([store.data.projects.map((p) => p.id), store.data.preferences.map((p) => [p.id, p.intent, p.revision]), store.data.preferencesRevision], [[A], [[B, "default", 2]], 4]);
+    assert.deepEqual(readdirSync(dir), ["nivra.json"], "nothing was set aside");
+  });
+
+  it("sets aside a file it can't read, under a name that keeps it, and starts empty", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nivra store "));
+    dirs.push(dir);
+    const path = join(dir, "nivra.json");
+    // A record from a version that knows more than this one: an intent this version has never heard of.
+    const at = "2026-10-17T12:00:00.000Z";
+    const newer = { id: B, statement: "Use Vitest", scope: "project", projectId: A, intent: "insist", status: "confirmed", origin: "entered", revision: 1, createdAt: at, updatedAt: at, confirmedAt: at };
+    const text = JSON.stringify({ version: 1, projects: [record(A, "local", "/home/odin/repo")], preferences: [newer], preferencesRevision: 1 });
+    writeFileSync(path, text);
+    const store = new HostStore(path);
+    assert.deepEqual([store.data.projects.length, store.data.preferences.length], [0, 0]);
+    const aside = readdirSync(dir).filter((name) => name.startsWith("nivra.json.unreadable-"));
+    assert.equal(aside.length, 1);
+    assert.equal(readFileSync(join(dir, aside[0]!), "utf8"), text, "the file is kept as it was");
   });
 
   it("moves a Windows-drive folder added for WSL to the Windows engine, keeping its id, and merges a twin (D17)", () => {

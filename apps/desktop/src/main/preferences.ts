@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { MAX_PREFERENCES, type PreferenceScope, type PreferenceSnapshot } from "@nivra/domain";
+import { MAX_CHOICE_CHARS, MAX_CHOICES, MAX_PREFERENCES, type PreferenceIntent, type PreferenceScope, type PreferenceSnapshot } from "@nivra/domain";
 import type { HostData, PreferenceRecord } from "./host-store.ts";
 
 /**
@@ -15,12 +15,41 @@ export interface NewPreference {
   scope: PreferenceScope;
   /** The project a project preference belongs to; null for a personal one. */
   projectId: string | null;
+  /** A default, or a project's decision to change its existing conventions (D23); a default when not given. */
+  intent?: PreferenceIntent;
+}
+
+/** What an edit sets: the wording, and whether a project's own preference is a default or a decision (D23). */
+export interface PreferenceChange {
+  statement: string;
+  /** Unchanged when not given. */
+  intent?: PreferenceIntent;
 }
 
 function cleanStatement(statement: string): string {
   const clean = statement.trim();
   if (!clean) throw new Error("A preference needs some words. Type what you prefer, then confirm it.");
   if (clean.length > MAX_STATEMENT) throw new Error(`A preference can be at most ${MAX_STATEMENT} characters; this one has ${clean.length}. Shorten it, then confirm it.`);
+  return clean;
+}
+
+/** Scope alone never makes a decision: only a project's own preference can be one, and only when the person says so. */
+function checkIntent(scope: PreferenceScope, intent: PreferenceIntent): PreferenceIntent {
+  if (intent === "override" && scope !== "project") throw new Error("Only a project's own preference can be a decision to change its conventions. Make it this project's own, or keep it as a default.");
+  return intent;
+}
+
+/**
+ * The task's choices as the person typed them, trimmed and checked here so a refusal says what to do (D23). The engine
+ * checks them again. They go with one run only and are never saved.
+ */
+export function cleanChoices(choices: readonly string[]): string[] {
+  if (choices.length > MAX_CHOICES) throw new Error(`An explanation can carry at most ${MAX_CHOICES} choices; this one has ${choices.length}. Remove some, then explain again.`);
+  const clean = choices.map((choice) => choice.trim());
+  if (clean.some((choice) => !choice)) throw new Error("A choice needs some words. Type what this task should do, or remove the empty choice, then explain again.");
+  const long = clean.find((choice) => choice.length > MAX_CHOICE_CHARS);
+  if (long !== undefined) throw new Error(`A choice can be at most ${MAX_CHOICE_CHARS} characters; one has ${long.length}. Shorten it, then explain again.`);
+  if (new Set(clean).size !== clean.length) throw new Error("The same choice is there twice. Remove one, then explain again.");
   return clean;
 }
 
@@ -31,12 +60,14 @@ export function addPreference(data: HostData, input: NewPreference, now: Date): 
     throw new Error(`Nivra keeps at most ${MAX_PREFERENCES} preferences. Delete one you no longer need, then add this one.`);
   }
   if (input.scope === "project" && !data.projects.some((p) => p.id === input.projectId)) throw new Error("That project is no longer in the list.");
+  const intent = checkIntent(input.scope, input.intent ?? "default");
   const at = now.toISOString();
   const record: PreferenceRecord = {
     id: randomUUID(),
     statement,
     scope: input.scope,
     projectId: input.scope === "project" ? input.projectId : null,
+    intent,
     status: "confirmed",
     origin: "entered",
     revision: 1,
@@ -48,16 +79,19 @@ export function addPreference(data: HostData, input: NewPreference, now: Date): 
 }
 
 /**
- * Rewords a preference. Its scope and project stay as they were: a project's own preference becomes personal only by
- * being added again as one. A confirmed preference stays confirmed, since the person wrote the new wording.
+ * Fixes a preference's wording, or whether a project's own preference is a default or a decision (D23). Its scope and
+ * project stay as they were: a project's own preference becomes personal only by being added again as one. Only a
+ * confirmed preference can be edited, and it stays confirmed, since the person wrote the change.
  */
-export function editPreference(data: HostData, id: string, statement: string, now: Date): { data: HostData; record: PreferenceRecord } {
+export function editPreference(data: HostData, id: string, change: PreferenceChange, now: Date): { data: HostData; record: PreferenceRecord } {
   const existing = data.preferences.find((p) => p.id === id);
   if (!existing) throw new Error("That preference no longer exists.");
-  const clean = cleanStatement(statement);
-  if (clean === existing.statement) return { data, record: existing };
+  if (existing.status !== "confirmed") throw new Error("Only a preference in use can be edited, and this one isn't. Edit the one in use, or add a new one.");
+  const statement = cleanStatement(change.statement);
+  const intent = checkIntent(existing.scope, change.intent ?? existing.intent);
+  if (statement === existing.statement && intent === existing.intent) return { data, record: existing };
   const at = now.toISOString();
-  const record: PreferenceRecord = { ...existing, statement: clean, revision: existing.revision + 1, updatedAt: at, confirmedAt: existing.status === "confirmed" ? at : null };
+  const record: PreferenceRecord = { ...existing, statement, intent, revision: existing.revision + 1, updatedAt: at, confirmedAt: at };
   return { data: { ...data, preferences: data.preferences.map((p) => (p.id === id ? record : p)), preferencesRevision: data.preferencesRevision + 1 }, record };
 }
 
@@ -81,7 +115,7 @@ export function removeProjectPreferences(data: HostData, projectId: string): { d
 export function snapshotFor(data: HostData, projectId: string): PreferenceSnapshot {
   const records = data.preferences
     .filter((p) => p.status === "confirmed" && (p.scope === "personal" || p.projectId === projectId))
-    .map(({ id, statement, scope, revision }) => ({ id, statement, scope, revision }));
+    .map(({ id, statement, scope, intent, revision }) => ({ id, statement, scope, intent, revision }));
   if (records.length > MAX_PREFERENCES) {
     throw new Error(`This project has ${records.length} confirmed preferences, and a run can carry ${MAX_PREFERENCES}. Delete some under Preferences, then start the run again.`);
   }

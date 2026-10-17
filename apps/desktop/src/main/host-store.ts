@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { PreferenceScope } from "@nivra/domain";
+import { PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
 import { driveFromMount, folderLabel, sameFolder } from "./paths.ts";
 
@@ -35,7 +35,8 @@ export type ProjectRecord = z.infer<typeof ProjectRecord>;
 
 /**
  * One preference, in the only canonical copy (D21). Only confirmed ones reach a run; suggestions drawn from a
- * repository, which wait for the person to confirm them, arrive with NIV-10.
+ * repository, which wait for the person to confirm them, arrive with NIV-10. Every field added since the first version
+ * has a default, so a file an older version wrote still reads (D23).
  */
 export const PreferenceRecord = z
   .strictObject({
@@ -44,6 +45,8 @@ export const PreferenceRecord = z
     scope: PreferenceScope,
     /** The project a project preference belongs to; null for a personal one, which applies to every project. */
     projectId: z.uuid().nullable(),
+    /** A default, or a project's decision to change its existing conventions (D23). */
+    intent: PreferenceIntent.default("default"),
     status: z.enum(["suggested", "confirmed"]),
     /** Where it came from: typed in by the person. */
     origin: z.enum(["entered"]),
@@ -54,7 +57,8 @@ export const PreferenceRecord = z
     /** When the person confirmed this wording; null while it is a suggestion. */
     confirmedAt: z.iso.datetime().nullable(),
   })
-  .refine((record) => (record.scope === "project") === (record.projectId !== null), "A project preference names its project, and a personal one names none.");
+  .refine((record) => (record.scope === "project") === (record.projectId !== null), "A project preference names its project, and a personal one names none.")
+  .refine((record) => record.intent === "default" || record.scope === "project", "Only a project's own preference can override its conventions.");
 export type PreferenceRecord = z.infer<typeof PreferenceRecord>;
 
 // Not strict: a key an older version wrote (`selectedTargetId`) is dropped on the next write, not a reason to set the

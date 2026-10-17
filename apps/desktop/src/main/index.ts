@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { PreferenceScope } from "@nivra/domain";
+import { PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
 import { IPC, type AppInfo, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
@@ -119,14 +119,18 @@ function start(): void {
   handle(IPC.removeProject, project, (_event, id) => host.removeProject(id));
   handle(IPC.listPreferences, none, () => host.preferences());
   // Statements are checked again, with a message a person can act on, when they are saved.
-  handle(IPC.addPreference, z.tuple([z.string().max(2_000), PreferenceScope, z.uuid().nullable()]), (_event, statement, scope, projectId) =>
-    host.addPreference({ statement, scope, projectId }),
+  handle(IPC.addPreference, z.tuple([z.string().max(2_000), PreferenceScope, z.uuid().nullable(), PreferenceIntent]), (_event, statement, scope, projectId, intent) =>
+    host.addPreference({ statement, scope, projectId, intent }),
   );
-  handle(IPC.editPreference, z.tuple([z.uuid(), z.string().max(2_000)]), (_event, id, statement) => host.editPreference(id, statement));
+  handle(IPC.editPreference, z.tuple([z.uuid(), z.string().max(2_000), PreferenceIntent]), (_event, id, statement, intent) => host.editPreference(id, { statement, intent }));
   handle(IPC.deletePreference, z.tuple([z.uuid()]), (_event, id) => host.deletePreference(id));
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));
   handle(IPC.setSharing, z.tuple([z.uuid(), z.boolean()]), (_event, id, modelContext) => host.setSharing(id, modelContext));
-  handle(IPC.startExplain, z.tuple([z.uuid(), z.string().max(2_000)]), (_event, id, question) => host.startExplain(id, question));
+  // The choices are required, so a caller that drops them fails here rather than explaining without them. The host
+  // checks them again, with messages a person can act on (D23).
+  handle(IPC.startExplain, z.tuple([z.uuid(), z.string().max(2_000), z.array(z.string().max(2_000)).max(20)]), (_event, id, question, choices) =>
+    host.startExplain(id, question, choices),
+  );
   handle(IPC.runResult, z.tuple([RunId]), (_event, id) => host.runResult(id));
   handle(IPC.runEvents, z.tuple([RunId, z.number().int().nonnegative()]), (_event, id, after) => host.runEvents(id, after));
   handle(IPC.cancelRun, z.tuple([RunId]), (_event, id) => host.cancelRun(id));

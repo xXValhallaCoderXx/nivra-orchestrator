@@ -7,5 +7,5 @@
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src/main/**/*", "src/shared/**/*", "scripts/**/*", "test/**/*"]
+  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "scripts/**/*", "test/**/*"]
 }

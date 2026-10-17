@@ -6,8 +6,10 @@
 //   pnpm rpc runs.start '{"workflowId":"hello","input":{"repoPath":"/path/to/repo"}}' --follow
 //
 // A run without a "context" gets an empty preference snapshot and no consent to share here; the app always sends its
-// own (D21, D22), for example
-//   "context":{"preferences":{"revision":1,"records":[{"id":"<uuid>","statement":"Use pnpm","scope":"personal","revision":1}]},"sharing":{"modelContext":true}}
+// own (D21, D22, D23), for example
+//   "context":{"preferences":{"revision":1,"records":[{"id":"<uuid>","statement":"Use pnpm","scope":"personal","intent":"default","revision":1}]},"sharing":{"modelContext":true}}
+// An explain run can carry the task's choices (D23):
+//   pnpm rpc runs.start '{"workflowId":"explain","input":{"repoPath":"/path/to/repo","choices":["Keep Jest for this task"]}}' --follow
 //
 // The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, when set, is passed to the engine
 // in `initialize`, the way the app does it (D8).

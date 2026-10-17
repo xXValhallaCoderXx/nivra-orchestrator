@@ -10,15 +10,17 @@ import { ANSWER_TOOL_DESCRIPTION, AnswerInput } from "./answer.ts";
 import type { Budget } from "./budget.ts";
 import { checkCitation, type CheckedCitation } from "./citations.ts";
 import type { Ledger, LedgerKind } from "./ledger.ts";
+import { conflictProblems } from "./precedence.ts";
 
 /**
  * The explain run's tools (D22), from Hird's `projects/tools.ts` @ 45c0057: list, search and read the repository, and
  * submit the answer. Every result is charged to the budget before it is returned (tool calls run one at a time), and
  * what it delivered is written to the ledger with the step it was delivered in. The tools never throw: an expected
  * refusal goes back to the model as `{ refused }`; anything unexpected is recorded as an internal failure, which stops
- * the run as a failure, never as a cancellation. An answer citing lines the model wasn't shown is turned down, naming
- * them, while it still has time to read them; when the answer is due, or after two such refusals, it is accepted and
- * its citations are labelled for what they are.
+ * the run as a failure, never as a cancellation. An answer whose conflicts name ids the run doesn't have, or citing
+ * lines the model wasn't shown, is turned down, naming them, while there is time to fix it (D23); when the answer is
+ * due, or after two such refusals of each kind, it is accepted: unusable conflicts are dropped and counted, and
+ * citations are labelled for what they are.
  */
 
 export interface ToolEvent {
@@ -27,7 +29,7 @@ export interface ToolEvent {
 }
 
 export interface ExplainToolsState {
-  /** The first accepted answer; later ones are refused. */
+  /** The first accepted answer, without the conflicts dropped from it; later ones are refused. */
   accepted: z.infer<typeof AnswerInput> | null;
   /** The step it was submitted in: only what was delivered before it can check a citation. */
   answerStep: number | null;
@@ -35,6 +37,10 @@ export interface ExplainToolsState {
   rejected: number;
   /** Answers turned down for citing lines the model wasn't shown. */
   citationRefusals: number;
+  /** Answers turned down for conflicts naming ids the run doesn't have, or fewer than two sides. */
+  conflictRefusals: number;
+  /** Conflicts dropped from the accepted answer because they couldn't be used. */
+  conflictsDropped: number;
   budgetExhausted: boolean;
 }
 
@@ -49,19 +55,22 @@ export interface ExplainToolsOptions {
   /** Whether this step must give the answer: then it is accepted whatever it cites. */
   answerDue: () => boolean;
   preferences: RunContext["preferences"];
+  /** The task's choice ids, `c1` to `c5`. */
+  choices: ReadonlySet<string>;
   signal?: AbortSignal | undefined;
   onTool: (event: ToolEvent) => void;
 }
 
 const BUDGET_NOTE = "The context budget for this run is used up: submit your answer now, from what you have read.";
-/** How many times an answer is turned down for its citations before it is accepted as it is. */
+/** How many times an answer is turned down for its citations, and for its conflicts, before it is accepted as it is. */
 export const MAX_CITATION_REFUSALS = 2;
+export const MAX_CONFLICT_REFUSALS = 2;
 /** The problems a model can fix by reading, or by dropping the citation. */
 const FIXABLE: ReadonlySet<CheckedCitation["problem"]> = new Set(["file not read", "lines not shown", "not a repository path"]);
 
 export function createExplainTools(options: ExplainToolsOptions): { tools: Record<string, ReturnType<typeof createTool>>; state: ExplainToolsState } {
   const { reader, ledger, budget, mask, internal } = options;
-  const state: ExplainToolsState = { accepted: null, answerStep: null, rejected: 0, citationRefusals: 0, budgetExhausted: false };
+  const state: ExplainToolsState = { accepted: null, answerStep: null, rejected: 0, citationRefusals: 0, conflictRefusals: 0, conflictsDropped: 0, budgetExhausted: false };
 
   /** Masks a result as JSON and checks it fits; a result that doesn't is replaced, and delivers nothing. */
   const finish = (result: unknown, cap: number): { value: unknown; json: string; fits: boolean } => {
@@ -180,14 +189,22 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
       execute: async (input) => {
         try {
           if (state.accepted) return { accepted: true, note: "An answer was already accepted. This one was not used." };
-          const known = new Set(options.preferences.records.map((record) => record.id));
-          const problems = input.preferenceDifferences.filter((difference) => !known.has(difference.preferenceId)).map((difference) => `${difference.preferenceId} isn't one of the engineer's preferences you were given.`);
-          if (problems.length) {
+          const known = { preferences: new Set(options.preferences.records.map((record) => record.id)), choices: options.choices };
+          const unusable = input.conflicts.map((conflict, index) => ({ index, problems: conflictProblems(conflict, known) })).filter((conflict) => conflict.problems.length);
+          if (unusable.length && !options.answerDue() && state.conflictRefusals < MAX_CONFLICT_REFUSALS) {
             state.rejected++;
-            options.onTool({ message: `submit_answer refused: ${problems.length} unknown preference ${problems.length === 1 ? "id" : "ids"}`, data: { tool: "submit_answer", step: options.step(), refused: "unknown preference id" } });
-            return { accepted: false, problems };
+            state.conflictRefusals++;
+            // The event counts them: a conflict's topic is model text, which the timeline never keeps.
+            options.onTool({
+              message: `submit_answer refused: ${unusable.length} ${unusable.length === 1 ? "conflict" : "conflicts"} that can't be used`,
+              data: { tool: "submit_answer", step: options.step(), refused: "unusable conflicts", conflicts: unusable.length },
+            });
+            return { accepted: false, problems: unusable.flatMap(({ index, problems }) => problems.map((problem) => `conflicts[${index}]: ${problem}. Fix it, or drop the conflict.`)).slice(0, 12) };
           }
-          const unshown = unshownCitations(input, options.step());
+          // When the answer is due, or after two refusals, what can't be used is dropped and the rest is kept.
+          const dropped = new Set(unusable.map((conflict) => conflict.index));
+          const answer = { ...input, conflicts: input.conflicts.filter((_, index) => !dropped.has(index)) };
+          const unshown = unshownCitations(answer, options.step());
           if (unshown.length && !options.answerDue() && state.citationRefusals < MAX_CITATION_REFUSALS) {
             state.rejected++;
             state.citationRefusals++;
@@ -197,10 +214,14 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
             });
             return { accepted: false, problems: unshown.slice(0, 12).map(describeUnshown) };
           }
-          state.accepted = input;
+          state.accepted = answer;
           state.answerStep = options.step();
-          const count = input.findings.length;
-          options.onTool({ message: `submit_answer accepted: ${count} ${count === 1 ? "finding" : "findings"}`, data: { tool: "submit_answer", step: state.answerStep, findings: count } });
+          state.conflictsDropped = dropped.size;
+          const count = answer.findings.length;
+          options.onTool({
+            message: `submit_answer accepted: ${count} ${count === 1 ? "finding" : "findings"}${dropped.size ? `; ${dropped.size} unusable ${dropped.size === 1 ? "conflict" : "conflicts"} dropped` : ""}`,
+            data: { tool: "submit_answer", step: state.answerStep, findings: count, conflicts: answer.conflicts.length, suggestions: answer.suggestions.length, conflictsDropped: dropped.size },
+          });
           return { accepted: true };
         } catch (error) {
           internal.fail(error);
@@ -213,7 +234,7 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
 
   /** Citations this answer makes to lines the model wasn't shown in an earlier step, each once. */
   function unshownCitations(input: z.infer<typeof AnswerInput>, step: number): CheckedCitation[] {
-    const all = [...input.findings.flatMap((finding) => finding.citations), ...input.preferenceDifferences.flatMap((difference) => difference.citations)];
+    const all = [...input.findings, ...input.conflicts, ...input.suggestions].flatMap((item) => item.citations);
     const seen = new Set<string>();
     return all
       .map((citation) => checkCitation(citation, ledger.entries, step))

@@ -19,7 +19,7 @@ const PORTABLE = "Prefer named exports, ü%#";
 const EDITED = "Prefer default exports, ü%#";
 const ALPHA_OWN = `alpha keeps its tests in __tests__ ${canary}`;
 
-type Context = { revision: number; count: number; records: Array<{ id: string; scope: string; revision: number }>; digest: string };
+type Context = { revision: number; count: number; records: Array<{ id: string; scope: string; intent: string; revision: number }>; digest: string };
 
 let root: string;
 let app: ElectronApplication;
@@ -60,8 +60,9 @@ async function choose(label: string): Promise<void> {
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 }
 
-async function confirmPreference(statement: string, scope: "Every project" | string): Promise<void> {
+async function confirmPreference(statement: string, scope: "Every project" | string, intent?: "Default for this project" | "Decision to change existing conventions"): Promise<void> {
   await page.getByTestId("preference-scope").getByText(scope, { exact: true }).click();
+  if (intent) await page.getByTestId("preference-intent-choice").getByText(intent, { exact: true }).click();
   await page.getByTestId("preference-input").fill(statement);
   await page.getByTestId("preference-confirm").click();
   await expect(page.getByTestId("preference-list")).toContainText(statement);
@@ -72,7 +73,7 @@ async function expectedFor(label: string): Promise<{ digest: string; ids: string
   const { projects, preferences } = await page.evaluate(async () => ({ projects: await window.nivra.listProjects(), preferences: await window.nivra.listPreferences() }));
   const projectId = projects.find((p) => p.label === label)!.id;
   const records = preferences.records.filter((r) => r.status === "confirmed" && (r.scope === "personal" || r.projectId === projectId));
-  const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.revision, r.statement]);
+  const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.intent, r.revision, r.statement]);
   return { digest: createHash("sha256").update(JSON.stringify(sorted)).digest("hex"), ids: records.map((r) => r.id), revision: preferences.revision };
 }
 
@@ -105,17 +106,20 @@ test.afterAll(async () => {
   rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 });
 
-test("a preference confirmed in the window reaches the project's run, every value intact", async () => {
+test("a preference confirmed in the window reaches the project's run, every value intact, its intent included", async () => {
   await pick(join(root, "alpha"));
   await expect(page.getByTestId("project-select")).toHaveValue("alpha");
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
   await confirmPreference(PORTABLE, "Every project");
-  await confirmPreference(ALPHA_OWN, "alpha only");
+  // A project's own preference can be a decision to change its conventions (D23); the badge says which it is.
+  await confirmPreference(ALPHA_OWN, "alpha only", "Decision to change existing conventions");
+  await expect(page.getByTestId("preference-row").filter({ hasText: ALPHA_OWN }).getByTestId("preference-intent")).toHaveText("Decision");
   await expect(page.getByTestId("preferences-summary")).toHaveText("Runs on alpha get 2 confirmed preferences: your personal ones and this project's own (revision 2).");
 
   const expected = await expectedFor("alpha");
   const received = await runHello();
   expect([received.count, received.revision, received.records.map((r) => r.id), received.digest]).toEqual([2, 2, expected.ids, expected.digest]);
+  expect(received.records.map((r) => r.intent)).toEqual(["default", "override"]);
   await expect(page.getByTestId("hello-timeline")).toContainText(`2 confirmed preferences from the app (revision 2), fingerprint ${expected.digest.slice(0, 12)}`);
 });
 

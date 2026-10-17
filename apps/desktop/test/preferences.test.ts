@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { MAX_PREFERENCES } from "@nivra/domain";
 import { HostStore, NO_SHARING, type HostData } from "../src/main/host-store.ts";
-import { addPreference, deletePreference, editPreference, removeProjectPreferences, snapshotFor } from "../src/main/preferences.ts";
+import { addPreference, cleanChoices, deletePreference, editPreference, removeProjectPreferences, snapshotFor } from "../src/main/preferences.ts";
 
 const dirs: string[] = [];
 after(() => {
@@ -60,22 +60,52 @@ describe("preferences (D21)", () => {
     assert.deepEqual(snapshotFor(withSuggestion, B), {
       revision: 3,
       records: [
-        { id: personal, statement: "Prefer named exports", scope: "personal", revision: 1 },
-        { id: ofB, statement: "Tests next to the code", scope: "project", revision: 1 },
+        { id: personal, statement: "Prefer named exports", scope: "personal", intent: "default", revision: 1 },
+        { id: ofB, statement: "Tests next to the code", scope: "project", intent: "default", revision: 1 },
       ],
     });
   });
 
   it("sends the new wording after an edit, with both revisions raised, and keeps the scope", () => {
     const { data, ids } = withPreferences(["Prefer named exports", A]);
-    const edited = editPreference(data, ids[0]!, "Prefer default exports", later);
+    const edited = editPreference(data, ids[0]!, { statement: "Prefer default exports" }, later);
     assert.deepEqual(
       [edited.record.statement, edited.record.scope, edited.record.projectId, edited.record.revision, edited.record.confirmedAt, edited.data.preferencesRevision],
       ["Prefer default exports", "project", A, 2, later.toISOString(), 2],
     );
     assert.deepEqual(snapshotFor(edited.data, A).records.map((r) => [r.statement, r.revision]), [["Prefer default exports", 2]]);
-    assert.equal(editPreference(edited.data, ids[0]!, " Prefer default exports ", later).data, edited.data, "the same words change nothing");
-    assert.throws(() => editPreference(data, "44444444-4444-4444-8444-444444444444", "Anything", later), /no longer exists/);
+    assert.equal(editPreference(edited.data, ids[0]!, { statement: " Prefer default exports " }, later).data, edited.data, "the same words change nothing");
+    assert.throws(() => editPreference(data, "44444444-4444-4444-8444-444444444444", { statement: "Anything" }, later), /no longer exists/);
+  });
+
+  it("records whether a project's own preference is a default or a decision, and lets only a project's own be a decision (D23)", () => {
+    const decision = addPreference(empty(), { statement: "Replace Jest with Vitest", scope: "project", projectId: A, intent: "override" }, now);
+    assert.deepEqual(snapshotFor(decision.data, A).records.map((r) => [r.statement, r.intent]), [["Replace Jest with Vitest", "override"]]);
+    assert.equal(addPreference(empty(), { statement: "Use Vitest", scope: "project", projectId: A }, now).record.intent, "default", "a default unless the person says otherwise");
+    assert.throws(() => addPreference(empty(), { statement: "Use Vitest", scope: "personal", projectId: null, intent: "override" }, now), /Only a project's own preference can be a decision/);
+
+    // Changing what it asks for is an edit: the same record, a new revision, and the next run gets it.
+    const asDefault = editPreference(decision.data, decision.record.id, { statement: "Replace Jest with Vitest", intent: "default" }, later);
+    assert.deepEqual([asDefault.record.id, asDefault.record.intent, asDefault.record.revision, asDefault.data.preferencesRevision], [decision.record.id, "default", 2, 2]);
+    assert.equal(editPreference(asDefault.data, decision.record.id, { statement: "Replace Jest with Vitest" }, later).data, asDefault.data, "an intent not given stays as it was");
+    const personal = addPreference(empty(), { statement: "Use pnpm", scope: "personal", projectId: null }, now);
+    assert.throws(() => editPreference(personal.data, personal.record.id, { statement: "Use pnpm", intent: "override" }, later), /Only a project's own preference can be a decision/);
+  });
+
+  it("edits only a preference in use", () => {
+    const { data } = withPreferences(["Prefer named exports", null]);
+    const suggested = { ...data.preferences[0]!, id: "44444444-4444-4444-8444-444444444444", status: "suggested" as const, confirmedAt: null };
+    const withSuggestion = { ...data, preferences: [...data.preferences, suggested] };
+    assert.throws(() => editPreference(withSuggestion, suggested.id, { statement: "Prefer default exports" }, later), /Only a preference in use can be edited/);
+  });
+
+  it("checks a task's choices before they are sent, saying what to fix (D23)", () => {
+    assert.deepEqual(cleanChoices(["  Keep Jest for this task ", "Use pnpm"]), ["Keep Jest for this task", "Use pnpm"]);
+    assert.deepEqual(cleanChoices([]), []);
+    assert.throws(() => cleanChoices(["1", "2", "3", "4", "5", "6"]), /at most 5 choices; this one has 6/);
+    assert.throws(() => cleanChoices(["Use pnpm", "   "]), /A choice needs some words/);
+    assert.throws(() => cleanChoices(["x".repeat(301)]), /at most 300 characters; one has 301/);
+    assert.throws(() => cleanChoices(["Use pnpm", " Use pnpm"]), /The same choice is there twice/);
   });
 
   it("sends nothing deleted, and a project's own preferences leave with it while personal ones stay", () => {

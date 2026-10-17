@@ -1,18 +1,26 @@
 import { Badge, Button, Group, SegmentedControl, Stack, Text, TextInput } from "@mantine/core";
-import type { PreferenceScope } from "@nivra/domain";
+import type { PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { useState } from "react";
 import type { PreferencesView, PreferenceView, ProjectView } from "../../../shared/ipc";
 import { errorMessage, Section } from "../shared/ui";
 
+/** What a project's own preference asks for (D23): a default gives way to the repository's conventions; a decision doesn't. */
+const INTENTS: Array<{ value: PreferenceIntent; label: string }> = [
+  { value: "default", label: "Default for this project" },
+  { value: "override", label: "Decision to change existing conventions" },
+];
+
 /**
  * The engineer's preferences, kept by the app (D21): the only copy, from which each run gets a snapshot when it starts.
  * Only confirmed preferences reach a run: the personal ones, which follow the engineer to every project, and the chosen
- * project's own. An edit or a deletion reaches the next run; a run already going keeps what it was given.
+ * project's own. An edit or a deletion reaches the next run; a run already going keeps what it was given. A project's
+ * own preference is a default unless the person says it is a decision to change the project's conventions (D23).
  */
 export function Preferences({ project, view, onChanged }: { project: ProjectView | null; view: PreferencesView | null; onChanged(): void }) {
   const [statement, setStatement] = useState("");
   const [scope, setScope] = useState<PreferenceScope>("personal");
-  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const [intent, setIntent] = useState<PreferenceIntent>("default");
+  const [editing, setEditing] = useState<{ id: string; text: string; intent: PreferenceIntent } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const records = view?.records ?? [];
@@ -35,11 +43,12 @@ export function Preferences({ project, view, onChanged }: { project: ProjectView
   }
 
   async function confirm() {
-    if (await act(() => window.nivra.addPreference(statement, scope, scope === "project" ? (project?.id ?? null) : null))) setStatement("");
+    const own = scope === "project";
+    if (await act(() => window.nivra.addPreference(statement, scope, own ? (project?.id ?? null) : null, own ? intent : "default"))) setStatement("");
   }
 
   async function save() {
-    if (editing && (await act(() => window.nivra.editPreference(editing.id, editing.text)))) setEditing(null);
+    if (editing && (await act(() => window.nivra.editPreference(editing.id, editing.text, editing.intent)))) setEditing(null);
   }
 
   return (
@@ -54,13 +63,23 @@ export function Preferences({ project, view, onChanged }: { project: ProjectView
           {records.map((record) => (
             <Group key={record.id} gap="sm" wrap="nowrap" align="center" data-testid="preference-row" data-preference-id={record.id}>
               {editing?.id === record.id ? (
-                <TextInput
-                  value={editing.text}
-                  onChange={(event) => setEditing({ id: record.id, text: event.currentTarget.value })}
-                  style={{ flex: 1 }}
-                  aria-label="Preference"
-                  data-testid="preference-edit-input"
-                />
+                <Stack gap={4} style={{ flex: 1 }}>
+                  <TextInput
+                    value={editing.text}
+                    onChange={(event) => setEditing({ ...editing, text: event.currentTarget.value })}
+                    aria-label="Preference"
+                    data-testid="preference-edit-input"
+                  />
+                  {record.scope === "project" && (
+                    <SegmentedControl
+                      size="xs"
+                      value={editing.intent}
+                      onChange={(value) => setEditing({ ...editing, intent: value as PreferenceIntent })}
+                      data={INTENTS}
+                      data-testid="preference-edit-intent"
+                    />
+                  )}
+                </Stack>
               ) : (
                 <Text size="sm" style={{ flex: 1, opacity: project && !sentTo(record) ? 0.55 : 1 }} data-testid="preference-statement">
                   {record.statement}
@@ -69,6 +88,11 @@ export function Preferences({ project, view, onChanged }: { project: ProjectView
               <Badge variant="light" color={record.scope === "personal" ? "blue" : "grape"} style={{ flex: "none" }}>
                 {record.scope === "personal" ? "Every project" : `${record.projectLabel ?? "A removed project"} only`}
               </Badge>
+              {record.scope === "project" && (
+                <Badge variant="light" color={record.intent === "override" ? "orange" : "gray"} style={{ flex: "none" }} data-testid="preference-intent">
+                  {record.intent === "override" ? "Decision" : "Default"}
+                </Badge>
+              )}
               {record.status !== "confirmed" && (
                 <Badge variant="light" color="yellow" style={{ flex: "none" }}>
                   Not confirmed
@@ -89,7 +113,7 @@ export function Preferences({ project, view, onChanged }: { project: ProjectView
                 </Group>
               ) : (
                 <Group gap={4} wrap="nowrap" style={{ flex: "none" }}>
-                  <Button size="xs" variant="subtle" onClick={() => setEditing({ id: record.id, text: record.statement })} disabled={busy} data-testid="preference-edit">
+                  <Button size="xs" variant="subtle" onClick={() => setEditing({ id: record.id, text: record.statement, intent: record.intent })} disabled={busy} data-testid="preference-edit">
                     Edit
                   </Button>
                   <Button size="xs" variant="subtle" color="red" onClick={() => void act(() => window.nivra.deletePreference(record.id))} disabled={busy} data-testid="preference-delete">
@@ -123,8 +147,12 @@ export function Preferences({ project, view, onChanged }: { project: ProjectView
           Confirm
         </Button>
       </Group>
+      {scope === "project" && project && (
+        <SegmentedControl value={intent} onChange={(value) => setIntent(value as PreferenceIntent)} data={INTENTS} data-testid="preference-intent-choice" />
+      )}
       <Text size="xs" c="var(--nivra-text-3)">
-        Confirming saves it on this computer. Nivra never adds a preference by itself.
+        Confirming saves it on this computer. Nivra never adds a preference by itself. A project's default gives way to the repository's own conventions; a
+        decision to change them doesn't.
       </Text>
       {error && (
         <Text size="sm" c="var(--nivra-error)" data-testid="preference-error">

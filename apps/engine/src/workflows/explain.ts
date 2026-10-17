@@ -7,7 +7,9 @@ import { Budget } from "../explain/budget.ts";
 import { checkCitation } from "../explain/citations.ts";
 import { Ledger } from "../explain/ledger.ts";
 import { EXPLAIN_LIMITS, mustAnswer } from "../explain/limits.ts";
+import { rankConflict } from "../explain/precedence.ts";
 import { DEFAULT_QUESTION, explainPrompt, INSTRUCTIONS } from "../explain/prompt.ts";
+import { TaskUnreadable, type ExplainTask } from "../explain/task.ts";
 import { createExplainTools } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
 import { createModelClient, failure, InternalFailure, ModelFailure, type Endpoint, type ModelClient, type StepRecord } from "../providers/model.ts";
@@ -34,8 +36,8 @@ export interface ExplainDeps {
   platform: NodeJS.Platform;
   /** What the host sent with the run, held in memory by the scheduler (D21). */
   context: (runId: string) => RunContext | null;
-  /** The person's question, from the run store: it never passes through Mastra (D22). */
-  question: (runId: string) => string;
+  /** The person's question and choices, from the run store: they never pass through Mastra (D22, D23). */
+  task: (runId: string) => ExplainTask | null;
   apiKey: () => string | null;
   endpoint: Endpoint;
   mask: Mask;
@@ -97,6 +99,8 @@ export function createExplainWorkflow(deps: ExplainDeps) {
       if (!given) throw failure("internal", "this run's context is missing");
       const { message, data } = await describePreferences(given.preferences);
       deps.recorder.output(runId, "context", message, data);
+      // Before anything is sent anywhere: a task that can't be read back never becomes the default question.
+      if (!deps.task(runId)) throw new TaskUnreadable();
       return inputData;
     },
   });
@@ -139,7 +143,10 @@ export function createExplainWorkflow(deps: ExplainDeps) {
     outputSchema: Explained,
     execute: async ({ inputData, runId, abortSignal }) => {
       const { context, key } = allowed(runId);
-      const question = deps.question(runId).trim() || DEFAULT_QUESTION;
+      const task = deps.task(runId);
+      if (!task) throw new TaskUnreadable();
+      const question = task.question.trim() || DEFAULT_QUESTION;
+      const choiceIds = new Set(task.choices.map((choice) => choice.id));
       const { reader, session } = await openReader(inputData.root, abortSignal);
       try {
         const ledger = new Ledger();
@@ -149,7 +156,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         const mapText = deps.mask(map.text);
         // The map is delivered before the first step.
         ledger.record(-1, "map", map.sources.map((source) => ({ path: source.path, startLine: 1, endLine: source.lines, sha256: source.sha256 })), mapText.length);
-        const prompt = explainPrompt(question, mapText, context.preferences);
+        const prompt = explainPrompt(question, mapText, context.preferences, task.choices);
         const budget = new Budget(requestBudget(inputData.contextLength), INSTRUCTIONS.length + prompt.length + TOOL_DEFINITION_CHARS);
         const policy = policyFor(inputData.model);
         const internal = new InternalFailure();
@@ -167,6 +174,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           step: () => finished,
           answerDue: () => answerDue,
           preferences: context.preferences,
+          choices: choiceIds,
           signal: abortSignal,
           onTool: (event) => deps.recorder.event(runId, "tool.called", "explain", event.message, event.data),
         });
@@ -244,23 +252,27 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         const answer = state.accepted;
         const answerStep = state.answerStep;
         const check = (citations: typeof answer.findings[number]["citations"]) => citations.map((citation) => checkCitation(citation, ledger.entries, answerStep));
-        const revisions = new Map(context.preferences.records.map((record) => [record.id, record.revision]));
         const findings = answer.findings.map((finding) => ({ statement: finding.statement, citations: check(finding.citations) }));
-        const preferenceDifferences = answer.preferenceDifferences.map((difference) => ({
-          preferenceId: difference.preferenceId,
-          revision: revisions.get(difference.preferenceId)!,
-          repositoryConvention: difference.repositoryConvention,
-          citations: check(difference.citations),
-        }));
-        const all = [...findings, ...preferenceDifferences].flatMap((item) => item.citations);
+        // The engine ranks what the model reported (D23): who governs never comes from the model's words.
+        const conflicts = answer.conflicts.map((conflict) => rankConflict(conflict, check(conflict.citations), context.preferences.records, choiceIds));
+        // A suggestion keeps only lines the model was shown, and goes when none are left: nothing unsupported is offered.
+        const suggestions = answer.suggestions.flatMap((suggestion) => {
+          const shown = check(suggestion.citations).filter((citation) => citation.checked);
+          return shown.length ? [{ statement: suggestion.statement, citations: shown }] : [];
+        });
+        const suggestionsDropped = answer.suggestions.length - suggestions.length;
+        const all = [...findings, ...conflicts].flatMap((item) => item.citations);
         const checked = all.filter((citation) => citation.checked).length;
         const result: ExplainResult = {
           question,
+          choices: task.choices,
           headAtStart: inputData.head,
           headAtEnd: await reader.head(),
           summary: answer.summary,
           findings,
-          preferenceDifferences,
+          conflicts,
+          suggestions,
+          preferenceDifferences: [],
           gaps: answer.gaps,
           context: ledger.context(),
           checks: { citations: all.length, checked },
@@ -273,6 +285,11 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           checked,
           changedFiles: result.context.changedFiles,
           headChanged: result.headAtEnd !== result.headAtStart,
+          conflicts: conflicts.length,
+          unresolved: conflicts.filter((conflict) => conflict.reason === "unresolved").length,
+          conflictsDropped: state.conflictsDropped,
+          suggestions: suggestions.length,
+          suggestionsDropped,
         });
         return { citations: all.length, checked };
       } finally {

@@ -4,7 +4,7 @@ import type { DoctorReport, ExplainResult, ProviderCheck, RunEventsPage, RunStat
 import type { AddProjectResult, EngineView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
-import { addPreference, deletePreference, editPreference, removeProjectPreferences, snapshotFor, type NewPreference } from "./preferences.ts";
+import { addPreference, cleanChoices, deletePreference, editPreference, removeProjectPreferences, snapshotFor, type NewPreference, type PreferenceChange } from "./preferences.ts";
 import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
 import { labelFor, type ExecutionTarget } from "./targets/types.ts";
@@ -145,9 +145,10 @@ export class Host {
    * Explains the project's repository with evidence (NIV-6, NIV-9) on its own engine. Refused while the project
    * doesn't allow sharing (D20). An engine can take a while to start, so this waits for a start in progress, then
    * checks consent again immediately before submitting; a run submitted while sharing was being turned off is
-   * cancelled at once (D22).
+   * cancelled at once (D22). The task's choices go with this run only, never into the store (D23).
    */
-  async startExplain(projectId: string, question: string): Promise<RunSummary> {
+  async startExplain(projectId: string, question: string, choices: readonly string[]): Promise<RunSummary> {
+    const cleaned = cleanChoices(choices);
     const project = this.#project(projectId);
     if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be explained.");
     if (!project.sharing.modelContext) throw new Error("This project doesn't allow sending its content to Token Factory. Allow sharing for it, then explain again.");
@@ -158,7 +159,7 @@ export class Host {
     if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be explained.");
     if (!current.sharing.modelContext || this.#epochOf(projectId) !== epoch) throw new Error("Sharing for this project was turned off, so the run wasn't started.");
     const context = { preferences: snapshotFor(this.#options.store.data, current.id), sharing: { modelContext: true } };
-    const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "explain", input: { repoPath: current.nativePath, question }, context });
+    const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "explain", input: { repoPath: current.nativePath, question, choices: cleaned }, context });
     this.#runs.set(run.id, current.targetId);
     // A late answer is accepted only while nothing about the project's consent has changed since it was checked.
     const now = this.#options.store.data.projects.find((p) => p.id === projectId);
@@ -279,10 +280,10 @@ export class Host {
     return this.#preferenceView(saved!);
   }
 
-  editPreference(id: string, statement: string): PreferenceView {
+  editPreference(id: string, change: PreferenceChange): PreferenceView {
     let saved: PreferenceRecord | undefined;
     this.#options.store.update((data) => {
-      const result = editPreference(data, id, statement, new Date());
+      const result = editPreference(data, id, change, new Date());
       saved = result.record;
       return result.data;
     });
@@ -495,6 +496,7 @@ export class Host {
       scope: record.scope,
       projectId: record.projectId,
       projectLabel: project?.label ?? null,
+      intent: record.intent,
       status: record.status,
       origin: record.origin,
       revision: record.revision,
