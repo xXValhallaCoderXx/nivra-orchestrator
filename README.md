@@ -57,10 +57,41 @@ keeps that engine.
 
 ## Install a test build
 
-*Planned:* installers will be attached to the repository's GitHub Releases. The Windows installer is not code-signed
-during the hackathon: Windows SmartScreen asks once — choose **More info → Run anyway**. On a PC where Windows Smart
-App Control is on, Windows refuses to start an unsigned app, with no way to run it anyway; the Linux build is not
-affected.
+Download v0.1.0 from the repository's [GitHub Releases](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases):
+`Nivra-0.1.0-win-x64.zip` for Windows or `Nivra-0.1.0-amd64.deb` for Linux, with `SHA256SUMS` and `build-info.json`
+(the commit and runtimes the build came from). To check a download, run `sha256sum -c SHA256SUMS --ignore-missing` in
+Linux or WSL, or `Get-FileHash` in PowerShell.
+
+**Windows 10/11 x64**
+1. Extract the zip into a folder of your own, for example `%LOCALAPPDATA%\Programs\Nivra`, and run `Nivra.exe`.
+2. The build isn't code-signed. SmartScreen may ask once: choose **More info → Run anyway**. If Smart App Control is
+   on, Windows may refuse an unsigned app it doesn't yet have enough reputation for, with no way to run it anyway
+   ([Microsoft's explanation](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)).
+   Use the Linux build, or a PC where Smart App Control is off.
+3. For folders in WSL you need WSL 2 and a distribution such as Ubuntu (`wsl --install`). The first time you add a
+   folder from it, Nivra installs its own engine runtime there, under `~/.nivra`; it doesn't need Node in WSL.
+
+**Linux x64** (Ubuntu 24.04 and similar)
+
+```bash
+sudo apt install ./Nivra-0.1.0-amd64.deb
+nivra
+```
+
+There is no AppImage: it doesn't start on a stock Ubuntu 24.04 (D10).
+
+**Removing it**
+- Windows: delete the folder, then `%APPDATA%\Nivra` (your projects, preferences and saved key) and
+  `%LOCALAPPDATA%\Nivra` (the native engine's data); in WSL, `~/.nivra`.
+- Linux: `sudo apt remove nivra`, then `~/.config/Nivra` and `~/.nivra`.
+
+**If something goes wrong**
+- *"Another Nivra engine is using …"*: another Nivra window is using that engine. Close it, then press Retry.
+- *WSL is missing, or has no usable distribution*: Nivra's WSL panel says what to install. Install it, then press
+  Check again.
+- *"No Nebius key is set"*: add your key under Settings.
+- *Explain asks before sending*: sending a project's content to Token Factory stays off until you allow it for that
+  project.
 
 ## Build from source
 
@@ -85,7 +116,30 @@ NEBIUS_API_KEY=... pnpm probe:tokenfactory
 
 ## Testing instructions
 
-*Planned:* step-by-step instructions for judges (NIV-16).
+A full pass takes about ten minutes. Each explanation sends excerpts of the public repository it explains to NVIDIA
+Nemotron through Nebius Token Factory, and nothing else leaves your machine.
+
+1. Install Nivra (above).
+2. Clone the two public demonstration repositories, whose conventions contrast. On Windows, clone them inside WSL, for
+   example in `~`:
+   ```bash
+   git clone https://github.com/xXValhallaCoderXx/valhalla-fitness
+   git clone https://github.com/xXValhallaCoderXx/nivra-demo-timer
+   ```
+3. Start Nivra. Under **Settings**, paste the Token Factory key from the submission's private testing instructions (or
+   your own), then press **Save**.
+4. **Add** `valhalla-fitness`; on Windows, browse to `\\wsl.localhost\<distribution>\home\<you>\valhalla-fitness`.
+   Press **Explain**, and allow sharing for this project. The answer's citations say which lines the model was shown.
+5. Under **Preferences**, confirm *Name component files in PascalCase; write tests with Vitest* for **Every project**,
+   and *valhalla-fitness builds its web UI with Mantine* for `valhalla-fitness` only.
+6. **Add** `nivra-demo-timer` and **Explain** it. Under **Conflicts**, its kebab-case files and Jest govern over your
+   personal default. **Context used** shows what the run received: never the `valhalla-fitness`-only preference.
+7. Add the task choice *Use PascalCase for this task*, then **Explain** again. The choice governs this run only:
+   "Currently" still shows the repository's convention, and your stored preferences don't change.
+8. Edit the personal preference, then delete it, and **Explain** after each: every run uses your preferences as they
+   are now.
+
+What a run may send, and what it never sends, is in [docs/decisions.md](docs/decisions.md) (D20 to D23).
 
 ## How it is built
 
