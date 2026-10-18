@@ -423,7 +423,18 @@ function handoff(observed: Observed, fixture: Fixture, expected: ReturnType<type
   expect("handoff.snapshot", fixture, same(got) && (observed.result === null || same(stored)), `received ${got?.count ?? "nothing"} at revision ${got?.revision ?? "?"}, fingerprint ${got?.digest.slice(0, 12) ?? "none"}; expected ${expected.ids.length} at ${expected.revision}, ${expected.digest.slice(0, 12)}`, attempt);
   const route = observed.summary.route;
   expect("handoff.route", fixture, route?.endpoint === "token-factory" && /^nvidia\/[\w.-]+$/.test(route.model), `route ${route ? `${route.endpoint} ${route.model}` : "none"}`, attempt);
-  expect("handoff.head", fixture, observed.result?.headAtStart === head, `HEAD at start ${observed.result?.headAtStart?.slice(0, 12) ?? "none"}`, attempt);
+  // A run that failed has no result; its prepare step still recorded the HEAD it read.
+  const prepared = observed.events.find((e) => e.stepId === "prepare" && e.type === "step.output")?.data?.["head"];
+  const atStart = observed.result?.headAtStart ?? (typeof prepared === "string" ? prepared : null);
+  expect("handoff.head", fixture, atStart === head, `HEAD at start ${atStart?.slice(0, 12) ?? "none"}${observed.result ? "" : " (from the prepare step)"}`, attempt);
+  const kind = observed.events.find((e) => e.type === "run.failed")?.data?.["kind"];
+  expect(
+    "handoff.final-state",
+    fixture,
+    observed.summary.status === "succeeded" ? observed.result !== null : observed.summary.status === "failed" && typeof kind === "string" && observed.summary.error !== null,
+    observed.summary.status === "succeeded" ? "succeeded, with a stored result" : `${observed.summary.status}, kind ${String(kind)}: "${observed.summary.error ?? ""}"`,
+    attempt,
+  );
 }
 
 async function explainOn(project: ProjectView, fixture: Fixture, purpose: Purpose, question: string, choices: readonly string[] = [], attempt = 1): Promise<Observed> {
@@ -458,6 +469,17 @@ async function interrupt(project: ProjectView, purpose: Purpose, id: CheckId, ac
     expect(id, "A", problem === null, problem ?? `acted on run ${runId} while it was running`, attempt);
     return;
   }
+}
+
+/** A throwaway repository, made fresh for this session, whose package name the model can be asked for. */
+function freshRepo(): string {
+  const fresh = join(work, "nivra-fresh-amber");
+  mkdirSync(join(fresh, "src"), { recursive: true });
+  writeFileSync(join(fresh, "package.json"), `${JSON.stringify({ name: "nivra-fresh-amber-1", version: "1.0.0", private: true, scripts: { test: "node --test" } }, null, 2)}\n`);
+  writeFileSync(join(fresh, "README.md"), "# Fresh\n\nA throwaway repository for Nivra's acceptance run.\n");
+  writeFileSync(join(fresh, "src", "index.js"), "export const greet = (name) => `Hello, ${name}`;\n");
+  for (const args of [["init", "-q", "-b", "main"], ["add", "-A"], ["-c", "user.name=nivra", "-c", "user.email=acceptance@nivra.invalid", "commit", "-q", "-m", "init"]]) output("git", ["-C", fresh, ...args]);
+  return fresh;
 }
 
 // ─── Phases ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -530,6 +552,18 @@ async function rehearsal(): Promise<void> {
   expect("app.intact", "A", back !== undefined && back.sharing.modelContext, "the project and its consent are still there");
   const unknown = await ui!.refusal(`window.nivra.runEvents(${JSON.stringify(closed)}, 0)`);
   expect("app.old-run-unknown", "A", unknown !== null && /no record of that run in this session/.test(unknown), `asking for the earlier run: ${unknown ?? "answered"}`);
+
+  // Two projects, chosen back and forth (the live session does this with A, B and a throwaway repository): each hello
+  // must run on the folder chosen.
+  const second = freshRepo();
+  const other = await ui!.pick(pathFor(second), target);
+  const ranOn: string[] = [];
+  for (const [project, folder] of [[a, fixtureA], [other, second], [a, fixtureA], [other, second]] as const) {
+    const runId = await hello(project, project === a ? "A" : "fresh");
+    const repoPath = ((await ui!.result(runId)).summary.input as { repoPath?: string } | null)?.repoPath ?? "";
+    ranOn.push(repoPath === pathFor(folder) || repoPath === folder ? "right" : "wrong");
+  }
+  expect("handoff.snapshot", "fresh", ranOn.every((r) => r === "right"), `four hello runs, switching between two projects, ran on: ${ranOn.join(", ")}`);
   expect("cleanup.key-removed", "none", (await ui!.settings()).nebiusKey === "none", "no key was ever saved in this profile");
   if (platform === "windows") expect("identity.no-native-engine", "none", (await ui!.engineOf("local"))?.state.status !== "online", "the native engine never started");
   await quit(profiles.main, "rehearsal-end");
@@ -569,15 +603,15 @@ async function live(): Promise<void> {
   const refusal = await ui!.refusal(`window.nivra.startExplain(${JSON.stringify(a.id)}, "", [])`);
   expect("consent.refused-bridge", "A", refusal !== null && /doesn't allow sending its content/.test(refusal), `the host said: ${refusal ?? "nothing (it started)"}`);
   let want = expectedSnapshot(await ui!.preferences(), a.id);
-  let observed = await explainOn(a, "A", "explain", "");
-  expect("a.explain", "A", observed.summary.status === "succeeded", `run ${observed.summary.status}`);
-  handoff(observed, "A", want, headA);
+  const answered = (o: Observed) => (o.summary.status === "succeeded" ? "pass" : "incomplete");
   const shown = (o: Observed) => (o.result?.checks.checked ?? 0) > 0;
-  if (!note("a.checked-citations", "A", shown(observed) ? "pass" : "incomplete", `${observed.result?.checks.checked ?? 0} of ${observed.result?.checks.citations ?? 0} citations shown to the model`)) {
-    observed = await explainOn(a, "A", "explain", RETRY.a, [], 2);
-    handoff(observed, "A", want, headA, 2);
-    note("a.checked-citations", "A", shown(observed) ? "pass" : "incomplete", `${observed.result?.checks.checked ?? 0} of ${observed.result?.checks.citations ?? 0} citations shown to the model`, 2);
-  }
+  const aChecks = (o: Observed, attempt: number) => {
+    note("a.explain", "A", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt);
+    handoff(o, "A", want, headA, attempt);
+    return note("a.checked-citations", "A", shown(o) ? "pass" : "incomplete", `${o.result?.checks.checked ?? 0} of ${o.result?.checks.citations ?? 0} citations shown to the model`, attempt);
+  };
+  let observed = await explainOn(a, "A", "explain", "");
+  if (!aChecks(observed, 1)) aChecks(await explainOn(a, "A", "explain", RETRY.a, [], 2), 2);
 
   const personal = await ui!.confirmPreference(PERSONAL, "Every project");
   const aOwn = await ui!.confirmPreference(A_OWN(a.label), `${a.label} only`);
@@ -592,6 +626,7 @@ async function live(): Promise<void> {
   }
   want = expectedSnapshot(await ui!.preferences(), b.id);
   const bChecks = (o: Observed, attempt: number) => {
+    note("b.explain", "B", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt);
     handoff(o, "B", want, headB, attempt);
     const conflicts = o.result?.conflicts ?? [];
     expect("b.isolation", "B", !(o.received?.records ?? []).some((r) => r.id === aOwn) && !conflicts.some((c) => c.preferences.some((p) => p.id === aOwn)), "A's own preference is in neither B's context nor its conflicts", attempt);
@@ -601,12 +636,19 @@ async function live(): Promise<void> {
     return note("b.repository-governs", "B", governs ? "pass" : "incomplete", governs ? "the repository governs over the personal default" : `no conflict where the repository governs over the personal default (reasons: ${conflicts.map((c) => c.reason).join(", ") || "none reported"})`, attempt);
   };
   observed = await explainOn(b, "B", "explain", "");
-  expect("b.explain", "B", observed.summary.status === "succeeded", `run ${observed.summary.status}`);
   if (!bChecks(observed, 1)) bChecks(await explainOn(b, "B", "explain", RETRY.b, [], 2), 2);
 
   const store = join(local(profiles.main), "nivra.json");
   const choiceChecks = async (o: Observed, before: Buffer, prefsBefore: string, attempt: number) => {
-    expect("choice.explain", "B", o.summary.status === "succeeded" && JSON.stringify(o.result?.choices.map((x) => x.id)) === '["c1"]', `run ${o.summary.status}; choices ${o.result?.choices.map((x) => x.id).join(", ") ?? "none"}`, attempt);
+    note("choice.explain", "B", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt);
+    const asked = (o.summary.input as { choices?: unknown } | null)?.choices;
+    expect(
+      "choice.recorded",
+      "B",
+      JSON.stringify(asked) === JSON.stringify([CHOICE]) && (o.result === null || JSON.stringify(o.result.choices.map((x) => x.id)) === '["c1"]'),
+      `the run's input holds ${Array.isArray(asked) ? asked.length : 0} choice(s)${o.result ? `; its result names ${o.result.choices.map((x) => x.id).join(", ")}` : ""}`,
+      attempt,
+    );
     handoff(o, "B", want, headB, attempt);
     expect("choice.store-unchanged", "B", readFileSync(store).equals(before) && JSON.stringify(await ui!.preferences()) === prefsBefore, "nivra.json is byte-identical and the preferences are unchanged", attempt);
     const conflicts = o.result?.conflicts ?? [];
@@ -652,12 +694,7 @@ async function live(): Promise<void> {
   expect("life.delete", "B", helloAfterDelete?.count === 0 && observed.received?.count === 0 && !(observed.result?.conflicts ?? []).some((c) => c.preferences.length > 0), `after the deletion B received ${observed.received?.count ?? "?"} preferences, and no conflict names one`);
 
   // 5. A changed file reaches the next request.
-  const fresh = join(work, "nivra-fresh-amber");
-  mkdirSync(join(fresh, "src"), { recursive: true });
-  writeFileSync(join(fresh, "package.json"), `${JSON.stringify({ name: "nivra-fresh-amber-1", version: "1.0.0", private: true, scripts: { test: "node --test" } }, null, 2)}\n`);
-  writeFileSync(join(fresh, "README.md"), "# Fresh\n\nA throwaway repository for Nivra's acceptance run.\n");
-  writeFileSync(join(fresh, "src", "index.js"), "export const greet = (name) => `Hello, ${name}`;\n");
-  for (const args of [["init", "-q", "-b", "main"], ["add", "-A"], ["-c", "user.name=nivra", "-c", "user.email=acceptance@nivra.invalid", "commit", "-q", "-m", "init"]]) output("git", ["-C", fresh, ...args]);
+  const fresh = freshRepo();
   const freshProject = await ui!.pick(pathFor(fresh), target);
   const freshHead = output("git", ["-C", fresh, "rev-parse", "HEAD"]);
   const question = "What is the exact name field in this repository's package.json? Quote it exactly.";

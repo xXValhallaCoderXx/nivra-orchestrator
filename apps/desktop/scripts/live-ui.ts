@@ -116,15 +116,24 @@ export class Ui {
     await this.page.getByTestId("project-add").click();
     const added = await waitFor(async () => (await this.projects()).find((p) => !before.has(p.id)) ?? null, 30_000, "the project to be added");
     if (added.targetId !== targetId) throw new Error(`the folder went to ${added.targetId}, not ${targetId}`);
+    // Adding chooses the new project, once the window has the refreshed list: until then, choosing it could race.
+    const select = this.page.getByTestId("project-select");
+    await waitFor(async () => (await select.inputValue()) === added.label, 15_000, "the window to choose the new project");
     await this.online(targetId);
     return added;
   }
-  /** Chooses a project by its label; choosing the one already chosen would clear the choice. */
+  /**
+   * Chooses a project by its label. Choosing the one already chosen would clear the choice (Mantine's Select allows
+   * that), so the open list is checked again, and closed rather than clicked when the project is already the choice.
+   */
   async choose(project: ProjectView): Promise<void> {
     const select = this.page.getByTestId("project-select");
     if ((await select.inputValue()) === project.label) return;
     await select.click();
-    await this.page.getByRole("option", { name: new RegExp(`^${project.label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).click();
+    const option = this.page.getByRole("option", { name: new RegExp(`^${project.label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) });
+    await option.waitFor({ timeout: 10_000 });
+    if ((await option.getAttribute("aria-selected")) === "true" || (await select.inputValue()) === project.label) await this.page.keyboard.press("Escape");
+    else await option.click();
     await waitFor(async () => (await select.inputValue()) === project.label, 10_000, "the project to be chosen");
   }
 
