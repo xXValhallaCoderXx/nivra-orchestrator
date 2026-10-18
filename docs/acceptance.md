@@ -175,7 +175,9 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
 - **The preference's wording, asked as a question:** on A, 5 of 5 citations shown, with PascalCase and Vitest found as
   the fixture record says. Fixture B also ran again; its results stay out of this file.
 - The statement was typed as a question rather than confirmed, so every run recorded "No confirmed preferences from
-  the app (revision 0)". The preference contrast itself is still to run.
+  the app (revision 0)". The preference contrast itself was still to run.
+- The preference contrast then ran on B. B is private, so its result is recorded in NIV-6, not here. D23's checkpoint
+  1 (below) ran B again with every kind of preference.
 
 A real engine driven through `apps/engine/scripts/rpc.ts`:
 - with no key, and with consent off, the run was refused each time with no request;
@@ -184,8 +186,10 @@ A real engine driven through `apps/engine/scripts/rpc.ts`:
 *Still pending:*
 - a public pair of repositories for showing the preference contrast in the demonstration: B's live results are
   recorded privately in NIV-6 and NIV-11 (counts only);
-- the stronger provider probes with a real key;
 - an explanation that reaches Token Factory from the native Windows engine.
+
+*Since done:* the stronger provider probes ran with a real key on 18 October, from the WSL engine (D23's checkpoint 1,
+below).
 
 ### Context assembly and the preference lifecycle (D23, NIV-11, NIV-10)
 
@@ -204,6 +208,8 @@ Offline (`pnpm verify`, `test:e2e`), against the loopback stub; no real model:
 - **Answers.**
   - Conflicts naming ids the run doesn't have, or fewer than two sides, are turned down twice at most, then dropped and
     counted; when the answer is due, they are dropped at once.
+  - A repository convention or a suggestion citing no lines is turned down twice at most while there is time; after
+    that, or when the answer is due, the convention decides nothing and the suggestion is dropped.
   - Suggestions keep only lines the model was shown.
   - A README can't add a choice, set an intent or name a winner.
   - A preference or choice asking for `.env` leaves it hidden.
@@ -223,13 +229,22 @@ Offline (`pnpm verify`, `test:e2e`), against the loopback stub; no real model:
   - Replace keeps history, and the next run gets only the replacement.
   - Keep saves the person's wording as the project's default, with the run's evidence, once even on a double click. It is
     refused for another project's run, an unknown suggestion, or a project being removed or gone.
-  - Export holds only the chosen scopes, with no ids, history or key, and is written `0600`. Import maps project labels,
-    skips what is already here, and never quotes a bad file.
+  - Export holds only the chosen scopes, with no ids, folders, history or key, and is written `0600`, leaving no temporary
+    file behind even when the write fails part way. Each source project has a key of its own in the file, so two
+    projects called `app` stay two.
+  - Import brings the file's personal preferences only if the person keeps them in. Leaving them out leaves every other
+    project's snapshot with the same preferences; only the store's revision rises.
+  - Each source project's preferences go only where the person sends them. A destination is suggested only when the
+    name is unambiguous; two same-named sources start left out, whether one or two local projects share the name.
+  - Import skips what is already here, and the preview says so, a repeat within the file included. It refuses a choice
+    that doesn't match the file, reads at most one byte past its size limit, never waits on a pipe, and never quotes a
+    bad file.
 
 *Live, 18 October* (Nate's dev Windows app on its own profile, driven through its UI by Claude at Nate's request; the
 key stayed inside the app; the WSL engine):
 - **Checkpoint 1, fixture B** (private: counts only):
-  - Check Token Factory: "Answer schema, forced: valid".
+  - Check Token Factory ran the stronger probes D22 left pending: required tool choice and a forced choice between two
+    tools were honoured, and "Answer schema, forced: valid". It reported a context length of 262,144 tokens.
   - B had the personal default, a B default and a B decision. Without choices, B's decision governed tests, and "Currently"
     still named Jest; the repository governed naming. With the choice "Keep Jest for this task", the choice governed tests.
   - Both runs succeeded, with 8 of 8 and 12 of 12 citations shown, no conflict dropped, and `nivra.json` unchanged.
@@ -308,7 +323,10 @@ The cross-platform foundation is done when all of these were seen to pass:
   - *Seen once, 17 October, with Nate's key:* 28 models, five of them NVIDIA's. Nemotron 3 Super called the tool and
     answered in 2,249 ms (964 tokens in, 65 out). It honoured required tool choice, and a forced tool when it was the
     only one offered. Rate-limit headers were present, and `/models` gave no context length.
-  - Which engine answered wasn't recorded, so reaching both is still pending.
+  - *18 October, from the WSL engine* (D23's checkpoint 1): required tool choice and a forced choice between two tools
+    were honoured, the real answer schema was valid when forced, and `/models?verbose=true` gave a context length of
+    262,144 tokens.
+  - Reaching it from the native engine is still pending.
 - **Clean machine:** the Windows zip runs native hello on a VM or Windows Sandbox with no Visual C++ redistributable
   installed. *Not yet run.*
 

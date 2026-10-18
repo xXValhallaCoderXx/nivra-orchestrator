@@ -776,15 +776,21 @@ The key saw 28 models, five of them NVIDIA's.
   - Both are flat and lenient: ids are plain strings, and citations default to none. Nivra refuses what can't be used,
     not the schema.
   - While the answer isn't due, an answer with unusable conflicts (ids the run doesn't have, or fewer than two sides) is
-    turned down, at most twice. When it is due, those conflicts are dropped and counted.
+    turned down, at most twice. After that, or once it is due, those conflicts are dropped and counted.
+  - A repository convention or a suggestion citing no lines at all is turned down like a citation of unshown lines,
+    within the same two refusals, so an uncited convention can't quietly lose to a default. After that, or once the
+    answer is due, the convention decides nothing and the suggestion is dropped.
   - Suggestions keep only the lines the model was shown, and one with none left is dropped.
   - The prompt asks for a suggestion for each convention the findings establish. Asked only to "propose" them, Nemotron 3
     Super gave none in live runs.
 - **Stored input is read leniently.**
-  - The store masks a run's input as one text, which also catches a key split across two fields. Masking can lengthen
-    text or make two choices identical, so the read-back checks only the input's shape.
-  - A mask that leaves the stored input unreadable makes it read as null. The run then fails before any request, with
-    Nivra's own message, never a parser's, and every other run still lists.
+  - The store masks a run's input as one text, so a private-key block split across fields is masked too; the other
+    patterns can't span fields. Masking can lengthen text or make two choices identical, so the read-back checks only
+    the input's shape. A block spanning choices can leave fewer choices that still read; the result shows the choices
+    as the run read them.
+  - A mask that leaves the stored input unreadable makes it read as null. The run then fails before its workflow
+    starts, so before any request and with no preference handoff recorded, with Nivra's own message, never a parser's.
+    Every other run still lists.
 - **The context view.**
   - **What each result records**, beside the sources:
     - the preferences received: kinds, revisions and the fingerprint;
@@ -824,13 +830,24 @@ The key saw 28 models, five of them NVIDIA's.
 - **This amends D21's "Nothing else creates one":** a preference is created only by the person confirming wording,
   whether typed, kept or imported.
 - **Export and import.**
-  - **An export** holds the confirmed preferences in the scopes the person chooses, by wording, scope, project label and
-    intent: no ids, revisions, evidence or history, and never a statement holding the saved key. Main writes it with mode
-    `0600`, even over an existing file, and never leaves a temporary copy behind.
-  - **An import** is read only from a regular file of at most 256 KB, then checked and previewed. Project preferences map
-    to local projects by label: one match is suggested, and none or several are the person's to choose.
-  - **Applying it** rechecks each project, skips what is already here, applies the limit to the whole file, and adds the
-    rest as confirmed, with `origin: imported`.
+  - **An export** holds the confirmed preferences in the scopes the person chooses, by wording, scope and intent. Each
+    source project appears once, under a key local to the file (`p1`, `p2`, …) with its label, so two projects with the
+    same name stay two. There are no ids, folders, revisions, evidence or history, and never a statement holding the
+    saved key; while a saved key can't be read, nothing is exported. Main writes it with mode `0600`, even over an
+    existing file (on Windows the folder's permissions decide who can read it), and never leaves a temporary copy
+    behind, even when the write fails part way. The format is version 2; the unreleased version 1 named projects by
+    label alone.
+  - **An import** is read only from a regular file of at most 256 KB, opened once and read at most one byte past that,
+    then checked and previewed.
+    - The file's personal preferences come in only if the person keeps them in.
+    - Each source project's preferences go to the local project the person chooses, or are left out. A destination is
+      suggested only when the label is unambiguous: one local project has it, and no other project in the file does.
+      The person can change it. Otherwise the source starts left out, and the window says why.
+    - The preview marks what would be skipped: what is already here, and what an earlier entry of the file already
+      brings to the same place.
+  - **Applying it** needs a choice for every source project in the file. It rechecks each destination, skips what is
+    already here, applies the limit to the whole import, and adds the rest as confirmed, with `origin: imported`. What
+    is left out reaches no project.
   - No message quotes the file or a path.
 - **Compatibility and protocol 4.**
   - Every field added to a result or a preference record has a default. So results stored under protocol 3, and a
@@ -849,6 +866,9 @@ The key saw 28 models, five of them NVIDIA's.
   shown count as evidence.
 - **Lenient schema, strict engine.** Whatever a schema refuses never reaches Nivra and costs an answer step. Checking in
   the engine lets an answer that is due keep what it can.
+- **A label isn't an identity.** Two checkouts called `app` are common, so an export keeps its source projects apart,
+  and an import never guesses where an ambiguous one goes. Personal preferences reach every project, so bringing them in
+  is a choice of its own.
 - **Live evidence.**
   - Checkpoint 1, on B: the decision governed, then the task choice did, while "Currently" kept B's convention and
     `nivra.json` stayed unchanged.

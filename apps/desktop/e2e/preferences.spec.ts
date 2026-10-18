@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -187,31 +187,94 @@ test("a replaced preference stays as history, and the next run gets only its rep
   expect([received.count, received.records.map((r) => r.id), received.digest]).toEqual([1, expected.ids, expected.digest]);
 });
 
-test("preferences go to a file the person picks and come back with the projects they choose, never with ids or history (D23)", async () => {
+/** Makes the native save and open dialogs answer with `path`, as if the person had picked it. */
+async function pickFile(path: string): Promise<void> {
+  await app.evaluate(({ dialog }, picked) => {
+    dialog.showSaveDialog = (async () => ({ canceled: false, filePath: picked })) as typeof dialog.showSaveDialog;
+    dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
+  }, path);
+}
+
+test("preferences go to a file the person picks and come back as they choose, never with ids, folders or history (D23)", async () => {
   const file = join(root, "exports", "nivra-preferences.json");
   mkdirSync(dirname(file), { recursive: true });
-  await app.evaluate(({ dialog }, path) => {
-    dialog.showSaveDialog = (async () => ({ canceled: false, filePath: path })) as typeof dialog.showSaveDialog;
-    dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
-  }, file);
+  await pickFile(file);
 
   await page.getByTestId("preference-export").click();
   await page.getByTestId("preference-export-scopes").getByLabel("alpha's own (1)").check();
   await page.getByTestId("preference-export-save").click();
   await expect(page.getByTestId("preference-transfer")).toHaveText("Exported 2 preferences to nivra-preferences.json.");
-  const exported = JSON.parse(readFileSync(file, "utf8")) as { format: string; preferences: Array<{ statement: string; scope: string; project: string | null; intent: string }> };
-  expect([exported.format, exported.preferences.map((p) => [p.scope, p.project, p.intent])]).toEqual(["nivra-preferences", [["project", "alpha", "override"], ["personal", null, "default"]]]);
-  expect(/"id"|revision|Use tabs/.test(readFileSync(file, "utf8"))).toBe(false);
+  const text = readFileSync(file, "utf8");
+  const exported = JSON.parse(text) as { format: string; version: number; projects: unknown[]; preferences: Array<{ scope: string; project: string | null; intent: string }> };
+  expect([exported.format, exported.version, exported.projects, exported.preferences.map((p) => [p.scope, p.project, p.intent])]).toEqual([
+    "nivra-preferences",
+    2,
+    [{ key: "p1", label: "alpha" }],
+    [["project", "p1", "override"], ["personal", null, "default"]],
+  ]);
+  expect([/"id"|revision|Use tabs/.test(text), text.includes(root)]).toEqual([false, false]);
 
-  // The personal one goes; importing brings it back, and skips alpha's, which is still here.
+  // The personal one goes. An import that leaves the file's personal preferences out doesn't bring it back, and skips
+  // alpha's own, which is still here; one that keeps them in does.
   await page.getByTestId("preference-row").filter({ hasText: "Use two spaces for indentation" }).getByTestId("preference-delete").click();
   await expect(page.getByTestId("preference-list")).not.toContainText("Use two spaces for indentation");
   await page.getByTestId("preference-import").click();
-  await expect(page.getByTestId("preference-import-entry")).toHaveCount(2);
+  await expect(page.getByTestId("preference-import-source")).toHaveCount(1);
+  await expect(page.getByTestId("preference-import-project")).toHaveValue("alpha only");
   await expect(page.getByTestId("preference-import-entry").filter({ hasText: ALPHA_OWN })).toContainText("(already here: skipped)");
+  await page.getByTestId("preference-import-personal-include").uncheck();
+  await expect(page.getByTestId("preference-import-entry").filter({ hasText: "Use two spaces for indentation" })).toContainText("(left out)");
   await page.getByTestId("preference-import-save").click();
-  await expect(page.getByTestId("preference-transfer")).toHaveText("Imported 1 preference; 1 skipped.");
+  await expect(page.getByTestId("preference-transfer")).toHaveText("Nothing imported; 1 already here; 1 left out.");
+  await expect(page.getByTestId("preference-list")).not.toContainText("Use two spaces for indentation");
+
+  await page.getByTestId("preference-import").click();
+  await expect(page.getByTestId("preference-import-personal-include")).toBeChecked();
+  await page.getByTestId("preference-import-save").click();
+  await expect(page.getByTestId("preference-transfer")).toHaveText("Imported 1 preference; 1 already here.");
   await expect(page.getByTestId("preference-row").filter({ hasText: "Use two spaces for indentation" }).getByTestId("preference-revision")).toContainText("imported");
+});
+
+test("two projects with the same name in a file stay apart, neither goes anywhere until the person says where, and a repeat is shown as skipped (D23)", async () => {
+  const file = join(root, "exports", "same-name.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      format: "nivra-preferences",
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      projects: [{ key: "p1", label: "alpha" }, { key: "p2", label: "alpha" }],
+      preferences: [
+        { statement: "Keep functions small", scope: "personal", project: null, intent: "default" },
+        { statement: "Keep functions small", scope: "personal", project: null, intent: "default" },
+        { statement: "Use Jest for alpha's tests", scope: "project", project: "p1", intent: "default" },
+        { statement: "Use Vitest for alpha's tests", scope: "project", project: "p2", intent: "default" },
+      ],
+    }),
+  );
+  await pickFile(file);
+
+  await page.getByTestId("preference-import").click();
+  const sources = page.getByTestId("preference-import-source");
+  const destinations = page.getByTestId("preference-import-project");
+  await expect(sources).toHaveCount(2);
+  // The file holds the same personal preference twice: the second would add nothing, as the host will count it.
+  await expect(page.getByTestId("preference-import-personal").getByTestId("preference-import-entry")).toHaveText(["Keep functions small", "Keep functions small (already here: skipped)"]);
+  for (const i of [0, 1]) {
+    await expect(sources.nth(i)).toContainText(`From alpha (${i + 1} of 2 projects with this name in the file)`);
+    await expect(sources.nth(i)).toContainText("The file has 2 projects called alpha: choose where each one's preferences go, or leave them out.");
+    await expect(destinations.nth(i)).toHaveValue("Leave them out");
+  }
+
+  await destinations.nth(0).click();
+  await page.getByRole("option", { name: "alpha only" }).click();
+  await expect(destinations.nth(0)).toHaveValue("alpha only");
+  await expect(sources.nth(0).getByTestId("preference-import-entry")).toHaveText("Use Jest for alpha's tests (default)");
+  await expect(sources.nth(1).getByTestId("preference-import-entry")).toHaveText("Use Vitest for alpha's tests (default) (left out)");
+  await page.getByTestId("preference-import-save").click();
+  await expect(page.getByTestId("preference-transfer")).toHaveText("Imported 2 preferences; 1 already here; 1 left out.");
+  await expect(page.getByTestId("preference-list")).toContainText("Use Jest for alpha's tests");
+  await expect(page.getByTestId("preference-list")).not.toContainText("Use Vitest for alpha's tests");
 });
 
 test("only the app's own store keeps preference text: nothing in the engine's databases or the logs", async () => {

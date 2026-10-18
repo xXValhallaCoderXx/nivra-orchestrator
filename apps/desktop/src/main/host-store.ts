@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
@@ -160,18 +160,46 @@ export class HostStore {
 }
 
 /**
- * Writes a file only its owner can read (0600), atomically: a new temp file, then a rename, so a file that already
- * exists ends up 0600 too. `writeFileSync`'s mode applies only when it creates the file (D23: preference exports).
+ * Writes a file with mode 0600 (on Windows, which keeps only read-only from a mode, the folder's permissions decide who
+ * can read it), atomically: a new temp file, then a rename, so a file that already exists ends up 0600 too.
+ * `writeFileSync`'s mode applies only when it creates the file (D23: preference exports).
  */
 export function writePrivateFile(path: string, text: string): void {
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temp, text, { mode: 0o600, flag: "wx" });
+  // The temp file never stays behind, whole or cut short by a failed write; one that was already there isn't this one's.
+  try {
+    writeFileSync(temp, text, { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") rmSync(temp, { force: true });
+    throw error;
+  }
   try {
     renameRetrying(temp, path);
   } catch (error) {
-    // The temp file holds the same text: it never stays behind.
     rmSync(temp, { force: true });
     throw error;
+  }
+}
+
+/**
+ * Reads a regular file of at most `maxBytes` (D23: preference imports). The file is opened once, and what is checked is
+ * what is read: its type from the open file, and its size by reading at most one byte more than allowed, so a file that
+ * reports no size (in /proc) or grows after being picked is still bounded. Opening never waits for a pipe's writer.
+ */
+export function readSmallFile(path: string, maxBytes: number): { text: string } | { refused: "not-a-file" | "too-large" } {
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  try {
+    if (!fstatSync(fd).isFile()) return { refused: "not-a-file" };
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = readSync(fd, buffer, length, buffer.length - length, null);
+      if (read === 0) break;
+      length += read;
+    }
+    return length > maxBytes ? { refused: "too-large" } : { text: buffer.toString("utf8", 0, length) };
+  } finally {
+    closeSync(fd);
   }
 }
 

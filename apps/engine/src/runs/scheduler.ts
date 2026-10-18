@@ -39,6 +39,14 @@ export interface WorkflowEntry {
   mastraInput?(input: unknown): unknown;
 }
 
+/**
+ * The input Mastra gets for a run. A workflow that narrows it gets exactly what it returns: nothing it leaves out ever
+ * falls back to the whole input, which would put the question and the choices in Mastra's records.
+ */
+export function mastraInputOf(entry: WorkflowEntry | undefined, input: unknown): unknown {
+  return entry?.mastraInput ? entry.mastraInput(input) : input;
+}
+
 export interface SchedulerOptions {
   store: RunStore;
   workflows: ReadonlyMap<WorkflowId, WorkflowEntry>;
@@ -204,7 +212,7 @@ export class RunScheduler {
       unwatch = handle.watch((event) => this.#onWatch(runId, slot, event));
       settled = slot.cancelRequested
         ? settleOutcome({ status: "canceled" }, true, cancelMessage())
-        : settleOutcome(await handle.start({ inputData: this.#workflows.get(run.workflowId)?.mastraInput?.(run.input) ?? run.input }), slot.cancelRequested, cancelMessage());
+        : settleOutcome(await handle.start({ inputData: mastraInputOf(this.#workflows.get(run.workflowId), run.input) }), slot.cancelRequested, cancelMessage());
     } catch (error) {
       settled = slot.cancelRequested ? settleOutcome({ status: "canceled" }, true, cancelMessage()) : settleOutcome({ status: "failed", error }, false);
     }

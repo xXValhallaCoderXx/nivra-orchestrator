@@ -205,6 +205,11 @@ describe("buildMap (NIV-9, D23)", () => {
     assert.deepEqual(map.sources.map((source) => source.path).sort(), [...sent].sort());
   });
 
+  it("names a manifest that isn't valid JSON as no source, since only its path is sent", async () => {
+    const map = await buildMap(await reader(repoWith({ "package.json": manifest("root", 2, 20), "packages/broken/package.json": "{ not json" })), null);
+    assert.deepEqual(map.sources.map((source) => source.path), ["package.json"]);
+  });
+
   it("names no source when only the minimal map fits", async () => {
     const huge = JSON.stringify({ name: "huge", ...Object.fromEntries(["scripts", "dependencies", "devDependencies"].map((list) => [list, Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`${list}-${i}-`.padEnd(150, "x"), "1"]))])) });
     const map = await buildMap(await reader(repoWith({ "package.json": huge })), null);

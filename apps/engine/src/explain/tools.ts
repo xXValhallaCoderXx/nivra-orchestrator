@@ -11,17 +11,18 @@ import type { Budget } from "./budget.ts";
 import { checkCitation, type CheckedCitation } from "./citations.ts";
 import type { Ledger, LedgerKind } from "./ledger.ts";
 import { turnsBeforeAnswer } from "./limits.ts";
-import { conflictProblems } from "./precedence.ts";
+import { conflictProblems, conventionOf } from "./precedence.ts";
 
 /**
  * The explain run's tools (D22), from Hird's `projects/tools.ts` @ 45c0057: list, search and read the repository, and
  * submit the answer. Every result is charged to the budget before it is returned (tool calls run one at a time), and
  * what it delivered is written to the ledger with the step it was delivered in. The tools never throw: an expected
  * refusal goes back to the model as `{ refused }`; anything unexpected is recorded as an internal failure, which stops
- * the run as a failure, never as a cancellation. An answer whose conflicts name ids the run doesn't have, or citing
- * lines the model wasn't shown, is turned down, naming them, while there is time to fix it (D23); when the answer is
- * due, or after two such refusals of each kind, it is accepted: unusable conflicts are dropped and counted, and
- * citations are labelled for what they are.
+ * the run as a failure, never as a cancellation. An answer whose conflicts name ids the run doesn't have, citing lines
+ * the model wasn't shown, or giving a repository convention or a suggestion with no lines at all, is turned down,
+ * naming them, while there is time to fix it (D23); when the answer is due, or after two such refusals of each kind, it
+ * is accepted: unusable conflicts are dropped and counted, citations are labelled for what they are, an uncited
+ * convention decides nothing, and an uncited suggestion is dropped.
  */
 
 export interface ToolEvent {
@@ -277,14 +278,30 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
           const dropped = new Set(unusable.map((conflict) => conflict.index));
           const answer = { ...input, conflicts: input.conflicts.filter((_, index) => !dropped.has(index)) };
           const unshown = unshownCitations(answer, options.step());
-          if (unshown.length && !options.answerDue() && state.citationRefusals < MAX_CITATION_REFUSALS) {
+          // A convention or a suggestion with no lines at all would rank or offer nothing, so the model is asked for them,
+          // as it is for lines it wasn't shown. Indexes are the model's own.
+          const uncited = [
+            ...input.conflicts.flatMap((conflict, index) =>
+              !dropped.has(index) && conventionOf(conflict) !== null && !conflict.citations.length
+                ? [`conflicts[${index}]: it gives the repository's convention but cites no lines that show it. Read them with read_file and cite them, or set repositoryConvention to null.`]
+                : [],
+            ),
+            ...input.suggestions.flatMap((suggestion, index) =>
+              suggestion.citations.length ? [] : [`suggestions[${index}]: it cites no lines that show the convention. Read them with read_file and cite them, or drop the suggestion.`],
+            ),
+          ];
+          if ((unshown.length || uncited.length) && !options.answerDue() && state.citationRefusals < MAX_CITATION_REFUSALS) {
             state.rejected++;
             state.citationRefusals++;
+            const counts = [
+              unshown.length ? `${unshown.length} ${unshown.length === 1 ? "citation" : "citations"} of lines the model wasn't shown` : null,
+              uncited.length ? `${uncited.length} ${uncited.length === 1 ? "claim" : "claims"} citing no lines` : null,
+            ];
             options.onTool({
-              message: `submit_answer refused: ${unshown.length} ${unshown.length === 1 ? "citation" : "citations"} of lines the model wasn't shown`,
-              data: { tool: "submit_answer", step: options.step(), refused: "unshown citations", citations: unshown.length },
+              message: `submit_answer refused: ${counts.filter((count) => count !== null).join("; ")}`,
+              data: { tool: "submit_answer", step: options.step(), refused: "citations", citations: unshown.length, uncited: uncited.length },
             });
-            return { accepted: false, problems: unshown.slice(0, 12).map(describeUnshown) };
+            return { accepted: false, problems: [...uncited, ...unshown.map(describeUnshown)].slice(0, 12) };
           }
           state.accepted = answer;
           state.answerStep = options.step();

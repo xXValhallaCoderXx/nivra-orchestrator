@@ -1,7 +1,7 @@
 import { Badge, Button, Checkbox, Group, SegmentedControl, Select, Stack, Text, TextInput } from "@mantine/core";
 import type { PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { useRef, useState } from "react";
-import type { ImportEntryView, PreferencesView, PreferenceView, ProjectView } from "../../../shared/ipc";
+import type { ImportEntryView, ImportSourceView, PreferencesView, PreferenceView, ProjectView } from "../../../shared/ipc";
 import { errorMessage, Section } from "../shared/ui";
 
 /** What a project's own preference asks for (D23): a default gives way to the repository's conventions; a decision doesn't. */
@@ -22,7 +22,15 @@ const ORIGIN: Record<PreferenceView["origin"], string> = { entered: "", suggeste
 export function Preferences({ project, projects, view, onChanged }: { project: ProjectView | null; projects: ProjectView[]; view: PreferencesView | null; onChanged(): void }) {
   const [statement, setStatement] = useState("");
   const [exportScopes, setExportScopes] = useState<{ personal: boolean; projectIds: string[] } | null>(null);
-  const [importing, setImporting] = useState<{ previewId: string; entries: ImportEntryView[]; mapping: string[] } | null>(null);
+  // What an import would bring, and the person's choices: the file's personal preferences in or out, and where each of
+  // its source projects goes ("" leaves it out).
+  const [importing, setImporting] = useState<{
+    previewId: string;
+    personal: ImportEntryView[];
+    projects: ImportSourceView[];
+    includePersonal: boolean;
+    mapping: Record<string, string>;
+  } | null>(null);
   const [transfer, setTransfer] = useState<string | null>(null);
   const [scope, setScope] = useState<PreferenceScope>("personal");
   const [intent, setIntent] = useState<PreferenceIntent>("default");
@@ -87,9 +95,37 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
     label: projectName(id, label),
     count: confirmed.filter((r) => r.projectId === id).length,
   }));
-  /** Whether an imported entry is already here, for the project it would go to now: it is then skipped. */
+  /** Whether an imported preference is already here, for where it would go now (null: personal): it is then skipped. */
   const alreadyHere = (entry: ImportEntryView, projectId: string | null) =>
-    confirmed.some((r) => r.statement === entry.statement.trim() && r.scope === entry.scope && r.projectId === projectId && r.intent === entry.intent);
+    confirmed.some((r) => r.statement === entry.statement.trim() && r.scope === (projectId === null ? "personal" : "project") && r.projectId === projectId && r.intent === entry.intent);
+  /** Where a source project's preferences would go now: a chosen project that has gone since leaves them out. */
+  const destinationOf = (key: string) => {
+    const chosen = importing?.mapping[key] ?? "";
+    return projects.some((p) => p.id === chosen) ? chosen : "";
+  };
+  /**
+   * What importing would do with each entry, as the person has chosen so far and as the host will do it: one the store
+   * already has, or one an earlier entry of the file already brings to the same place, is skipped.
+   */
+  const importPlan = (() => {
+    if (!importing) return null;
+    const coming = new Set<string>();
+    const fate = (entry: ImportEntryView, projectId: string | null): "in" | "here" => {
+      const key = JSON.stringify([entry.statement.trim(), projectId, entry.intent]);
+      if (alreadyHere(entry, projectId) || coming.has(key)) return "here";
+      coming.add(key);
+      return "in";
+    };
+    const NOTE = { in: "", here: " (already here: skipped)", out: " (left out)" } as const;
+    const personal = importing.personal.map((entry) => NOTE[importing.includePersonal ? fate(entry, null) : "out"]);
+    const projectNotes = new Map(
+      importing.projects.map((source) => {
+        const destination = destinationOf(source.key);
+        return [source.key, source.entries.map((entry) => NOTE[destination ? fate(entry, destination) : "out"])] as const;
+      }),
+    );
+    return { personal, projects: projectNotes };
+  })();
 
   async function exportChosen() {
     if (!exportScopes) return;
@@ -109,8 +145,10 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
     setTransfer(null);
     await act(async () => {
       const result = await window.nivra.previewImport();
-      // One project with the same name is suggested; none or several are the person's to choose.
-      if (result.status === "preview") setImporting({ ...result, mapping: result.entries.map((entry) => (entry.scope === "project" && entry.matches.length === 1 ? entry.matches[0]!.id : "")) });
+      // A destination is filled in only where the host suggests one; anything ambiguous starts left out.
+      if (result.status === "preview") {
+        setImporting({ ...result, includePersonal: result.personal.length > 0, mapping: Object.fromEntries(result.projects.map((source) => [source.key, source.suggested ?? ""])) });
+      }
     });
   }
 
@@ -118,11 +156,11 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
     if (!importing) return;
     let note: string | null = null;
     const saved = await act(async () => {
-      const result = await window.nivra.importPreferences(
-        importing.previewId,
-        importing.mapping.map((id) => id || null),
-      );
-      note = `Imported ${result.added} ${result.added === 1 ? "preference" : "preferences"}${result.skipped ? `; ${result.skipped} skipped` : ""}.`;
+      const result = await window.nivra.importPreferences(importing.previewId, {
+        personal: importing.includePersonal,
+        projects: importing.projects.map((source) => ({ source: source.key, project: destinationOf(source.key) || null })),
+      });
+      note = `${result.added ? `Imported ${result.added} ${result.added === 1 ? "preference" : "preferences"}` : "Nothing imported"}${result.alreadyHere ? `; ${result.alreadyHere} already here` : ""}${result.leftOut ? `; ${result.leftOut} left out` : ""}.`;
     });
     if (saved) {
       setImporting(null);
@@ -327,34 +365,65 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
         </Stack>
       )}
       {importing && (
-        <Stack gap={4} data-testid="preference-import-preview">
+        <Stack gap={6} data-testid="preference-import-preview">
           <Text size="sm" fw={600}>
-            Import {importing.entries.length} {importing.entries.length === 1 ? "preference" : "preferences"}?
+            Import from this file?
           </Text>
-          {importing.entries.map((entry, index) => (
-            <Group key={index} gap="sm" wrap="nowrap" align="center" data-testid="preference-import-entry">
-              <Text size="xs" style={{ flex: 1 }}>
-                {entry.statement}
-                {(entry.scope === "personal" ? alreadyHere(entry, null) : importing.mapping[index] ? alreadyHere(entry, importing.mapping[index]!) : false) ? " (already here: skipped)" : ""}
-              </Text>
-              <Badge variant="light" color={entry.scope === "personal" ? "blue" : entry.intent === "override" ? "orange" : "gray"} style={{ flex: "none" }}>
-                {entry.scope === "personal" ? "Every project" : `${entry.project}'s ${entry.intent === "override" ? "decision" : "default"}`}
-              </Badge>
-              {entry.scope === "project" && (
-                <Select
-                  size="xs"
-                  w={200}
-                  allowDeselect={false}
-                  aria-label={`Project for “${entry.statement}”`}
-                  data={[{ value: "", label: "Skip it" }, ...projects.map((p) => ({ value: p.id, label: `${projectName(p.id, p.label)} only` }))]}
-                  value={importing.mapping[index] ?? ""}
-                  onChange={(value) => setImporting({ ...importing, mapping: importing.mapping.map((id, i) => (i === index ? (value ?? "") : id)) })}
-                  error={entry.matches.length > 1 && !importing.mapping[index] ? `Several projects are called ${entry.project}: choose one` : undefined}
-                  data-testid="preference-import-project"
-                />
-              )}
-            </Group>
-          ))}
+          {importing.personal.length > 0 && (
+            <Stack gap={2} data-testid="preference-import-personal">
+              <Checkbox
+                size="xs"
+                label={`Your personal preferences (${importing.personal.length}): every project would get them`}
+                checked={importing.includePersonal}
+                onChange={(event) => setImporting({ ...importing, includePersonal: event.currentTarget.checked })}
+                data-testid="preference-import-personal-include"
+              />
+              {importing.personal.map((entry, index) => (
+                <Text key={index} size="xs" pl={28} c={importing.includePersonal ? undefined : "var(--nivra-text-3)"} data-testid="preference-import-entry">
+                  {entry.statement}
+                  {importPlan?.personal[index]}
+                </Text>
+              ))}
+            </Stack>
+          )}
+          {importing.projects.map((source) => {
+            const chosen = destinationOf(source.key);
+            return (
+              <Stack key={source.key} gap={2} data-testid="preference-import-source">
+                <Group gap="sm" wrap="nowrap" align="center">
+                  <Text size="xs" fw={600} style={{ flex: 1 }}>
+                    From {source.label}
+                    {source.sameLabel > 1 ? ` (${source.position} of ${source.sameLabel} projects with this name in the file)` : ""}
+                  </Text>
+                  <Select
+                    size="xs"
+                    w={240}
+                    allowDeselect={false}
+                    aria-label={`Where the preferences from ${source.label}${source.sameLabel > 1 ? ` (${source.position} of ${source.sameLabel})` : ""} go`}
+                    data={[{ value: "", label: "Leave them out" }, ...projects.map((p) => ({ value: p.id, label: `${projectName(p.id, p.label)} only` }))]}
+                    value={chosen}
+                    onChange={(value) => setImporting({ ...importing, mapping: { ...importing.mapping, [source.key]: value ?? "" } })}
+                    data-testid="preference-import-project"
+                  />
+                </Group>
+                {!chosen && !source.suggested && (source.sameLabel > 1 || source.matches.length !== 1) && (
+                  <Text size="xs" c="var(--nivra-text-3)">
+                    {source.sameLabel > 1
+                      ? `The file has ${source.sameLabel} projects called ${source.label}: choose where each one's preferences go, or leave them out.`
+                      : source.matches.length > 1
+                        ? `Several projects here are called ${source.label}: choose one, or leave them out.`
+                        : `No project here is called ${source.label}: choose one, or leave them out.`}
+                  </Text>
+                )}
+                {source.entries.map((entry, index) => (
+                  <Text key={index} size="xs" pl={28} c={chosen ? undefined : "var(--nivra-text-3)"} data-testid="preference-import-entry">
+                    {entry.statement} ({entry.intent === "override" ? "decision" : "default"})
+                    {importPlan?.projects.get(source.key)?.[index]}
+                  </Text>
+                ))}
+              </Stack>
+            );
+          })}
           <Group gap={4}>
             <Button size="xs" onClick={() => void importChosen()} loading={busy} data-testid="preference-import-save">
               Import

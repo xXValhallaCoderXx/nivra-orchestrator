@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { HostStore, migrateHostData, NO_SHARING, writePrivateFile, type HostData } from "../src/main/host-store.ts";
+import { HostStore, migrateHostData, NO_SHARING, readSmallFile, writePrivateFile, type HostData } from "../src/main/host-store.ts";
 
 const dirs: string[] = [];
 after(() => {
@@ -91,5 +92,29 @@ describe("host records", () => {
     writePrivateFile(path, "new");
     assert.deepEqual([readFileSync(path, "utf8"), (statSync(path).mode & 0o777).toString(8), readdirSync(dir)], ["new", "600", ["nivra-preferences.json"]]);
   });
-});
 
+  it("leaves no temporary copy behind when writing a private file fails part way (D23)", { skip: process.platform === "win32" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "nivra export "));
+    dirs.push(dir);
+    // A child limited to 8 KiB per file, so the 64 KiB write fails after the temp file was made.
+    const script = `import { writePrivateFile } from ${JSON.stringify(new URL("../src/main/host-store.ts", import.meta.url).href)};
+      try { writePrivateFile(${JSON.stringify(join(dir, "nivra-preferences.json"))}, "x".repeat(65_536)); } catch (error) { console.log(error.code); }`;
+    const child = spawnSync("bash", ["-c", 'ulimit -f 8 && exec "$0" --input-type=module -e "$1"', process.execPath, script], { encoding: "utf8" });
+    assert.deepEqual([child.stdout.trim(), readdirSync(dir)], ["EFBIG", []], child.stderr.slice(0, 500));
+  });
+
+  it("reads a small file whole, and refuses a larger one or one that isn't a regular file, never waiting on a pipe (D23)", { skip: process.platform === "win32" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "nivra import "));
+    dirs.push(dir);
+    const file = join(dir, "nivra-preferences.json");
+    writeFileSync(file, "x".repeat(100));
+    const fifo = join(dir, "pipe");
+    assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+    assert.deepEqual(
+      [readSmallFile(file, 100), readSmallFile(file, 99), readSmallFile(dir, 100), readSmallFile(fifo, 100)],
+      [{ text: "x".repeat(100) }, { refused: "too-large" }, { refused: "not-a-file" }, { refused: "not-a-file" }],
+    );
+    // A file that reports no size is still read only up to the limit.
+    assert.deepEqual([statSync("/proc/self/status").size, readSmallFile("/proc/self/status", 10)], [0, { refused: "too-large" }]);
+  });
+});

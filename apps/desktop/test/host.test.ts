@@ -339,7 +339,7 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     ]);
   });
 
-  it("exports what the person chose without the saved key, and imports it into another profile as they map it (D23)", async () => {
+  it("exports what the person chose without the saved key, and imports it into another profile as they choose (D23)", async () => {
     const root = mkdtempSync(join(tmpdir(), "nivra repos "));
     dirs.push(root);
     const { host, ids, keys } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
@@ -352,16 +352,47 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     const { text, count } = await host.exportPreferences({ personal: true, projectIds: [ids[0]!] });
     assert.equal(count, 2);
 
-    // Another profile, with a project of the same name: the preview suggests it, and the person's mapping decides.
+    // Another profile, with a project of the same name: the preview suggests it, and the person's choice decides.
     const other = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "elsewhere", "native")) }] });
+    const earlier = other.host.previewImport(text);
     const preview = other.host.previewImport(text);
-    assert.deepEqual(preview.entries.map((e) => [e.scope, e.matches.map((m) => m.label), e.duplicate]), [["personal", [], false], ["project", ["native"], false]]);
-    assert.deepEqual(other.host.importPreferences(preview.previewId, [null, other.ids[0]!]), { added: 2, skipped: 0 });
+    assert.throws(() => other.host.importPreferences(earlier.previewId, { personal: true, projects: [{ source: "p1", project: other.ids[0]! }] }), /no longer waiting/, "a new preview releases the one before");
+    assert.deepEqual(
+      [preview.personal.map((e) => e.statement), preview.projects.map((s) => [s.key, s.label, s.matches.map((m) => m.label), s.suggested])],
+      [["Prefer named exports"], [["p1", "native", ["native"], other.ids[0]]]],
+    );
+    assert.deepEqual(other.host.importPreferences(preview.previewId, { personal: true, projects: [{ source: "p1", project: other.ids[0]! }] }), { added: 2, alreadyHere: 0, leftOut: 0 });
     assert.deepEqual(other.host.preferences().records.map((r) => [r.statement, r.scope, r.intent, r.origin, r.projectId]), [
       ["Prefer named exports", "personal", "default", "imported", null],
       ["Replace Jest with Vitest", "project", "override", "imported", other.ids[0]],
     ]);
-    assert.throws(() => other.host.importPreferences(preview.previewId, [null, null]), /no longer waiting/);
+    assert.throws(() => other.host.importPreferences(preview.previewId, { personal: false, projects: [{ source: "p1", project: null }] }), /no longer waiting/);
+  });
+
+  it("imports a project's preferences without the file's personal ones, and another project's runs get what they got before (D23)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    const source = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
+    source.host.addPreference({ statement: "Prefer named exports", scope: "personal", projectId: null });
+    source.host.addPreference({ statement: "Tests in __tests__", scope: "project", projectId: source.ids[0]! });
+    const { text } = await source.host.exportPreferences({ personal: true, projectIds: [source.ids[0]!] });
+
+    const { host, ids } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "elsewhere", "native")) }, { targetId: "local", path: makeRepo(join(root, "elsewhere", "tools")) }] });
+    host.addPreference({ statement: "Keep functions small", scope: "personal", projectId: null });
+    host.addPreference({ statement: "Run checks through pnpm scripts", scope: "project", projectId: ids[1]! });
+    await host.open(ids[1]!);
+    await online(host, "local");
+    const before = await received(host, (await host.startHello(ids[1]!, 0)).id);
+    const personal = () => host.preferences().records.filter((r) => r.scope === "personal");
+    const personalBefore = personal();
+
+    const preview = host.previewImport(text);
+    assert.deepEqual(host.importPreferences(preview.previewId, { personal: false, projects: [{ source: "p1", project: ids[0]! }] }), { added: 1, alreadyHere: 0, leftOut: 1 });
+    assert.deepEqual(personal(), personalBefore, "the file's personal preference stayed out");
+    const after = await received(host, (await host.startHello(ids[1]!, 0)).id);
+    assert.deepEqual([after.revision, after.count, after.digest, after.records], [before.revision + 1, before.count, before.digest, before.records], "the other project's runs get the same preferences");
+    const statements = (records: Array<{ id: string }>) => records.map((r) => host.preferences().records.find((p) => p.id === r.id)?.statement).sort();
+    assert.deepEqual(statements((await received(host, (await host.startHello(ids[0]!, 0)).id)).records), ["Keep functions small", "Tests in __tests__"]);
   });
 
   it("adds each picked folder for the engine that owns it, and refuses what can't run, saying why", async () => {
@@ -506,6 +537,25 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     writeFileSync(join(home, "release"), "");
     await assert.rejects(starting, /removed while its explanation was starting, so the run was stopped/);
     assert.deepEqual([host.projects().length, calls()], [0, ["runs.start", "runs.cancel"]]);
+  });
+
+  it("keeps nothing for a project removed while the suggestion's result is being read (D23)", async () => {
+    const { host, ids, root } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    const home = join(root, "local home");
+    const calls = () => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter((method) => method.startsWith("runs.")) : []);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "release"), "");
+    writeFileSync(join(home, "hold-result"), "");
+    await host.setSharing(ids[0]!, true);
+    await host.open(ids[0]!);
+    await online(host, "local");
+    const run = await host.startExplain(ids[0]!, "", []);
+    const keeping = host.keepSuggestion(ids[0]!, run.id, 0, "Name component files in PascalCase.");
+    await waitFor(() => calls().includes("runs.result"), "the result to be asked for");
+    await host.removeProject(ids[0]!);
+    writeFileSync(join(home, "release-result"), "");
+    await assert.rejects(keeping, /removed while the suggestion was being kept, so nothing was saved/);
+    assert.deepEqual([host.projects().length, host.preferences().records.length], [0, 0]);
   });
 
   it("refuses a new explanation once removal has begun, while it waits for the project's runs to stop", async () => {

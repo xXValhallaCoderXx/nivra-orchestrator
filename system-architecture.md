@@ -146,12 +146,15 @@ source commit, marked ported or rewritten, in [docs/provenance.md](docs/provenan
   - every repository with its target label ("Ubuntu · WSL", "Windows · Local"), and Add/Remove;
   - the engine badge and notices for the chosen project;
   - WSL guidance (Windows only);
-  - Explain (D22): a question, or the default; the consent dialog the first time; a "Sharing: on" badge with Turn off;
-    a live timeline with Cancel; and the result as plain text. The result shows HEAD at run start, the summary,
-    findings with citation chips ("shown to the model" or why not), differences from preferences, gaps, the context
-    used, and the model, time and tokens ("not reported" when the provider didn't say);
-  - Preferences: confirm a new one (for every project, or for the chosen project only), edit or delete one, and see
-    which ones the chosen project's runs get (D21);
+  - Explain (D22, D23): a question, or the default, and up to five choices for this task; the consent dialog the first
+    time; a "Sharing: on" badge with Turn off; a live timeline with Cancel; and the result as plain text. The result
+    shows HEAD at run start, the summary, findings with citation chips ("shown to the model" or why not), conflicts
+    (Currently, Intended, and what governs and why), suggested preferences with Keep for this project, gaps, and the
+    model, time and tokens ("not reported" when the provider didn't say). "Context used" opens a panel of what the run
+    was given, what was left out, and how the budget and the answer went;
+  - Preferences: confirm a new one (for every project, or for the chosen project only, as a default or a decision),
+    edit, replace or delete one, see the Replaced history and where each came from, export and import them, and see
+    which ones the chosen project's runs get (D21, D23);
   - a hello run with a live timeline and Cancel;
   - Doctor;
   - Settings: the Nebius key, and a Token Factory check.
@@ -168,7 +171,7 @@ helper. Every handler in main checks two things before acting:
 | `listPreferences`, `addPreference`, `editPreference`, `deletePreference` | The preference store (D21). A new preference is confirmed by being added; a project preference names its project by id, and says whether it is a default or a decision to change the project's conventions (D23). Edit fixes wording or intent. |
 | `supersedePreference(id, statement, intent)` | Replaces a preference with a new decision; the old one is kept as history that no run gets (D23). |
 | `keepSuggestion(projectId, runId, index, statement)` | Keeps a suggestion from one of the project's explanations this session as its own default, in the person's wording, with the run's evidence (D23). |
-| `exportPreferences(scopes)`, `previewImport()`, `importPreferences(previewId, mapping)` | Export and import (D23): files are chosen in main's own dialogs; an export holds no ids, history or key and is written `0600`; an import is previewed, mapped to local projects by the person, and never quoted on failure. |
+| `exportPreferences(scopes)`, `previewImport()`, `importPreferences(previewId, choice)` | Export and import (D23): files are chosen in main's own dialogs; an export holds no ids, folders, history or key, keeps same-named source projects apart, and is written `0600`; an import is previewed, brings personal preferences only if the person keeps them in and each source project's only where the person sends them, and is never quoted on failure. |
 | `openProject(projectId)` | Starts that project's engine if it isn't running yet. It never starts a different one. |
 | `listEngines` | The state of every engine a project uses. Asking starts nothing. |
 | `restartEngine(projectId)` | Restarts the project's engine, or checks its distribution again. |
@@ -470,7 +473,8 @@ Migration v2 (D22) added the run's duration, usage and route, and the `artifacts
   Mastra pauses 10 s. **`pnpm probe:tokenfactory`** runs the same check from a terminal.
 - **Seen with a real key** (checkpoint 1, 17 October): 28 models, five of them NVIDIA's. Nemotron 3 Super made the tool
   call in 2,249 ms. It honoured required tool choice, and a forced tool when it was the only one offered. The stronger
-  probes haven't been run with a real key yet.
+  probes ran on 18 October from the WSL engine (D23's checkpoint 1): a forced choice between two tools was honoured, the
+  answer schema was valid when forced, and the context length was 262,144 tokens.
 - **Live explanations** (17 October, the WSL engine): fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage. 6 of its 21 citations point to lines the model
   was shown; the other 15 cite files it saw only named in the map. Once such answers were turned down, the same
   question gave 13 of 13 (76.3 s, 11 calls), and "Where is the login component?" gave 4 of 4.
@@ -637,7 +641,9 @@ flowchart LR
     - Edit fixes wording or intent.
     - Replace makes a new decision; the old record stays as history that no run gets.
     - Delete removes a preference; deleting a replacement leaves its history.
-    - Export and import carry wording, scope, project label and intent, never ids, history or keys.
+    - Export and import carry wording, scope and intent, with each source project under a key local to the file and
+      its label; never ids, folders, history or keys. An import brings personal preferences only if the person keeps
+      them in, and each source project's only where the person sends them.
   - **What engines get.** With each run, main sends the project's own engine a validated snapshot: the confirmed
     personal preferences, the project's own, their intents and the store's revision. Engines never keep a copy of the
     profile, and never open the host's store.
@@ -765,25 +771,27 @@ place: the fixes made after the live runs, and the corrections from the reviews 
 | `test:e2e` | 14 passed, 1 skipped: the test only a packaged app runs |
 | Real engine through `apps/engine/scripts/rpc.ts` | Explain with no key, and with consent off: each refused before any request. Explain against the stub: succeeded, 2 of 2 citations checked, route `loopback-test`, and the search hit kept in the context used. Hello: succeeded. Doctor: "Nebius Token Factory" by default, and a test endpoint with `--token-factory-url`. |
 | `pnpm verify:windows` | 17/17, on the runtimes above |
-| Live, with Nate's key (the Windows app, the WSL engine), before the three fixes | Fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage; 6 of 21 citations shown to the model. Fixture B, which is private, also ran. No preference had been confirmed, so the preference contrast is still to run. |
+| Live, with Nate's key (the Windows app, the WSL engine), before the three fixes | Fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage; 6 of 21 citations shown to the model. Fixture B, which is private, also ran. No preference had been confirmed, so the preference contrast was still to run. |
 | Live, after the fixes | Fixture A, default question: 76.3 s, 77,514 tokens in and 2,420 out over 11 calls; one refusal, then 13 of 13 citations shown. "Where is the login component?": 25.5 s, 6 calls; one refusal, then 4 of 4. The preference contrast ran on fixture B, which is private: its result is recorded in NIV-6, not here. |
 | `pnpm dev:win --no-launch`, then `test:windows` | 6/6 at 01:39 +08:00 on 18 October, including explaining on the WSL and the native engine. Earlier, Windows Smart App Control, in enforcement mode, refused to start the unsigned `Nivra.exe` (Code Integrity event 3077, at 17:03 and 17:04); Nate turned it off on this machine. One test helper was corrected: it no longer picks the already chosen project again, which the project select treats as clearing the choice. |
 
 **Results against the final change set** (context assembly and the preference lifecycle, D23):
 
-Run on 18 October 2026, after noon +08:00, against `feature/niv-11` with every code change of the D23 change set in
-place: the four step commits (`9d47853`, `d3103ef`, `42df01c` with its follow-up `910e23e`, `c7e6093`), the fixes from
-the independent review, and the D20 scenario. Only docs changed afterwards.
+Run on 18 October 2026, from 13:19 +08:00, against `feature/niv-11` with every code change of the D23 change set in
+place: the four step commits (`9d47853`, `d3103ef`, `42df01c` with its follow-up `910e23e`, `c7e6093`), the first
+independent review's fixes and the D20 scenario (`8a91cfb`), then the fixes for the NIV-10 review (source projects
+kept apart in exports, personal preferences left out of an import at will) and for the second independent review. Only
+docs changed afterwards.
 
 | Check | Result |
 |---|---|
-| `pnpm verify` | Typecheck clean, the preload now included; tests 262/262 (domain 28, desktop 93, engine 141) |
-| `pnpm stage:runtime all` | Staged afresh: `linux-x64` `0a65a9bd426678f5`, `win-x64` `16293aa24f03d461` |
-| `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 14 passed, 5 skipped: the tests that need the test endpoint switch, which a packaged app ignores |
-| `test:e2e` | 18 passed, 1 skipped (the test only a packaged app runs), the D20 sequence end to end included |
-| Real engine through `apps/engine/scripts/rpc.ts` | Doctor and hello unchanged. Explain with a task choice against the stub: succeeded. A key block split across the question and a choice: failed before any request, and every run still listed. A model reporting a 6,000-token context: refused as `context-too-small` before any chat request. |
+| `pnpm verify` | Typecheck clean, the preload now included; tests 272/272 (domain 28, desktop 100, engine 144) |
+| `pnpm stage:runtime all` | Staged afresh: `linux-x64` `f0f3baa2aafb1925`, `win-x64` `e47d01e4a355740f` |
+| `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 15 passed, 5 skipped: the tests that need the test endpoint switch, which a packaged app ignores |
+| `test:e2e` | 19 passed, 1 skipped (the test only a packaged app runs), the D20 sequence end to end included |
+| Real engine through `apps/engine/scripts/rpc.ts` | Doctor and hello unchanged. Explain with a task choice against the stub: an answer giving a convention and a suggestion with no lines was turned down once, then accepted with both cited, and the choice governed; neither the choice nor the preference reached Mastra's records. A key block split across the question and a choice: failed before any request, and every run still listed. A model reporting a 4,000-token context: refused as `context-too-small` before any chat request, the budget shown as 0. |
 | `pnpm verify:windows` | 17/17, on the runtimes above |
-| `pnpm dev:win --no-launch`, then `test:windows` | 6/6 |
+| `pnpm dev:win --skip-stage --no-launch`, then `test:windows` | 6/6 |
 | Live, checkpoint 1, against `9d47853` (fixture B, private: counts only) | Check Token Factory: the new answer schema, forced, was valid; context length 262,144. Two explanations of B: B's decision governed tests, then the task choice did; the repository governed naming; 8 of 8 and 12 of 12 citations shown; `nivra.json` unchanged. |
 | Live, checkpoint 2, against `910e23e` (fixture A) | Five suggestions from the default question, each with lines shown to the model; one kept, then replaced; the next run received only the replacement; `nivra.json` unchanged during it. |
 
@@ -804,7 +812,7 @@ the independent review, and the D20 scenario. Only docs changed afterwards.
 | Desktop host, targets, protocol, engine core, runs, engine recovery, packaging, local checks | **Built**: the foundation, committed in `2556052` | NIV-3 (Done), NIV-5 |
 | Scope, data sharing, out-of-scope list (D20); fixtures | Decided. The two user-supplied fixtures are recorded. | NIV-2 |
 | Preference store, and the scoped handoff to engines | **Built** (D21); the whole-distribution interruption check passed | NIV-5, reused by NIV-10 |
-| Explain with evidence, model client, repository map, consent, the run lifecycle it needs | **Built** (D22), tested offline and run live on both fixtures; the preference contrast is pending | NIV-6, NIV-9, NIV-8 (read-only slice) |
+| Explain with evidence, model client, repository map, consent, the run lifecycle it needs | **Built** (D22), tested offline and run live on both fixtures. The preference contrast ran on B (private), then again with full precedence at D23's checkpoint 1; a public pair of repositories for the demonstration is pending | NIV-6, NIV-9, NIV-8 (read-only slice) |
 | Managing preferences, context assembly with overrides and full precedence | **Built** (D23), tested offline (the D20 sequence through the UI included) and run live on both fixtures; promotion to a personal preference is deferred | NIV-10, NIV-11 |
 | Acceptance on packaged builds, release, video, submission | Planned | NIV-14 – NIV-17 |
 | New-app creation, coding worker, sandboxes, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |

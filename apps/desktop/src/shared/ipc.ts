@@ -126,21 +126,29 @@ export interface PreferencesView {
 /** How an export went (D23): saved, with how many preferences and the file's name (for display only), or cancelled. */
 export type ExportResult = { status: "saved"; count: number; fileName: string } | { status: "cancelled" };
 
-/**
- * One preference in a file chosen for import, and what importing it would do: the local projects whose label matches
- * its project's, and whether it is already here.
- */
+/** One preference in a file chosen for import: its wording and intent; its scope is the group it is listed under. */
 export interface ImportEntryView {
   statement: string;
-  scope: PreferenceScope;
   intent: PreferenceIntent;
-  /** The label of the project it belonged to; null for a personal one. */
-  project: string | null;
-  matches: Array<{ id: string; label: string }>;
-  duplicate: boolean;
 }
 
-export type ImportPreviewResult = { status: "preview"; previewId: string; entries: ImportEntryView[] } | { status: "cancelled" };
+/**
+ * One of the projects a file's preferences came from (D23), and where they could go: the local projects with the same
+ * label, and the one suggested when the label is unambiguous (one match, and no other project in the file with the
+ * same label). `sameLabel` and `position` tell two source projects with the same label apart.
+ */
+export interface ImportSourceView {
+  /** The project's key in the file. */
+  key: string;
+  label: string;
+  sameLabel: number;
+  position: number;
+  matches: Array<{ id: string; label: string }>;
+  suggested: string | null;
+  entries: ImportEntryView[];
+}
+
+export type ImportPreviewResult = { status: "preview"; previewId: string; personal: ImportEntryView[]; projects: ImportSourceView[] } | { status: "cancelled" };
 
 export type AddProjectResult =
   | { status: "added"; project: ProjectView; warning: string | null }
@@ -191,8 +199,11 @@ export interface NivraApi {
   exportPreferences(scopes: { personal: boolean; projectIds: string[] }): Promise<ExportResult>;
   /** Asks for an export file in the native dialog, and says what importing it would do; nothing is saved yet. */
   previewImport(): Promise<ImportPreviewResult>;
-  /** Imports a previewed file: for each entry, the local project a project preference goes to, or null to skip it. */
-  importPreferences(previewId: string, mapping: Array<string | null>): Promise<{ added: number; skipped: number }>;
+  /**
+   * Imports a previewed file as the person chose: whether its personal preferences come in, and for each of its source
+   * projects, by key, the local project its preferences go to, or null to leave them out.
+   */
+  importPreferences(previewId: string, choice: { personal: boolean; projects: Array<{ source: string; project: string | null }> }): Promise<{ added: number; alreadyHere: number; leftOut: number }>;
   /** Runs hello on the project's engine, with a snapshot of the preferences that apply to the project (D21). */
   startHello(projectId: string, holdMs: number): Promise<RunSummary>;
   /** Allows or stops sending the project's content to Token Factory (D20); stopping cancels its explain runs. */

@@ -189,17 +189,17 @@ describe("preferences (D21)", () => {
     assert.equal(readFileSync(path, "utf8").includes("Prefer named exports ü%#"), true);
   });
 
-  it("exports only the confirmed preferences in the scopes chosen, by wording, scope, project label and intent (D23)", () => {
+  it("exports only the confirmed preferences in the scopes chosen, each source project by a key of its own and its label (D23)", () => {
     const { data, ids } = withPreferences(["Prefer named exports", null], ["Tests in __tests__", A], ["Tests next to the code", B]);
     const replaced = supersedePreference(data, ids[0]!, { statement: "Prefer default exports", intent: "default" }, later).data;
     const { text, count } = buildExport(replaced, { personal: true, projectIds: [A] }, ["sk-saved-key-0123456789"], later);
-    const file = JSON.parse(text) as { format: string; version: number; preferences: unknown[] };
-    assert.deepEqual([count, file.format, file.version], [2, "nivra-preferences", 1]);
+    const file = JSON.parse(text) as { format: string; version: number; projects: unknown[]; preferences: unknown[] };
+    assert.deepEqual([count, file.format, file.version, file.projects], [2, "nivra-preferences", 2, [{ key: "p1", label: "a" }]]);
     assert.deepEqual(file.preferences, [
-      { statement: "Tests in __tests__", scope: "project", project: "a", intent: "default" },
+      { statement: "Tests in __tests__", scope: "project", project: "p1", intent: "default" },
       { statement: "Prefer default exports", scope: "personal", project: null, intent: "default" },
     ]);
-    assert.equal(text.includes(ids[0]!) || text.includes('"id"') || text.includes("revision") || text.includes("Prefer named exports"), false, "no ids, revisions or history");
+    assert.equal([ids[0]!, A, B, '"id"', "revision", "/repos/", "Prefer named exports"].some((needle) => text.includes(needle)), false, "no store ids, folders, revisions or history");
     assert.throws(() => buildExport(replaced, { personal: false, projectIds: [] }, [], later), /nothing to export in the scopes you chose/);
   });
 
@@ -208,9 +208,17 @@ describe("preferences (D21)", () => {
     assert.throws(() => buildExport(data, { personal: true, projectIds: [] }, ["sk-saved-key-0123456789"], later), /holds your saved Nebius key, so nothing was exported/);
   });
 
-  it("refuses a file that isn't an export without quoting it", () => {
+  it("refuses a file that isn't an export, or names a project it doesn't list, without quoting it", () => {
     const secret = `private-${"x".repeat(20)}`;
-    for (const text of [`{"format":"something-else","secret":"${secret}"}`, `not json ${secret}`, JSON.stringify({ format: "nivra-preferences", version: 1, exportedAt: now.toISOString(), preferences: [{ statement: secret, scope: "personal", project: "a", intent: "default" }] })]) {
+    const v2 = (body: object) => JSON.stringify({ format: "nivra-preferences", version: 2, exportedAt: now.toISOString(), projects: [], preferences: [], ...body });
+    for (const text of [
+      `{"format":"something-else","secret":"${secret}"}`,
+      `not json ${secret}`,
+      JSON.stringify({ format: "nivra-preferences", version: 1, exportedAt: now.toISOString(), preferences: [{ statement: secret, scope: "personal", project: null, intent: "default" }] }),
+      v2({ preferences: [{ statement: secret, scope: "project", project: "p1", intent: "default" }] }),
+      v2({ projects: [{ key: "p1", label: secret }, { key: "p1", label: "b" }] }),
+      v2({ projects: [{ key: "p1", label: secret }], preferences: [{ statement: "   ", scope: "project", project: "p1", intent: "default" }] }),
+    ]) {
       assert.throws(
         () => parseImport(text),
         (error: unknown) => error instanceof Error && /isn't a Nivra preferences export/.test(error.message) && !error.message.includes(secret),
@@ -218,49 +226,81 @@ describe("preferences (D21)", () => {
     }
   });
 
-  it("previews an import: projects by matching label, and what is already here", () => {
-    const { data } = withPreferences(["Prefer named exports", null]);
-    const twinB = { ...data, projects: [...data.projects, project("33333333-3333-4333-8333-333333333333", "/elsewhere/b")] };
-    const file = parseImport(
-      JSON.stringify({
-        format: "nivra-preferences",
-        version: 1,
-        exportedAt: now.toISOString(),
-        preferences: [
-          { statement: "Prefer named exports", scope: "personal", project: null, intent: "default" },
-          { statement: "Tests in __tests__", scope: "project", project: "a", intent: "default" },
-          { statement: "Replace Jest with Vitest", scope: "project", project: "b", intent: "override" },
-          { statement: "Use Tailwind", scope: "project", project: "gone", intent: "default" },
-        ],
-      }),
+  /** An export from a profile whose projects are `sources` ([label, folder, statement] each), plus one personal preference. */
+  function exportFrom(sources: Array<[label: string, folder: string, statement: string]>) {
+    let data: HostData = { version: 1, projects: [], preferences: [], preferencesRevision: 0 };
+    sources.forEach(([label, folder], i) => (data = { ...data, projects: [...data.projects, { ...project(`0000000${i}-0000-4000-8000-000000000000`, folder), label }] }));
+    data = addPreference(data, { statement: "Prefer named exports", scope: "personal", projectId: null }, now).data;
+    sources.forEach(([, , statement], i) => (data = addPreference(data, { statement, scope: "project", projectId: data.projects[i]!.id }, now).data));
+    return parseImport(buildExport(data, { personal: true, projectIds: data.projects.map((p) => p.id) }, [], now).text);
+  }
+  const sameName = () => exportFrom([["app", "/one/app", "Use Jest"], ["app", "/two/app", "Use Vitest"]]);
+  const destination = (...folders: string[]): HostData => ({ version: 1, projects: folders.map((folder, i) => ({ ...project(`d000000${i}-0000-4000-8000-000000000000`, folder), label: "app" })), preferences: [], preferencesRevision: 0 });
+
+  it("keeps two source projects with the same name apart, and suggests neither, with one project of that name here (D23)", () => {
+    const file = sameName();
+    assert.deepEqual(file.projects, [{ key: "p1", label: "app" }, { key: "p2", label: "app" }]);
+    const here = destination("/home/me/app");
+    const [one] = here.projects.map((p) => p.id);
+    const preview = previewImport(here, file);
+    assert.deepEqual(
+      preview.projects.map((source) => [source.key, source.sameLabel, source.position, source.matches, source.suggested, source.entries.map((e) => e.statement)]),
+      [
+        ["p1", 2, 1, [one], null, ["Use Jest"]],
+        ["p2", 2, 2, [one], null, ["Use Vitest"]],
+      ],
     );
-    assert.deepEqual(previewImport(twinB, file).map((e) => [e.matches.length, e.duplicate]), [[0, true], [1, false], [2, false], [0, false]]);
+    // Untouched, nothing of either goes anywhere; the person's choice sends one and leaves the other out.
+    const untouched = applyImport(here, file, { personal: false, projects: [{ source: "p1", project: null }, { source: "p2", project: null }] }, later);
+    assert.deepEqual([untouched.added, untouched.leftOut, untouched.data], [0, 3, here]);
+    const chosen = applyImport(here, file, { personal: false, projects: [{ source: "p1", project: one! }, { source: "p2", project: null }] }, later);
+    assert.deepEqual([chosen.added, chosen.leftOut, chosen.data.preferences.map((p) => [p.statement, p.projectId])], [1, 2, [["Use Jest", one]]]);
   });
 
-  it("imports with the person's choice of project for each, skipping what is already here, as confirmed and imported (D23)", () => {
+  it("keeps two source projects with the same name apart with two projects of that name here, each going where the person says", () => {
+    const file = sameName();
+    const here = destination("/home/me/app", "/work/app");
+    const [first, second] = here.projects.map((p) => p.id);
+    assert.deepEqual(previewImport(here, file).projects.map((source) => [source.matches.length, source.suggested]), [[2, null], [2, null]]);
+    const imported = applyImport(here, file, { personal: false, projects: [{ source: "p1", project: second! }, { source: "p2", project: first! }] }, later);
+    assert.deepEqual(imported.data.preferences.map((p) => [p.statement, p.projectId, p.origin]), [["Use Jest", second, "imported"], ["Use Vitest", first, "imported"]]);
+  });
+
+  it("suggests a destination only when one project here has the name and no other project in the file does", () => {
+    const file = exportFrom([["web", "/one/web", "Use Mantine"], ["api", "/one/api", "Use Fastify"]]);
+    const here: HostData = { version: 1, projects: [{ ...project(B, "/home/me/web"), label: "web" }], preferences: [], preferencesRevision: 0 };
+    assert.deepEqual(previewImport(here, file).projects.map((source) => [source.label, source.suggested]), [["web", B], ["api", null]]);
+    // A project the file lists without preferences brings nothing, so it neither shows nor makes a label ambiguous.
+    const edited = parseImport(JSON.stringify({ ...file, projects: [...file.projects, { key: "p3", label: "web" }] }));
+    assert.deepEqual(previewImport(here, edited).projects.map((source) => [source.key, source.sameLabel, source.position, source.suggested]), [["p1", 1, 1, B], ["p2", 1, 1, null]]);
+  });
+
+  it("leaves the file's personal preferences out when the person says so, and every other project's runs unchanged (D23)", () => {
+    const file = exportFrom([["a", "/one/a", "Tests in __tests__"]]);
+    const { data: before } = withPreferences(["Keep functions small", null], ["Run checks through pnpm scripts", B]);
+    const imported = applyImport(before, file, { personal: false, projects: [{ source: "p1", project: A }] }, later);
+    assert.deepEqual([imported.added, imported.leftOut], [1, 1]);
+    assert.deepEqual(imported.data.preferences.slice(0, -1), before.preferences, "what was here is untouched");
+    assert.deepEqual(imported.data.preferences.map((p) => [p.statement, p.scope, p.projectId]).at(-1), ["Tests in __tests__", "project", A]);
+    assert.deepEqual(snapshotFor(imported.data, B).records, snapshotFor(before, B).records, "another project's runs get what they got before");
+    assert.deepEqual(snapshotFor(imported.data, A).records.map((r) => r.statement), ["Keep functions small", "Tests in __tests__"], "no personal preference came from the file");
+  });
+
+  it("imports as the person chose, skipping what is already here, as confirmed and imported, within the limit (D23)", () => {
     const { data } = withPreferences(["Prefer named exports", null]);
-    const file = parseImport(
-      JSON.stringify({
-        format: "nivra-preferences",
-        version: 1,
-        exportedAt: now.toISOString(),
-        preferences: [
-          { statement: "Prefer named exports", scope: "personal", project: null, intent: "default" },
-          { statement: "Tests in __tests__", scope: "project", project: "a", intent: "default" },
-          { statement: "Replace Jest with Vitest", scope: "project", project: "b", intent: "override" },
-        ],
-      }),
-    );
-    const imported = applyImport(data, file, [null, A, null], later);
-    assert.deepEqual([imported.added, imported.skipped, imported.data.preferencesRevision], [1, 2, data.preferencesRevision + 1]);
+    const file = exportFrom([["a", "/one/a", "Tests in __tests__"], ["b", "/one/b", "Replace Jest with Vitest"]]);
+    const imported = applyImport(data, file, { personal: true, projects: [{ source: "p1", project: A }, { source: "p2", project: null }] }, later);
+    assert.deepEqual([imported.added, imported.alreadyHere, imported.leftOut, imported.data.preferencesRevision], [1, 1, 1, data.preferencesRevision + 1]);
     const added = imported.data.preferences.at(-1)!;
-    assert.deepEqual([added.statement, added.scope, added.projectId, added.intent, added.status, added.origin, added.confirmedAt], ["Tests in __tests__", "project", A, "default", "confirmed", "imported", later.toISOString()]);
-    assert.equal(applyImport(imported.data, file, [null, A, null], later).data, imported.data, "importing it again adds nothing");
-    assert.throws(() => applyImport(data, file, [null, "33333333-3333-4333-8333-333333333333", null], later), /no longer in the list/);
-    assert.throws(() => applyImport(data, file, [null], later), /don't match the file/);
+    assert.deepEqual([added.statement, added.scope, added.projectId, added.status, added.origin, added.confirmedAt], ["Tests in __tests__", "project", A, "confirmed", "imported", later.toISOString()]);
+    assert.equal(applyImport(imported.data, file, { personal: true, projects: [{ source: "p1", project: A }, { source: "p2", project: null }] }, later).data, imported.data, "importing it again adds nothing");
+
+    // A choice that doesn't match the file, or names a project that has gone, is refused.
+    assert.throws(() => applyImport(data, file, { personal: true, projects: [{ source: "p1", project: A }] }, later), /don't match the file/);
+    assert.throws(() => applyImport(data, file, { personal: true, projects: [{ source: "p1", project: A }, { source: "p2", project: null }, { source: "p3", project: null }] }, later), /don't match the file/);
+    assert.throws(() => applyImport(data, file, { personal: true, projects: [{ source: "p1", project: "33333333-3333-4333-8333-333333333333" }, { source: "p2", project: null }] }, later), /no longer in the list/);
     let full = data;
     for (let i = 1; i < MAX_PREFERENCES; i++) full = addPreference(full, { statement: `Preference ${i}`, scope: "personal", projectId: null }, now).data;
-    assert.throws(() => applyImport(full, file, [null, A, B], later), /past 50 preferences, replaced ones included \(50 now, 2 to add\)/);
+    assert.throws(() => applyImport(full, file, { personal: true, projects: [{ source: "p1", project: A }, { source: "p2", project: B }] }, later), /past 50 preferences, replaced ones included \(50 now, 2 to add\)/);
   });
 });
-

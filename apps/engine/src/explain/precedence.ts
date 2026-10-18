@@ -25,7 +25,7 @@ export interface KnownSources {
 }
 
 /** The repository's side of a conflict, when the model reported one. */
-const conventionOf = (conflict: { repositoryConvention: string | null }): string | null => conflict.repositoryConvention?.trim() || null;
+export const conventionOf = (conflict: { repositoryConvention: string | null }): string | null => conflict.repositoryConvention?.trim() || null;
 
 /**
  * Why a reported conflict can't be used, for the model to fix: ids the run doesn't have, or fewer than two sides (the

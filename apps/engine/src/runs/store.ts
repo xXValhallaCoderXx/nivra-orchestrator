@@ -264,9 +264,9 @@ export class RunStore {
 }
 
 /**
- * A run's input as stored. It is masked as one text, which also catches a key split across two fields, so a mask that
- * spans fields can leave text that is no longer JSON. That input reads as null: the run's own workflow refuses it
- * (D23), and every other run still lists.
+ * A run's input as stored. It is masked as one text, so a private-key block split across fields is masked too, and a
+ * mask that spans fields can leave text that is no longer JSON. That input reads as null: the run is refused before
+ * its workflow starts (D23), and every other run still lists.
  */
 function storedInput(text: string): unknown {
   try {

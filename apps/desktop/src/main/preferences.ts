@@ -208,28 +208,37 @@ export function snapshotFor(data: HostData, projectId: string): PreferenceSnapsh
 }
 
 /**
- * A file of exported preferences (D23): each one's wording, scope, the label of its project and its intent. No ids,
- * revisions or evidence: the file leaves the app, and an import makes new records.
+ * A file of exported preferences (D23), version 2: each one's wording, scope and intent, and for a project's own, the
+ * project it came from by a key that means something only in this file, with that project's label. Two projects with
+ * the same label stay two. No store ids, folders, revisions or evidence: the file leaves the app, and an import makes
+ * new records.
  */
-export const PreferenceExport = z.strictObject({
-  format: z.literal("nivra-preferences"),
-  version: z.literal(1),
-  exportedAt: z.iso.datetime(),
-  preferences: z
-    .array(
-      z
-        .strictObject({
-          statement: z.string().min(1).max(MAX_STATEMENT),
-          scope: PreferenceScope,
-          /** The label of the project a project preference belonged to; null for a personal one. */
-          project: z.string().min(1).max(200).nullable(),
-          intent: PreferenceIntent,
-        })
-        .refine((entry) => (entry.scope === "project") === (entry.project !== null))
-        .refine((entry) => entry.intent === "default" || entry.scope === "project"),
-    )
-    .max(MAX_PREFERENCES),
-});
+export const PreferenceExport = z
+  .strictObject({
+    format: z.literal("nivra-preferences"),
+    version: z.literal(2),
+    exportedAt: z.iso.datetime(),
+    projects: z.array(z.strictObject({ key: z.string().regex(/^p[1-9][0-9]{0,2}$/), label: z.string().min(1).max(200) })).max(MAX_PREFERENCES),
+    preferences: z
+      .array(
+        z
+          .strictObject({
+            statement: z
+              .string()
+              .max(MAX_STATEMENT)
+              .refine((statement) => statement.trim().length > 0),
+            scope: PreferenceScope,
+            /** The key of the project a project preference came from; null for a personal one. */
+            project: z.string().nullable(),
+            intent: PreferenceIntent,
+          })
+          .refine((entry) => (entry.scope === "project") === (entry.project !== null))
+          .refine((entry) => entry.intent === "default" || entry.scope === "project"),
+      )
+      .max(MAX_PREFERENCES),
+  })
+  .refine((file) => new Set(file.projects.map((project) => project.key)).size === file.projects.length)
+  .refine((file) => file.preferences.every((entry) => entry.project === null || file.projects.some((project) => project.key === entry.project)));
 export type PreferenceExport = z.infer<typeof PreferenceExport>;
 
 /** The scopes an export holds: personal preferences, and each chosen project's own. */
@@ -249,12 +258,15 @@ export function buildExport(data: HostData, scopes: ExportScopes, secrets: reado
   if (records.some((p) => secrets.some((secret) => secret.length > 0 && p.statement.includes(secret)))) {
     throw new Error("A preference holds your saved Nebius key, so nothing was exported. Edit that preference to take the key out, then export again.");
   }
-  const label = (projectId: string | null) => data.projects.find((p) => p.id === projectId)?.label ?? null;
+  // Each source project gets a key of its own in this file, so two with the same label are never merged.
+  const keys = new Map<string, string>();
+  for (const p of records) if (p.projectId !== null && !keys.has(p.projectId)) keys.set(p.projectId, `p${keys.size + 1}`);
   const file = PreferenceExport.parse({
     format: "nivra-preferences",
-    version: 1,
+    version: 2,
     exportedAt: now.toISOString(),
-    preferences: records.map((p) => ({ statement: p.statement, scope: p.scope, project: p.scope === "project" ? label(p.projectId) : null, intent: p.intent })),
+    projects: [...keys].map(([projectId, key]) => ({ key, label: data.projects.find((p) => p.id === projectId)?.label ?? "A removed project" })),
+    preferences: records.map((p) => ({ statement: p.statement, scope: p.scope, project: p.projectId === null ? null : keys.get(p.projectId)!, intent: p.intent })),
   });
   return { text: `${JSON.stringify(file, null, 2)}\n`, count: records.length };
 }
@@ -278,43 +290,84 @@ export function parseImport(text: string): PreferenceExport {
 const alreadyHere = (data: HostData, entry: PreferenceExport["preferences"][number], projectId: string | null) =>
   data.preferences.some((p) => p.status === "confirmed" && p.statement === entry.statement.trim() && p.scope === entry.scope && p.projectId === projectId && p.intent === entry.intent);
 
-/**
- * What importing would do (D23): for each entry, the local projects whose label matches its project's, and whether it
- * is already here. A project preference goes where the person says: one match is suggested; none or several are theirs
- * to choose.
- */
-export function previewImport(data: HostData, file: PreferenceExport): Array<PreferenceExport["preferences"][number] & { matches: string[]; duplicate: boolean }> {
-  return file.preferences.map((entry) => {
-    const matches = entry.scope === "project" ? data.projects.filter((p) => p.label === entry.project).map((p) => p.id) : [];
-    const duplicate = entry.scope === "personal" ? alreadyHere(data, entry, null) : matches.length === 1 && alreadyHere(data, entry, matches[0]!);
-    return { ...entry, matches, duplicate };
-  });
+/** One of an export's source projects, as an import preview shows it. */
+export interface ImportSource {
+  /** The project's key in the file. */
+  key: string;
+  label: string;
+  /** How many of the file's projects have this label, and which of them this is: two "app"s stay two. */
+  sameLabel: number;
+  position: number;
+  /** The local projects with the same label. */
+  matches: string[];
+  /** Where it would go untouched: the one local project with its label, only when no other project in the file has it. */
+  suggested: string | null;
+  entries: Array<{ statement: string; intent: PreferenceIntent }>;
 }
 
 /**
- * Adds an export's preferences (D23). `mapping` holds, for each entry, the local project a project preference goes to,
- * or null to skip it; a personal entry ignores it. Each project is checked against the list as it is now; preferences
- * already here are skipped; the limit applies to the whole import. Added ones are confirmed, `origin: imported`, and
- * the store's revision rises once.
+ * What importing would do (D23): the file's personal preferences, and each of its source projects with the local
+ * projects whose label matches. A destination is suggested only when the label is unambiguous: one local match, and no
+ * other project in the file with the same label. Otherwise the person chooses where each goes.
  */
-export function applyImport(data: HostData, file: PreferenceExport, mapping: ReadonlyArray<string | null>, now: Date): { data: HostData; added: number; skipped: number } {
-  if (mapping.length !== file.preferences.length) throw new Error("The import's choices don't match the file. Preview the file again, then import.");
+export function previewImport(data: HostData, file: PreferenceExport): { personal: Array<{ statement: string; intent: PreferenceIntent }>; projects: ImportSource[] } {
+  const personal = file.preferences.filter((entry) => entry.scope === "personal").map(({ statement, intent }) => ({ statement, intent }));
+  // Only the projects the file has preferences for are shown, and only they can make a label ambiguous.
+  const listed = file.projects.filter((source) => file.preferences.some((entry) => entry.project === source.key));
+  const projects = listed.map((source): ImportSource => {
+    const same = listed.filter((project) => project.label === source.label);
+    const matches = data.projects.filter((project) => project.label === source.label).map((project) => project.id);
+    return {
+      key: source.key,
+      label: source.label,
+      sameLabel: same.length,
+      position: same.indexOf(source) + 1,
+      matches,
+      suggested: same.length === 1 && matches.length === 1 ? matches[0]! : null,
+      entries: file.preferences.filter((entry) => entry.project === source.key).map(({ statement, intent }) => ({ statement, intent })),
+    };
+  });
+  return { personal, projects };
+}
+
+/**
+ * What the person chose to import (D23): whether the file's personal preferences come in, and for each of its source
+ * projects, by key, the local project its preferences go to, or null to leave them out. Every source project needs a
+ * choice: where one goes is never guessed.
+ */
+export interface ImportChoice {
+  personal: boolean;
+  projects: ReadonlyArray<{ source: string; project: string | null }>;
+}
+
+/**
+ * Adds an export's preferences as the person chose (D23). Each chosen project is checked against the list as it is
+ * now; preferences already here are skipped; the limit applies to the whole import. Added ones are confirmed,
+ * `origin: imported`, and the store's revision rises once.
+ */
+export function applyImport(data: HostData, file: PreferenceExport, choice: ImportChoice, now: Date): { data: HostData; added: number; alreadyHere: number; leftOut: number } {
+  const destination = new Map(choice.projects.map((chosen) => [chosen.source, chosen.project]));
+  const sources = new Set(file.preferences.flatMap((entry) => (entry.project === null ? [] : [entry.project])));
+  if (destination.size !== choice.projects.length || [...sources].some((key) => !destination.has(key)) || [...destination.keys()].some((key) => !sources.has(key))) {
+    throw new Error("The import's choices don't match the file. Preview the file again, then import.");
+  }
   const at = now.toISOString();
   const added: PreferenceRecord[] = [];
-  let skipped = 0;
-  file.preferences.forEach((entry, index) => {
-    const projectId = entry.scope === "project" ? (mapping[index] ?? null) : null;
-    if (entry.scope === "project" && projectId === null) {
-      skipped++;
-      return;
+  let present = 0;
+  let leftOut = 0;
+  for (const entry of file.preferences) {
+    const projectId = entry.project === null ? null : (destination.get(entry.project) ?? null);
+    if (entry.scope === "personal" ? !choice.personal : projectId === null) {
+      leftOut++;
+      continue;
     }
-    if (projectId !== null && !data.projects.some((p) => p.id === projectId)) throw new Error("A project chosen for the import is no longer in the list. Preview the file again, then import.");
+    if (projectId !== null && !data.projects.some((p) => p.id === projectId)) throw new Error("A project chosen for the import is no longer in the list. Choose again where its preferences go, then import.");
     const statement = cleanStatement(entry.statement);
     const intent = checkIntent(entry.scope, entry.intent);
     const twice = added.some((p) => p.statement === statement && p.scope === entry.scope && p.projectId === projectId && p.intent === intent);
     if (twice || alreadyHere(data, entry, projectId)) {
-      skipped++;
-      return;
+      present++;
+      continue;
     }
     added.push({
       id: randomUUID(),
@@ -333,12 +386,12 @@ export function applyImport(data: HostData, file: PreferenceExport, mapping: Rea
       supersededAt: null,
       evidence: null,
     });
-  });
+  }
   if (data.preferences.length + added.length > MAX_PREFERENCES) {
     throw new Error(
-      `Importing would take Nivra past ${MAX_PREFERENCES} preferences, replaced ones included (${data.preferences.length} now, ${added.length} to add). Delete some, or skip some of the file's, then import again.`,
+      `Importing would take Nivra past ${MAX_PREFERENCES} preferences, replaced ones included (${data.preferences.length} now, ${added.length} to add). Delete some, or leave some of the file's out, then import again.`,
     );
   }
-  if (added.length === 0) return { data, added: 0, skipped };
-  return { data: { ...data, preferences: [...data.preferences, ...added], preferencesRevision: data.preferencesRevision + 1 }, added: added.length, skipped };
+  if (added.length === 0) return { data, added: 0, alreadyHere: present, leftOut };
+  return { data: { ...data, preferences: [...data.preferences, ...added], preferencesRevision: data.preferencesRevision + 1 }, added: added.length, alreadyHere: present, leftOut };
 }

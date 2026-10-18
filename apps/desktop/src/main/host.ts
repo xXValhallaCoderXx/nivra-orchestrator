@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { DoctorReport, ExplainResult, PreferenceIntent, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
-import type { AddProjectResult, EngineView, ImportEntryView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
+import type { AddProjectResult, EngineView, ImportEntryView, ImportSourceView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
 import {
@@ -18,6 +18,7 @@ import {
   snapshotFor,
   supersedePreference,
   type ExportScopes,
+  type ImportChoice,
   type NewPreference,
   type PreferenceChange,
   type PreferenceExport,
@@ -323,26 +324,31 @@ export class Host {
   }
 
   /**
-   * Reads the text of a file the person chose to import, and says what importing it would do: for each preference, the
-   * local projects whose label matches, and whether it is already here. The file is kept for this session until it is
-   * imported; nothing is saved yet.
+   * Reads the text of a file the person chose to import, and says what importing it would do: its personal preferences,
+   * and each of its source projects with the local projects whose label matches. The file is kept until it is imported
+   * or another is previewed; nothing is saved yet.
    */
-  previewImport(text: string): { previewId: string; entries: ImportEntryView[] } {
+  previewImport(text: string): { previewId: string; personal: ImportEntryView[]; projects: ImportSourceView[] } {
     const file = parseImport(text);
     const previewId = randomUUID();
+    this.#imports.clear();
     this.#imports.set(previewId, file);
     const label = (id: string) => this.#options.store.data.projects.find((p) => p.id === id)?.label ?? id;
-    return { previewId, entries: previewImport(this.#options.store.data, file).map((entry) => ({ ...entry, matches: entry.matches.map((id) => ({ id, label: label(id) })) })) };
+    const preview = previewImport(this.#options.store.data, file);
+    return { previewId, personal: preview.personal, projects: preview.projects.map((source) => ({ ...source, matches: source.matches.map((id) => ({ id, label: label(id) })) })) };
   }
 
-  /** Imports a previewed file with the person's choice of project for each project preference, or null to skip it (D23). */
-  importPreferences(previewId: string, mapping: ReadonlyArray<string | null>): { added: number; skipped: number } {
+  /**
+   * Imports a previewed file as the person chose (D23): with or without its personal preferences, and each source project
+   * to the local project they picked, or left out.
+   */
+  importPreferences(previewId: string, choice: ImportChoice): { added: number; alreadyHere: number; leftOut: number } {
     const file = this.#imports.get(previewId);
     if (!file) throw new Error("That import is no longer waiting. Choose the file again.");
-    let outcome = { added: 0, skipped: 0 };
+    let outcome = { added: 0, alreadyHere: 0, leftOut: 0 };
     this.#options.store.update((data) => {
-      const result = applyImport(data, file, mapping, new Date());
-      outcome = { added: result.added, skipped: result.skipped };
+      const result = applyImport(data, file, choice, new Date());
+      outcome = { added: result.added, alreadyHere: result.alreadyHere, leftOut: result.leftOut };
       return result.data;
     });
     this.#imports.delete(previewId);

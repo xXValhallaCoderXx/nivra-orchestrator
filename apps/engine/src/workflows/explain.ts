@@ -158,7 +158,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         const definitions = toolDefinitionChars();
         const budget = new Budget(requestBudget(inputData.contextLength), INSTRUCTIONS.length + prompt.length + definitions);
         const beforeReading = budget.used();
-        deps.recorder.output(runId, "explain", `Request budget: ${budget.tokens} tokens, about ${beforeReading} of them before any reading`, {
+        deps.recorder.output(runId, "explain", `Request budget: ${Math.max(0, budget.tokens)} tokens; about ${beforeReading} are needed before any reading`, {
           tokens: budget.tokens,
           beforeReading,
           toolDefinitionChars: definitions,

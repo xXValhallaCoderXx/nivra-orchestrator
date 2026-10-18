@@ -302,7 +302,7 @@ describe("explain tools (D22)", () => {
   it("turns down a conflict naming a choice the task doesn't have, or with fewer than two sides, then drops it after two refusals (D23)", async () => {
     const { call, state, events, next } = await setupTools({ choices: ["c1"] });
     // As the schema hands it over, with its defaults filled in.
-    const usable = { topic: "test runner", repositoryConvention: "Jest", citations: [], preferenceIds: [DECISION], choiceIds: ["c1"] };
+    const usable = { topic: "test runner", repositoryConvention: null, citations: [], preferenceIds: [DECISION], choiceIds: ["c1"] };
     const answer = {
       summary: "x",
       findings: [],
@@ -339,5 +339,27 @@ describe("explain tools (D22)", () => {
     const conflict = await call("submit_answer", { summary: "x", findings: [], conflicts: [{ topic: "t", repositoryConvention: "y", citations: [cite("big.ts", 9)], preferenceIds: [PERSONAL] }] });
     const suggestion = await call("submit_answer", { summary: "x", findings: [], suggestions: [{ statement: "Use tabs", citations: [cite("big.ts", 9)] }] });
     assert.deepEqual([conflict["accepted"], suggestion["accepted"], state.citationRefusals], [false, false, 2]);
+  });
+
+  it("turns down a repository convention or a suggestion citing no lines while there is time, so it can't quietly lose to a default (D23)", async () => {
+    const { call, state, events, next } = await setupTools();
+    // As the schema hands them over: citations default to none.
+    const uncited = { summary: "x", findings: [], conflicts: [{ topic: "test runner", repositoryConvention: "Jest", citations: [], preferenceIds: [PERSONAL], choiceIds: [] }], suggestions: [{ statement: "Use Jest", citations: [] }] };
+    const first = await call("submit_answer", uncited);
+    assert.deepEqual([first["accepted"], first["problems"]], [
+      false,
+      [
+        "conflicts[0]: it gives the repository's convention but cites no lines that show it. Read them with read_file and cite them, or set repositoryConvention to null.",
+        "suggestions[0]: it cites no lines that show the convention. Read them with read_file and cite them, or drop the suggestion.",
+      ],
+    ]);
+    assert.match(events.at(-1) ?? "", /^submit_answer refused: 2 claims citing no lines$/);
+    // The model drops what it can't support, and the answer is accepted.
+    next();
+    const second = await call("submit_answer", { ...uncited, conflicts: [], suggestions: [] });
+    assert.deepEqual([second["accepted"], state.citationRefusals], [true, 1]);
+
+    const due = await setupTools({ answerDue: () => true });
+    assert.deepEqual([(await due.call("submit_answer", uncited))["accepted"], due.state.citationRefusals, due.state.accepted?.conflicts.length], [true, 0, 1], "when the answer is due it is taken as it is");
   });
 });
