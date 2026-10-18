@@ -1,5 +1,5 @@
-import { Alert, Badge, Button, Group, List, Modal, Stack, Table, Text, Textarea, TextInput } from "@mantine/core";
-import type { CheckedCitation, ConflictOutcome, ConflictSource, ExplainConflict, ExplainResult, RunStatus, RunSummary } from "@nivra/domain";
+import { Accordion, Alert, Badge, Button, Group, List, Modal, Stack, Table, Text, Textarea, TextInput } from "@mantine/core";
+import type { AnswerDueReason, CheckedCitation, ConflictOutcome, ConflictSource, ExplainConflict, ExplainResult, RunStatus, RunSummary } from "@nivra/domain";
 import { useEffect, useState } from "react";
 import type { PreferencesView, ProjectView } from "../../../shared/ipc";
 import { TERMINAL, useRunEvents } from "../shared/runs";
@@ -125,6 +125,77 @@ function ConflictItem({ conflict, choices, preferences }: { conflict: ExplainCon
   );
 }
 
+const plural = (count: number, one: string, many = `${one}s`) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
+const DUE: Record<AnswerDueReason, string> = { "last-steps": "the last steps were reached", time: "time ran short", budget: "the budget ran out" };
+const KIND_LABEL = { "personal-default": "personal default", "project-default": "project default", override: "project decision" } as const;
+const NOT_RECORDED = "Not recorded for this run.";
+
+/**
+ * The context view (NIV-11, D23): what the model was given, what was left out, and how the budget and the answer went.
+ * A result stored before these were recorded says so, never zero.
+ */
+function ContextDetails({ result }: { result: ExplainResult }) {
+  const { context } = result;
+  const received = context.preferences;
+  const kinds = received ? received.records.map((record) => KIND_LABEL[record.scope === "personal" ? "personal-default" : record.intent === "override" ? "override" : "project-default"]) : [];
+  const byKind = (Object.values(KIND_LABEL) as string[]).map((kind) => [kind, kinds.filter((k) => k === kind).length] as const).filter(([, n]) => n > 0);
+  const { hidden, budget, answer } = context;
+  return (
+    <Stack gap={8} data-testid="explain-context-details">
+      <Stack gap={2}>
+        <Text size="xs" fw={600}>
+          What the model was given
+        </Text>
+        <Text size="xs" data-testid="explain-context-preferences">
+          Preferences received:{" "}
+          {received
+            ? received.records.length
+              ? `${byKind.map(([kind, n]) => plural(n, kind)).join(", ")} (store revision ${received.revision}, fingerprint ${received.digest.slice(0, 12)})`
+              : `none (store revision ${received.revision})`
+            : NOT_RECORDED}
+        </Text>
+        <Text size="xs">Choices for this task: {result.choices.length ? result.choices.map((choice) => `${choice.id} “${choice.text}”`).join("; ") : "none"}</Text>
+        <Text size="xs">
+          The map: {context.map.length ? `from ${context.map.map((m) => m.path).join(", ")}` : "file counts and names only"}
+          {context.mapChars !== null ? `, ${plural(context.mapChars, "character")}` : ""}
+        </Text>
+        <Text size="xs">Read: {linesByFile(context.reads) || "nothing"}</Text>
+        <Text size="xs">
+          Search results: {plural(context.searches, "search", "searches")}, {plural(context.searchHits, "hit")}
+          {context.hits.length ? ` (${linesByFile(context.hits)})` : ""}
+        </Text>
+      </Stack>
+      <Stack gap={2}>
+        <Text size="xs" fw={600}>
+          What was left out
+        </Text>
+        <Text size="xs" data-testid="explain-context-hidden">
+          Hidden from the model:{" "}
+          {hidden
+            ? `${plural(hidden.secret, "file")} that may hold secrets, ${plural(hidden.output, "dependency or build output file")}, and ${hidden.tooLargePartial ? "at least " : ""}${plural(hidden.tooLarge, "file")} too large to read.`
+            : NOT_RECORDED}
+        </Text>
+        <Text size="xs">Untracked files are never read. Other projects' own preferences, and replaced or deleted ones, are never sent.</Text>
+      </Stack>
+      <Stack gap={2}>
+        <Text size="xs" fw={600}>
+          Budget and answer
+        </Text>
+        <Text size="xs" data-testid="explain-context-budget">
+          {budget
+            ? `Request limit: ${plural(budget.tokens, "token")}; the last request carried about ${plural(budget.estimatedTokens, "token")} (Nivra's estimate). Results given less room than usual because of the budget: ${budget.resultsLimited}; results too large to send: ${budget.resultsReplaced}. The budget ${budget.ranOut ? "ran out" : "didn't run out"}.`
+            : NOT_RECORDED}
+        </Text>
+        <Text size="xs" data-testid="explain-context-answer">
+          {answer
+            ? `${answer.dueReasons.length ? `The answer was due because ${answer.dueReasons.map((reason) => DUE[reason]).join(" and ")}.` : "The model answered before it had to."} Turned down before it was accepted: ${answer.refusals.citations} for citations, ${answer.refusals.conflicts} for conflicts, ${answer.refusals.schema} for its shape. Dropped from the accepted answer: ${plural(answer.conflictsDropped, "conflict")}, ${plural(answer.suggestionsDropped, "suggestion")}.`
+            : NOT_RECORDED}
+        </Text>
+      </Stack>
+    </Stack>
+  );
+}
+
 function Result({ result, summary, preferences }: { result: ExplainResult; summary: RunSummary; preferences: PreferencesView | null }) {
   const headChanged = result.headAtEnd !== result.headAtStart;
   return (
@@ -232,13 +303,22 @@ function Result({ result, summary, preferences }: { result: ExplainResult; summa
           </List>
         </Stack>
       )}
-      <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-context">
-        Context used: {result.context.reads.length} {result.context.reads.length === 1 ? "file" : "files"} read ({linesByFile(result.context.reads) || "none"}),{" "}
-        {result.context.searches} {result.context.searches === 1 ? "search" : "searches"} with {result.context.searchHits} {result.context.searchHits === 1 ? "hit" : "hits"}
-        {result.context.hits.length > 0 ? ` (${linesByFile(result.context.hits)})` : ""}, the map from{" "}
-        {result.context.map.map((m) => m.path).join(", ") || "file counts only"};{" "}
-        {result.context.chars.toLocaleString()} characters of results. {result.checks.checked} of {result.checks.citations} citations point to lines the model was shown. Untracked files are never read.
-      </Text>
+      <Accordion variant="contained" chevronPosition="left" data-testid="explain-context-panel">
+        <Accordion.Item value="context">
+          <Accordion.Control>
+            <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-context">
+              Context used: {result.context.reads.length} {result.context.reads.length === 1 ? "file" : "files"} read ({linesByFile(result.context.reads) || "none"}),{" "}
+              {result.context.searches} {result.context.searches === 1 ? "search" : "searches"} with {result.context.searchHits} {result.context.searchHits === 1 ? "hit" : "hits"}
+              {result.context.hits.length > 0 ? ` (${linesByFile(result.context.hits)})` : ""}, the map from{" "}
+              {result.context.map.map((m) => m.path).join(", ") || "file counts only"};{" "}
+              {result.context.chars.toLocaleString()} characters of results. {result.checks.checked} of {result.checks.citations} citations point to lines the model was shown. Untracked files are never read.
+            </Text>
+          </Accordion.Control>
+          <Accordion.Panel>
+            <ContextDetails result={result} />
+          </Accordion.Panel>
+        </Accordion.Item>
+      </Accordion>
       <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-run-line">
         {summary.route ? `${summary.route.model}${summary.route.endpoint === "loopback-test" ? " (test endpoint)" : ""}` : "model unknown"} ·{" "}
         {summary.durationMs !== null ? `${(summary.durationMs / 1000).toFixed(1)} s` : "time not recorded"} · {usageText(summary)}

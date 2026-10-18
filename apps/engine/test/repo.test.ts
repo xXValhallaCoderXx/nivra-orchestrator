@@ -8,6 +8,7 @@ import { createLocalBackend } from "../src/exec/local.ts";
 import { findGit } from "../src/exec/find-executable.ts";
 import { hiddenReason, outputRoot } from "../src/repo/deny.ts";
 import { LIMITS, RepoReader } from "../src/repo/files.ts";
+import { buildMap, MAP_LIMITS } from "../src/repo/map.ts";
 import { checkRelativePath, RepoError } from "../src/repo/paths.ts";
 import { combinedMask } from "../src/secrets/patterns.ts";
 import { removeDir, tempDir } from "./helpers.ts";
@@ -170,5 +171,43 @@ describe("RepoReader (NIV-9, D22)", () => {
     const repo = await reader(makeFixture(), cancel.signal);
     cancel.abort();
     await assert.rejects(repo.search({ query: "needle-" }), (error: unknown) => error instanceof Error && /Cancelled|aborted/i.test(error.message));
+  });
+});
+
+describe("buildMap (NIV-9, D23)", () => {
+  /** A committed repository holding these files. */
+  function repoWith(files: Record<string, string>): string {
+    const root = join(tempDir(), "map ü%#");
+    dirs.push(dirname(root));
+    mkdirSync(root, { recursive: true });
+    git(root, "init", "-q", "-b", "main");
+    for (const [path, content] of Object.entries(files)) write(root, path, content);
+    git(root, "add", "-A", "-f");
+    git(root, "commit", "-q", "-m", "map");
+    return root;
+  }
+  const manifest = (name: string, deps: number, nameChars: number) =>
+    JSON.stringify({ name, dependencies: Object.fromEntries(Array.from({ length: deps }, (_, i) => [`${name}-dependency-${i}-`.padEnd(nameChars, "x"), "1.0.0"])) });
+
+  it("counts the files the model is never given from the reader, whatever the map had room for", async () => {
+    const files = await reader(makeFixture());
+    const { hidden } = await buildMap(files, null);
+    const by = (reason: string) => [...files.hidden.values()].filter((r) => r === reason).length;
+    assert.deepEqual(hidden, { secret: by("secret"), output: by("output"), tooLarge: 1, tooLargePartial: false });
+    assert.ok(hidden.secret > 0 && hidden.output > 0);
+  });
+
+  it("keeps as sources only the manifests still in the map it sends", async () => {
+    const files = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`packages/p${i}/package.json`, manifest(`p${i}`, 40, 60)]));
+    const map = await buildMap(await reader(repoWith(files)), null);
+    const sent = (JSON.parse(map.text) as { manifests: Array<{ path: string }> }).manifests.map((m) => m.path);
+    assert.ok(map.text.length <= MAP_LIMITS.chars && sent.length > 0 && sent.length < 12, `${sent.length} manifests sent, ${map.text.length} characters`);
+    assert.deepEqual(map.sources.map((source) => source.path).sort(), [...sent].sort());
+  });
+
+  it("names no source when only the minimal map fits", async () => {
+    const huge = JSON.stringify({ name: "huge", ...Object.fromEntries(["scripts", "dependencies", "devDependencies"].map((list) => [list, Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`${list}-${i}-`.padEnd(150, "x"), "1"]))])) });
+    const map = await buildMap(await reader(repoWith({ "package.json": huge })), null);
+    assert.deepEqual([map.sources, (JSON.parse(map.text) as { note?: string }).note], [[], "The map was too large; use list_files."]);
   });
 });

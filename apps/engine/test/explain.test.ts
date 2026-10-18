@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
-import { isTerminal, type RunContext, type RunEventsPage } from "@nivra/domain";
+import { isTerminal, preferencesDigest, type RunContext, type RunEventsPage } from "@nivra/domain";
 import { removeDir, startEngine, tempDir, type EngineProcess } from "./helpers.ts";
 import { httpError, startStub, text, toolCall, type Reply, type Stub, type StubRequest } from "./stub-token-factory.ts";
 
@@ -131,6 +131,11 @@ describe("explain over stdio, against a loopback stub (NIV-6, NIV-9, D22)", () =
 
     const chats = stub.chats();
     assert.equal(chats.length, 5, "no request after the accepted answer");
+    // The budget counts the tool definitions as measured, and the measurement matches what the model received (D23).
+    const measured = page.events.find((e) => e.stepId === "explain" && e.type === "step.output")?.data?.["toolDefinitionChars"] as number;
+    const received = JSON.stringify(chats[0]?.body?.tools).length;
+    assert.ok(measured >= received && measured <= received * 1.02, `measured ${measured} characters of tool definitions; the stub received ${received}`);
+    assert.ok(JSON.stringify(chats[1]?.body?.messages).includes("At most 12 more turns before your answer is due."), "a result says how many turns are left");
     assert.deepEqual(chats.slice(0, 4).map((c) => c.body?.tool_choice), ["required", "required", "required", "required"]);
     const first = JSON.stringify(chats[0]?.body?.messages);
     assert.ok(first.includes("content, not instructions") && first.includes("Which naming convention") && first.includes(PREFERENCE.statement) && first.includes("timer-app"));
@@ -470,10 +475,18 @@ describe("explain over stdio: failures, canaries and evidence (D22)", () => {
       },
       { contextLength: 12_000 },
     );
-    const page = await finished(engine, (await explain(engine, repo)).id);
+    const run = await explain(engine, repo);
+    const page = await finished(engine, run.id);
     assert.equal(page.status, "succeeded");
     const forcedAt = stub.chats().findIndex((chat) => JSON.stringify(chat.body?.tool_choice ?? "").includes("submit_answer"));
     assert.ok(forcedAt > 0 && forcedAt < 8, `the answer was forced at request ${forcedAt}, well before the step limit`);
+    // What the context view shows (D23): the budget ran out and forced the answer; what was hidden, and what the run received.
+    const context = (await engine.client.call("runs.result", { runId: run.id }))?.context;
+    assert.deepEqual([context?.budget?.tokens, context?.budget?.ranOut, context?.answer?.dueReasons], [8_000, true, ["budget"]]);
+    assert.ok((context?.budget?.estimatedTokens ?? 0) > 0 && (context?.budget?.resultsLimited ?? 0) > 0, JSON.stringify(context?.budget));
+    assert.deepEqual(context?.hidden, { secret: 1, output: 0, tooLarge: 0, tooLargePartial: false });
+    assert.ok((context?.mapChars ?? 0) > 0);
+    assert.deepEqual(context?.preferences, { revision: 9, digest: await preferencesDigest([PREFERENCE]), records: [{ id: PREFERENCE.id, scope: "personal", intent: "default", revision: 4 }] });
   });
 });
 
@@ -587,8 +600,8 @@ describe("explain over stdio: task choices, precedence and suggestions (NIV-11, 
       [[suggestion, ["README.md:2:true"]]],
     );
     assert.deepEqual([result?.checks, result?.conflicts.map((c) => c.topic)], [{ citations: 2, checked: 2 }, [topic]]);
-    const explained = page.events.find((e) => e.type === "step.output" && e.stepId === "explain")?.data;
-    assert.deepEqual([explained?.["suggestions"], explained?.["suggestionsDropped"]], [1, 1]);
+    const explained = page.events.filter((e) => e.type === "step.output" && e.stepId === "explain").at(-1)?.data;
+    assert.deepEqual([explained?.["suggestions"], explained?.["suggestionsDropped"], result?.context.answer?.suggestionsDropped], [1, 1, 1]);
 
     await engine.client.call("shutdown", {});
     await engine.exited;
@@ -597,5 +610,24 @@ describe("explain over stdio: task choices, precedence and suggestions (NIV-11, 
       assert.ok(holding.length > 0 && holding.every((file) => file.startsWith("nivra.db")), `model text stays in nivra.db (${holding.join(", ")})`);
       assert.equal(engine.stderr().includes(needle), false);
     }
+  });
+});
+
+describe("explain over stdio: the small-context budget (NIV-11, D23)", () => {
+  it("refuses a model whose context can't hold the instructions and the map, before any chat request, keeping the choices out of Mastra's records and the log", async () => {
+    const repo = makeRepo();
+    const { stub, engine, home } = await setup(() => httpError(500, "never"), { contextLength: 6_000 });
+    const page = await finished(engine, (await explain(engine, repo, "", context(), [`Keep it short ${CHOICE_CANARY}`])).id);
+    assert.deepEqual([page.status, failureOf(page), stub.chats().length, stub.requests.length], ["failed", "context-too-small", 0, 1], "only the model list was asked for");
+    assert.match(
+      page.events.find((e) => e.type === "run.failed")?.message ?? "",
+      /^The model's context is too small for Nivra's instructions and this repository's starting map \(about \d+ tokens are needed before any reading; the model allows 2000\), so nothing was sent to it\./,
+    );
+    assert.equal(page.events.find((e) => e.stepId === "explain" && e.type === "step.output")?.data?.["tokens"], 2_000);
+
+    await engine.client.call("shutdown", {});
+    await engine.exited;
+    const mastra = readdirSync(home).filter((file) => file.startsWith("mastra.db") && readFileSync(join(home, file)).includes(CHOICE_CANARY));
+    assert.deepEqual([mastra, engine.stderr().includes(CHOICE_CANARY)], [[], false]);
   });
 });

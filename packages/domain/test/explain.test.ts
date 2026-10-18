@@ -52,5 +52,8 @@ describe("ExplainResult", () => {
     };
     const result = ExplainResult.parse(stored);
     assert.deepEqual([result.choices, result.conflicts, result.suggestions, result.preferenceDifferences.length], [[], [], [], 1]);
+    // What the context view adds is unknown for such a result: null, never zero.
+    const { mapChars, preferences, hidden, budget, answer } = result.context;
+    assert.deepEqual([mapChars, preferences, hidden, budget, answer], [null, null, null, null, null]);
   });
 });

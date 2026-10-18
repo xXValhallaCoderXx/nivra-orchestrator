@@ -84,6 +84,16 @@ test("explaining asks for the project's consent first, then shows checked and un
   await expect(page.getByTestId("explain-head")).toContainText("HEAD at run start");
   // The search hit is in the context used, though that line was never read.
   await expect(page.getByTestId("explain-context")).toContainText("1 search with 1 hit (src/timer.ts 1)");
+  // The context view (D23): what the model was given, what was left out, and how the budget and the answer went.
+  await page.getByTestId("explain-context").click();
+  await expect(page.getByTestId("explain-context-preferences")).toHaveText("Preferences received: none (store revision 0)");
+  await expect(page.getByTestId("explain-context-hidden")).toHaveText(
+    "Hidden from the model: 0 files that may hold secrets, 0 dependency or build output files, and 0 files too large to read.",
+  );
+  await expect(page.getByTestId("explain-context-budget")).toContainText("The budget didn't run out.");
+  await expect(page.getByTestId("explain-context-answer")).toContainText(
+    "The model answered before it had to. Turned down before it was accepted: 2 for citations, 0 for conflicts, 0 for its shape.",
+  );
   await expect(page.getByTestId("explain-sharing")).toBeVisible();
   await expect(page.getByTestId("explain-timeline")).toContainText("No confirmed preferences from the app (revision 0)");
   await expect(page.getByTestId("explain-timeline")).toContainText("submit_answer refused: 1 citation of lines the model wasn't shown");

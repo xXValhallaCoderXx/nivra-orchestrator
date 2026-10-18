@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { createLocalBackend } from "../src/exec/local.ts";
 import { findGit } from "../src/exec/find-executable.ts";
-import { mustAnswer } from "../src/explain/limits.ts";
+import { mustAnswer, turnsBeforeAnswer } from "../src/explain/limits.ts";
+import { requestBudget } from "../src/providers/policy.ts";
 import { createExplainTools } from "../src/explain/tools.ts";
 import { InternalFailure } from "../src/providers/model.ts";
 import { RepoReader } from "../src/repo/files.ts";
@@ -117,15 +118,27 @@ describe("Budget (D22)", () => {
   });
 });
 
-describe("mustAnswer (D22)", () => {
+describe("mustAnswer and turnsBeforeAnswer (D22, D23)", () => {
   const limits = { maxSteps: 16, stepMs: 90_000, totalMs: 360_000 };
-  it("forces the answer in the last three steps, when the budget is spent, or when there's no time for another call and the answer", () => {
-    assert.equal(mustAnswer({ stepNumber: 3, elapsedMs: 10_000, budgetExhausted: false }, limits), false);
-    assert.equal(mustAnswer({ stepNumber: 12, elapsedMs: 10_000, budgetExhausted: false }, limits), false);
-    assert.equal(mustAnswer({ stepNumber: 13, elapsedMs: 10_000, budgetExhausted: false }, limits), true, "three steps are kept, so a turned-down answer can be given again");
-    assert.equal(mustAnswer({ stepNumber: 3, elapsedMs: 10_000, budgetExhausted: true }, limits), true);
-    assert.equal(mustAnswer({ stepNumber: 3, elapsedMs: 180_000, budgetExhausted: false }, limits), false, "exactly room for one more call and the answer");
-    assert.equal(mustAnswer({ stepNumber: 3, elapsedMs: 180_001, budgetExhausted: false }, limits), true);
+  it("says why the answer is due: the last three steps, the budget, or no time for another call and the answer", () => {
+    const due = (stepNumber: number, elapsedMs: number, budgetExhausted: boolean) => mustAnswer({ stepNumber, elapsedMs, budgetExhausted }, limits);
+    assert.deepEqual(due(3, 10_000, false), []);
+    assert.deepEqual(due(12, 10_000, false), []);
+    assert.deepEqual(due(13, 10_000, false), ["last-steps"], "three steps are kept, so a turned-down answer can be given again");
+    assert.deepEqual(due(3, 10_000, true), ["budget"]);
+    assert.deepEqual(due(3, 180_000, false), [], "exactly room for one more call and the answer");
+    assert.deepEqual(due(3, 180_001, false), ["time"]);
+    assert.deepEqual(due(14, 300_000, true), ["last-steps", "time", "budget"]);
+  });
+
+  it("counts the exploring turns left after the one in progress, never below none", () => {
+    assert.deepEqual([0, 9, 10, 11, 12, 13, 15].map((step) => turnsBeforeAnswer(step, limits)), [12, 3, 2, 1, 0, 0, 0]);
+  });
+});
+
+describe("requestBudget (D23)", () => {
+  it("holds back the answer from the model's context or the app's cap, whichever is smaller, with no floor", () => {
+    assert.deepEqual([null, 262_144, 64_000, 12_000, 6_000, 4_000, 3_000].map((contextLength) => requestBudget(contextLength)), [60_000, 60_000, 60_000, 8_000, 2_000, 0, -1_000]);
   });
 });
 
@@ -203,6 +216,39 @@ describe("explain tools (D22)", () => {
     while (!budget.exhausted()) await call("read_file", { path: "big.ts", startLine: 200 });
     const refused = await call("read_file", { path: "big.ts", startLine: 500 });
     assert.equal(refused["budgetExhausted"], true);
+  });
+
+  it("counts a result that got less room than usual because of the budget (D23)", async () => {
+    const roomy = await setupTools();
+    await roomy.call("read_file", { path: "big.ts" });
+    const tight = await setupTools({ budgetTokens: 3_000 });
+    await tight.call("read_file", { path: "big.ts" });
+    assert.deepEqual([roomy.state.resultsLimited, tight.state.resultsLimited, tight.state.resultsReplaced], [0, 1, 0]);
+  });
+
+  it("describes a result too large to send as such, delivers nothing from it, and counts it (D23)", async () => {
+    const delivered = { path: "a.ts", startLine: 1, endLine: 1, sha256: "a".repeat(64) };
+    const huge = { read: async () => ({ result: { path: "a.ts", startLine: 1, endLine: 1, totalLines: 1, nextStartLine: null, content: "x".repeat(20_000) }, delivered }) } as unknown as RepoReader;
+    const { call, ledger, events, state } = await setupTools({ reader: huge });
+    const result = await call("read_file", { path: "a.ts" });
+    assert.deepEqual([result["truncated"], ledger.entries.length, state.resultsReplaced, state.resultsLimited], [true, 0, 1, 0]);
+    assert.equal(events.at(-1), "read_file a.ts: the result was too large to send, so nothing from it was delivered");
+  });
+
+  it("tells the model in every result how many turns it has left, and to answer now in the last two (D23)", async () => {
+    const { call, next } = await setupTools();
+    const turns = async () => String((await call("read_file", { path: "big.ts", endLine: 2 }))["turns"]);
+    const seen = [await turns()];
+    for (let step = 1; step <= 12; step++) {
+      next();
+      if (step >= 10) seen.push(await turns());
+    }
+    assert.deepEqual(seen, [
+      "At most 12 more turns before your answer is due.",
+      "Answer now: at most 2 more turns before your answer is due.",
+      "Answer now: at most 1 more turn before your answer is due.",
+      "Answer now: the next turn is for your answer.",
+    ]);
   });
 
   it("turns down an answer citing lines the model wasn't shown, naming them, then accepts one citing what it read", async () => {

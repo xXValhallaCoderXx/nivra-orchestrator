@@ -440,6 +440,8 @@ function kindForStatus(status: number): ModelFailureKind {
 const MESSAGES: Record<ModelFailureKind, (detail: string, status: number | null) => string> = {
   "sharing-refused": () => "This project doesn't allow sending its content to Token Factory, so nothing was sent. Allow sharing for it, then try again.",
   "no-key": () => "No Nebius key is set, so nothing was sent. Add your key in Settings, then try again.",
+  "context-too-small": (d) =>
+    `The model's context is too small for Nivra's instructions and this repository's starting map${d ? ` (${d})` : ""}, so nothing was sent to it. Shorten the question or the choices; if that isn't enough, this key needs a model with a larger context: Check Token Factory in Settings shows what it can use.`,
   auth: (_d, s) => `Token Factory refused the API key (HTTP ${s ?? "401"}). Check the key in Settings, or create a new one in the Token Factory console.`,
   "rate-limit": (d) => `Token Factory is rate-limiting this key (HTTP 429). ${d ? `Try again in ${d}.` : "Wait a minute, then try again."}`,
   "model-unavailable": (d) => `The model isn't available to this key${d ? ` (${d})` : ""}. Check Token Factory in Settings to see which models the key can use.`,

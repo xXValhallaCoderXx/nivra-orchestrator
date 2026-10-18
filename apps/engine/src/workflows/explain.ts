@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import type { ExplainResult, JsonObject, RunContext, RunRoute, RunUsage } from "@nivra/domain";
+import { preferencesDigest, type AnswerDueReason, type ExplainResult, type JsonObject, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
@@ -10,7 +10,7 @@ import { EXPLAIN_LIMITS, mustAnswer } from "../explain/limits.ts";
 import { rankConflict } from "../explain/precedence.ts";
 import { DEFAULT_QUESTION, explainPrompt, INSTRUCTIONS } from "../explain/prompt.ts";
 import { TaskUnreadable, type ExplainTask } from "../explain/task.ts";
-import { createExplainTools } from "../explain/tools.ts";
+import { createExplainTools, toolDefinitionChars } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
 import { createModelClient, failure, InternalFailure, ModelFailure, type Endpoint, type ModelClient, type StepRecord } from "../providers/model.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
@@ -21,8 +21,6 @@ import { RepoError } from "../repo/paths.ts";
 import type { Mask } from "../secrets/patterns.ts";
 
 export const EXPLAIN_WORKFLOW_ID = "explain";
-/** Tool definitions, as the model receives them, estimated for the budget. */
-const TOOL_DEFINITION_CHARS = 4_000;
 
 export interface ExplainRecorder {
   output(runId: string, stepId: string, message: string, data?: JsonObject): void;
@@ -157,12 +155,24 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         // The map is delivered before the first step.
         ledger.record(-1, "map", map.sources.map((source) => ({ path: source.path, startLine: 1, endLine: source.lines, sha256: source.sha256 })), mapText.length);
         const prompt = explainPrompt(question, mapText, context.preferences, task.choices);
-        const budget = new Budget(requestBudget(inputData.contextLength), INSTRUCTIONS.length + prompt.length + TOOL_DEFINITION_CHARS);
+        const definitions = toolDefinitionChars();
+        const budget = new Budget(requestBudget(inputData.contextLength), INSTRUCTIONS.length + prompt.length + definitions);
+        const beforeReading = budget.used();
+        deps.recorder.output(runId, "explain", `Request budget: ${budget.tokens} tokens, about ${beforeReading} of them before any reading`, {
+          tokens: budget.tokens,
+          beforeReading,
+          toolDefinitionChars: definitions,
+          contextLength: inputData.contextLength,
+        });
+        // A model whose context can't hold the instructions and the map with room to read is refused before any chat
+        // request is made (D23), never sent more than it allows.
+        if (budget.exhausted()) throw failure("context-too-small", `about ${beforeReading} tokens are needed before any reading; the model allows ${Math.max(0, budget.tokens)}`);
         const policy = policyFor(inputData.model);
         const internal = new InternalFailure();
         let finished = 0;
-        // Set before each step: whether it must give the answer, which is then accepted whatever it cites.
+        // Set before each step: whether it must give the answer, which is then accepted whatever it cites, and why.
         let answerDue = false;
+        let dueReasons: AnswerDueReason[] = [];
         // Answers Mastra turned down because they didn't match the schema: the tool never saw them.
         let invalidAnswers = 0;
         const { tools, state } = createExplainTools({
@@ -192,7 +202,10 @@ export function createExplainWorkflow(deps: ExplainDeps) {
             stopWhen: () => state.accepted !== null,
             // An exploring step starts only with time left for it and for the answer after it (D22).
             prepareStep: ({ stepNumber }) => {
-              answerDue = mustAnswer({ stepNumber, elapsedMs: performance.now() - started, budgetExhausted: budget.exhausted() });
+              dueReasons = mustAnswer({ stepNumber, elapsedMs: performance.now() - started, budgetExhausted: budget.exhausted() });
+              answerDue = dueReasons.length > 0;
+              // However the budget runs out, the run records that it did.
+              if (dueReasons.includes("budget")) state.budgetExhausted = true;
               if (!answerDue) return { toolChoice: policy.explore };
               return { activeTools: ["submit_answer"], toolChoice: policy.forceAnswer ? { type: "tool", toolName: "submit_answer" } : "auto" };
             },
@@ -263,6 +276,20 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         const suggestionsDropped = answer.suggestions.length - suggestions.length;
         const all = [...findings, ...conflicts].flatMap((item) => item.citations);
         const checked = all.filter((citation) => citation.checked).length;
+        const records = context.preferences.records;
+        // What the context view shows (D23): what the run was given, what was left out, and how the budget and the answer went.
+        const details = {
+          preferences: { revision: context.preferences.revision, digest: await preferencesDigest(records), records: records.map(({ id, scope, intent, revision }) => ({ id, scope, intent, revision })) },
+          hidden: map.hidden,
+          budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
+          answer: {
+            dueReasons,
+            refusals: { citations: state.citationRefusals, conflicts: state.conflictRefusals, schema: invalidAnswers },
+            acceptedAfterRefusals: state.rejected + invalidAnswers,
+            conflictsDropped: state.conflictsDropped,
+            suggestionsDropped,
+          },
+        };
         const result: ExplainResult = {
           question,
           choices: task.choices,
@@ -274,7 +301,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           suggestions,
           preferenceDifferences: [],
           gaps: answer.gaps,
-          context: ledger.context(),
+          context: { ...ledger.context(), ...details },
           checks: { citations: all.length, checked },
           answeredAtStep: answerStep,
           finishedAt: new Date().toISOString(),

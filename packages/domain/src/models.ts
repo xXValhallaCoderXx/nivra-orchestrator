@@ -2,11 +2,13 @@ import { z } from "zod";
 
 /**
  * Why a model call, or a run that makes them, failed (D22), so the app can say what to do without reading the message.
- * `sharing-refused` and `no-key` stop a run before any request is made.
+ * `sharing-refused` and `no-key` stop a run before any request is made; `context-too-small` stops it before any chat
+ * request, when the model's context can't hold the instructions and the starting map with room to read (D23).
  */
 export const ModelFailureKind = z.enum([
   "sharing-refused",
   "no-key",
+  "context-too-small",
   "auth",
   "rate-limit",
   "model-unavailable",

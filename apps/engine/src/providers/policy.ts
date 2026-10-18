@@ -37,8 +37,12 @@ export const APP_TOKEN_CAP = 64_000;
 /** Held back for the model's answer, on every request. */
 export const ANSWER_TOKENS = 4_000;
 
-/** The token budget for everything sent in one request, with room left for the answer. */
+/**
+ * The token budget for everything sent in one request, with room left for the answer. There is no floor: a model whose
+ * context can't hold the instructions and the map with room to read is refused before any chat request (D23), never
+ * sent more than it allows.
+ */
 export function requestBudget(contextLength: number | null): number {
   const limit = contextLength === null ? APP_TOKEN_CAP : Math.min(contextLength, APP_TOKEN_CAP);
-  return Math.max(8_000, limit - ANSWER_TOKENS);
+  return limit - ANSWER_TOKENS;
 }

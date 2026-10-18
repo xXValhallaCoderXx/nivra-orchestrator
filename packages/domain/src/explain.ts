@@ -51,6 +51,54 @@ export const ExplainConflict = z.strictObject({
 });
 export type ExplainConflict = z.infer<typeof ExplainConflict>;
 
+/** Why the answer was due when it was given (D22, D23): the last steps were reached, time ran short, or the budget ran out. */
+export const AnswerDueReason = z.enum(["last-steps", "time", "budget"]);
+export type AnswerDueReason = z.infer<typeof AnswerDueReason>;
+
+const count = z.number().int().nonnegative();
+
+/**
+ * What the context view shows beyond the sources (NIV-11, D23). Each part is null for a result stored before it was
+ * recorded: unknown, never zero.
+ */
+const ContextDetails = {
+  /** Characters of the starting map, as sent. */
+  mapChars: count.nullable().default(null),
+  /** The preferences the run received: ids, scopes, intents and revisions, the store's revision and the fingerprint. */
+  preferences: z
+    .strictObject({
+      revision: count,
+      digest: z.string(),
+      records: z.array(z.strictObject({ id: z.uuid(), scope: PreferenceScope, intent: PreferenceIntent, revision: z.number().int().positive() })),
+    })
+    .nullable()
+    .default(null),
+  /**
+   * Files the model was never given, by reason. `tooLarge` counts only the files whose size was checked;
+   * `tooLargePartial` says not every tracked file was.
+   */
+  hidden: z.strictObject({ secret: count, output: count, tooLarge: count, tooLargePartial: z.boolean() }).nullable().default(null),
+  /**
+   * The request budget in tokens, and what the last request carried by Nivra's estimate; results that got less room
+   * than usual because of the budget, results replaced because they were too large, and whether the budget ran out.
+   */
+  budget: z
+    .strictObject({ tokens: z.number().int(), estimatedTokens: count, resultsLimited: count, resultsReplaced: count, ranOut: z.boolean() })
+    .nullable()
+    .default(null),
+  /** How the answer came to be accepted: why it was due (none when the model answered before it had to), what was turned down first, and what was dropped. */
+  answer: z
+    .strictObject({
+      dueReasons: z.array(AnswerDueReason),
+      refusals: z.strictObject({ citations: count, conflicts: count, schema: count }),
+      acceptedAfterRefusals: count,
+      conflictsDropped: count,
+      suggestionsDropped: count,
+    })
+    .nullable()
+    .default(null),
+};
+
 export const ExplainResult = z.strictObject({
   question: z.string(),
   /** The task's choices as the run read them, with the ids the model and the conflicts use. */
@@ -78,6 +126,7 @@ export const ExplainResult = z.strictObject({
     searchHits: z.number().int().nonnegative(),
     chars: z.number().int().nonnegative(),
     changedFiles: z.array(z.string()),
+    ...ContextDetails,
   }),
   checks: z.strictObject({ citations: z.number().int().nonnegative(), checked: z.number().int().nonnegative() }),
   answeredAtStep: z.number().int().nonnegative(),

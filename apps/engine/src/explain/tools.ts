@@ -10,6 +10,7 @@ import { ANSWER_TOOL_DESCRIPTION, AnswerInput } from "./answer.ts";
 import type { Budget } from "./budget.ts";
 import { checkCitation, type CheckedCitation } from "./citations.ts";
 import type { Ledger, LedgerKind } from "./ledger.ts";
+import { turnsBeforeAnswer } from "./limits.ts";
 import { conflictProblems } from "./precedence.ts";
 
 /**
@@ -41,7 +42,12 @@ export interface ExplainToolsState {
   conflictRefusals: number;
   /** Conflicts dropped from the accepted answer because they couldn't be used. */
   conflictsDropped: number;
+  /** Whether the budget ran out, however it did. */
   budgetExhausted: boolean;
+  /** Results that got less room than usual because of the budget. */
+  resultsLimited: number;
+  /** Results too large to send, which delivered nothing. */
+  resultsReplaced: number;
 }
 
 export interface ExplainToolsOptions {
@@ -68,20 +74,95 @@ export const MAX_CONFLICT_REFUSALS = 2;
 /** The problems a model can fix by reading, or by dropping the citation. */
 const FIXABLE: ReadonlySet<CheckedCitation["problem"]> = new Set(["file not read", "lines not shown", "not a repository path"]);
 
+/** Each tool's description and input schema, as the model receives them: the tools are built from these, and measured. */
+export const EXPLAIN_TOOL_SPECS = {
+  list_files: {
+    description: `List the repository's tracked files, optionally filtered by a glob such as "src/**/*.ts". Returns at most ${LIMITS.listFiles} paths: "total" counts every match and "truncated" says the list was cut, so narrow the glob. Files under "hidden" exist but are never read (secrets, dependency or build output).`,
+    inputSchema: z.object({
+      glob: z.string().max(200).optional().describe("A glob over repository-relative paths, e.g. src/**/*.ts"),
+      limit: z.number().int().min(1).max(LIMITS.listFiles).optional(),
+    }),
+  },
+  search_code: {
+    description: `Search tracked files for a literal string; set regex for a POSIX extended regular expression (no \\d, \\w or lookaround) and ignoreCase to ignore case. Returns up to ${LIMITS.searchResults} matching lines with paths and line numbers, at most ${LIMITS.searchPerFile} per file. "unreadable" names files that matched but can't be read: say the text is there, never that it wasn't found.`,
+    inputSchema: z.object({
+      query: z.string().min(1).max(LIMITS.queryChars).describe("The exact text to find, or the pattern when regex is set"),
+      glob: z.string().max(200).optional(),
+      limit: z.number().int().min(1).max(LIMITS.searchResults).optional(),
+      regex: z.boolean().optional(),
+      ignoreCase: z.boolean().optional(),
+    }),
+  },
+  read_file: {
+    description: `Read a tracked file with line numbers. A call returns as many whole lines as fit (at most ${LIMITS.readLines}); when "nextStartLine" isn't null, call again with startLine set to it to continue.`,
+    inputSchema: z.object({
+      path: z.string().min(1).max(500).describe("A repository-relative path, as list_files shows it"),
+      startLine: z.number().int().min(1).optional(),
+      endLine: z.number().int().min(1).optional(),
+    }),
+  },
+  submit_answer: { description: ANSWER_TOOL_DESCRIPTION, inputSchema: AnswerInput },
+};
+
+let definitionChars: number | null = null;
+/**
+ * The characters the tool definitions add to every request (D23), measured the way Mastra sends them: each tool as a
+ * function with its name, description and input schema, converted as Mastra converts it (zod's JSON Schema, draft 7,
+ * the input side, every object closed). A test compares this with what a stub receives.
+ */
+export function toolDefinitionChars(): number {
+  const close = (context: { jsonSchema: object }) => {
+    const schema = context.jsonSchema as { type?: unknown; additionalProperties?: unknown };
+    if (schema.type === "object") schema.additionalProperties = false;
+  };
+  definitionChars ??= JSON.stringify(
+    Object.entries(EXPLAIN_TOOL_SPECS).map(([name, spec]) => ({
+      type: "function",
+      function: { name, description: spec.description, parameters: z.toJSONSchema(spec.inputSchema, { target: "draft-7", io: "input", unrepresentable: "any", override: close }) },
+    })),
+  ).length;
+  return definitionChars;
+}
+
+/** What each result tells the model about the turns it has left (D23): how many, then, in the last two, to answer now. */
+export function turnsNote(step: number): string {
+  const left = turnsBeforeAnswer(step);
+  if (left > 2) return `At most ${left} more turns before your answer is due.`;
+  return `Answer now: ${left === 0 ? "the next turn is for your answer" : `at most ${left} more ${left === 1 ? "turn" : "turns"} before your answer is due`}.`;
+}
+
 export function createExplainTools(options: ExplainToolsOptions): { tools: Record<string, ReturnType<typeof createTool>>; state: ExplainToolsState } {
   const { reader, ledger, budget, mask, internal } = options;
-  const state: ExplainToolsState = { accepted: null, answerStep: null, rejected: 0, citationRefusals: 0, conflictRefusals: 0, conflictsDropped: 0, budgetExhausted: false };
+  const state: ExplainToolsState = {
+    accepted: null,
+    answerStep: null,
+    rejected: 0,
+    citationRefusals: 0,
+    conflictRefusals: 0,
+    conflictsDropped: 0,
+    budgetExhausted: false,
+    resultsLimited: 0,
+    resultsReplaced: 0,
+  };
 
   /** Masks a result as JSON and checks it fits; a result that doesn't is replaced, and delivers nothing. */
-  const finish = (result: unknown, cap: number): { value: unknown; json: string; fits: boolean } => {
-    const json = mask(JSON.stringify(result));
+  const finish = (result: object, turns: string, cap: number): { value: unknown; json: string; fits: boolean } => {
+    const json = mask(JSON.stringify({ ...result, turns }));
     if (json.length <= cap) return { value: JSON.parse(json), json, fits: true };
-    const note = { truncated: true, note: "That result was too large to send; narrow the request." };
+    const note = { truncated: true, note: "That result was too large to send; narrow the request.", turns };
     return { value: note, json: JSON.stringify(note), fits: false };
   };
 
-  /** Runs one tool call: budget, the call itself, the ledger and the timeline, never a throw. */
-  const run = async (tool: string, input: JsonObject, body: (cap: number) => Promise<{ result: unknown; delivered: Delivered[]; kind: LedgerKind | null; describe: (result: unknown) => { message: string; data: JsonObject } }>) => {
+  /**
+   * Runs one tool call: budget, the call itself, the ledger and the timeline, never a throw. `asked` describes the
+   * request alone, for a result too large to send: then nothing about the result is recorded as delivered.
+   */
+  const run = async (
+    tool: string,
+    input: JsonObject,
+    asked: { message: string; data: JsonObject },
+    body: (cap: number) => Promise<{ result: object; delivered: Delivered[]; kind: LedgerKind | null; describe: (result: unknown) => { message: string; data: JsonObject } }>,
+  ) => {
     const started = performance.now();
     const step = options.step();
     const argsChars = JSON.stringify(input).length;
@@ -95,13 +176,21 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
         return { budgetExhausted: true, note: BUDGET_NOTE };
       }
       const cap = Math.min(LIMITS.resultChars, budget.remainingChars());
-      const { result, delivered, kind, describe } = await body(cap);
-      const finished = finish(result, cap);
+      // Room is held back for the turns note, so the result as sent still fits the cap.
+      const turns = turnsNote(step);
+      const { result, delivered, kind, describe } = await body(cap - JSON.stringify({ turns }).length);
+      const finished = finish(result, turns, cap);
       budget.charge(finished.json.length + argsChars);
       if (finished.fits && kind) ledger.record(step, kind, delivered, finished.json.length);
       else ledger.count(finished.json.length);
+      if (!finished.fits) {
+        state.resultsReplaced++;
+        record(`${asked.message}: the result was too large to send, so nothing from it was delivered`, { ...asked.data, chars: finished.json.length, tooLarge: true });
+        return finished.value;
+      }
+      if (cap < LIMITS.resultChars) state.resultsLimited++;
       const described = describe(result);
-      record(described.message, { ...described.data, chars: finished.json.length, ...(finished.fits ? {} : { tooLarge: true }) });
+      record(described.message, { ...described.data, chars: finished.json.length });
       return finished.value;
     } catch (error) {
       if (error instanceof RepoError) {
@@ -120,13 +209,9 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
   const tools = {
     list_files: createTool({
       id: "list_files",
-      description: `List the repository's tracked files, optionally filtered by a glob such as "src/**/*.ts". Returns at most ${LIMITS.listFiles} paths: "total" counts every match and "truncated" says the list was cut, so narrow the glob. Files under "hidden" exist but are never read (secrets, dependency or build output).`,
-      inputSchema: z.object({
-        glob: z.string().max(200).optional().describe("A glob over repository-relative paths, e.g. src/**/*.ts"),
-        limit: z.number().int().min(1).max(LIMITS.listFiles).optional(),
-      }),
+      ...EXPLAIN_TOOL_SPECS.list_files,
       execute: async (input) =>
-        run("list_files", input, async (cap) => ({
+        run("list_files", input, { message: `list_files${input.glob ? ` ${input.glob}` : ""}`, data: { glob: input.glob ?? null } }, async (cap) => ({
           result: reader.list(input, cap),
           delivered: [],
           kind: null,
@@ -138,16 +223,9 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
     }),
     search_code: createTool({
       id: "search_code",
-      description: `Search tracked files for a literal string; set regex for a POSIX extended regular expression (no \\d, \\w or lookaround) and ignoreCase to ignore case. Returns up to ${LIMITS.searchResults} matching lines with paths and line numbers, at most ${LIMITS.searchPerFile} per file. "unreadable" names files that matched but can't be read: say the text is there, never that it wasn't found.`,
-      inputSchema: z.object({
-        query: z.string().min(1).max(LIMITS.queryChars).describe("The exact text to find, or the pattern when regex is set"),
-        glob: z.string().max(200).optional(),
-        limit: z.number().int().min(1).max(LIMITS.searchResults).optional(),
-        regex: z.boolean().optional(),
-        ignoreCase: z.boolean().optional(),
-      }),
+      ...EXPLAIN_TOOL_SPECS.search_code,
       execute: async (input) =>
-        run("search_code", input, async (cap) => {
+        run("search_code", input, { message: `search_code "${input.query}"`, data: { query: input.query } }, async (cap) => {
           const { result, delivered } = await reader.search(input, cap);
           return {
             result,
@@ -162,14 +240,9 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
     }),
     read_file: createTool({
       id: "read_file",
-      description: `Read a tracked file with line numbers. A call returns as many whole lines as fit (at most ${LIMITS.readLines}); when "nextStartLine" isn't null, call again with startLine set to it to continue.`,
-      inputSchema: z.object({
-        path: z.string().min(1).max(500).describe("A repository-relative path, as list_files shows it"),
-        startLine: z.number().int().min(1).optional(),
-        endLine: z.number().int().min(1).optional(),
-      }),
+      ...EXPLAIN_TOOL_SPECS.read_file,
       execute: async (input) =>
-        run("read_file", input, async (cap) => {
+        run("read_file", input, { message: `read_file ${input.path}`, data: { path: input.path } }, async (cap) => {
           const { result, delivered } = await reader.read(input, cap);
           return {
             result,
@@ -184,8 +257,7 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
     }),
     submit_answer: createTool({
       id: "submit_answer",
-      description: ANSWER_TOOL_DESCRIPTION,
-      inputSchema: AnswerInput,
+      ...EXPLAIN_TOOL_SPECS.submit_answer,
       execute: async (input) => {
         try {
           if (state.accepted) return { accepted: true, note: "An answer was already accepted. This one was not used." };
