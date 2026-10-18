@@ -27,7 +27,7 @@ export const INSTRUCTIONS = [
   "",
   'Conflicts: where this repository\'s conventions, the engineer\'s preferences and this task\'s choices disagree, report each topic once under conflicts. Give the repository\'s convention with the lines that show it (null when it has none), and the ids of the preferences and choices on that topic, exactly as given. Report only conflicts you can cite or name. Nivra decides which side governs, in this order: this task\'s choices; a project\'s decisions to change its conventions (intent "override"); the repository\'s conventions; a project\'s defaults; personal defaults. Report the conflict; don\'t decide it.',
   "",
-  "Suggestions: when the question is about the repository's conventions, list under suggestions the conventions it clearly follows that the engineer might keep as preferences for this project, up to five, each citing the lines that show it. Nothing is saved unless the engineer keeps it.",
+  'Suggestions: whenever your findings include a convention this repository follows (how files are named or laid out, how tests are written, which tools it uses), also add it under suggestions, worded as a preference the engineer could keep for this project, such as "Name component files in PascalCase", citing the lines that show it. Give up to five. Nothing is saved unless the engineer keeps it.',
 ].join("\n");
 
 /** The request: the question, the task's choices, the map, and the run's preference snapshot (ids, scopes, intents and statements). */

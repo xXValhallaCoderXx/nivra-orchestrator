@@ -79,7 +79,7 @@ export const AnswerInput = z.object({
     )
     .max(ANSWER_LIMITS.suggestions)
     .default([])
-    .describe("Conventions worth keeping as preferences for this project, each with the lines that show it"),
+    .describe("Each convention your findings show this repository follows, worded as a preference the engineer could keep for this project, with the lines that show it"),
   gaps: z
     .array(z.string().min(1).max(ANSWER_LIMITS.gapChars))
     .max(ANSWER_LIMITS.gaps)
