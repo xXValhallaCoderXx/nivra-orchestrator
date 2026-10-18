@@ -64,9 +64,82 @@ const REASON: Record<ConflictOutcome, string> = {
  * says it changed, so an old result never shows a replaced or edited preference as current.
  */
 function preferenceText(preferences: PreferencesView | null, id: string, revision: number): { current: boolean; text: string } {
-  const record = preferences?.records.find((candidate) => candidate.id === id);
+  const records = preferences?.records ?? [];
+  const record = records.find((candidate) => candidate.id === id);
   if (record && record.status === "confirmed" && record.revision === revision) return { current: true, text: `“${record.statement}”` };
+  if (record?.status === "superseded") {
+    // Followed to the preference now in use; one replaced in turn, or deleted, isn't named.
+    let next = records.find((candidate) => candidate.id === record.supersededBy);
+    for (let hops = 0; next && next.status === "superseded" && hops < records.length; hops++) next = records.find((candidate) => candidate.id === next!.supersededBy);
+    return { current: false, text: `a preference replaced since this run${next ? ` by “${next.statement}”` : ""} (id ${id.slice(0, 8)}, revision ${revision})` };
+  }
   return { current: false, text: `a preference that changed or was deleted since this run (id ${id.slice(0, 8)}, revision ${revision})` };
+}
+
+/**
+ * One suggestion from the run (D23), not saved. Keep opens the usual field, filled with the suggestion and editable:
+ * what is saved, as this project's own default, is the wording the person confirms.
+ */
+function SuggestionItem({ suggestion, index, projectId, runId, onKept }: { suggestion: ExplainResult["suggestions"][number]; index: number; projectId: string | null; runId: string; onKept(): void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [kept, setKept] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function keep() {
+    if (text === null || !projectId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await window.nivra.keepSuggestion(projectId, runId, index, text);
+      setKept(true);
+      setText(null);
+      onKept();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Stack gap={4} data-testid="explain-suggestion">
+      <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+        {suggestion.statement}
+      </Text>
+      <Group gap={4}>
+        {suggestion.citations.map((citation, i) => (
+          <CitationChip key={i} citation={citation} />
+        ))}
+      </Group>
+      {kept ? (
+        <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-suggestion-kept">
+          Kept as this project's own default.
+        </Text>
+      ) : text === null ? (
+        <Group>
+          <Button size="xs" variant="default" onClick={() => setText(suggestion.statement)} disabled={!projectId} data-testid="explain-suggestion-keep">
+            Keep for this project
+          </Button>
+        </Group>
+      ) : (
+        <Group gap={4} wrap="nowrap" align="center">
+          <TextInput value={text} onChange={(event) => setText(event.currentTarget.value)} maxLength={500} style={{ flex: 1 }} aria-label="Preference to keep" data-testid="explain-suggestion-input" />
+          <Button size="xs" onClick={() => void keep()} loading={busy} disabled={!text.trim()} data-testid="explain-suggestion-confirm">
+            Confirm
+          </Button>
+          <Button size="xs" variant="subtle" onClick={() => setText(null)} disabled={busy}>
+            Cancel
+          </Button>
+        </Group>
+      )}
+      {error && (
+        <Text size="sm" c="var(--nivra-error)" data-testid="explain-suggestion-error">
+          {error}
+        </Text>
+      )}
+    </Stack>
+  );
 }
 
 /**
@@ -196,7 +269,19 @@ function ContextDetails({ result }: { result: ExplainResult }) {
   );
 }
 
-function Result({ result, summary, preferences }: { result: ExplainResult; summary: RunSummary; preferences: PreferencesView | null }) {
+function Result({
+  result,
+  summary,
+  preferences,
+  projectId,
+  onPreferencesChanged,
+}: {
+  result: ExplainResult;
+  summary: RunSummary;
+  preferences: PreferencesView | null;
+  projectId: string | null;
+  onPreferencesChanged(): void;
+}) {
   const headChanged = result.headAtEnd !== result.headAtStart;
   return (
     <Stack gap="sm" data-testid="explain-result">
@@ -277,17 +362,11 @@ function Result({ result, summary, preferences }: { result: ExplainResult; summa
           <Text size="sm" fw={600}>
             Suggested preferences (not saved)
           </Text>
+          <Text size="xs" c="var(--nivra-text-3)">
+            Conventions the model saw in this repository, each with the lines it was shown. Keeping one saves your wording as this project's own default.
+          </Text>
           {result.suggestions.map((suggestion, index) => (
-            <Stack key={index} gap={4} data-testid="explain-suggestion">
-              <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
-                {suggestion.statement}
-              </Text>
-              <Group gap={4}>
-                {suggestion.citations.map((citation, i) => (
-                  <CitationChip key={i} citation={citation} />
-                ))}
-              </Group>
-            </Stack>
+            <SuggestionItem key={index} suggestion={suggestion} index={index} projectId={projectId} runId={summary.id} onKept={onPreferencesChanged} />
           ))}
         </Stack>
       )}
@@ -339,6 +418,7 @@ export function Explain({
   run,
   onRun,
   onSharingChanged,
+  onPreferencesChanged,
 }: {
   project: ProjectView | null;
   online: boolean;
@@ -346,6 +426,8 @@ export function Explain({
   run: RunRef | null;
   onRun(projectId: string, ref: RunRef): void;
   onSharingChanged(): void;
+  /** A suggestion was kept, so the window reads the preferences again. */
+  onPreferencesChanged(): void;
 }) {
   const [question, setQuestion] = useState("");
   const [choices, setChoices] = useState<string[]>([]);
@@ -531,7 +613,7 @@ export function Explain({
           </Table.Tbody>
         </Table>
       )}
-      {outcome?.result && <Result result={outcome.result} summary={outcome.summary} preferences={preferences} />}
+      {outcome?.result && <Result result={outcome.result} summary={outcome.summary} preferences={preferences} projectId={projectId} onPreferencesChanged={onPreferencesChanged} />}
       <Modal opened={consent} onClose={() => setConsent(false)} title="Send this project's content to Token Factory?" data-testid="explain-consent">
         <Stack gap="sm">
           <Text size="sm">To explain {project?.label ?? "this repository"}, Nivra sends Nebius Token Factory:</Text>

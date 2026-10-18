@@ -322,6 +322,23 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     assert.deepEqual([afterRestart.digest, afterRestart.revision], [afterDelete.digest, afterDelete.revision]);
   });
 
+  it("sends only the replacement once a preference is replaced, and keeps the replaced one as history (D23)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    const { host, ids } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
+    const first = host.addPreference({ statement: "Use Vitest when adding tests", scope: "project", projectId: ids[0]! });
+    const replacement = host.supersedePreference(first.id, { statement: "Replace the Jest setup with Vitest", intent: "override" });
+    await host.open(ids[0]!);
+    await online(host, "local");
+    const got = await received(host, (await host.startHello(ids[0]!, 0)).id);
+    assert.deepEqual(got.records.map((r) => [r.id, r.intent, r.revision]), [[replacement.id, "override", 1]]);
+    assert.equal(got.digest, digestOf([replacement]));
+    assert.deepEqual(host.preferences().records.map((r) => [r.id, r.status, r.supersededBy, r.supersedes]), [
+      [first.id, "superseded", replacement.id, null],
+      [replacement.id, "confirmed", null, first.id],
+    ]);
+  });
+
   it("adds each picked folder for the engine that owns it, and refuses what can't run, saying why", async () => {
     const { host } = makeHost();
     const linux = await host.addPicked("\\\\wsl.localhost\\test\\home\\odin\\repo ü%#");
@@ -595,6 +612,49 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
 
     await host.shutdown();
     assert.deepEqual([filesHolding(root, first), filesHolding(root, edited)], [[], []], "no statement outlives its deletion, in any store or log");
+  });
+
+  it("keeps a suggestion from one of the project's runs as its own default, with the result's evidence, once, and never for another project (D23)", async () => {
+    const statement = `Keep a README at the top of the repository ${randomUUID()}`;
+    const stub = await stubWith(readThenAnswer(() => ({ ...ANSWER, suggestions: [{ statement: "Keep a README", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }] })));
+    const root = reposRoot();
+    const { host, ids, keys } = makeHost({
+      tokenFactoryUrl: stub.url,
+      projects: [{ targetId: "local", path: makeRepo(join(root, "a"), { "README.md": "# A\n" }) }, { targetId: "local", path: makeRepo(join(root, "b"), { "README.md": "# B\n" }) }],
+    });
+    const [projectA, projectB] = ids as [string, string];
+    keys.current = { NEBIUS_API_KEY: KEY };
+    for (const id of ids) await host.setSharing(id, true);
+    await host.open(projectA);
+    await online(host, "local");
+    const explainOn = async (projectId: string) => {
+      const before = stub.chats().length;
+      const run = await host.startExplain(projectId, "", []);
+      assert.equal((await ended(host, run.id)).status, "succeeded");
+      return { run, sent: stub.chats().slice(before).map((chat) => chat.raw).join("\n") };
+    };
+    const { run } = await explainOn(projectA);
+
+    await assert.rejects(host.keepSuggestion(projectB, run.id, 0, statement), /no record of for this project in this session/);
+    await assert.rejects(host.keepSuggestion(projectA, run.id, 3, statement), /isn't in the run's result/);
+    // A double click: two keeps at once save one record, in the wording the person confirmed.
+    const [first, second] = await Promise.all([host.keepSuggestion(projectA, run.id, 0, `  ${statement} `), host.keepSuggestion(projectA, run.id, 0, statement)]);
+    assert.equal(first.id, second.id);
+    const kept = host.preferences().records.filter((r) => r.origin === "suggested");
+    assert.deepEqual(
+      kept.map((r) => [r.statement, r.scope, r.projectId, r.intent, r.status, r.evidence?.runId, r.evidence?.suggestion, r.evidence?.citations]),
+      [[statement, "project", projectA, "default", "confirmed", run.id, 0, [{ path: "README.md", startLine: 1, endLine: 1 }]]],
+    );
+
+    // A's next run gets it; B's never does.
+    assert.equal((await explainOn(projectA)).sent.includes(statement), true);
+    assert.equal((await explainOn(projectB)).sent.includes(statement), false);
+
+    // Nothing can be kept for a project being removed, or gone.
+    const removing = host.removeProject(projectA);
+    await assert.rejects(host.keepSuggestion(projectA, run.id, 0, statement), /being removed, so nothing can be kept/);
+    await removing;
+    await assert.rejects(host.keepSuggestion(projectA, run.id, 0, statement), /no longer in the list/);
   });
 
   it("sends a task's choices with that run only, and leaves the host's store byte-identical (D23)", async () => {

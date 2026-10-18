@@ -23,6 +23,7 @@ const EXPECTED_API = [
   "getAppInfo",
   "getSettings",
   "getWsl",
+  "keepSuggestion",
   "listEngines",
   "listPreferences",
   "listProjects",
@@ -36,6 +37,7 @@ const EXPECTED_API = [
   "setSharing",
   "startExplain",
   "startHello",
+  "supersedePreference",
 ];
 
 let root: string;

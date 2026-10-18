@@ -23,6 +23,8 @@ export const IPC = {
   addPreference: "preferences:add",
   editPreference: "preferences:edit",
   deletePreference: "preferences:delete",
+  supersedePreference: "preferences:supersede",
+  keepSuggestion: "preferences:keep",
   startHello: "runs:hello",
   startExplain: "runs:explain",
   runResult: "runs:result",
@@ -96,13 +98,20 @@ export interface PreferenceView {
   projectLabel: string | null;
   /** A default, which the repository's conventions outrank, or a project's decision to change them (D23). */
   intent: PreferenceIntent;
-  /** Only confirmed preferences reach a run. */
-  status: "suggested" | "confirmed";
-  origin: "entered";
+  /** Only confirmed preferences reach a run; a replaced one is kept as history (D23). */
+  status: "suggested" | "confirmed" | "superseded";
+  /** Typed in by the person, kept from a run's suggestion, or imported. */
+  origin: "entered" | "suggested" | "imported";
   /** 1 when created, raised by every edit. */
   revision: number;
   updatedAt: string;
   confirmedAt: string | null;
+  /** The preference this one replaced; for a replaced one, what replaced it and when. */
+  supersedes: string | null;
+  supersededBy: string | null;
+  supersededAt: string | null;
+  /** For one kept from a suggestion: the run, the suggestion's place, the HEAD it started at, when it ran, and the lines shown to the model. */
+  evidence: { runId: string; suggestion: number; headAtStart: string | null; ranAt: string; citations: Array<{ path: string; startLine: number; endLine: number }> } | null;
 }
 
 export interface PreferencesView {
@@ -149,6 +158,10 @@ export interface NivraApi {
   /** Fixes a preference's wording, or whether a project's own preference is a default or a decision. */
   editPreference(id: string, statement: string, intent: PreferenceIntent): Promise<PreferenceView>;
   deletePreference(id: string): Promise<void>;
+  /** Replaces a preference with a new decision; the old one is kept as history, and no run gets it again (D23). */
+  supersedePreference(id: string, statement: string, intent: PreferenceIntent): Promise<PreferenceView>;
+  /** Keeps a suggestion from one of the project's explanations this session as its own default, in the person's wording (D23). */
+  keepSuggestion(projectId: string, runId: string, index: number, statement: string): Promise<PreferenceView>;
   /** Runs hello on the project's engine, with a snapshot of the preferences that apply to the project (D21). */
   startHello(projectId: string, holdMs: number): Promise<RunSummary>;
   /** Allows or stops sending the project's content to Token Factory (D20); stopping cancels its explain runs. */

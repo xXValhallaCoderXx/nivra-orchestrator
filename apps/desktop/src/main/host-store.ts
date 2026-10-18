@@ -34,9 +34,22 @@ export const ProjectRecord = z.strictObject({
 export type ProjectRecord = z.infer<typeof ProjectRecord>;
 
 /**
- * One preference, in the only canonical copy (D21). Only confirmed ones reach a run; suggestions drawn from a
- * repository, which wait for the person to confirm them, arrive with NIV-10. Every field added since the first version
- * has a default, so a file an older version wrote still reads (D23).
+ * Where a kept suggestion came from (D23): the run and the suggestion's place in its result, the HEAD that run started
+ * at, when it finished, and only the lines the model was shown. It stays in the host and never reaches a run.
+ */
+export const PreferenceEvidence = z.strictObject({
+  runId: z.uuid(),
+  suggestion: z.number().int().nonnegative(),
+  headAtStart: z.string().nullable(),
+  ranAt: z.iso.datetime(),
+  citations: z.array(z.strictObject({ path: z.string(), startLine: z.number().int().positive(), endLine: z.number().int().positive() })).max(8),
+});
+export type PreferenceEvidence = z.infer<typeof PreferenceEvidence>;
+
+/**
+ * One preference, in the only canonical copy (D21). Only confirmed ones reach a run. One the person replaced stays as
+ * history, `superseded`, and never reaches a run again (D23). Every field added since the first version has a default,
+ * so a file an older version wrote still reads.
  */
 export const PreferenceRecord = z
   .strictObject({
@@ -47,15 +60,21 @@ export const PreferenceRecord = z
     projectId: z.uuid().nullable(),
     /** A default, or a project's decision to change its existing conventions (D23). */
     intent: PreferenceIntent.default("default"),
-    status: z.enum(["suggested", "confirmed"]),
-    /** Where it came from: typed in by the person. */
-    origin: z.enum(["entered"]),
+    status: z.enum(["suggested", "confirmed", "superseded"]),
+    /** Where it came from: typed in by the person, kept from a run's suggestion, or imported (D23). */
+    origin: z.enum(["entered", "suggested", "imported"]),
     /** 1 when created, raised by every edit. */
     revision: z.number().int().positive(),
     createdAt: z.iso.datetime(),
     updatedAt: z.iso.datetime(),
     /** When the person confirmed this wording; null while it is a suggestion. */
     confirmedAt: z.iso.datetime().nullable(),
+    /** The preference this one replaced, and for a replaced one, what replaced it and when (D23). */
+    supersedes: z.uuid().nullable().default(null),
+    supersededBy: z.uuid().nullable().default(null),
+    supersededAt: z.iso.datetime().nullable().default(null),
+    /** For one kept from a suggestion, where it came from. */
+    evidence: PreferenceEvidence.nullable().default(null),
   })
   .refine((record) => (record.scope === "project") === (record.projectId !== null), "A project preference names its project, and a personal one names none.")
   .refine((record) => record.intent === "default" || record.scope === "project", "Only a project's own preference can override its conventions.");

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { MAX_CHOICE_CHARS, MAX_CHOICES, MAX_PREFERENCES, type PreferenceIntent, type PreferenceScope, type PreferenceSnapshot } from "@nivra/domain";
-import type { HostData, PreferenceRecord } from "./host-store.ts";
+import type { HostData, PreferenceEvidence, PreferenceRecord } from "./host-store.ts";
 
 /**
  * The engineer's preferences, as pure changes to the host's records (D21). The host store is the only canonical copy:
@@ -57,7 +57,7 @@ export function cleanChoices(choices: readonly string[]): string[] {
 export function addPreference(data: HostData, input: NewPreference, now: Date): { data: HostData; record: PreferenceRecord } {
   const statement = cleanStatement(input.statement);
   if (data.preferences.length >= MAX_PREFERENCES) {
-    throw new Error(`Nivra keeps at most ${MAX_PREFERENCES} preferences. Delete one you no longer need, then add this one.`);
+    throw new Error(`Nivra keeps at most ${MAX_PREFERENCES} preferences, replaced ones included. Delete one you no longer need, then add this one.`);
   }
   if (input.scope === "project" && !data.projects.some((p) => p.id === input.projectId)) throw new Error("That project is no longer in the list.");
   const intent = checkIntent(input.scope, input.intent ?? "default");
@@ -74,8 +74,91 @@ export function addPreference(data: HostData, input: NewPreference, now: Date): 
     createdAt: at,
     updatedAt: at,
     confirmedAt: at,
+    supersedes: null,
+    supersededBy: null,
+    supersededAt: null,
+    evidence: null,
   };
   return { data: { ...data, preferences: [...data.preferences, record], preferencesRevision: data.preferencesRevision + 1 }, record };
+}
+
+/**
+ * Replaces a preference with a new decision (D23): a new record, in the person's wording and intent, with the same scope
+ * and project, naming what it replaced. The old one stays as history, `superseded`, and no run gets it again. Only a
+ * preference in use can be replaced; the store's revision rises once.
+ */
+export function supersedePreference(data: HostData, id: string, change: { statement: string; intent: PreferenceIntent }, now: Date): { data: HostData; record: PreferenceRecord } {
+  const existing = data.preferences.find((p) => p.id === id);
+  if (!existing) throw new Error("That preference no longer exists.");
+  if (existing.status !== "confirmed") throw new Error("Only a preference in use can be replaced, and this one isn't. Replace the one in use instead.");
+  const statement = cleanStatement(change.statement);
+  const intent = checkIntent(existing.scope, change.intent);
+  if (existing.scope === "project" && !data.projects.some((p) => p.id === existing.projectId)) throw new Error("That project is no longer in the list.");
+  if (data.preferences.length >= MAX_PREFERENCES) {
+    throw new Error(`Nivra keeps at most ${MAX_PREFERENCES} preferences, replaced ones included. Delete one you no longer need, such as an old replaced one, then replace this one.`);
+  }
+  if (statement === existing.statement && intent === existing.intent) {
+    throw new Error("The replacement says the same as the preference it replaces. Change the wording or what it asks for, or keep the preference as it is.");
+  }
+  const at = now.toISOString();
+  const record: PreferenceRecord = {
+    id: randomUUID(),
+    statement,
+    scope: existing.scope,
+    projectId: existing.projectId,
+    intent,
+    status: "confirmed",
+    origin: "entered",
+    revision: 1,
+    createdAt: at,
+    updatedAt: at,
+    confirmedAt: at,
+    supersedes: existing.id,
+    supersededBy: null,
+    supersededAt: null,
+    evidence: null,
+  };
+  const replaced: PreferenceRecord = { ...existing, status: "superseded", supersededBy: record.id, supersededAt: at };
+  return { data: { ...data, preferences: [...data.preferences.map((p) => (p.id === id ? replaced : p)), record], preferencesRevision: data.preferencesRevision + 1 }, record };
+}
+
+/** A run's suggestion as the person chose to keep it: their wording, the project, and where it came from. */
+export interface KeptSuggestion {
+  projectId: string;
+  statement: string;
+  evidence: PreferenceEvidence;
+}
+
+/**
+ * Saves the wording the person confirmed for a run's suggestion as that project's own default (D23), with where it came
+ * from: never a decision, and never personal (promotion is deferred). A suggestion already kept is returned as it is,
+ * so a second click saves nothing.
+ */
+export function keepSuggestion(data: HostData, kept: KeptSuggestion, now: Date): { data: HostData; record: PreferenceRecord; created: boolean } {
+  const existing = data.preferences.find((p) => p.evidence?.runId === kept.evidence.runId && p.evidence.suggestion === kept.evidence.suggestion);
+  if (existing) return { data, record: existing, created: false };
+  const statement = cleanStatement(kept.statement);
+  if (!data.projects.some((p) => p.id === kept.projectId)) throw new Error("That project is no longer in the list.");
+  if (data.preferences.length >= MAX_PREFERENCES) throw new Error(`Nivra keeps at most ${MAX_PREFERENCES} preferences, replaced ones included. Delete one you no longer need, then keep this one.`);
+  const at = now.toISOString();
+  const record: PreferenceRecord = {
+    id: randomUUID(),
+    statement,
+    scope: "project",
+    projectId: kept.projectId,
+    intent: "default",
+    status: "confirmed",
+    origin: "suggested",
+    revision: 1,
+    createdAt: at,
+    updatedAt: at,
+    confirmedAt: at,
+    supersedes: null,
+    supersededBy: null,
+    supersededAt: null,
+    evidence: kept.evidence,
+  };
+  return { data: { ...data, preferences: [...data.preferences, record], preferencesRevision: data.preferencesRevision + 1 }, record, created: true };
 }
 
 /**

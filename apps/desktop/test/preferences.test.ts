@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { MAX_PREFERENCES } from "@nivra/domain";
 import { HostStore, NO_SHARING, type HostData } from "../src/main/host-store.ts";
-import { addPreference, cleanChoices, deletePreference, editPreference, removeProjectPreferences, snapshotFor } from "../src/main/preferences.ts";
+import { addPreference, cleanChoices, deletePreference, editPreference, keepSuggestion, removeProjectPreferences, snapshotFor, supersedePreference } from "../src/main/preferences.ts";
 
 const dirs: string[] = [];
 after(() => {
@@ -97,6 +97,47 @@ describe("preferences (D21)", () => {
     const suggested = { ...data.preferences[0]!, id: "44444444-4444-4444-8444-444444444444", status: "suggested" as const, confirmedAt: null };
     const withSuggestion = { ...data, preferences: [...data.preferences, suggested] };
     assert.throws(() => editPreference(withSuggestion, suggested.id, { statement: "Prefer default exports" }, later), /Only a preference in use can be edited/);
+  });
+
+  it("replaces a preference with a new decision, keeping the old one as history that no run gets (D23)", () => {
+    const { data, ids } = withPreferences(["Use Vitest when adding tests", A], ["Prefer named exports", null]);
+    const replaced = supersedePreference(data, ids[0]!, { statement: "Replace this project's Jest setup with Vitest", intent: "override" }, later);
+    const old = replaced.data.preferences.find((p) => p.id === ids[0]);
+    assert.deepEqual(
+      [replaced.record.statement, replaced.record.scope, replaced.record.projectId, replaced.record.intent, replaced.record.revision, replaced.record.supersedes, replaced.record.origin],
+      ["Replace this project's Jest setup with Vitest", "project", A, "override", 1, ids[0], "entered"],
+    );
+    assert.deepEqual([old?.status, old?.supersededBy, old?.supersededAt, old?.statement, old?.revision], ["superseded", replaced.record.id, later.toISOString(), "Use Vitest when adding tests", 1]);
+    assert.equal(replaced.data.preferencesRevision, data.preferencesRevision + 1, "the store's revision rises once");
+    assert.deepEqual(snapshotFor(replaced.data, A).records.map((r) => r.statement), ["Prefer named exports", "Replace this project's Jest setup with Vitest"]);
+
+    // History can't be edited or replaced again; deleting the replacement leaves the history.
+    assert.throws(() => editPreference(replaced.data, ids[0]!, { statement: "Anything" }, later), /Only a preference in use can be edited/);
+    assert.throws(() => supersedePreference(replaced.data, ids[0]!, { statement: "Anything", intent: "default" }, later), /Only a preference in use can be replaced/);
+    const deleted = deletePreference(replaced.data, replaced.record.id);
+    assert.deepEqual([deleted.preferences.find((p) => p.id === ids[0])?.status, snapshotFor(deleted, A).records.map((r) => r.statement)], ["superseded", ["Prefer named exports"]]);
+  });
+
+  it("refuses a replacement that says the same, a personal decision, and one past the limit, saying what to do", () => {
+    const { data, ids } = withPreferences(["Prefer named exports", null]);
+    assert.throws(() => supersedePreference(data, ids[0]!, { statement: " Prefer named exports ", intent: "default" }, later), /says the same as the preference it replaces/);
+    assert.throws(() => supersedePreference(data, ids[0]!, { statement: "Prefer default exports", intent: "override" }, later), /Only a project's own preference can be a decision/);
+    let full = data;
+    for (let i = 1; i < MAX_PREFERENCES; i++) full = addPreference(full, { statement: `Preference ${i}`, scope: "personal", projectId: null }, now).data;
+    assert.throws(() => supersedePreference(full, ids[0]!, { statement: "Prefer default exports", intent: "default" }, later), /at most 50 preferences, replaced ones included/);
+  });
+
+  it("keeps a suggestion as the project's own default, in the person's wording, once (D23)", () => {
+    const evidence = { runId: "55555555-5555-4555-8555-555555555555", suggestion: 1, headAtStart: "abc123", ranAt: now.toISOString(), citations: [{ path: "package.json", startLine: 4, endLine: 4 }] };
+    const kept = keepSuggestion(empty(), { projectId: A, statement: "  Run tests with Jest ", evidence }, later);
+    assert.deepEqual(
+      [kept.created, kept.record.statement, kept.record.scope, kept.record.projectId, kept.record.intent, kept.record.origin, kept.record.status, kept.record.evidence, kept.data.preferencesRevision],
+      [true, "Run tests with Jest", "project", A, "default", "suggested", "confirmed", evidence, 1],
+    );
+    const again = keepSuggestion(kept.data, { projectId: A, statement: "Different words", evidence }, later);
+    assert.deepEqual([again.created, again.data, again.record.id], [false, kept.data, kept.record.id], "the same run's same suggestion saves once");
+    assert.throws(() => keepSuggestion(empty(), { projectId: "33333333-3333-4333-8333-333333333333", statement: "Run tests with Jest", evidence }, later), /no longer in the list/);
+    assert.deepEqual(snapshotFor(kept.data, B).records, [], "another project never gets it");
   });
 
   it("checks a task's choices before they are sent, saying what to fix (D23)", () => {

@@ -1,10 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type { DoctorReport, ExplainResult, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
+import type { DoctorReport, ExplainResult, PreferenceIntent, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
 import type { AddProjectResult, EngineView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
-import { addPreference, cleanChoices, deletePreference, editPreference, removeProjectPreferences, snapshotFor, type NewPreference, type PreferenceChange } from "./preferences.ts";
+import {
+  addPreference,
+  cleanChoices,
+  deletePreference,
+  editPreference,
+  keepSuggestion,
+  removeProjectPreferences,
+  snapshotFor,
+  supersedePreference,
+  type NewPreference,
+  type PreferenceChange,
+} from "./preferences.ts";
 import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
 import { labelFor, type ExecutionTarget } from "./targets/types.ts";
@@ -294,6 +305,51 @@ export class Host {
     this.#options.store.update((data) => deletePreference(data, id));
   }
 
+  /** Replaces a preference with a new decision; the old one is kept as history, and no run gets it again (D23). */
+  supersedePreference(id: string, change: { statement: string; intent: PreferenceIntent }): PreferenceView {
+    let saved: PreferenceRecord | undefined;
+    this.#options.store.update((data) => {
+      const result = supersedePreference(data, id, change, new Date());
+      saved = result.record;
+      return result.data;
+    });
+    return this.#preferenceView(saved!);
+  }
+
+  /**
+   * Keeps a run's suggestion as the project's own default, in the wording the person confirmed (D23). The run must be one
+   * of this project's explanations this session, never found by its path: a project added again is another project.
+   * The result comes from the engine that ran it, and everything is checked again after that wait, so a project
+   * removed meanwhile gets nothing. The evidence is the result's, with only the lines the model was shown. The save and
+   * its check for a suggestion already kept happen in one store update, so a double click saves once.
+   */
+  async keepSuggestion(projectId: string, runId: string, index: number, statement: string): Promise<PreferenceView> {
+    this.#project(projectId);
+    if (this.#removing.has(projectId)) throw new Error("This project is being removed, so nothing can be kept for it.");
+    const ofProject = () => this.#explainRuns.get(projectId)?.has(runId) ?? false;
+    if (!ofProject()) throw new Error("That suggestion comes from a run Nivra has no record of for this project in this session. Explain the project again, then keep it from the new result.");
+    const { result } = await this.runResult(runId);
+    if (!this.#options.store.data.projects.some((p) => p.id === projectId) || this.#removing.has(projectId) || !ofProject()) {
+      throw new Error("The project was removed while the suggestion was being kept, so nothing was saved.");
+    }
+    const suggestion = result?.suggestions[index];
+    if (!result || !suggestion) throw new Error("That suggestion isn't in the run's result. Explain the project again, then keep it from the new result.");
+    const evidence = {
+      runId,
+      suggestion: index,
+      headAtStart: result.headAtStart,
+      ranAt: result.finishedAt,
+      citations: suggestion.citations.filter((citation) => citation.checked).map(({ path, startLine, endLine }) => ({ path, startLine, endLine })),
+    };
+    let saved: PreferenceRecord | undefined;
+    this.#options.store.update((data) => {
+      const outcome = keepSuggestion(data, { projectId, statement, evidence }, new Date());
+      saved = outcome.record;
+      return outcome.data;
+    });
+    return this.#preferenceView(saved!);
+  }
+
   /** Hands every engine the keys as they are now (D8), including one that was still starting when they changed. */
   async secretsChanged(): Promise<void> {
     const secrets = await this.#options.credentials();
@@ -502,6 +558,10 @@ export class Host {
       revision: record.revision,
       updatedAt: record.updatedAt,
       confirmedAt: record.confirmedAt,
+      supersedes: record.supersedes,
+      supersededBy: record.supersededBy,
+      supersededAt: record.supersededAt,
+      evidence: record.evidence,
     };
   }
 

@@ -124,6 +124,10 @@ function start(): void {
   );
   handle(IPC.editPreference, z.tuple([z.uuid(), z.string().max(2_000), PreferenceIntent]), (_event, id, statement, intent) => host.editPreference(id, { statement, intent }));
   handle(IPC.deletePreference, z.tuple([z.uuid()]), (_event, id) => host.deletePreference(id));
+  handle(IPC.supersedePreference, z.tuple([z.uuid(), z.string().max(2_000), PreferenceIntent]), (_event, id, statement, intent) => host.supersedePreference(id, { statement, intent }));
+  handle(IPC.keepSuggestion, z.tuple([z.uuid(), RunId, z.number().int().nonnegative().max(100), z.string().max(2_000)]), (_event, projectId, runId, index, statement) =>
+    host.keepSuggestion(projectId, runId, index, statement),
+  );
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));
   handle(IPC.setSharing, z.tuple([z.uuid(), z.boolean()]), (_event, id, modelContext) => host.setSharing(id, modelContext));
   // The choices are required, so a caller that drops them fails here rather than explaining without them. The host

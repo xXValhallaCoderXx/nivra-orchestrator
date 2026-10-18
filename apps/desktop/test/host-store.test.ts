@@ -28,7 +28,7 @@ describe("host records", () => {
     assert.equal(readFileSync(path, "utf8").includes("selectedTargetId"), false);
   });
 
-  it("reads preferences written before intent existed as defaults, projects and all (D23)", () => {
+  it("reads preferences written before intent and supersession existed, projects and all (D23)", () => {
     const dir = mkdtempSync(join(tmpdir(), "nivra store "));
     dirs.push(dir);
     const path = join(dir, "nivra.json");
@@ -37,6 +37,8 @@ describe("host records", () => {
     writeFileSync(path, JSON.stringify({ version: 1, projects: [record(A, "local", "/home/odin/repo")], preferences: [older], preferencesRevision: 4 }));
     const store = new HostStore(path);
     assert.deepEqual([store.data.projects.map((p) => p.id), store.data.preferences.map((p) => [p.id, p.intent, p.revision]), store.data.preferencesRevision], [[A], [[B, "default", 2]], 4]);
+    const [read] = store.data.preferences;
+    assert.deepEqual([read?.supersedes, read?.supersededBy, read?.supersededAt, read?.evidence], [null, null, null, null], "fields added since read as none");
     assert.deepEqual(readdirSync(dir), ["nivra.json"], "nothing was set aside");
   });
 

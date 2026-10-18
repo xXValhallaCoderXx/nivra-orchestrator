@@ -169,6 +169,24 @@ test("a deleted preference is gone from the next run", async () => {
   await expect(page.getByTestId("hello-timeline")).toContainText("No confirmed preferences from the app (revision 4)");
 });
 
+test("a replaced preference stays as history, and the next run gets only its replacement (D23)", async () => {
+  const [before, after] = ["Use tabs for indentation", "Use two spaces for indentation"];
+  await confirmPreference(before, "Every project");
+  const id = await page.getByTestId("preference-row").filter({ hasText: before }).getAttribute("data-preference-id");
+  const row = page.locator(`[data-testid="preference-row"][data-preference-id="${id}"]`);
+  await row.getByTestId("preference-replace").click();
+  await row.getByTestId("preference-edit-input").fill(after);
+  await row.getByTestId("preference-replace-save").click();
+  await expect(page.getByTestId("preference-list")).toContainText(after);
+  await expect(page.getByTestId("preference-list")).not.toContainText(before);
+  await expect(page.getByTestId("preference-replaced-row")).toContainText(`“${before}” (Every project), replaced`);
+  await expect(page.getByTestId("preference-replaced-row")).toContainText(`by “${after}”. No run gets it.`);
+
+  const expected = await expectedFor("beta");
+  const received = await runHello();
+  expect([received.count, received.records.map((r) => r.id), received.digest]).toEqual([1, expected.ids, expected.digest]);
+});
+
 test("only the app's own store keeps preference text: nothing in the engine's databases or the logs", async () => {
   await app.close();
   const holding = (dir: string) =>

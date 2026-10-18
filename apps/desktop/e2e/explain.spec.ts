@@ -145,6 +145,32 @@ test("a conflict shows what the code does now, what governs this task and why, a
   await row.getByTestId("preference-save").click();
   await expect(shown.getByTestId("explain-conflict-others")).toContainText("changed or was deleted since this run");
   await expect(shown).not.toContainText(`${statement}, always`);
+
+  // Replaced, it is named as replaced, with what replaced it, and never shown as current (D23).
+  await row.getByTestId("preference-replace").click();
+  await row.getByTestId("preference-edit-input").fill("Name component files in camelCase");
+  await row.getByTestId("preference-replace-save").click();
+  await expect(shown.getByTestId("explain-conflict-others")).toContainText("replaced since this run by “Name component files in camelCase”");
+});
+
+test("a suggestion can be kept, in the person's own wording, as the project's own default (D23)", async () => {
+  test.skip(packaged, "a packaged app ignores the test endpoint switch");
+  const suggestion = { statement: "Name component files in kebab-case", citations: [{ path: "README.md", startLine: 2, endLine: 2 }] };
+  more = (request) => (request.raw.includes('"role":"tool"') ? toolCall("submit_answer", { ...ANSWER, suggestions: [suggestion] }, { id: "k1" }) : toolCall("read_file", { path: "README.md" }, { id: "k0" }));
+  while (await page.getByTestId("explain-choice-remove").count()) await page.getByTestId("explain-choice-remove").first().click();
+  await page.getByTestId("explain-start").click();
+  const item = page.getByTestId("explain-suggestion");
+  await expect(item).toContainText(suggestion.statement);
+  await expect(item.getByTestId("explain-citation")).toHaveAttribute("data-checked", "yes");
+
+  const kept = "Name component files in kebab-case, like start-timer.tsx";
+  await item.getByTestId("explain-suggestion-keep").click();
+  await item.getByTestId("explain-suggestion-input").fill(kept);
+  await item.getByTestId("explain-suggestion-confirm").click();
+  await expect(item.getByTestId("explain-suggestion-kept")).toHaveText("Kept as this project's own default.");
+  const row = page.getByTestId("preference-row").filter({ hasText: kept });
+  await expect(row.getByTestId("preference-intent")).toHaveText("Default");
+  await expect(row.getByTestId("preference-revision")).toContainText("kept from a suggestion");
 });
 
 test("a packaged app ignores the test endpoint switch, and explaining without a key fails before any request", async () => {
