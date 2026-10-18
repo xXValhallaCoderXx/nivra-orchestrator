@@ -149,6 +149,10 @@ describe("preferences (D21)", () => {
     );
     const again = keepSuggestion(kept.data, { projectId: A, statement: "Different words", evidence }, later);
     assert.deepEqual([again.created, again.data, again.record.id], [false, kept.data, kept.record.id], "the same run's same suggestion saves once");
+    // Replaced since, it isn't in use: keeping it again is a new choice, and saves it.
+    const replaced = supersedePreference(kept.data, kept.record.id, { statement: "Run tests with Vitest", intent: "default" }, later).data;
+    const rekept = keepSuggestion(replaced, { projectId: A, statement: "Run tests with Jest", evidence }, later);
+    assert.deepEqual([rekept.created, rekept.record.status, rekept.data.preferences.length], [true, "confirmed", 3]);
     assert.throws(() => keepSuggestion(empty(), { projectId: "33333333-3333-4333-8333-333333333333", statement: "Run tests with Jest", evidence }, later), /no longer in the list/);
     assert.deepEqual(snapshotFor(kept.data, B).records, [], "another project never gets it");
   });

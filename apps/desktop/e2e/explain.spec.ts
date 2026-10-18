@@ -167,7 +167,7 @@ test("a suggestion can be kept, in the person's own wording, as the project's ow
   await item.getByTestId("explain-suggestion-keep").click();
   await item.getByTestId("explain-suggestion-input").fill(kept);
   await item.getByTestId("explain-suggestion-confirm").click();
-  await expect(item.getByTestId("explain-suggestion-kept")).toHaveText("Kept as this project's own default.");
+  await expect(item.getByTestId("explain-suggestion-kept")).toHaveText(`Kept as this project's own default: “${kept}”.`);
   const row = page.getByTestId("preference-row").filter({ hasText: kept });
   await expect(row.getByTestId("preference-intent")).toHaveText("Default");
   await expect(row.getByTestId("preference-revision")).toContainText("kept from a suggestion");

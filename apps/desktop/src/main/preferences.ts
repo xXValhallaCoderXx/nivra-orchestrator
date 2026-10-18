@@ -132,11 +132,12 @@ export interface KeptSuggestion {
 
 /**
  * Saves the wording the person confirmed for a run's suggestion as that project's own default (D23), with where it came
- * from: never a decision, and never personal (promotion is deferred). A suggestion already kept is returned as it is,
- * so a second click saves nothing.
+ * from: never a decision, and never personal (promotion is deferred). A suggestion already kept, and still in use, is
+ * returned as it is, so a second click saves nothing.
  */
 export function keepSuggestion(data: HostData, kept: KeptSuggestion, now: Date): { data: HostData; record: PreferenceRecord; created: boolean } {
-  const existing = data.preferences.find((p) => p.evidence?.runId === kept.evidence.runId && p.evidence.suggestion === kept.evidence.suggestion);
+  // Kept once and still in use: saved once. Kept, then replaced or deleted: keeping it again is a new choice.
+  const existing = data.preferences.find((p) => p.status === "confirmed" && p.evidence?.runId === kept.evidence.runId && p.evidence.suggestion === kept.evidence.suggestion);
   if (existing) return { data, record: existing, created: false };
   const statement = cleanStatement(kept.statement);
   if (!data.projects.some((p) => p.id === kept.projectId)) throw new Error("That project is no longer in the list.");

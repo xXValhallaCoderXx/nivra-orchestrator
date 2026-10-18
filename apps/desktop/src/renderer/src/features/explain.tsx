@@ -58,13 +58,16 @@ const REASON: Record<ConflictOutcome, string> = {
   "personal-default": "Nothing ranked higher was established.",
   unresolved: "Sources of the same rank disagree, so Nivra picked neither. Add a choice for this task to settle it.",
 };
+/** Choices are the top rank, so a tie between them is settled only by changing one of them. */
+const CHOICES_TIED = "Choices for this task disagree, so Nivra picked neither. Remove or reword one of them, then explain again.";
 
 /**
  * A preference's wording, but only while it is still the confirmed version the run was given. Otherwise the window
  * says it changed, so an old result never shows a replaced or edited preference as current.
  */
 function preferenceText(preferences: PreferencesView | null, id: string, revision: number): { current: boolean; text: string } {
-  const records = preferences?.records ?? [];
+  if (!preferences) return { current: false, text: `a preference (id ${id.slice(0, 8)}, revision ${revision}; the list hasn't loaded yet)` };
+  const records = preferences.records;
   const record = records.find((candidate) => candidate.id === id);
   if (record && record.status === "confirmed" && record.revision === revision) return { current: true, text: `“${record.statement}”` };
   if (record?.status === "superseded") {
@@ -78,21 +81,35 @@ function preferenceText(preferences: PreferencesView | null, id: string, revisio
 
 /**
  * One suggestion from the run (D23), not saved. Keep opens the usual field, filled with the suggestion and editable:
- * what is saved, as this project's own default, is the wording the person confirms.
+ * what is saved, as this project's own default, is the wording the person confirms. It shows as kept only while the
+ * preference it became is in use, read from the store: one replaced or deleted since can be kept again.
  */
-function SuggestionItem({ suggestion, index, projectId, runId, onKept }: { suggestion: ExplainResult["suggestions"][number]; index: number; projectId: string | null; runId: string; onKept(): void }) {
+function SuggestionItem({
+  suggestion,
+  index,
+  projectId,
+  runId,
+  preferences,
+  onKept,
+}: {
+  suggestion: ExplainResult["suggestions"][number];
+  index: number;
+  projectId: string | null;
+  runId: string;
+  preferences: PreferencesView | null;
+  onKept(): void;
+}) {
   const [text, setText] = useState<string | null>(null);
-  const [kept, setKept] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const kept = preferences?.records.find((record) => record.status === "confirmed" && record.evidence?.runId === runId && record.evidence.suggestion === index) ?? null;
 
   async function keep() {
-    if (text === null || !projectId) return;
+    if (text === null || !projectId || busy) return;
     setBusy(true);
     setError(null);
     try {
       await window.nivra.keepSuggestion(projectId, runId, index, text);
-      setKept(true);
       setText(null);
       onKept();
     } catch (reason) {
@@ -114,7 +131,7 @@ function SuggestionItem({ suggestion, index, projectId, runId, onKept }: { sugge
       </Group>
       {kept ? (
         <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-suggestion-kept">
-          Kept as this project's own default.
+          Kept as this project's own default: “{kept.statement}”.
         </Text>
       ) : text === null ? (
         <Group>
@@ -187,7 +204,7 @@ function ConflictItem({ conflict, choices, preferences }: { conflict: ExplainCon
       <Text size="sm" data-testid="explain-conflict-governs">
         {governs
           ? `Governs this task: ${SOURCE_LABEL[governs.source]}${intended ? "" : governs.source === "repository" ? "" : ` ${wording(governs)}`}. ${REASON[conflict.reason]}`
-          : `Unresolved. ${REASON.unresolved}`}
+          : `Unresolved. ${conflict.choices.length > 0 ? CHOICES_TIED : REASON.unresolved}`}
       </Text>
       {others.length > 0 && (
         <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-conflict-others">
@@ -256,7 +273,7 @@ function ContextDetails({ result }: { result: ExplainResult }) {
         </Text>
         <Text size="xs" data-testid="explain-context-budget">
           {budget
-            ? `Request limit: ${plural(budget.tokens, "token")}; the last request carried about ${plural(budget.estimatedTokens, "token")} (Nivra's estimate). Results given less room than usual because of the budget: ${budget.resultsLimited}; results too large to send: ${budget.resultsReplaced}. The budget ${budget.ranOut ? "ran out" : "didn't run out"}.`
+            ? `Request limit: ${plural(budget.tokens, "token")}; by the end of the run, about ${plural(budget.estimatedTokens, "token")} were in use (Nivra's estimate). Results given less room than usual because of the budget: ${budget.resultsLimited}; results too large to send: ${budget.resultsReplaced}. The budget ${budget.ranOut ? "ran out" : "didn't run out"}.`
             : NOT_RECORDED}
         </Text>
         <Text size="xs" data-testid="explain-context-answer">
@@ -366,7 +383,7 @@ function Result({
             Conventions the model saw in this repository, each with the lines it was shown. Keeping one saves your wording as this project's own default.
           </Text>
           {result.suggestions.map((suggestion, index) => (
-            <SuggestionItem key={index} suggestion={suggestion} index={index} projectId={projectId} runId={summary.id} onKept={onPreferencesChanged} />
+            <SuggestionItem key={index} suggestion={suggestion} index={index} projectId={projectId} runId={summary.id} preferences={preferences} onKept={onPreferencesChanged} />
           ))}
         </Stack>
       )}
@@ -460,12 +477,11 @@ export function Explain({
     setError(null);
     setOutcome(null);
     try {
-      // A choice row left empty is no choice; everything typed goes to main, which says what to fix.
-      const started = await window.nivra.startExplain(
-        projectId,
-        question.trim(),
-        choices.filter((choice) => choice.trim()),
-      );
+      // A choice row left empty is no choice. It is dropped from the form too, so each row's id (c1, c2, …) is the id
+      // the run and its conflicts use; everything typed goes to main, which says what to fix.
+      const sent = choices.filter((choice) => choice.trim());
+      setChoices(sent);
+      const started = await window.nivra.startExplain(projectId, question.trim(), sent);
       setRunId(started.id);
       onRun(projectId, { runId: started.id, status: started.status });
     } catch (reason) {

@@ -132,13 +132,19 @@ function start(): void {
   // is written only its owner can read; an import file is read only up to a size no export of 50 preferences reaches.
   const MAX_IMPORT_BYTES = 256 * 1024;
   const preferenceFiles = [{ name: "Nivra preferences", extensions: ["json"] }];
+  /** A file error in Nivra's words: its code, never the path or the system's text. */
+  const fileProblem = (error: unknown) => (error as NodeJS.ErrnoException).code ?? (error instanceof Error ? error.name : "an unknown error");
   handle(IPC.exportPreferences, z.tuple([z.strictObject({ personal: z.boolean(), projectIds: z.array(z.uuid()).max(500) })]), async (event, scopes): Promise<ExportResult> => {
     const { text, count } = await host.exportPreferences(scopes);
     const window = BrowserWindow.fromWebContents(event.sender);
     const options = { title: "Export preferences", defaultPath: "nivra-preferences.json", filters: preferenceFiles };
     const result = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
     if (result.canceled || !result.filePath) return { status: "cancelled" };
-    writePrivateFile(result.filePath, text);
+    try {
+      writePrivateFile(result.filePath, text);
+    } catch (error) {
+      throw new Error(`Nivra couldn't write the file there (${fileProblem(error)}), so nothing was exported. Choose another folder, then export again.`);
+    }
     return { status: "saved", count, fileName: basename(result.filePath) };
   });
   handle(IPC.previewImport, none, async (event): Promise<ImportPreviewResult> => {
@@ -147,8 +153,18 @@ function start(): void {
     const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
     const picked = result.filePaths[0];
     if (result.canceled || !picked) return { status: "cancelled" };
-    if (statSync(picked).size > MAX_IMPORT_BYTES) throw new Error("That file is too large to be a Nivra preferences export, so nothing was imported. Choose a file Nivra exported.");
-    return { status: "preview", ...host.previewImport(readFileSync(picked, "utf8")) };
+    let text: string;
+    try {
+      // A device or a pipe is never read: it could block main, and it isn't an export.
+      const info = statSync(picked);
+      if (!info.isFile()) throw new Error("That isn't a file Nivra can read, so nothing was imported. Choose a file Nivra exported.");
+      if (info.size > MAX_IMPORT_BYTES) throw new Error("That file is too large to be a Nivra preferences export, so nothing was imported. Choose a file Nivra exported.");
+      text = readFileSync(picked, "utf8");
+    } catch (error) {
+      if (error instanceof Error && !(error as NodeJS.ErrnoException).code) throw error;
+      throw new Error(`Nivra couldn't read that file (${fileProblem(error)}), so nothing was imported. Choose a file Nivra exported.`);
+    }
+    return { status: "preview", ...host.previewImport(text) };
   });
   handle(IPC.importPreferences, z.tuple([z.uuid(), z.array(z.uuid().nullable()).max(MAX_PREFERENCES)]), (_event, previewId, mapping) => host.importPreferences(previewId, mapping));
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));

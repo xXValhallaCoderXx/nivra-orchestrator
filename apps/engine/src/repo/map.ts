@@ -68,8 +68,9 @@ export async function buildMap(reader: RepoReader, head: string | null): Promise
   for (const path of files.filter((p) => posix.basename(p) === "package.json").sort(byDepth).slice(0, MAP_LIMITS.manifests)) {
     try {
       const { text, lines, sha256 } = await reader.text(path);
-      sources.push({ path, sha256, lines });
+      // A manifest that isn't valid JSON is sent as its path alone, so it is no source of what the model was given.
       const json = JSON.parse(text) as Record<string, unknown>;
+      sources.push({ path, sha256, lines });
       const names = (value: unknown) => (value && typeof value === "object" ? Object.keys(value).slice(0, MAP_LIMITS.names) : []);
       manifests.push({
         path,

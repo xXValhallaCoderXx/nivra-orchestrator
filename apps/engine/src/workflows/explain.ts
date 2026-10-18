@@ -166,7 +166,12 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         });
         // A model whose context can't hold the instructions and the map with room to read is refused before any chat
         // request is made (D23), never sent more than it allows.
-        if (budget.exhausted()) throw failure("context-too-small", `about ${beforeReading} tokens are needed before any reading; the model allows ${Math.max(0, budget.tokens)}`);
+        if (budget.exhausted()) {
+          throw failure(
+            "context-too-small",
+            `about ${beforeReading} tokens are needed before any reading, and ${Math.max(0, budget.tokens)} are available once ${ANSWER_TOKENS} are held back for the answer, which leaves no room to read`,
+          );
+        }
         const policy = policyFor(inputData.model);
         const internal = new InternalFailure();
         let finished = 0;

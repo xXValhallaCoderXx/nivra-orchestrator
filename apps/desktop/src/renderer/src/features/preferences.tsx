@@ -1,6 +1,6 @@
 import { Badge, Button, Checkbox, Group, SegmentedControl, Select, Stack, Text, TextInput } from "@mantine/core";
 import type { PreferenceIntent, PreferenceScope } from "@nivra/domain";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ImportEntryView, PreferencesView, PreferenceView, ProjectView } from "../../../shared/ipc";
 import { errorMessage, Section } from "../shared/ui";
 
@@ -36,7 +36,11 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
   const sent = records.filter(sentTo).length;
   const scopeLabel = (record: PreferenceView) => (record.scope === "personal" ? "Every project" : `${record.projectLabel ?? "A removed project"} only`);
 
+  // Set at once, unlike `busy`, so a quick second click can't repeat a change that already went through.
+  const acting = useRef(false);
   async function act(work: () => Promise<unknown>): Promise<boolean> {
+    if (acting.current) return false;
+    acting.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -46,6 +50,7 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
       setError(errorMessage(reason));
       return false;
     } finally {
+      acting.current = false;
       setBusy(false);
       onChanged();
     }
@@ -53,7 +58,11 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
 
   async function confirm() {
     const own = scope === "project";
-    if (await act(() => window.nivra.addPreference(statement, scope, own ? (project?.id ?? null) : null, own ? intent : "default"))) setStatement("");
+    if (await act(() => window.nivra.addPreference(statement, scope, own ? (project?.id ?? null) : null, own ? intent : "default"))) {
+      setStatement("");
+      // A decision is the person's choice each time, never carried over to the next preference.
+      setIntent("default");
+    }
   }
 
   async function save() {
@@ -67,11 +76,20 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
 
   // Export and import (D23): the scopes are the person's to choose, and so is the project each imported one goes to.
   const confirmed = records.filter((record) => record.status === "confirmed");
+  /** A project's name, with its folder when another project has the same name, so the two can be told apart. */
+  const projectName = (id: string, label: string) => {
+    const shared = projects.filter((p) => p.label === label).length > 1;
+    const folder = projects.find((p) => p.id === id)?.displayPath;
+    return shared && folder ? `${label} (${folder})` : label;
+  };
   const ownByProject = [...new Map(confirmed.filter((r) => r.projectId !== null).map((r) => [r.projectId!, r.projectLabel ?? "A removed project"])).entries()].map(([id, label]) => ({
     id,
-    label,
+    label: projectName(id, label),
     count: confirmed.filter((r) => r.projectId === id).length,
   }));
+  /** Whether an imported entry is already here, for the project it would go to now: it is then skipped. */
+  const alreadyHere = (entry: ImportEntryView, projectId: string | null) =>
+    confirmed.some((r) => r.statement === entry.statement.trim() && r.scope === entry.scope && r.projectId === projectId && r.intent === entry.intent);
 
   async function exportChosen() {
     if (!exportScopes) return;
@@ -317,7 +335,7 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
             <Group key={index} gap="sm" wrap="nowrap" align="center" data-testid="preference-import-entry">
               <Text size="xs" style={{ flex: 1 }}>
                 {entry.statement}
-                {entry.duplicate ? " (already here: skipped)" : ""}
+                {(entry.scope === "personal" ? alreadyHere(entry, null) : importing.mapping[index] ? alreadyHere(entry, importing.mapping[index]!) : false) ? " (already here: skipped)" : ""}
               </Text>
               <Badge variant="light" color={entry.scope === "personal" ? "blue" : entry.intent === "override" ? "orange" : "gray"} style={{ flex: "none" }}>
                 {entry.scope === "personal" ? "Every project" : `${entry.project}'s ${entry.intent === "override" ? "decision" : "default"}`}
@@ -328,7 +346,7 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
                   w={200}
                   allowDeselect={false}
                   aria-label={`Project for “${entry.statement}”`}
-                  data={[{ value: "", label: "Skip it" }, ...projects.map((p) => ({ value: p.id, label: `${p.label} only` }))]}
+                  data={[{ value: "", label: "Skip it" }, ...projects.map((p) => ({ value: p.id, label: `${projectName(p.id, p.label)} only` }))]}
                   value={importing.mapping[index] ?? ""}
                   onChange={(value) => setImporting({ ...importing, mapping: importing.mapping.map((id, i) => (i === index ? (value ?? "") : id)) })}
                   error={entry.matches.length > 1 && !importing.mapping[index] ? `Several projects are called ${entry.project}: choose one` : undefined}

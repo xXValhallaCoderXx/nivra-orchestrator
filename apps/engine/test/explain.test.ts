@@ -621,7 +621,7 @@ describe("explain over stdio: the small-context budget (NIV-11, D23)", () => {
     assert.deepEqual([page.status, failureOf(page), stub.chats().length, stub.requests.length], ["failed", "context-too-small", 0, 1], "only the model list was asked for");
     assert.match(
       page.events.find((e) => e.type === "run.failed")?.message ?? "",
-      /^The model's context is too small for Nivra's instructions and this repository's starting map \(about \d+ tokens are needed before any reading; the model allows 2000\), so nothing was sent to it\./,
+      /^The model's context is too small for Nivra's instructions and this repository's starting map \(about \d+ tokens are needed before any reading, and 2000 are available once 4000 are held back for the answer, which leaves no room to read\), so nothing was sent to it\./,
     );
     assert.equal(page.events.find((e) => e.stepId === "explain" && e.type === "step.output")?.data?.["tokens"], 2_000);
 

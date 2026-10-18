@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
@@ -166,7 +166,13 @@ export class HostStore {
 export function writePrivateFile(path: string, text: string): void {
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temp, text, { mode: 0o600, flag: "wx" });
-  renameRetrying(temp, path);
+  try {
+    renameRetrying(temp, path);
+  } catch (error) {
+    // The temp file holds the same text: it never stays behind.
+    rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 /**

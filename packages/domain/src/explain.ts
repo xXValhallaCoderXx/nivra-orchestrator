@@ -79,8 +79,9 @@ const ContextDetails = {
    */
   hidden: z.strictObject({ secret: count, output: count, tooLarge: count, tooLargePartial: z.boolean() }).nullable().default(null),
   /**
-   * The request budget in tokens, and what the last request carried by Nivra's estimate; results that got less room
-   * than usual because of the budget, results replaced because they were too large, and whether the budget ran out.
+   * The request budget in tokens, and the tokens in use by the end of the run by Nivra's estimate (the last request,
+   * its answer and any results after it); results that got less room than usual because of the budget, results
+   * replaced because they were too large, and whether the budget ran out.
    */
   budget: z
     .strictObject({ tokens: z.number().int(), estimatedTokens: count, resultsLimited: count, resultsReplaced: count, ranOut: z.boolean() })
