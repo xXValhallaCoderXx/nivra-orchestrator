@@ -1,10 +1,28 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type { DoctorReport, ExplainResult, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
-import type { AddProjectResult, EngineView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
+import type { DoctorReport, ExplainResult, PreferenceIntent, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
+import type { AddProjectResult, EngineView, ImportEntryView, ImportSourceView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
-import { addPreference, deletePreference, editPreference, removeProjectPreferences, snapshotFor, type NewPreference } from "./preferences.ts";
+import {
+  addPreference,
+  applyImport,
+  buildExport,
+  cleanChoices,
+  deletePreference,
+  editPreference,
+  keepSuggestion,
+  parseImport,
+  previewImport,
+  removeProjectPreferences,
+  snapshotFor,
+  supersedePreference,
+  type ExportScopes,
+  type ImportChoice,
+  type NewPreference,
+  type PreferenceChange,
+  type PreferenceExport,
+} from "./preferences.ts";
 import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
 import { labelFor, type ExecutionTarget } from "./targets/types.ts";
@@ -57,6 +75,8 @@ export class Host {
   readonly #explainRuns = new Map<string, Set<string>>();
   /** Projects being removed: no explanation may start for them, and a late answer to one that did is not accepted. */
   readonly #removing = new Set<string>();
+  /** Export files the person chose to import, read and checked, until they are imported; this session only. */
+  readonly #imports = new Map<string, PreferenceExport>();
   #wsl: WslTargets | null = null;
   #wslChecked = false;
   #discovering: Promise<WslTargets | null> | null = null;
@@ -145,9 +165,10 @@ export class Host {
    * Explains the project's repository with evidence (NIV-6, NIV-9) on its own engine. Refused while the project
    * doesn't allow sharing (D20). An engine can take a while to start, so this waits for a start in progress, then
    * checks consent again immediately before submitting; a run submitted while sharing was being turned off is
-   * cancelled at once (D22).
+   * cancelled at once (D22). The task's choices go with this run only, never into the store (D23).
    */
-  async startExplain(projectId: string, question: string): Promise<RunSummary> {
+  async startExplain(projectId: string, question: string, choices: readonly string[]): Promise<RunSummary> {
+    const cleaned = cleanChoices(choices);
     const project = this.#project(projectId);
     if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be explained.");
     if (!project.sharing.modelContext) throw new Error("This project doesn't allow sending its content to Token Factory. Allow sharing for it, then explain again.");
@@ -158,7 +179,7 @@ export class Host {
     if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be explained.");
     if (!current.sharing.modelContext || this.#epochOf(projectId) !== epoch) throw new Error("Sharing for this project was turned off, so the run wasn't started.");
     const context = { preferences: snapshotFor(this.#options.store.data, current.id), sharing: { modelContext: true } };
-    const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "explain", input: { repoPath: current.nativePath, question }, context });
+    const run = await engine.supervisor.call("runs.start", { clientRequestId: randomUUID(), workflowId: "explain", input: { repoPath: current.nativePath, question, choices: cleaned }, context });
     this.#runs.set(run.id, current.targetId);
     // A late answer is accepted only while nothing about the project's consent has changed since it was checked.
     const now = this.#options.store.data.projects.find((p) => p.id === projectId);
@@ -279,10 +300,10 @@ export class Host {
     return this.#preferenceView(saved!);
   }
 
-  editPreference(id: string, statement: string): PreferenceView {
+  editPreference(id: string, change: PreferenceChange): PreferenceView {
     let saved: PreferenceRecord | undefined;
     this.#options.store.update((data) => {
-      const result = editPreference(data, id, statement, new Date());
+      const result = editPreference(data, id, change, new Date());
       saved = result.record;
       return result.data;
     });
@@ -291,6 +312,92 @@ export class Host {
 
   deletePreference(id: string): void {
     this.#options.store.update((data) => deletePreference(data, id));
+  }
+
+  /**
+   * The text of an export of the scopes the person chose (D23), for main to write where they say. It needs the saved
+   * keys, because a statement holding one is refused rather than written to a file that leaves the app.
+   */
+  async exportPreferences(scopes: ExportScopes): Promise<{ text: string; count: number }> {
+    const secrets = Object.values(await this.#options.credentials()).filter((value): value is string => typeof value === "string" && value.length > 0);
+    return buildExport(this.#options.store.data, scopes, secrets, new Date());
+  }
+
+  /**
+   * Reads the text of a file the person chose to import, and says what importing it would do: its personal preferences,
+   * and each of its source projects with the local projects whose label matches. The file is kept until it is imported
+   * or another is previewed; nothing is saved yet.
+   */
+  previewImport(text: string): { previewId: string; personal: ImportEntryView[]; projects: ImportSourceView[] } {
+    const file = parseImport(text);
+    const previewId = randomUUID();
+    this.#imports.clear();
+    this.#imports.set(previewId, file);
+    const label = (id: string) => this.#options.store.data.projects.find((p) => p.id === id)?.label ?? id;
+    const preview = previewImport(this.#options.store.data, file);
+    return { previewId, personal: preview.personal, projects: preview.projects.map((source) => ({ ...source, matches: source.matches.map((id) => ({ id, label: label(id) })) })) };
+  }
+
+  /**
+   * Imports a previewed file as the person chose (D23): with or without its personal preferences, and each source project
+   * to the local project they picked, or left out.
+   */
+  importPreferences(previewId: string, choice: ImportChoice): { added: number; alreadyHere: number; leftOut: number } {
+    const file = this.#imports.get(previewId);
+    if (!file) throw new Error("That import is no longer waiting. Choose the file again.");
+    let outcome = { added: 0, alreadyHere: 0, leftOut: 0 };
+    this.#options.store.update((data) => {
+      const result = applyImport(data, file, choice, new Date());
+      outcome = { added: result.added, alreadyHere: result.alreadyHere, leftOut: result.leftOut };
+      return result.data;
+    });
+    this.#imports.delete(previewId);
+    return outcome;
+  }
+
+  /** Replaces a preference with a new decision; the old one is kept as history, and no run gets it again (D23). */
+  supersedePreference(id: string, change: { statement: string; intent: PreferenceIntent }): PreferenceView {
+    let saved: PreferenceRecord | undefined;
+    this.#options.store.update((data) => {
+      const result = supersedePreference(data, id, change, new Date());
+      saved = result.record;
+      return result.data;
+    });
+    return this.#preferenceView(saved!);
+  }
+
+  /**
+   * Keeps a run's suggestion as the project's own default, in the wording the person confirmed (D23). The run must be one
+   * of this project's explanations this session, never found by its path: a project added again is another project.
+   * The result comes from the engine that ran it, and everything is checked again after that wait, so a project
+   * removed meanwhile gets nothing. The evidence is the result's, with only the lines the model was shown. The save and
+   * its check for a suggestion already kept happen in one store update, so a double click saves once.
+   */
+  async keepSuggestion(projectId: string, runId: string, index: number, statement: string): Promise<PreferenceView> {
+    this.#project(projectId);
+    if (this.#removing.has(projectId)) throw new Error("This project is being removed, so nothing can be kept for it.");
+    const ofProject = () => this.#explainRuns.get(projectId)?.has(runId) ?? false;
+    if (!ofProject()) throw new Error("That suggestion comes from a run Nivra has no record of for this project in this session. Explain the project again, then keep it from the new result.");
+    const { result } = await this.runResult(runId);
+    if (!this.#options.store.data.projects.some((p) => p.id === projectId) || this.#removing.has(projectId) || !ofProject()) {
+      throw new Error("The project was removed while the suggestion was being kept, so nothing was saved.");
+    }
+    const suggestion = result?.suggestions[index];
+    if (!result || !suggestion) throw new Error("That suggestion isn't in the run's result. Explain the project again, then keep it from the new result.");
+    const evidence = {
+      runId,
+      suggestion: index,
+      headAtStart: result.headAtStart,
+      ranAt: result.finishedAt,
+      citations: suggestion.citations.filter((citation) => citation.checked).map(({ path, startLine, endLine }) => ({ path, startLine, endLine })),
+    };
+    let saved: PreferenceRecord | undefined;
+    this.#options.store.update((data) => {
+      const outcome = keepSuggestion(data, { projectId, statement, evidence }, new Date());
+      saved = outcome.record;
+      return outcome.data;
+    });
+    return this.#preferenceView(saved!);
   }
 
   /** Hands every engine the keys as they are now (D8), including one that was still starting when they changed. */
@@ -495,11 +602,16 @@ export class Host {
       scope: record.scope,
       projectId: record.projectId,
       projectLabel: project?.label ?? null,
+      intent: record.intent,
       status: record.status,
       origin: record.origin,
       revision: record.revision,
       updatedAt: record.updatedAt,
       confirmedAt: record.confirmedAt,
+      supersedes: record.supersedes,
+      supersededBy: record.supersededBy,
+      supersededAt: record.supersededAt,
+      evidence: record.evidence,
     };
   }
 

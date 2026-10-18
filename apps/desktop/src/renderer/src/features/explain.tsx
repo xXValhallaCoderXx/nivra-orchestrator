@@ -1,5 +1,5 @@
-import { Alert, Badge, Button, Group, List, Modal, Stack, Table, Text, Textarea } from "@mantine/core";
-import type { CheckedCitation, ExplainResult, RunStatus, RunSummary } from "@nivra/domain";
+import { Accordion, Alert, Badge, Button, Group, List, Modal, Stack, Table, Text, Textarea, TextInput } from "@mantine/core";
+import type { AnswerDueReason, CheckedCitation, ConflictOutcome, ConflictSource, ExplainConflict, ExplainResult, RunStatus, RunSummary } from "@nivra/domain";
 import { useEffect, useState } from "react";
 import type { PreferencesView, ProjectView } from "../../../shared/ipc";
 import { TERMINAL, useRunEvents } from "../shared/runs";
@@ -38,13 +38,278 @@ function CitationChip({ citation }: { citation: CheckedCitation }) {
 const linesByFile = (files: ExplainResult["context"]["reads"]): string =>
   files.map((file) => `${file.path} ${file.ranges.map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(", ")}`).join("; ");
 
-function Result({ result, summary, preferences }: { result: ExplainResult; summary: RunSummary; preferences: PreferencesView | null }) {
+/** The most choices one explanation can carry, and the longest each can be: the domain's limits (D23). */
+const MAX_CHOICES = 5;
+const MAX_CHOICE_CHARS = 300;
+
+/** A conflict's sources, highest rank first (D23). */
+const SOURCE_LABEL: Record<ConflictSource, string> = {
+  choice: "this task's choice",
+  override: "this project's decision to change its conventions",
+  repository: "the repository's convention",
+  "project-default": "this project's default",
+  "personal-default": "your personal default",
+};
+const REASON: Record<ConflictOutcome, string> = {
+  choice: "Choices for this task come first.",
+  override: "A project's decision to change its conventions comes before the repository's conventions.",
+  repository: "The repository's own conventions come before defaults.",
+  "project-default": "Nothing ranked higher was established.",
+  "personal-default": "Nothing ranked higher was established.",
+  unresolved: "Sources of the same rank disagree, so Nivra picked neither. Add a choice for this task to settle it.",
+};
+/** Choices are the top rank, so a tie between them is settled only by changing one of them. */
+const CHOICES_TIED = "Choices for this task disagree, so Nivra picked neither. Remove or reword one of them, then explain again.";
+
+/**
+ * A preference's wording, but only while it is still the confirmed version the run was given. Otherwise the window
+ * says it changed, so an old result never shows a replaced or edited preference as current.
+ */
+function preferenceText(preferences: PreferencesView | null, id: string, revision: number): { current: boolean; text: string } {
+  if (!preferences) return { current: false, text: `a preference (id ${id.slice(0, 8)}, revision ${revision}; the list hasn't loaded yet)` };
+  const records = preferences.records;
+  const record = records.find((candidate) => candidate.id === id);
+  if (record && record.status === "confirmed" && record.revision === revision) return { current: true, text: `“${record.statement}”` };
+  if (record?.status === "superseded") {
+    // Followed to the preference now in use; one replaced in turn, or deleted, isn't named.
+    let next = records.find((candidate) => candidate.id === record.supersededBy);
+    for (let hops = 0; next && next.status === "superseded" && hops < records.length; hops++) next = records.find((candidate) => candidate.id === next!.supersededBy);
+    return { current: false, text: `a preference replaced since this run${next ? ` by “${next.statement}”` : ""} (id ${id.slice(0, 8)}, revision ${revision})` };
+  }
+  return { current: false, text: `a preference that changed or was deleted since this run (id ${id.slice(0, 8)}, revision ${revision})` };
+}
+
+/**
+ * One suggestion from the run (D23), not saved. Keep opens the usual field, filled with the suggestion and editable:
+ * what is saved, as this project's own default, is the wording the person confirms. It shows as kept only while the
+ * preference it became is in use, read from the store: one replaced or deleted since can be kept again.
+ */
+function SuggestionItem({
+  suggestion,
+  index,
+  projectId,
+  runId,
+  preferences,
+  onKept,
+}: {
+  suggestion: ExplainResult["suggestions"][number];
+  index: number;
+  projectId: string | null;
+  runId: string;
+  preferences: PreferencesView | null;
+  onKept(): void;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const kept = preferences?.records.find((record) => record.status === "confirmed" && record.evidence?.runId === runId && record.evidence.suggestion === index) ?? null;
+
+  async function keep() {
+    if (text === null || !projectId || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await window.nivra.keepSuggestion(projectId, runId, index, text);
+      setText(null);
+      onKept();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Stack gap={4} data-testid="explain-suggestion">
+      <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+        {suggestion.statement}
+      </Text>
+      <Group gap={4}>
+        {suggestion.citations.map((citation, i) => (
+          <CitationChip key={i} citation={citation} />
+        ))}
+      </Group>
+      {kept ? (
+        <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-suggestion-kept">
+          Kept as this project's own default: “{kept.statement}”.
+        </Text>
+      ) : text === null ? (
+        <Group>
+          <Button size="xs" variant="default" onClick={() => setText(suggestion.statement)} disabled={!projectId} data-testid="explain-suggestion-keep">
+            Keep for this project
+          </Button>
+        </Group>
+      ) : (
+        <Group gap={4} wrap="nowrap" align="center">
+          <TextInput value={text} onChange={(event) => setText(event.currentTarget.value)} maxLength={500} style={{ flex: 1 }} aria-label="Preference to keep" data-testid="explain-suggestion-input" />
+          <Button size="xs" onClick={() => void keep()} loading={busy} disabled={!text.trim()} data-testid="explain-suggestion-confirm">
+            Confirm
+          </Button>
+          <Button size="xs" variant="subtle" onClick={() => setText(null)} disabled={busy}>
+            Cancel
+          </Button>
+        </Group>
+      )}
+      {error && (
+        <Text size="sm" c="var(--nivra-error)" data-testid="explain-suggestion-error">
+          {error}
+        </Text>
+      )}
+    </Stack>
+  );
+}
+
+/**
+ * One conflict as the engine ranked it (D23): what the code does now, what is intended when a choice or decision
+ * governs, which source governs this task's work and why, and what else spoke to the topic. Each conflict stands on its
+ * own: the model can split a topic in two, so the window never merges them.
+ */
+function ConflictItem({ conflict, choices, preferences }: { conflict: ExplainConflict; choices: ExplainResult["choices"]; preferences: PreferencesView | null }) {
+  const established = conflict.repositoryConvention !== null && conflict.citations.some((citation) => citation.checked);
+  const sources: Array<{ source: ConflictSource; id: string | null }> = [
+    ...conflict.choices.map((id) => ({ source: "choice" as const, id })),
+    ...conflict.preferences.map((p) => ({ source: (p.scope === "personal" ? "personal-default" : p.intent === "override" ? "override" : "project-default") as ConflictSource, id: p.id })),
+    ...(established ? [{ source: "repository" as const, id: null }] : []),
+  ];
+  const wording = (source: { source: ConflictSource; id: string | null }): string => {
+    if (source.source === "repository") return conflict.repositoryConvention ?? "";
+    if (source.source === "choice") return `${source.id}: “${choices.find((choice) => choice.id === source.id)?.text ?? ""}”`;
+    const preference = conflict.preferences.find((p) => p.id === source.id);
+    return preference ? preferenceText(preferences, preference.id, preference.revision).text : "";
+  };
+  const governs = conflict.governs;
+  const intended = governs && (governs.source === "choice" || governs.source === "override") ? governs : null;
+  const others = sources.filter((source) => !(governs && source.source === governs.source && source.id === governs.id));
+  return (
+    <Stack gap={4} data-testid="explain-conflict" data-reason={conflict.reason}>
+      <Text size="sm" fw={600}>
+        {conflict.topic}
+      </Text>
+      <Text size="sm" style={{ whiteSpace: "pre-wrap" }} data-testid="explain-conflict-currently">
+        Currently: {conflict.repositoryConvention ?? "no convention of the repository's was reported"}
+        {conflict.repositoryConvention !== null && !established ? " (not established: none of the lines it cites was shown to the model)" : ""}
+      </Text>
+      {conflict.citations.length > 0 && (
+        <Group gap={4}>
+          {conflict.citations.map((citation, i) => (
+            <CitationChip key={i} citation={citation} />
+          ))}
+        </Group>
+      )}
+      {intended && (
+        <Text size="sm" data-testid="explain-conflict-intended">
+          Intended: {wording(intended)}
+        </Text>
+      )}
+      <Text size="sm" data-testid="explain-conflict-governs">
+        {governs
+          ? `Governs this task: ${SOURCE_LABEL[governs.source]}${intended ? "" : governs.source === "repository" ? "" : ` ${wording(governs)}`}. ${REASON[conflict.reason]}`
+          : `Unresolved. ${conflict.choices.length > 0 ? CHOICES_TIED : REASON.unresolved}`}
+      </Text>
+      {others.length > 0 && (
+        <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-conflict-others">
+          {governs ? "Outranked" : "Disagreeing"}: {others.map((source) => `${SOURCE_LABEL[source.source]} ${wording(source)}`).join("; ")}
+        </Text>
+      )}
+    </Stack>
+  );
+}
+
+const plural = (count: number, one: string, many = `${one}s`) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
+const DUE: Record<AnswerDueReason, string> = { "last-steps": "the last steps were reached", time: "time ran short", budget: "the budget ran out" };
+const KIND_LABEL = { "personal-default": "personal default", "project-default": "project default", override: "project decision" } as const;
+const NOT_RECORDED = "Not recorded for this run.";
+
+/**
+ * The context view (NIV-11, D23): what the model was given, what was left out, and how the budget and the answer went.
+ * A result stored before these were recorded says so, never zero.
+ */
+function ContextDetails({ result }: { result: ExplainResult }) {
+  const { context } = result;
+  const received = context.preferences;
+  const kinds = received ? received.records.map((record) => KIND_LABEL[record.scope === "personal" ? "personal-default" : record.intent === "override" ? "override" : "project-default"]) : [];
+  const byKind = (Object.values(KIND_LABEL) as string[]).map((kind) => [kind, kinds.filter((k) => k === kind).length] as const).filter(([, n]) => n > 0);
+  const { hidden, budget, answer } = context;
+  return (
+    <Stack gap={8} data-testid="explain-context-details">
+      <Stack gap={2}>
+        <Text size="xs" fw={600}>
+          What the model was given
+        </Text>
+        <Text size="xs" data-testid="explain-context-preferences">
+          Preferences received:{" "}
+          {received
+            ? received.records.length
+              ? `${byKind.map(([kind, n]) => plural(n, kind)).join(", ")} (store revision ${received.revision}, fingerprint ${received.digest.slice(0, 12)})`
+              : `none (store revision ${received.revision})`
+            : NOT_RECORDED}
+        </Text>
+        <Text size="xs">Choices for this task: {result.choices.length ? result.choices.map((choice) => `${choice.id} “${choice.text}”`).join("; ") : "none"}</Text>
+        <Text size="xs">
+          The map: {context.map.length ? `from ${context.map.map((m) => m.path).join(", ")}` : "file counts and names only"}
+          {context.mapChars !== null ? `, ${plural(context.mapChars, "character")}` : ""}
+        </Text>
+        <Text size="xs">Read: {linesByFile(context.reads) || "nothing"}</Text>
+        <Text size="xs">
+          Search results: {plural(context.searches, "search", "searches")}, {plural(context.searchHits, "hit")}
+          {context.hits.length ? ` (${linesByFile(context.hits)})` : ""}
+        </Text>
+      </Stack>
+      <Stack gap={2}>
+        <Text size="xs" fw={600}>
+          What was left out
+        </Text>
+        <Text size="xs" data-testid="explain-context-hidden">
+          Hidden from the model:{" "}
+          {hidden
+            ? `${plural(hidden.secret, "file")} that may hold secrets, ${plural(hidden.output, "dependency or build output file")}, and ${hidden.tooLargePartial ? "at least " : ""}${plural(hidden.tooLarge, "file")} too large to read.`
+            : NOT_RECORDED}
+        </Text>
+        <Text size="xs">Untracked files are never read. Other projects' own preferences, and replaced or deleted ones, are never sent.</Text>
+      </Stack>
+      <Stack gap={2}>
+        <Text size="xs" fw={600}>
+          Budget and answer
+        </Text>
+        <Text size="xs" data-testid="explain-context-budget">
+          {budget
+            ? `Request limit: ${plural(budget.tokens, "token")}; by the end of the run, about ${plural(budget.estimatedTokens, "token")} were in use (Nivra's estimate). Results given less room than usual because of the budget: ${budget.resultsLimited}; results too large to send: ${budget.resultsReplaced}. The budget ${budget.ranOut ? "ran out" : "didn't run out"}.`
+            : NOT_RECORDED}
+        </Text>
+        <Text size="xs" data-testid="explain-context-answer">
+          {answer
+            ? `${answer.dueReasons.length ? `The answer was due because ${answer.dueReasons.map((reason) => DUE[reason]).join(" and ")}.` : "The model answered before it had to."} Turned down before it was accepted: ${answer.refusals.citations} for citations, ${answer.refusals.conflicts} for conflicts, ${answer.refusals.schema} for its shape. Dropped from the accepted answer: ${plural(answer.conflictsDropped, "conflict")}, ${plural(answer.suggestionsDropped, "suggestion")}.`
+            : NOT_RECORDED}
+        </Text>
+      </Stack>
+    </Stack>
+  );
+}
+
+function Result({
+  result,
+  summary,
+  preferences,
+  projectId,
+  onPreferencesChanged,
+}: {
+  result: ExplainResult;
+  summary: RunSummary;
+  preferences: PreferencesView | null;
+  projectId: string | null;
+  onPreferencesChanged(): void;
+}) {
   const headChanged = result.headAtEnd !== result.headAtStart;
   return (
     <Stack gap="sm" data-testid="explain-result">
       <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-head">
         HEAD at run start: {result.headAtStart ? result.headAtStart.slice(0, 12) : "no commits yet"} · read as the files were on disk, at {new Date(result.finishedAt).toLocaleString()}
       </Text>
+      {result.choices.length > 0 && (
+        <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-result-choices">
+          Choices for this task: {result.choices.map((choice) => `${choice.id} “${choice.text}”`).join("; ")}
+        </Text>
+      )}
       {headChanged && (
         <Alert color="yellow" variant="light">
           <Text size="sm">
@@ -74,18 +339,27 @@ function Result({ result, summary, preferences }: { result: ExplainResult; summa
           ))}
         </Stack>
       )}
+      {result.conflicts.length > 0 && (
+        <Stack gap={8} data-testid="explain-conflicts">
+          <Text size="sm" fw={600}>
+            Conflicts
+          </Text>
+          {result.conflicts.map((conflict, index) => (
+            <ConflictItem key={index} conflict={conflict} choices={result.choices} preferences={preferences} />
+          ))}
+        </Stack>
+      )}
       {result.preferenceDifferences.length > 0 && (
         <Stack gap={6}>
           <Text size="sm" fw={600}>
             Where this repository differs from your preferences (the repository wins here)
           </Text>
           {result.preferenceDifferences.map((difference, index) => {
-            const current = preferences?.records.find((record) => record.id === difference.preferenceId);
-            const same = current !== undefined && current.revision === difference.revision;
+            const wording = preferenceText(preferences, difference.preferenceId, difference.revision);
             return (
               <Stack key={index} gap={4} data-testid="explain-preference-difference">
-                <Text size="sm" c={same ? undefined : "var(--nivra-text-3)"}>
-                  {same ? `Your preference: “${current.statement}”` : `A preference that changed or was deleted since this run (id ${difference.preferenceId.slice(0, 8)}, revision ${difference.revision}).`}
+                <Text size="sm" c={wording.current ? undefined : "var(--nivra-text-3)"}>
+                  {wording.current ? `Your preference: ${wording.text}` : `${wording.text.charAt(0).toUpperCase()}${wording.text.slice(1)}.`}
                 </Text>
                 <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
                   This repository: {difference.repositoryConvention}
@@ -100,6 +374,19 @@ function Result({ result, summary, preferences }: { result: ExplainResult; summa
           })}
         </Stack>
       )}
+      {result.suggestions.length > 0 && (
+        <Stack gap={6} data-testid="explain-suggestions">
+          <Text size="sm" fw={600}>
+            Suggested preferences (not saved)
+          </Text>
+          <Text size="xs" c="var(--nivra-text-3)">
+            Conventions the model saw in this repository, each with the lines it was shown. Keeping one saves your wording as this project's own default.
+          </Text>
+          {result.suggestions.map((suggestion, index) => (
+            <SuggestionItem key={index} suggestion={suggestion} index={index} projectId={projectId} runId={summary.id} preferences={preferences} onKept={onPreferencesChanged} />
+          ))}
+        </Stack>
+      )}
       {result.gaps.length > 0 && (
         <Stack gap={2}>
           <Text size="sm" fw={600}>
@@ -112,13 +399,22 @@ function Result({ result, summary, preferences }: { result: ExplainResult; summa
           </List>
         </Stack>
       )}
-      <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-context">
-        Context used: {result.context.reads.length} {result.context.reads.length === 1 ? "file" : "files"} read ({linesByFile(result.context.reads) || "none"}),{" "}
-        {result.context.searches} {result.context.searches === 1 ? "search" : "searches"} with {result.context.searchHits} {result.context.searchHits === 1 ? "hit" : "hits"}
-        {result.context.hits.length > 0 ? ` (${linesByFile(result.context.hits)})` : ""}, the map from{" "}
-        {result.context.map.map((m) => m.path).join(", ") || "file counts only"};{" "}
-        {result.context.chars.toLocaleString()} characters of results. {result.checks.checked} of {result.checks.citations} citations point to lines the model was shown. Untracked files are never read.
-      </Text>
+      <Accordion variant="contained" chevronPosition="left" data-testid="explain-context-panel">
+        <Accordion.Item value="context">
+          <Accordion.Control>
+            <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-context">
+              Context used: {result.context.reads.length} {result.context.reads.length === 1 ? "file" : "files"} read ({linesByFile(result.context.reads) || "none"}),{" "}
+              {result.context.searches} {result.context.searches === 1 ? "search" : "searches"} with {result.context.searchHits} {result.context.searchHits === 1 ? "hit" : "hits"}
+              {result.context.hits.length > 0 ? ` (${linesByFile(result.context.hits)})` : ""}, the map from{" "}
+              {result.context.map.map((m) => m.path).join(", ") || "file counts only"};{" "}
+              {result.context.chars.toLocaleString()} characters of results. {result.checks.checked} of {result.checks.citations} citations point to lines the model was shown. Untracked files are never read.
+            </Text>
+          </Accordion.Control>
+          <Accordion.Panel>
+            <ContextDetails result={result} />
+          </Accordion.Panel>
+        </Accordion.Item>
+      </Accordion>
       <Text size="xs" c="var(--nivra-text-3)" data-testid="explain-run-line">
         {summary.route ? `${summary.route.model}${summary.route.endpoint === "loopback-test" ? " (test endpoint)" : ""}` : "model unknown"} ·{" "}
         {summary.durationMs !== null ? `${(summary.durationMs / 1000).toFixed(1)} s` : "time not recorded"} · {usageText(summary)}
@@ -139,6 +435,7 @@ export function Explain({
   run,
   onRun,
   onSharingChanged,
+  onPreferencesChanged,
 }: {
   project: ProjectView | null;
   online: boolean;
@@ -146,8 +443,11 @@ export function Explain({
   run: RunRef | null;
   onRun(projectId: string, ref: RunRef): void;
   onSharingChanged(): void;
+  /** A suggestion was kept, so the window reads the preferences again. */
+  onPreferencesChanged(): void;
 }) {
   const [question, setQuestion] = useState("");
+  const [choices, setChoices] = useState<string[]>([]);
   const [runId, setRunId] = useState<string | null>(run?.runId ?? null);
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -177,7 +477,11 @@ export function Explain({
     setError(null);
     setOutcome(null);
     try {
-      const started = await window.nivra.startExplain(projectId, question.trim());
+      // A choice row left empty is no choice. It is dropped from the form too, so each row's id (c1, c2, …) is the id
+      // the run and its conflicts use; everything typed goes to main, which says what to fix.
+      const sent = choices.filter((choice) => choice.trim());
+      setChoices(sent);
+      const started = await window.nivra.startExplain(projectId, question.trim(), sent);
       setRunId(started.id);
       onRun(projectId, { runId: started.id, status: started.status });
     } catch (reason) {
@@ -224,6 +528,40 @@ export function Explain({
         maxLength={2_000}
         data-testid="explain-question"
       />
+      <Stack gap={4} data-testid="explain-choices">
+        <Text size="sm" fw={500}>
+          Choices for this task
+        </Text>
+        <Text size="xs" c="var(--nivra-text-3)">
+          Decisions for this explanation only, such as “Keep Jest for this task”. They come before the repository and your preferences, and they aren't saved.
+        </Text>
+        {choices.map((choice, index) => (
+          <Group key={index} gap={4} wrap="nowrap">
+            <Text size="xs" c="var(--nivra-text-3)" w={20}>
+              c{index + 1}
+            </Text>
+            <TextInput
+              value={choice}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setChoices((all) => all.map((other, i) => (i === index ? value : other)));
+              }}
+              maxLength={MAX_CHOICE_CHARS}
+              style={{ flex: 1 }}
+              aria-label={`Choice ${index + 1}`}
+              data-testid="explain-choice"
+            />
+            <Button size="xs" variant="subtle" onClick={() => setChoices((all) => all.filter((_, i) => i !== index))} data-testid="explain-choice-remove">
+              Remove
+            </Button>
+          </Group>
+        ))}
+        <Group>
+          <Button size="xs" variant="default" onClick={() => setChoices((all) => [...all, ""])} disabled={choices.length >= MAX_CHOICES} data-testid="explain-choice-add">
+            Add a choice
+          </Button>
+        </Group>
+      </Stack>
       <Group gap="sm">
         <Button
           onClick={() => (project?.sharing.modelContext ? void start() : setConsent(true))}
@@ -291,13 +629,13 @@ export function Explain({
           </Table.Tbody>
         </Table>
       )}
-      {outcome?.result && <Result result={outcome.result} summary={outcome.summary} preferences={preferences} />}
+      {outcome?.result && <Result result={outcome.result} summary={outcome.summary} preferences={preferences} projectId={projectId} onPreferencesChanged={onPreferencesChanged} />}
       <Modal opened={consent} onClose={() => setConsent(false)} title="Send this project's content to Token Factory?" data-testid="explain-consent">
         <Stack gap="sm">
           <Text size="sm">To explain {project?.label ?? "this repository"}, Nivra sends Nebius Token Factory:</Text>
           <List size="sm">
             <List.Item>excerpts and paths from the project's tracked files;</List.Item>
-            <List.Item>your question;</List.Item>
+            <List.Item>your question, and any choices you added for this task;</List.Item>
             <List.Item>your confirmed preferences that apply to this project.</List.Item>
           </List>
           <Text size="sm">

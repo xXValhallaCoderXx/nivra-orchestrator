@@ -263,13 +263,26 @@ export class RunStore {
   }
 }
 
+/**
+ * A run's input as stored. It is masked as one text, so a private-key block split across fields is masked too, and a
+ * mask that spans fields can leave text that is no longer JSON. That input reads as null: the run is refused before
+ * its workflow starts (D23), and every other run still lists.
+ */
+function storedInput(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function toSummary(row: Row): RunSummary {
   return RunSummary.parse({
     id: str(row["id"]),
     workflowId: str(row["workflow_id"]),
     title: str(row["title"]),
     status: str(row["status"]),
-    input: JSON.parse(str(row["input"])),
+    input: storedInput(str(row["input"])),
     createdAt: str(row["created_at"]),
     startedAt: strOrNull(row["started_at"]),
     finishedAt: strOrNull(row["finished_at"]),

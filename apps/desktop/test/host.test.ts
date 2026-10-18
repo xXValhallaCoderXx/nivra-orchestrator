@@ -126,13 +126,13 @@ async function received(host: Host, runId: string) {
   }, "the run to end");
   assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
   const data = page.events.find((e) => e.stepId === "context" && e.type === "step.output")?.data;
-  return data as { revision: number; count: number; records: Array<{ id: string; scope: string; revision: number }>; digest: string };
+  return data as { revision: number; count: number; records: Array<{ id: string; scope: string; intent: string; revision: number }>; digest: string };
 }
 
 /** The fingerprint of these records, worked out here as D21 defines it, independently of the engine's code. */
-const digestOf = (records: ReadonlyArray<{ id: string; scope: string; revision: number; statement: string }>) =>
+const digestOf = (records: ReadonlyArray<{ id: string; scope: string; intent: string; revision: number; statement: string }>) =>
   createHash("sha256")
-    .update(JSON.stringify([...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.revision, r.statement])))
+    .update(JSON.stringify([...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.intent, r.revision, r.statement])))
     .digest("hex");
 
 /** Files under `dir`, at any depth, whose bytes hold `text`. */
@@ -271,7 +271,7 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     const [native, linux] = ids as [string, string];
     const canary = `nivra-preference-canary-${randomUUID()}`;
     const personal = host.addPreference({ statement: `Prefer named exports, ü%#, ${canary}`, scope: "personal", projectId: null });
-    const nativeOwn = host.addPreference({ statement: "Tests live in __tests__", scope: "project", projectId: native });
+    const nativeOwn = host.addPreference({ statement: "Tests live in __tests__", scope: "project", projectId: native, intent: "override" });
     const linuxOwn = host.addPreference({ statement: "Tests sit next to the code", scope: "project", projectId: linux });
     const statements = new Map(host.preferences().records.map((r) => [r.id, r]));
     const expected = (...records: Array<{ id: string }>) => digestOf(records.map((r) => statements.get(r.id)!));
@@ -282,6 +282,7 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     const onLinux = await received(host, (await host.startHello(linux, 0)).id);
     assert.deepEqual(onNative.records.map((r) => r.id), [personal.id, nativeOwn.id]);
     assert.deepEqual(onLinux.records.map((r) => r.id), [personal.id, linuxOwn.id]);
+    assert.deepEqual([onNative.records.map((r) => r.intent), onLinux.records.map((r) => r.intent)], [["default", "override"], ["default", "default"]], "each record's intent arrived (D23)");
     assert.deepEqual([onNative.digest, onLinux.digest], [expected(personal, nativeOwn), expected(personal, linuxOwn)], "every value arrived at each engine");
     assert.deepEqual([onNative.revision, onLinux.revision], [3, 3]);
 
@@ -301,7 +302,7 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     await online(host, "wsl:Test");
     const first = await received(host, (await host.startHello(linux, 0)).id);
 
-    const edited = host.editPreference(portable.id, "Prefer default exports");
+    const edited = host.editPreference(portable.id, { statement: "Prefer default exports" });
     const afterEdit = await received(host, (await host.startHello(linux, 0)).id);
     assert.deepEqual([edited.revision, afterEdit.revision], [2, first.revision + 1]);
     assert.deepEqual(afterEdit.records.find((r) => r.id === portable.id)?.revision, 2);
@@ -319,6 +320,79 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     await online(restarted, "wsl:Test");
     const afterRestart = await received(restarted, (await restarted.startHello(linux, 0)).id);
     assert.deepEqual([afterRestart.digest, afterRestart.revision], [afterDelete.digest, afterDelete.revision]);
+  });
+
+  it("sends only the replacement once a preference is replaced, and keeps the replaced one as history (D23)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    const { host, ids } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
+    const first = host.addPreference({ statement: "Use Vitest when adding tests", scope: "project", projectId: ids[0]! });
+    const replacement = host.supersedePreference(first.id, { statement: "Replace the Jest setup with Vitest", intent: "override" });
+    await host.open(ids[0]!);
+    await online(host, "local");
+    const got = await received(host, (await host.startHello(ids[0]!, 0)).id);
+    assert.deepEqual(got.records.map((r) => [r.id, r.intent, r.revision]), [[replacement.id, "override", 1]]);
+    assert.equal(got.digest, digestOf([replacement]));
+    assert.deepEqual(host.preferences().records.map((r) => [r.id, r.status, r.supersededBy, r.supersedes]), [
+      [first.id, "superseded", replacement.id, null],
+      [replacement.id, "confirmed", null, first.id],
+    ]);
+  });
+
+  it("exports what the person chose without the saved key, and imports it into another profile as they choose (D23)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    const { host, ids, keys } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
+    keys.current = { NEBIUS_API_KEY: "test-key-0123456789" };
+    const leaky = host.addPreference({ statement: "Call the API with test-key-0123456789", scope: "personal", projectId: null });
+    await assert.rejects(host.exportPreferences({ personal: true, projectIds: [] }), /holds your saved Nebius key, so nothing was exported/);
+    host.deletePreference(leaky.id);
+    host.addPreference({ statement: "Prefer named exports", scope: "personal", projectId: null });
+    host.addPreference({ statement: "Replace Jest with Vitest", scope: "project", projectId: ids[0]!, intent: "override" });
+    const { text, count } = await host.exportPreferences({ personal: true, projectIds: [ids[0]!] });
+    assert.equal(count, 2);
+
+    // Another profile, with a project of the same name: the preview suggests it, and the person's choice decides.
+    const other = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "elsewhere", "native")) }] });
+    const earlier = other.host.previewImport(text);
+    const preview = other.host.previewImport(text);
+    assert.throws(() => other.host.importPreferences(earlier.previewId, { personal: true, projects: [{ source: "p1", project: other.ids[0]! }] }), /no longer waiting/, "a new preview releases the one before");
+    assert.deepEqual(
+      [preview.personal.map((e) => e.statement), preview.projects.map((s) => [s.key, s.label, s.matches.map((m) => m.label), s.suggested])],
+      [["Prefer named exports"], [["p1", "native", ["native"], other.ids[0]]]],
+    );
+    assert.deepEqual(other.host.importPreferences(preview.previewId, { personal: true, projects: [{ source: "p1", project: other.ids[0]! }] }), { added: 2, alreadyHere: 0, leftOut: 0 });
+    assert.deepEqual(other.host.preferences().records.map((r) => [r.statement, r.scope, r.intent, r.origin, r.projectId]), [
+      ["Prefer named exports", "personal", "default", "imported", null],
+      ["Replace Jest with Vitest", "project", "override", "imported", other.ids[0]],
+    ]);
+    assert.throws(() => other.host.importPreferences(preview.previewId, { personal: false, projects: [{ source: "p1", project: null }] }), /no longer waiting/);
+  });
+
+  it("imports a project's preferences without the file's personal ones, and another project's runs get what they got before (D23)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    const source = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
+    source.host.addPreference({ statement: "Prefer named exports", scope: "personal", projectId: null });
+    source.host.addPreference({ statement: "Tests in __tests__", scope: "project", projectId: source.ids[0]! });
+    const { text } = await source.host.exportPreferences({ personal: true, projectIds: [source.ids[0]!] });
+
+    const { host, ids } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "elsewhere", "native")) }, { targetId: "local", path: makeRepo(join(root, "elsewhere", "tools")) }] });
+    host.addPreference({ statement: "Keep functions small", scope: "personal", projectId: null });
+    host.addPreference({ statement: "Run checks through pnpm scripts", scope: "project", projectId: ids[1]! });
+    await host.open(ids[1]!);
+    await online(host, "local");
+    const before = await received(host, (await host.startHello(ids[1]!, 0)).id);
+    const personal = () => host.preferences().records.filter((r) => r.scope === "personal");
+    const personalBefore = personal();
+
+    const preview = host.previewImport(text);
+    assert.deepEqual(host.importPreferences(preview.previewId, { personal: false, projects: [{ source: "p1", project: ids[0]! }] }), { added: 1, alreadyHere: 0, leftOut: 1 });
+    assert.deepEqual(personal(), personalBefore, "the file's personal preference stayed out");
+    const after = await received(host, (await host.startHello(ids[1]!, 0)).id);
+    assert.deepEqual([after.revision, after.count, after.digest, after.records], [before.revision + 1, before.count, before.digest, before.records], "the other project's runs get the same preferences");
+    const statements = (records: Array<{ id: string }>) => records.map((r) => host.preferences().records.find((p) => p.id === r.id)?.statement).sort();
+    assert.deepEqual(statements((await received(host, (await host.startHello(ids[0]!, 0)).id)).records), ["Keep functions small", "Tests in __tests__"]);
   });
 
   it("adds each picked folder for the engine that owns it, and refuses what can't run, saying why", async () => {
@@ -353,7 +427,7 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
 
 describe("Host: explaining needs the project's consent, and withdrawing it stops the run (D20, D22)", () => {
   const KEY = "test-key-0123456789";
-  const ANSWER = { summary: "A repository with a README.", findings: [{ statement: "It has a README.", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }], preferenceDifferences: [], gaps: [] };
+  const ANSWER = { summary: "A repository with a README.", findings: [{ statement: "It has a README.", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }], gaps: [] };
   /** Reads the README, then answers: stateless, so runs on two engines can share one stub. */
   const readThenAnswer = (answer: () => Record<string, unknown>) => (request: StubRequest): Reply =>
     request.raw.includes('"role":"tool"') ? toolCall("submit_answer", answer(), { id: "c1" }) : toolCall("read_file", { path: "README.md" }, { id: "c0" });
@@ -388,7 +462,7 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     const stub = await stubWith(() => httpError(500, "unused"));
     const { host, ids } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
     assert.deepEqual(host.projects().map((p) => p.sharing.modelContext), [false]);
-    await assert.rejects(host.startExplain(ids[0]!, ""), /doesn't allow sending its content to Token Factory/);
+    await assert.rejects(host.startExplain(ids[0]!, "", []), /doesn't allow sending its content to Token Factory/);
     assert.deepEqual([stateOf(host, "local")?.status, stub.requests.length], ["stopped", 0]);
   });
 
@@ -408,7 +482,7 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     });
     keys.current = { NEBIUS_API_KEY: KEY };
     await host.setSharing(ids[0]!, true);
-    const starting = host.startExplain(ids[0]!, "");
+    const starting = host.startExplain(ids[0]!, "", []);
     await preparing;
     await host.setSharing(ids[0]!, false);
     release();
@@ -428,7 +502,7 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     const holds = [await host.startHello(ids[0]!, 60_000), await host.startHello(ids[0]!, 60_000)];
     for (const hold of holds) await waitFor(async () => (await host.runEvents(hold.id, 0)).events.some((e) => e.message.includes("Holding a child process")), "the hello run to hold");
     await host.setSharing(ids[0]!, true);
-    const run = await host.startExplain(ids[0]!, "");
+    const run = await host.startExplain(ids[0]!, "", []);
     assert.equal(run.status, "queued");
     await host.setSharing(ids[0]!, false);
     assert.deepEqual([(await ended(host, run.id)).status, stub.requests.length], ["cancelled", 0]);
@@ -442,7 +516,7 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     await host.open(ids[0]!);
     await online(host, "wsl:Test");
     await host.setSharing(ids[0]!, true);
-    const run = await host.startExplain(ids[0]!, "");
+    const run = await host.startExplain(ids[0]!, "", []);
     await waitFor(() => stub.chats().length === 2, "the second model call");
     await host.setSharing(ids[0]!, false);
     assert.equal((await ended(host, run.id)).status, "cancelled");
@@ -457,12 +531,31 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     await host.setSharing(ids[0]!, true);
     await host.open(ids[0]!);
     await online(host, "local");
-    const starting = host.startExplain(ids[0]!, "");
+    const starting = host.startExplain(ids[0]!, "", []);
     await waitFor(() => calls().includes("runs.start"), "the submission to reach the engine");
     await host.removeProject(ids[0]!);
     writeFileSync(join(home, "release"), "");
     await assert.rejects(starting, /removed while its explanation was starting, so the run was stopped/);
     assert.deepEqual([host.projects().length, calls()], [0, ["runs.start", "runs.cancel"]]);
+  });
+
+  it("keeps nothing for a project removed while the suggestion's result is being read (D23)", async () => {
+    const { host, ids, root } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    const home = join(root, "local home");
+    const calls = () => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter((method) => method.startsWith("runs.")) : []);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "release"), "");
+    writeFileSync(join(home, "hold-result"), "");
+    await host.setSharing(ids[0]!, true);
+    await host.open(ids[0]!);
+    await online(host, "local");
+    const run = await host.startExplain(ids[0]!, "", []);
+    const keeping = host.keepSuggestion(ids[0]!, run.id, 0, "Name component files in PascalCase.");
+    await waitFor(() => calls().includes("runs.result"), "the result to be asked for");
+    await host.removeProject(ids[0]!);
+    writeFileSync(join(home, "release-result"), "");
+    await assert.rejects(keeping, /removed while the suggestion was being kept, so nothing was saved/);
+    assert.deepEqual([host.projects().length, host.preferences().records.length], [0, 0]);
   });
 
   it("refuses a new explanation once removal has begun, while it waits for the project's runs to stop", async () => {
@@ -474,12 +567,12 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     await host.setSharing(ids[0]!, true);
     await host.open(ids[0]!);
     await online(host, "local");
-    await host.startExplain(ids[0]!, "");
+    await host.startExplain(ids[0]!, "", []);
     // Removal stops the first run, and the engine holds its answer: removal is waiting.
     writeFileSync(join(home, "hold-cancel"), "");
     const removing = host.removeProject(ids[0]!);
     await waitFor(() => calls().includes("runs.cancel"), "removal to ask for the run to stop");
-    await assert.rejects(host.startExplain(ids[0]!, ""), /being removed, so it can't be explained/);
+    await assert.rejects(host.startExplain(ids[0]!, "", []), /being removed, so it can't be explained/);
     writeFileSync(join(home, "release-cancel"), "");
     await removing;
     assert.deepEqual([host.projects().length, calls()], [0, ["runs.start", "runs.cancel"]]);
@@ -493,7 +586,7 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     await host.setSharing(ids[0]!, true);
     await host.open(ids[0]!);
     await online(host, "local");
-    await host.startExplain(ids[0]!, "");
+    await host.startExplain(ids[0]!, "", []);
     writeFileSync(join(home, "fail-cancel"), "");
     await assert.rejects(host.removeProject(ids[0]!), /couldn't stop an explain run \(the run couldn't be stopped\), so the project is still in the list/);
     assert.equal(host.projects().length, 1);
@@ -506,7 +599,7 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     await host.open(ids[0]!);
     await online(host, "wsl:Test");
     await host.setSharing(ids[0]!, true);
-    const run = await host.startExplain(ids[0]!, "");
+    const run = await host.startExplain(ids[0]!, "", []);
     await waitFor(() => stub.chats().length === 2, "the second model call");
     await host.removeProject(ids[0]!);
     assert.equal((await ended(host, run.id)).status, "cancelled");
@@ -532,7 +625,7 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
 
     const sentDuring = async (projectId: string) => {
       const before = stub.chats().length;
-      const run = await host.startExplain(projectId, "");
+      const run = await host.startExplain(projectId, "", []);
       assert.equal((await ended(host, run.id)).status, "succeeded");
       return { run, sent: stub.chats().slice(before).map((chat) => chat.raw).join("\n") };
     };
@@ -553,7 +646,10 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     const [first, edited] = [`nivra-canary-${randomUUID()}`, `nivra-canary-${randomUUID()}`];
     let differenceId = "";
     const stub = await stubWith(
-      readThenAnswer(() => ({ ...ANSWER, preferenceDifferences: differenceId ? [{ preferenceId: differenceId, repositoryConvention: "kebab-case files", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }] : [] })),
+      readThenAnswer(() => ({
+        ...ANSWER,
+        conflicts: differenceId ? [{ topic: "component file names", repositoryConvention: "kebab-case files", citations: [{ path: "README.md", startLine: 1, endLine: 1 }], preferenceIds: [differenceId] }] : [],
+      })),
     );
     const repo = makeRepo(join(reposRoot(), "linux"), { "README.md": "# Linux, with kebab-case files\n" });
     const { host, ids, keys, root } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "wsl:Test", path: repo }] });
@@ -565,7 +661,7 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     await online(host, "wsl:Test");
     const explainOnce = async () => {
       const before = stub.chats().length;
-      const run = await host.startExplain(ids[0]!, "");
+      const run = await host.startExplain(ids[0]!, "", []);
       assert.equal((await ended(host, run.id)).status, "succeeded");
       return { run, sent: stub.chats().slice(before).map((chat) => chat.raw).join("\n") };
     };
@@ -575,12 +671,12 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     // Each explain run records what it was given; the fingerprint is worked out here independently (D21).
     const given = await received(host, original.run.id);
     assert.deepEqual([given.count, given.records.map((r) => [r.id, r.revision]), given.digest], [1, [[preference.id, 1]], digestOf([preference])]);
-    const editedRecord = host.editPreference(preference.id, `Name component files in PascalCase, always ${edited}`);
+    const editedRecord = host.editPreference(preference.id, { statement: `Name component files in PascalCase, always ${edited}` });
     const afterEdit = await explainOnce();
     assert.deepEqual([afterEdit.sent.includes(edited), afterEdit.sent.includes(first)], [true, false]);
     assert.equal((await received(host, afterEdit.run.id)).digest, digestOf([editedRecord]));
     const { result } = await host.runResult(original.run.id);
-    assert.deepEqual(result?.preferenceDifferences.map((d) => [d.preferenceId, d.revision]), [[preference.id, 1]], "the old result keeps the revision it was given");
+    assert.deepEqual(result?.conflicts.map((c) => c.preferences.map((p) => [p.id, p.revision])), [[[preference.id, 1]]], "the old result keeps the revision it was given");
     assert.equal(host.preferences().records.find((r) => r.id === preference.id)?.revision, 2);
 
     host.deletePreference(preference.id);
@@ -591,5 +687,86 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
 
     await host.shutdown();
     assert.deepEqual([filesHolding(root, first), filesHolding(root, edited)], [[], []], "no statement outlives its deletion, in any store or log");
+  });
+
+  it("keeps a suggestion from one of the project's runs as its own default, with the result's evidence, once, and never for another project (D23)", async () => {
+    const statement = `Keep a README at the top of the repository ${randomUUID()}`;
+    const stub = await stubWith(readThenAnswer(() => ({ ...ANSWER, suggestions: [{ statement: "Keep a README", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }] })));
+    const root = reposRoot();
+    const { host, ids, keys } = makeHost({
+      tokenFactoryUrl: stub.url,
+      projects: [{ targetId: "local", path: makeRepo(join(root, "a"), { "README.md": "# A\n" }) }, { targetId: "local", path: makeRepo(join(root, "b"), { "README.md": "# B\n" }) }],
+    });
+    const [projectA, projectB] = ids as [string, string];
+    keys.current = { NEBIUS_API_KEY: KEY };
+    for (const id of ids) await host.setSharing(id, true);
+    await host.open(projectA);
+    await online(host, "local");
+    const explainOn = async (projectId: string) => {
+      const before = stub.chats().length;
+      const run = await host.startExplain(projectId, "", []);
+      assert.equal((await ended(host, run.id)).status, "succeeded");
+      return { run, sent: stub.chats().slice(before).map((chat) => chat.raw).join("\n") };
+    };
+    const { run } = await explainOn(projectA);
+
+    await assert.rejects(host.keepSuggestion(projectB, run.id, 0, statement), /no record of for this project in this session/);
+    await assert.rejects(host.keepSuggestion(projectA, run.id, 3, statement), /isn't in the run's result/);
+    // A double click: two keeps at once save one record, in the wording the person confirmed.
+    const [first, second] = await Promise.all([host.keepSuggestion(projectA, run.id, 0, `  ${statement} `), host.keepSuggestion(projectA, run.id, 0, statement)]);
+    assert.equal(first.id, second.id);
+    const kept = host.preferences().records.filter((r) => r.origin === "suggested");
+    assert.deepEqual(
+      kept.map((r) => [r.statement, r.scope, r.projectId, r.intent, r.status, r.evidence?.runId, r.evidence?.suggestion, r.evidence?.citations]),
+      [[statement, "project", projectA, "default", "confirmed", run.id, 0, [{ path: "README.md", startLine: 1, endLine: 1 }]]],
+    );
+
+    // A's next run gets it; B's never does.
+    assert.equal((await explainOn(projectA)).sent.includes(statement), true);
+    assert.equal((await explainOn(projectB)).sent.includes(statement), false);
+
+    // Nothing can be kept for a project being removed, or gone.
+    const removing = host.removeProject(projectA);
+    await assert.rejects(host.keepSuggestion(projectA, run.id, 0, statement), /being removed, so nothing can be kept/);
+    await removing;
+    await assert.rejects(host.keepSuggestion(projectA, run.id, 0, statement), /no longer in the list/);
+  });
+
+  it("sends a task's choices with that run only, and leaves the host's store byte-identical (D23)", async () => {
+    const choice = `Keep Jest for this task ${randomUUID()}`;
+    const stub = await stubWith(readThenAnswer(() => ANSWER));
+    const { host, ids, keys, root } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    host.addPreference({ statement: "Use Vitest", scope: "personal", projectId: null });
+    await host.setSharing(ids[0]!, true);
+    await host.open(ids[0]!);
+    await online(host, "local");
+    const store = join(root, "nivra.json");
+    const before = readFileSync(store);
+
+    const run = await host.startExplain(ids[0]!, "", [`  ${choice}  `]);
+    assert.equal((await ended(host, run.id)).status, "succeeded");
+    assert.ok(stub.chats().some((chat) => chat.raw.includes(choice)), "the choice reached the model");
+    assert.deepEqual((await host.runResult(run.id)).result?.choices, [{ id: "c1", text: choice }]);
+    assert.equal(readFileSync(store).equals(before), true, "the run changed nothing in nivra.json");
+
+    const sent = stub.chats().length;
+    const next = await host.startExplain(ids[0]!, "", []);
+    assert.equal((await ended(host, next.id)).status, "succeeded");
+    assert.equal(stub.chats().slice(sent).some((chat) => chat.raw.includes(choice)), false, "the next run doesn't carry it");
+    assert.equal(filesHolding(root, choice).includes("nivra.json"), false);
+  });
+
+  it("refuses choices it can't send, saying what to fix, before starting any engine", async () => {
+    const stub = await stubWith(() => httpError(500, "unused"));
+    const { host, ids } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    await host.setSharing(ids[0]!, true);
+    const refusal = (choices: string[]) => host.startExplain(ids[0]!, "", choices).then(() => "started", (error: unknown) => (error instanceof Error ? error.message : String(error)));
+    const messages = [await refusal(["1", "2", "3", "4", "5", "6"]), await refusal(["Use pnpm", "  "]), await refusal(["x".repeat(301)]), await refusal(["Use pnpm", " Use pnpm "])];
+    assert.match(messages[0]!, /at most 5 choices; this one has 6\. Remove some, then explain again\.$/);
+    assert.match(messages[1]!, /^A choice needs some words/);
+    assert.match(messages[2]!, /at most 300 characters; one has 301\. Shorten it/);
+    assert.match(messages[3]!, /^The same choice is there twice/);
+    assert.deepEqual([stateOf(host, "local")?.status, stub.requests.length], ["stopped", 0]);
   });
 });

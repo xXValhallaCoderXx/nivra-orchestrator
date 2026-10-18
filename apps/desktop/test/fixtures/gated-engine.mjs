@@ -1,7 +1,9 @@
 // Stands in for an engine whose answer to runs.start is held until the test releases it (a `release` file in its
 // home), so a test can act while a submission is out. It writes every method it is asked for to `calls.log`, turns
 // runs.cancel down while a `fail-cancel` file exists, as an engine that can't stop a run would, and holds its answer to
-// runs.cancel while a `hold-cancel` file exists, until a `release-cancel` file appears.
+// runs.cancel while a `hold-cancel` file exists, until a `release-cancel` file appears. runs.get and runs.result
+// answer for a finished run whose result holds one suggestion; runs.result is held while a `hold-result` file exists,
+// until a `release-result` file appears.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -23,7 +25,7 @@ process.stdin.on("data", (chunk) => {
     buffer = buffer.slice(end + 1);
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
-      send({ id: request.id, result: { protocolVersion: 3, engineVersion: "gated", instanceId, pid: process.pid, home, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 4, engineVersion: "gated", instanceId, pid: process.pid, home, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
@@ -32,6 +34,34 @@ process.stdin.on("data", (chunk) => {
         clearInterval(held);
         send({ id: request.id, result: summary("running") });
       }, 25);
+    } else if (request.method === "runs.get") {
+      send({ id: request.id, result: { ...summary("succeeded"), id: request.params.runId, finishedAt: new Date().toISOString() } });
+    } else if (request.method === "runs.result") {
+      const answer = () =>
+        send({
+          id: request.id,
+          result: {
+            question: "",
+            headAtStart: null,
+            headAtEnd: null,
+            summary: "A gated result.",
+            findings: [],
+            suggestions: [{ statement: "Name component files in PascalCase.", citations: [] }],
+            gaps: [],
+            context: { map: [], reads: [], searches: 0, searchHits: 0, chars: 0, changedFiles: [] },
+            checks: { citations: 0, checked: 0 },
+            answeredAtStep: 0,
+            finishedAt: new Date().toISOString(),
+          },
+        });
+      if (!existsSync(join(home, "hold-result"))) answer();
+      else {
+        const held = setInterval(() => {
+          if (!existsSync(join(home, "release-result"))) return;
+          clearInterval(held);
+          answer();
+        }, 25);
+      }
     } else if (request.method === "runs.cancel") {
       const answer = () => {
         if (existsSync(join(home, "fail-cancel"))) send({ id: request.id, error: { code: -32000, message: "the run couldn't be stopped" } });

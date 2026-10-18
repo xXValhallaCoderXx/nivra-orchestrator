@@ -10,11 +10,14 @@ This document describes what is **built**:
 - the preference store owned by the host, and the snapshot each run receives (D21);
 - explaining a repository with evidence on NVIDIA Nemotron through Token Factory, with per-project consent and
   citations checked against what the model was shown (D22). It is tested offline against a stub and has run live on
-  both fixtures; the live preference contrast is pending.
+  both fixtures;
+- context assembly (D23): task choices, five-rank precedence ranked by the engine, an inspectable context view, and the
+  preference lifecycle (intent, supersession, keeping a suggestion, export and import). It is tested offline, including
+  the D20 sequence through the UI, and ran live on both fixtures on 18 October.
 
 It also describes what is **planned**, in two parts. **None of it is working yet.**
-- **The rest of the immediate milestone (D20):** managing preferences (NIV-10) and assembling context with overrides
-  and full precedence (NIV-11).
+- **The rest of the immediate milestone (D20):** promoting a project's preference to a personal one (NIV-10), and the
+  packaged acceptance runs (NIV-14).
 - **A later milestone, deferred by D20:**
   - new-app creation;
   - the coding worker;
@@ -67,7 +70,7 @@ flowchart LR
   subgraph Host["Desktop host: Electron, native on Windows or Linux"]
     R["Renderer<br/>React + Mantine<br/>sandboxed, no Node"]
     M["Main process<br/>project registry · preferences · secret store · engines"]
-    R -- "window.nivra: 23 typed calls" --> M
+    R -- "window.nivra: 28 typed calls" --> M
   end
   subgraph W["Target: Windows (local)"]
     E1["Engine<br/>Node + Mastra<br/>own database"]
@@ -84,7 +87,7 @@ flowchart LR
 
 | Layer | What it is | What it may do |
 |---|---|---|
-| **Renderer** | The window: React 19 + Mantine 9 | Call 23 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
+| **Renderer** | The window: React 19 + Mantine 9 | Call 28 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
 | **Main process** | Electron's main process, a thin shell over plain Node modules | Own the project list, each project's consent, the preferences, the secret store and the engines. Translate the window's calls into engine calls, each run carrying its project's preference snapshot and consent. |
 | **Engine** | One Node process per target in use, each with its own databases | Today: the hello and explain runs, Doctor, run records and a Token Factory check. Planned: sandboxes and coding work. It speaks only JSON-RPC on stdin and stdout. |
 
@@ -143,18 +146,21 @@ source commit, marked ported or rewritten, in [docs/provenance.md](docs/provenan
   - every repository with its target label ("Ubuntu · WSL", "Windows · Local"), and Add/Remove;
   - the engine badge and notices for the chosen project;
   - WSL guidance (Windows only);
-  - Explain (D22): a question, or the default; the consent dialog the first time; a "Sharing: on" badge with Turn off;
-    a live timeline with Cancel; and the result as plain text. The result shows HEAD at run start, the summary,
-    findings with citation chips ("shown to the model" or why not), differences from preferences, gaps, the context
-    used, and the model, time and tokens ("not reported" when the provider didn't say);
-  - Preferences: confirm a new one (for every project, or for the chosen project only), edit or delete one, and see
-    which ones the chosen project's runs get (D21);
+  - Explain (D22, D23): a question, or the default, and up to five choices for this task; the consent dialog the first
+    time; a "Sharing: on" badge with Turn off; a live timeline with Cancel; and the result as plain text. The result
+    shows HEAD at run start, the summary, findings with citation chips ("shown to the model" or why not), conflicts
+    (Currently, Intended, and what governs and why), suggested preferences with Keep for this project, gaps, and the
+    model, time and tokens ("not reported" when the provider didn't say). "Context used" opens a panel of what the run
+    was given, what was left out, and how the budget and the answer went;
+  - Preferences: confirm a new one (for every project, or for the chosen project only, as a default or a decision),
+    edit, replace or delete one, see the Replaced history and where each came from, export and import them, and see
+    which ones the chosen project's runs get (D21, D23);
   - a hello run with a live timeline and Cancel;
   - Doctor;
   - Settings: the Nebius key, and a Token Factory check.
 
 ### 4.2 The bridge
-`window.nivra` exposes 23 named functions, each invoking exactly one IPC channel. There is no generic "send any channel"
+`window.nivra` exposes 28 named functions, each invoking exactly one IPC channel. There is no generic "send any channel"
 helper. Every handler in main checks two things before acting:
 - the sender is the top frame of one of Nivra's windows, at the exact app URL;
 - the arguments pass zod validation.
@@ -162,14 +168,17 @@ helper. Every handler in main checks two things before acting:
 | Call | Purpose |
 |---|---|
 | `listProjects`, `addProject`, `removeProject` | The project registry. `addProject` opens the native folder dialog in main. `removeProject` also removes the project's own preferences, and says how many. |
-| `listPreferences`, `addPreference`, `editPreference`, `deletePreference` | The preference store (D21). A new preference is confirmed by being added; a project preference names its project by id. |
+| `listPreferences`, `addPreference`, `editPreference`, `deletePreference` | The preference store (D21). A new preference is confirmed by being added; a project preference names its project by id, and says whether it is a default or a decision to change the project's conventions (D23). Edit fixes wording or intent. |
+| `supersedePreference(id, statement, intent)` | Replaces a preference with a new decision; the old one is kept as history that no run gets (D23). |
+| `keepSuggestion(projectId, runId, index, statement)` | Keeps a suggestion from one of the project's explanations this session as its own default, in the person's wording, with the run's evidence (D23). |
+| `exportPreferences(scopes)`, `previewImport()`, `importPreferences(previewId, choice)` | Export and import (D23): files are chosen in main's own dialogs; an export holds no ids, folders, history or key, keeps same-named source projects apart, and is written `0600`; an import is previewed, brings personal preferences only if the person keeps them in and each source project's only where the person sends them, and is never quoted on failure. |
 | `openProject(projectId)` | Starts that project's engine if it isn't running yet. It never starts a different one. |
 | `listEngines` | The state of every engine a project uses. Asking starts nothing. |
 | `restartEngine(projectId)` | Restarts the project's engine, or checks its distribution again. |
 | `getWsl`, `checkWsl` | What WSL offers on this machine, and how to fix it (Windows only). |
 | `startHello(projectId, holdMs)`, `runEvents(runId, after)`, `cancelRun(runId)` | Runs. `startHello` sends the project's preference snapshot with the run. |
 | `setSharing(projectId, modelContext)` | The project's consent to send its content to Token Factory (D20, D22). Turning it off cancels the project's explain runs. |
-| `startExplain(projectId, question)`, `runResult(runId)` | Explain the project's repository; refused while sharing is off. `runResult` returns the run's summary and stored result from the engine that ran it. |
+| `startExplain(projectId, question, choices)`, `runResult(runId)` | Explain the project's repository, with up to five choices for this task only (D23); refused while sharing is off. `runResult` returns the run's summary and stored result from the engine that ran it. |
 | `runDoctor(projectId)` | Environment checks on that project's engine. |
 | `getSettings`, `setNebiusKey` | How the saved key is stored; save or remove it. |
 | `checkTokenFactory(projectId)` | From that project's engine: lists the NVIDIA models, makes one Nemotron tool call, then probes required and forced tool choice and the answer schema. |
@@ -316,7 +325,7 @@ sequenceDiagram
 ## 6. Host ↔ engine protocol *(built, D2)*
 
 - **Transport.** JSON-RPC 2.0 over the engine's stdin and stdout, one message per line (NDJSON). Lines are capped at
-  8 MiB, and `PROTOCOL_VERSION` (now 3) is checked in `initialize`.
+  8 MiB, and `PROTOCOL_VERSION` (now 4) is checked in `initialize`.
 - **Stdout carries the protocol and nothing else.**
   - A small unbundled launcher keeps the real stdout writer for the protocol, and sends every other stdout write and
     every `console.log` to stderr.
@@ -464,7 +473,8 @@ Migration v2 (D22) added the run's duration, usage and route, and the `artifacts
   Mastra pauses 10 s. **`pnpm probe:tokenfactory`** runs the same check from a terminal.
 - **Seen with a real key** (checkpoint 1, 17 October): 28 models, five of them NVIDIA's. Nemotron 3 Super made the tool
   call in 2,249 ms. It honoured required tool choice, and a forced tool when it was the only one offered. The stronger
-  probes haven't been run with a real key yet.
+  probes ran on 18 October from the WSL engine (D23's checkpoint 1): a forced choice between two tools was honoured, the
+  answer schema was valid when forced, and the context length was 262,144 tokens.
 - **Live explanations** (17 October, the WSL engine): fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage. 6 of its 21 citations point to lines the model
   was shown; the other 15 cite files it saw only named in the map. Once such answers were turned down, the same
   question gave 13 of 13 (76.3 s, 11 calls), and "Where is the login component?" gave 4 of 4.
@@ -569,14 +579,13 @@ flowchart LR
 
 ---
 
-## 12. Context, explanation and preferences *(the immediate milestone, D20: the preference store and handoff are built, D21; explaining with evidence is built, D22; managing preferences and context assembly are planned)*
+## 12. Context, explanation and preferences *(the immediate milestone, D20: the preference store and handoff are built, D21; explaining with evidence is built, D22; context assembly and the preference lifecycle are built, D23)*
 
-- **Explain with evidence (NIV-6, NIV-9)** *(built, D22; tested offline and run live on both fixtures; the preference
-  contrast is pending)*.
+- **Explain with evidence (NIV-6, NIV-9)** *(built, D22; tested offline and run live on both fixtures)*.
   - The engine reads the repository in bounded, targeted reads: the picked folder's tracked files only, as they are on
     disk. A budget for the whole request is enforced inside each tool.
-  - The answer is structured: a summary, findings citing exact `path:line` ranges, differences from preferences, and
-    gaps.
+  - The answer is structured: a summary, findings citing exact `path:line` ranges, conflicts, suggestions and gaps
+    (D23).
   - The engine checks each citation against the lines it delivered to the model before the answer. It reports a
     checked citation as "shown to the model", never as proof that the explanation is correct.
   - An answer citing lines the model wasn't shown is turned down, naming them, while there is time to read them. When
@@ -612,26 +621,55 @@ flowchart LR
   - Repository or model text can never grant consent, and can never promote private project information into the
     global profile.
   - A sandbox's network policy (later milestone) is a third, separate control.
-- **Preferences** *(built for NIV-5, D21; NIV-10 builds on them)*.
+- **Preferences** *(built for NIV-5, D21; managed with NIV-10, D23)*.
   - **Storage.** One canonical store, owned by the host, in `nivra.json`.
-  - **What each record holds:** an id, the statement, a scope (personal, or one project), a status (confirmed or
-    suggested), an origin, a revision raised by every edit, and dates. The store has a revision of its own, raised by
-    every change.
-  - **How one is made.** The person types it and presses Confirm. Nothing else creates one.
+  - **What each record holds:**
+    - an id and the statement;
+    - a scope (personal, or one project);
+    - an intent: a `default`, or for a project's own, a decision to change its conventions;
+    - a status (confirmed, or `superseded` once replaced);
+    - an origin (typed, kept from a suggestion, or imported);
+    - a revision raised by every edit, and dates;
+    - what it replaced or was replaced by, and for a kept suggestion, its evidence.
+
+    The store has a revision of its own, raised by every change. Every field added since the first version has a
+    default, so older files read unchanged.
+  - **How one is made.** Only by the person confirming wording: typed and confirmed, kept from a run's suggestion, or
+    imported (D23 amends D21's "Nothing else creates one"). A kept suggestion is always the project's own default;
+    promotion to a personal preference is deferred.
+  - **Lifecycle.**
+    - Edit fixes wording or intent.
+    - Replace makes a new decision; the old record stays as history that no run gets.
+    - Delete removes a preference; deleting a replacement leaves its history.
+    - Export and import carry wording, scope and intent, with each source project under a key local to the file and
+      its label; never ids, folders, history or keys. An import brings personal preferences only if the person keeps
+      them in, and each source project's only where the person sends them.
   - **What engines get.** With each run, main sends the project's own engine a validated snapshot: the confirmed
-    personal preferences, the project's own, and the store's revision. Engines never keep a copy of the profile, and
-    never open the host's store.
+    personal preferences, the project's own, their intents and the store's revision. Engines never keep a copy of the
+    profile, and never open the host's store.
   - **Persistence.** Preference contents stay out of Mastra's persisted step data and out of the run's record.
-  - *Planned (NIV-10):* suggestions drawn from repository observations, which only the person can confirm; supersession;
-    export and import.
-  - **In explanations** (D22): the answer reports where the repository differs from a confirmed preference, by id,
-    citing the repository's convention, and the repository wins. An old result shows a preference's wording only while
-    its revision still matches.
-  - *Planned (NIV-11):* overrides and full precedence, below.
-- **Context assembly (NIV-11).**
-  - Precedence: explicit task choices first, then the repository's own conventions (with evidence), then confirmed
-    personal defaults.
-  - Project A's records never reach project B.
+- **Context assembly (NIV-11)** *(built, D23)*.
+  - **Task choices.** Up to five per explain run. They rank first, apply to that run only, and are never saved.
+  - **Precedence**, highest first:
+    1. this task's choices;
+    2. a project's decisions;
+    3. the repository's conventions, but only with lines shown to the model;
+    4. a project's defaults;
+    5. personal defaults.
+
+    The model reports conflicts and names their sources; the engine ranks them by kind and id, never by their words.
+    Ties at the top are `unresolved`.
+  - **Current versus intended.** What governs decides the task's intended work. "Currently" always shows what the code
+    does.
+  - **Isolation.** Project A's records never reach project B. A kept suggestion belongs to its project.
+  - **The context view.** Beside the sources, each result records:
+    - the preferences received;
+    - hidden files by reason;
+    - the budget and what was cut or replaced;
+    - why the answer was due, what was turned down and what was dropped.
+
+    The window shows them under "Context used".
+  - **The claim.** Deterministic given the conflicts the model reported, and no more.
 - **Fixtures.** User-supplied repositories A and B (D20), recorded with their revisions and contrasting conventions in
   `docs/acceptance.md`. Repository B is private, so only its stack and revision appear there.
 - **Deferred (later milestone):** new-app creation, with its plan preview, scaffold, proposal, approval and result view.
@@ -719,7 +757,7 @@ The integration tests in `pnpm verify` include:
 | 17 Oct, 05:16–05:35 | The foundation as committed in `2556052`: `pnpm verify`, `verify:windows`, `test:packaged`, `test:windows`, `test:e2e`, RPC | 116/116 · 17/17 · 5/5 · 5/5 · 5/5 · ok |
 | 17 Oct, 07:36–07:42 | The preference change set (D21) as committed in `c39e204`: `pnpm verify`, `verify:windows`, `test:packaged`, `test:windows`, `test:e2e`, `verify:interrupt`, RPC | 131/131 · 17/17 · 11/11 · 5/5 · 11/11 · 9/9 · ok |
 
-**Results against the final change set** (explain with evidence, D22):
+**Results against the D22 change set** (explain with evidence):
 
 Run on 18 October 2026, 01:35–01:40 +08:00, against the working tree with every code change of the D22 change set in
 place: the fixes made after the live runs, and the corrections from the reviews of `ffe215c`, `200d5dc` and PR #1
@@ -733,16 +771,35 @@ place: the fixes made after the live runs, and the corrections from the reviews 
 | `test:e2e` | 14 passed, 1 skipped: the test only a packaged app runs |
 | Real engine through `apps/engine/scripts/rpc.ts` | Explain with no key, and with consent off: each refused before any request. Explain against the stub: succeeded, 2 of 2 citations checked, route `loopback-test`, and the search hit kept in the context used. Hello: succeeded. Doctor: "Nebius Token Factory" by default, and a test endpoint with `--token-factory-url`. |
 | `pnpm verify:windows` | 17/17, on the runtimes above |
-| Live, with Nate's key (the Windows app, the WSL engine), before the three fixes | Fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage; 6 of 21 citations shown to the model. Fixture B, which is private, also ran. No preference had been confirmed, so the preference contrast is still to run. |
+| Live, with Nate's key (the Windows app, the WSL engine), before the three fixes | Fixture A with the default question: `nvidia/nemotron-3-super-120b-a12b`, 46.4 s, 21,876 tokens in and 1,647 out over 4 calls, all reporting usage; 6 of 21 citations shown to the model. Fixture B, which is private, also ran. No preference had been confirmed, so the preference contrast was still to run. |
 | Live, after the fixes | Fixture A, default question: 76.3 s, 77,514 tokens in and 2,420 out over 11 calls; one refusal, then 13 of 13 citations shown. "Where is the login component?": 25.5 s, 6 calls; one refusal, then 4 of 4. The preference contrast ran on fixture B, which is private: its result is recorded in NIV-6, not here. |
 | `pnpm dev:win --no-launch`, then `test:windows` | 6/6 at 01:39 +08:00 on 18 October, including explaining on the WSL and the native engine. Earlier, Windows Smart App Control, in enforcement mode, refused to start the unsigned `Nivra.exe` (Code Integrity event 3077, at 17:03 and 17:04); Nate turned it off on this machine. One test helper was corrected: it no longer picks the already chosen project again, which the project select treats as clearing the choice. |
+
+**Results against the final change set** (context assembly and the preference lifecycle, D23):
+
+Run on 18 October 2026, from 13:19 +08:00, against `feature/niv-11` with every code change of the D23 change set in
+place: the four step commits (`9d47853`, `d3103ef`, `42df01c` with its follow-up `910e23e`, `c7e6093`), the first
+independent review's fixes and the D20 scenario (`8a91cfb`), then the fixes for the NIV-10 review (source projects
+kept apart in exports, personal preferences left out of an import at will) and for the second independent review. Only
+docs changed afterwards.
+
+| Check | Result |
+|---|---|
+| `pnpm verify` | Typecheck clean, the preload now included; tests 272/272 (domain 28, desktop 100, engine 144) |
+| `pnpm stage:runtime all` | Staged afresh: `linux-x64` `f0f3baa2aafb1925`, `win-x64` `e47d01e4a355740f` |
+| `pnpm --filter @nivra/desktop package:dir`, then `test:packaged` | 15 passed, 5 skipped: the tests that need the test endpoint switch, which a packaged app ignores |
+| `test:e2e` | 19 passed, 1 skipped (the test only a packaged app runs), the D20 sequence end to end included |
+| Real engine through `apps/engine/scripts/rpc.ts` | Doctor and hello unchanged. Explain with a task choice against the stub: an answer giving a convention and a suggestion with no lines was turned down once, then accepted with both cited, and the choice governed; neither the choice nor the preference reached Mastra's records. A key block split across the question and a choice: failed before any request, and every run still listed. A model reporting a 4,000-token context: refused as `context-too-small` before any chat request, the budget shown as 0. |
+| `pnpm verify:windows` | 17/17, on the runtimes above |
+| `pnpm dev:win --skip-stage --no-launch`, then `test:windows` | 6/6 |
+| Live, checkpoint 1, against `9d47853` (fixture B, private: counts only) | Check Token Factory: the new answer schema, forced, was valid; context length 262,144. Two explanations of B: B's decision governed tests, then the task choice did; the repository governed naming; 8 of 8 and 12 of 12 citations shown; `nivra.json` unchanged. |
+| Live, checkpoint 2, against `910e23e` (fixture A) | Five suggestions from the default question, each with lines shown to the model; one kept, then replaced; the next run received only the replacement; `nivra.json` unchanged during it. |
 
 **Not yet run** (still pending):
 - the installed deb on a stock Ubuntu (an unpacked build test is not installation coverage);
 - the Windows zip on a clean machine without the Visual C++ redistributable;
-- a public pair of repositories for showing the preference contrast in the demonstration (fixture B is private), and
-  the stronger provider probes;
-- Token Factory from both engines: checkpoint 1 didn't record which engine answered;
+- a public pair of repositories for showing the preference contrast in the demonstration (fixture B is private);
+- Token Factory from the native Windows engine: the stronger provider probes ran live on 18 October from the WSL engine;
 - Token Factory Sandboxes;
 - macOS.
 
@@ -755,8 +812,8 @@ place: the fixes made after the live runs, and the corrections from the reviews 
 | Desktop host, targets, protocol, engine core, runs, engine recovery, packaging, local checks | **Built**: the foundation, committed in `2556052` | NIV-3 (Done), NIV-5 |
 | Scope, data sharing, out-of-scope list (D20); fixtures | Decided. The two user-supplied fixtures are recorded. | NIV-2 |
 | Preference store, and the scoped handoff to engines | **Built** (D21); the whole-distribution interruption check passed | NIV-5, reused by NIV-10 |
-| Explain with evidence, model client, repository map, consent, the run lifecycle it needs | **Built** (D22), tested offline and run live on both fixtures; the preference contrast is pending | NIV-6, NIV-9, NIV-8 (read-only slice) |
-| Managing preferences, context assembly with overrides and full precedence | Planned (immediate milestone). Explanations already report differences from confirmed preferences (D22). | NIV-10, NIV-11 |
+| Explain with evidence, model client, repository map, consent, the run lifecycle it needs | **Built** (D22), tested offline and run live on both fixtures. The preference contrast ran on B (private), then again with full precedence at D23's checkpoint 1; a public pair of repositories for the demonstration is pending | NIV-6, NIV-9, NIV-8 (read-only slice) |
+| Managing preferences, context assembly with overrides and full precedence | **Built** (D23), tested offline (the D20 sequence through the UI included) and run live on both fixtures; promotion to a personal preference is deferred | NIV-10, NIV-11 |
 | Acceptance on packaged builds, release, video, submission | Planned | NIV-14 – NIV-17 |
 | New-app creation, coding worker, sandboxes, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 

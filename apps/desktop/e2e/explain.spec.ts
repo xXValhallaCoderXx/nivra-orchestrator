@@ -30,7 +30,6 @@ const ANSWER = {
     { statement: "startTimer is defined in src/timer.ts.", citations: [{ path: "src/timer.ts", startLine: 1, endLine: 1 }] },
     { statement: "A claim about a file it never read.", citations: [{ path: "src/other.ts", startLine: 1, endLine: 1 }] },
   ],
-  preferenceDifferences: [],
   gaps: ["How the timer is tested."],
 };
 
@@ -75,6 +74,7 @@ test("explaining asks for the project's consent first, then shows checked and un
   await page.getByTestId("explain-question").fill("Which naming convention do component files follow?");
   await page.getByTestId("explain-start").click();
   await expect(page.getByTestId("explain-consent").getByText("excerpts and paths from the project's tracked files")).toBeVisible();
+  await expect(page.getByTestId("explain-consent").getByText("your question, and any choices you added for this task")).toBeVisible();
   await page.getByTestId("explain-consent-allow").click();
   await expect(page.getByTestId("explain-status")).toHaveText("succeeded");
   await expect(page.getByTestId("explain-summary")).toHaveText(ANSWER.summary);
@@ -84,6 +84,16 @@ test("explaining asks for the project's consent first, then shows checked and un
   await expect(page.getByTestId("explain-head")).toContainText("HEAD at run start");
   // The search hit is in the context used, though that line was never read.
   await expect(page.getByTestId("explain-context")).toContainText("1 search with 1 hit (src/timer.ts 1)");
+  // The context view (D23): what the model was given, what was left out, and how the budget and the answer went.
+  await page.getByTestId("explain-context").click();
+  await expect(page.getByTestId("explain-context-preferences")).toHaveText("Preferences received: none (store revision 0)");
+  await expect(page.getByTestId("explain-context-hidden")).toHaveText(
+    "Hidden from the model: 0 files that may hold secrets, 0 dependency or build output files, and 0 files too large to read.",
+  );
+  await expect(page.getByTestId("explain-context-budget")).toContainText("The budget didn't run out.");
+  await expect(page.getByTestId("explain-context-answer")).toContainText(
+    "The model answered before it had to. Turned down before it was accepted: 2 for citations, 0 for conflicts, 0 for its shape.",
+  );
   await expect(page.getByTestId("explain-sharing")).toBeVisible();
   await expect(page.getByTestId("explain-timeline")).toContainText("No confirmed preferences from the app (revision 0)");
   await expect(page.getByTestId("explain-timeline")).toContainText("submit_answer refused: 1 citation of lines the model wasn't shown");
@@ -103,30 +113,64 @@ test("turning sharing off refuses the next explanation before any request", asyn
   expect(stub.requests.length).toBe(before);
 });
 
-test("a difference from a preference shows its wording, and says it changed once the preference is edited", async () => {
+test("a conflict shows what the code does now, what governs this task and why, and stops quoting a preference once it is edited (D23)", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
   const statement = "Name component files in PascalCase";
+  const choice = "Keep kebab-case for this task";
   await page.getByTestId("preference-scope").getByText("Every project", { exact: true }).click();
   await page.getByTestId("preference-input").fill(statement);
   await page.getByTestId("preference-confirm").click();
   await expect(page.getByTestId("preference-list")).toContainText(statement);
   const id = await page.getByTestId("preference-row").filter({ hasText: statement }).getAttribute("data-preference-id");
-  const difference = { preferenceId: id, repositoryConvention: "Component files use kebab-case.", citations: [{ path: "README.md", startLine: 2, endLine: 2 }] };
-  more = (request) => (request.raw.includes('"role":"tool"') ? toolCall("submit_answer", { ...ANSWER, preferenceDifferences: [difference] }, { id: "d1" }) : toolCall("read_file", { path: "README.md" }, { id: "d0" }));
+  const conflict = { topic: "component file names", repositoryConvention: "Component files use kebab-case.", citations: [{ path: "README.md", startLine: 2, endLine: 2 }], preferenceIds: [id], choiceIds: ["c1"] };
+  more = (request) => (request.raw.includes('"role":"tool"') ? toolCall("submit_answer", { ...ANSWER, conflicts: [conflict] }, { id: "d1" }) : toolCall("read_file", { path: "README.md" }, { id: "d0" }));
 
+  await page.getByTestId("explain-choice-add").click();
+  await page.getByTestId("explain-choice").fill(choice);
   // The previous test turned sharing off, so consent is asked for again.
   await page.getByTestId("explain-start").click();
   await page.getByTestId("explain-consent-allow").click();
-  const shown = page.getByTestId("explain-preference-difference");
-  await expect(shown).toContainText(`Your preference: “${statement}”`);
-  await expect(shown).toContainText("Component files use kebab-case.");
+  await expect(page.getByTestId("explain-result-choices")).toHaveText(`Choices for this task: c1 “${choice}”`);
+  const shown = page.getByTestId("explain-conflict");
+  await expect(shown).toHaveAttribute("data-reason", "choice");
+  await expect(shown.getByTestId("explain-conflict-currently")).toHaveText("Currently: Component files use kebab-case.");
+  await expect(shown.getByTestId("explain-conflict-intended")).toHaveText(`Intended: c1: “${choice}”`);
+  await expect(shown.getByTestId("explain-conflict-governs")).toHaveText("Governs this task: this task's choice. Choices for this task come first.");
+  await expect(shown.getByTestId("explain-conflict-others")).toContainText(`your personal default “${statement}”`);
+  await expect(shown.getByTestId("explain-conflict-others")).toContainText("the repository's convention Component files use kebab-case.");
 
   const row = page.locator(`[data-testid="preference-row"][data-preference-id="${id}"]`);
   await row.getByTestId("preference-edit").click();
   await row.getByTestId("preference-edit-input").fill(`${statement}, always`);
   await row.getByTestId("preference-save").click();
-  await expect(shown).toContainText("changed or was deleted since this run");
+  await expect(shown.getByTestId("explain-conflict-others")).toContainText("changed or was deleted since this run");
   await expect(shown).not.toContainText(`${statement}, always`);
+
+  // Replaced, it is named as replaced, with what replaced it, and never shown as current (D23).
+  await row.getByTestId("preference-replace").click();
+  await row.getByTestId("preference-edit-input").fill("Name component files in camelCase");
+  await row.getByTestId("preference-replace-save").click();
+  await expect(shown.getByTestId("explain-conflict-others")).toContainText("replaced since this run by “Name component files in camelCase”");
+});
+
+test("a suggestion can be kept, in the person's own wording, as the project's own default (D23)", async () => {
+  test.skip(packaged, "a packaged app ignores the test endpoint switch");
+  const suggestion = { statement: "Name component files in kebab-case", citations: [{ path: "README.md", startLine: 2, endLine: 2 }] };
+  more = (request) => (request.raw.includes('"role":"tool"') ? toolCall("submit_answer", { ...ANSWER, suggestions: [suggestion] }, { id: "k1" }) : toolCall("read_file", { path: "README.md" }, { id: "k0" }));
+  while (await page.getByTestId("explain-choice-remove").count()) await page.getByTestId("explain-choice-remove").first().click();
+  await page.getByTestId("explain-start").click();
+  const item = page.getByTestId("explain-suggestion");
+  await expect(item).toContainText(suggestion.statement);
+  await expect(item.getByTestId("explain-citation")).toHaveAttribute("data-checked", "yes");
+
+  const kept = "Name component files in kebab-case, like start-timer.tsx";
+  await item.getByTestId("explain-suggestion-keep").click();
+  await item.getByTestId("explain-suggestion-input").fill(kept);
+  await item.getByTestId("explain-suggestion-confirm").click();
+  await expect(item.getByTestId("explain-suggestion-kept")).toHaveText(`Kept as this project's own default: “${kept}”.`);
+  const row = page.getByTestId("preference-row").filter({ hasText: kept });
+  await expect(row.getByTestId("preference-intent")).toHaveText("Default");
+  await expect(row.getByTestId("preference-revision")).toContainText("kept from a suggestion");
 });
 
 test("a packaged app ignores the test endpoint switch, and explaining without a key fails before any request", async () => {

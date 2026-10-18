@@ -5,6 +5,7 @@ import { libsqlFileUrl } from "../src/db/libsql-url.ts";
 import { startWatchdog } from "../src/engine.ts";
 import { childEnv, insideWsl } from "../src/exec/child-env.ts";
 import { findOnPath } from "../src/exec/find-executable.ts";
+import { mastraInputOf } from "../src/runs/scheduler.ts";
 import { SecretVault } from "../src/secrets/vault.ts";
 import { parseStatus } from "../src/workflows/hello.ts";
 
@@ -115,5 +116,19 @@ describe("parseStatus", () => {
     ].join("\n");
     assert.deepEqual(parseStatus(output), { branch: "main", upstream: "origin/main", ahead: 2, behind: 1, changes: 2 });
     assert.equal(parseStatus("# branch.head (detached)\n").branch, null);
+  });
+});
+
+describe("mastraInputOf", () => {
+  it("hands Mastra exactly what a workflow narrows its input to, never the whole input in place of nothing (D22)", () => {
+    const input = { repoPath: "/repo", question: "a question Mastra must never store" };
+    assert.deepEqual(
+      [
+        mastraInputOf({ id: "explain", title: () => "", mastraInput: () => ({ repoPath: "/repo" }) }, input),
+        mastraInputOf({ id: "explain", title: () => "", mastraInput: () => undefined }, input),
+        mastraInputOf({ id: "hello", title: () => "" }, input) === input,
+      ],
+      [{ repoPath: "/repo" }, undefined, true],
+    );
   });
 });

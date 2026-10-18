@@ -93,8 +93,9 @@ export function App() {
               run={selected ? (explainRuns[selected.id] ?? null) : null}
               onRun={(id, ref) => setExplainRuns((current) => (current[id]?.runId === ref.runId && current[id]?.status === ref.status ? current : { ...current, [id]: ref }))}
               onSharingChanged={() => setProjectsVersion((n) => n + 1)}
+              onPreferencesChanged={() => setPreferencesVersion((n) => n + 1)}
             />
-            <Preferences project={selected} view={preferences.value} onChanged={() => setPreferencesVersion((n) => n + 1)} />
+            <Preferences key={`preferences:${selected?.id ?? "none"}`} project={selected} projects={list} view={preferences.value} onChanged={() => setPreferencesVersion((n) => n + 1)} />
             <HelloRun
               key={`hello:${selected?.id ?? "none"}`}
               project={selected}

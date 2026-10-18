@@ -741,3 +741,151 @@ The key saw 28 models, five of them NVIDIA's.
   request, plus 4,000 for the answer, so a model with an 8,192-token context would be overrun. Nemotron 3 Super's
   context is far larger. Respecting small contexts, or refusing them before any request, is a follow-up from the
   review.
+
+## D23. Context assembly: task choices, five-rank precedence, a context view, and the preference lifecycle (2026-10-18)
+
+**Decision.** NIV-11, with the parts of NIV-10 it needs. Nate set the precedence and the scope on 18 October.
+- **Task choices.** An explain run carries up to five choices: each is trimmed, 1–300 characters, and unique. They rank
+  first, apply to that run only, and are never saved to the profile. They are stored masked with the run's input, like
+  the question, and never handed to Mastra.
+- **Intent.** A project's own preference is a `default` or an `override`, a decision to change the project's existing
+  conventions. A personal preference is always a default, and scope alone never makes an override. Snapshots carry
+  intent, and the fingerprint covers it: `[id, scope, intent, revision, statement]`.
+- **Precedence, highest first:**
+  1. this task's choices;
+  2. a project's decisions;
+  3. the repository's existing conventions;
+  4. a project's defaults;
+  5. personal defaults.
+
+  How it is applied:
+  - **The model reports, and the engine ranks.** The model reports each conflict by topic and names its sources: the
+    repository's convention with the lines that show it, preference ids, and choice ids. The engine ranks them
+    (`explain/precedence.ts`), telling sources apart by kind and id, never by their words.
+  - **Evidence first.** The repository counts only when at least one of its lines was shown to the model; otherwise its
+    claim is reported as "not established".
+  - **Ties.** Two different sources at the top rank are `unresolved`: shown, with nothing picked.
+  - **Current versus intended.** What governs decides the task's intended work. "Currently" always shows what the code
+    does: a choice or a decision is shown as intended, never as current behaviour.
+  - **Repository text has no authority.** It can't add a choice, change an intent or name a winner.
+  - **Permissions stay put.** Preferences never override permissions or data-sharing restrictions: a hidden file stays
+    hidden, whoever asks for it.
+  - **What the outcome claims, and no more:** it is deterministic given the conflicts the model reported. "None
+    reported" doesn't mean none exist, and the model can split one topic in two.
+- **The answer.** It replaces `preferenceDifferences` with `conflicts` and `suggestions`.
+  - Both are flat and lenient: ids are plain strings, and citations default to none. Nivra refuses what can't be used,
+    not the schema.
+  - While the answer isn't due, an answer with unusable conflicts (ids the run doesn't have, or fewer than two sides) is
+    turned down, at most twice. After that, or once it is due, those conflicts are dropped and counted.
+  - A repository convention or a suggestion citing no lines at all is turned down like a citation of unshown lines,
+    within the same two refusals, so an uncited convention can't quietly lose to a default. After that, or once the
+    answer is due, the convention decides nothing and the suggestion is dropped.
+  - Suggestions keep only the lines the model was shown, and one with none left is dropped.
+  - The prompt asks for a suggestion for each convention the findings establish. Asked only to "propose" them, Nemotron 3
+    Super gave none in live runs.
+- **Stored input is read leniently.**
+  - The store masks a run's input as one text, so a private-key block split across fields is masked too; the other
+    patterns can't span fields. Masking can lengthen text or make two choices identical, so the read-back checks only
+    the input's shape. A block spanning choices can leave fewer choices that still read; the result shows the choices
+    as the run read them.
+  - A mask that leaves the stored input unreadable makes it read as null. The run then fails before its workflow
+    starts, so before any request and with no preference handoff recorded, with Nivra's own message, never a parser's.
+    Every other run still lists.
+- **The context view.**
+  - **What each result records**, beside the sources:
+    - the preferences received: kinds, revisions and the fingerprint;
+    - the map's size;
+    - hidden files by reason, as a lower bound past 20,000 files;
+    - the request budget, and Nivra's estimate of what was in use by the end of the run;
+    - results limited by the budget, and results replaced because they were too large;
+    - whether the budget ran out, and why the answer was due;
+    - refusals by cause, and what was dropped.
+  - **Unknown, never zero:** each part is null in a result stored before it was recorded.
+  - **The window** shows them in a panel that opens from "Context used".
+- **The budget.**
+  - Tool definitions are measured as Mastra sends them (zod's JSON Schema: draft 7, input side, closed objects). They
+    measure 6,659 characters, against the 4,000 previously assumed.
+  - `requestBudget` has no floor. A model whose context can't hold the instructions and the map, with room to read, is
+    refused as `context-too-small` before any chat request.
+  - Each list, search and read result says how many turns are left, and in the last two, to answer now.
+- **Truthfulness fixes.**
+  - The map's sources follow what was actually sent after it shrinks; a manifest that fails to parse isn't one.
+  - A result too large to send is described as such, and delivers nothing.
+  - A budget run-out is recorded however it happens.
+- **Supersession.**
+  - **Replace** makes a new decision: a new record (revision 1, the same scope and project, `supersedes`). The old one
+    becomes `superseded`, kept as history that no run gets.
+  - **Edit** fixes wording or intent, and is refused for a record that isn't in use.
+  - **Deleting** a replacement leaves its history.
+  - History counts towards the 50.
+- **Keeping a suggestion.**
+  - The person confirms wording for a suggestion from one of the project's explanations this session. It is saved as that
+    project's own default, with `origin: suggested` and evidence: the run, the suggestion's place in its result, HEAD at
+    run start, when the run finished, and only the lines shown to the model.
+  - **Checks.** The host checks that the run belongs to the project, never by path, and checks again after reading the
+    result.
+  - **Saved once.** It saves once while the kept preference is in use, even on a double click. Once that preference is
+    replaced or deleted, keeping it again saves it again.
+  - **Deferred:** promotion to a personal preference ("Use in every project") stays pending in NIV-10.
+- **This amends D21's "Nothing else creates one":** a preference is created only by the person confirming wording,
+  whether typed, kept or imported.
+- **Export and import.**
+  - **An export** holds the confirmed preferences in the scopes the person chooses, by wording, scope and intent. Each
+    source project appears once, under a key local to the file (`p1`, `p2`, …) with its label, so two projects with the
+    same name stay two. There are no ids, folders, revisions, evidence or history, and never a statement holding the
+    saved key; while a saved key can't be read, nothing is exported. Main writes it with mode `0600`, even over an
+    existing file (on Windows the folder's permissions decide who can read it), and never leaves a temporary copy
+    behind, even when the write fails part way. The format is version 2; the unreleased version 1 named projects by
+    label alone.
+  - **An import** is read only from a regular file of at most 256 KB, opened once and read at most one byte past that,
+    then checked and previewed.
+    - The file's personal preferences come in only if the person keeps them in.
+    - Each source project's preferences go to the local project the person chooses, or are left out. A destination is
+      suggested only when the label is unambiguous: one local project has it, and no other project in the file does.
+      The person can change it. Otherwise the source starts left out, and the window says why.
+    - The preview marks what would be skipped: what is already here, and what an earlier entry of the file already
+      brings to the same place.
+  - **Applying it** needs a choice for every source project in the file. It rechecks each destination, skips what is
+    already here, applies the limit to the whole import, and adds the rest as confirmed, with `origin: imported`. What
+    is left out reaches no project.
+  - No message quotes the file or a path.
+- **Compatibility and protocol 4.**
+  - Every field added to a result or a preference record has a default. So results stored under protocol 3, and a
+    `nivra.json` written by the previous version, still read.
+  - An older app sets a newer `nivra.json` aside as `nivra.json.unreadable-<ms>`, never overwriting it.
+  - The preload is now typechecked. The IPC handler requires the choices argument, so a caller that drops them fails
+    instead of explaining without them.
+
+**Why.**
+- **D20 and NIV-11.** D20's demonstration needs an explicit override that changes nothing stored. NIV-11 needs
+  precedence that comes out the same way every time, and a view of what a run was given and what was left out.
+- **The engine applies the rule, not the model.** The model finds conflicts, but its words can't be trusted to apply a
+  rule. The engine ranks from ids, so the outcome can't be argued by the model or the repository, and a mistake in
+  attribution is visible in the window rather than silent.
+- **Only shown lines count.** An unsupported claim about the code should decide nothing, so only lines the model was
+  shown count as evidence.
+- **Lenient schema, strict engine.** Whatever a schema refuses never reaches Nivra and costs an answer step. Checking in
+  the engine lets an answer that is due keep what it can.
+- **A label isn't an identity.** Two checkouts called `app` are common, so an export keeps its source projects apart,
+  and an import never guesses where an ambiguous one goes. Personal preferences reach every project, so bringing them in
+  is a choice of its own.
+- **Live evidence.**
+  - Checkpoint 1, on B: the decision governed, then the task choice did, while "Currently" kept B's convention and
+    `nivra.json` stayed unchanged.
+  - Checkpoint 2, on A: suggestions appeared only once they were asked for. A replaced preference stopped reaching
+    later runs.
+- **Nate's precedence.** Project scope alone isn't an override. Repository observations and suggestions never become
+  decisions by themselves. Conflicts are visible, and explanations describe what the code does.
+
+**Consequences.**
+- Every caller of `runs.start` sends each snapshot record's intent; `rpc.ts` shows how.
+- `submit_answer`'s schema and description changed, so the provider check probes the new schema. It was valid live on 18
+  October.
+- **Not handled yet:**
+  - A suggestion from an earlier session can't be kept, because runs are remembered for the session only; the window
+    says so.
+  - A suggestion matching a preference already kept isn't marked.
+  - When the answer is due, an unusable conflict is dropped whole, even if two of its sides were valid.
+- D22's open consequence about small contexts is resolved.
+- NIV-10 keeps promotion and its evidence rule open. Context packages for coding workers stay with the later milestone
+  (D20).

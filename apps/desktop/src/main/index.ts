@@ -1,13 +1,13 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
 import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { PreferenceScope } from "@nivra/domain";
+import { MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
-import { IPC, type AppInfo, type SettingsView } from "../shared/ipc.ts";
+import { IPC, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
-import { HostStore } from "./host-store.ts";
+import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
 import { runtimeIn, type RuntimeLayout } from "./targets/local.ts";
 import { targetFactory } from "./targets/registry.ts";
@@ -119,14 +119,74 @@ function start(): void {
   handle(IPC.removeProject, project, (_event, id) => host.removeProject(id));
   handle(IPC.listPreferences, none, () => host.preferences());
   // Statements are checked again, with a message a person can act on, when they are saved.
-  handle(IPC.addPreference, z.tuple([z.string().max(2_000), PreferenceScope, z.uuid().nullable()]), (_event, statement, scope, projectId) =>
-    host.addPreference({ statement, scope, projectId }),
+  handle(IPC.addPreference, z.tuple([z.string().max(2_000), PreferenceScope, z.uuid().nullable(), PreferenceIntent]), (_event, statement, scope, projectId, intent) =>
+    host.addPreference({ statement, scope, projectId, intent }),
   );
-  handle(IPC.editPreference, z.tuple([z.uuid(), z.string().max(2_000)]), (_event, id, statement) => host.editPreference(id, statement));
+  handle(IPC.editPreference, z.tuple([z.uuid(), z.string().max(2_000), PreferenceIntent]), (_event, id, statement, intent) => host.editPreference(id, { statement, intent }));
   handle(IPC.deletePreference, z.tuple([z.uuid()]), (_event, id) => host.deletePreference(id));
+  handle(IPC.supersedePreference, z.tuple([z.uuid(), z.string().max(2_000), PreferenceIntent]), (_event, id, statement, intent) => host.supersedePreference(id, { statement, intent }));
+  handle(IPC.keepSuggestion, z.tuple([z.uuid(), RunId, z.number().int().nonnegative().max(100), z.string().max(2_000)]), (_event, projectId, runId, index, statement) =>
+    host.keepSuggestion(projectId, runId, index, statement),
+  );
+  // Export and import (D23): the files are chosen in main's own dialogs, and the renderer never sends a path. An export
+  // is written with mode 0600; an import file is read only up to a size no export of 50 preferences reaches.
+  const MAX_IMPORT_BYTES = 256 * 1024;
+  const preferenceFiles = [{ name: "Nivra preferences", extensions: ["json"] }];
+  /** A file error in Nivra's words: its code, never the path or the system's text. */
+  const fileProblem = (error: unknown) => (error as NodeJS.ErrnoException).code ?? (error instanceof Error ? error.name : "an unknown error");
+  handle(IPC.exportPreferences, z.tuple([z.strictObject({ personal: z.boolean(), projectIds: z.array(z.uuid()).max(500) })]), async (event, scopes): Promise<ExportResult> => {
+    // A saved key that can't be read here can't be looked for in the preferences, so nothing leaves until it can be.
+    if ((await secrets.state("NEBIUS_API_KEY")) === "unreadable") {
+      throw new Error("Your saved Nebius key can't be read here, so Nivra can't check that no preference holds it, and nothing was exported. Enter the key again under Settings, then export again.");
+    }
+    const { text, count } = await host.exportPreferences(scopes);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const options = { title: "Export preferences", defaultPath: "nivra-preferences.json", filters: preferenceFiles };
+    const result = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return { status: "cancelled" };
+    try {
+      writePrivateFile(result.filePath, text);
+    } catch (error) {
+      throw new Error(`Nivra couldn't write the file there (${fileProblem(error)}), so nothing was exported. Choose another folder, then export again.`);
+    }
+    return { status: "saved", count, fileName: basename(result.filePath) };
+  });
+  handle(IPC.previewImport, none, async (event): Promise<ImportPreviewResult> => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const options = { title: "Import preferences", properties: ["openFile" as const], filters: preferenceFiles };
+    const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+    const picked = result.filePaths[0];
+    if (result.canceled || !picked) return { status: "cancelled" };
+    let text: string;
+    try {
+      // A device or a pipe is never read: it could block main, and it isn't an export.
+      const read = readSmallFile(picked, MAX_IMPORT_BYTES);
+      if ("refused" in read) {
+        throw new Error(
+          read.refused === "not-a-file"
+            ? "That isn't a file Nivra can read, so nothing was imported. Choose a file Nivra exported."
+            : "That file is too large to be a Nivra preferences export, so nothing was imported. Choose a file Nivra exported.",
+        );
+      }
+      text = read.text;
+    } catch (error) {
+      if (error instanceof Error && !(error as NodeJS.ErrnoException).code) throw error;
+      throw new Error(`Nivra couldn't read that file (${fileProblem(error)}), so nothing was imported. Choose a file Nivra exported.`);
+    }
+    return { status: "preview", ...host.previewImport(text) };
+  });
+  handle(
+    IPC.importPreferences,
+    z.tuple([z.uuid(), z.strictObject({ personal: z.boolean(), projects: z.array(z.strictObject({ source: z.string().max(8), project: z.uuid().nullable() })).max(MAX_PREFERENCES) })]),
+    (_event, previewId, choice) => host.importPreferences(previewId, choice),
+  );
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));
   handle(IPC.setSharing, z.tuple([z.uuid(), z.boolean()]), (_event, id, modelContext) => host.setSharing(id, modelContext));
-  handle(IPC.startExplain, z.tuple([z.uuid(), z.string().max(2_000)]), (_event, id, question) => host.startExplain(id, question));
+  // The choices are required, so a caller that drops them fails here rather than explaining without them. The host
+  // checks them again, with messages a person can act on (D23).
+  handle(IPC.startExplain, z.tuple([z.uuid(), z.string().max(2_000), z.array(z.string().max(2_000)).max(20)]), (_event, id, question, choices) =>
+    host.startExplain(id, question, choices),
+  );
   handle(IPC.runResult, z.tuple([RunId]), (_event, id) => host.runResult(id));
   handle(IPC.runEvents, z.tuple([RunId, z.number().int().nonnegative()]), (_event, id, after) => host.runEvents(id, after));
   handle(IPC.cancelRun, z.tuple([RunId]), (_event, id) => host.cancelRun(id));

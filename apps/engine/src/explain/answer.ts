@@ -5,16 +5,27 @@ import { z } from "zod";
  * structured, an exact repository-relative path and a line range, so the engine can check each one against what it
  * actually delivered, instead of parsing prose. The provider check submits to the same schema, so a successful probe
  * says something about the real answer, not just a toy tool.
+ *
+ * Conflicts and suggestions (D23) are flat and lenient on purpose. Whatever the schema refuses never reaches Nivra, so
+ * it can't be dropped from an answer that is due, and it costs one of the answer steps. So ids are plain strings and
+ * citations default to none; the engine checks ids, sources and citations itself.
  */
 
 export const ANSWER_LIMITS = {
   summaryChars: 4_000,
   statementChars: 1_000,
+  topicChars: 200,
   conventionChars: 500,
+  /** A preference's own limit, so a kept suggestion always fits. */
+  suggestionChars: 500,
   gapChars: 300,
+  idChars: 64,
   findings: 20,
   citations: 8,
-  preferenceDifferences: 10,
+  conflicts: 10,
+  /** Preference ids, and choice ids, per conflict. */
+  conflictIds: 5,
+  suggestions: 5,
   gaps: 10,
   pathChars: 500,
 } as const;
@@ -28,6 +39,22 @@ export const Citation = z
   .refine((citation) => citation.endLine >= citation.startLine, "endLine must not come before startLine.");
 export type Citation = z.infer<typeof Citation>;
 
+const Ids = (description: string) => z.array(z.string().min(1).max(ANSWER_LIMITS.idChars)).max(ANSWER_LIMITS.conflictIds).default([]).describe(description);
+
+export const AnswerConflict = z.object({
+  topic: z.string().min(1).max(ANSWER_LIMITS.topicChars).describe('What the sources disagree about, in a few words, such as "test runner"'),
+  repositoryConvention: z
+    .string()
+    .max(ANSWER_LIMITS.conventionChars)
+    .nullable()
+    .default(null)
+    .describe("What this repository does now, from lines you read; null when it has no convention on this"),
+  citations: z.array(Citation).max(ANSWER_LIMITS.citations).default([]).describe("The lines you read that show the repository's convention"),
+  preferenceIds: Ids("The ids of the engineer's preferences on this topic, exactly as given"),
+  choiceIds: Ids("The ids of this task's choices on this topic, such as c1"),
+});
+export type AnswerConflict = z.infer<typeof AnswerConflict>;
+
 export const AnswerInput = z.object({
   summary: z.string().min(1).max(ANSWER_LIMITS.summaryChars).describe("A short explanation that answers the question, in plain text"),
   findings: z
@@ -38,17 +65,21 @@ export const AnswerInput = z.object({
       }),
     )
     .max(ANSWER_LIMITS.findings),
-  preferenceDifferences: z
+  conflicts: z
+    .array(AnswerConflict)
+    .max(ANSWER_LIMITS.conflicts)
+    .default([])
+    .describe("Where the repository, the engineer's preferences and this task's choices disagree, one topic each"),
+  suggestions: z
     .array(
       z.object({
-        preferenceId: z.uuid().describe("The id of one of the engineer's preferences, exactly as given"),
-        repositoryConvention: z.string().min(1).max(ANSWER_LIMITS.conventionChars).describe("What this repository does instead, which wins here"),
-        citations: z.array(Citation).max(ANSWER_LIMITS.citations),
+        statement: z.string().min(1).max(ANSWER_LIMITS.suggestionChars).describe("A convention this repository follows, worded as a preference the engineer could keep"),
+        citations: z.array(Citation).max(ANSWER_LIMITS.citations).default([]).describe("The lines you read that show it"),
       }),
     )
-    .max(ANSWER_LIMITS.preferenceDifferences)
+    .max(ANSWER_LIMITS.suggestions)
     .default([])
-    .describe("Where the repository's own conventions differ from the engineer's preferences"),
+    .describe("Each convention your findings show this repository follows, worded as a preference the engineer could keep for this project, with the lines that show it"),
   gaps: z
     .array(z.string().min(1).max(ANSWER_LIMITS.gapChars))
     .max(ANSWER_LIMITS.gaps)
@@ -58,4 +89,4 @@ export const AnswerInput = z.object({
 export type AnswerInput = z.infer<typeof AnswerInput>;
 
 export const ANSWER_TOOL_DESCRIPTION =
-  "Submit your answer. Call this once, when you have read enough. Cite only lines read_file or search_code showed you in an earlier step: an answer citing other lines is turned down while there is time to read them. The first accepted answer is final.";
+  "Submit your answer. Call this once, when you have read enough. Cite only lines read_file or search_code showed you in an earlier step, and name only the preference and choice ids you were given: an answer that doesn't is turned down while there is time to fix it. The first accepted answer is final.";

@@ -49,7 +49,7 @@ describe("engine over stdio", () => {
   it("answers initialize with where it runs, and keeps stdout to JSON-RPC alone", async () => {
     const { home, engine } = setup();
     const info = await engine.initialize();
-    assert.equal(info.protocolVersion, 3);
+    assert.equal(info.protocolVersion, 4);
     assert.equal(info.protocolVersion, PROTOCOL_VERSION);
     assert.equal(info.home, home);
     assert.equal(info.platform, process.platform);
@@ -216,8 +216,8 @@ describe("engine over stdio", () => {
     const repo = makeRepo(root, `repo ${marker}`);
     const canary = `nivra-preference-canary-${randomUUID()}`;
     const records = [
-      { id: randomUUID(), statement: `Prefer named exports ${canary}`, scope: "personal" as const, revision: 3 },
-      { id: randomUUID(), statement: "Tests sit next to the code they test, ü%#", scope: "project" as const, revision: 1 },
+      { id: randomUUID(), statement: `Prefer named exports ${canary}`, scope: "personal" as const, intent: "default" as const, revision: 3 },
+      { id: randomUUID(), statement: "Tests sit next to the code they test, ü%#", scope: "project" as const, intent: "override" as const, revision: 1 },
     ];
     await engine.initialize();
     const run = await startHello(engine, repo, 0, { preferences: { revision: 7, records }, sharing: { modelContext: false } });
@@ -225,9 +225,9 @@ describe("engine over stdio", () => {
     assert.equal(page.status, "succeeded");
     const received = page.events.find((e) => e.type === "step.output" && e.stepId === "context");
     assert.match(received?.message ?? "", /^2 confirmed preferences from the app \(revision 7\), fingerprint [0-9a-f]{12}$/);
-    assert.deepEqual(received?.data?.["records"], records.map(({ id, scope, revision }) => ({ id, scope, revision })));
+    assert.deepEqual(received?.data?.["records"], records.map(({ id, scope, intent, revision }) => ({ id, scope, intent, revision })));
     // Worked out here from what was sent, independently of the engine's code: equal only if every value arrived.
-    const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.revision, r.statement]);
+    const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.intent, r.revision, r.statement]);
     assert.equal(received?.data?.["digest"], createHash("sha256").update(JSON.stringify(sorted)).digest("hex"));
     assert.equal(received?.data?.["digest"], await preferencesDigest(records));
 
@@ -249,15 +249,18 @@ describe("engine over stdio", () => {
       engine.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "runs.start", params: { clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: repo }, ...(context === undefined ? {} : { context }) } })}\n`);
     const answer = (id: number) =>
       waitFor(() => engine.lines.map((line) => JSON.parse(line) as { id?: number; error?: { code: number; message: string } }).find((m) => m.id === id), { what: `the answer to request ${id}` });
-    const record = () => ({ id: randomUUID(), statement: "Use pnpm", scope: "personal", revision: 1 });
+    const record = () => ({ id: randomUUID(), statement: "Use pnpm", scope: "personal", intent: "default", revision: 1 });
     const twice = record();
     send(901, undefined);
     send(902, { preferences: { revision: 1, records: [twice, twice] } });
     send(903, { preferences: { revision: 1, records: Array.from({ length: 51 }, record) } });
     send(904, { preferences: { revision: 1, records: [{ ...record(), statement: "" }] } });
-    for (const id of [901, 902, 903, 904]) assert.equal((await answer(id)).error?.code, ErrorCode.InvalidParams, `request ${id}`);
+    // Only a project's own preference can be a decision to change its conventions (D23).
+    send(905, { preferences: { revision: 1, records: [{ ...record(), intent: "override" }] }, sharing: { modelContext: false } });
+    for (const id of [901, 902, 903, 904, 905]) assert.equal((await answer(id)).error?.code, ErrorCode.InvalidParams, `request ${id}`);
     assert.match((await answer(901)).error?.message ?? "", /context/);
     assert.match((await answer(902)).error?.message ?? "", /Each preference appears once/);
+    assert.match((await answer(905)).error?.message ?? "", /Only a project's own preference can override/);
     assert.equal((await engine.client.call("runs.list", {})).runs.length, 0);
   });
 

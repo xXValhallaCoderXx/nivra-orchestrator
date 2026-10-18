@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import type { RepoReader } from "./files.ts";
+import { LIMITS, type RepoReader } from "./files.ts";
 import { RepoError } from "./paths.ts";
 
 /**
@@ -35,8 +35,14 @@ export interface MapSource {
 export interface RepoMap {
   /** JSON, at most `MAP_LIMITS.chars` characters, as the model receives it. */
   text: string;
-  /** The files read to build it, with the hashes of the bytes read. */
+  /** The files read to build it whose content is still in what is sent, with the hashes of the bytes read (D23). */
   sources: MapSource[];
+  /**
+   * Files the model is never given, by reason, counted from the reader whatever the map had room for (D23). Only the
+   * first `LIMITS.statFiles` tracked files have their size checked, so `tooLarge` is a lower bound when
+   * `tooLargePartial` is set.
+   */
+  hidden: { secret: number; output: number; tooLarge: number; tooLargePartial: boolean };
 }
 
 const depth = (path: string) => path.split("/").length;
@@ -62,8 +68,9 @@ export async function buildMap(reader: RepoReader, head: string | null): Promise
   for (const path of files.filter((p) => posix.basename(p) === "package.json").sort(byDepth).slice(0, MAP_LIMITS.manifests)) {
     try {
       const { text, lines, sha256 } = await reader.text(path);
-      sources.push({ path, sha256, lines });
+      // A manifest that isn't valid JSON is sent as its path alone, so it is no source of what the model was given.
       const json = JSON.parse(text) as Record<string, unknown>;
+      sources.push({ path, sha256, lines });
       const names = (value: unknown) => (value && typeof value === "object" ? Object.keys(value).slice(0, MAP_LIMITS.names) : []);
       manifests.push({
         path,
@@ -112,6 +119,13 @@ export async function buildMap(reader: RepoReader, head: string | null): Promise
     else map.manifests = map.manifests.slice(0, map.manifests.length - 1);
     text = JSON.stringify(map);
   }
-  if (text.length > MAP_LIMITS.chars) text = JSON.stringify({ head, trackedFiles: files.length, hiddenFiles: hidden, folders: map.folders, extensions: map.extensions, note: "The map was too large; use list_files." });
-  return { text, sources };
+  const counts = { ...hidden, tooLarge: reader.oversized.size, tooLargePartial: reader.readable.size > LIMITS.statFiles };
+  if (text.length > MAP_LIMITS.chars) {
+    // The fallback sends no manifest or workspace content, so no file is a source of what the model was given.
+    text = JSON.stringify({ head, trackedFiles: files.length, hiddenFiles: hidden, folders: map.folders, extensions: map.extensions, note: "The map was too large; use list_files." });
+    return { text, sources: [], hidden: counts };
+  }
+  // A manifest cut to make the map fit was never sent, so it isn't a source either.
+  const sent = new Set([...map.manifests.map((manifest) => manifest["path"]), ...(workspace ? [workspaceFile] : [])]);
+  return { text, sources: sources.filter((source) => sent.has(source.path)), hidden: counts };
 }

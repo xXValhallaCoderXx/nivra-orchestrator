@@ -53,10 +53,10 @@ Run on Windows with a WSL engine and on Linux. Native Windows results are report
 | Test | Required result | Status |
 |---|---|---|
 | Evidence | Explanations cite `path:line`. Each citation is checked against the content actually read, and a valid location is never presented as proof that the explanation is right. | Passing offline against a stub, and live on A and B (D22; see below). |
-| Repository conventions vs personal defaults | Repository B's conventions win over a confirmed personal default. | The answer reports where the repository differs from a confirmed preference, and the repository wins: passing offline (D22). Live on B: run, with the result recorded privately in NIV-6, because B is private. Overrides and full precedence: NIV-11. |
-| Explicit override | A task-specific choice wins without changing the stored profile. | Pending |
-| Context isolation | Project A's project-only records and files never reach project B's requests. | Passing for the run's context (D21) and for model requests, files included (D22); offline. See below. |
-| Changed or deleted preference | The next request uses the edited preference, or none after deletion. | Passing for the run's context, including after an app restart (D21), and for model requests (D22), offline. See below. |
+| Repository conventions vs personal defaults | Repository B's conventions win over a confirmed personal default. | Passing: the engine ranks each conflict the model reports, and a repository convention with lines shown to the model outranks project and personal defaults (D23). Offline, through the UI (the D20 scenario) and over stdio; live on B on 18 October (counts only, B is private). See below. |
+| Explicit override | A task-specific choice wins without changing the stored profile. | Passing: offline, through the UI (the D20 scenario), over stdio and in the host, with `nivra.json` byte-identical across the run; live on B on 18 October, where the choice governed while "Currently" still named B's test runner (D23). See below. |
+| Context isolation | Project A's project-only records and files never reach project B's requests. | Passing for the run's context (D21) and for model requests, files included (D22), and for a suggestion kept in A (D23); offline, and in the D20 scenario. See below. |
+| Changed or deleted preference | The next request uses the edited preference, or none after deletion. | Passing for the run's context, including after an app restart (D21), and for model requests (D22), offline; a replaced preference too, offline and live on A on 18 October (D23). See below. |
 | Consent | No repository-derived material leaves the machine without that project's `modelContext` consent. `cloudExecution` stays off and unused. | Passing offline, including consent withdrawn while a run starts, waits or runs (D22; see below). |
 | Cancellation and restart | The app reports the true state. An interrupted run ends as `run.interrupted` and is never replayed. | Passing at the engine level and for explain runs (`pnpm verify`). |
 | Failure reporting | Each of these is reported clearly, with no silent retry: invalid key, unavailable model, rate limiting, timeout, malformed tool results, network failure, sharing refusal. | Passing offline against a stub, except timeouts, which are tested in-process with short deadlines (D22; see below). |
@@ -111,7 +111,7 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
   - Each run records the preferences it was given: the count, ids, revisions and a fingerprint, never their text. The
     host test works the fingerprint out independently.
   - An answer reports where the repository differs from a confirmed preference, by id and revision. One that names a
-    preference the run wasn't given is turned down.
+    preference the run wasn't given is turned down. (Superseded by D23's conflicts and precedence; see below.)
   - An edit reaches the next request, and a deletion removes it.
   - An old result keeps the revision it saw, and the window then says the preference changed since the run.
   - The engine writes no statement it was given. Text the model echoes stays in `nivra.db`, never in `mastra.db*` or the
@@ -144,7 +144,8 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
   once: a first request that fails is one event, and a success followed by a failure is two. A cancel before any
   request, or between two, records none.
 - **Budget and time.**
-  - With a small context length, the answer was forced early.
+  - With a small context length, the answer was forced early. A context too small for the instructions and the map is
+    refused before any chat request (D23).
   - Per-call and whole-run deadlines end as `timeout`, never as a quiet stop. This is shown in-process with short
     deadlines; the real ones (150 s and 480 s) aren't exercised.
 - **Cancel and restart.**
@@ -174,7 +175,9 @@ Offline, against a loopback stub of Token Factory: tests never call a real model
 - **The preference's wording, asked as a question:** on A, 5 of 5 citations shown, with PascalCase and Vitest found as
   the fixture record says. Fixture B also ran again; its results stay out of this file.
 - The statement was typed as a question rather than confirmed, so every run recorded "No confirmed preferences from
-  the app (revision 0)". The preference contrast itself is still to run.
+  the app (revision 0)". The preference contrast itself was still to run.
+- The preference contrast then ran on B. B is private, so its result is recorded in NIV-6, not here. D23's checkpoint
+  1 (below) ran B again with every kind of preference.
 
 A real engine driven through `apps/engine/scripts/rpc.ts`:
 - with no key, and with consent off, the run was refused each time with no request;
@@ -182,9 +185,74 @@ A real engine driven through `apps/engine/scripts/rpc.ts`:
 
 *Still pending:*
 - a public pair of repositories for showing the preference contrast in the demonstration: B's live results are
-  recorded privately in NIV-6;
-- the stronger provider probes with a real key;
+  recorded privately in NIV-6 and NIV-11 (counts only);
 - an explanation that reaches Token Factory from the native Windows engine.
+
+*Since done:* the stronger provider probes ran with a real key on 18 October, from the WSL engine (D23's checkpoint 1,
+below).
+
+### Context assembly and the preference lifecycle (D23, NIV-11, NIV-10)
+
+Offline (`pnpm verify`, `test:e2e`), against the loopback stub; no real model:
+- **The D20 sequence, end to end through the UI** (`e2e/d20.spec.ts`):
+  1. A is explained with checked citations.
+  2. A portable preference and one of A's own are confirmed.
+  3. B is explained: B's convention governs over the personal default, and A's own never reaches B's requests.
+  4. A task choice governs that run only; "Currently" keeps B's convention, and `nivra.json` is byte-identical.
+  5. An edit reaches the next request, then a deletion leaves none, and the old result stops quoting the preference.
+- **Precedence.**
+  - Every pair of the five kinds: the higher rank governs.
+  - Ties at each rank are `unresolved`.
+  - A repository claim with no line shown to the model doesn't rank, but is still reported.
+  - Arrival order changes nothing.
+- **Answers.**
+  - Conflicts naming ids the run doesn't have, or fewer than two sides, are turned down twice at most, then dropped and
+    counted; when the answer is due, they are dropped at once.
+  - A repository convention or a suggestion citing no lines is turned down twice at most while there is time; after
+    that, or when the answer is due, the convention decides nothing and the suggestion is dropped.
+  - Suggestions keep only lines the model was shown.
+  - A README can't add a choice, set an intent or name a winner.
+  - A preference or choice asking for `.env` leaves it hidden.
+- **Stored input.**
+  - Two choices that masking made the same still run, as `c1` and `c2`.
+  - A key block split across the question and a choice fails the run before any request, and every run still lists.
+- **Canaries.**
+  - Choices never reach `mastra.db*` or the log: on success, on a provider error echoing them, on a failed model list, or
+    on a small-context refusal.
+  - Model text in conflict topics and suggestions stays in `nivra.db`.
+- **The context view's data** in a run forced by its budget: the budget, why the answer was due, hidden files and the
+  preferences received.
+- **The budget.**
+  - The measured tool definitions match what the stub receives.
+  - A model reporting a 6,000-token context is refused before any chat request.
+- **The lifecycle.**
+  - Replace keeps history, and the next run gets only the replacement.
+  - Keep saves the person's wording as the project's default, with the run's evidence, once even on a double click. It is
+    refused for another project's run, an unknown suggestion, or a project being removed or gone.
+  - Export holds only the chosen scopes, with no ids, folders, history or key, and is written `0600`, leaving no temporary
+    file behind even when the write fails part way. Each source project has a key of its own in the file, so two
+    projects called `app` stay two.
+  - Import brings the file's personal preferences only if the person keeps them in. Leaving them out leaves every other
+    project's snapshot with the same preferences; only the store's revision rises.
+  - Each source project's preferences go only where the person sends them. A destination is suggested only when the
+    name is unambiguous; two same-named sources start left out, whether one or two local projects share the name.
+  - Import skips what is already here, and the preview says so, a repeat within the file included. It refuses a choice
+    that doesn't match the file, reads at most one byte past its size limit, never waits on a pipe, and never quotes a
+    bad file.
+
+*Live, 18 October* (Nate's dev Windows app on its own profile, driven through its UI by Claude at Nate's request; the
+key stayed inside the app; the WSL engine):
+- **Checkpoint 1, fixture B** (private: counts only):
+  - Check Token Factory ran the stronger probes D22 left pending: required tool choice and a forced choice between two
+    tools were honoured, and "Answer schema, forced: valid". It reported a context length of 262,144 tokens.
+  - B had the personal default, a B default and a B decision. Without choices, B's decision governed tests, and "Currently"
+    still named Jest; the repository governed naming. With the choice "Keep Jest for this task", the choice governed tests.
+  - Both runs succeeded, with 8 of 8 and 12 of 12 citations shown, no conflict dropped, and `nivra.json` unchanged.
+- **Checkpoint 2, fixture A:**
+  - The first attempt produced no suggestion, so the prompt now asks for one per convention the findings establish.
+  - Then the default question produced five suggestions, each with lines shown to the model.
+  - "Name component files in PascalCase." was kept as A's default, then replaced. The next run received the replacement,
+    not the replaced preference, and `nivra.json` was unchanged during it.
 
 ### Deferred to a later milestone (kept, not dropped)
 
@@ -255,7 +323,10 @@ The cross-platform foundation is done when all of these were seen to pass:
   - *Seen once, 17 October, with Nate's key:* 28 models, five of them NVIDIA's. Nemotron 3 Super called the tool and
     answered in 2,249 ms (964 tokens in, 65 out). It honoured required tool choice, and a forced tool when it was the
     only one offered. Rate-limit headers were present, and `/models` gave no context length.
-  - Which engine answered wasn't recorded, so reaching both is still pending.
+  - *18 October, from the WSL engine* (D23's checkpoint 1): required tool choice and a forced choice between two tools
+    were honoured, the real answer schema was valid when forced, and `/models?verbose=true` gave a context length of
+    262,144 tokens.
+  - Reaching it from the native engine is still pending.
 - **Clean machine:** the Windows zip runs native hello on a VM or Windows Sandbox with no Visual C++ redistributable
   installed. *Not yet run.*
 

@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { PreferenceScope } from "@nivra/domain";
+import { PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
 import { driveFromMount, folderLabel, sameFolder } from "./paths.ts";
 
@@ -34,8 +35,22 @@ export const ProjectRecord = z.strictObject({
 export type ProjectRecord = z.infer<typeof ProjectRecord>;
 
 /**
- * One preference, in the only canonical copy (D21). Only confirmed ones reach a run; suggestions drawn from a
- * repository, which wait for the person to confirm them, arrive with NIV-10.
+ * Where a kept suggestion came from (D23): the run and the suggestion's place in its result, the HEAD that run started
+ * at, when it finished, and only the lines the model was shown. It stays in the host and never reaches a run.
+ */
+export const PreferenceEvidence = z.strictObject({
+  runId: z.uuid(),
+  suggestion: z.number().int().nonnegative(),
+  headAtStart: z.string().nullable(),
+  ranAt: z.iso.datetime(),
+  citations: z.array(z.strictObject({ path: z.string(), startLine: z.number().int().positive(), endLine: z.number().int().positive() })).max(8),
+});
+export type PreferenceEvidence = z.infer<typeof PreferenceEvidence>;
+
+/**
+ * One preference, in the only canonical copy (D21). Only confirmed ones reach a run. One the person replaced stays as
+ * history, `superseded`, and never reaches a run again (D23). Every field added since the first version has a default,
+ * so a file an older version wrote still reads.
  */
 export const PreferenceRecord = z
   .strictObject({
@@ -44,17 +59,26 @@ export const PreferenceRecord = z
     scope: PreferenceScope,
     /** The project a project preference belongs to; null for a personal one, which applies to every project. */
     projectId: z.uuid().nullable(),
-    status: z.enum(["suggested", "confirmed"]),
-    /** Where it came from: typed in by the person. */
-    origin: z.enum(["entered"]),
+    /** A default, or a project's decision to change its existing conventions (D23). */
+    intent: PreferenceIntent.default("default"),
+    status: z.enum(["suggested", "confirmed", "superseded"]),
+    /** Where it came from: typed in by the person, kept from a run's suggestion, or imported (D23). */
+    origin: z.enum(["entered", "suggested", "imported"]),
     /** 1 when created, raised by every edit. */
     revision: z.number().int().positive(),
     createdAt: z.iso.datetime(),
     updatedAt: z.iso.datetime(),
     /** When the person confirmed this wording; null while it is a suggestion. */
     confirmedAt: z.iso.datetime().nullable(),
+    /** The preference this one replaced, and for a replaced one, what replaced it and when (D23). */
+    supersedes: z.uuid().nullable().default(null),
+    supersededBy: z.uuid().nullable().default(null),
+    supersededAt: z.iso.datetime().nullable().default(null),
+    /** For one kept from a suggestion, where it came from. */
+    evidence: PreferenceEvidence.nullable().default(null),
   })
-  .refine((record) => (record.scope === "project") === (record.projectId !== null), "A project preference names its project, and a personal one names none.");
+  .refine((record) => (record.scope === "project") === (record.projectId !== null), "A project preference names its project, and a personal one names none.")
+  .refine((record) => record.intent === "default" || record.scope === "project", "Only a project's own preference can override its conventions.");
 export type PreferenceRecord = z.infer<typeof PreferenceRecord>;
 
 // Not strict: a key an older version wrote (`selectedTargetId`) is dropped on the next write, not a reason to set the
@@ -132,6 +156,50 @@ export class HostStore {
     writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
     renameRetrying(temp, this.path);
     this.#data = next;
+  }
+}
+
+/**
+ * Writes a file with mode 0600 (on Windows, which keeps only read-only from a mode, the folder's permissions decide who
+ * can read it), atomically: a new temp file, then a rename, so a file that already exists ends up 0600 too.
+ * `writeFileSync`'s mode applies only when it creates the file (D23: preference exports).
+ */
+export function writePrivateFile(path: string, text: string): void {
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  // The temp file never stays behind, whole or cut short by a failed write; one that was already there isn't this one's.
+  try {
+    writeFileSync(temp, text, { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") rmSync(temp, { force: true });
+    throw error;
+  }
+  try {
+    renameRetrying(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+}
+
+/**
+ * Reads a regular file of at most `maxBytes` (D23: preference imports). The file is opened once, and what is checked is
+ * what is read: its type from the open file, and its size by reading at most one byte more than allowed, so a file that
+ * reports no size (in /proc) or grows after being picked is still bounded. Opening never waits for a pipe's writer.
+ */
+export function readSmallFile(path: string, maxBytes: number): { text: string } | { refused: "not-a-file" | "too-large" } {
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  try {
+    if (!fstatSync(fd).isFile()) return { refused: "not-a-file" };
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = readSync(fd, buffer, length, buffer.length - length, null);
+      if (read === 0) break;
+      length += read;
+    }
+    return length > maxBytes ? { refused: "too-large" } : { text: buffer.toString("utf8", 0, length) };
+  } finally {
+    closeSync(fd);
   }
 }
 

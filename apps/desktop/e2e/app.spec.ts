@@ -20,13 +20,17 @@ const EXPECTED_API = [
   "checkWsl",
   "deletePreference",
   "editPreference",
+  "exportPreferences",
   "getAppInfo",
   "getSettings",
   "getWsl",
+  "importPreferences",
+  "keepSuggestion",
   "listEngines",
   "listPreferences",
   "listProjects",
   "openProject",
+  "previewImport",
   "removeProject",
   "restartEngine",
   "runDoctor",
@@ -36,6 +40,7 @@ const EXPECTED_API = [
   "setSharing",
   "startExplain",
   "startHello",
+  "supersedePreference",
 ];
 
 let root: string;

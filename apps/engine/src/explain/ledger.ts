@@ -24,8 +24,10 @@ export interface ContextUsed {
   hits: Array<{ path: string; ranges: Array<[number, number]>; sha256: string[] }>;
   searches: number;
   searchHits: number;
-  /** Characters of tool results delivered, after masking. */
+  /** Characters delivered, after masking: the map and every tool result. */
   chars: number;
+  /** Characters of the map alone, as sent (D23). */
+  mapChars: number;
   /** Files seen with more than one hash: they changed while the run read them. */
   changedFiles: string[];
 }
@@ -34,10 +36,12 @@ export class Ledger {
   readonly entries: LedgerEntry[] = [];
   #searches = 0;
   #chars = 0;
+  #mapChars = 0;
 
   record(step: number, kind: LedgerKind, delivered: readonly Delivered[], chars: number): void {
     for (const item of delivered) this.entries.push({ step, kind, path: item.path, startLine: item.startLine, endLine: item.endLine, sha256: item.sha256 });
     if (kind === "search") this.#searches++;
+    if (kind === "map") this.#mapChars += chars;
     this.#chars += chars;
   }
 
@@ -64,6 +68,7 @@ export class Ledger {
       searches: this.#searches,
       searchHits: this.entries.filter((e) => e.kind === "search").length,
       chars: this.#chars,
+      mapChars: this.#mapChars,
       changedFiles: this.changedFiles(),
     };
   }

@@ -75,7 +75,7 @@ async function expectedFor(targetId: string): Promise<{ ids: string[]; digest: s
   const { projects, preferences } = await page.evaluate(async () => ({ projects: await window.nivra.listProjects(), preferences: await window.nivra.listPreferences() }));
   const projectId = projects.find((p) => p.targetId === targetId)!.id;
   const records = preferences.records.filter((r) => r.status === "confirmed" && (r.scope === "personal" || r.projectId === projectId));
-  const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.revision, r.statement]);
+  const sorted = [...records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((r) => [r.id, r.scope, r.intent, r.revision, r.statement]);
   return { ids: records.map((r) => r.id), digest: createHash("sha256").update(JSON.stringify(sorted)).digest("hex") };
 }
 
