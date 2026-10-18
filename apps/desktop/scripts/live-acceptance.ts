@@ -14,9 +14,9 @@
 // attempt is recorded privately; the public summary is built from listed fields only (acceptance-record.ts). The
 // Windows→WSL session moves the person's ~/.nivra aside, because every Windows profile's WSL engine uses it, and
 // puts it back at the end (acceptance-state.ts). Cleanup is always the last thing a session does.
-import { spawnSync } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,6 +75,7 @@ const output = (command: string, args: string[], cwd = "/") => {
   return result.stdout.replace(/\r/g, "").trim();
 };
 const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+const sameNode = (a: string, b: string) => a.replace(/^v/, "") === b.replace(/^v/, "");
 const windowsBusy = () => {
   const result = run("/mnt/c/Windows/System32/tasklist.exe", ["/FI", "IMAGENAME eq Nivra.exe", "/FO", "CSV", "/NH"]);
   return result.stdout.toLowerCase().includes("nivra.exe") ? ["a Nivra window (Nivra.exe)"] : [];
@@ -148,6 +149,7 @@ const work = join(evidence, "work");
 mkdirSync(privateDir, { recursive: true });
 mkdirSync(work, { recursive: true });
 chmodSync(evidence, 0o700);
+chmodSync(privateDir, 0o700);
 const started = performance.now();
 const elapsed = () => Math.round(performance.now() - started);
 
@@ -174,7 +176,8 @@ const record: RecoveryRecord = {
   acceptanceHomeIno: null,
   profiles: platform === "windows" ? [win(winRoot)] : [local(profiles.main), local(profiles.badKey)],
   engines: [],
-  evidence,
+  // Logs kept at the end and the acceptance WSL home go with the rest of the private evidence.
+  evidence: privateDir,
 };
 const recordFiles = [join(privateDir, "recovery.json"), POINTER];
 const save = (r: RecoveryRecord) => saveRecord(r, recordFiles);
@@ -308,6 +311,8 @@ function identity(): string {
 // ─── Launching ───────────────────────────────────────────────────────────────────────────────────────────────────
 let app: ElectronApplication | null = null;
 let ui: Ui | null = null;
+let appProcess: ChildProcess | null = null;
+const alive = (child: ChildProcess | null) => child !== null && child.exitCode === null && child.signalCode === null;
 const executable = { path: "" };
 const providerFree = () => Object.fromEntries(Object.entries(process.env).filter(([name]) => !/NEBIUS|TOKEN_FACTORY|_API_KEY$/i.test(name))) as Record<string, string>;
 
@@ -321,7 +326,8 @@ async function launch(profile: string, engineHome: string, env: Record<string, s
     timeout: 120_000,
     env: { ...providerFree(), ...env },
   });
-  app.process().stderr?.on("data", (chunk: Buffer) => appendFileSync(join(privateDir, "app-stderr.log"), chunk));
+  appProcess = app.process();
+  appProcess.stderr?.on("data", (chunk: Buffer) => appendFileSync(join(privateDir, "app-stderr.log"), chunk));
   ui = new Ui(app, await app.firstWindow());
   log(`window shown in ${Math.round(performance.now() - at)} ms`);
   const info = await ui.appInfo();
@@ -334,16 +340,22 @@ async function launch(profile: string, engineHome: string, env: Record<string, s
 /** Copies the logs before an engine restart or a relaunch rotates them. */
 function keepLogs(profile: string, phase: string): void {
   const logs = join(local(profile), "logs");
-  if (existsSync(logs)) output("cp", ["-r", logs, join(privateDir, "logs", `${String(elapsed()).padStart(8, "0")}-${phase}`)]);
+  if (existsSync(logs)) cpSync(logs, join(privateDir, "logs", `${String(elapsed()).padStart(8, "0")}-${phase}`), { recursive: true });
 }
 
-async function quit(profile: string, phase: string): Promise<void> {
-  if (!app) return;
-  await app.close().catch(() => undefined);
+async function quit(profile: string, phase: string): Promise<number> {
+  if (!app) return 0;
+  const at = performance.now();
+  // How long a quit takes is evidence, not a limit: with a held run it has taken up to a minute.
+  await Promise.race([app.close().catch(() => undefined), sleep(120_000)]);
+  if (alive(appProcess)) throw new Error("the app didn't quit within 120 s");
+  const took = Math.round(performance.now() - at);
+  log(`the app quit in ${took} ms (${phase})`);
   app = null;
   ui = null;
   await waitFor(() => record.engines.every((e) => !existsSync(`/proc/${e.pid}`)), 30_000, "this session's engines to exit");
   keepLogs(profile, phase);
+  return took;
 }
 
 const target = platform === "windows" ? `wsl:${distro}` : "local";
@@ -457,7 +469,7 @@ async function rehearsal(): Promise<void> {
   const freshBefore = platform === "windows" ? !existsSync(runtimeFolder) : null;
   const a = await ui!.pick(pathFor(fixtureA), target);
   const engine = await engineOnline("the rehearsal");
-  expect("identity.engine", "none", engine.runtimeHash === linuxRuntime.contentHash && engine.node === `v${linuxRuntime.node}` && engine.protocolVersion === linuxRuntime.protocolVersion, `runtime ${engine.runtimeHash}, Node ${engine.node}, protocol ${engine.protocolVersion}`);
+  expect("identity.engine", "none", engine.runtimeHash === linuxRuntime.contentHash && sameNode(engine.node, linuxRuntime.node) && engine.protocolVersion === linuxRuntime.protocolVersion, `runtime ${engine.runtimeHash}, Node ${engine.node}, protocol ${engine.protocolVersion}`);
   if (platform === "windows") expect("identity.provisioned", "none", freshBefore === true && existsSync(runtimeFolder), `runtime ${linuxRuntime.contentHash} installed into a fresh ${homePath}`);
 
   expect("consent.refused", "A", !(await ui!.refuseConsent()) && !(await ui!.projects()).find((p) => p.id === a.id)!.sharing.modelContext, "Cancel in the consent dialog started nothing, and sharing stayed off");
@@ -503,12 +515,12 @@ async function rehearsal(): Promise<void> {
   expect("engine.kill-held", "A", k.status === "failed" && k.events.at(-1)?.type === "run.interrupted" && starts === 1 && revived.instanceId !== victim.instanceId, `held run ${k.status}, last event ${k.events.at(-1)?.type}: "${k.events.at(-1)?.message ?? ""}"; started ${starts} time(s)`);
 
   const closed = await hello(a, "A", 60);
-  await quit(profiles.main, "app-close");
+  const quitMs = await quit(profiles.main, "app-close");
   const copy = join(privateDir, "db", `${String(elapsed()).padStart(8, "0")}-app-close`);
   copyRunStore(engineHomeNow(), copy);
   const rows = readRuns(copy);
   const row = rows.find((r) => r.id === closed);
-  expect("app.closed-run", "A", row !== undefined && row.status !== "running", `the held run ended ${row?.status ?? "missing"}: "${row?.lastEvent?.message ?? ""}"`);
+  expect("app.closed-run", "A", row !== undefined && row.status !== "running", `the held run ended ${row?.status ?? "missing"}: "${row?.lastEvent?.message ?? ""}"; the app took ${quitMs} ms to quit`);
   expect("app.no-running", "none", rows.every((r) => r.status !== "running" && r.status !== "queued"), `${rows.length} runs in the store, none left running`);
 
   await launch(profiles.main, profiles.engine);
@@ -540,7 +552,7 @@ async function live(): Promise<void> {
   expect("identity.app-info", "none", info.packaged && info.version === buildInfo.version && info.electron === buildInfo.electron.electron, `packaged ${info.packaged}, version ${info.version}, Electron ${info.electron}`);
   const a = await ui!.pick(pathFor(fixtureA), target);
   const engine = await engineOnline("the live session");
-  expect("identity.engine", "none", engine.runtimeHash === linuxRuntime.contentHash && engine.node === `v${linuxRuntime.node}`, `runtime ${engine.runtimeHash}, Node ${engine.node}`);
+  expect("identity.engine", "none", engine.runtimeHash === linuxRuntime.contentHash && sameNode(engine.node, linuxRuntime.node) && engine.protocolVersion === linuxRuntime.protocolVersion, `runtime ${engine.runtimeHash}, Node ${engine.node}, protocol ${engine.protocolVersion}`);
   const headA = acceptance.fixtures.A!.head;
 
   // 1. The key: typed by the person; this only waits for Settings to say one is saved.
@@ -716,12 +728,12 @@ async function live(): Promise<void> {
     }
     const prefsBeforeQuit = JSON.stringify((await ui!.preferences()).records);
     const projectsBefore = JSON.stringify((await ui!.projects()).map((p) => [p.id, p.label, p.sharing.modelContext]));
-    await quit(profiles.main, "app-restart");
+    const quitMs = await quit(profiles.main, "app-restart");
     const copy = join(privateDir, "db", `${String(elapsed()).padStart(8, "0")}-app-restart`);
     copyRunStore(engineHomeNow(), copy);
     const rows = readRuns(copy);
     const row = rows.find((r) => r.id === runId);
-    expect("app.closed-run", "A", row !== undefined && row.status !== "running", `the run ended ${row?.status ?? "missing"}: "${row?.lastEvent?.message ?? ""}"`, attempt);
+    expect("app.closed-run", "A", row !== undefined && row.status !== "running", `the run ended ${row?.status ?? "missing"}: "${row?.lastEvent?.message ?? ""}"; the app took ${quitMs} ms to quit`, attempt);
     expect("app.no-running", "none", rows.every((r) => r.status !== "running" && r.status !== "queued"), `${rows.length} runs in the store, none left running`, attempt);
     await launch(profiles.main, profiles.engine, values.network ? { HTTPS_PROXY: "http://127.0.0.1:9", https_proxy: "http://127.0.0.1:9", NO_PROXY: "" } : {});
     // With several projects, none is chosen at start, and an engine starts only for a chosen one (D17).
@@ -798,9 +810,14 @@ try {
     const removed = await Promise.race([openUi.setKey(null).then(() => true, () => false), sleep(10_000).then(() => false)]);
     log(removed ? "removed the key from the open profile" : "the open app didn't answer; its profile is deleted below, with any key");
   }
-  if (openApp) {
-    await Promise.race([openApp.close().catch(() => undefined), sleep(15_000)]);
-    openApp.process().kill("SIGKILL");
+  if (openApp) await Promise.race([openApp.close().catch(() => undefined), sleep(15_000)]);
+  if (alive(appProcess)) {
+    try {
+      appProcess!.kill("SIGKILL");
+      log("killed the app, which didn't quit");
+    } catch (error) {
+      log(`couldn't kill the app: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   try {
     const notes = await finishSession(record, save, { busy: platform === "windows" ? windowsBusy : undefined, log });
