@@ -60,6 +60,7 @@ const { values, positionals } = parseArgs({
     network: { type: "boolean", default: false },
     "electron-arg": { type: "string", multiple: true, default: [] },
     recover: { type: "boolean", default: false },
+    summarize: { type: "string" },
     "dry-run": { type: "boolean", default: false },
   },
 });
@@ -94,6 +95,32 @@ if (values.recover) {
   } catch (error) {
     stop(`${error instanceof Error ? error.message : String(error)}\nBy hand: see restoreByHand in ${file}.`);
   }
+}
+
+// ─── A summary again ─────────────────────────────────────────────────────────────────────────────────────────────
+// Rebuilds a session's public files from its private record, after the summary itself changed. A run's kind is taken
+// from its saved events where the record has none (an interruption ends with run.interrupted, not run.failed).
+if (values.summarize) {
+  const dir = resolve(values.summarize);
+  const saved = JSON.parse(readFileSync(join(dir, "private", "record.json"), "utf8")) as AcceptanceRecord;
+  for (const entry of saved.runs) {
+    const file = join(dir, "private", "runs", `${entry.runId}.json`);
+    if (entry.failureKind === null && existsSync(file)) {
+      const events = (JSON.parse(readFileSync(file, "utf8")) as { events: RunEvent[] }).events;
+      if (events.at(-1)?.type === "run.interrupted") entry.failureKind = "interrupted";
+    }
+  }
+  const file = values["fixture-b-file"];
+  const b = file ? realpathSync(readFileSync(file, "utf8").trim()) : null;
+  const ids: PrivateIdentifiers = b
+    ? { paths: [b, `\\\\wsl.localhost\\${values.distro}${b.replace(/\//g, "\\")}`], label: basename(b), name: basename(b), remote: run("git", ["-C", b, "remote", "get-url", "origin"]).stdout.trim() || null, head: output("git", ["-C", b, "rev-parse", "HEAD"]) }
+    : { paths: [], label: "", name: "", remote: null, head: "" };
+  if (saved.fixtures.B && !b) stop("This session used fixture B: pass --fixture-b-file, so its identifiers can be checked for in what would be published.");
+  const { json, markdown } = publicFiles(saved, ids);
+  writeFileSync(join(dir, "public-summary.json"), json);
+  writeFileSync(join(dir, "public-summary.md"), markdown);
+  console.log(`Rewrote ${join(dir, "public-summary.json")} and .md.`);
+  process.exit(0);
 }
 
 // ─── Preflight ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -398,7 +425,7 @@ async function observe(runId: string, fixture: Fixture, purpose: Purpose, attemp
     purpose,
     attempt,
     status: summary.status,
-    failureKind: (failed?.data?.["kind"] as string | undefined) ?? null,
+    failureKind: (failed?.data?.["kind"] as string | undefined) ?? (events.at(-1)?.type === "run.interrupted" ? "interrupted" : null),
     model: summary.route?.model ?? null,
     endpoint: summary.route?.endpoint ?? null,
     durationMs: summary.durationMs,

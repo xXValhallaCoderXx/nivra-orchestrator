@@ -192,6 +192,7 @@ const FAILURE_KINDS = new Set([
   "malformed",
   "cancelled",
   "internal",
+  "interrupted",
 ]);
 const ENDPOINTS = new Set(["token-factory", "loopback-test"]);
 const REASONS = new Set(["choice", "override", "repository", "project-default", "personal-default", "unresolved"]);
@@ -262,7 +263,18 @@ export interface PublicSummary {
   criteria: Array<{ criterion: Criterion; outcome: Outcome; checks: number; attempts: number }>;
   checks: Array<{ id: CheckId; criterion: Criterion; kind: Kind; fixture: Fixture; attempt: number; outcome: Outcome }>;
   runs: Array<Omit<RunEntry, "runId">>;
-  totals: { runs: number; attempts: number; inputTokens: number | null; outputTokens: number | null; calls: number; durationMs: number };
+  totals: {
+    runs: number;
+    attempts: number;
+    /** Exact only when every run reported; otherwise null, with what was reported as a lower bound. */
+    inputTokens: number | null;
+    outputTokens: number | null;
+    reportedInputTokens: number;
+    reportedOutputTokens: number;
+    unreportedRuns: number;
+    calls: number;
+    durationMs: number;
+  };
   commands: string[];
 }
 
@@ -341,6 +353,9 @@ export function publicSummary(record: AcceptanceRecord): PublicSummary {
       // A run with no usage made no model call; one whose tokens weren't reported makes the total unknown.
       inputTokens: sum((run) => (run.usage ? run.usage.inputTokens : 0)),
       outputTokens: sum((run) => (run.usage ? run.usage.outputTokens : 0)),
+      reportedInputTokens: runs.reduce((total, run) => total + (run.usage?.inputTokens ?? 0), 0),
+      reportedOutputTokens: runs.reduce((total, run) => total + (run.usage?.outputTokens ?? 0), 0),
+      unreportedRuns: runs.filter((run) => run.usage !== null && (run.usage.inputTokens === null || run.usage.outputTokens === null)).length,
       calls: runs.reduce((total, run) => total + (run.usage?.calls ?? 0), 0),
       durationMs: runs.reduce((total, run) => total + (run.durationMs ?? 0), 0),
     },
@@ -406,7 +421,11 @@ export function renderMarkdown(summary: PublicSummary): string {
         `| ${r.fixture} | ${r.purpose} | ${r.attempt} | ${r.status} | ${r.failureKind ?? "—"} | ${r.model ?? "—"} | ${seconds(r.durationMs)} | ${r.usage ? `${count(r.usage.inputTokens)} / ${count(r.usage.outputTokens)}` : "—"} | ${r.usage?.calls ?? "—"} | ${r.citations ? `${r.citations.checked} of ${r.citations.total}` : "—"} | ${r.conflicts ? Object.entries(r.conflicts).map(([reason, n]) => `${reason} ${n}`).join(", ") || "none" : "—"} |`,
     ),
     "",
-    `Totals: ${summary.totals.runs} runs over ${summary.totals.attempts} attempts; ${count(summary.totals.inputTokens)} tokens in and ${count(summary.totals.outputTokens)} out over ${summary.totals.calls} calls; ${seconds(summary.totals.durationMs)} of run time. Failed and retried attempts are included.`,
+    `Totals: ${summary.totals.runs} runs over ${summary.totals.attempts} attempts; ${
+      summary.totals.inputTokens !== null && summary.totals.outputTokens !== null
+        ? `${count(summary.totals.inputTokens)} tokens in and ${count(summary.totals.outputTokens)} out`
+        : `at least ${count(summary.totals.reportedInputTokens)} tokens in and ${count(summary.totals.reportedOutputTokens)} out (${summary.totals.unreportedRuns} ${summary.totals.unreportedRuns === 1 ? "run" : "runs"} cut short didn't report)`
+    } over ${summary.totals.calls} calls; ${seconds(summary.totals.durationMs)} of run time. Failed and retried attempts are included.`,
     "",
     "Commands:",
     ...summary.commands.map((command) => `- \`${command}\``),

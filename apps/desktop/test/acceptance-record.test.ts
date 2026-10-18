@@ -128,7 +128,7 @@ describe("the acceptance record and its public summary (NIV-14)", () => {
 
   it("totals a cost that wasn't reported as unknown, never as zero, and never publishes a model id outside nvidia/", () => {
     const summary = publicSummary({ ...record(), runs: [run("A", { usage: { inputTokens: null, outputTokens: null, calls: 2, reportedCalls: 1 }, model: "someone/else" })] });
-    assert.deepEqual([summary.totals.inputTokens, summary.runs[0]!.model], [null, "unrecognised"]);
+    assert.deepEqual([summary.totals.inputTokens, summary.totals.reportedInputTokens, summary.totals.unreportedRuns, summary.runs[0]!.model], [null, 0, 1, "unrecognised"]);
   });
 
   it("works out a conflict's reason from its sides, independently of the engine", () => {
