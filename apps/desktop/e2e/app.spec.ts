@@ -108,6 +108,14 @@ test("a repository picked in the native dialog runs on its folder's engine, runs
   await expect(page.getByTestId("hello-status")).toHaveText("cancelled");
 });
 
+test("a key holding a character no key has is refused when it is saved, saying why, and nothing is saved", async () => {
+  for (const key of ["test-key-\u200b0123456789", "test-key-01234\n56789", "test-key 0123456789"]) {
+    const refusal = await page.evaluate((value) => window.nivra.setNebiusKey(value).then(() => null, (error: Error) => error.message), key);
+    expect(refusal).toContain("so it wasn't saved. Copy the key again, then save it.");
+  }
+  expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");
+});
+
 test("Doctor reports git and the execution boundaries", async () => {
   await page.getByTestId("doctor-run").click();
   await expect(page.getByTestId("doctor-report")).toContainText("Git");
