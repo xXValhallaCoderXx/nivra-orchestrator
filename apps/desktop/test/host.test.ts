@@ -339,6 +339,31 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     ]);
   });
 
+  it("exports what the person chose without the saved key, and imports it into another profile as they map it (D23)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    const { host, ids, keys } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
+    keys.current = { NEBIUS_API_KEY: "test-key-0123456789" };
+    const leaky = host.addPreference({ statement: "Call the API with test-key-0123456789", scope: "personal", projectId: null });
+    await assert.rejects(host.exportPreferences({ personal: true, projectIds: [] }), /holds your saved Nebius key, so nothing was exported/);
+    host.deletePreference(leaky.id);
+    host.addPreference({ statement: "Prefer named exports", scope: "personal", projectId: null });
+    host.addPreference({ statement: "Replace Jest with Vitest", scope: "project", projectId: ids[0]!, intent: "override" });
+    const { text, count } = await host.exportPreferences({ personal: true, projectIds: [ids[0]!] });
+    assert.equal(count, 2);
+
+    // Another profile, with a project of the same name: the preview suggests it, and the person's mapping decides.
+    const other = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "elsewhere", "native")) }] });
+    const preview = other.host.previewImport(text);
+    assert.deepEqual(preview.entries.map((e) => [e.scope, e.matches.map((m) => m.label), e.duplicate]), [["personal", [], false], ["project", ["native"], false]]);
+    assert.deepEqual(other.host.importPreferences(preview.previewId, [null, other.ids[0]!]), { added: 2, skipped: 0 });
+    assert.deepEqual(other.host.preferences().records.map((r) => [r.statement, r.scope, r.intent, r.origin, r.projectId]), [
+      ["Prefer named exports", "personal", "default", "imported", null],
+      ["Replace Jest with Vitest", "project", "override", "imported", other.ids[0]],
+    ]);
+    assert.throws(() => other.host.importPreferences(preview.previewId, [null, null]), /no longer waiting/);
+  });
+
   it("adds each picked folder for the engine that owns it, and refuses what can't run, saying why", async () => {
     const { host } = makeHost();
     const linux = await host.addPicked("\\\\wsl.localhost\\test\\home\\odin\\repo ü%#");

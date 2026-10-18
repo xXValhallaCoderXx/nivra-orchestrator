@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { MAX_CHOICE_CHARS, MAX_CHOICES, MAX_PREFERENCES, type PreferenceIntent, type PreferenceScope, type PreferenceSnapshot } from "@nivra/domain";
+import { MAX_CHOICE_CHARS, MAX_CHOICES, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, type PreferenceSnapshot } from "@nivra/domain";
+import { z } from "zod";
 import type { HostData, PreferenceEvidence, PreferenceRecord } from "./host-store.ts";
 
 /**
@@ -203,4 +204,140 @@ export function snapshotFor(data: HostData, projectId: string): PreferenceSnapsh
     throw new Error(`This project has ${records.length} confirmed preferences, and a run can carry ${MAX_PREFERENCES}. Delete some under Preferences, then start the run again.`);
   }
   return { revision: data.preferencesRevision, records };
+}
+
+/**
+ * A file of exported preferences (D23): each one's wording, scope, the label of its project and its intent. No ids,
+ * revisions or evidence: the file leaves the app, and an import makes new records.
+ */
+export const PreferenceExport = z.strictObject({
+  format: z.literal("nivra-preferences"),
+  version: z.literal(1),
+  exportedAt: z.iso.datetime(),
+  preferences: z
+    .array(
+      z
+        .strictObject({
+          statement: z.string().min(1).max(MAX_STATEMENT),
+          scope: PreferenceScope,
+          /** The label of the project a project preference belonged to; null for a personal one. */
+          project: z.string().min(1).max(200).nullable(),
+          intent: PreferenceIntent,
+        })
+        .refine((entry) => (entry.scope === "project") === (entry.project !== null))
+        .refine((entry) => entry.intent === "default" || entry.scope === "project"),
+    )
+    .max(MAX_PREFERENCES),
+});
+export type PreferenceExport = z.infer<typeof PreferenceExport>;
+
+/** The scopes an export holds: personal preferences, and each chosen project's own. */
+export interface ExportScopes {
+  personal: boolean;
+  projectIds: readonly string[];
+}
+
+/**
+ * An export of the confirmed preferences in the scopes the person chose (D23). A statement that holds a saved key is
+ * refused rather than written to a file that leaves the app.
+ */
+export function buildExport(data: HostData, scopes: ExportScopes, secrets: readonly string[], now: Date): { text: string; count: number } {
+  const chosen = new Set(scopes.projectIds);
+  const records = data.preferences.filter((p) => p.status === "confirmed" && (p.scope === "personal" ? scopes.personal : p.projectId !== null && chosen.has(p.projectId)));
+  if (records.length === 0) throw new Error("There is nothing to export in the scopes you chose. Choose your personal preferences, or a project with preferences of its own, then export again.");
+  if (records.some((p) => secrets.some((secret) => secret.length > 0 && p.statement.includes(secret)))) {
+    throw new Error("A preference holds your saved Nebius key, so nothing was exported. Edit that preference to take the key out, then export again.");
+  }
+  const label = (projectId: string | null) => data.projects.find((p) => p.id === projectId)?.label ?? null;
+  const file = PreferenceExport.parse({
+    format: "nivra-preferences",
+    version: 1,
+    exportedAt: now.toISOString(),
+    preferences: records.map((p) => ({ statement: p.statement, scope: p.scope, project: p.scope === "project" ? label(p.projectId) : null, intent: p.intent })),
+  });
+  return { text: `${JSON.stringify(file, null, 2)}\n`, count: records.length };
+}
+
+const NOT_AN_EXPORT = "That file isn't a Nivra preferences export, or it was changed since it was exported, so nothing was imported. Choose a file Nivra exported.";
+
+/** Reads an export (D23). A file that isn't one is refused in Nivra's words, never quoting it. */
+export function parseImport(text: string): PreferenceExport {
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(NOT_AN_EXPORT);
+  }
+  const parsed = PreferenceExport.safeParse(json);
+  if (!parsed.success) throw new Error(NOT_AN_EXPORT);
+  return parsed.data;
+}
+
+/** Whether the store already holds this preference, in use, for this project. */
+const alreadyHere = (data: HostData, entry: PreferenceExport["preferences"][number], projectId: string | null) =>
+  data.preferences.some((p) => p.status === "confirmed" && p.statement === entry.statement.trim() && p.scope === entry.scope && p.projectId === projectId && p.intent === entry.intent);
+
+/**
+ * What importing would do (D23): for each entry, the local projects whose label matches its project's, and whether it
+ * is already here. A project preference goes where the person says: one match is suggested; none or several are theirs
+ * to choose.
+ */
+export function previewImport(data: HostData, file: PreferenceExport): Array<PreferenceExport["preferences"][number] & { matches: string[]; duplicate: boolean }> {
+  return file.preferences.map((entry) => {
+    const matches = entry.scope === "project" ? data.projects.filter((p) => p.label === entry.project).map((p) => p.id) : [];
+    const duplicate = entry.scope === "personal" ? alreadyHere(data, entry, null) : matches.length === 1 && alreadyHere(data, entry, matches[0]!);
+    return { ...entry, matches, duplicate };
+  });
+}
+
+/**
+ * Adds an export's preferences (D23). `mapping` holds, for each entry, the local project a project preference goes to,
+ * or null to skip it; a personal entry ignores it. Each project is checked against the list as it is now; preferences
+ * already here are skipped; the limit applies to the whole import. Added ones are confirmed, `origin: imported`, and
+ * the store's revision rises once.
+ */
+export function applyImport(data: HostData, file: PreferenceExport, mapping: ReadonlyArray<string | null>, now: Date): { data: HostData; added: number; skipped: number } {
+  if (mapping.length !== file.preferences.length) throw new Error("The import's choices don't match the file. Preview the file again, then import.");
+  const at = now.toISOString();
+  const added: PreferenceRecord[] = [];
+  let skipped = 0;
+  file.preferences.forEach((entry, index) => {
+    const projectId = entry.scope === "project" ? (mapping[index] ?? null) : null;
+    if (entry.scope === "project" && projectId === null) {
+      skipped++;
+      return;
+    }
+    if (projectId !== null && !data.projects.some((p) => p.id === projectId)) throw new Error("A project chosen for the import is no longer in the list. Preview the file again, then import.");
+    const statement = cleanStatement(entry.statement);
+    const intent = checkIntent(entry.scope, entry.intent);
+    const twice = added.some((p) => p.statement === statement && p.scope === entry.scope && p.projectId === projectId && p.intent === intent);
+    if (twice || alreadyHere(data, entry, projectId)) {
+      skipped++;
+      return;
+    }
+    added.push({
+      id: randomUUID(),
+      statement,
+      scope: entry.scope,
+      projectId,
+      intent,
+      status: "confirmed",
+      origin: "imported",
+      revision: 1,
+      createdAt: at,
+      updatedAt: at,
+      confirmedAt: at,
+      supersedes: null,
+      supersededBy: null,
+      supersededAt: null,
+      evidence: null,
+    });
+  });
+  if (data.preferences.length + added.length > MAX_PREFERENCES) {
+    throw new Error(
+      `Importing would take Nivra past ${MAX_PREFERENCES} preferences, replaced ones included (${data.preferences.length} now, ${added.length} to add). Delete some, or skip some of the file's, then import again.`,
+    );
+  }
+  if (added.length === 0) return { data, added: 0, skipped };
+  return { data: { ...data, preferences: [...data.preferences, ...added], preferencesRevision: data.preferencesRevision + 1 }, added: added.length, skipped };
 }

@@ -187,6 +187,33 @@ test("a replaced preference stays as history, and the next run gets only its rep
   expect([received.count, received.records.map((r) => r.id), received.digest]).toEqual([1, expected.ids, expected.digest]);
 });
 
+test("preferences go to a file the person picks and come back with the projects they choose, never with ids or history (D23)", async () => {
+  const file = join(root, "exports", "nivra-preferences.json");
+  mkdirSync(dirname(file), { recursive: true });
+  await app.evaluate(({ dialog }, path) => {
+    dialog.showSaveDialog = (async () => ({ canceled: false, filePath: path })) as typeof dialog.showSaveDialog;
+    dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
+  }, file);
+
+  await page.getByTestId("preference-export").click();
+  await page.getByTestId("preference-export-scopes").getByLabel("alpha's own (1)").check();
+  await page.getByTestId("preference-export-save").click();
+  await expect(page.getByTestId("preference-transfer")).toHaveText("Exported 2 preferences to nivra-preferences.json.");
+  const exported = JSON.parse(readFileSync(file, "utf8")) as { format: string; preferences: Array<{ statement: string; scope: string; project: string | null; intent: string }> };
+  expect([exported.format, exported.preferences.map((p) => [p.scope, p.project, p.intent])]).toEqual(["nivra-preferences", [["project", "alpha", "override"], ["personal", null, "default"]]]);
+  expect(/"id"|revision|Use tabs/.test(readFileSync(file, "utf8"))).toBe(false);
+
+  // The personal one goes; importing brings it back, and skips alpha's, which is still here.
+  await page.getByTestId("preference-row").filter({ hasText: "Use two spaces for indentation" }).getByTestId("preference-delete").click();
+  await expect(page.getByTestId("preference-list")).not.toContainText("Use two spaces for indentation");
+  await page.getByTestId("preference-import").click();
+  await expect(page.getByTestId("preference-import-entry")).toHaveCount(2);
+  await expect(page.getByTestId("preference-import-entry").filter({ hasText: ALPHA_OWN })).toContainText("(already here: skipped)");
+  await page.getByTestId("preference-import-save").click();
+  await expect(page.getByTestId("preference-transfer")).toHaveText("Imported 1 preference; 1 skipped.");
+  await expect(page.getByTestId("preference-row").filter({ hasText: "Use two spaces for indentation" }).getByTestId("preference-revision")).toContainText("imported");
+});
+
 test("only the app's own store keeps preference text: nothing in the engine's databases or the logs", async () => {
   await app.close();
   const holding = (dir: string) =>

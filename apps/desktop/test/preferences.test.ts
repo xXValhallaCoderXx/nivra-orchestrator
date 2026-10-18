@@ -5,7 +5,20 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { MAX_PREFERENCES } from "@nivra/domain";
 import { HostStore, NO_SHARING, type HostData } from "../src/main/host-store.ts";
-import { addPreference, cleanChoices, deletePreference, editPreference, keepSuggestion, removeProjectPreferences, snapshotFor, supersedePreference } from "../src/main/preferences.ts";
+import {
+  addPreference,
+  applyImport,
+  buildExport,
+  cleanChoices,
+  deletePreference,
+  editPreference,
+  keepSuggestion,
+  parseImport,
+  previewImport,
+  removeProjectPreferences,
+  snapshotFor,
+  supersedePreference,
+} from "../src/main/preferences.ts";
 
 const dirs: string[] = [];
 after(() => {
@@ -171,4 +184,79 @@ describe("preferences (D21)", () => {
     assert.equal(reopened.data.preferencesRevision, 1);
     assert.equal(readFileSync(path, "utf8").includes("Prefer named exports ü%#"), true);
   });
+
+  it("exports only the confirmed preferences in the scopes chosen, by wording, scope, project label and intent (D23)", () => {
+    const { data, ids } = withPreferences(["Prefer named exports", null], ["Tests in __tests__", A], ["Tests next to the code", B]);
+    const replaced = supersedePreference(data, ids[0]!, { statement: "Prefer default exports", intent: "default" }, later).data;
+    const { text, count } = buildExport(replaced, { personal: true, projectIds: [A] }, ["sk-saved-key-0123456789"], later);
+    const file = JSON.parse(text) as { format: string; version: number; preferences: unknown[] };
+    assert.deepEqual([count, file.format, file.version], [2, "nivra-preferences", 1]);
+    assert.deepEqual(file.preferences, [
+      { statement: "Tests in __tests__", scope: "project", project: "a", intent: "default" },
+      { statement: "Prefer default exports", scope: "personal", project: null, intent: "default" },
+    ]);
+    assert.equal(text.includes(ids[0]!) || text.includes('"id"') || text.includes("revision") || text.includes("Prefer named exports"), false, "no ids, revisions or history");
+    assert.throws(() => buildExport(replaced, { personal: false, projectIds: [] }, [], later), /nothing to export in the scopes you chose/);
+  });
+
+  it("refuses to export a statement that holds the saved key", () => {
+    const { data } = withPreferences(["Use the key sk-saved-key-0123456789 for tests", null]);
+    assert.throws(() => buildExport(data, { personal: true, projectIds: [] }, ["sk-saved-key-0123456789"], later), /holds your saved Nebius key, so nothing was exported/);
+  });
+
+  it("refuses a file that isn't an export without quoting it", () => {
+    const secret = `private-${"x".repeat(20)}`;
+    for (const text of [`{"format":"something-else","secret":"${secret}"}`, `not json ${secret}`, JSON.stringify({ format: "nivra-preferences", version: 1, exportedAt: now.toISOString(), preferences: [{ statement: secret, scope: "personal", project: "a", intent: "default" }] })]) {
+      assert.throws(
+        () => parseImport(text),
+        (error: unknown) => error instanceof Error && /isn't a Nivra preferences export/.test(error.message) && !error.message.includes(secret),
+      );
+    }
+  });
+
+  it("previews an import: projects by matching label, and what is already here", () => {
+    const { data } = withPreferences(["Prefer named exports", null]);
+    const twinB = { ...data, projects: [...data.projects, project("33333333-3333-4333-8333-333333333333", "/elsewhere/b")] };
+    const file = parseImport(
+      JSON.stringify({
+        format: "nivra-preferences",
+        version: 1,
+        exportedAt: now.toISOString(),
+        preferences: [
+          { statement: "Prefer named exports", scope: "personal", project: null, intent: "default" },
+          { statement: "Tests in __tests__", scope: "project", project: "a", intent: "default" },
+          { statement: "Replace Jest with Vitest", scope: "project", project: "b", intent: "override" },
+          { statement: "Use Tailwind", scope: "project", project: "gone", intent: "default" },
+        ],
+      }),
+    );
+    assert.deepEqual(previewImport(twinB, file).map((e) => [e.matches.length, e.duplicate]), [[0, true], [1, false], [2, false], [0, false]]);
+  });
+
+  it("imports with the person's choice of project for each, skipping what is already here, as confirmed and imported (D23)", () => {
+    const { data } = withPreferences(["Prefer named exports", null]);
+    const file = parseImport(
+      JSON.stringify({
+        format: "nivra-preferences",
+        version: 1,
+        exportedAt: now.toISOString(),
+        preferences: [
+          { statement: "Prefer named exports", scope: "personal", project: null, intent: "default" },
+          { statement: "Tests in __tests__", scope: "project", project: "a", intent: "default" },
+          { statement: "Replace Jest with Vitest", scope: "project", project: "b", intent: "override" },
+        ],
+      }),
+    );
+    const imported = applyImport(data, file, [null, A, null], later);
+    assert.deepEqual([imported.added, imported.skipped, imported.data.preferencesRevision], [1, 2, data.preferencesRevision + 1]);
+    const added = imported.data.preferences.at(-1)!;
+    assert.deepEqual([added.statement, added.scope, added.projectId, added.intent, added.status, added.origin, added.confirmedAt], ["Tests in __tests__", "project", A, "default", "confirmed", "imported", later.toISOString()]);
+    assert.equal(applyImport(imported.data, file, [null, A, null], later).data, imported.data, "importing it again adds nothing");
+    assert.throws(() => applyImport(data, file, [null, "33333333-3333-4333-8333-333333333333", null], later), /no longer in the list/);
+    assert.throws(() => applyImport(data, file, [null], later), /don't match the file/);
+    let full = data;
+    for (let i = 1; i < MAX_PREFERENCES; i++) full = addPreference(full, { statement: `Preference ${i}`, scope: "personal", projectId: null }, now).data;
+    assert.throws(() => applyImport(full, file, [null, A, B], later), /past 50 preferences, replaced ones included \(50 now, 2 to add\)/);
+  });
 });
+

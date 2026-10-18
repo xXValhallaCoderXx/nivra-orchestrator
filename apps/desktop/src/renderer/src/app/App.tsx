@@ -95,7 +95,7 @@ export function App() {
               onSharingChanged={() => setProjectsVersion((n) => n + 1)}
               onPreferencesChanged={() => setPreferencesVersion((n) => n + 1)}
             />
-            <Preferences project={selected} view={preferences.value} onChanged={() => setPreferencesVersion((n) => n + 1)} />
+            <Preferences project={selected} projects={list} view={preferences.value} onChanged={() => setPreferencesVersion((n) => n + 1)} />
             <HelloRun
               key={`hello:${selected?.id ?? "none"}`}
               project={selected}

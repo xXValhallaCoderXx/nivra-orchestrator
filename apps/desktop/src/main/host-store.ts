@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { PreferenceIntent, PreferenceScope } from "@nivra/domain";
@@ -156,6 +157,16 @@ export class HostStore {
     renameRetrying(temp, this.path);
     this.#data = next;
   }
+}
+
+/**
+ * Writes a file only its owner can read (0600), atomically: a new temp file, then a rename, so a file that already
+ * exists ends up 0600 too. `writeFileSync`'s mode applies only when it creates the file (D23: preference exports).
+ */
+export function writePrivateFile(path: string, text: string): void {
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temp, text, { mode: 0o600, flag: "wx" });
+  renameRetrying(temp, path);
 }
 
 /**

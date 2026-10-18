@@ -1,13 +1,13 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir, release } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { PreferenceIntent, PreferenceScope } from "@nivra/domain";
+import { MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
-import { IPC, type AppInfo, type SettingsView } from "../shared/ipc.ts";
+import { IPC, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
-import { HostStore } from "./host-store.ts";
+import { HostStore, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
 import { runtimeIn, type RuntimeLayout } from "./targets/local.ts";
 import { targetFactory } from "./targets/registry.ts";
@@ -128,6 +128,29 @@ function start(): void {
   handle(IPC.keepSuggestion, z.tuple([z.uuid(), RunId, z.number().int().nonnegative().max(100), z.string().max(2_000)]), (_event, projectId, runId, index, statement) =>
     host.keepSuggestion(projectId, runId, index, statement),
   );
+  // Export and import (D23): the files are chosen in main's own dialogs, and the renderer never sends a path. An export
+  // is written only its owner can read; an import file is read only up to a size no export of 50 preferences reaches.
+  const MAX_IMPORT_BYTES = 256 * 1024;
+  const preferenceFiles = [{ name: "Nivra preferences", extensions: ["json"] }];
+  handle(IPC.exportPreferences, z.tuple([z.strictObject({ personal: z.boolean(), projectIds: z.array(z.uuid()).max(500) })]), async (event, scopes): Promise<ExportResult> => {
+    const { text, count } = await host.exportPreferences(scopes);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const options = { title: "Export preferences", defaultPath: "nivra-preferences.json", filters: preferenceFiles };
+    const result = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return { status: "cancelled" };
+    writePrivateFile(result.filePath, text);
+    return { status: "saved", count, fileName: basename(result.filePath) };
+  });
+  handle(IPC.previewImport, none, async (event): Promise<ImportPreviewResult> => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const options = { title: "Import preferences", properties: ["openFile" as const], filters: preferenceFiles };
+    const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+    const picked = result.filePaths[0];
+    if (result.canceled || !picked) return { status: "cancelled" };
+    if (statSync(picked).size > MAX_IMPORT_BYTES) throw new Error("That file is too large to be a Nivra preferences export, so nothing was imported. Choose a file Nivra exported.");
+    return { status: "preview", ...host.previewImport(readFileSync(picked, "utf8")) };
+  });
+  handle(IPC.importPreferences, z.tuple([z.uuid(), z.array(z.uuid().nullable()).max(MAX_PREFERENCES)]), (_event, previewId, mapping) => host.importPreferences(previewId, mapping));
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));
   handle(IPC.setSharing, z.tuple([z.uuid(), z.boolean()]), (_event, id, modelContext) => host.setSharing(id, modelContext));
   // The choices are required, so a caller that drops them fails here rather than explaining without them. The host

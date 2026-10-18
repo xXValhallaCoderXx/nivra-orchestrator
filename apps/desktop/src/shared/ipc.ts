@@ -25,6 +25,9 @@ export const IPC = {
   deletePreference: "preferences:delete",
   supersedePreference: "preferences:supersede",
   keepSuggestion: "preferences:keep",
+  exportPreferences: "preferences:export",
+  previewImport: "preferences:import-preview",
+  importPreferences: "preferences:import",
   startHello: "runs:hello",
   startExplain: "runs:explain",
   runResult: "runs:result",
@@ -120,6 +123,25 @@ export interface PreferencesView {
   records: PreferenceView[];
 }
 
+/** How an export went (D23): saved, with how many preferences and the file's name (for display only), or cancelled. */
+export type ExportResult = { status: "saved"; count: number; fileName: string } | { status: "cancelled" };
+
+/**
+ * One preference in a file chosen for import, and what importing it would do: the local projects whose label matches
+ * its project's, and whether it is already here.
+ */
+export interface ImportEntryView {
+  statement: string;
+  scope: PreferenceScope;
+  intent: PreferenceIntent;
+  /** The label of the project it belonged to; null for a personal one. */
+  project: string | null;
+  matches: Array<{ id: string; label: string }>;
+  duplicate: boolean;
+}
+
+export type ImportPreviewResult = { status: "preview"; previewId: string; entries: ImportEntryView[] } | { status: "cancelled" };
+
 export type AddProjectResult =
   | { status: "added"; project: ProjectView; warning: string | null }
   | { status: "cancelled" }
@@ -162,6 +184,15 @@ export interface NivraApi {
   supersedePreference(id: string, statement: string, intent: PreferenceIntent): Promise<PreferenceView>;
   /** Keeps a suggestion from one of the project's explanations this session as its own default, in the person's wording (D23). */
   keepSuggestion(projectId: string, runId: string, index: number, statement: string): Promise<PreferenceView>;
+  /**
+   * Exports the confirmed preferences in the scopes chosen (personal, and each chosen project's own) to a file the person
+   * picks in the native dialog: no ids, no evidence, never a saved key (D23).
+   */
+  exportPreferences(scopes: { personal: boolean; projectIds: string[] }): Promise<ExportResult>;
+  /** Asks for an export file in the native dialog, and says what importing it would do; nothing is saved yet. */
+  previewImport(): Promise<ImportPreviewResult>;
+  /** Imports a previewed file: for each entry, the local project a project preference goes to, or null to skip it. */
+  importPreferences(previewId: string, mapping: Array<string | null>): Promise<{ added: number; skipped: number }>;
   /** Runs hello on the project's engine, with a snapshot of the preferences that apply to the project (D21). */
   startHello(projectId: string, holdMs: number): Promise<RunSummary>;
   /** Allows or stops sending the project's content to Token Factory (D20); stopping cancels its explain runs. */

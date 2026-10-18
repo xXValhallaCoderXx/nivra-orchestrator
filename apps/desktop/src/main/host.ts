@@ -1,20 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { DoctorReport, ExplainResult, PreferenceIntent, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
-import type { AddProjectResult, EngineView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
+import type { AddProjectResult, EngineView, ImportEntryView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
 import {
   addPreference,
+  applyImport,
+  buildExport,
   cleanChoices,
   deletePreference,
   editPreference,
   keepSuggestion,
+  parseImport,
+  previewImport,
   removeProjectPreferences,
   snapshotFor,
   supersedePreference,
+  type ExportScopes,
   type NewPreference,
   type PreferenceChange,
+  type PreferenceExport,
 } from "./preferences.ts";
 import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
@@ -68,6 +74,8 @@ export class Host {
   readonly #explainRuns = new Map<string, Set<string>>();
   /** Projects being removed: no explanation may start for them, and a late answer to one that did is not accepted. */
   readonly #removing = new Set<string>();
+  /** Export files the person chose to import, read and checked, until they are imported; this session only. */
+  readonly #imports = new Map<string, PreferenceExport>();
   #wsl: WslTargets | null = null;
   #wslChecked = false;
   #discovering: Promise<WslTargets | null> | null = null;
@@ -303,6 +311,42 @@ export class Host {
 
   deletePreference(id: string): void {
     this.#options.store.update((data) => deletePreference(data, id));
+  }
+
+  /**
+   * The text of an export of the scopes the person chose (D23), for main to write where they say. It needs the saved
+   * keys, because a statement holding one is refused rather than written to a file that leaves the app.
+   */
+  async exportPreferences(scopes: ExportScopes): Promise<{ text: string; count: number }> {
+    const secrets = Object.values(await this.#options.credentials()).filter((value): value is string => typeof value === "string" && value.length > 0);
+    return buildExport(this.#options.store.data, scopes, secrets, new Date());
+  }
+
+  /**
+   * Reads the text of a file the person chose to import, and says what importing it would do: for each preference, the
+   * local projects whose label matches, and whether it is already here. The file is kept for this session until it is
+   * imported; nothing is saved yet.
+   */
+  previewImport(text: string): { previewId: string; entries: ImportEntryView[] } {
+    const file = parseImport(text);
+    const previewId = randomUUID();
+    this.#imports.set(previewId, file);
+    const label = (id: string) => this.#options.store.data.projects.find((p) => p.id === id)?.label ?? id;
+    return { previewId, entries: previewImport(this.#options.store.data, file).map((entry) => ({ ...entry, matches: entry.matches.map((id) => ({ id, label: label(id) })) })) };
+  }
+
+  /** Imports a previewed file with the person's choice of project for each project preference, or null to skip it (D23). */
+  importPreferences(previewId: string, mapping: ReadonlyArray<string | null>): { added: number; skipped: number } {
+    const file = this.#imports.get(previewId);
+    if (!file) throw new Error("That import is no longer waiting. Choose the file again.");
+    let outcome = { added: 0, skipped: 0 };
+    this.#options.store.update((data) => {
+      const result = applyImport(data, file, mapping, new Date());
+      outcome = { added: result.added, skipped: result.skipped };
+      return result.data;
+    });
+    this.#imports.delete(previewId);
+    return outcome;
   }
 
   /** Replaces a preference with a new decision; the old one is kept as history, and no run gets it again (D23). */

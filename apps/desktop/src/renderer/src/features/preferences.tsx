@@ -1,7 +1,7 @@
-import { Badge, Button, Group, SegmentedControl, Stack, Text, TextInput } from "@mantine/core";
+import { Badge, Button, Checkbox, Group, SegmentedControl, Select, Stack, Text, TextInput } from "@mantine/core";
 import type { PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { useState } from "react";
-import type { PreferencesView, PreferenceView, ProjectView } from "../../../shared/ipc";
+import type { ImportEntryView, PreferencesView, PreferenceView, ProjectView } from "../../../shared/ipc";
 import { errorMessage, Section } from "../shared/ui";
 
 /** What a project's own preference asks for (D23): a default gives way to the repository's conventions; a decision doesn't. */
@@ -19,8 +19,11 @@ const ORIGIN: Record<PreferenceView["origin"], string> = { entered: "", suggeste
  * Editing fixes a preference's wording; replacing it is a new decision, and the old one stays as history that no run
  * gets.
  */
-export function Preferences({ project, view, onChanged }: { project: ProjectView | null; view: PreferencesView | null; onChanged(): void }) {
+export function Preferences({ project, projects, view, onChanged }: { project: ProjectView | null; projects: ProjectView[]; view: PreferencesView | null; onChanged(): void }) {
   const [statement, setStatement] = useState("");
+  const [exportScopes, setExportScopes] = useState<{ personal: boolean; projectIds: string[] } | null>(null);
+  const [importing, setImporting] = useState<{ previewId: string; entries: ImportEntryView[]; mapping: string[] } | null>(null);
+  const [transfer, setTransfer] = useState<string | null>(null);
   const [scope, setScope] = useState<PreferenceScope>("personal");
   const [intent, setIntent] = useState<PreferenceIntent>("default");
   const [editing, setEditing] = useState<{ id: string; text: string; intent: PreferenceIntent; mode: "edit" | "replace" } | null>(null);
@@ -60,6 +63,53 @@ export function Preferences({ project, view, onChanged }: { project: ProjectView
         ? await act(() => window.nivra.editPreference(editing.id, editing.text, editing.intent))
         : await act(() => window.nivra.supersedePreference(editing.id, editing.text, editing.intent));
     if (saved) setEditing(null);
+  }
+
+  // Export and import (D23): the scopes are the person's to choose, and so is the project each imported one goes to.
+  const confirmed = records.filter((record) => record.status === "confirmed");
+  const ownByProject = [...new Map(confirmed.filter((r) => r.projectId !== null).map((r) => [r.projectId!, r.projectLabel ?? "A removed project"])).entries()].map(([id, label]) => ({
+    id,
+    label,
+    count: confirmed.filter((r) => r.projectId === id).length,
+  }));
+
+  async function exportChosen() {
+    if (!exportScopes) return;
+    let note: string | null = null;
+    if (
+      await act(async () => {
+        const result = await window.nivra.exportPreferences(exportScopes);
+        if (result.status === "saved") note = `Exported ${result.count} ${result.count === 1 ? "preference" : "preferences"} to ${result.fileName}.`;
+      })
+    ) {
+      setTransfer(note);
+      if (note) setExportScopes(null);
+    }
+  }
+
+  async function chooseImport() {
+    setTransfer(null);
+    await act(async () => {
+      const result = await window.nivra.previewImport();
+      // One project with the same name is suggested; none or several are the person's to choose.
+      if (result.status === "preview") setImporting({ ...result, mapping: result.entries.map((entry) => (entry.scope === "project" && entry.matches.length === 1 ? entry.matches[0]!.id : "")) });
+    });
+  }
+
+  async function importChosen() {
+    if (!importing) return;
+    let note: string | null = null;
+    const saved = await act(async () => {
+      const result = await window.nivra.importPreferences(
+        importing.previewId,
+        importing.mapping.map((id) => id || null),
+      );
+      note = `Imported ${result.added} ${result.added === 1 ? "preference" : "preferences"}${result.skipped ? `; ${result.skipped} skipped` : ""}.`;
+    });
+    if (saved) {
+      setImporting(null);
+      setTransfer(note);
+    }
   }
 
   /** What replaced a preference, followed to the one in use; a replacement deleted since is said to be gone. */
@@ -212,6 +262,95 @@ export function Preferences({ project, view, onChanged }: { project: ProjectView
             </Group>
           ))}
         </Stack>
+      )}
+      <Group gap="sm">
+        <Button
+          size="xs"
+          variant="default"
+          onClick={() => setExportScopes(exportScopes ? null : { personal: true, projectIds: project && ownByProject.some((p) => p.id === project.id) ? [project.id] : [] })}
+          disabled={busy || confirmed.length === 0}
+          data-testid="preference-export"
+        >
+          Export…
+        </Button>
+        <Button size="xs" variant="default" onClick={() => void chooseImport()} disabled={busy} data-testid="preference-import">
+          Import…
+        </Button>
+      </Group>
+      {exportScopes && (
+        <Stack gap={4} data-testid="preference-export-scopes">
+          <Checkbox
+            size="xs"
+            label={`Your personal preferences (${confirmed.filter((r) => r.scope === "personal").length})`}
+            checked={exportScopes.personal}
+            onChange={(event) => setExportScopes({ ...exportScopes, personal: event.currentTarget.checked })}
+            data-testid="preference-export-personal"
+          />
+          {ownByProject.map((own) => (
+            <Checkbox
+              key={own.id}
+              size="xs"
+              label={`${own.label}'s own (${own.count})`}
+              checked={exportScopes.projectIds.includes(own.id)}
+              onChange={(event) =>
+                setExportScopes({ ...exportScopes, projectIds: event.currentTarget.checked ? [...exportScopes.projectIds, own.id] : exportScopes.projectIds.filter((id) => id !== own.id) })
+              }
+              data-testid="preference-export-project"
+            />
+          ))}
+          <Text size="xs" c="var(--nivra-text-3)">
+            The file holds each preference's wording, scope, project name and intent: no ids, no history and no keys. Keep it somewhere private.
+          </Text>
+          <Group>
+            <Button size="xs" onClick={() => void exportChosen()} loading={busy} disabled={!exportScopes.personal && exportScopes.projectIds.length === 0} data-testid="preference-export-save">
+              Export
+            </Button>
+          </Group>
+        </Stack>
+      )}
+      {importing && (
+        <Stack gap={4} data-testid="preference-import-preview">
+          <Text size="sm" fw={600}>
+            Import {importing.entries.length} {importing.entries.length === 1 ? "preference" : "preferences"}?
+          </Text>
+          {importing.entries.map((entry, index) => (
+            <Group key={index} gap="sm" wrap="nowrap" align="center" data-testid="preference-import-entry">
+              <Text size="xs" style={{ flex: 1 }}>
+                {entry.statement}
+                {entry.duplicate ? " (already here: skipped)" : ""}
+              </Text>
+              <Badge variant="light" color={entry.scope === "personal" ? "blue" : entry.intent === "override" ? "orange" : "gray"} style={{ flex: "none" }}>
+                {entry.scope === "personal" ? "Every project" : `${entry.project}'s ${entry.intent === "override" ? "decision" : "default"}`}
+              </Badge>
+              {entry.scope === "project" && (
+                <Select
+                  size="xs"
+                  w={200}
+                  allowDeselect={false}
+                  aria-label={`Project for “${entry.statement}”`}
+                  data={[{ value: "", label: "Skip it" }, ...projects.map((p) => ({ value: p.id, label: `${p.label} only` }))]}
+                  value={importing.mapping[index] ?? ""}
+                  onChange={(value) => setImporting({ ...importing, mapping: importing.mapping.map((id, i) => (i === index ? (value ?? "") : id)) })}
+                  error={entry.matches.length > 1 && !importing.mapping[index] ? `Several projects are called ${entry.project}: choose one` : undefined}
+                  data-testid="preference-import-project"
+                />
+              )}
+            </Group>
+          ))}
+          <Group gap={4}>
+            <Button size="xs" onClick={() => void importChosen()} loading={busy} data-testid="preference-import-save">
+              Import
+            </Button>
+            <Button size="xs" variant="subtle" onClick={() => setImporting(null)} disabled={busy}>
+              Cancel
+            </Button>
+          </Group>
+        </Stack>
+      )}
+      {transfer && (
+        <Text size="sm" c="var(--nivra-text-2)" data-testid="preference-transfer">
+          {transfer}
+        </Text>
       )}
       {error && (
         <Text size="sm" c="var(--nivra-error)" data-testid="preference-error">

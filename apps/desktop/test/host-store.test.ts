@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { HostStore, migrateHostData, NO_SHARING, type HostData } from "../src/main/host-store.ts";
+import { HostStore, migrateHostData, NO_SHARING, writePrivateFile, type HostData } from "../src/main/host-store.ts";
 
 const dirs: string[] = [];
 after(() => {
@@ -82,4 +82,14 @@ describe("host records", () => {
     assert.equal(migrateHostData(hostData([record(A, "wsl:Ubuntu", "/mnt/c/repo")]), "linux").changed, false);
     assert.equal(migrateHostData(hostData([record(B, "wsl:Ubuntu", "/home/odin/app")]), "win32").changed, false);
   });
+
+  it("writes a private file only its owner can read, even over a file that could be read by others (D23)", { skip: process.platform === "win32" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "nivra export "));
+    dirs.push(dir);
+    const path = join(dir, "nivra-preferences.json");
+    writeFileSync(path, "old", { mode: 0o644 });
+    writePrivateFile(path, "new");
+    assert.deepEqual([readFileSync(path, "utf8"), (statSync(path).mode & 0o777).toString(8), readdirSync(dir)], ["new", "600", ["nivra-preferences.json"]]);
+  });
 });
+
