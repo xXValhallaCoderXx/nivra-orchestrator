@@ -16,7 +16,9 @@
     "dev": "pnpm --filter @nivra/desktop --fail-if-no-match dev",
     "dev:win": "pnpm --filter @nivra/desktop --fail-if-no-match dev:win",
     "package:linux": "pnpm --filter @nivra/desktop --fail-if-no-match package:linux",
-    "package:win": "pnpm --filter @nivra/desktop --fail-if-no-match package:win"
+    "package:win": "pnpm --filter @nivra/desktop --fail-if-no-match package:win",
+    "release:candidate": "pnpm --filter @nivra/desktop --fail-if-no-match release:candidate",
+    "accept:live": "pnpm --filter @nivra/desktop --fail-if-no-match accept:live"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

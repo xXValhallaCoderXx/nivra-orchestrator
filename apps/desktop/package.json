@@ -23,7 +23,9 @@
     "package:win": "node scripts/stage-runtime.ts all && electron-vite build && electron-builder --win zip --x64",
     "dev:win": "node scripts/dev-win.ts",
     "test:packaged": "playwright test --project=packaged",
-    "test:windows": "playwright test --project=windows"
+    "test:windows": "playwright test --project=windows",
+    "release:candidate": "node scripts/release-candidate.ts",
+    "accept:live": "node scripts/live-acceptance.ts"
   },
   "devDependencies": {
     "@mantine/core": "9.7.1",
