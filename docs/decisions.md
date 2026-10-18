@@ -889,3 +889,63 @@ The key saw 28 models, five of them NVIDIA's.
 - D22's open consequence about small contexts is resolved.
 - NIV-10 keeps promotion and its evidence rule open. Context packages for coding workers stay with the later milestone
   (D20).
+
+## D24. Packaged acceptance, release candidates, judge access and the track (2026-10-19)
+
+**Decision.**
+- **Acceptance runs live, on the packaged builds of one candidate,** through an explicit script (`pnpm accept:live`),
+  never part of `pnpm verify`.
+  - It drives the installed deb, or the release zip extracted on Windows, through the UI, in profiles of its own.
+  - The person types the key into the window; the script only waits until Settings says one is saved.
+  - Each platform rehearses first without a key or a model.
+- **Strict checks and required demonstrations.**
+  - Strict checks cover what Nivra itself does: identity, the snapshot each run receives, isolation, ranking, final
+    states and cleanup. Any failure fails acceptance.
+  - What depends on the model is a required demonstration, with one targeted retry: a usable answer, citations shown to
+    the model, the repository governing, a task choice governing. One still missing is incomplete, never a pass.
+- **The person's data.**
+  - Every Windows profile's WSL engine uses `~/.nivra` (D17), so a Windows→WSL session moves it aside with a recovery
+    record, and puts it back.
+  - Cleanup is always last. A restore never overwrites what it can't recognise.
+  - An engine's store is read from a copy that includes its WAL.
+- **Evidence.** A private record stays with the person. The public summary is built from listed fields only (B gives
+  numbers), and checked for B's identifiers.
+- **Release candidates.**
+  - `pnpm release:candidate` builds from a clean tree after `pnpm verify`, staging once and building once. It writes
+    `build-info.json` (commit, toolchain, runtimes and hashes) and `SHA256SUMS`.
+  - A candidate is identified by its commit and hashes, and the version stays as it is.
+  - The release publishes the accepted files unchanged. An app fix means a new candidate, and renewed evidence for what
+    it touches.
+- **Judge access:** a dedicated Token Factory key, revocable on its own, given only in the submission's private testing
+  instructions.
+  - It is kept working until judging ends (16 December, 04:00 SGT).
+  - If exposed, it is replaced and the instructions are updated. The rules require free access, not one particular key.
+  - This supersedes D20's "Judge access remains undecided".
+- **The track:** Best Apps and Agents, chosen by Nate on 18 October from the official rules. The Coding track's "write,
+  run, and test code" describes work D20 defers.
+- **Keys are printable ASCII.** Settings refuses a key holding a space, a line break or any other character outside
+  printable ASCII, saying why, and saves nothing.
+
+**Why.**
+- **Offline tests can't stand in.** The packaged checks never reach a model, and the dev build isn't what judges run.
+  NIV-14 needs the journey live on what will ship.
+- **Model variance.** It explains a missing result; it doesn't pass one. The runs showed both sides of this:
+  - a first answer on A arrived without `findings`, and failed `malformed`;
+  - on B, a convention cited a file the model hadn't read, so the personal default truthfully governed until the retry.
+- **The key.** A key pasted with an invisible character inside can't go in a request header. Before the fix, the
+  request failed before it was sent, and Nivra could only say something had failed.
+- **Live evidence (18–19 October)**, from candidate `ead56e8`: every criterion passed on the Linux deb (16 runs) and on
+  the Windows zip driving WSL (15 runs). The details are in `docs/acceptance.md`.
+
+**Consequences.**
+- `docs/acceptance.md` records the candidate, the machine, the fixtures, each platform's results, the earlier attempts
+  and the commands. NIV-14's evidence comment links to them.
+- **Native Windows** is outside the harness: checking its processes and reading its store would need Windows tools. It
+  keeps its existing offline evidence, and a live native explanation is still to run.
+- **Not handled yet:**
+  - Quitting the Linux app while a held hello run is going takes about a minute; the final state is right.
+  - A model's three forced answers without `findings` end the run `malformed`.
+  - The engine doesn't log the detail of internal failures.
+
+  Each is proposed as a follow-up.
+- Clean-setup checks of the judge's path, and publishing the release, follow under NIV-16.

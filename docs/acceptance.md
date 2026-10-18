@@ -61,6 +61,10 @@ Run on Windows with a WSL engine and on Linux. Native Windows results are report
 | Cancellation and restart | The app reports the true state. An interrupted run ends as `run.interrupted` and is never replayed. | Passing at the engine level and for explain runs (`pnpm verify`). |
 | Failure reporting | Each of these is reported clearly, with no silent retry: invalid key, unavailable model, rate limiting, timeout, malformed tool results, network failure, sharing refusal. | Passing offline against a stub, except timeouts, which are tested in-process with short deadlines (D22; see below). |
 
+**On the packaged builds (NIV-14, 18–19 October):** every test above passed live on the Linux deb and on the Windows
+zip driving WSL, from one candidate. Live, the failures covered were an invalid key, a network failure, sharing
+refused and withdrawn, and a malformed answer. See *Packaged acceptance, live*.
+
 ### Preference handoff (D21, NIV-5)
 
 The host's store sends each run a snapshot of the confirmed preferences that apply to its project. Today the hello
@@ -254,6 +258,101 @@ key stayed inside the app; the WSL engine):
   - "Name component files in PascalCase." was kept as A's default, then replaced. The next run received the replacement,
     not the replaced preference, and `nivra.json` was unchanged during it.
 
+### Packaged acceptance, live (NIV-14)
+
+This is the D20 journey and its failure cases, run live on the packaged builds of one candidate, each in profiles of
+its own (`pnpm accept:live`).
+- **The model:** `nvidia/nemotron-3-super-120b-a12b`, through Token Factory.
+- **Fixture B** is private, so it appears as counts only.
+
+**The candidate:** v0.1.0 at `ead56e8`, built by `pnpm release:candidate` from a clean tree after `pnpm verify`.
+`build-info.json` and `SHA256SUMS` sit beside it.
+- `Nivra-0.1.0-amd64.deb`: sha256 `33ee9691ec93e7948d835a817e884cd01449b8a1ff131d56f009650412d44493`
+- `Nivra-0.1.0-win-x64.zip`: sha256 `f19a99ae3c2d9f67fef62c4b817e2789ff7cc22045ba0f678bd68b5fe78287b6`
+- Runtimes: linux-x64 `f0f3baa2aafb1925`, win-x64 `e47d01e4a355740f`.
+
+**The machine:**
+- Windows 11 build 26300.9457 (26H2);
+- WSL 2.7.8.0, with mirrored networking and WSLg 1.0.73.2;
+- Ubuntu 24.04.1 LTS on kernel 6.18.33.1-microsoft-standard-WSL2;
+- an AMD Ryzen 9 7900X, with 31 GiB visible to WSL;
+- Electron 44.7.0 (Chrome 152.0.7977.130), and Node 24.21.0 in the app and in the engines.
+
+It is one machine, not a minimum specification.
+
+**The fixtures:**
+- A: `valhalla-fitness` at `29c3a40a`, with 1,268 tracked files and 3 dirty entries.
+- B: 728 tracked files, 1 dirty entry.
+
+**How it ran**
+- **Linux:** the deb installed with `dpkg --verify` clean, and launched under WSLg with its own profile and engine home.
+- **Windows → WSL:**
+  - the zip extracted on Windows;
+  - `~/.nivra` moved aside, so the WSL runtime was installed fresh from the zip;
+  - afterwards it was restored and checked against its recorded inode and store.
+- **Rehearsals first.** Both platforms rehearsed without a key or a model: consent refused, no key, cancel, a graceful
+  restart, a kill giving `run.interrupted`, closing the app mid-run, and switching between projects.
+- **Strict checks** cover what Nivra itself does, and must pass on every run.
+- **Required demonstrations** get one targeted retry: citations shown on A, the repository governing on B, and the task
+  choice governing.
+
+**Results: every criterion passes on both platforms.**
+
+| Criterion | Linux (deb) | Windows → WSL (zip) |
+|---|---|---|
+| Identity: hashes, versions, runtimes | Passed | Passed; the WSL runtime was installed fresh from the zip, and no native engine started |
+| Every run receives the current preferences, at the fixture's HEAD, through Token Factory | Every run | Every run |
+| A explained with evidence | 14 of 14 citations shown to the model | 13 of 18 shown |
+| A personal and an A-only preference confirmed | Passed | Passed |
+| On B, the repository governs over the personal default, and A's own never reaches B | Attempt 1: the convention cited a file the model hadn't read, and arrived when the answer was due, so the personal default governed. Attempt 2: the repository governs, with 6 of 6 shown | The repository governs, with 8 of 8 shown |
+| A task choice governs that run; Currently stays the repository's; nothing stored changes | The choice governs, with 19 of 19 shown; `nivra.json` byte-identical | Attempt 1: the choice governed, but its repository citations were of files not read. Attempt 2: the choice governs, with 8 of 8 shown |
+| Edit, replace and delete reach the next request | Passed | Passed |
+| A changed file reaches the next request | The map's `package.json` hash changed, and HEAD didn't | The same |
+| Consent refused in the dialog and by the host; withdrawn mid-run, the run ends "Cancelled" | Passed | Passed |
+| Cancelled mid-run, the run ends "Cancelled" | Passed | Passed |
+| A graceful restart mid-run ends "Cancelled: the app asked it to stop"; a kill gives `run.interrupted`, started once, never replayed | Passed | Passed |
+| Quitting mid-run cancels the run; none is left running in the WAL-recovered store; the profile is intact after relaunch | Passed; the quit took 107 ms | Passed; the quit took 2.1 s |
+| Provider failures are named, with no chat request | A bad key gives `auth`; a proxy pointing nowhere gives `network` | A bad key gives `auth` |
+| Cleanup: the key removed, the engines gone, the profiles deleted, the home restored | Passed | Passed |
+| Runs, tokens and time | 16 runs; at least 727,084 tokens in and 30,906 out, with 3 runs cut short not reporting; 87 calls; 915.8 s | 15 runs; at least 891,999 in and 35,533 out, with 3 runs cut short not reporting; 99 calls; 1,002.5 s |
+
+Each withdrawal, cancel and graceful restart cut a request in flight. The run recorded it once, as a `cancelled` model
+call, and nothing more. Each kill ended `interrupted`, and the run was never started again.
+
+**Earlier attempts, kept as evidence**
+- **Linux, session 1** (candidate `cedaf53`):
+  - A's first explanation failed `malformed`: Nemotron left `findings` out of all three answers, over 16 steps and
+    187,201 input tokens. The targeted retry showed 6 of 6.
+  - The session then stopped on a fault in the harness, since fixed.
+- **Linux, session 2:** it stopped at the provider check.
+  - The pasted key held a character that can't go in a request header, and Nivra could only say "Something inside
+    Nivra failed (TypeError)".
+  - **Fixed in the app** (`ead56e8`): Settings refuses such a key, saying why. Live, it refused the same paste.
+- **Windows, the first session:** it timed out waiting for the key, and its cleanup restored the home.
+
+**Observations, not failures**
+- **Quitting with a held hello run.** On Linux the quit took about 54 s in the rehearsals; on Windows → WSL, about
+  0.3 s. With an explanation running, it took between 0.1 and 2.1 s. The final state was right every time. A follow-up
+  is proposed.
+- **Withdrawing consent** is recorded as a plain "Cancelled", the same as a cancel.
+- **One WSL home.** Every Windows profile's WSL engine shares `~/.nivra`, so the session moved it aside rather than give
+  itself a home of its own.
+- **After an app restart,** earlier runs can't be viewed in the window; runs are kept for the session only. Their final
+  states were read from the store.
+
+**Native Windows** is reported separately. It isn't part of this harness, because checking its processes and reading
+its store would need Windows tools.
+- From existing evidence: `verify:windows` 17/17, and `test:windows` 6/6 (the native engine starts; consent; refused
+  without a key; a Windows folder picked through WSL).
+- An explanation from the native engine hasn't been run live.
+
+**Evidence**
+- Each session's private record (its runs, events, logs and store copies) stays with Nate.
+- Its public summary is built from listed fields only, and checked for B's identifiers.
+- Commands:
+  - `pnpm release:candidate`
+  - `pnpm accept:live --platform linux|windows --session rehearsal|live --fixture-a <A> [--fixture-b-file <private>] [--move-wsl-home] [--network]`
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
@@ -304,9 +403,11 @@ The cross-platform foundation is done when all of these were seen to pass:
   - the same Windows folder picked through WSL is recognised as the Windows project;
   - quitting leaves no engine running (`pgrep` in WSL, `tasklist` on Windows).
   
-  *Seen passing 2026-10-17 through the real UI (`test:windows`, 5/5).* The zip carries both runtimes.
+  *Seen passing 2026-10-17 through the real UI (`test:windows`, 5/5); latest on 2026-10-19 against `ead56e8`, 6/6.*
+  The zip carries both runtimes.
 - **Packaged Linux app** (`electron-builder --dir`): the same flow on the local target through the real UI, plus the
-  preference handoff (`test:packaged`, 11/11). *Seen passing 2026-10-17.*
+  preference handoff (`test:packaged`, 11/11). *Seen passing 2026-10-17; latest on 2026-10-19 against `ead56e8`, 16
+  passed, with 5 skipped that need the test endpoint switch, which a packaged app ignores.*
 - **Actionable refusals and guidance** for:
   - no WSL, or an outdated WSL;
   - WSL with no distribution, or only Docker Desktop's, or only WSL 1 ones;
@@ -316,8 +417,10 @@ The cross-platform foundation is done when all of these were seen to pass:
   - missing git.
   
   *Covered by unit tests with captured tool output; not yet seen on a machine that has them.*
-- **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target. *Not yet
-  run: installing needs sudo.*
+- **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target.
+  - *Installed and accepted live on 19 October* in this machine's Ubuntu 24.04 under WSL2 (see *Packaged acceptance,
+    live*).
+  - WSL's kernel has AppArmor off, so a stock Ubuntu desktop with AppArmor on is still to check (NIV-16).
 - **Token Factory** reached from both the WSL and the native engine: models listed and one Nemotron call made
   (Settings → Check Token Factory, on each target).
   - *Seen once, 17 October, with Nate's key:* 28 models, five of them NVIDIA's. Nemotron 3 Super called the tool and

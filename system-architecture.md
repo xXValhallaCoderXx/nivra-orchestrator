@@ -14,10 +14,11 @@ This document describes what is **built**:
 - context assembly (D23): task choices, five-rank precedence ranked by the engine, an inspectable context view, and the
   preference lifecycle (intent, supersession, keeping a suggestion, export and import). It is tested offline, including
   the D20 sequence through the UI, and ran live on both fixtures on 18 October.
+- packaged acceptance (D24): the whole D20 journey, with its failure cases, ran live on the Linux deb and on the Windows
+  zip driving WSL, from one release candidate (`ead56e8`), and passed every criterion on both.
 
 It also describes what is **planned**, in two parts. **None of it is working yet.**
-- **The rest of the immediate milestone (D20):** promoting a project's preference to a personal one (NIV-10), and the
-  packaged acceptance runs (NIV-14).
+- **The rest of the immediate milestone (D20):** promoting a project's preference to a personal one (NIV-10).
 - **A later milestone, deferred by D20:**
   - new-app creation;
   - the coding worker;
@@ -814,7 +815,8 @@ docs changed afterwards.
 | Preference store, and the scoped handoff to engines | **Built** (D21); the whole-distribution interruption check passed | NIV-5, reused by NIV-10 |
 | Explain with evidence, model client, repository map, consent, the run lifecycle it needs | **Built** (D22), tested offline and run live on both fixtures. The preference contrast ran on B (private), then again with full precedence at D23's checkpoint 1; a public pair of repositories for the demonstration is pending | NIV-6, NIV-9, NIV-8 (read-only slice) |
 | Managing preferences, context assembly with overrides and full precedence | **Built** (D23), tested offline (the D20 sequence through the UI included) and run live on both fixtures; promotion to a personal preference is deferred | NIV-10, NIV-11 |
-| Acceptance on packaged builds, release, video, submission | Planned | NIV-14 – NIV-17 |
+| Acceptance on packaged builds | **Passed** (D24): live on the Linux deb and on the Windows zip driving WSL, from candidate `ead56e8`; native Windows reported from offline evidence | NIV-14 |
+| Release, clean-setup checks, video, submission | In progress: the candidate is built with `SHA256SUMS`, the install and testing instructions are written, and the synthetic demo repository is ready to publish | NIV-15 – NIV-17 |
 | New-app creation, coding worker, sandboxes, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
 The estimates are not commitments. None of the planned work is a precondition for committing the foundation.
@@ -855,14 +857,13 @@ In short:
 - **What every entry needs.** A runtime Token Factory inference call meets the general Nebius platform requirement, and
   an NVIDIA open-source model is also required. The explain workflow makes runtime calls to NVIDIA Nemotron through
   Token Factory (D22). It has run live on both fixtures; fixture A's run is the public evidence.
-- **Track fit is open.** The Coding and Agentic Engineering track describes agents that "write, run, and test code in
-  Token Factory". It doesn't name the Sandboxes product. The immediate milestone is read-only (D20), so whether it fits
-  the track needs reassessing. The options and draft questions for the organisers are in the checklist. No answer has
-  been obtained or assumed.
+- **The track is Best Apps and Agents** (D24), chosen by Nate on 18 October from the official rules. The Coding and
+  Agentic Engineering track's "write, run, and test code in Token Factory" describes work D20 defers.
 - **No OpenShell bonus.** The rules publish no scoring bonus for NVIDIA OpenShell.
 - **Sandboxes isn't available yet.** Token Factory Sandboxes is in beta and needs an access request. Access is
   requested but not active.
-- **Judge access** must be free until judging ends (16 December, 04:00 SGT). How is undecided (NIV-16).
+- **Judge access** must be free until judging ends (16 December, 04:00 SGT). Judges get a dedicated, separately revocable
+  Token Factory key, in the submission's private testing instructions (D24, NIV-16).
 - **Effect on the design:** none. The architecture doesn't depend on these answers (D19, D20).
 
 ## 18. Questions for reviewers
