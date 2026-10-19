@@ -36,6 +36,8 @@ export const IPC = {
   getSettings: "settings:get",
   setNebiusKey: "settings:nebius-key",
   checkTokenFactory: "providers:check",
+  listConversations: "conversations:list",
+  createConversation: "conversations:create",
 } as const;
 
 export interface AppInfo {
@@ -164,6 +166,34 @@ export interface SettingsView {
   note: string | null;
 }
 
+/** Whether the workspace (D26) could be opened; everything else works without it. */
+export type WorkspaceView =
+  | { state: "ready"; schemaVersion: number; sqlite: string; notice: string | null }
+  | { state: "unavailable"; reason: string };
+
+/** What a new conversation is about: nothing (general, no repository reaches it), or one project, fixed for good. */
+export type ConversationScope = { kind: "general" } | { kind: "project"; projectId: string };
+
+export interface ConversationSummary {
+  id: string;
+  kind: "general" | "project";
+  projectId: string | null;
+  /** The project's label when the conversation started, kept after the project is removed. */
+  projectLabel: string | null;
+  /** Whether its project is still in the list; null for a general conversation. */
+  projectPresent: boolean | null;
+  /** The engine its turns run on: `local` for a general conversation, else the project's (D17). */
+  targetId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationsView {
+  workspace: WorkspaceView;
+  conversations: ConversationSummary[];
+}
+
 export interface NivraApi {
   getAppInfo(): Promise<AppInfo>;
   /** One view per engine a project uses or that is running; nothing is started by asking. */
@@ -223,4 +253,8 @@ export interface NivraApi {
   setNebiusKey(key: string | null): Promise<SettingsView>;
   /** Token Factory from the project's engine: its NVIDIA models and one Nemotron tool call (B7). */
   checkTokenFactory(projectId: string): Promise<ProviderCheck>;
+  /** The workspace's state and every conversation, the most recently active first. Reading starts no engine. */
+  listConversations(): Promise<ConversationsView>;
+  /** Starts a conversation, general or about one project; its scope never changes afterwards. Starts no engine. */
+  createConversation(scope: ConversationScope): Promise<ConversationSummary>;
 }

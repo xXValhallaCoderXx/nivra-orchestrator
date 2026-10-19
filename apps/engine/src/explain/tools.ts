@@ -1,11 +1,10 @@
 import { createTool } from "@mastra/core/tools";
-import type { JsonObject, RunContext } from "@nivra/domain";
+import type { JsonObject, Mask, RunContext } from "@nivra/domain";
 import { z } from "zod";
 import type { InternalFailure } from "../providers/model.ts";
 import { LIMITS, type Delivered, type RepoReader } from "../repo/files.ts";
 import { RepoCancelled } from "../repo/git.ts";
 import { RepoError } from "../repo/paths.ts";
-import type { Mask } from "../secrets/patterns.ts";
 import { ANSWER_TOOL_DESCRIPTION, AnswerInput } from "./answer.ts";
 import type { Budget } from "./budget.ts";
 import { checkCitation, type CheckedCitation } from "./citations.ts";

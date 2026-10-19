@@ -6,3 +6,4 @@ export * from "./models.ts";
 export * from "./explain.ts";
 export * from "./methods.ts";
 export * from "./client.ts";
+export * from "./credentials.ts";

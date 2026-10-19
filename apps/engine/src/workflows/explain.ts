@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { preferencesDigest, type AnswerDueReason, type ExplainResult, type JsonObject, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
+import { preferencesDigest, type AnswerDueReason, type ExplainResult, type JsonObject, type Mask, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
@@ -18,7 +18,6 @@ import { RepoReader } from "../repo/files.ts";
 import { buildMap } from "../repo/map.ts";
 import { describePreferences } from "./preferences-record.ts";
 import { RepoError } from "../repo/paths.ts";
-import type { Mask } from "../secrets/patterns.ts";
 
 export const EXPLAIN_WORKFLOW_ID = "explain";
 

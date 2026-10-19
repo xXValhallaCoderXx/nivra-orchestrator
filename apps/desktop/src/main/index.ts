@@ -44,6 +44,7 @@ function start(): void {
   const host = new Host({
     targets: targetFactory({ platform, ...runtimeSources(platform) }),
     store,
+    workspacePath: join(app.getPath("userData"), "workspace.db"),
     logsDir: app.getPath("logs"),
     client: { name: "Nivra", version: app.getVersion() },
     credentials: () => secrets.all(),
@@ -190,6 +191,12 @@ function start(): void {
   handle(IPC.runResult, z.tuple([RunId]), (_event, id) => host.runResult(id));
   handle(IPC.runEvents, z.tuple([RunId, z.number().int().nonnegative()]), (_event, id, after) => host.runEvents(id, after));
   handle(IPC.cancelRun, z.tuple([RunId]), (_event, id) => host.cancelRun(id));
+  handle(IPC.listConversations, none, () => host.conversations());
+  handle(
+    IPC.createConversation,
+    z.tuple([z.discriminatedUnion("kind", [z.strictObject({ kind: z.literal("general") }), z.strictObject({ kind: z.literal("project"), projectId: z.uuid() })])]),
+    (_event, scope) => host.createConversation(scope),
+  );
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {

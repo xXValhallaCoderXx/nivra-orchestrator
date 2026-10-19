@@ -105,6 +105,7 @@ function hostAt(root: string, options: HostOptions = {}) {
   const host = new Host({
     targets,
     store,
+    workspacePath: join(root, "workspace.db"),
     logsDir: join(root, "logs"),
     client: { name: "host-test", version: "0" },
     credentials: async () => keys.current,
@@ -768,5 +769,47 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     assert.match(messages[2]!, /at most 300 characters; one has 301\. Shorten it/);
     assert.match(messages[3]!, /^The same choice is there twice/);
     assert.deepEqual([stateOf(host, "local")?.status, stub.requests.length], ["stopped", 0]);
+  });
+});
+
+describe("Host: the workspace keeps conversations, and starting one starts no engine (D26)", () => {
+  it("keeps general and project conversations, each on its own engine, and still has them after a restart", async () => {
+    const { host, root, ids } = makeHost({ projects: [{ targetId: "local", path: "/repos/app" }] });
+    const empty = host.conversations();
+    assert.deepEqual([empty.workspace.state, empty.conversations.length], ["ready", 0]);
+    const general = host.createConversation({ kind: "general" });
+    const about = host.createConversation({ kind: "project", projectId: ids[0]! });
+    assert.deepEqual(
+      [general.kind, general.projectId, general.targetId, general.projectPresent, about.kind, about.projectId, about.projectLabel, about.targetId, about.projectPresent],
+      ["general", null, "local", null, "project", ids[0], "app", "local", true],
+    );
+    // Starting a conversation reaches no engine.
+    assert.deepEqual(host.engines().map((e) => e.state.status), ["stopped"]);
+    await host.shutdown();
+    const again = hostAt(root).host;
+    assert.deepEqual(
+      again.conversations().conversations.map((c) => c.id).sort(),
+      [general.id, about.id].sort(),
+    );
+  });
+
+  it("keeps a project conversation's scope and label after its project is removed, and starts none for a removed project", async () => {
+    const { host, ids } = makeHost({ projects: [{ targetId: "local", path: "/repos/app" }] });
+    const about = host.createConversation({ kind: "project", projectId: ids[0]! });
+    await host.removeProject(ids[0]!);
+    const kept = host.conversations().conversations.find((c) => c.id === about.id)!;
+    assert.deepEqual([kept.projectId, kept.projectLabel, kept.projectPresent], [ids[0], "app", false]);
+    assert.throws(() => host.createConversation({ kind: "project", projectId: ids[0]! }), /That project is no longer in the list/);
+  });
+
+  it("says why its workspace can't be used while another Nivra holds it, and everything else still works", () => {
+    const { host, root } = makeHost({ projects: [{ targetId: "local", path: "/repos/app" }] });
+    host.createConversation({ kind: "general" });
+    const second = hostAt(root).host;
+    const view = second.conversations();
+    assert.equal(view.workspace.state, "unavailable");
+    assert.match(view.workspace.state === "unavailable" ? view.workspace.reason : "", /^Another copy of Nivra is using your history/);
+    assert.throws(() => second.createConversation({ kind: "general" }), /^Error: Another copy of Nivra is using your history/);
+    assert.equal(second.projects().length, 1);
   });
 });

@@ -1,5 +1,6 @@
 import { basename, join } from "node:path";
 import {
+  combinedMask,
   ErrorCode,
   ExplainInput,
   ExplainResult,
@@ -25,7 +26,6 @@ import { RpcFailure, RpcServer } from "./rpc/server.ts";
 import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
-import { combinedMask } from "./secrets/patterns.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
 

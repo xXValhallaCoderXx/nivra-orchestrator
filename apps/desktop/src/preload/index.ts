@@ -34,6 +34,8 @@ const api = {
   getSettings: () => ipcRenderer.invoke(IPC.getSettings),
   setNebiusKey: (key) => ipcRenderer.invoke(IPC.setNebiusKey, key),
   checkTokenFactory: (projectId) => ipcRenderer.invoke(IPC.checkTokenFactory, projectId),
+  listConversations: () => ipcRenderer.invoke(IPC.listConversations),
+  createConversation: (scope) => ipcRenderer.invoke(IPC.createConversation, scope),
 } satisfies NivraApi;
 
 contextBridge.exposeInMainWorld("nivra", api);

@@ -4,13 +4,13 @@ import { createHash } from "node:crypto";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
+import { combinedMask } from "@nivra/domain";
 import { createLocalBackend } from "../src/exec/local.ts";
 import { findGit } from "../src/exec/find-executable.ts";
 import { hiddenReason, outputRoot } from "../src/repo/deny.ts";
 import { LIMITS, RepoReader } from "../src/repo/files.ts";
 import { buildMap, MAP_LIMITS } from "../src/repo/map.ts";
 import { checkRelativePath, RepoError } from "../src/repo/paths.ts";
-import { combinedMask } from "../src/secrets/patterns.ts";
 import { removeDir, tempDir } from "./helpers.ts";
 
 const dirs: string[] = [];

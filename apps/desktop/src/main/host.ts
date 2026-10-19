@@ -1,7 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { DoctorReport, ExplainResult, PreferenceIntent, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
-import type { AddProjectResult, EngineView, ImportEntryView, ImportSourceView, PreferencesView, PreferenceView, ProjectView, WslView } from "../shared/ipc.ts";
+import type {
+  AddProjectResult,
+  ConversationScope,
+  ConversationsView,
+  ConversationSummary,
+  EngineView,
+  ImportEntryView,
+  ImportSourceView,
+  PreferencesView,
+  PreferenceView,
+  ProjectView,
+  WorkspaceView,
+  WslView,
+} from "../shared/ipc.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
 import {
@@ -27,10 +40,14 @@ import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
 import { labelFor, type ExecutionTarget } from "./targets/types.ts";
 import { isHiddenDistro, wslGuidance } from "./targets/wsl-discovery.ts";
+import { getConversation, insertConversation, listConversations, type ConversationRecord } from "./workspace.ts";
+import { openWorkspace, type WorkspaceDb, type WorkspaceOpening } from "./workspace-db.ts";
 
 export interface HostOptions {
   targets: TargetFactory;
   store: HostStore;
+  /** The workspace database (D26), beside `nivra.json`; opened by `init`. */
+  workspacePath: string;
   logsDir: string;
   client: { name: string; version: string };
   credentials: () => Promise<Partial<Record<SecretName, string>>>;
@@ -77,6 +94,8 @@ export class Host {
   readonly #removing = new Set<string>();
   /** Export files the person chose to import, read and checked, until they are imported; this session only. */
   readonly #imports = new Map<string, PreferenceExport>();
+  /** The workspace (D26): open, or why it isn't. Nothing else depends on it. */
+  #workspace: WorkspaceOpening = { state: "unavailable", reason: "Nivra's history hasn't been opened yet." };
   #wsl: WslTargets | null = null;
   #wslChecked = false;
   #discovering: Promise<WslTargets | null> | null = null;
@@ -86,12 +105,44 @@ export class Host {
     this.#options = options;
   }
 
-  /** Brings older records in line (D17) and starts looking for WSL in the background. Starts no engine. */
+  /**
+   * Brings older records in line (D17), opens the workspace (D26) and starts looking for WSL in the background. Starts
+   * no engine. A workspace that can't be opened is kept as state, never thrown: everything else still works.
+   */
   init(): void {
     const migrated = migrateHostData(this.#options.store.data, this.#options.platform);
     if (migrated.changed) this.#options.store.update(() => migrated.data);
     for (const [id, notice] of migrated.notices) this.#notices.set(id, notice);
+    this.#workspace = openWorkspace(this.#options.workspacePath);
+    if (this.#workspace.state === "unavailable") this.#options.log(`Workspace unavailable: ${this.#workspace.reason}`);
+    else if (this.#workspace.notice) this.#options.log(`Workspace: ${this.#workspace.notice}`);
     void this.#discover();
+  }
+
+  /** The workspace's state and every conversation, the most recently active first. Starts nothing. */
+  conversations(): ConversationsView {
+    const workspace = this.#workspace;
+    return { workspace: this.#workspaceView(), conversations: workspace.state === "ready" ? listConversations(workspace.db).map((record) => this.#conversationView(record)) : [] };
+  }
+
+  /**
+   * Starts a conversation (D26). A general one runs on this computer's own engine and no repository reaches it; one
+   * about a project keeps that project, its engine and its label for good, whatever project is chosen later. Creating
+   * one starts no engine.
+   */
+  createConversation(scope: ConversationScope): ConversationSummary {
+    const workspace = this.#workspaceDb();
+    const now = new Date().toISOString();
+    let record: ConversationRecord;
+    if (scope.kind === "general") {
+      record = { id: randomUUID(), kind: "general", projectId: null, projectLabel: null, targetId: "local", title: "New conversation", createdAt: now, updatedAt: now };
+    } else {
+      const project = this.#project(scope.projectId);
+      if (this.#removing.has(project.id)) throw new Error("This project is being removed, so a conversation can't start about it.");
+      record = { id: randomUUID(), kind: "project", projectId: project.id, projectLabel: project.label, targetId: project.targetId, title: "New conversation", createdAt: now, updatedAt: now };
+    }
+    insertConversation(workspace, record);
+    return this.#conversationView(getConversation(workspace, record.id)!);
   }
 
   /** What WSL offers on a Windows host, and what to do when it offers nothing; null elsewhere. */
@@ -420,9 +471,12 @@ export class Host {
     for (const engine of this.#engines.values()) engine.supervisor.resumed();
   }
 
-  /** Stops every engine in parallel, each in the D4 order; none can start afterwards. */
+  /** Stops every engine in parallel, each in the D4 order, then closes the workspace; none can start afterwards. */
   shutdown(): Promise<void> {
-    this.#closing ??= Promise.allSettled([...this.#engines.values()].map((engine) => engine.supervisor.close())).then(() => undefined);
+    this.#closing ??= Promise.allSettled([...this.#engines.values()].map((engine) => engine.supervisor.close())).then(() => {
+      if (this.#workspace.state === "ready") this.#workspace.db.close();
+      this.#workspace = { state: "unavailable", reason: "Nivra is quitting." };
+    });
     return this.#closing;
   }
 
@@ -440,6 +494,24 @@ export class Host {
     if (failed.length === 0) return;
     const why = failed[0]!.reason instanceof Error ? failed[0]!.reason.message : String(failed[0]!.reason);
     throw new Error(refusal(failed.length === 1 ? "an explain run" : `${failed.length} explain runs`, why, failed.length === 1 ? "it" : "them"));
+  }
+
+  /** The open workspace, or the reason it isn't, in the person's terms. */
+  #workspaceDb(): WorkspaceDb {
+    if (this.#workspace.state !== "ready") throw new Error(this.#workspace.reason);
+    return this.#workspace.db;
+  }
+
+  #workspaceView(): WorkspaceView {
+    const workspace = this.#workspace;
+    return workspace.state === "ready" ? { state: "ready", schemaVersion: workspace.schemaVersion, sqlite: workspace.sqlite, notice: workspace.notice } : { state: "unavailable", reason: workspace.reason };
+  }
+
+  #conversationView(record: ConversationRecord): ConversationSummary {
+    return {
+      ...record,
+      projectPresent: record.projectId === null ? null : this.#options.store.data.projects.some((p) => p.id === record.projectId),
+    };
   }
 
   #project(projectId: string): ProjectRecord {
