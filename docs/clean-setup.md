@@ -112,6 +112,64 @@ a folder on a Windows drive, press **Run hello**, then press **Run checks** unde
 
 | Check | Setup | Release files | Date | Result |
 |---|---|---|---|---|
-| 1. Windows → WSL | a fresh local user on Nate's PC | | | *Not run* |
-| 2. The deb, AppArmor on | | | | *Not run* |
+| 1. Windows → WSL | planned: a fresh WSL distribution and Nivra profile on Nate's account | | | *Not run yet* |
+| 2. The deb, AppArmor on | an Ubuntu 24.04.5 desktop VM (see below) | `Nivra-0.1.1-amd64.deb`, sha256 `86da0745…d632d1ab` | 19 October | **Passed**, 22 of 22 checks |
 | 3. Windows-drive folders, no Visual C++ redistributable | | | | *Not run*; the controlled check passes on 0.1.1 (see 3) |
+
+### Check 2, 19 October
+
+**The setup**, since Nate's PC has no Hyper-V and no spare machine:
+- a KVM virtual machine inside WSL, shown on the Windows desktop through WSLg;
+- Ubuntu's 24.04 cloud image, checked against Ubuntu's signed `SHA256SUMS`, with `ubuntu-desktop-minimal` and
+  `spice-vdagent` added by cloud-init;
+- Ubuntu 24.04.5 LTS on its stock `6.8.0-147-generic` kernel, with AppArmor on and
+  `kernel.apparmor_restrict_unprivileged_userns = 1`;
+- a GNOME session on Wayland, with the Firefox snap.
+
+**By hand (Nate):**
+- downloading the deb and `SHA256SUMS` in Firefox, and `sha256sum -c` printing `OK`;
+- `sudo apt update && sudo apt install ./Nivra-0.1.1-amd64.deb`;
+- starting Nivra from Show Apps, adding valhalla-fitness, and saving the key;
+- Settings said "Key saved, encrypted", kept in GNOME's keyring.
+
+**Checked over SSH after the install**
+- **The AppArmor profile** is at `/etc/apparmor.d/nivra`. The kernel had it loaded, in unconfined mode with user namespaces
+  allowed.
+- **`chrome-sandbox`** is `755 root`, not setuid.
+- **Chromium's sandbox is on.** The renderer and the sandboxed helper processes run in their own user namespace, and the
+  renderer has seccomp filtering. No process runs with `--no-sandbox`.
+
+**README steps 4–8, driven by Claude through Nivra's UI.** Nivra was restarted with a debugging port on the VM's
+localhost, and the steps were run with the acceptance harness's UI helpers and scoring (`scripts/live-ui.ts`). Every check
+passed on the first attempt, with no retry:
+- **valhalla-fitness** was explained in 212 s; 5 of 5 citations point to lines the model was shown.
+- **The two preferences** were confirmed.
+- **nivra-demo-timer:**
+  - the repository governs over the personal default;
+  - both conflicts are ranked as their sides say;
+  - valhalla-fitness's own preference is in neither its context nor its conflicts.
+- **The task choice** governs "component file naming", with "Currently" showing the repository's convention, and
+  `nivra.json` stayed byte-identical.
+- **After the edit,** the next run received revision 2. After the delete, it received no preference.
+- **The key** was then removed, and Settings said so.
+- **Usage:** 5 runs on `nvidia/nemotron-3-super-120b-a12b`, at least 197,726 tokens in and 14,290 out, over 32 calls and
+  533 s.
+
+**The removal, as the README says it**
+- `sudo apt remove nivra` removed `/opt/Nivra`, the AppArmor profile and `/usr/bin/nivra`, and the profile was unloaded.
+- `rm -rf ~/.config/Nivra ~/.nivra` removed the rest.
+- apt printed two harmless `update-alternatives` warnings, because electron-builder's removal script runs after the files
+  are gone. dpkg lists the package as removed (`rc`) until `apt purge`.
+
+**Ways this differed from a judge's machine**
+- The VM is a cloud image with the minimal desktop added, not an installation from the desktop ISO.
+- The VM's window couldn't share the clipboard, so the key went from the Windows clipboard to the VM's over SSH, through a
+  pipe that printed nothing.
+- For the test, screen blanking, locking and automatic suspend were turned off.
+
+**Found along the way**
+- **The window can stay hidden.** Nivra was launched over SSH while GNOME's screen was locked, and its window never
+  appeared: it is created hidden and shown on `ready-to-show`, which never fired. Showing it from the main process
+  worked. A follow-up is proposed: show the window after a timeout as well.
+- **A login prompt from `git clone`.** One clone asked for GitHub credentials, likely from a mistyped URL. Both
+  repositories are public and clone without a login.

@@ -477,8 +477,12 @@ The cross-platform foundation is done when all of these were seen to pass:
 - **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target.
   - *Installed and accepted live on 19 October* in this machine's Ubuntu 24.04 under WSL2 (see *Packaged acceptance,
     live*).
-  - WSL's kernel has AppArmor off, so a stock Ubuntu desktop with AppArmor on is still to check
-    ([clean-setup.md](clean-setup.md), check 2; NIV-16).
+  - *Checked on 19 October, for 0.1.1,* on a stock Ubuntu 24.04.5 desktop VM with AppArmor on and unprivileged user
+    namespaces restricted.
+    - The installed profile was loaded, and Chromium's sandbox ran in its own user namespace.
+    - README steps 4–8 passed through the UI, 22 checks of 22.
+    - apt removed everything but the data folders, which the README says to delete ([clean-setup.md](clean-setup.md),
+      check 2; NIV-16).
 - **Token Factory** reached from both the WSL and the native engine: models listed and one Nemotron call made
   (Settings → Check Token Factory, on each target).
   - *Seen once, 17 October, with Nate's key:* 28 models, five of them NVIDIA's. Nemotron 3 Super called the tool and
