@@ -34,7 +34,35 @@ pnpm --filter @nivra/desktop test:packaged   # the same against the electron-bui
 pnpm --filter @nivra/desktop test:windows    # from WSL: drive the Windows build `pnpm dev:win --no-launch` copied
 pnpm package:linux          # deb (primary) and AppImage
 pnpm package:win            # Windows zip, from WSL (an NSIS installer needs Windows)
+pnpm release:candidate      # from a clean tree: verify, stage once, build the deb and the zip, write build-info.json and SHA256SUMS
 ```
+
+Live acceptance on packaged builds (NIV-14). It is an explicit script, never part of `verify`; a live session uses
+tokens:
+
+```bash
+pnpm accept:live --platform linux --session rehearsal --fixture-a <path>       # token-free: no key, no model
+pnpm accept:live --platform windows --session rehearsal --fixture-a <path> --move-wsl-home
+pnpm accept:live --platform linux --session live --fixture-a <path> --fixture-b-file <file> [--network]
+pnpm accept:live --recover [<record>] [--dry-run]                              # after a session that died
+```
+
+It exits:
+- 0 when every criterion the session must establish passed: every criterion for a live session, and the token-free
+  ones for a rehearsal;
+- 1 when a criterion failed, or the session stopped early;
+- 2 when none failed, but one it must establish is incomplete or wasn't run.
+
+- **Builds.** It drives the installed deb (`/opt/Nivra/nivra`) or the release zip, extracted on Windows. It checks both
+  against `release/build-info.json` and `SHA256SUMS`.
+- **Profiles.** It uses profiles and engine homes of its own.
+- **The WSL home.** A Windows session moves `~/.nivra` aside, because every Windows profile's WSL engine uses it, then
+  puts it back. The recovery record (`~/.nivra-acceptance-recovery.json`) is written before anything moves.
+- **The key.** You type it into the window. The script only waits until Settings says one is saved.
+- **Fixture B.** Its path is read from a file only you can read.
+- **Evidence.** It goes to `~/nivra-acceptance/<run>/`.
+  - `private/` holds everything, and is yours alone.
+  - `public-summary.*` is built from listed fields only, so it gives B's numbers and nothing else.
 
 Main is an ES module and the preload is CommonJS (a sandboxed preload must be). Two command-line switches isolate a
 run: Chromium's `--user-data-dir=<dir>` for the host's records, and `--nivra-engine-home=<dir>` for the local engine's
@@ -55,6 +83,13 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 
 `verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`; the WSL
 engine uses `~/.nivra` inside the distribution, as the installed app will.
+- **A candidate's runtimes:** `--zip <path>` takes both runtimes from a release candidate's Windows zip, exactly as
+  packaged, instead of staging.
+- **The Visual C++ runtime (D25):** it checks that the native engine loads only the copy shipped beside its addon. It
+  also runs a controlled check in a copy of the runtime. There, the addon's import is renamed so that no installed
+  runtime can stand in, and the engine must still start and run hello. Without the renamed DLL, it must refuse.
+- **`test:windows` on a candidate:** extract its zip into `%LOCALAPPDATA%\nivra-dev\app` with Windows' `tar.exe`, in
+  place of `pnpm dev:win --no-launch`.
 
 Terminating a whole distribution while the app runs needs a distribution made for the purpose. **The check terminates
 it, with everything running in it**, and it refuses the distribution it runs in:

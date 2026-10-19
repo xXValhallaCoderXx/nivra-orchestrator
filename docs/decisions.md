@@ -889,3 +889,116 @@ The key saw 28 models, five of them NVIDIA's.
 - D22's open consequence about small contexts is resolved.
 - NIV-10 keeps promotion and its evidence rule open. Context packages for coding workers stay with the later milestone
   (D20).
+
+## D24. Packaged acceptance, release candidates, judge access and the track (2026-10-19)
+
+**Decision.**
+- **Acceptance runs live, on the packaged builds of one candidate,** through an explicit script (`pnpm accept:live`),
+  never part of `pnpm verify`.
+  - It drives the installed deb, or the release zip extracted on Windows, through the UI, in profiles of its own.
+  - The person types the key into the window; the script only waits until Settings says one is saved.
+  - Each platform rehearses first without a key or a model.
+- **Strict checks and required demonstrations.**
+  - Strict checks cover what Nivra itself does: identity, the snapshot each run receives, isolation, ranking, final
+    states and cleanup. Any failure fails acceptance.
+  - What depends on the model is a required demonstration, with one targeted retry: a usable answer, citations shown to
+    the model, the repository governing, a task choice governing. One still missing is incomplete, never a pass.
+- **The person's data.**
+  - Every Windows profile's WSL engine uses `~/.nivra` (D17), so a Windows→WSL session moves it aside with a recovery
+    record, and puts it back.
+  - Cleanup is always last. A restore never overwrites what it can't recognise.
+  - An engine's store is read from a copy that includes its WAL.
+- **Evidence.** A private record stays with the person. The public summary is built from listed fields only (B gives
+  numbers), and checked for B's identifiers.
+- **Release candidates.**
+  - `pnpm release:candidate` builds from a clean tree after `pnpm verify`, staging once and building once. It writes
+    `build-info.json` (commit, toolchain, runtimes and hashes) and `SHA256SUMS`.
+  - A candidate is identified by its commit and hashes, and the version stays as it is.
+  - The release publishes the accepted files unchanged. An app fix means a new candidate, and renewed evidence for what
+    it touches.
+- **Judge access:** Nate's existing Token Factory key, given only in the submission's private testing instructions.
+  Nate chose this on 19 October over a second key.
+  - It is kept working until judging ends (16 December, 04:00 SGT). Judges' use shares its quota and cost.
+  - If it is exposed, it is replaced and the instructions are updated at once. Replacing it also changes Nate's own
+    setup. The rules require free access, not one particular key.
+  - This supersedes D20's "Judge access remains undecided".
+- **The track:** Best Apps and Agents, chosen by Nate on 18 October from the official rules. The Coding track's "write,
+  run, and test code" describes work D20 defers.
+- **Keys are printable ASCII.** Settings refuses a key holding a space, a line break or any other character outside
+  printable ASCII, saying why, and saves nothing.
+
+**Why.**
+- **Offline tests can't stand in.** The packaged checks never reach a model, and the dev build isn't what judges run.
+  NIV-14 needs the journey live on what will ship.
+- **Model variance.** It explains a missing result; it doesn't pass one. The runs showed both sides of this:
+  - a first answer on A arrived without `findings`, and failed `malformed`;
+  - on B, a convention cited a file the model hadn't read, so the personal default truthfully governed until the retry.
+- **The key.** A key pasted with an invisible character inside can't go in a request header. Before the fix, the
+  request failed before it was sent, and Nivra could only say something had failed.
+- **Live evidence (18–19 October)**, from candidate `ead56e8`: every criterion passed on the Linux deb (16 runs) and on
+  the Windows zip driving WSL (15 runs). The details are in `docs/acceptance.md`.
+
+**Consequences.**
+- `docs/acceptance.md` records the candidate, the machine, the fixtures, each platform's results, the earlier attempts
+  and the commands. NIV-14's evidence comment links to them.
+- **Native Windows** is outside the harness: checking its processes and reading its store would need Windows tools. It
+  keeps its existing offline evidence, and a live native explanation is still to run.
+- **Not handled yet:**
+  - Quitting the Linux app while a held hello run is going takes about a minute; the final state is right.
+  - A model's three forced answers without `findings` end the run `malformed`.
+  - The engine doesn't log the detail of internal failures.
+
+  Each is proposed as a follow-up.
+- Clean-setup checks of the judge's path, and publishing the release, follow under NIV-16.
+
+## D25. The Visual C++ runtime beside the addon that imports it, and candidate 0.1.1 (2026-10-19)
+
+**Decision.**
+- **Where the DLLs go.** Staging copies each Visual C++ runtime DLL a native addon names into that addon's own folder,
+  with the DLLs those name in turn, byte for byte from System32 (or `--vc-runtime-from`). Nothing goes next to
+  `node.exe`, which links its C runtime statically. This supersedes D6's "shipped next to `node.exe`".
+- **How it's checked.**
+  - Staging fails if a DLL an addon names isn't in that addon's folder. The release candidate re-hashes every packaged
+    runtime file and checks the placement again.
+  - `verify:windows` checks that the native engine has loaded only the copy beside its addon, never an installed one.
+  - It also runs a controlled check. In a copy of the runtime, the addon's import and the DLL beside it are renamed to a
+    name no installation has. The engine must still start, run hello and write both stores. With the renamed DLL
+    removed, it must refuse to start.
+  - `verify:windows --zip` runs these on a candidate's packaged runtimes.
+- **A new version.** A published version's files are never replaced, so the fixed candidate is 0.1.1. The engine stays
+  at 0.1.0, since it didn't change. This amends D24's "the version stays as it is": the version changes when a
+  candidate follows a published release.
+
+**Why.**
+- **Where Windows looks.** libsql's Windows addon imports `VCRUNTIME140.dll`. Node loads an addon with
+  `LOAD_WITH_ALTERED_SEARCH_PATH`, which searches:
+  1. the addon's folder;
+  2. the system folders;
+  3. the working directory;
+  4. `Path`.
+
+  It never searches `node.exe`'s folder, and the native engine runs in its home. So on a PC without the Redistributable,
+  v0.1.0's native engine would stop at start.
+- **Why no check caught it.** Every PC that ran the checks has the DLL in System32, which satisfied the import. A check
+  that the DLL is somewhere in the runtime, or a run on such a PC, passes whatever the layout.
+- **Shown by experiment, on this PC.** With the import renamed in a copy, v0.1.0's layout couldn't load the addon ("The
+  specified module could not be found"), and the fixed layout loaded it. No PC without the Redistributable has run
+  either yet.
+
+**Consequences.**
+- **What changed between the candidates:**
+  - only the Windows runtime, `e47d01e4a355740f` → `d7b773e6d952ca65`;
+  - the Linux runtime (`f0f3baa2aafb1925`) and the WSL tarball are byte-identical;
+  - `app.asar` differs only in `package.json`'s version.
+- **NIV-14's live evidence carries over** to 0.1.1's Linux deb and to its Windows zip driving WSL. No model was called
+  again.
+- **The affected checks ran again** on the packaged files of candidate 0.1.1 (`cad5eca`). The details are in
+  `docs/acceptance.md`.
+  - `verify:windows --zip`: 20/20. On v0.1.0's zip, the same checks give 18/20, failing exactly the two new ones.
+  - `test:windows`: 6/6.
+  - `test:packaged`: 16 passed. 5 were skipped, because they need the test endpoint switch, which a packaged app
+    ignores.
+- **v0.1.0 stays published, unchanged.** 0.1.1 goes beside it as a release of its own, never over it. It was published
+  as a pre-release on 19 October, and v0.1.0's notes now say it is superseded.
+- **The clean-machine test is still to run.** It needs a Windows PC or VM without the Redistributable, and this machine
+  has neither Windows Sandbox nor Hyper-V.

@@ -1,20 +1,23 @@
 // Runs ON WINDOWS, as a real Windows process (the staged node.exe), started by verify-windows.ts from WSL (D14). It
 // drives the native Windows engine and a WSL engine through the same target and supervisor modules Electron's main
 // process uses, and checks what CI would have: start, hello, cancel, a clean stop, and that an engine dies with its
-// parent when the parent is killed (libuv's kill-on-close job object, D4).
+// parent when the parent is killed (libuv's kill-on-close job object, D4). It also checks that the native engine's
+// storage driver loads the Visual C++ runtime shipped beside it, not one installed on this machine (D25).
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { parseArgs } from "node:util";
 import { isTerminal, preferencesDigest, type RunContext, type RunEvent, type RunEventsPage } from "@nivra/domain";
 import { findGit } from "../../engine/src/exec/find-executable.ts";
-import { EngineSupervisor } from "../src/main/supervisor.ts";
+import { EngineStartError, EngineSupervisor } from "../src/main/supervisor.ts";
 import { LocalTarget, runtimeIn } from "../src/main/targets/local.ts";
 import { runTool } from "../src/main/targets/process.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
 import { discoverWsl, type WslDistro } from "../src/main/targets/wsl-discovery.ts";
 import { instancePattern, WslTarget } from "../src/main/targets/wsl.ts";
+import { renameDllImport, VC_RUNTIME_DLL, vcRuntimeAddons } from "./runtime-files.ts";
 
 const { values } = parseArgs({
   options: {
@@ -52,8 +55,8 @@ async function waitFor<T>(check: () => T | Promise<T>, timeoutMs: number, what: 
   }
 }
 
-function nativeTarget(home: string): LocalTarget {
-  return new LocalTarget({ platform: "win32", runtime: runtimeIn(runtimeDir, "win32"), home });
+function nativeTarget(home: string, runtime = runtimeDir): LocalTarget {
+  return new LocalTarget({ platform: "win32", runtime: runtimeIn(runtime, "win32"), home });
 }
 
 async function wslTarget(): Promise<{ target: WslTarget; distro: WslDistro; wslExe: string }> {
@@ -73,6 +76,59 @@ function supervisorFor(target: ExecutionTarget, name: string): EngineSupervisor 
     heartbeatMs: 30_000,
     log: (line) => console.log(`    ${line}`),
   });
+}
+
+/** The modules a Windows process has loaded, by path, as PowerShell lists them. */
+async function modulesOf(pid: number): Promise<string[]> {
+  const powershell = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; (Get-Process -Id ${pid}).Modules | ForEach-Object { $_.FileName }`;
+  const listed = await runTool(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], { timeoutMs: 60_000 });
+  if (listed.code !== 0) throw new Error(`PowerShell couldn't list process ${pid}'s modules: ${listed.stderr.trim() || `exit ${String(listed.code)}`}`);
+  return listed.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+const vcRuntimeIn = (modules: readonly string[]): string[] => modules.filter((path) => VC_RUNTIME_DLL.test(basename(path)));
+
+const samePath = (a: string, b: string): boolean => realpathSync.native(a).toLowerCase() === realpathSync.native(b).toLowerCase();
+
+/** The loaded Visual C++ runtime DLLs not beside an addon in `runtime` that names them: a machine without them installed would lack them. */
+function notBesideAddons(loaded: readonly string[], runtime: string): string[] {
+  const addons = vcRuntimeAddons(runtime);
+  return loaded.filter((path) => !addons.some(({ addon, names }) => names.includes(basename(path).toLowerCase()) && samePath(dirname(path), dirname(addon))));
+}
+
+/**
+ * Copies `runtime` to `dir`, then, in the copy only, renames each Visual C++ runtime DLL an addon names to a name as long
+ * that no installation has (nivr0time140.dll for vcruntime140.dll): in the addon, in anything else in its folder that
+ * names it, and the DLL itself where it sits beside the addon. Returns those renamed DLLs, relative to `dir`, and how
+ * many names were renamed.
+ */
+function renamedCopy(runtime: string, dir: string): { beside: string[]; names: number } {
+  rmSync(dir, { recursive: true, force: true });
+  cpSync(runtime, dir, { recursive: true });
+  const stands = new Map<string, string>();
+  const beside: string[] = [];
+  for (const { addon, names } of vcRuntimeAddons(dir)) {
+    const folder = dirname(addon);
+    for (const name of names) {
+      if (!stands.has(name)) stands.set(name, `nivr${stands.size}${name.slice(5)}`);
+      const stand = stands.get(name)!;
+      for (const file of readdirSync(folder)) {
+        const path = join(folder, file);
+        if (!statSync(path).isFile()) continue;
+        const bytes = readFileSync(path);
+        if (bytes.toString("latin1").toLowerCase().includes(name)) writeFileSync(path, renameDllImport(bytes, name, stand));
+      }
+      if (existsSync(join(folder, name))) {
+        renameSync(join(folder, name), join(folder, stand));
+        beside.push(relative(dir, join(folder, stand)));
+      }
+    }
+  }
+  return { beside, names: stands.size };
 }
 
 // ---- child mode -----------------------------------------------------------------------------------------------------
@@ -172,6 +228,13 @@ async function main(): Promise<void> {
       const status = page.events.find((e) => e.stepId === "git-status" && e.type === "step.output");
       return `${status?.message ?? "?"}; ${await contextArrived(page)}`;
     });
+    await check("native: the storage driver loads the Visual C++ runtime shipped beside it, not an installed one", async () => {
+      const loaded = vcRuntimeIn(await modulesOf(nativePid));
+      if (!loaded.length) throw new Error(`engine ${nativePid} has loaded no Visual C++ runtime DLL, so its storage driver isn't loaded`);
+      const elsewhere = notBesideAddons(loaded, runtimeDir);
+      if (elsewhere.length) throw new Error(`engine ${nativePid} loaded ${elsewhere.join(", ")}, not a copy beside the addon that imports it: a machine without the Visual C++ Redistributable would lack it`);
+      return `engine ${nativePid} loaded only ${loaded.map((path) => relative(realpathSync.native(runtimeDir), realpathSync.native(path))).join(", ")}`;
+    });
     await check("native: cancel stops the process the run started", async () => {
       const run = await runHello(native, git ? repo : work, 60_000);
       const holding = await waitRun(native, run.id, (p) => holdPid(p.events) !== null || isTerminal(p.status));
@@ -200,6 +263,65 @@ async function main(): Promise<void> {
       if (again.instanceId === info.instanceId) throw new Error("the same engine instance answered");
       await native.stop();
       return `engine ${info.pid} killed; "${reason}"; Restart started pid ${again.pid}`;
+    });
+
+    // This machine has the Visual C++ runtime in System32, so the checks above can't show that the engine needs none
+    // installed. In a copy of the runtime, the addons' Visual C++ imports are renamed to names no installation has, and
+    // the DLLs beside them renamed to match: only the copies the runtime ships can satisfy them (D25).
+    console.log("\nNative Windows engine, controlled: no installed Visual C++ runtime can stand in");
+    const controlled = join(work, "runtime controlled");
+    const controlledHome = join(work, "home controlled");
+    let renamed: string[] | null = null;
+    await check("native, controlled: with its addons' Visual C++ imports renamed in a copy, the engine starts, opens its databases and runs hello", async () => {
+      if (!git) throw new Error("Git for Windows isn't installed, so no repository could be made");
+      const copy = renamedCopy(runtimeDir, controlled);
+      renamed = copy.beside;
+      if (copy.names === 0) throw new Error("no addon in this runtime imports the Visual C++ runtime, so there is nothing to check");
+      rmSync(controlledHome, { recursive: true, force: true });
+      const supervisor = supervisorFor(nativeTarget(controlledHome, controlled), "controlled");
+      const info = await supervisor.start();
+      let runId = "";
+      try {
+        const run = await runHello(supervisor, repo);
+        runId = run.id;
+        const page = await waitRun(supervisor, run.id, (p) => isTerminal(p.status));
+        if (page.status !== "succeeded") throw new Error(page.events.map((e) => e.message).join(" | "));
+        const modules = await modulesOf(info.pid);
+        const installed = vcRuntimeIn(modules);
+        if (installed.length) throw new Error(`engine ${info.pid} loaded ${installed.join(", ")} as well as the renamed copies`);
+        if (!modules.some((path) => copy.beside.some((dll) => samePath(join(controlled, dll), path)))) throw new Error(`engine ${info.pid} loaded none of the renamed copies`);
+      } finally {
+        await supervisor.stop();
+      }
+      // Both stores hold what the run wrote, read once the engine has stopped (D7): the run in nivra.db, and Mastra's
+      // tables in mastra.db, which only libsql's driver could have made.
+      const count = (db: string, sql: string, ...params: string[]): number => {
+        const database = new DatabaseSync(join(controlledHome, db), { readOnly: true });
+        try {
+          return Number((database.prepare(sql).get(...params) as { n: number }).n);
+        } finally {
+          database.close();
+        }
+      };
+      const runs = count("nivra.db", "SELECT count(*) AS n FROM runs WHERE id = ?", runId);
+      const tables = count("mastra.db", "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table'");
+      if (runs !== 1 || tables === 0) throw new Error(`after the run, nivra.db holds ${runs} runs with its id and mastra.db ${tables} tables`);
+      return `engine ${info.pid} loaded only ${copy.beside.map((dll) => basename(dll)).join(", ")} beside its addon; hello succeeded and is in nivra.db; mastra.db has ${tables} tables`;
+    });
+    await check("native, controlled: without those DLLs beside its addon, the engine refuses to start", async () => {
+      if (!renamed) throw new Error("the controlled copy wasn't made");
+      for (const dll of renamed) rmSync(join(controlled, dll));
+      const supervisor = supervisorFor(nativeTarget(controlledHome, controlled), "controlled-missing");
+      try {
+        await supervisor.start();
+      } catch (error) {
+        const code = error instanceof EngineStartError ? error.code : "not an engine start error";
+        const message = error instanceof Error ? error.message : String(error);
+        if (code !== "runtime-broken") throw new Error(`the engine failed to start, but not because its runtime couldn't load (${code}): ${message}`);
+        return `refused (${code}): ${message.replace(/\s+/g, " ").slice(0, 220)}`;
+      }
+      await supervisor.stop();
+      throw new Error("the engine started without them, so something else on this machine supplied the renamed DLLs");
     });
   }
   await check("native: an engine dies with its parent (job object)", () => orphanCheck("native"));

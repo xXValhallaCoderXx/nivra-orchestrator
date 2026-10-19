@@ -61,6 +61,10 @@ Run on Windows with a WSL engine and on Linux. Native Windows results are report
 | Cancellation and restart | The app reports the true state. An interrupted run ends as `run.interrupted` and is never replayed. | Passing at the engine level and for explain runs (`pnpm verify`). |
 | Failure reporting | Each of these is reported clearly, with no silent retry: invalid key, unavailable model, rate limiting, timeout, malformed tool results, network failure, sharing refusal. | Passing offline against a stub, except timeouts, which are tested in-process with short deadlines (D22; see below). |
 
+**On the packaged builds (NIV-14, 18–19 October):** every test above passed live on the Linux deb and on the Windows
+zip driving WSL, from one candidate. Live, the failures covered were an invalid key, a network failure, sharing
+refused and withdrawn, and a malformed answer. See *Packaged acceptance, live*.
+
 ### Preference handoff (D21, NIV-5)
 
 The host's store sends each run a snapshot of the confirmed preferences that apply to its project. Today the hello
@@ -254,6 +258,172 @@ key stayed inside the app; the WSL engine):
   - "Name component files in PascalCase." was kept as A's default, then replaced. The next run received the replacement,
     not the replaced preference, and `nivra.json` was unchanged during it.
 
+### Packaged acceptance, live (NIV-14)
+
+This is the D20 journey and its failure cases, run live on the packaged builds of one candidate, each in profiles of
+its own (`pnpm accept:live`).
+- **The model:** `nvidia/nemotron-3-super-120b-a12b`, through Token Factory.
+- **Fixture B** is private, so it appears as counts only.
+
+**The candidate:** v0.1.0 at `ead56e8`, built by `pnpm release:candidate` from a clean tree after `pnpm verify`.
+`build-info.json` and `SHA256SUMS` sit beside it.
+- `Nivra-0.1.0-amd64.deb`: sha256 `33ee9691ec93e7948d835a817e884cd01449b8a1ff131d56f009650412d44493`
+- `Nivra-0.1.0-win-x64.zip`: sha256 `f19a99ae3c2d9f67fef62c4b817e2789ff7cc22045ba0f678bd68b5fe78287b6`
+- Runtimes: linux-x64 `f0f3baa2aafb1925`, win-x64 `e47d01e4a355740f`.
+
+**The machine:**
+- Windows 11 build 26300.9457 (26H2);
+- WSL 2.7.8.0, with mirrored networking and WSLg 1.0.73.2;
+- Ubuntu 24.04.1 LTS on kernel 6.18.33.1-microsoft-standard-WSL2;
+- an AMD Ryzen 9 7900X, with 31 GiB visible to WSL;
+- Electron 44.7.0 (Chrome 152.0.7977.130), and Node 24.21.0 in the app and in the engines.
+
+It is one machine, not a minimum specification.
+
+**The fixtures:**
+- A: `valhalla-fitness` at `29c3a40a`, with 1,268 tracked files and 3 dirty entries.
+- B: 728 tracked files, 1 dirty entry.
+
+**How it ran**
+- **Linux:** the deb installed with `dpkg --verify` clean, and launched under WSLg with its own profile and engine home.
+- **Windows → WSL:**
+  - the zip extracted on Windows;
+  - `~/.nivra` moved aside, so the WSL runtime was installed fresh from the zip;
+  - afterwards it was restored and checked against its recorded inode and store.
+- **Rehearsals first.** Both platforms rehearsed without a key or a model: consent refused, no key, cancel, a graceful
+  restart, a kill giving `run.interrupted`, closing the app mid-run, and switching between projects.
+- **Strict checks** cover what Nivra itself does, and must pass on every run.
+- **Required demonstrations** get one targeted retry: citations shown on A, the repository governing on B, and the task
+  choice governing.
+
+**Results: every criterion passes on both platforms.**
+
+| Criterion | Linux (deb) | Windows → WSL (zip) |
+|---|---|---|
+| Identity: hashes, versions, runtimes | Passed | Passed; the WSL runtime was installed fresh from the zip, and no native engine started |
+| Every run receives the current preferences, at the fixture's HEAD, through Token Factory | Every run | Every run |
+| A explained with evidence | 14 of 14 citations shown to the model | 13 of 18 shown |
+| A personal and an A-only preference confirmed | Passed | Passed |
+| On B, the repository governs over the personal default, and A's own never reaches B | Attempt 1: the convention cited a file the model hadn't read, and arrived when the answer was due, so the personal default governed. Attempt 2: the repository governs, with 6 of 6 shown | The repository governs, with 8 of 8 shown |
+| A task choice governs that run; Currently stays the repository's; nothing stored changes | The choice governs, with 19 of 19 shown; `nivra.json` byte-identical | Attempt 1: the choice governed, but its repository citations were of files not read. Attempt 2: the choice governs, with 8 of 8 shown |
+| Edit, replace and delete reach the next request | Passed | Passed |
+| A changed file reaches the next request | The map's `package.json` hash changed, and HEAD didn't | The same |
+| Consent refused in the dialog and by the host; withdrawn mid-run, the run ends "Cancelled" | Passed | Passed |
+| Cancelled mid-run, the run ends "Cancelled" | Passed | Passed |
+| A graceful restart mid-run ends "Cancelled: the app asked it to stop"; a kill gives `run.interrupted`, started once, never replayed | Passed | Passed |
+| Quitting mid-run cancels the run; none is left running in the WAL-recovered store; the profile is intact after relaunch | Passed; the quit took 107 ms | Passed; the quit took 2.1 s |
+| Provider failures are named, with no chat request | A bad key gives `auth`; a proxy pointing nowhere gives `network` | A bad key gives `auth` |
+| Cleanup: the key removed, the engines gone, the profiles deleted, the home restored | Passed | Passed |
+| Runs, tokens and time | 16 runs; at least 727,084 tokens in and 30,906 out, with 3 runs cut short not reporting; 87 calls; 915.8 s | 15 runs; at least 891,999 in and 35,533 out, with 3 runs cut short not reporting; 99 calls; 1,002.5 s |
+
+Each withdrawal, cancel and graceful restart cut a request in flight. The run recorded it once, as a `cancelled` model
+call, and nothing more. Each kill ended `interrupted`, and the run was never started again.
+
+**Earlier attempts, kept as evidence**
+- **Linux, session 1** (candidate `cedaf53`):
+  - A's first explanation failed `malformed`: Nemotron left `findings` out of all three answers, over 16 steps and
+    187,201 input tokens. The targeted retry showed 6 of 6.
+  - The session then stopped on a fault in the harness, since fixed.
+- **Linux, session 2:** it stopped at the provider check.
+  - The pasted key held a character that can't go in a request header, and Nivra could only say "Something inside
+    Nivra failed (TypeError)".
+  - **Fixed in the app** (`ead56e8`): Settings refuses such a key, saying why. Live, it refused the same paste.
+- **Windows, the first session:** it timed out waiting for the key, and its cleanup restored the home.
+
+**Re-evaluated with the corrected harness (20 October)**
+- **What the review found.** The harness kept only one result per check and fixture, so a pass from one run could hide
+  a strict failure from another. A session also exited 0 with a required demonstration still incomplete.
+- **What changed.**
+  - Each check now records its scenario: the purpose of the run it checks.
+  - Retries collapse only within one scenario, and a strict failure is never superseded.
+  - A session exits 1 on any failure, and 2 when a criterion it must establish is incomplete or wasn't run.
+- **What re-evaluating all ten saved records showed.**
+  - The two accepted sessions hold no strict failure, and still pass 14 of 14.
+  - The old aggregation had hidden one strict failure, in Linux session 1 above: `handoff.head` on the run that failed
+    `malformed`.
+  - That failure was the harness's own: it read HEAD only from a result, which a failed run doesn't have. It was fixed
+    in `3898f7e`, before the accepted sessions.
+
+**Observations, not failures**
+- **Quitting with a held hello run.** On Linux the quit took about 54 s in the rehearsals; on Windows → WSL, about
+  0.3 s. With an explanation running, it took between 0.1 and 2.1 s. The final state was right every time. A follow-up
+  is proposed.
+- **Withdrawing consent** is recorded as a plain "Cancelled", the same as a cancel.
+- **One WSL home.** Every Windows profile's WSL engine shares `~/.nivra`, so the session moved it aside rather than give
+  itself a home of its own.
+- **After an app restart,** earlier runs can't be viewed in the window; runs are kept for the session only. Their final
+  states were read from the store.
+
+**Native Windows** is reported separately. It isn't part of this harness, because checking its processes and reading
+its store would need Windows tools.
+- From existing evidence: `verify:windows` 17/17, and `test:windows` 6/6 (the native engine starts; consent; refused
+  without a key; a Windows folder picked through WSL).
+- An explanation from the native engine hasn't been run live.
+
+**Evidence**
+- Each session's private record (its runs, events, logs and store copies) stays with Nate.
+- Its public summary is built from listed fields only, and checked for B's identifiers.
+- Commands:
+  - `pnpm release:candidate`
+  - `pnpm accept:live --platform linux|windows --session rehearsal|live --fixture-a <A> [--fixture-b-file <private>] [--move-wsl-home] [--network]`
+
+### Release candidate 0.1.1 (D25, NIV-16)
+
+v0.1.0's runtime shipped `vcruntime140.dll` next to `node.exe`, where Windows never looks for an addon's dependencies.
+So on a PC without the Visual C++ Redistributable, its native engine would stop at start. Candidate 0.1.1 ships the DLL
+beside the addon (D25).
+
+**The candidate:** 0.1.1 at `cad5eca`, built by `pnpm release:candidate` from a clean tree after `pnpm verify`. The build
+re-hashed every packaged runtime file and checked where the DLL sits.
+- `Nivra-0.1.1-amd64.deb`: sha256 `86da07456e6be5d602f6be433d4feb4824b27f8c79acc876cc0330b2d632d1ab`
+- `Nivra-0.1.1-win-x64.zip`: sha256 `df371719c50b9387491e9cccc680233cd4c594340b7cb67858bdd02a9e6d7783`
+- `build-info.json`: sha256 `8885a7875fb85a6a24d332f0b7b7811333cfae7aaead278684ec7dbee9809b5b`
+- **Published** as the [v0.1.1 pre-release](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1)
+  on 19 October, tagged at `cad5eca`, with these files unchanged. Each uploaded file's digest was checked against the
+  local one. v0.1.0 stays published, with its files unchanged and a note saying it is superseded.
+
+**What changed from v0.1.0**
+
+| Payload | v0.1.0 | 0.1.1 |
+|---|---|---|
+| Linux runtime | `f0f3baa2aafb1925`, 3,708 files | Byte-identical |
+| WSL tarball | sha256 `2d426b0f643f45a9…` | Byte-identical |
+| Windows runtime | `e47d01e4a355740f`, with the DLL next to `node.exe` | `d7b773e6d952ca65`: the DLL moved beside libsql's addon, and the other 3,708 files unchanged |
+| `app.asar`, on both platforms | `fc6812bc96f3c80f…` | `a6fdf4e50f213ee0…`: of its 9 files, only `package.json` differs, in its version |
+| Electron and the toolchain | Electron 44.7.0 | The same |
+
+So NIV-14's live evidence carries over to 0.1.1's Linux deb and to its Windows zip driving WSL. No model was called
+again.
+
+**Rerun on 0.1.1's packaged files (19 October)**
+- `verify:windows --zip`, on the runtimes extracted from the zip: 20/20. That is the 17 earlier native and WSL checks,
+  and the 3 below.
+- `test:windows`, on the zip extracted with Windows' `tar.exe`: 6/6.
+- `test:packaged`, on the candidate's Linux build: 16 passed. 5 were skipped, because they need the test endpoint
+  switch, which a packaged app ignores.
+
+**The controlled experiment,** on this PC, which has `vcruntime140.dll` in System32:
+
+| Check | v0.1.0's zip | 0.1.1's zip |
+|---|---|---|
+| The engine loads only the Visual C++ runtime copy beside its addon | Failed: it loaded `C:\WINDOWS\SYSTEM32\VCRUNTIME140.dll` | Passed: only `engine\node_modules\@libsql\win32-x64-msvc\vcruntime140.dll` |
+| In a copy where the addon's import is renamed to a name no installation has, the engine starts, runs hello and writes both stores | Failed: "The specified module could not be found" | Passed. It loaded only the renamed copy; the run is in `nivra.db`, and `mastra.db` has 44 tables |
+| With the renamed DLL removed, the engine refuses to start (`runtime-broken`) | Passed | Passed |
+
+**No clean-machine test has run yet.** It needs a Windows PC or VM without the redistributable
+([clean-setup.md](clean-setup.md), check 3).
+
+**Not rerun,** because the payloads they exercise didn't change:
+- the live sessions, which call the model;
+- the token-free `accept:live` rehearsals;
+- installing the deb and running `dpkg --verify`.
+
+**Commands**
+- `pnpm release:candidate`
+- `pnpm --filter @nivra/desktop verify:windows --zip release/Nivra-0.1.1-win-x64.zip`, and the same with v0.1.0's zip
+- `pnpm --filter @nivra/desktop test:windows`, after extracting the zip into `%LOCALAPPDATA%\nivra-dev\app`
+- `xvfb-run -a pnpm --filter @nivra/desktop test:packaged`
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
@@ -304,9 +474,16 @@ The cross-platform foundation is done when all of these were seen to pass:
   - the same Windows folder picked through WSL is recognised as the Windows project;
   - quitting leaves no engine running (`pgrep` in WSL, `tasklist` on Windows).
   
-  *Seen passing 2026-10-17 through the real UI (`test:windows`, 5/5).* The zip carries both runtimes.
+  *Seen passing 2026-10-17 through the real UI (`test:windows`, 5/5); on 2026-10-19 against `ead56e8`, 6/6; latest against 0.1.1's zip (`cad5eca`), 6/6.*
+  The zip carries both runtimes.
+  - *Checked as a judge would use it, 19–20 October.* The published v0.1.1 zip was downloaded in Edge and extracted with
+    Extract All. README steps 4–8 then passed through the UI against a fresh WSL distribution: Ubuntu 26.04.1, today's
+    `wsl --install` default, with 23 checks of 23 ([clean-setup.md](clean-setup.md), check 1; NIV-16).
+    - It ran on Nate's existing account, with a fresh Nivra profile and his mirrored networking.
+    - A fresh Windows account with WSL's default networking hasn't been checked.
 - **Packaged Linux app** (`electron-builder --dir`): the same flow on the local target through the real UI, plus the
-  preference handoff (`test:packaged`, 11/11). *Seen passing 2026-10-17.*
+  preference handoff (`test:packaged`, 11/11). *Seen passing 2026-10-17; on 2026-10-19 against `ead56e8`, 16 passed,
+  with 5 skipped that need the test endpoint switch, which a packaged app ignores; latest the same against `cad5eca`.*
 - **Actionable refusals and guidance** for:
   - no WSL, or an outdated WSL;
   - WSL with no distribution, or only Docker Desktop's, or only WSL 1 ones;
@@ -316,8 +493,15 @@ The cross-platform foundation is done when all of these were seen to pass:
   - missing git.
   
   *Covered by unit tests with captured tool output; not yet seen on a machine that has them.*
-- **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target. *Not yet
-  run: installing needs sudo.*
+- **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target.
+  - *Installed and accepted live on 19 October* in this machine's Ubuntu 24.04 under WSL2 (see *Packaged acceptance,
+    live*).
+  - *Checked on 19 October, for 0.1.1,* on a stock Ubuntu 24.04.5 desktop VM with AppArmor on and unprivileged user
+    namespaces restricted.
+    - The installed profile was loaded, and Chromium's sandbox ran in its own user namespace.
+    - README steps 4–8 passed through the UI, 22 checks of 22.
+    - apt removed everything but the data folders, which the README says to delete ([clean-setup.md](clean-setup.md),
+      check 2; NIV-16).
 - **Token Factory** reached from both the WSL and the native engine: models listed and one Nemotron call made
   (Settings → Check Token Factory, on each target).
   - *Seen once, 17 October, with Nate's key:* 28 models, five of them NVIDIA's. Nemotron 3 Super called the tool and
@@ -329,6 +513,10 @@ The cross-platform foundation is done when all of these were seen to pass:
   - Reaching it from the native engine is still pending.
 - **Clean machine:** the Windows zip runs native hello on a VM or Windows Sandbox with no Visual C++ redistributable
   installed. *Not yet run.*
+  - v0.1.0 would fail it. Its runtime shipped the DLL next to `node.exe`, and Windows doesn't look there for an addon's
+    dependencies.
+  - 0.1.1 ships the DLL beside the addon (D25). The controlled check passes on its zip (*Release candidate 0.1.1*).
+  - A clean machine is still to run ([clean-setup.md](clean-setup.md), check 3).
 
 ## Hackathon submission checklist
 

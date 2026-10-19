@@ -193,6 +193,11 @@ function start(): void {
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {
+    // A Nebius key is printable ASCII. One pasted with a line break or an invisible character inside can't go in a
+    // request header: the request would fail before it was sent, and the person would learn only that something failed.
+    if (key !== null && !/^[\x21-\x7E]+$/.test(key)) {
+      throw new Error("That key holds a space, a line break or a character no Nebius key has, often copied along with it, so it wasn't saved. Copy the key again, then save it.");
+    }
     await secrets.set("NEBIUS_API_KEY", key);
     await host.secretsChanged().catch((error: unknown) => console.error("Could not hand the engine the new key", error));
     return settings();

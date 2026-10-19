@@ -1,7 +1,8 @@
 // Stages the engine runtime for one or more targets (D5), ported from Hird's stage-engine.ts (provenance.md):
 //   build/stage/<target>/node     Node itself, checked against nodejs.org's published checksums
 //   build/stage/<target>/engine   main.mjs (the unbundled launcher), engine.mjs (esbuild bundle of our code), the
-//                                  engine's production node_modules for the target, and manifest.json
+//                                  engine's production node_modules for the target, and manifest.json; on Windows, the
+//                                  Visual C++ runtime DLLs each native addon imports sit beside it (D25)
 //   build/stage/runtime-linux-x64.tar.gz   (linux-x64 only) the deterministic tarball streamed into WSL distributions
 //
 //   node scripts/stage-runtime.ts [linux-x64 | win-x64 | mac-arm64 | all] [--vc-runtime-from <dir>] [--skip-smoke]
@@ -11,9 +12,9 @@
 // differ only in case. win-x64 may be staged from Linux (WSL): nothing in it depends on file modes.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -21,6 +22,7 @@ import { createGzip, inflateRawSync } from "node:zlib";
 import { build } from "esbuild";
 import { EngineSelfCheck, LineSplitter, PROTOCOL_VERSION, RpcClient } from "@nivra/domain";
 import { ENGINE_VERSION } from "../../engine/src/version.ts";
+import { hashRuntime, misplacedVcRuntime, placeVcRuntime } from "./runtime-files.ts";
 
 const NODE_VERSION = "24.21.0";
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -35,8 +37,6 @@ const TARGETS: Record<string, Target> = {
   "mac-arm64": { name: "mac-arm64", os: "mac", arch: "arm64" },
 };
 const hostTarget = (): string => `${process.platform === "win32" ? "win" : process.platform === "darwin" ? "mac" : "linux"}-${process.arch}`;
-/** Visual C++ runtime DLLs a native addon may import (D6). */
-const VC_RUNTIME = ["VCRUNTIME140.dll", "VCRUNTIME140_1.dll", "MSVCP140.dll"];
 /** A long Windows install prefix: C:\Users\<name>\AppData\Local\Programs\Nivra\resources\runtime\win-x64\ */
 const WINDOWS_PREFIX_CHARS = 100;
 
@@ -180,8 +180,8 @@ async function stageTarget(target: Target): Promise<void> {
 
   let vcRuntime: string[] = [];
   if (target.os === "win") {
-    step("Adding the Visual C++ runtime DLLs the native addons import (D6)");
-    vcRuntime = addVcRuntime(modules, nodeDir);
+    step("Adding the Visual C++ runtime DLLs beside the native addons that import them (D25)");
+    vcRuntime = addVcRuntime(stage);
     step("Checking path lengths against Windows' MAX_PATH");
     let longest = "";
     walk(stage, (path) => {
@@ -257,59 +257,25 @@ async function addNode(target: Target, nodeDir: string): Promise<void> {
 }
 
 /**
- * Copies the Visual C++ runtime DLLs the native addons import next to node.exe (D6) and returns their names. A needed
- * DLL that cannot be found fails staging: without it, the storage driver will not load on a Windows machine that lacks
- * the Visual C++ Redistributable, and nothing on this machine would show it.
+ * Copies the Visual C++ runtime DLLs each native addon imports into the addon's own folder, where Windows looks for
+ * them (D25), and returns them, relative to the runtime. A needed DLL that cannot be found fails staging: without it,
+ * the storage driver will not load on a Windows machine that lacks the Visual C++ Redistributable, and nothing on this
+ * machine would show it.
  */
-function addVcRuntime(modules: string, nodeDir: string): string[] {
-  const needed = new Set<string>();
-  walk(modules, (path, isDir) => {
-    if (isDir || !path.endsWith(".node")) return;
-    const text = readFileSync(path).toString("latin1").toLowerCase();
-    for (const dll of VC_RUNTIME) if (text.includes(dll.toLowerCase())) needed.add(dll);
-  });
-  if (needed.size === 0) {
-    console.log("  no native addon imports the Visual C++ runtime");
-    return [];
-  }
+function addVcRuntime(stage: string): string[] {
   const from = values["vc-runtime-from"] ?? (process.platform === "win32" ? join(process.env["SystemRoot"] ?? "C:\\Windows", "System32") : "/mnt/c/Windows/System32");
-  const available = existsSync(from) ? readdirSync(from) : [];
-  const missing = [...needed].filter((dll) => !available.some((file) => file.toLowerCase() === dll.toLowerCase()));
+  const { placed, missing } = placeVcRuntime(stage, from);
   if (missing.length) {
     const message = `${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} needed by a native addon but not in ${from}. Point --vc-runtime-from at a folder that has ${missing.length === 1 ? "it" : "them"} (System32 on a Windows machine with the Visual C++ Redistributable).`;
     if (!values["allow-missing-vc-runtime"]) throw new Error(message);
     console.warn(`  ⚠ ${message}\n  ⚠ Continuing because of --allow-missing-vc-runtime: this runtime will not load its storage driver on a clean Windows machine. Never ship it.`);
+  } else {
+    const misplaced = misplacedVcRuntime(stage);
+    if (misplaced.length) throw new Error(`A native addon would not find its Visual C++ runtime on a machine without the Redistributable:\n${misplaced.map((problem) => `  ✗ ${problem}`).join("\n")}`);
   }
-  const shipped: string[] = [];
-  for (const dll of needed) {
-    const found = available.find((file) => file.toLowerCase() === dll.toLowerCase());
-    if (!found) continue;
-    cpSync(join(from, found), join(nodeDir, dll.toLowerCase()));
-    // System32 copies arrive read-only; an installer must be able to replace them.
-    chmodSync(join(nodeDir, dll.toLowerCase()), 0o644);
-    console.log(`  ${dll.toLowerCase()} (from ${from})`);
-    shipped.push(dll.toLowerCase());
-  }
-  return shipped;
-}
-
-/** A hash of every staged file but the manifest, by path and content: names the runtime's folder in WSL (D5). */
-function hashRuntime(stage: string): { contentHash: string; sha256: string; files: number } {
-  const paths: string[] = [];
-  walk(stage, (path, isDir) => {
-    if (!isDir) paths.push(path);
-  });
-  const hash = createHash("sha256");
-  let files = 0;
-  for (const path of paths.map((p) => relative(stage, p).split(sep).join("/")).sort()) {
-    if (path === "engine/manifest.json") continue;
-    const bytes = readFileSync(join(stage, path));
-    hash.update(`${path}\0${bytes.length}\0`);
-    hash.update(bytes);
-    files++;
-  }
-  const sha256 = hash.digest("hex");
-  return { contentHash: sha256.slice(0, 16), sha256, files };
+  if (placed.length === 0) console.log("  no native addon imports the Visual C++ runtime");
+  for (const path of placed) console.log(`  ${path} (from ${from})`);
+  return placed;
 }
 
 /** GNU tar with fixed order, times and owners, gzipped without a timestamp: the same files give the same bytes. */
