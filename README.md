@@ -3,10 +3,11 @@
 A desktop workspace for engineers. It explains a repository with evidence, and remembers the engineer's confirmed
 preferences across projects without letting them override a project's own conventions.
 
-> **Status:** the cross-platform foundation is built and verified: Windows with a WSL or native engine, and Linux.
-> Explaining a repository with evidence is built, tested offline, and has run live on NVIDIA Nemotron through Nebius
-> Token Factory. Built for the Nebius × NVIDIA Global AI Hackathon. Sections marked *planned* describe work that isn't
-> built yet.
+> **Status:** v0.1.1 is released for Windows, with WSL, and for Linux.
+> - Built: explaining a repository with evidence, confirmed preferences with explicit precedence, and task choices.
+> - These passed live acceptance on the packaged builds, with NVIDIA Nemotron through Nebius Token Factory.
+>
+> Built for the Nebius × NVIDIA Global AI Hackathon. Sections marked *planned* describe work that isn't built yet.
 
 ## What it does
 
@@ -23,11 +24,16 @@ The target demonstration for the current milestone is read-only:
 - **Built:** preferences you confirm, kept by the app on this computer.
   - Personal ones apply to every project; a project's own apply only to it.
   - Each run gets a snapshot of the ones that apply when it starts, so an edit or a deletion reaches the next run.
-  - Explanations report where a repository's conventions differ from them, and the repository wins.
+  - You can edit, replace or delete them, and export or import them. Suggestions drawn from a repository are saved only
+    when you keep them.
+- **Built:** explicit precedence.
+  - When a repository's conventions differ from your preferences, an explanation reports the conflict, and the engine
+    says which source governs.
+  - Highest first: this task's choices, a project's decisions to change its conventions, the repository's existing
+    conventions, a project's defaults, then personal defaults.
+  - A task's choice governs that run only. It is shown as intended, never as current behaviour.
 - **Built:** per-project consent before any repository content is sent to a model, off by default. Turning it off
   stops that project's explanations.
-- *Planned:* overrides and full precedence between a task's own choices, a project's conventions and personal
-  preferences, and suggestions drawn from a repository that only you can confirm.
 - *Deferred to a later milestone:* new-app creation and coding work inside a sandbox.
 
 ## How it uses NVIDIA and Nebius

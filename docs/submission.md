@@ -64,6 +64,108 @@ defers, so that track is no longer the target.
 **Questions for the organisers:** not needed. The track is decided, Sandboxes no longer matter to this submission,
 and judges get a key in the private testing instructions (#11). None was sent.
 
+## Submission text (draft for the form)
+
+For Nate to paste into Devpost and edit. Each claim rests on recorded evidence, and planned work is labelled as planned.
+Match the field names to the form when submitting: Devpost blocks tooling, so they haven't been read here.
+
+**Project name:** Nivra
+
+**Elevator pitch** (200 characters at most):
+> A desktop agent that explains your repository with checked evidence, and applies your confirmed preferences with
+> explicit precedence, on NVIDIA Nemotron through Nebius Token Factory.
+
+**About the project**
+
+*Inspiration.* Coding assistants remember what you like, but they rarely say whose rule wins when a repository's own
+conventions disagree, or which lines they actually read. Nivra makes both visible.
+
+*What it does*
+- **It explains a repository with evidence.** Each finding cites files and lines. Nivra checks every citation against
+  the lines the model was actually shown, and labels it as just that, never as proof that the explanation is right.
+- **It remembers preferences you confirm.** Personal ones apply to every project, and a project's own apply only to it.
+  Each run gets a snapshot of the ones that apply when it starts, so an edit or a deletion reaches the next run.
+- **It applies explicit precedence.** When a repository's conventions differ from your preferences, the explanation
+  reports the conflict, and the engine says which source governs. Highest first:
+  1. this task's choices;
+  2. a project's decisions to change its conventions;
+  3. the repository's existing conventions;
+  4. a project's defaults;
+  5. personal defaults.
+
+  A task's choice governs that run only, and is shown as intended, never as current behaviour.
+- **Nothing is sent without consent.** Sending a project's content to the model is off until you allow it for that
+  project.
+- **It runs where the repository lives.** On Windows, folders in WSL run in their distribution; on Linux, locally.
+
+*How we built it*
+- **The desktop app:** Electron, with React and Mantine.
+- **Engines:** a Node engine for each place repositories live, speaking JSON-RPC over stdio. Its workflows run on
+  Mastra, with SQLite for runs and workflow state.
+- **The model:** explanations call NVIDIA Nemotron 3 Super (`nvidia/nemotron-3-super-120b-a12b`) through Nebius Token
+  Factory's OpenAI-compatible API.
+  - The model reads the repository only through fixed, read-only tools that the engine runs: list, search and read.
+  - It answers in a structured form that the engine validates.
+  - Every call has a deadline, and so does the whole run. The usage each call reports is recorded.
+- **Ranking:** the model reports each conflict and names its sources. The engine ranks them by the sources' kind and
+  id, never by their words.
+
+*Challenges*
+- **Evidence discipline.** Models cite files they have only seen named. Nivra refuses citations of lines the model
+  wasn't shown, and says which ones, until every citation it keeps is checked.
+- **Running across Windows and WSL.** That meant a protocol-only stdout, `wsl.exe`'s UTF-16 output, a runtime
+  installed into each distribution on first use, and paths that cross the boundary.
+- **Packaging honestly.** Preparing clean-machine checks, we found that the Windows runtime shipped a C++ runtime DLL
+  where Windows never looks. We fixed it in v0.1.1, with a regression check that an installed copy can't satisfy.
+
+*Accomplishments*
+- **Live acceptance on the packaged builds:** every criterion passed on the Linux deb and on the Windows zip driving
+  WSL, 14 of 14 each. It ran on candidate 0.1.0, whose Linux and WSL payloads v0.1.1 keeps unchanged.
+- **Clean-setup checks of the published v0.1.1 files,** with README testing steps 4–8 run through the app:
+  - Windows → WSL against a fresh Ubuntu 26.04.1: 23 of 23 checks;
+  - Ubuntu 24.04 with AppArmor on: 22 of 22.
+
+*What we learned:* structured answers need a refusal loop that names the problem, and an agent's evidence is worth
+showing only when the app checks it.
+
+*What's next (planned, not built):*
+- coding work inside a sandbox, with patches you approve;
+- new-app creation;
+- macOS.
+
+**Built with:** Electron, React, Mantine, TypeScript, Node.js, Mastra, SQLite, zod, NVIDIA Nemotron, Nebius Token
+Factory, WSL, Playwright.
+
+**Links**
+- Source: https://github.com/xXValhallaCoderXx/nivra-orchestrator (MIT)
+- Release: https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1
+- Demonstration repositories: https://github.com/xXValhallaCoderXx/valhalla-fitness and
+  https://github.com/xXValhallaCoderXx/nivra-demo-timer
+- Video: to add from NIV-17
+
+**Track:** Best Apps and Agents (#5).
+
+**Testing instructions** (the private field for judges, #11)
+1. Install v0.1.1 from the release.
+   - Windows 10/11 x64: the zip. Folders inside WSL 2 run there. SmartScreen asks once: **More info → Run anyway**.
+     Smart App Control may refuse an unsigned app.
+   - Linux x64: the deb, installed with `sudo apt install ./Nivra-0.1.1-amd64.deb`.
+2. Under Settings, paste this Token Factory key: `<the key, entered here only>`. It works until judging ends, 16
+   December, 04:00 SGT.
+3. Follow the README's testing instructions: about ten minutes, with five explanations that take one to four minutes
+   each.
+
+**Measured, with conditions,** for the text or the video. The model runs on Nebius, so times depend on the service.
+These were measured on 19–20 October on Windows 11 with WSL 2.7.8, and on an Ubuntu 24.04 VM:
+- explanations took 46–212 s each;
+- each used 11,887–142,580 input tokens;
+- every citation pointed to lines the model was shown: 129 of 129, across the ten explanations.
+
+**Pre-existing work (#10):** Nivra was started on 16 October 2026, inside the submission period (26 August to 30
+October 2026). It reuses concepts and some code from Hird, an earlier desktop app by the same author, also started
+inside the period, on 8 October 2026. [provenance.md](provenance.md) lists every piece, with the Hird commit it came
+from.
+
 ## Technology feedback (draft for #9)
 
 From recorded runs (D22, D23); Nate edits before submitting.
