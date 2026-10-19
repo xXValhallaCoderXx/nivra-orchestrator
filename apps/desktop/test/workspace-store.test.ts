@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
-import { getConversation, insertConversation, listConversations, type ConversationRecord } from "../src/main/workspace.ts";
+import { deleteConversation, getConversation, getTurn, insertConversation, insertTurn, listConversations, messagesOf, projectAnswer, recordRun, settleTurn, type ConversationRecord } from "../src/main/workspace.ts";
 import { classifyWorkspaceError, openWorkspace, WORKSPACE_MIGRATIONS, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 
 const dirs: string[] = [];
@@ -196,5 +196,48 @@ describe("the workspace database (D26)", () => {
     const workspace = ready(join(dir, "workspace.db"));
     assert.equal(workspace.schemaVersion, 1);
     mkdirSync(dir, { recursive: true });
+  });
+});
+
+describe("a conversation's turns and messages (D26)", () => {
+  const turnOf = (conversationId: string) => ({ id: randomUUID(), conversationId, sessionId: "s", targetId: "local", preferences: [], history: null, createdAt: AT });
+  const reply = (text: string) => ({ kind: "general" as const, text, cutOff: false, context: { preferences: { revision: 0, digest: "d", records: [] }, history: { exchanges: 0, chars: 0, shortened: 0, omitted: { overLimit: 0, unanswered: 0, preferencesChanged: 0 }, digest: "d" } }, finishedAt: AT });
+
+  it("takes one turn at a time, projects an answer once, keeps a turn's first outcome, and names the conversation from its first message", () => {
+    const workspace = ready(join(folder(), "workspace.db"));
+    const record = general();
+    insertConversation(workspace.db, record);
+    const first = turnOf(record.id);
+    assert.equal(insertTurn(workspace.db, first, { id: randomUUID(), text: "How should I stage\nthis refactor?" }), true);
+    assert.equal(insertTurn(workspace.db, turnOf(record.id), { id: randomUUID(), text: "And another?" }), false, "one turn at a time");
+    assert.equal(getConversation(workspace.db, record.id)?.title, "How should I stage");
+    assert.equal(recordRun(workspace.db, first.id, randomUUID()), true);
+    const answer = { id: randomUUID(), text: "In two steps.", reply: reply("In two steps."), createdAt: AT };
+    assert.deepEqual([projectAnswer(workspace.db, first.id, answer), projectAnswer(workspace.db, first.id, { ...answer, id: randomUUID() })], [true, false]);
+    assert.equal(settleTurn(workspace.db, first.id, { status: "interrupted" }, AT), false, "an answered turn keeps its outcome");
+    assert.deepEqual([getTurn(workspace.db, first.id)?.status, messagesOf(workspace.db, record.id).map((m) => [m.seq, m.role])], ["answered", [[1, "person"], [2, "assistant"]]]);
+    workspace.db.close();
+    // After a restart: the same, with nothing added.
+    const again = ready(workspace.db.path);
+    assert.deepEqual(messagesOf(again.db, record.id).map((m) => m.text), ["How should I stage\nthis refactor?", "In two steps."]);
+  });
+
+  it("deletes a conversation's turns and messages, and leaves none of their text in the file", () => {
+    const path = join(folder(), "workspace.db");
+    const workspace = ready(path);
+    const record = general();
+    insertConversation(workspace.db, record);
+    const canary = `nivra-deleted-canary-${randomUUID()}`;
+    const turn = turnOf(record.id);
+    insertTurn(workspace.db, turn, { id: randomUUID(), text: `Question ${canary}` });
+    recordRun(workspace.db, turn.id, randomUUID());
+    projectAnswer(workspace.db, turn.id, { id: randomUUID(), text: `Answer ${canary}`, reply: reply(`Answer ${canary}`), createdAt: AT });
+    assert.ok(readFileSync(path).includes(canary) || readFileSync(`${path}-wal`).includes(canary), "the text was there");
+    assert.equal(deleteConversation(workspace.db, record.id), true);
+    const db = workspace.db.db;
+    const count = (table: string) => Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
+    assert.deepEqual([count("conversations"), count("run_links"), count("messages")], [0, 0, 0]);
+    const files = readdirSync(dirname(path)).filter((name) => name.startsWith("workspace.db"));
+    assert.deepEqual(files.filter((name) => readFileSync(join(dirname(path), name)).includes(canary)), []);
   });
 });

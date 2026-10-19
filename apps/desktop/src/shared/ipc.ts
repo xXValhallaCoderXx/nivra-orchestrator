@@ -1,4 +1,4 @@
-import type { DoctorReport, EngineInfo, ExplainResult, PreferenceIntent, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
+import type { ChatResult, DoctorReport, EngineInfo, ExplainResult, HistoryRecord, PreferenceIntent, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -192,6 +192,48 @@ export interface ConversationSummary {
 export interface ConversationsView {
   workspace: WorkspaceView;
   conversations: ConversationSummary[];
+}
+
+/**
+ * A turn's state (D26). `not-sent` is claimed only when it is established that nothing reached an engine's store;
+ * `unknown` when Nivra can't tell. Nothing is ever resent: sending again starts a new turn.
+ */
+export type TurnStatus = "submitting" | "running" | "answered" | "failed" | "cancelled" | "interrupted" | "not-sent" | "unknown";
+
+export interface TurnView {
+  id: string;
+  status: TurnStatus;
+  /** What happened, in Nivra's words, when it ended without an answer; null while it goes, and once answered. */
+  note: string | null;
+  /** Why its engine can't be reached to check it, while that lasts; it is checked again when the conversation opens. */
+  unresolved: string | null;
+  runId: string | null;
+  cancelRequested: boolean;
+  /** What the turn was given: how many preferences, and the history sent and left out (counts, never text). */
+  given: { preferences: number; history: HistoryRecord | null };
+  createdAt: string;
+  settledAt: string | null;
+}
+
+export interface MessageView {
+  id: string;
+  seq: number;
+  role: "person" | "assistant";
+  text: string;
+  /** An answer's whole reply: a general one's text, or a repository one's evidence, proposals and assumptions. */
+  reply: ChatResult | null;
+  turnId: string | null;
+  createdAt: string;
+}
+
+export interface ConversationView {
+  summary: ConversationSummary;
+  messages: MessageView[];
+  turns: TurnView[];
+  /** The engine its turns run on. */
+  engine: EngineView;
+  /** Why it can't continue (its project was removed); null when it can. */
+  closed: string | null;
 }
 
 export interface NivraApi {

@@ -1,20 +1,38 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type { DoctorReport, ExplainResult, PreferenceIntent, ProviderCheck, RunEventsPage, RunStatus, RunSummary, SecretName } from "@nivra/domain";
+import {
+  CHAT_LIMITS,
+  ErrorCode,
+  isTerminal,
+  RpcCallError,
+  type ChatContext,
+  type ChatInput,
+  type DoctorReport,
+  type ExplainResult,
+  type PreferenceIntent,
+  type ProviderCheck,
+  type RunEventsPage,
+  type RunStatus,
+  type RunSummary,
+  type SecretName,
+} from "@nivra/domain";
 import type {
   AddProjectResult,
   ConversationScope,
   ConversationsView,
   ConversationSummary,
+  ConversationView,
   EngineView,
   ImportEntryView,
   ImportSourceView,
   PreferencesView,
   PreferenceView,
   ProjectView,
+  TurnView,
   WorkspaceView,
   WslView,
 } from "../shared/ipc.ts";
+import { selectHistory } from "./history.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
 import {
@@ -36,11 +54,32 @@ import {
   type PreferenceChange,
   type PreferenceExport,
 } from "./preferences.ts";
-import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
+import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
+import { EngineOfflineError, EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
 import { labelFor, type ExecutionTarget } from "./targets/types.ts";
 import { isHiddenDistro, wslGuidance } from "./targets/wsl-discovery.ts";
-import { getConversation, insertConversation, listConversations, type ConversationRecord } from "./workspace.ts";
+import {
+  deleteConversation,
+  getConversation,
+  getTurn,
+  insertConversation,
+  insertTurn,
+  listConversations,
+  messagesOf,
+  openTurns,
+  projectAnswer,
+  recordRun,
+  requestCancel,
+  setTurnHome,
+  settleTurn,
+  turnByRun,
+  turnsOf,
+  withdrawCancel,
+  type CancelReason,
+  type ConversationRecord,
+  type TurnRecord,
+} from "./workspace.ts";
 import { openWorkspace, type WorkspaceDb, type WorkspaceOpening } from "./workspace-db.ts";
 
 export interface HostOptions {
@@ -60,7 +99,15 @@ export interface HostOptions {
   /** Supervisor timings; tests shorten them. */
   supervisor?: Pick<SupervisorOptions, "heartbeatMs" | "shutdownGraceMs" | "eofGraceMs" | "startTimeoutMs">;
   log: (line: string) => void;
+  /** Tests only: called between fetching a turn's reply and writing it, so a deletion can land there. */
+  testHooks?: { beforeProjection?(turnId: string): Promise<void> };
 }
+
+/** Why a conversation can't continue once its project is gone. */
+const CLOSED = "This conversation's project was removed, so it can't continue. Its history stays here until you delete it.";
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const isRunNotFound = (error: unknown) => error instanceof RpcCallError && error.code === ErrorCode.RunNotFound;
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref?.());
 
 interface Engine {
   readonly target: ExecutionTarget;
@@ -90,6 +137,14 @@ export class Host {
   readonly #sharingEpochs = new Map<string, number>();
   /** Each project's explain runs this session, so turning sharing off can cancel them. */
   readonly #explainRuns = new Map<string, Set<string>>();
+  /** Each project's conversation runs this session, for the same reason (D26). */
+  readonly #conversationRuns = new Map<string, Set<string>>();
+  /** This host session, recorded with each turn: only this session's own submissions can still be in flight. */
+  readonly #sessionId = randomUUID();
+  /** Turns whose `runs.start` this session hasn't finished with, and who asked them to stop meanwhile. */
+  readonly #submissions = new Map<string, { cancel: CancelReason | null }>();
+  /** Turns being followed to their end. */
+  readonly #following = new Set<string>();
   /** Projects being removed: no explanation may start for them, and a late answer to one that did is not accepted. */
   readonly #removing = new Set<string>();
   /** Export files the person chose to import, read and checked, until they are imported; this session only. */
@@ -143,6 +198,120 @@ export class Host {
     }
     insertConversation(workspace, record);
     return this.#conversationView(getConversation(workspace, record.id)!);
+  }
+
+  /** One conversation as it is now, read from the workspace. Asks no engine and starts nothing. */
+  conversation(conversationId: string): ConversationView {
+    const workspace = this.#workspaceDb();
+    const record = getConversation(workspace, conversationId);
+    if (!record) throw new Error("That conversation is no longer in the list.");
+    const summary = this.#conversationView(record);
+    const engine = this.#engineView(record.targetId);
+    return {
+      summary,
+      messages: messagesOf(workspace, conversationId).map(({ conversationId: _of, ...message }) => message),
+      turns: turnsOf(workspace, conversationId).map((turn) => this.#turnView(turn, engine)),
+      engine,
+      closed: summary.projectPresent === false ? CLOSED : null,
+    };
+  }
+
+  /**
+   * Opens a conversation (D26). Turns left open, by an earlier session or a lost answer, are followed on their own
+   * engine, which starts when needed: an answer is projected, an interruption reported, and a send whose answer was lost
+   * is found by its request id. Nothing is ever resent. A target already known to be unavailable isn't retried.
+   */
+  async openConversation(conversationId: string): Promise<ConversationView> {
+    const workspace = this.#workspaceDb();
+    const record = getConversation(workspace, conversationId);
+    if (!record) throw new Error("That conversation is no longer in the list.");
+    const open = openTurns(workspace, { conversationId }).filter((turn) => !this.#submissions.has(turn.id));
+    if (open.length) {
+      if (!this.#unavailable.has(record.targetId)) await this.#ensure(record.targetId).catch(() => undefined);
+      for (const turn of open) this.#follow(turn.id);
+    }
+    return this.conversation(conversationId);
+  }
+
+  /**
+   * Sends the person's message as a new turn (D26). Refused at once, with nothing stored, when it can't go: a credential
+   * in it, a turn still open, or a repository conversation whose project is gone or doesn't allow sharing. Otherwise the
+   * message and its turn are stored first, then sent in the background: the engine's start is awaited, consent checked
+   * again, the engine's store recorded, and only then is the request written. The history goes with it, chosen here.
+   */
+  async sendMessage(conversationId: string, text: string): Promise<ConversationView> {
+    const workspace = this.#workspaceDb();
+    const message = text.trim();
+    if (!message) throw new Error("Type a message first.");
+    if (message.length > CHAT_LIMITS.messageChars) throw new Error(`That message is ${message.length} characters long, and a turn can carry ${CHAT_LIMITS.messageChars}. Shorten it, then send it again.`);
+    refuseCredentials("Your message", message, await this.#knownSecrets(), "send");
+    const conversation = getConversation(workspace, conversationId);
+    if (!conversation) throw new Error("That conversation is no longer in the list.");
+    const busy = "This conversation is still waiting for an answer. Wait for it, or cancel it, then send again.";
+    if (openTurns(workspace, { conversationId }).length) throw new Error(busy);
+    let input: ChatInput = { message, scope: { kind: "general" } };
+    let epoch = 0;
+    if (conversation.projectId !== null) {
+      const project = this.#options.store.data.projects.find((p) => p.id === conversation.projectId);
+      if (!project) throw new Error(CLOSED);
+      if (this.#removing.has(project.id)) throw new Error("This conversation's project is being removed, so it can't continue.");
+      if (!project.sharing.modelContext) throw new Error("This project doesn't allow sending its content to Token Factory. Allow sharing for it, then send again.");
+      epoch = this.#epochOf(project.id);
+      input = { message, scope: { kind: "repository", repoPath: project.nativePath } };
+    }
+    // The snapshot is taken now (D21): with no project, the personal preferences only.
+    const preferences = snapshotFor(this.#options.store.data, conversation.projectId);
+    const { history, record } = await selectHistory(turnsOf(workspace, conversationId), messagesOf(workspace, conversationId), preferences);
+    const turnId = randomUUID();
+    const turn = { id: turnId, conversationId, sessionId: this.#sessionId, targetId: conversation.targetId, preferences: preferences.records.map(({ id, revision }) => ({ id, revision })), history: record, createdAt: new Date().toISOString() };
+    if (!getConversation(workspace, conversationId)) throw new Error("That conversation is no longer in the list.");
+    if (!insertTurn(workspace, turn, { id: randomUUID(), text: message })) throw new Error(busy);
+    this.#submissions.set(turnId, { cancel: null });
+    const context: ChatContext = { preferences, sharing: { modelContext: conversation.projectId !== null }, history };
+    void this.#submit(turnId, conversation, input, context, epoch).catch((error: unknown) => this.#options.log(`A turn couldn't be sent: ${errorText(error)}`));
+    return this.conversation(conversationId);
+  }
+
+  /**
+   * Stops a turn the person no longer wants. One being sent stops before its request is written, or is cancelled as soon
+   * as its engine answers; a running one is cancelled on its engine. Its end is recorded as cancelled by the person.
+   */
+  async cancelTurn(conversationId: string, turnId: string): Promise<ConversationView> {
+    const workspace = this.#workspaceDb();
+    const turn = getTurn(workspace, turnId);
+    if (!turn || turn.conversationId !== conversationId) throw new Error("That message is no longer in this conversation.");
+    if (turn.status === "submitting" || turn.status === "running") {
+      requestCancel(workspace, turnId, "person");
+      const pending = this.#submissions.get(turnId);
+      if (pending) pending.cancel ??= "person";
+      if (turn.runId) await this.cancelRun(turn.runId);
+      else if (!pending) this.#follow(turnId);
+    }
+    return this.conversation(conversationId);
+  }
+
+  /**
+   * Deletes a conversation with its turns, messages and plans (D26). Its turn still going is stopped first; when it
+   * can't be, the conversation stays, and the person is told why. Text copied into a task's brief stays with the task,
+   * and each engine keeps its own record of the runs.
+   */
+  async deleteConversation(conversationId: string): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const record = getConversation(workspace, conversationId);
+    if (!record) throw new Error("That conversation is no longer in the list.");
+    const open = openTurns(workspace, { conversationId });
+    for (const turn of open) {
+      requestCancel(workspace, turn.id, "deletion");
+      const pending = this.#submissions.get(turn.id);
+      if (pending) pending.cancel ??= "deletion";
+    }
+    // A run whose engine isn't online isn't running any more: its engine fails it as interrupted when it starts (D4).
+    const running = open.filter((turn) => turn.runId && this.#engines.get(turn.targetId)?.supervisor.state.status === "online");
+    const failed = (await Promise.allSettled(running.map((turn) => this.cancelRun(turn.runId!)))).filter((result) => result.status === "rejected");
+    if (failed.length) {
+      throw new Error(`Nivra couldn't stop this conversation's answer on ${this.#labelOf(record.targetId)} (${errorText(failed[0]!.reason)}), so the conversation is still here. Restart that engine, then delete it again.`);
+    }
+    deleteConversation(workspace, conversationId);
   }
 
   /** What WSL offers on a Windows host, and what to do when it offers nothing; null elsewhere. */
@@ -268,7 +437,11 @@ export class Host {
     this.#options.store.update((data) => ({ ...data, projects: data.projects.map((p) => (p.id === projectId ? { ...p, sharing: { ...p.sharing, modelContext } } : p)) }));
     if (!modelContext) {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
-      await this.#stopExplainRuns(projectId, (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`);
+      const withdraw = this.#markProjectTurns(projectId, "sharing");
+      await this.#stopExplainRuns(projectId, (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`).catch((error: unknown) => {
+        withdraw();
+        throw error;
+      });
     }
     return this.#view(this.#project(projectId));
   }
@@ -317,14 +490,17 @@ export class Host {
     // Marked before the first wait, so no explanation can start while its runs are being stopped.
     this.#removing.add(projectId);
     this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
+    const withdraw = this.#markProjectTurns(projectId, "removal");
     try {
       await this.#stopExplainRuns(projectId, (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
     } catch (error) {
+      withdraw();
       this.#removing.delete(projectId);
       throw error;
     }
     this.#notices.delete(projectId);
     this.#explainRuns.delete(projectId);
+    this.#conversationRuns.delete(projectId);
     let preferencesRemoved = 0;
     this.#options.store.update((data) => {
       const { data: next, removed } = removeProjectPreferences(data, projectId);
@@ -486,14 +662,254 @@ export class Host {
     return this.#sharingEpochs.get(projectId) ?? 0;
   }
 
-  /** Cancels the project's queued and running explain runs; when one can't be stopped, says so through `refusal`. */
+  /** Cancels the project's queued and running explain and conversation runs; when one can't be stopped, says so through `refusal`. */
   async #stopExplainRuns(projectId: string, refusal: (runs: string, why: string, them: "it" | "them") => string): Promise<void> {
     // A run whose engine isn't online isn't running any more.
-    const runs = [...(this.#explainRuns.get(projectId) ?? [])].filter((runId) => this.#engines.get(this.#runs.get(runId) ?? "")?.supervisor.state.status === "online");
+    const all = [...(this.#explainRuns.get(projectId) ?? []), ...(this.#conversationRuns.get(projectId) ?? [])];
+    const runs = all.filter((runId) => this.#engines.get(this.#runs.get(runId) ?? "")?.supervisor.state.status === "online");
     const failed = (await Promise.allSettled(runs.map((runId) => this.cancelRun(runId)))).filter((result) => result.status === "rejected");
     if (failed.length === 0) return;
     const why = failed[0]!.reason instanceof Error ? failed[0]!.reason.message : String(failed[0]!.reason);
     throw new Error(refusal(failed.length === 1 ? "an explain run" : `${failed.length} explain runs`, why, failed.length === 1 ? "it" : "them"));
+  }
+
+  /**
+   * Records why the project's open conversation turns stop, so each ends as cancelled by that, not by the person.
+   * Returns a function that takes the reason back, for when they couldn't be stopped. A turn still being sent stops
+   * through its epoch check either way.
+   */
+  #markProjectTurns(projectId: string, reason: CancelReason): () => void {
+    if (this.#workspace.state !== "ready") return () => undefined;
+    const workspace = this.#workspace.db;
+    const marked = openTurns(workspace, { projectId }).filter((turn) => requestCancel(workspace, turn.id, reason) && turn.cancelReason === null);
+    for (const turn of marked) {
+      const pending = this.#submissions.get(turn.id);
+      if (pending) pending.cancel ??= reason;
+    }
+    return () => {
+      if (this.#workspace.state === "ready") for (const turn of marked) withdrawCancel(this.#workspace.db, turn.id, reason);
+    };
+  }
+
+  /** The keys the host holds, for the protection policy (D8, D26). */
+  async #knownSecrets(): Promise<KnownSecrets> {
+    return Object.entries(await this.#options.credentials()).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
+  }
+
+  /** Why a turn must not be sent now (a cancel, or its project's consent gone since it was asked for); null when it may. */
+  #stopReason(turnId: string, conversation: ConversationRecord, epoch: number): CancelReason | null {
+    const asked = this.#submissions.get(turnId)?.cancel ?? null;
+    if (asked) return asked;
+    if (conversation.projectId === null) return null;
+    const project = this.#options.store.data.projects.find((p) => p.id === conversation.projectId);
+    if (!project || this.#removing.has(project.id)) return "removal";
+    if (!project.sharing.modelContext || this.#epochOf(project.id) !== epoch) return "sharing";
+    return null;
+  }
+
+  /** Ends an open turn without an answer; a turn that has already ended keeps its first outcome. */
+  #settle(turnId: string, outcome: Parameters<typeof settleTurn>[2]): void {
+    if (this.#workspace.state !== "ready") return;
+    settleTurn(this.#workspace.db, turnId, outcome, new Date().toISOString());
+  }
+
+  /**
+   * Sends a stored turn (D26). The request is written only after the engine's store is recorded with the turn, so a turn
+   * with none was never sent. A failure known to come before writing is "not sent"; anything after it (no answer, a
+   * closed connection, an error answer: the engine may have started the run first) leaves the turn to be found by its
+   * request id.
+   */
+  async #submit(turnId: string, conversation: ConversationRecord, input: ChatInput, context: ChatContext, epoch: number): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const label = this.#labelOf(conversation.targetId);
+    const notSent = (why: string) => {
+      this.#submissions.delete(turnId);
+      this.#settle(turnId, { status: "not-sent", errorMessage: why });
+    };
+    let engine: Engine;
+    try {
+      engine = await this.#ensure(conversation.targetId);
+      if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
+    } catch (error) {
+      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so this message wasn't sent and nothing reached the model.`);
+      return;
+    }
+    const state = engine.supervisor.state;
+    if (state.status !== "online") {
+      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so this message wasn't sent and nothing reached the model.`);
+      return;
+    }
+    const before = this.#stopReason(turnId, conversation, epoch);
+    if (before) {
+      this.#submissions.delete(turnId);
+      requestCancel(workspace, turnId, before);
+      this.#settle(turnId, { status: "cancelled", errorMessage: "It was stopped before it was sent, so nothing reached the model." });
+      return;
+    }
+    // Deleted or ended meanwhile: nothing to send.
+    if (!setTurnHome(workspace, turnId, state.info.homeId)) {
+      this.#submissions.delete(turnId);
+      return;
+    }
+    let run: RunSummary;
+    try {
+      run = await engine.supervisor.call("runs.start", { clientRequestId: turnId, workflowId: "chat", input, context });
+    } catch (error) {
+      // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
+      if (error instanceof EngineOfflineError || error instanceof TypeError) {
+        notSent(`The engine on ${label} didn't take this message (${errorText(error)}), so nothing reached the model.`);
+        return;
+      }
+      this.#options.log(`A turn's request got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
+      this.#submissions.delete(turnId);
+      this.#follow(turnId);
+      return;
+    }
+    this.#runs.set(run.id, conversation.targetId);
+    recordRun(workspace, turnId, run.id);
+    if (conversation.projectId !== null) {
+      const runs = this.#conversationRuns.get(conversation.projectId) ?? new Set<string>();
+      runs.add(run.id);
+      this.#conversationRuns.set(conversation.projectId, runs);
+    }
+    // Stopped while the request was out (a cancel, a deletion, consent withdrawn): the run stops now.
+    const late = this.#stopReason(turnId, conversation, epoch);
+    this.#submissions.delete(turnId);
+    const gone = getTurn(workspace, turnId) === null;
+    if (late || gone) {
+      if (!gone && late) requestCancel(workspace, turnId, late);
+      await engine.supervisor.call("runs.cancel", { runId: run.id }).catch((error: unknown) => this.#options.log(`A turn stopped while it was being sent couldn't be cancelled: ${errorText(error)}`));
+      if (gone) return;
+    }
+    this.#follow(turnId);
+  }
+
+  /**
+   * Follows an open turn to its end on its own engine (D26), however it was left: just sent, sent by an earlier session,
+   * or sent with its answer lost. Checks again until the turn ends or Nivra quits, waiting while its engine is away.
+   * - No store recorded: it was never sent (`not-sent`).
+   * - Another store on that target: `unknown`, never resent.
+   * - No run id: found by its request id; absent from the same store means it never arrived (`not-sent`).
+   * - A run: followed until it ends, then its answer projected or its end recorded.
+   */
+  #follow(turnId: string): void {
+    if (this.#following.has(turnId) || this.#submissions.has(turnId)) return;
+    this.#following.add(turnId);
+    void (async () => {
+      let delay = 400;
+      let cancelSent = false;
+      try {
+        while (!this.#closing && this.#workspace.state === "ready") {
+          const workspace = this.#workspace.db;
+          const turn = getTurn(workspace, turnId);
+          if (!turn || (turn.status !== "submitting" && turn.status !== "running")) return;
+          if (turn.homeId === null) {
+            this.#settle(turnId, { status: "not-sent", errorMessage: "Nivra stopped before sending this message, so nothing reached the model." });
+            return;
+          }
+          const engine = this.#engines.get(turn.targetId);
+          const state = engine?.supervisor.state;
+          if (engine && state?.status === "online") {
+            if (state.info.homeId !== turn.homeId) {
+              this.#settle(turnId, { status: "unknown", errorMessage: `it went to an engine whose records aren't here (another engine home on ${this.#labelOf(turn.targetId)})` });
+              return;
+            }
+            try {
+              let summary: RunSummary | null;
+              if (turn.runId) {
+                summary = await engine.supervisor.call("runs.get", { runId: turn.runId });
+              } else {
+                summary = await engine.supervisor.call("runs.find", { clientRequestId: turnId });
+                if (!summary) {
+                  this.#settle(turnId, { status: "not-sent", errorMessage: "Its engine has no record of this message, so it never ran and nothing reached the model." });
+                  return;
+                }
+                this.#runs.set(summary.id, turn.targetId);
+                recordRun(workspace, turnId, summary.id);
+              }
+              if (isTerminal(summary.status)) {
+                await this.#finish(turnId, engine, summary);
+                return;
+              }
+              if (turn.cancelRequested && !cancelSent) {
+                cancelSent = true;
+                await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch(() => undefined);
+              }
+              delay = 400;
+            } catch (error) {
+              if (isRunNotFound(error)) {
+                this.#settle(turnId, { status: "unknown", errorMessage: `the engine on ${this.#labelOf(turn.targetId)} has no record of its run any more` });
+                return;
+              }
+              delay = Math.min(delay * 2, 5_000);
+            }
+          } else {
+            delay = Math.min(delay * 2, 5_000);
+          }
+          await pause(delay);
+        }
+      } catch (error) {
+        this.#options.log(`Following a turn stopped: ${errorText(error)}`);
+      } finally {
+        this.#following.delete(turnId);
+      }
+    })();
+  }
+
+  /**
+   * Records how a turn's run ended (D26). A reply is masked again and projected once. A cancel Nivra asked for keeps
+   * its reason; any other cancel, or a `run.interrupted` event, means Nivra or its engine stopped first: interrupted.
+   */
+  async #finish(turnId: string, engine: Engine, summary: RunSummary): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const known = await this.#knownSecrets();
+    if (summary.status === "succeeded") {
+      const reply = await engine.supervisor.call("runs.reply", { runId: summary.id });
+      if (!reply) {
+        this.#settle(turnId, { status: "unknown", errorMessage: "its run finished, but its engine has no reply stored for it" });
+        return;
+      }
+      const masked = maskValue(reply, known);
+      await this.#options.testHooks?.beforeProjection?.(turnId);
+      if (this.#workspace.state !== "ready") return;
+      projectAnswer(this.#workspace.db, turnId, { id: randomUUID(), text: masked.kind === "general" ? masked.text : masked.answer, reply: masked, createdAt: new Date().toISOString() });
+      return;
+    }
+    const turn = getTurn(workspace, turnId);
+    if (summary.status === "cancelled") {
+      if (turn?.cancelReason) this.#settle(turnId, { status: "cancelled" });
+      else this.#settle(turnId, { status: "interrupted" });
+      return;
+    }
+    let interrupted = false;
+    let kind: string | null = null;
+    for (let after = 0; ; ) {
+      const page = await engine.supervisor.call("runs.events", { runId: summary.id, after, limit: 500 });
+      for (const event of page.events) {
+        if (event.type === "run.interrupted") interrupted = true;
+        if (event.type === "run.failed" && typeof event.data?.["kind"] === "string") kind = event.data["kind"];
+      }
+      if (page.events.length < 500) break;
+      after = page.next;
+    }
+    if (interrupted) this.#settle(turnId, { status: "interrupted" });
+    else this.#settle(turnId, { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The run failed.", known) });
+  }
+
+  #turnView(turn: TurnRecord, engine: EngineView): TurnView {
+    const open = turn.status === "submitting" || turn.status === "running";
+    const away = open && !this.#submissions.has(turn.id) && engine.state.status !== "online";
+    return {
+      id: turn.id,
+      status: turn.status,
+      note: noteFor(turn),
+      unresolved: away ? (engine.state.status === "failed" ? engine.state.reason : `The engine on ${engine.label} isn't running, so Nivra can't check this message yet. It checks again when you open the conversation.`) : null,
+      runId: turn.runId,
+      cancelRequested: turn.cancelRequested,
+      given: { preferences: turn.preferences.length, history: turn.history },
+      createdAt: turn.createdAt,
+      settledAt: turn.settledAt,
+    };
   }
 
   /** The open workspace, or the reason it isn't, in the person's terms. */
@@ -526,7 +942,8 @@ export class Host {
   }
 
   #runEngine(runId: string): Engine {
-    const targetId = this.#runs.get(runId);
+    // A conversation's run is routed from the workspace too, so it is reachable after a restart (D26).
+    const targetId = this.#runs.get(runId) ?? (this.#workspace.state === "ready" ? turnByRun(this.#workspace.db, runId)?.targetId : undefined);
     if (!targetId) throw new Error("Nivra has no record of that run in this session. Start it again.");
     const engine = this.#engines.get(targetId);
     if (!engine) throw new Error(`The engine on ${this.#labelOf(targetId)} isn't running.`);
@@ -695,5 +1112,29 @@ export class Host {
     const reason = this.#unavailable.get(targetId);
     if (reason) return { targetId, label, state: { status: "failed", reason, code: "target-unavailable", logPath: null }, warnings: [] };
     return { targetId, label, state: { status: "stopped" }, warnings: [] };
+  }
+}
+
+/** What happened to a turn that ended without an answer, in the person's terms; null while it goes or once answered. */
+function noteFor(turn: TurnRecord): string | null {
+  switch (turn.status) {
+    case "failed":
+      return `${turn.errorMessage ?? "The run failed."} Nothing was resent.`;
+    case "cancelled":
+      return turn.cancelReason === "sharing"
+        ? "Stopped: sharing for this project was turned off. Nothing was resent."
+        : turn.cancelReason === "removal"
+          ? "Stopped: the project was removed. Nothing was resent."
+          : turn.errorMessage
+            ? `Cancelled. ${turn.errorMessage}`
+            : "Cancelled. Nothing was resent.";
+    case "interrupted":
+      return "Interrupted: Nivra or its engine stopped before the answer arrived. Nothing was resent.";
+    case "not-sent":
+      return turn.errorMessage ?? "Not sent: nothing reached the model.";
+    case "unknown":
+      return `Nivra can't tell whether this message reached the model: ${turn.errorMessage ?? "its engine can't say"}. Nothing was resent.`;
+    default:
+      return null;
   }
 }
