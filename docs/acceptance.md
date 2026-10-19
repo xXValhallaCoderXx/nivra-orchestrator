@@ -420,7 +420,8 @@ The cross-platform foundation is done when all of these were seen to pass:
 - **Installed deb** on Ubuntu 24.04, launched without changing AppArmor: the same flow on the local target.
   - *Installed and accepted live on 19 October* in this machine's Ubuntu 24.04 under WSL2 (see *Packaged acceptance,
     live*).
-  - WSL's kernel has AppArmor off, so a stock Ubuntu desktop with AppArmor on is still to check (NIV-16).
+  - WSL's kernel has AppArmor off, so a stock Ubuntu desktop with AppArmor on is still to check
+    ([clean-setup.md](clean-setup.md), check 2; NIV-16).
 - **Token Factory** reached from both the WSL and the native engine: models listed and one Nemotron call made
   (Settings → Check Token Factory, on each target).
   - *Seen once, 17 October, with Nate's key:* 28 models, five of them NVIDIA's. Nemotron 3 Super called the tool and
@@ -432,6 +433,9 @@ The cross-platform foundation is done when all of these were seen to pass:
   - Reaching it from the native engine is still pending.
 - **Clean machine:** the Windows zip runs native hello on a VM or Windows Sandbox with no Visual C++ redistributable
   installed. *Not yet run.*
+  - An experiment on 19 October shows that, as built, this would fail. Without the redistributable, the native engine
+    can't load libsql. The DLL it ships sits next to `node.exe`, and Windows doesn't look there for an add-on's
+    dependencies ([clean-setup.md](clean-setup.md), check 3).
 
 ## Hackathon submission checklist
 
