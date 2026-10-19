@@ -112,9 +112,59 @@ a folder on a Windows drive, press **Run hello**, then press **Run checks** unde
 
 | Check | Setup | Release files | Date | Result |
 |---|---|---|---|---|
-| 1. Windows → WSL | planned: a fresh WSL distribution and Nivra profile on Nate's account | | | *Not run yet* |
+| 1. Windows → WSL | a fresh WSL distribution and Nivra profile on Nate's account (see below) | `Nivra-0.1.1-win-x64.zip`, sha256 `df371719…a6d7783` | 19–20 October | **Passed**, 23 of 23 checks |
 | 2. The deb, AppArmor on | an Ubuntu 24.04.5 desktop VM (see below) | `Nivra-0.1.1-amd64.deb`, sha256 `86da0745…d632d1ab` | 19 October | **Passed**, 22 of 22 checks |
 | 3. Windows-drive folders, no Visual C++ redistributable | | | | *Not run*; the controlled check passes on 0.1.1 (see 3) |
+
+### Check 1, 19–20 October
+
+**The setup.** Nate has one Windows account, so instead of a new account the check used a fresh WSL distribution and a
+fresh Nivra profile on his.
+- **The distribution:** `NivraJudge`, installed beside his own as `wsl --install Ubuntu --name NivraJudge`. That gives
+  Ubuntu 26.04.1 LTS, today's `wsl --install` default, on WSL 2.7.8.
+- **The profile:** a new one, `--user-data-dir` in `%LOCALAPPDATA%\nivra-clean-check`. His own profile in
+  `%APPDATA%\Nivra` was never touched.
+- **Shared with his account:**
+  - Windows 11 Home, build 26300;
+  - the Visual C++ runtime;
+  - Smart App Control, which is off;
+  - mirrored networking, set in his `.wslconfig`.
+
+**By hand (Nate)**
+- **First run of the distribution:** he created the Linux user `renat`, then cloned both repositories there.
+- **Download:** the zip, in Edge. `Get-FileHash` gave `DF371719…A6D7783`, matching `SHA256SUMS`.
+- **Extraction:** **Extract All…**, to its own default, `Downloads\Nivra-0.1.1-win-x64`. That's 3,784 files. Its
+  `app.asar` (`a6fdf4e5…`) and Windows runtime (`d7b773e6d952ca65`) are the candidate's.
+- **SmartScreen** asked on the first double-click of the extracted `Nivra.exe`, and not again after **Run anyway**.
+- **The key:** after it was saved, Settings said "Key saved, encrypted" (DPAPI).
+
+**README steps 4–8, driven by Claude through Nivra's UI.** Nivra was started from a launcher with its fresh profile and
+local debugging ports, and the steps ran as in check 2. Every check passed on the first attempt, with no retry:
+- **The first Add** of a `\\wsl.localhost\NivraJudge\…` folder installed Nivra's runtime into the new distribution. The
+  engine was online 5.6 s later.
+- **valhalla-fitness** was explained in 104 s; 10 of 10 citations point to lines the model was shown.
+- **nivra-demo-timer:**
+  - the repository governs over the personal default;
+  - both conflicts are ranked as their sides say;
+  - valhalla-fitness's own preference is in neither its context nor its conflicts.
+- **The task choice** governs "component file naming", with "Currently" showing the repository's convention, and
+  `nivra.json` stayed byte-identical.
+- **After the edit,** the next run received revision 2. After the delete, it received no preference.
+- **The key** was then removed.
+- **Usage:** 5 runs on `nvidia/nemotron-3-super-120b-a12b`, at least 234,104 tokens in and 14,579 out, over 34 calls and
+  421 s.
+
+**The removal.** The extracted folder and the test profile were deleted. `%LOCALAPPDATA%\Nivra` was never created, since
+no native engine started. Unregistering the distribution removes its `~/.nivra`.
+
+**Found along the way, both in WSL, not Nivra**
+- **The systemd user session fails.** Opening Ubuntu 26.04.1 under WSL 2.7.8 printed "Failed to start the systemd user
+  session". systemd couldn't spawn its executor ("Device or resource busy") on the unified cgroup hierarchy. Nivra starts
+  its engine with `wsl.exe --exec`, which doesn't need that session, and it worked. Any judge on today's default Ubuntu
+  would see the same warning.
+- **Interop broke more than once.** Using `NivraJudge` from Nate's other distribution, or stopping it, unregistered
+  WSL's Windows-interop handler there, so Windows programs stopped running from it until `sudo` re-registered the
+  handler. Nivra starts its engines from Windows, so this doesn't affect it.
 
 ### Check 2, 19 October
 
