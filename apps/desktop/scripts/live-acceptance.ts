@@ -14,6 +14,9 @@
 // attempt is recorded privately; the public summary is built from listed fields only (acceptance-record.ts). The
 // Windows→WSL session moves the person's ~/.nivra aside, because every Windows profile's WSL engine uses it, and
 // puts it back at the end (acceptance-state.ts). Cleanup is always the last thing a session does.
+//
+// Exit status: 0 when every criterion the session must establish passed; 1 when a criterion failed, or the session
+// stopped early; 2 when none failed, but one the session must establish is incomplete or wasn't run (sessionVerdict).
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -30,6 +33,7 @@ import {
   criteriaOutcomes,
   expectedReason,
   publicFiles,
+  sessionVerdict,
   type AcceptanceRecord,
   type CheckId,
   type Fixture,
@@ -38,6 +42,7 @@ import {
   type PrivateIdentifiers,
   type Purpose,
   type RunEntry,
+  type Scenario,
 } from "./acceptance-record.ts";
 import { copyRunStore, enginesUsing, finishSession, isEngine, loadRecord, moveHome, noteAcceptanceHome, readRuns, Refused, saveRecord, type RecoveryRecord } from "./acceptance-state.ts";
 import { expectedSnapshot, sleep, Ui, waitFor } from "./live-ui.ts";
@@ -243,14 +248,14 @@ const acceptance: AcceptanceRecord = {
   ],
 };
 const persist = () => writeFileSync(join(privateDir, "record.json"), `${JSON.stringify(acceptance, null, 2)}\n`);
-function note(id: CheckId, fixture: Fixture, outcome: Outcome, detail: string, attempt = 1): boolean {
-  const entry = { id, outcome, attempt, fixture, at: elapsed(), detail };
+function note(id: CheckId, fixture: Fixture, outcome: Outcome, detail: string, attempt = 1, scenario: Scenario = "session"): boolean {
+  const entry = { id, outcome, attempt, fixture, scenario, at: elapsed(), detail };
   acceptance.checks.push(entry);
   appendFileSync(join(privateDir, "record.jsonl"), `${JSON.stringify(entry)}\n`);
-  log(`${outcome === "pass" ? "✓" : outcome === "fail" ? "✗" : "…"} ${id}${attempt > 1 ? ` (attempt ${attempt})` : ""} [${CHECKS[id][1]}] ${detail}`);
+  log(`${outcome === "pass" ? "✓" : outcome === "fail" ? "✗" : "…"} ${id}${scenario === "session" ? "" : ` · ${scenario}`}${attempt > 1 ? ` (attempt ${attempt})` : ""} [${CHECKS[id][1]}] ${detail}`);
   return outcome === "pass";
 }
-const expect = (id: CheckId, fixture: Fixture, ok: boolean, detail: string, attempt = 1) => note(id, fixture, ok ? "pass" : "fail", detail, attempt);
+const expect = (id: CheckId, fixture: Fixture, ok: boolean, detail: string, attempt = 1, scenario: Scenario = "session") => note(id, fixture, ok ? "pass" : "fail", detail, attempt, scenario);
 class Gate extends Error {}
 
 // ─── Machine, build and fixtures ─────────────────────────────────────────────────────────────────────────────────
@@ -442,18 +447,18 @@ async function observe(runId: string, fixture: Fixture, purpose: Purpose, attemp
 }
 
 /** The strict checks every live explanation must pass: what it received, where it went, and the HEAD it read. */
-function handoff(observed: Observed, fixture: Fixture, expected: ReturnType<typeof expectedSnapshot>, head: string, attempt = 1): void {
+function handoff(observed: Observed, fixture: Fixture, expected: ReturnType<typeof expectedSnapshot>, head: string, scenario: Purpose, attempt = 1): void {
   const got = observed.received;
   const stored = observed.result?.context.preferences ?? null;
   const same = (r: { revision: number; digest: string; records: Array<{ id: string; revision: number }> } | null) =>
     r !== null && r.revision === expected.revision && r.digest === expected.digest && JSON.stringify([...r.records].sort((a, b) => (a.id < b.id ? -1 : 1)).map((x) => [x.id, x.revision])) === JSON.stringify(expected.ids.map((id, i) => [id, expected.revisions[i]]));
-  expect("handoff.snapshot", fixture, same(got) && (observed.result === null || same(stored)), `received ${got?.count ?? "nothing"} at revision ${got?.revision ?? "?"}, fingerprint ${got?.digest.slice(0, 12) ?? "none"}; expected ${expected.ids.length} at ${expected.revision}, ${expected.digest.slice(0, 12)}`, attempt);
+  expect("handoff.snapshot", fixture, same(got) && (observed.result === null || same(stored)), `received ${got?.count ?? "nothing"} at revision ${got?.revision ?? "?"}, fingerprint ${got?.digest.slice(0, 12) ?? "none"}; expected ${expected.ids.length} at ${expected.revision}, ${expected.digest.slice(0, 12)}`, attempt, scenario);
   const route = observed.summary.route;
-  expect("handoff.route", fixture, route?.endpoint === "token-factory" && /^nvidia\/[\w.-]+$/.test(route.model), `route ${route ? `${route.endpoint} ${route.model}` : "none"}`, attempt);
+  expect("handoff.route", fixture, route?.endpoint === "token-factory" && /^nvidia\/[\w.-]+$/.test(route.model), `route ${route ? `${route.endpoint} ${route.model}` : "none"}`, attempt, scenario);
   // A run that failed has no result; its prepare step still recorded the HEAD it read.
   const prepared = observed.events.find((e) => e.stepId === "prepare" && e.type === "step.output")?.data?.["head"];
   const atStart = observed.result?.headAtStart ?? (typeof prepared === "string" ? prepared : null);
-  expect("handoff.head", fixture, atStart === head, `HEAD at start ${atStart?.slice(0, 12) ?? "none"}${observed.result ? "" : " (from the prepare step)"}`, attempt);
+  expect("handoff.head", fixture, atStart === head, `HEAD at start ${atStart?.slice(0, 12) ?? "none"}${observed.result ? "" : " (from the prepare step)"}`, attempt, scenario);
   const kind = observed.events.find((e) => e.type === "run.failed")?.data?.["kind"];
   expect(
     "handoff.final-state",
@@ -461,6 +466,7 @@ function handoff(observed: Observed, fixture: Fixture, expected: ReturnType<type
     observed.summary.status === "succeeded" ? observed.result !== null : observed.summary.status === "failed" && typeof kind === "string" && observed.summary.error !== null,
     observed.summary.status === "succeeded" ? "succeeded, with a stored result" : `${observed.summary.status}, kind ${String(kind)}: "${observed.summary.error ?? ""}"`,
     attempt,
+    scenario,
   );
 }
 
@@ -488,12 +494,12 @@ async function interrupt(project: ProjectView, purpose: Purpose, id: CheckId, ac
     const status = await ui!.status(runId);
     if (status !== "running") {
       await observe(runId, "A", purpose, attempt);
-      note(id, "A", "incomplete", `missed window: run ${runId} was already ${status} when the action was due`, attempt);
+      note(id, "A", "incomplete", `missed window: run ${runId} was already ${status} when the action was due`, attempt, purpose);
       continue;
     }
     const problem = await act(runId);
     await observe(runId, "A", purpose, attempt);
-    expect(id, "A", problem === null, problem ?? `acted on run ${runId} while it was running`, attempt);
+    expect(id, "A", problem === null, problem ?? `acted on run ${runId} while it was running`, attempt, purpose);
     return;
   }
 }
@@ -633,9 +639,9 @@ async function live(): Promise<void> {
   const answered = (o: Observed) => (o.summary.status === "succeeded" ? "pass" : "incomplete");
   const shown = (o: Observed) => (o.result?.checks.checked ?? 0) > 0;
   const aChecks = (o: Observed, attempt: number) => {
-    note("a.explain", "A", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt);
-    handoff(o, "A", want, headA, attempt);
-    return note("a.checked-citations", "A", shown(o) ? "pass" : "incomplete", `${o.result?.checks.checked ?? 0} of ${o.result?.checks.citations ?? 0} citations shown to the model`, attempt);
+    note("a.explain", "A", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt, "explain");
+    handoff(o, "A", want, headA, "explain", attempt);
+    return note("a.checked-citations", "A", shown(o) ? "pass" : "incomplete", `${o.result?.checks.checked ?? 0} of ${o.result?.checks.citations ?? 0} citations shown to the model`, attempt, "explain");
   };
   let observed = await explainOn(a, "A", "explain", "");
   if (!aChecks(observed, 1)) aChecks(await explainOn(a, "A", "explain", RETRY.a, [], 2), 2);
@@ -653,21 +659,21 @@ async function live(): Promise<void> {
   }
   want = expectedSnapshot(await ui!.preferences(), b.id);
   const bChecks = (o: Observed, attempt: number) => {
-    note("b.explain", "B", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt);
-    handoff(o, "B", want, headB, attempt);
+    note("b.explain", "B", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt, "explain");
+    handoff(o, "B", want, headB, "explain", attempt);
     const conflicts = o.result?.conflicts ?? [];
-    expect("b.isolation", "B", !(o.received?.records ?? []).some((r) => r.id === aOwn) && !conflicts.some((c) => c.preferences.some((p) => p.id === aOwn)), "A's own preference is in neither B's context nor its conflicts", attempt);
+    expect("b.isolation", "B", !(o.received?.records ?? []).some((r) => r.id === aOwn) && !conflicts.some((c) => c.preferences.some((p) => p.id === aOwn)), "A's own preference is in neither B's context nor its conflicts", attempt, "explain");
     const wrong = conflicts.filter((c) => c.reason !== expectedReason(c));
-    expect("b.ranking", "B", wrong.length === 0, `${conflicts.length} conflict(s), ${wrong.length} ranked differently from their sides`, attempt);
+    expect("b.ranking", "B", wrong.length === 0, `${conflicts.length} conflict(s), ${wrong.length} ranked differently from their sides`, attempt, "explain");
     const governs = conflicts.some((c) => c.reason === "repository" && c.preferences.some((p) => p.id === personal));
-    return note("b.repository-governs", "B", governs ? "pass" : "incomplete", governs ? "the repository governs over the personal default" : `no conflict where the repository governs over the personal default (reasons: ${conflicts.map((c) => c.reason).join(", ") || "none reported"})`, attempt);
+    return note("b.repository-governs", "B", governs ? "pass" : "incomplete", governs ? "the repository governs over the personal default" : `no conflict where the repository governs over the personal default (reasons: ${conflicts.map((c) => c.reason).join(", ") || "none reported"})`, attempt, "explain");
   };
   observed = await explainOn(b, "B", "explain", "");
   if (!bChecks(observed, 1)) bChecks(await explainOn(b, "B", "explain", RETRY.b, [], 2), 2);
 
   const store = join(local(profiles.main), "nivra.json");
   const choiceChecks = async (o: Observed, before: Buffer, prefsBefore: string, attempt: number) => {
-    note("choice.explain", "B", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt);
+    note("choice.explain", "B", answered(o), `run ${o.summary.status}${o.summary.error ? `: "${o.summary.error}"` : ""}`, attempt, "choice");
     const asked = (o.summary.input as { choices?: unknown } | null)?.choices;
     expect(
       "choice.recorded",
@@ -675,15 +681,16 @@ async function live(): Promise<void> {
       JSON.stringify(asked) === JSON.stringify([CHOICE]) && (o.result === null || JSON.stringify(o.result.choices.map((x) => x.id)) === '["c1"]'),
       `the run's input holds ${Array.isArray(asked) ? asked.length : 0} choice(s)${o.result ? `; its result names ${o.result.choices.map((x) => x.id).join(", ")}` : ""}`,
       attempt,
+      "choice",
     );
-    handoff(o, "B", want, headB, attempt);
-    expect("choice.store-unchanged", "B", readFileSync(store).equals(before) && JSON.stringify(await ui!.preferences()) === prefsBefore, "nivra.json is byte-identical and the preferences are unchanged", attempt);
+    handoff(o, "B", want, headB, "choice", attempt);
+    expect("choice.store-unchanged", "B", readFileSync(store).equals(before) && JSON.stringify(await ui!.preferences()) === prefsBefore, "nivra.json is byte-identical and the preferences are unchanged", attempt, "choice");
     const conflicts = o.result?.conflicts ?? [];
-    expect("choice.ranking", "B", conflicts.every((c) => c.reason === expectedReason(c)), `${conflicts.length} conflict(s) ranked as their sides say`, attempt);
+    expect("choice.ranking", "B", conflicts.every((c) => c.reason === expectedReason(c)), `${conflicts.length} conflict(s) ranked as their sides say`, attempt, "choice");
     const governed = conflicts.find((c) => c.reason === "choice" && c.choices.includes("c1") && c.repositoryConvention !== null && c.citations.some((x) => x.checked));
     const intended = governed ? await ui!.page.locator('[data-testid="explain-conflict"][data-reason="choice"]').first().getByTestId("explain-conflict-intended").textContent().catch(() => null) : null;
     const ok = governed !== undefined && (intended ?? "").includes("c1");
-    return note("choice.governs", "B", ok ? "pass" : "incomplete", ok ? "the choice governs; Currently shows the repository's convention and Intended names c1" : `no conflict governed by c1 with the repository's convention shown (reasons: ${conflicts.map((c) => c.reason).join(", ") || "none reported"})`, attempt);
+    return note("choice.governs", "B", ok ? "pass" : "incomplete", ok ? "the choice governs; Currently shows the repository's convention and Intended names c1" : `no conflict governed by c1 with the repository's convention shown (reasons: ${conflicts.map((c) => c.reason).join(", ") || "none reported"})`, attempt, "choice");
   };
   let before = readFileSync(store);
   let prefsBefore = JSON.stringify(await ui!.preferences());
@@ -700,25 +707,25 @@ async function live(): Promise<void> {
   want = expectedSnapshot(await ui!.preferences(), b.id);
   const helloAfterEdit = await ui!.received(await hello(b, "B"));
   observed = await explainOn(b, "B", "edit", "");
-  handoff(observed, "B", want, headB);
-  expect("life.edit", "B", edited.revision === 2 && helloAfterEdit?.digest === want.digest && observed.received?.digest === want.digest, `revision ${edited.revision}; hello and the next explanation received fingerprint ${observed.received?.digest.slice(0, 12) ?? "none"}`);
-  note("life.wording", "B", (await ui!.page.getByTestId("explain-conflict-others").allTextContents()).some((t) => t.includes(EDITED)) ? "pass" : "incomplete", "the edited wording in the result's conflicts");
+  handoff(observed, "B", want, headB, "edit");
+  expect("life.edit", "B", edited.revision === 2 && helloAfterEdit?.digest === want.digest && observed.received?.digest === want.digest, `revision ${edited.revision}; hello and the next explanation received fingerprint ${observed.received?.digest.slice(0, 12) ?? "none"}`, 1, "edit");
+  note("life.wording", "B", (await ui!.page.getByTestId("explain-conflict-others").allTextContents()).some((t) => t.includes(EDITED)) ? "pass" : "incomplete", "the edited wording in the result's conflicts", 1, "edit");
 
   const replacement = await ui!.replacePreference(aOwn, A_REPLACED(a.label));
   const replaced = (await ui!.preferences()).records.find((r) => r.id === aOwn);
   want = expectedSnapshot(await ui!.preferences(), a.id);
   const helloAfterReplace = await ui!.received(await hello(a, "A"));
   observed = await explainOn(a, "A", "replace", "");
-  handoff(observed, "A", want, headA);
+  handoff(observed, "A", want, headA, "replace");
   const ids = (r: Observed["received"]) => (r?.records ?? []).map((x) => x.id);
-  expect("life.replace", "A", replacement !== aOwn && replaced?.status === "superseded" && ids(helloAfterReplace).includes(replacement) && !ids(helloAfterReplace).includes(aOwn) && ids(observed.received).includes(replacement) && !ids(observed.received).includes(aOwn), "the replacement is sent and the replaced one isn't");
+  expect("life.replace", "A", replacement !== aOwn && replaced?.status === "superseded" && ids(helloAfterReplace).includes(replacement) && !ids(helloAfterReplace).includes(aOwn) && ids(observed.received).includes(replacement) && !ids(observed.received).includes(aOwn), "the replacement is sent and the replaced one isn't", 1, "replace");
 
   await ui!.deletePreference(personal);
   want = expectedSnapshot(await ui!.preferences(), b.id);
   const helloAfterDelete = await ui!.received(await hello(b, "B"));
   observed = await explainOn(b, "B", "delete", "");
-  handoff(observed, "B", want, headB);
-  expect("life.delete", "B", helloAfterDelete?.count === 0 && observed.received?.count === 0 && !(observed.result?.conflicts ?? []).some((c) => c.preferences.length > 0), `after the deletion B received ${observed.received?.count ?? "?"} preferences, and no conflict names one`);
+  handoff(observed, "B", want, headB, "delete");
+  expect("life.delete", "B", helloAfterDelete?.count === 0 && observed.received?.count === 0 && !(observed.result?.conflicts ?? []).some((c) => c.preferences.length > 0), `after the deletion B received ${observed.received?.count ?? "?"} preferences, and no conflict names one`, 1, "delete");
 
   // 5. A changed file reaches the next request.
   const fresh = freshRepo();
@@ -727,13 +734,13 @@ async function live(): Promise<void> {
   const question = "What is the exact name field in this repository's package.json? Quote it exactly.";
   want = expectedSnapshot(await ui!.preferences(), freshProject.id);
   const first = await explainOn(freshProject, "fresh", "fresh", question);
-  handoff(first, "fresh", want, freshHead);
+  handoff(first, "fresh", want, freshHead, "fresh");
   writeFileSync(join(fresh, "package.json"), readFileSync(join(fresh, "package.json"), "utf8").replace("nivra-fresh-amber-1", "nivra-fresh-amber-2"));
   const second = await explainOn(freshProject, "fresh", "fresh", question);
-  handoff(second, "fresh", want, freshHead);
+  handoff(second, "fresh", want, freshHead, "fresh");
   const manifestHash = (o: Observed) => o.result?.context.map.find((m) => m.path === "package.json")?.sha256 ?? null;
-  expect("fresh.map-changed", "fresh", manifestHash(first) !== null && manifestHash(second) !== null && manifestHash(first) !== manifestHash(second) && second.result?.headAtStart === freshHead, `package.json ${manifestHash(first)?.slice(0, 12)} then ${manifestHash(second)?.slice(0, 12)}; HEAD unchanged`);
-  note("fresh.name-seen", "fresh", JSON.stringify(second.result?.summary ?? "").includes("nivra-fresh-amber-2") || (second.result?.findings ?? []).some((f) => f.statement.includes("nivra-fresh-amber-2")) ? "pass" : "incomplete", "the new name in the answer");
+  expect("fresh.map-changed", "fresh", manifestHash(first) !== null && manifestHash(second) !== null && manifestHash(first) !== manifestHash(second) && second.result?.headAtStart === freshHead, `package.json ${manifestHash(first)?.slice(0, 12)} then ${manifestHash(second)?.slice(0, 12)}; HEAD unchanged`, 1, "fresh");
+  note("fresh.name-seen", "fresh", JSON.stringify(second.result?.summary ?? "").includes("nivra-fresh-amber-2") || (second.result?.findings ?? []).some((f) => f.statement.includes("nivra-fresh-amber-2")) ? "pass" : "incomplete", "the new name in the answer", 1, "fresh");
 
   // 6. Failures, on A, each while its run is still active.
   await interrupt(a, "withdraw", "consent.withdrawn", async (runId) => {
@@ -787,7 +794,7 @@ async function live(): Promise<void> {
     await ui!.firstModelCall(runId);
     if ((await ui!.status(runId)) !== "running") {
       await observe(runId, "A", "app-restart", attempt);
-      note("app.closed-run", "A", "incomplete", `missed window: run ${runId} had already ended`, attempt);
+      note("app.closed-run", "A", "incomplete", `missed window: run ${runId} had already ended`, attempt, "app-restart");
       continue;
     }
     const prefsBeforeQuit = JSON.stringify((await ui!.preferences()).records);
@@ -797,15 +804,15 @@ async function live(): Promise<void> {
     copyRunStore(engineHomeNow(), copy);
     const rows = readRuns(copy);
     const row = rows.find((r) => r.id === runId);
-    expect("app.closed-run", "A", row !== undefined && row.status !== "running", `the run ended ${row?.status ?? "missing"}: "${row?.lastEvent?.message ?? ""}"; the app took ${quitMs} ms to quit`, attempt);
-    expect("app.no-running", "none", rows.every((r) => r.status !== "running" && r.status !== "queued"), `${rows.length} runs in the store, none left running`, attempt);
+    expect("app.closed-run", "A", row !== undefined && row.status !== "running", `the run ended ${row?.status ?? "missing"}: "${row?.lastEvent?.message ?? ""}"; the app took ${quitMs} ms to quit`, attempt, "app-restart");
+    expect("app.no-running", "none", rows.every((r) => r.status !== "running" && r.status !== "queued"), `${rows.length} runs in the store, none left running`, attempt, "app-restart");
     await launch(profiles.main, profiles.engine, values.network ? { HTTPS_PROXY: "http://127.0.0.1:9", https_proxy: "http://127.0.0.1:9", NO_PROXY: "" } : {});
     // With several projects, none is chosen at start, and an engine starts only for a chosen one (D17).
     await ui!.choose(a);
     await engineOnline("after relaunching");
-    expect("app.intact", "A", JSON.stringify((await ui!.preferences()).records) === prefsBeforeQuit && JSON.stringify((await ui!.projects()).map((p) => [p.id, p.label, p.sharing.modelContext])) === projectsBefore, "preferences, projects and consent are as they were", attempt);
+    expect("app.intact", "A", JSON.stringify((await ui!.preferences()).records) === prefsBeforeQuit && JSON.stringify((await ui!.projects()).map((p) => [p.id, p.label, p.sharing.modelContext])) === projectsBefore, "preferences, projects and consent are as they were", attempt, "app-restart");
     const unknown = await ui!.refusal(`window.nivra.runEvents(${JSON.stringify(runId)}, 0)`);
-    expect("app.old-run-unknown", "A", unknown !== null && /no record of that run in this session/.test(unknown), `asking for the earlier run: ${unknown ?? "answered"}`, attempt);
+    expect("app.old-run-unknown", "A", unknown !== null && /no record of that run in this session/.test(unknown), `asking for the earlier run: ${unknown ?? "answered"}`, attempt, "app-restart");
     break;
   }
   if (values.network) {
@@ -813,7 +820,7 @@ async function live(): Promise<void> {
     const refusalText = await ui!.refusal(`window.nivra.checkTokenFactory(${JSON.stringify(freshProject.id)})`);
     const failed = await explainOn(freshProject, "fresh", "network", question);
     const kind = failed.events.find((e) => e.type === "run.failed")?.data?.["kind"];
-    note("provider.network", "fresh", failed.summary.status === "failed" && kind === "network" ? "pass" : "incomplete", `provider check: ${refusalText ?? "answered"}; the explanation ${failed.summary.status}, kind ${String(kind)}`);
+    note("provider.network", "fresh", failed.summary.status === "failed" && kind === "network" ? "pass" : "incomplete", `provider check: ${refusalText ?? "answered"}; the explanation ${failed.summary.status}, kind ${String(kind)}`, 1, "network");
     await quit(profiles.main, "network");
     await launch(profiles.main, profiles.engine);
     await ui!.choose(a);
@@ -821,8 +828,8 @@ async function live(): Promise<void> {
   }
   want = expectedSnapshot(await ui!.preferences(), freshProject.id);
   const afterRestart = await explainOn(freshProject, "fresh", "after-restart", question);
-  handoff(afterRestart, "fresh", want, freshHead);
-  expect("app.live-after", "fresh", afterRestart.summary.status === "succeeded", `a run after the restart ${afterRestart.summary.status}`);
+  handoff(afterRestart, "fresh", want, freshHead, "after-restart");
+  expect("app.live-after", "fresh", afterRestart.summary.status === "succeeded", `a run after the restart ${afterRestart.summary.status}`, 1, "after-restart");
   if (platform === "windows") expect("identity.no-native-engine", "none", (await ui!.engineOf("local"))?.state.status !== "online", "the native engine never started");
 
   // The main profile's last launch: the key goes while the app can still answer.
@@ -842,7 +849,7 @@ async function live(): Promise<void> {
   await ui!.setKey("nivra-acceptance-invalid-key-0000");
   const bad = await explainOn(freshAgain, "fresh", "bad-key", question);
   const badKind = bad.events.find((e) => e.type === "run.failed")?.data?.["kind"];
-  expect("provider.bad-key", "fresh", bad.summary.status === "failed" && badKind === "auth" && bad.summary.route === null && bad.summary.usage === null && !bad.events.some((e) => e.type === "model.call"), `the run ${bad.summary.status}, kind ${String(badKind)}, no model call`);
+  expect("provider.bad-key", "fresh", bad.summary.status === "failed" && badKind === "auth" && bad.summary.route === null && bad.summary.usage === null && !bad.events.some((e) => e.type === "model.call"), `the run ${bad.summary.status}, kind ${String(badKind)}, no model call`, 1, "bad-key");
   await ui!.setKey(null);
   await quit(profiles.badKey, "bad-key-end");
 }
@@ -904,6 +911,9 @@ try {
   }
   console.log(`\n${platform} ${session} session${stopped ? ` stopped early: ${redact(stopped)}` : ""}`);
   for (const [criterion, outcome] of Object.entries(outcomes)) if (outcome !== "not-run") console.log(`  ${outcome.padEnd(10)} ${criterion}`);
+  const verdict = sessionVerdict(acceptance.checks, session);
+  if (verdict.failed.length) console.log(`  failed: ${verdict.failed.join(", ")}`);
+  if (verdict.incomplete.length) console.log(`  incomplete or not run, though a ${session} session must establish them: ${verdict.incomplete.join(", ")}`);
   console.log(`  evidence: ${evidence} (private/ is yours alone; public-summary.* is shareable)`);
-  process.exitCode = stopped || Object.values(outcomes).some((o) => o === "fail") ? 1 : 0;
+  process.exitCode = stopped ? 1 : verdict.exitCode;
 }

@@ -90,6 +90,11 @@ export interface CheckEntry {
   outcome: Outcome;
   attempt: number;
   fixture: Fixture;
+  /**
+   * What the check is about: the purpose of the run it checks, or the whole session. Attempts are retries within one
+   * scenario. Records made before scenarios were kept have none.
+   */
+  scenario?: Scenario;
   /** Milliseconds from the session's start. */
   at: number;
   /** For the private record only: it may name B. */
@@ -115,6 +120,8 @@ export const PURPOSES = [
   "no-key",
 ] as const;
 export type Purpose = (typeof PURPOSES)[number];
+export type Scenario = Purpose | "session";
+const SCENARIOS: ReadonlySet<string> = new Set<string>([...PURPOSES, "session"]);
 
 export interface RunEntry {
   runId: string;
@@ -222,13 +229,23 @@ const fixed = (value: string | null, allowed: ReadonlySet<string>) => (value !==
 const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
 const hex = (value: string) => (HEX.test(value) ? value : "unrecognised");
 
-/** The outcome of each check after its last attempt. Attempts are numbered from 1. */
+/** One check, on one fixture, in one scenario: the unit that retries collapse within. */
+const occurrence = (check: CheckEntry) => `${check.id}|${check.fixture}|${check.scenario ?? ""}`;
+
+/**
+ * The outcome of each check occurrence. Within one, the last attempt counts (attempts are numbered from 1), with one
+ * exception: a strict check that failed on any attempt stays failed. A retry is for a model's variance, never for
+ * Nivra's own behaviour. Separate scenarios never overwrite one another. In records made before scenarios were kept, a
+ * strict failure is still never superseded.
+ */
 export function finalOutcomes(checks: readonly CheckEntry[]): Map<string, CheckEntry> {
   const last = new Map<string, CheckEntry>();
   for (const check of checks) {
-    const key = `${check.id}|${check.fixture}`;
+    const key = occurrence(check);
     const seen = last.get(key);
-    if (!seen || check.attempt >= seen.attempt) last.set(key, check);
+    const strict = CHECKS[check.id]?.[1] === "strict";
+    if (seen && strict && seen.outcome === "fail") continue;
+    if (!seen || check.attempt >= seen.attempt || (strict && check.outcome === "fail")) last.set(key, check);
   }
   return last;
 }
@@ -249,6 +266,24 @@ export function criteriaOutcomes(checks: readonly CheckEntry[]): Record<Criterio
   return outcomes;
 }
 
+/** What a token-free rehearsal establishes: it calls no model, so the journey's criteria aren't its to run. */
+export const REHEARSAL_CRITERIA: readonly Criterion[] = ["identity", "handoff", "consent", "provider-failure", "cancel", "engine-restart", "app-restart", "cleanup"];
+
+/**
+ * The session's verdict and exit code:
+ * - 1 when any criterion failed;
+ * - 2 when none failed, but one this session must establish is incomplete or wasn't run;
+ * - 0 when each of those passed.
+ * A live session must establish every criterion, and a rehearsal REHEARSAL_CRITERIA. Optional checks never change it.
+ */
+export function sessionVerdict(checks: readonly CheckEntry[], session: "rehearsal" | "live"): { exitCode: 0 | 1 | 2; failed: Criterion[]; incomplete: Criterion[] } {
+  const outcomes = criteriaOutcomes(checks);
+  const all = Object.keys(CRITERIA) as Criterion[];
+  const failed = all.filter((criterion) => outcomes[criterion] === "fail");
+  const incomplete = (session === "live" ? all : REHEARSAL_CRITERIA).filter((criterion) => outcomes[criterion] === "incomplete" || outcomes[criterion] === "not-run");
+  return { exitCode: failed.length ? 1 : incomplete.length ? 2 : 0, failed, incomplete };
+}
+
 export interface PublicSummary {
   platform: "linux" | "windows";
   session: "rehearsal" | "live";
@@ -261,7 +296,7 @@ export interface PublicSummary {
     B: { dirty: number; tracked: number; conventions: FixtureFacts["conventions"] } | null;
   };
   criteria: Array<{ criterion: Criterion; outcome: Outcome; checks: number; attempts: number }>;
-  checks: Array<{ id: CheckId; criterion: Criterion; kind: Kind; fixture: Fixture; attempt: number; outcome: Outcome }>;
+  checks: Array<{ id: CheckId; criterion: Criterion; kind: Kind; fixture: Fixture; scenario: string | null; attempt: number; outcome: Outcome }>;
   runs: Array<Omit<RunEntry, "runId">>;
   totals: {
     runs: number;
@@ -334,7 +369,7 @@ export function publicSummary(record: AcceptanceRecord): PublicSummary {
     },
     criteria: (Object.keys(CRITERIA) as Criterion[]).map((criterion) => {
       const own = record.checks.filter((check) => CHECKS[check.id]?.[0] === criterion);
-      return { criterion, outcome: criteria[criterion], checks: new Set(own.map((check) => `${check.id}|${check.fixture}`)).size, attempts: own.length };
+      return { criterion, outcome: criteria[criterion], checks: new Set(own.map(occurrence)).size, attempts: own.length };
     }),
     checks: record.checks
       .filter((check) => check.id in CHECKS)
@@ -343,6 +378,7 @@ export function publicSummary(record: AcceptanceRecord): PublicSummary {
         criterion: CHECKS[check.id][0],
         kind: CHECKS[check.id][1],
         fixture: FIXTURES.has(check.fixture) ? check.fixture : "none",
+        scenario: check.scenario === undefined ? null : SCENARIOS.has(check.scenario) ? check.scenario : "unrecognised",
         attempt: num(check.attempt) ?? 1,
         outcome: OUTCOMES.has(check.outcome) ? check.outcome : "fail",
       })),

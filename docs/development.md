@@ -47,6 +47,12 @@ pnpm accept:live --platform linux --session live --fixture-a <path> --fixture-b-
 pnpm accept:live --recover [<record>] [--dry-run]                              # after a session that died
 ```
 
+It exits:
+- 0 when every criterion the session must establish passed: every criterion for a live session, and the token-free
+  ones for a rehearsal;
+- 1 when a criterion failed, or the session stopped early;
+- 2 when none failed, but one it must establish is incomplete or wasn't run.
+
 - **Builds.** It drives the installed deb (`/opt/Nivra/nivra`) or the release zip, extracted on Windows. It checks both
   against `release/build-info.json` and `SHA256SUMS`.
 - **Profiles.** It uses profiles and engine homes of its own.

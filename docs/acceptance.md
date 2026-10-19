@@ -330,6 +330,20 @@ call, and nothing more. Each kill ended `interrupted`, and the run was never sta
   - **Fixed in the app** (`ead56e8`): Settings refuses such a key, saying why. Live, it refused the same paste.
 - **Windows, the first session:** it timed out waiting for the key, and its cleanup restored the home.
 
+**Re-evaluated with the corrected harness (20 October)**
+- **What the review found.** The harness kept only one result per check and fixture, so a pass from one run could hide
+  a strict failure from another. A session also exited 0 with a required demonstration still incomplete.
+- **What changed.**
+  - Each check now records its scenario: the purpose of the run it checks.
+  - Retries collapse only within one scenario, and a strict failure is never superseded.
+  - A session exits 1 on any failure, and 2 when a criterion it must establish is incomplete or wasn't run.
+- **What re-evaluating all ten saved records showed.**
+  - The two accepted sessions hold no strict failure, and still pass 14 of 14.
+  - The old aggregation had hidden one strict failure, in Linux session 1 above: `handoff.head` on the run that failed
+    `malformed`.
+  - That failure was the harness's own: it read HEAD only from a result, which a failed run doesn't have. It was fixed
+    in `3898f7e`, before the accepted sessions.
+
 **Observations, not failures**
 - **Quitting with a held hello run.** On Linux the quit took about 54 s in the rehearsals; on Windows → WSL, about
   0.3 s. With an explanation running, it took between 0.1 and 2.1 s. The final state was right every time. A follow-up

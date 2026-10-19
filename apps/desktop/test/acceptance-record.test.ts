@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  CHECKS,
+  CRITERIA,
   criteriaOutcomes,
   expectedReason,
   findLeaks,
   publicFiles,
   publicSummary,
+  sessionVerdict,
   type AcceptanceRecord,
   type CheckEntry,
+  type Criterion,
   type PrivateIdentifiers,
   type RunEntry,
 } from "../scripts/acceptance-record.ts";
@@ -21,11 +25,12 @@ const B: PrivateIdentifiers = {
   head: "b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9",
 };
 
-const check = (id: CheckEntry["id"], outcome: CheckEntry["outcome"], fixture: CheckEntry["fixture"] = "A", attempt = 1): CheckEntry => ({
+const check = (id: CheckEntry["id"], outcome: CheckEntry["outcome"], fixture: CheckEntry["fixture"] = "A", attempt = 1, scenario?: CheckEntry["scenario"]): CheckEntry => ({
   id,
   outcome,
   attempt,
   fixture,
+  ...(scenario ? { scenario } : {}),
   at: 1,
   detail: `checked at ${B.paths[0]} on ${B.label}, HEAD ${B.head}: "B names its components in kebab-case"`,
 });
@@ -124,6 +129,45 @@ describe("the acceptance record and its public summary (NIV-14)", () => {
     const summary = publicSummary({ ...record(), checks, runs: [run("A"), run("A", { attempt: 2, status: "failed", failureKind: "rate-limit", usage: { inputTokens: 9_000, outputTokens: 0, calls: 1, reportedCalls: 1 } })] });
     assert.deepEqual(summary.criteria.find((c) => c.criterion === "evidence-a"), { criterion: "evidence-a", outcome: "pass", checks: 2, attempts: 3 });
     assert.deepEqual([summary.totals.attempts, summary.totals.inputTokens, summary.totals.calls], [2, 59_000, 9], "a failed attempt still counts");
+  });
+
+  it("keeps each scenario's checks apart, so a pass in one never hides a strict failure in another (the review's cases)", () => {
+    // A passing retry of B's explanation (attempt 2), then the edit's run failing at attempt 1: attempt order.
+    const attemptOrder = [check("handoff.snapshot", "pass", "B", 2, "explain"), check("handoff.snapshot", "fail", "B", 1, "edit")];
+    // A failure, then a later pass at the same attempt in another scenario.
+    const sameAttempt = [check("handoff.route", "fail", "B", 1, "explain"), check("handoff.route", "pass", "B", 1, "choice")];
+    for (const checks of [attemptOrder, sameAttempt]) {
+      assert.equal(criteriaOutcomes(checks).handoff, "fail");
+      const summary = publicSummary({ ...record(), checks });
+      assert.deepEqual(summary.criteria.find((c) => c.criterion === "handoff"), { criterion: "handoff", outcome: "fail", checks: 2, attempts: 2 });
+      assert.deepEqual(summary.checks.map((c) => [c.scenario, c.outcome]), checks.map((c) => [c.scenario, c.outcome]));
+      assert.match(publicFiles({ ...record(), checks }, B).markdown, /\| \*\*fail\*\* \| 2 \| 2 \|/);
+    }
+  });
+
+  it("never lets a retry supersede a strict failure, even within one scenario or in a record kept before scenarios", () => {
+    assert.equal(criteriaOutcomes([check("handoff.head", "fail", "B", 1, "explain"), check("handoff.head", "pass", "B", 2, "explain")]).handoff, "fail");
+    assert.equal(criteriaOutcomes([check("handoff.snapshot", "pass", "B", 2), check("handoff.snapshot", "fail", "B", 1)]).handoff, "fail", "no scenario recorded");
+    // Retries still collapse where they're meant to: a demonstration's targeted retry, and a missed window.
+    assert.equal(criteriaOutcomes([check("b.repository-governs", "incomplete", "B", 1, "explain"), check("b.repository-governs", "pass", "B", 2, "explain"), check("b.isolation", "pass", "B", 1, "explain")])["contrast-b"], "pass");
+    assert.equal(criteriaOutcomes([check("engine.kill-live", "incomplete", "A", 1, "kill"), check("engine.kill-live", "pass", "A", 2, "kill")])["engine-restart"], "pass");
+  });
+
+  it("exits non-zero when a required demonstration stays incomplete, and only for what the session must establish", () => {
+    const criteria = Object.keys(CRITERIA) as Criterion[];
+    /** One passing gating check for each criterion. */
+    const passing = (only: readonly Criterion[] = criteria) =>
+      only.map((criterion) => check(Object.entries(CHECKS).find(([, [c, kind]]) => c === criterion && kind !== "optional")![0] as CheckEntry["id"], "pass"));
+    assert.deepEqual(sessionVerdict(passing(), "live"), { exitCode: 0, failed: [], incomplete: [] }, "every criterion passed");
+    const missing = [...passing(), check("b.repository-governs", "incomplete", "B", 1, "explain"), check("b.repository-governs", "incomplete", "B", 2, "explain")];
+    assert.deepEqual(sessionVerdict(missing, "live"), { exitCode: 2, failed: [], incomplete: ["contrast-b"] }, "a required demonstration still incomplete after its retry");
+    const optional = [...passing(), check("life.wording", "incomplete", "B", 1, "edit"), check("provider.network", "incomplete", "fresh", 1, "network")];
+    assert.deepEqual(sessionVerdict(optional, "live"), { exitCode: 0, failed: [], incomplete: [] }, "optional wording never gates");
+    assert.deepEqual(sessionVerdict([...passing(), check("app.intact", "fail")], "live"), { exitCode: 1, failed: ["app-restart"], incomplete: [] });
+    assert.deepEqual(sessionVerdict(passing(criteria.filter((c) => c !== "freshness")), "live"), { exitCode: 2, failed: [], incomplete: ["freshness"] }, "a live session must establish every criterion");
+    const rehearsal: Criterion[] = ["identity", "handoff", "consent", "provider-failure", "cancel", "engine-restart", "app-restart", "cleanup"];
+    assert.deepEqual(sessionVerdict(passing(rehearsal), "rehearsal"), { exitCode: 0, failed: [], incomplete: [] }, "a rehearsal never runs the journey");
+    assert.deepEqual(sessionVerdict(passing(rehearsal.filter((c) => c !== "cleanup")), "rehearsal"), { exitCode: 2, failed: [], incomplete: ["cleanup"] });
   });
 
   it("totals a cost that wasn't reported as unknown, never as zero, and never publishes a model id outside nvidia/", () => {
