@@ -12,7 +12,7 @@ process.stdin.on("data", (chunk) => {
     const request = JSON.parse(buffer.slice(0, end));
     buffer = buffer.slice(end + 1);
     if (request.method === "initialize") {
-      const result = { protocolVersion: 1, engineVersion: "unresponsive", instanceId, pid: process.pid, home, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch };
+      const result = { protocolVersion: 1, engineVersion: "unresponsive", instanceId, pid: process.pid, home, homeId: randomUUID(), runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch };
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`);
     }
   }

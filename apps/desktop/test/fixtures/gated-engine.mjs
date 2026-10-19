@@ -3,14 +3,16 @@
 // runs.cancel down while a `fail-cancel` file exists, as an engine that can't stop a run would, and holds its answer to
 // runs.cancel while a `hold-cancel` file exists, until a `release-cancel` file appears. runs.get and runs.result
 // answer for a finished run whose result holds one suggestion; runs.result is held while a `hold-result` file exists,
-// until a `release-result` file appears.
+// until a `release-result` file appears. Its store's id (D26) is kept in its home, so the same home keeps one id.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const home = process.argv[process.argv.indexOf("--home") + 1];
 const instanceId = process.argv[process.argv.indexOf("--instance") + 1] || randomUUID();
 mkdirSync(home, { recursive: true });
+if (!existsSync(join(home, "home-id"))) writeFileSync(join(home, "home-id"), randomUUID());
+const homeId = readFileSync(join(home, "home-id"), "utf8").trim();
 const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 const summary = (status) => {
   const now = new Date().toISOString();
@@ -25,7 +27,7 @@ process.stdin.on("data", (chunk) => {
     buffer = buffer.slice(end + 1);
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
-      send({ id: request.id, result: { protocolVersion: 4, engineVersion: "gated", instanceId, pid: process.pid, home, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 5, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {

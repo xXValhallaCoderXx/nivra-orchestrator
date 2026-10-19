@@ -10,6 +10,10 @@
 //   "context":{"preferences":{"revision":1,"records":[{"id":"<uuid>","statement":"Use pnpm","scope":"personal","intent":"default","revision":1}]},"sharing":{"modelContext":true}}
 // An explain run needs that consent, and can carry the task's choices (D23):
 //   pnpm rpc runs.start '{"workflowId":"explain","input":{"repoPath":"/path/to/repo","choices":["Keep Jest for this task"]},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true}}}' --follow
+// A conversation's turn (D26) carries the history too; without a context it gets none. A repository turn needs consent:
+//   pnpm rpc runs.start '{"workflowId":"chat","input":{"message":"How should I stage this?","scope":{"kind":"general"}}}' --follow
+//   pnpm rpc runs.start '{"workflowId":"chat","input":{"message":"Plan a CSV export","scope":{"kind":"repository","repoPath":"/path/to/repo"}},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true},"history":{"exchanges":[],"omitted":{"overLimit":0,"unanswered":0,"preferencesChanged":0}}}}' --follow
+// After --follow, a chat run's stored reply is printed.
 //
 // The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, when set, is passed to the engine
 // in `initialize`, the way the app does it (D8).
@@ -38,8 +42,11 @@ try {
   process.exit(2);
 }
 if (method === "runs.start" && params["clientRequestId"] === undefined) params = { clientRequestId: randomUUID(), ...params };
-// Without a context: no preferences, and no consent to send repository content to a model (D22).
-if (method === "runs.start" && params["context"] === undefined) params = { ...params, context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } } };
+// Without a context: no preferences, no consent to send repository content to a model (D22), and for a turn no history.
+if (method === "runs.start" && params["context"] === undefined) {
+  const history = params["workflowId"] === "chat" ? { history: { exchanges: [], omitted: { overLimit: 0, unanswered: 0, preferencesChanged: 0 } } } : {};
+  params = { ...params, context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false }, ...history } };
+}
 
 const apiKey = process.env["NEBIUS_API_KEY"]?.trim();
 delete process.env["NEBIUS_API_KEY"];
@@ -82,6 +89,7 @@ try {
       if (isTerminal(page.status)) {
         console.log(`status: ${page.status}`);
         if (page.status !== "succeeded") status = 1;
+        if ((result as { workflowId?: string }).workflowId === "chat") console.log(JSON.stringify(await client.call("runs.reply", { runId }), null, 2));
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 250));

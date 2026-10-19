@@ -49,9 +49,10 @@ describe("engine over stdio", () => {
   it("answers initialize with where it runs, and keeps stdout to JSON-RPC alone", async () => {
     const { home, engine } = setup();
     const info = await engine.initialize();
-    assert.equal(info.protocolVersion, 4);
+    assert.equal(info.protocolVersion, 5);
     assert.equal(info.protocolVersion, PROTOCOL_VERSION);
     assert.equal(info.home, home);
+    assert.match(info.homeId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     assert.equal(info.platform, process.platform);
     assert.equal(info.runtimeHash, null);
     // The engine logs its readiness with console.log on purpose: it must arrive on stderr, never stdout.
@@ -60,11 +61,15 @@ describe("engine over stdio", () => {
     assert.deepEqual(engine.protocolErrors, []);
   });
 
-  it("refuses work before initialize, unknown methods and invalid parameters, by code", async () => {
+  it("refuses work before initialize, unknown methods and invalid parameters, by code, and tells an unknown run apart (D26)", async () => {
     const { engine } = setup();
     assert.equal(await codeOf(engine.client.call("runs.list", {})), ErrorCode.NotInitialized);
     await engine.initialize();
-    assert.equal(await codeOf(engine.client.call("runs.get", { runId: randomUUID() })), ErrorCode.InvalidParams);
+    assert.equal(await codeOf(engine.client.call("runs.get", { runId: randomUUID() })), ErrorCode.RunNotFound);
+    assert.equal(await engine.client.call("runs.find", { clientRequestId: randomUUID() }), null);
+    // Parameters that fail their schema keep their own code, sent raw because the client checks them first.
+    engine.child.stdin.write('{"jsonrpc":"2.0","id":98,"method":"runs.get","params":{"runId":"not-a-uuid"}}\n');
+    await waitFor(() => engine.lines.some((line) => line.includes('"id":98') && line.includes(`"code":${ErrorCode.InvalidParams}`)), { what: "invalid parameters" });
     engine.child.stdin.write('{"jsonrpc":"2.0","id":99,"method":"no.such.method"}\n');
     engine.child.stdin.write("this is not json\n");
     await waitFor(() => engine.lines.some((line) => line.includes(`"code":${ErrorCode.MethodNotFound}`)), { what: "method-not-found" });

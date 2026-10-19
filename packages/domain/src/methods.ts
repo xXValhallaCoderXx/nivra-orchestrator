@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { RunContext } from "./context.ts";
 import { ExplainResult } from "./explain.ts";
 import { ModelEndpoint, ModelFailureKind } from "./models.ts";
@@ -31,6 +32,11 @@ export const EngineInfo = z.strictObject({
   instanceId: z.uuid(),
   pid: z.number().int().positive(),
   home: z.string(),
+  /**
+   * A random id stored in the home's database when it was created (D26): it names the store, as a path can't. A run's
+   * absence means it was never accepted only when asked of the store with the same id.
+   */
+  homeId: z.uuid(),
   /** The staged runtime's content hash (D5); null when the engine runs from source. */
   runtimeHash: z.string().nullable(),
   node: z.string(),
@@ -66,6 +72,8 @@ const RunRequest = {
 export const StartRunParams = z.discriminatedUnion("workflowId", [
   z.strictObject({ ...RunRequest, workflowId: z.literal("hello"), input: HelloInput }),
   z.strictObject({ ...RunRequest, workflowId: z.literal("explain"), input: ExplainInput }),
+  // A conversation's turn carries the conversation so far as well (D26), held in memory like the snapshot.
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ChatContext, workflowId: z.literal("chat"), input: ChatInput }),
 ]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
@@ -135,6 +143,8 @@ export const Methods = {
   "providers.check": { params: z.strictObject({ model: z.string().min(1).max(200).optional() }), result: ProviderCheck },
   "runs.start": { params: StartRunParams, result: RunSummary },
   "runs.get": { params: z.strictObject({ runId: RunId }), result: RunSummary },
+  /** The run a request id created, or null when this store has none (D26): how a send whose answer was lost is found. */
+  "runs.find": { params: z.strictObject({ clientRequestId: z.uuid() }), result: RunSummary.nullable() },
   "runs.list": {
     params: z.strictObject({ limit: z.number().int().min(1).max(100).default(20), cursor: z.number().int().positive().nullable().default(null) }),
     result: RunList,
@@ -146,6 +156,8 @@ export const Methods = {
   "runs.cancel": { params: z.strictObject({ runId: RunId }), result: z.strictObject({ status: RunStatus, wasTerminal: z.boolean() }) },
   /** An explain run's stored result; null until it has one. */
   "runs.result": { params: z.strictObject({ runId: RunId }), result: ExplainResult.nullable() },
+  /** A chat run's stored reply; null until it has one. */
+  "runs.reply": { params: z.strictObject({ runId: RunId }), result: ChatResult.nullable() },
 } as const satisfies Record<string, { params: z.ZodType; result: z.ZodType }>;
 
 export type MethodName = keyof typeof Methods;
