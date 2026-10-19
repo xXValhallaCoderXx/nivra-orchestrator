@@ -1,8 +1,9 @@
 // Builds a release candidate that can be traced to its commit (NIV-14, NIV-16): from a clean tree, after `pnpm verify`,
 // it stages both runtimes once, builds the app once, packages the Linux deb and the Windows zip, checks that what was
-// packaged is what was staged, and writes release/build-info.json and release/SHA256SUMS. The version stays as it is:
-// a candidate is identified by its commit and its hashes, and the release publishes the accepted files unchanged. The
-// AppImage isn't built: it doesn't start on a stock Ubuntu 24.04 (D10). Run it from WSL (D14).
+// packaged is what was staged, and writes release/build-info.json and release/SHA256SUMS. A candidate is identified by
+// its commit and its hashes, and a release publishes the accepted files unchanged; a published version's files are
+// never replaced, so a candidate after a release carries a new version (D25). The AppImage isn't built: it doesn't
+// start on a stock Ubuntu 24.04 (D10). Run it from WSL (D14).
 //
 //   pnpm release:candidate [--skip-verify]
 import { spawnSync } from "node:child_process";
@@ -11,6 +12,7 @@ import { createReadStream, existsSync, readdirSync, readFileSync, rmSync, statSy
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { hashRuntime, misplacedVcRuntime } from "./runtime-files.ts";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repo = resolve(desktop, "..", "..");
@@ -70,8 +72,14 @@ step("Checking that what was packaged is what was staged");
 type Manifest = { contentHash: string; sha256: string; files: number; engineVersion: string; protocolVersion: number; node: string; vcRuntime?: unknown };
 const runtimes = (["linux-x64", "win-x64"] as const).map((target) => {
   const staged = json<Manifest>(join(stage, target, "engine", "manifest.json"));
-  const packaged = json<Manifest>(join(release, target === "linux-x64" ? "linux-unpacked" : "win-unpacked", "resources", "runtime", target, "engine", "manifest.json"));
+  const packagedDir = join(release, target === "linux-x64" ? "linux-unpacked" : "win-unpacked", "resources", "runtime", target);
+  const packaged = json<Manifest>(join(packagedDir, "engine", "manifest.json"));
   if (packaged.contentHash !== staged.contentHash || packaged.sha256 !== staged.sha256) fail(`The packaged ${target} runtime (${packaged.contentHash}) isn't the staged one (${staged.contentHash}).`);
+  // A manifest can be right while a file isn't: hash every packaged file, as staging did.
+  const contents = hashRuntime(packagedDir);
+  if (contents.sha256 !== staged.sha256 || contents.files !== staged.files) fail(`The packaged ${target} runtime's files hash to ${contents.contentHash} (${contents.files} files), not ${staged.contentHash} (${staged.files} files).`);
+  const misplaced = target === "win-x64" ? misplacedVcRuntime(packagedDir) : [];
+  if (misplaced.length) fail(`A native addon in the packaged ${target} runtime would not find its Visual C++ runtime:\n${misplaced.map((problem) => `  ✗ ${problem}`).join("\n")}`);
   return { target, contentHash: staged.contentHash, sha256: staged.sha256, files: staged.files, engineVersion: staged.engineVersion, protocolVersion: staged.protocolVersion, node: staged.node, ...(staged.vcRuntime ? { vcRuntime: staged.vcRuntime } : {}) };
 });
 const tarball = join(release, "win-unpacked", "resources", "runtime", "runtime-linux-x64.tar.gz");

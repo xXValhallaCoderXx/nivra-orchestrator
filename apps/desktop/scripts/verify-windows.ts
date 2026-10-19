@@ -1,18 +1,20 @@
 // Verifies the Windows host paths on this machine, from WSL, without CI (D14). It stages both runtimes, copies the
 // Windows runtime and a bundled harness to %LOCALAPPDATA%\nivra-dev\verify, and runs the harness with the staged
-// node.exe: a real Windows parent that drives the native engine and a WSL engine as Electron's main process will.
+// node.exe: a real Windows parent that drives the native engine and a WSL engine as Electron's main process will. With
+// --zip, it takes both runtimes from a release candidate's Windows zip instead, exactly as packaged (D25).
 //
-//   pnpm --filter @nivra/desktop verify:windows [--distro <name>] [--skip-stage]
+//   pnpm --filter @nivra/desktop verify:windows [--distro <name>] [--skip-stage | --zip <path to Nivra-<version>-win-x64.zip>]
 import { spawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { build } from "esbuild";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const stageRoot = join(desktop, "build", "stage");
-const { values } = parseArgs({ options: { distro: { type: "string" }, "skip-stage": { type: "boolean", default: false } } });
+const { values } = parseArgs({ options: { distro: { type: "string" }, "skip-stage": { type: "boolean", default: false }, zip: { type: "string" } } });
+const zip = values.zip ? resolve(values.zip) : null;
 
 const step = (text: string) => console.log(`\n▸ ${text}`);
 const fail = (message: string): never => {
@@ -21,6 +23,8 @@ const fail = (message: string): never => {
 };
 
 if (process.platform !== "linux" || !existsSync("/mnt/c/Windows/System32/cmd.exe")) fail("Run this from WSL on a Windows machine: it starts Windows programs through interop.");
+if (zip && !existsSync(zip)) fail(`${zip} doesn't exist. Build a candidate with pnpm release:candidate, or pass the zip's path.`);
+const contentHash = (manifest: string): string => (JSON.parse(readFileSync(manifest, "utf8")) as { contentHash: string }).contentHash;
 
 /** Runs a Windows program through interop from a Windows folder, so it never sees a \\wsl.localhost working directory. */
 function windows(exe: string, args: string[]): string {
@@ -29,13 +33,11 @@ function windows(exe: string, args: string[]): string {
   return result.stdout.replace(/\r/g, "").trim();
 }
 
-if (!values["skip-stage"]) {
+if (!values["skip-stage"] && !zip) {
   step("Staging both runtimes");
   const staged = spawnSync(process.execPath, [join(desktop, "scripts", "stage-runtime.ts"), "all"], { stdio: "inherit" });
   if (staged.status !== 0) fail("Staging failed.");
 }
-const linux = JSON.parse(readFileSync(join(stageRoot, "runtime-linux-x64.json"), "utf8")) as { contentHash: string };
-const windowsHash = (JSON.parse(readFileSync(join(stageRoot, "win-x64", "engine", "manifest.json"), "utf8")) as { contentHash: string }).contentHash;
 
 step("Bundling the harness");
 const verifyDir = join(desktop, "build", "verify");
@@ -55,25 +57,45 @@ const localAppData = windows("/mnt/c/Windows/System32/cmd.exe", ["/d", "/c", "ec
 const workWin = `${localAppData}\\nivra-dev\\verify`;
 const work = windows("/usr/bin/wslpath", ["-u", workWin]);
 mkdirSync(work, { recursive: true });
-const runtimeWin = `${workWin}\\runtime-win-x64`;
-const runtime = join(work, "runtime-win-x64");
-const copiedHash = existsSync(join(runtime, "engine", "manifest.json"))
-  ? (JSON.parse(readFileSync(join(runtime, "engine", "manifest.json"), "utf8")) as { contentHash: string }).contentHash
-  : null;
-if (copiedHash !== windowsHash) {
-  // One archive and Windows' own tar beat copying thousands of small files across the WSL boundary.
-  const archive = join(work, "runtime-win-x64.tar");
-  const packed = spawnSync("tar", ["-cf", archive, "-C", join(stageRoot, "win-x64"), "."], { stdio: "inherit" });
-  if (packed.status !== 0) fail("Packing the Windows runtime failed.");
-  rmSync(runtime, { recursive: true, force: true });
-  mkdirSync(runtime, { recursive: true });
-  windows("/mnt/c/Windows/System32/tar.exe", ["-xf", `${workWin}\\runtime-win-x64.tar`, "-C", runtimeWin]);
-  rmSync(archive, { force: true });
-  console.log(`  runtime ${windowsHash} → ${runtimeWin}`);
+let runtimeWin: string;
+let runtime: string;
+let tarballWin: string;
+let linuxHash: string;
+if (zip) {
+  // Windows' own tar extracts the zip as a person would; only the runtimes are needed.
+  const candidate = join(work, "candidate");
+  rmSync(candidate, { recursive: true, force: true });
+  mkdirSync(candidate, { recursive: true });
+  cpSync(zip, join(work, "candidate.zip"));
+  windows("/mnt/c/Windows/System32/tar.exe", ["-xf", `${workWin}\\candidate.zip`, "-C", `${workWin}\\candidate`, "resources/runtime"]);
+  rmSync(join(work, "candidate.zip"), { force: true });
+  runtimeWin = `${workWin}\\candidate\\resources\\runtime\\win-x64`;
+  runtime = join(candidate, "resources", "runtime", "win-x64");
+  tarballWin = `${workWin}\\candidate\\resources\\runtime\\runtime-linux-x64.tar.gz`;
+  linuxHash = contentHash(join(candidate, "resources", "runtime", "runtime-linux-x64.json"));
+  console.log(`  ${basename(zip)}: runtimes win-x64 ${contentHash(join(runtime, "engine", "manifest.json"))} and linux-x64 ${linuxHash} → ${workWin}\\candidate`);
 } else {
-  console.log(`  runtime ${windowsHash} already there`);
+  linuxHash = contentHash(join(stageRoot, "runtime-linux-x64.json"));
+  const windowsHash = contentHash(join(stageRoot, "win-x64", "engine", "manifest.json"));
+  runtimeWin = `${workWin}\\runtime-win-x64`;
+  runtime = join(work, "runtime-win-x64");
+  const copiedHash = existsSync(join(runtime, "engine", "manifest.json")) ? contentHash(join(runtime, "engine", "manifest.json")) : null;
+  if (copiedHash !== windowsHash) {
+    // One archive and Windows' own tar beat copying thousands of small files across the WSL boundary.
+    const archive = join(work, "runtime-win-x64.tar");
+    const packed = spawnSync("tar", ["-cf", archive, "-C", join(stageRoot, "win-x64"), "."], { stdio: "inherit" });
+    if (packed.status !== 0) fail("Packing the Windows runtime failed.");
+    rmSync(runtime, { recursive: true, force: true });
+    mkdirSync(runtime, { recursive: true });
+    windows("/mnt/c/Windows/System32/tar.exe", ["-xf", `${workWin}\\runtime-win-x64.tar`, "-C", runtimeWin]);
+    rmSync(archive, { force: true });
+    console.log(`  runtime ${windowsHash} → ${runtimeWin}`);
+  } else {
+    console.log(`  runtime ${windowsHash} already there`);
+  }
+  cpSync(join(stageRoot, "runtime-linux-x64.tar.gz"), join(work, "runtime-linux-x64.tar.gz"));
+  tarballWin = `${workWin}\\runtime-linux-x64.tar.gz`;
 }
-cpSync(join(stageRoot, "runtime-linux-x64.tar.gz"), join(work, "runtime-linux-x64.tar.gz"));
 cpSync(join(verifyDir, "harness.mjs"), join(work, "harness.mjs"));
 
 step("Running the harness on Windows");
@@ -83,9 +105,9 @@ const args = [
   "--runtime",
   runtimeWin,
   "--tarball",
-  `${workWin}\\runtime-linux-x64.tar.gz`,
+  tarballWin,
   "--hash",
-  linux.contentHash,
+  linuxHash,
   "--work",
   workWin,
   ...(values.distro ? ["--distro", values.distro] : []),
