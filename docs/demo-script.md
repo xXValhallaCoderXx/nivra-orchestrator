@@ -7,8 +7,12 @@ override → fresh context.
 ## Before recording
 
 - **The build.** Use the v0.1.1 Windows zip from the release, and record on Windows with WSL folders, the main path.
-- **A fresh profile.** Start Nivra with its own profile, `--user-data-dir=%LOCALAPPDATA%\nivra-demo\profile`, so no
-  other projects or preferences appear.
+- **Separate profiles for rehearsal and recording.** A profile keeps its projects, preferences and consent.
+  - Rehearse in `--user-data-dir=%LOCALAPPDATA%\nivra-demo\rehearsal`.
+  - Record each take in `--user-data-dir=%LOCALAPPDATA%\nivra-demo\recording`, deleting that folder before the take.
+    The opening scene then shows an empty project list, and consent is asked again.
+- **One Nivra at a time.** Close any other Nivra, such as the dev app, first: every profile's WSL engine uses `~/.nivra`
+  in the distribution, and only one engine can hold it.
 - **The repositories.** Clone the two public ones into a neutral WSL folder, for example `~/demo`:
   ```bash
   mkdir -p ~/demo && cd ~/demo && git clone https://github.com/xXValhallaCoderXx/valhalla-fitness && git clone https://github.com/xXValhallaCoderXx/nivra-demo-timer
@@ -31,9 +35,9 @@ caption on the cut, such as "Model run, about 2 minutes, shortened". Nothing is 
 | 0:00–0:12 | The problem | Nivra, open on its empty project list | "Coding assistants remember what you like. But when a repository's own conventions disagree, whose rule wins? And what did the model actually read?" |
 | 0:12–0:45 | Evidence | **Add folder…** → `valhalla-fitness`. **Explain** → **Allow for this project**. *Cut.* The answer: findings with citation chips. Then the line "Context used: … N of N citations point to lines the model was shown" | "Nivra explains a repository with evidence. NVIDIA Nemotron reads it through read-only tools, over Nebius Token Factory. Every citation is checked against the lines the model was actually shown." |
 | 0:45–1:05 | Confirmed memory | Under Preferences:<br>• type `Name component files in PascalCase; write tests with Vitest`, keep **Every project**, press **Confirm**;<br>• type `valhalla-fitness builds its web UI with Mantine`, choose **valhalla-fitness only**, press **Confirm** | "I confirm two preferences: a personal one for every project, and one for this project only." |
-| 1:05–1:45 | A contrasting repository | **Add folder…** → `nivra-demo-timer`. **Explain** → **Allow for this project**. *Cut.* Under **Conflicts**: "Currently: …kebab-case…", then **Governs this task**: the repository, with the personal default outranked. Expand **Context used** to show **What the model was given**: the personal preference, without the Mantine one | "This repository names its files in kebab-case and tests with Jest. Nivra reports the conflict, and the repository's convention governs over my personal default. The Mantine preference belongs to the first project, so it was never sent." |
+| 1:05–1:45 | A contrasting repository | **Add folder…** → `nivra-demo-timer`. **Explain** → **Allow for this project**. *Cut.* Under **Conflicts**: "Currently: …kebab-case…", then **Governs this task**: the repository, with the personal default outranked. In Preferences, the Mantine row says "not sent to nivra-demo-timer". Expand **Context used**: under **What the model was given**, "Preferences received: 1 personal default" | "This repository names its files in kebab-case and tests with Jest. Nivra reports the conflict, and the repository's convention governs over my personal default. The Mantine preference belongs to the first project, so it was never sent." |
 | 1:45–2:15 | An explicit override | **Choices for this task** → **Add a choice** → `Use PascalCase for this task` → **Explain**. *Cut.* The conflict shows **Currently** (the repository's convention), **Intended** (the choice) and **Governs this task** (the choice). Then the Preferences list, unchanged | "For one task, I can decide differently. The choice governs this run only: 'Currently' still shows the repository's convention, and my stored preferences don't change." |
-| 2:15–2:40 | Fresh context | **Remove** the choice. **Edit** the personal preference, then **Explain**. *Cut.* Context used shows the new wording. **Delete** it, then **Explain**. *Cut.* No preference was sent | "Edit or delete a preference, and the very next run uses it as it is now." |
+| 2:15–2:40 | Fresh context | **Remove** the choice. **Edit** the personal preference and save it: Preferences shows the new wording at "revision 2". **Explain**. *Cut.* Context used: "Preferences received: 1 personal default", with a new store revision and fingerprint. **Delete** the preference, then **Explain**. *Cut.* "Preferences received: none" | "Edit or delete a preference, and the very next run uses it as it is now." |
 | 2:40–2:58 | How it runs | Settings ("Key saved, encrypted"), the project's WSL label, then the release page | "Nemotron 3 Super through Nebius Token Factory, at runtime. The engine runs where the repository lives, here in WSL. Nivra is open source, for Windows and Linux." |
 
 ## Never on screen

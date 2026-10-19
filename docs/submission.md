@@ -111,8 +111,9 @@ conventions disagree, or which lines they actually read. Nivra makes both visibl
   id, never by their words.
 
 *Challenges*
-- **Evidence discipline.** Models cite files they have only seen named. Nivra refuses citations of lines the model
-  wasn't shown, and says which ones, until every citation it keeps is checked.
+- **Evidence discipline.** Models cite files they have only seen named. Nivra turns down an answer that cites lines the
+  model wasn't shown, naming each one, while there's time to read them. After two refusals, or once the answer is due,
+  it accepts the answer, and any such citation stays labelled "Not checked".
 - **Running across Windows and WSL.** That meant a protocol-only stdout, `wsl.exe`'s UTF-16 output, a runtime
   installed into each distribution on first use, and paths that cross the boundary.
 - **Packaging honestly.** Preparing clean-machine checks, we found that the Windows runtime shipped a C++ runtime DLL
