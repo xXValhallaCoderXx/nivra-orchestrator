@@ -77,6 +77,13 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 
 `verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`; the WSL
 engine uses `~/.nivra` inside the distribution, as the installed app will.
+- **A candidate's runtimes:** `--zip <path>` takes both runtimes from a release candidate's Windows zip, exactly as
+  packaged, instead of staging.
+- **The Visual C++ runtime (D25):** it checks that the native engine loads only the copy shipped beside its addon. It
+  also runs a controlled check in a copy of the runtime. There, the addon's import is renamed so that no installed
+  runtime can stand in, and the engine must still start and run hello. Without the renamed DLL, it must refuse.
+- **`test:windows` on a candidate:** extract its zip into `%LOCALAPPDATA%\nivra-dev\app` with Windows' `tar.exe`, in
+  place of `pnpm dev:win --no-launch`.
 
 Terminating a whole distribution while the app runs needs a distribution made for the purpose. **The check terminates
 it, with everything running in it**, and it refuses the distribution it runs in:

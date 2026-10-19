@@ -57,8 +57,8 @@ keeps that engine.
 
 ## Install a test build
 
-Download v0.1.0 from the repository's [GitHub Releases](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases):
-`Nivra-0.1.0-win-x64.zip` for Windows or `Nivra-0.1.0-amd64.deb` for Linux, with `SHA256SUMS` and `build-info.json`
+Download v0.1.1 from the repository's [GitHub Releases](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases):
+`Nivra-0.1.1-win-x64.zip` for Windows or `Nivra-0.1.1-amd64.deb` for Linux, with `SHA256SUMS` and `build-info.json`
 (the commit and runtimes the build came from). To check a download, run `sha256sum -c SHA256SUMS --ignore-missing` in
 Linux or WSL, or `Get-FileHash` in PowerShell.
 
@@ -74,7 +74,7 @@ Linux or WSL, or `Get-FileHash` in PowerShell.
 **Linux x64** (Ubuntu 24.04 and similar)
 
 ```bash
-sudo apt install ./Nivra-0.1.0-amd64.deb
+sudo apt install ./Nivra-0.1.1-amd64.deb
 nivra
 ```
 

@@ -353,6 +353,60 @@ its store would need Windows tools.
   - `pnpm release:candidate`
   - `pnpm accept:live --platform linux|windows --session rehearsal|live --fixture-a <A> [--fixture-b-file <private>] [--move-wsl-home] [--network]`
 
+### Release candidate 0.1.1 (D25, NIV-16)
+
+v0.1.0's runtime shipped `vcruntime140.dll` next to `node.exe`, where Windows never looks for an addon's dependencies.
+So on a PC without the Visual C++ Redistributable, its native engine would stop at start. Candidate 0.1.1 ships the DLL
+beside the addon (D25).
+
+**The candidate:** 0.1.1 at `cad5eca`, built by `pnpm release:candidate` from a clean tree after `pnpm verify`. The build
+re-hashed every packaged runtime file and checked where the DLL sits.
+- `Nivra-0.1.1-amd64.deb`: sha256 `86da07456e6be5d602f6be433d4feb4824b27f8c79acc876cc0330b2d632d1ab`
+- `Nivra-0.1.1-win-x64.zip`: sha256 `df371719c50b9387491e9cccc680233cd4c594340b7cb67858bdd02a9e6d7783`
+- `build-info.json`: sha256 `8885a7875fb85a6a24d332f0b7b7811333cfae7aaead278684ec7dbee9809b5b`
+
+**What changed from v0.1.0**
+
+| Payload | v0.1.0 | 0.1.1 |
+|---|---|---|
+| Linux runtime | `f0f3baa2aafb1925`, 3,708 files | Byte-identical |
+| WSL tarball | sha256 `2d426b0f643f45a9…` | Byte-identical |
+| Windows runtime | `e47d01e4a355740f`, with the DLL next to `node.exe` | `d7b773e6d952ca65`: the DLL moved beside libsql's addon, and the other 3,708 files unchanged |
+| `app.asar`, on both platforms | `fc6812bc96f3c80f…` | `a6fdf4e50f213ee0…`: of its 9 files, only `package.json` differs, in its version |
+| Electron and the toolchain | Electron 44.7.0 | The same |
+
+So NIV-14's live evidence carries over to 0.1.1's Linux deb and to its Windows zip driving WSL. No model was called
+again.
+
+**Rerun on 0.1.1's packaged files (19 October)**
+- `verify:windows --zip`, on the runtimes extracted from the zip: 20/20. That is the 17 earlier native and WSL checks,
+  and the 3 below.
+- `test:windows`, on the zip extracted with Windows' `tar.exe`: 6/6.
+- `test:packaged`, on the candidate's Linux build: 16 passed. 5 were skipped, because they need the test endpoint
+  switch, which a packaged app ignores.
+
+**The controlled experiment,** on this PC, which has `vcruntime140.dll` in System32:
+
+| Check | v0.1.0's zip | 0.1.1's zip |
+|---|---|---|
+| The engine loads only the Visual C++ runtime copy beside its addon | Failed: it loaded `C:\WINDOWS\SYSTEM32\VCRUNTIME140.dll` | Passed: only `engine\node_modules\@libsql\win32-x64-msvc\vcruntime140.dll` |
+| In a copy where the addon's import is renamed to a name no installation has, the engine starts, runs hello and writes both stores | Failed: "The specified module could not be found" | Passed. It loaded only the renamed copy; the run is in `nivra.db`, and `mastra.db` has 44 tables |
+| With the renamed DLL removed, the engine refuses to start (`runtime-broken`) | Passed | Passed |
+
+**No clean-machine test has run yet.** It needs a Windows PC or VM without the redistributable
+([clean-setup.md](clean-setup.md), check 3).
+
+**Not rerun,** because the payloads they exercise didn't change:
+- the live sessions, which call the model;
+- the token-free `accept:live` rehearsals;
+- installing the deb and running `dpkg --verify`.
+
+**Commands**
+- `pnpm release:candidate`
+- `pnpm --filter @nivra/desktop verify:windows --zip release/Nivra-0.1.1-win-x64.zip`, and the same with v0.1.0's zip
+- `pnpm --filter @nivra/desktop test:windows`, after extracting the zip into `%LOCALAPPDATA%\nivra-dev\app`
+- `xvfb-run -a pnpm --filter @nivra/desktop test:packaged`
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
@@ -403,11 +457,11 @@ The cross-platform foundation is done when all of these were seen to pass:
   - the same Windows folder picked through WSL is recognised as the Windows project;
   - quitting leaves no engine running (`pgrep` in WSL, `tasklist` on Windows).
   
-  *Seen passing 2026-10-17 through the real UI (`test:windows`, 5/5); latest on 2026-10-19 against `ead56e8`, 6/6.*
+  *Seen passing 2026-10-17 through the real UI (`test:windows`, 5/5); on 2026-10-19 against `ead56e8`, 6/6; latest against 0.1.1's zip (`cad5eca`), 6/6.*
   The zip carries both runtimes.
 - **Packaged Linux app** (`electron-builder --dir`): the same flow on the local target through the real UI, plus the
-  preference handoff (`test:packaged`, 11/11). *Seen passing 2026-10-17; latest on 2026-10-19 against `ead56e8`, 16
-  passed, with 5 skipped that need the test endpoint switch, which a packaged app ignores.*
+  preference handoff (`test:packaged`, 11/11). *Seen passing 2026-10-17; on 2026-10-19 against `ead56e8`, 16 passed,
+  with 5 skipped that need the test endpoint switch, which a packaged app ignores; latest the same against `cad5eca`.*
 - **Actionable refusals and guidance** for:
   - no WSL, or an outdated WSL;
   - WSL with no distribution, or only Docker Desktop's, or only WSL 1 ones;
@@ -433,9 +487,10 @@ The cross-platform foundation is done when all of these were seen to pass:
   - Reaching it from the native engine is still pending.
 - **Clean machine:** the Windows zip runs native hello on a VM or Windows Sandbox with no Visual C++ redistributable
   installed. *Not yet run.*
-  - An experiment on 19 October shows that, as built, this would fail. Without the redistributable, the native engine
-    can't load libsql. The DLL it ships sits next to `node.exe`, and Windows doesn't look there for an add-on's
-    dependencies ([clean-setup.md](clean-setup.md), check 3).
+  - v0.1.0 would fail it. Its runtime shipped the DLL next to `node.exe`, and Windows doesn't look there for an addon's
+    dependencies.
+  - 0.1.1 ships the DLL beside the addon (D25). The controlled check passes on its zip (*Release candidate 0.1.1*).
+  - A clean machine is still to run ([clean-setup.md](clean-setup.md), check 3).
 
 ## Hackathon submission checklist
 

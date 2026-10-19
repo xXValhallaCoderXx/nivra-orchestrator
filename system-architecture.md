@@ -15,7 +15,9 @@ This document describes what is **built**:
   preference lifecycle (intent, supersession, keeping a suggestion, export and import). It is tested offline, including
   the D20 sequence through the UI, and ran live on both fixtures on 18 October.
 - packaged acceptance (D24): the whole D20 journey, with its failure cases, ran live on the Linux deb and on the Windows
-  zip driving WSL, from one release candidate (`ead56e8`), and passed every criterion on both.
+  zip driving WSL, from one release candidate (`ead56e8`), and passed every criterion on both. Candidate 0.1.1
+  (`cad5eca`, D25) moves the Windows runtime's Visual C++ DLL beside the addon that imports it. Its Linux and WSL
+  payloads are byte-identical, so that evidence carries over, and its Windows checks ran again.
 
 It also describes what is **planned**, in two parts. **None of it is working yet.**
 - **The rest of the immediate milestone (D20):** promoting a project's preference to a personal one (NIV-10).
@@ -815,8 +817,8 @@ docs changed afterwards.
 | Preference store, and the scoped handoff to engines | **Built** (D21); the whole-distribution interruption check passed | NIV-5, reused by NIV-10 |
 | Explain with evidence, model client, repository map, consent, the run lifecycle it needs | **Built** (D22), tested offline and run live on both fixtures. The preference contrast ran on B (private), then again with full precedence at D23's checkpoint 1; a public pair of repositories for the demonstration is pending | NIV-6, NIV-9, NIV-8 (read-only slice) |
 | Managing preferences, context assembly with overrides and full precedence | **Built** (D23), tested offline (the D20 sequence through the UI included) and run live on both fixtures; promotion to a personal preference is deferred | NIV-10, NIV-11 |
-| Acceptance on packaged builds | **Passed** (D24): live on the Linux deb and on the Windows zip driving WSL, from candidate `ead56e8`; native Windows reported from offline evidence | NIV-14 |
-| Release, clean-setup checks, video, submission | In progress: the candidate is built with `SHA256SUMS`, the install and testing instructions are written, and the synthetic demo repository is ready to publish | NIV-15 – NIV-17 |
+| Acceptance on packaged builds | **Passed** (D24): live on the Linux deb and on the Windows zip driving WSL, from candidate `ead56e8`. It carries over to candidate 0.1.1 (D25), whose Windows checks ran again. Native Windows is reported from offline evidence and a controlled check | NIV-14 |
+| Release, clean-setup checks, video, submission | In progress: v0.1.0 is a published pre-release, and candidate 0.1.1 (D25) is built with `SHA256SUMS`, ready to publish. The install and testing instructions are written, the synthetic demo repository is published, and the clean-setup checks are next | NIV-15 – NIV-17 |
 | New-app creation, coding worker, sandboxes, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
 The estimates are not commitments. None of the planned work is a precondition for committing the foundation.

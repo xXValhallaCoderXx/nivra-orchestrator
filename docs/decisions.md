@@ -950,3 +950,53 @@ The key saw 28 models, five of them NVIDIA's.
 
   Each is proposed as a follow-up.
 - Clean-setup checks of the judge's path, and publishing the release, follow under NIV-16.
+
+## D25. The Visual C++ runtime beside the addon that imports it, and candidate 0.1.1 (2026-10-19)
+
+**Decision.**
+- **Where the DLLs go.** Staging copies each Visual C++ runtime DLL a native addon names into that addon's own folder,
+  with the DLLs those name in turn, byte for byte from System32 (or `--vc-runtime-from`). Nothing goes next to
+  `node.exe`, which links its C runtime statically. This supersedes D6's "shipped next to `node.exe`".
+- **How it's checked.**
+  - Staging fails if a DLL an addon names isn't in that addon's folder. The release candidate re-hashes every packaged
+    runtime file and checks the placement again.
+  - `verify:windows` checks that the native engine has loaded only the copy beside its addon, never an installed one.
+  - It also runs a controlled check. In a copy of the runtime, the addon's import and the DLL beside it are renamed to a
+    name no installation has. The engine must still start, run hello and write both stores. With the renamed DLL
+    removed, it must refuse to start.
+  - `verify:windows --zip` runs these on a candidate's packaged runtimes.
+- **A new version.** A published version's files are never replaced, so the fixed candidate is 0.1.1. The engine stays
+  at 0.1.0, since it didn't change. This amends D24's "the version stays as it is": the version changes when a
+  candidate follows a published release.
+
+**Why.**
+- **Where Windows looks.** libsql's Windows addon imports `VCRUNTIME140.dll`. Node loads an addon with
+  `LOAD_WITH_ALTERED_SEARCH_PATH`, which searches:
+  1. the addon's folder;
+  2. the system folders;
+  3. the working directory;
+  4. `Path`.
+
+  It never searches `node.exe`'s folder, and the native engine runs in its home. So on a PC without the Redistributable,
+  v0.1.0's native engine would stop at start.
+- **Why no check caught it.** Every PC that ran the checks has the DLL in System32, which satisfied the import. A check
+  that the DLL is somewhere in the runtime, or a run on such a PC, passes whatever the layout.
+- **Shown by experiment, on this PC.** With the import renamed in a copy, v0.1.0's layout couldn't load the addon ("The
+  specified module could not be found"), and the fixed layout loaded it. No PC without the Redistributable has run
+  either yet.
+
+**Consequences.**
+- **What changed between the candidates:**
+  - only the Windows runtime, `e47d01e4a355740f` → `d7b773e6d952ca65`;
+  - the Linux runtime (`f0f3baa2aafb1925`) and the WSL tarball are byte-identical;
+  - `app.asar` differs only in `package.json`'s version.
+- **NIV-14's live evidence carries over** to 0.1.1's Linux deb and to its Windows zip driving WSL. No model was called
+  again.
+- **The affected checks ran again** on the packaged files of candidate 0.1.1 (`cad5eca`). The details are in
+  `docs/acceptance.md`.
+  - `verify:windows --zip`: 20/20. On v0.1.0's zip, the same checks give 18/20, failing exactly the two new ones.
+  - `test:windows`: 6/6.
+  - `test:packaged`: 16 passed.
+- **v0.1.0 stays published, unchanged.** 0.1.1 goes beside it as a release of its own, never over it.
+- **The clean-machine test is still to run.** It needs a Windows PC or VM without the Redistributable, and this machine
+  has neither Windows Sandbox nor Hyper-V.

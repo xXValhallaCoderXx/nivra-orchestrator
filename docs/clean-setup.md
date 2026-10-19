@@ -4,7 +4,7 @@ The live acceptance (NIV-14) ran on Nate's PC, which has every tool installed. T
 files published on the release, the README's steps, and setups that never had Nivra, its runtime or its settings.
 
 - Run them on the release under test: today, the
-  [v0.1.0 pre-release](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.0).
+  [v0.1.1 pre-release](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1).
 - Record what happened, including anything the README got wrong or left out. A check that isn't run is recorded as not
   run.
 - **The key** is the judges' key (Nate's existing Token Factory key, D24). Paste it only into Nivra's Settings, never
@@ -18,9 +18,9 @@ Control is off: this check covers neither (see check 3, and the README).
 
 1. In your own account, open Terminal as administrator and run `net user nivrajudge * /add`; it asks for a password
    twice. Switch to `nivrajudge` (Start → your picture) and sign in. Your own session can stay signed in.
-2. In Edge, open the release and download `Nivra-0.1.0-win-x64.zip` and `SHA256SUMS`. In PowerShell:
+2. In Edge, open the release and download `Nivra-0.1.1-win-x64.zip` and `SHA256SUMS`. In PowerShell:
    ```powershell
-   Get-FileHash $HOME\Downloads\Nivra-0.1.0-win-x64.zip
+   Get-FileHash $HOME\Downloads\Nivra-0.1.1-win-x64.zip
    Get-Content $HOME\Downloads\SHA256SUMS
    ```
    The hash must match the zip's line (`Get-FileHash` prints it in capitals). Record it.
@@ -68,14 +68,14 @@ can't be WSL, whose kernel has AppArmor off; that's why this check is still open
    lsb_release -ds; uname -r; cat /sys/module/apparmor/parameters/enabled; sysctl kernel.apparmor_restrict_unprivileged_userns
    ```
    Expected: Ubuntu 24.04.x LTS, `Y`, and `= 1`.
-2. In Firefox, open the release and download `Nivra-0.1.0-amd64.deb` and `SHA256SUMS`. Then:
+2. In Firefox, open the release and download `Nivra-0.1.1-amd64.deb` and `SHA256SUMS`. Then:
    ```bash
-   cd ~/Downloads && sha256sum -c SHA256SUMS --ignore-missing && sha256sum Nivra-0.1.0-amd64.deb
+   cd ~/Downloads && sha256sum -c SHA256SUMS --ignore-missing && sha256sum Nivra-0.1.1-amd64.deb
    ```
-   Expect `Nivra-0.1.0-amd64.deb: OK`. Record the hash.
+   Expect `Nivra-0.1.1-amd64.deb: OK`. Record the hash.
 3. Install it as the README says, after refreshing the package lists:
    ```bash
-   sudo apt update && sudo apt install ./Nivra-0.1.0-amd64.deb
+   sudo apt update && sudo apt install ./Nivra-0.1.1-amd64.deb
    ```
    Record any warning. apt's notice that the download "is performed unsandboxed as root" is harmless. git comes with
    the deb.
@@ -97,30 +97,16 @@ can't be WSL, whose kernel has AppArmor off; that's why this check is still open
 
 ## 3. Folders on a Windows drive, without the Visual C++ redistributable
 
-**Not run on a clean machine:** Windows 11 Home has no Windows Sandbox. An experiment on 19 October shows that, as
-built, it would fail:
-- **The import.** libsql's Windows add-on imports `VCRUNTIME140.dll`. `node.exe` links its C runtime statically, so
-  nothing has loaded that DLL before the add-on.
-- **Where Windows looks.** The runtime ships the DLL next to `node.exe` (D6). Node loads an add-on with
-  `LOAD_WITH_ALTERED_SEARCH_PATH`. Windows then looks in this order:
-  1. the add-on's own folder;
-  2. System32 and the Windows folder;
-  3. the working directory;
-  4. `Path`.
+**Not run on a clean machine:** Windows 11 Home has no Windows Sandbox or Hyper-V, and this PC has the redistributable.
+- **v0.1.0 would fail here.** Its runtime shipped `vcruntime140.dll` next to `node.exe`, where Windows never looks for
+  an add-on's dependencies, so its native engine would stop at start (D25).
+- **0.1.1 ships the DLL beside the add-on.** The controlled check on this PC passes: with the add-on's import renamed in
+  a copy so that no installed runtime can satisfy it, the packaged engine starts, opens its databases and runs hello. The
+  same check fails on v0.1.0. That is an experiment, not a clean machine ([acceptance.md](acceptance.md), *Release
+  candidate 0.1.1*).
 
-  It never looks in `node.exe`'s folder. The native engine's working directory is its home.
-- **The experiment.** The add-on's import was renamed so that only the shipped copy could satisfy it.
-  - With the DLL next to `node.exe`, loading failed: "The specified module could not be found."
-  - With the DLL next to the add-on, or with the working directory in `node.exe`'s folder, it loaded.
-- **What would happen.** The engine imports libsql when it starts. On a PC without the redistributable, the native
-  engine would therefore stop at start with a runtime error.
-- **Why the earlier checks passed.** Every PC used so far has `vcruntime140.dll` in System32, so `verify:windows` and
-  `test:windows` passed.
-- **What isn't affected.** WSL engines and the Linux build don't use this add-on build. The judges' instructions use
-  WSL folders only.
-
-To check it, use a Windows PC or VM where `Test-Path C:\Windows\System32\vcruntime140.dll` prints `False`. Add a folder
-on a Windows drive, press **Run hello**, then press **Run checks** under Doctor.
+To check it for real, use a Windows PC or VM where `Test-Path C:\Windows\System32\vcruntime140.dll` prints `False`. Add
+a folder on a Windows drive, press **Run hello**, then press **Run checks** under Doctor.
 
 ## Results
 
@@ -128,4 +114,4 @@ on a Windows drive, press **Run hello**, then press **Run checks** under Doctor.
 |---|---|---|---|---|
 | 1. Windows → WSL | a fresh local user on Nate's PC | | | *Not run* |
 | 2. The deb, AppArmor on | | | | *Not run* |
-| 3. Windows-drive folders, no Visual C++ redistributable | | | | *Not run*; expected to fail as built (see 3) |
+| 3. Windows-drive folders, no Visual C++ redistributable | | | | *Not run*; the controlled check passes on 0.1.1 (see 3) |
