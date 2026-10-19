@@ -236,6 +236,80 @@ export interface ConversationView {
   closed: string | null;
 }
 
+/** A task's state (D26). `active` and `review` come only from attempts, which can't start yet. */
+export type TaskState = "draft" | "ready" | "active" | "review" | "completed";
+
+/** Where a brief came from: a version of a plan saved from a conversation's answer. */
+export interface BriefSource {
+  kind: "plan";
+  planId: string;
+  planLineage: string;
+  planVersion: number;
+  conversationId: string | null;
+  messageId: string | null;
+  /** The project of the conversation it came from; null for a general one. */
+  projectId: string | null;
+  /** For a repository answer: HEAD when its evidence was read. */
+  headAtStart: string | null;
+  /** The lines its evidence and proposals cited that were shown to the model. */
+  citations: Array<{ path: string; startLine: number; endLine: number }>;
+}
+
+/** What a task asks for, as one immutable version. A direct task and one made from a plan have the same shape. */
+export interface BriefContent {
+  goal: string;
+  acceptanceCriteria: string[];
+  scope: string;
+  exclusions: string;
+  context: string;
+  assumptions: string[];
+  checks: string[];
+  executionPolicy: { concurrency: 1; network: "off"; approval: "required" };
+  sources: BriefSource[];
+  /** Parts cleared because the task's repository changed: to write again for the new one. */
+  revalidate: Array<"context" | "assumptions">;
+}
+
+/** The parts of a brief the person writes. */
+export type BriefFields = Pick<BriefContent, "goal" | "acceptanceCriteria" | "scope" | "exclusions" | "context" | "assumptions" | "checks">;
+
+export interface PlanView {
+  id: string;
+  lineageId: string;
+  version: number;
+  text: string;
+  conversationId: string;
+  messageId: string;
+  /** The latest version in its lineage. */
+  latest: number;
+  createdAt: string;
+}
+
+export interface TaskSummary {
+  id: string;
+  title: string;
+  state: TaskState;
+  projectId: string | null;
+  projectLabel: string | null;
+  /** Whether its project is still in the list; null without one. */
+  projectPresent: boolean | null;
+  briefVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskView {
+  summary: TaskSummary;
+  revision: number;
+  brief: { id: string; version: number; sha256: string; content: BriefContent; createdAt: string };
+  versions: Array<{ id: string; version: number; createdAt: string }>;
+  /** Each plan the brief came from: the version it used, the latest there is, or that it was deleted. */
+  sourcePlans: Array<{ planLineage: string; usedVersion: number; latestVersion: number | null; conversationId: string | null }>;
+  attempts: Array<{ id: string; briefVersion: number; status: TurnStatus; createdAt: string }>;
+  /** Why the task can't run, in plain words; running tasks isn't available yet. */
+  runUnavailable: string;
+}
+
 export interface NivraApi {
   getAppInfo(): Promise<AppInfo>;
   /** One view per engine a project uses or that is running; nothing is started by asking. */

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ChatResult, HistoryRecord } from "@nivra/domain";
 import { str, strOrNull, type Row, type WorkspaceDb } from "./workspace-db.ts";
 
@@ -259,4 +260,149 @@ export function deleteConversation(workspace: WorkspaceDb, conversationId: strin
   const deleted = Number(workspace.db.prepare("DELETE FROM conversations WHERE id = ?").run(conversationId).changes) === 1;
   workspace.checkpoint();
   return deleted;
+}
+
+/** One immutable version of a plan or a brief (D26). An edit is a new version in the same lineage. */
+export interface ArtifactRecord {
+  id: string;
+  kind: "plan" | "brief";
+  lineageId: string;
+  version: number;
+  content: unknown;
+  sha256: string;
+  conversationId: string | null;
+  taskId: string | null;
+  messageId: string | null;
+  runLinkId: string | null;
+  derivedFrom: string | null;
+  createdAt: string;
+}
+
+const artifactOf = (row: Row): ArtifactRecord => ({
+  id: str(row["id"]),
+  kind: str(row["kind"]) === "brief" ? "brief" : "plan",
+  lineageId: str(row["lineage_id"]),
+  version: Number(row["version"]),
+  content: JSON.parse(str(row["content_json"])),
+  sha256: str(row["sha256"]),
+  conversationId: strOrNull(row["conversation_id"]),
+  taskId: strOrNull(row["task_id"]),
+  messageId: strOrNull(row["message_id"]),
+  runLinkId: strOrNull(row["run_link_id"]),
+  derivedFrom: strOrNull(row["derived_from"]),
+  createdAt: str(row["created_at"]),
+});
+
+/**
+ * Adds the next version to a lineage, in one transaction. With `after`, only when the latest version is still that one,
+ * so an edit made from an older version never lands on top of a newer one (null then).
+ */
+export function insertArtifact(
+  workspace: WorkspaceDb,
+  artifact: Omit<ArtifactRecord, "version" | "sha256">,
+  after?: number,
+): ArtifactRecord | null {
+  return workspace.tx((db) => {
+    const latest = Number(db.prepare("SELECT COALESCE(MAX(version), 0) AS v FROM artifacts WHERE lineage_id = ?").get(artifact.lineageId)?.["v"]);
+    if (after !== undefined && latest !== after) return null;
+    const json = JSON.stringify(artifact.content);
+    const record: ArtifactRecord = { ...artifact, version: latest + 1, sha256: createHash("sha256").update(json).digest("hex") };
+    db.prepare(
+      "INSERT INTO artifacts (id, kind, lineage_id, version, content_json, sha256, conversation_id, task_id, message_id, run_link_id, derived_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(record.id, record.kind, record.lineageId, record.version, json, record.sha256, record.conversationId, record.taskId, record.messageId, record.runLinkId, record.derivedFrom, record.createdAt);
+    return record;
+  });
+}
+
+export function getArtifact(workspace: WorkspaceDb, id: string): ArtifactRecord | null {
+  const row = workspace.db.prepare("SELECT * FROM artifacts WHERE id = ?").get(id);
+  return row ? artifactOf(row) : null;
+}
+
+/** A lineage's versions, oldest first. */
+export function versionsOf(workspace: WorkspaceDb, lineageId: string): ArtifactRecord[] {
+  return workspace.db.prepare("SELECT * FROM artifacts WHERE lineage_id = ? ORDER BY version").all(lineageId).map(artifactOf);
+}
+
+/** A conversation's plans, every version. */
+export function plansOf(workspace: WorkspaceDb, conversationId: string): ArtifactRecord[] {
+  return workspace.db.prepare("SELECT * FROM artifacts WHERE kind = 'plan' AND conversation_id = ? ORDER BY created_at, version").all(conversationId).map(artifactOf);
+}
+
+export interface TaskRecord {
+  id: string;
+  title: string;
+  projectId: string | null;
+  state: "draft" | "ready" | "active" | "review" | "completed";
+  /** Raised by every change to the task or its brief, so a change made from an older view is refused. */
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+const taskOf = (row: Row): TaskRecord => ({
+  id: str(row["id"]),
+  title: str(row["title"]),
+  projectId: strOrNull(row["project_id"]),
+  state: str(row["state"]) as TaskRecord["state"],
+  revision: Number(row["revision"]),
+  createdAt: str(row["created_at"]),
+  updatedAt: str(row["updated_at"]),
+});
+
+/** Creates a task with its first brief, in one transaction. A brief's lineage is its task's id. */
+export function insertTask(workspace: WorkspaceDb, task: Omit<TaskRecord, "revision" | "state">, brief: { id: string; content: unknown; derivedFrom: string | null }): void {
+  workspace.tx((db) => {
+    db.prepare("INSERT INTO tasks (id, title, project_id, state, revision, created_at, updated_at) VALUES (?, ?, ?, 'draft', 1, ?, ?)").run(task.id, task.title, task.projectId, task.createdAt, task.updatedAt);
+    insertArtifact(workspace, { id: brief.id, kind: "brief", lineageId: task.id, content: brief.content, conversationId: null, taskId: task.id, messageId: null, runLinkId: null, derivedFrom: brief.derivedFrom, createdAt: task.createdAt });
+  });
+}
+
+/** Changes a task, only from the revision it was read at; false when it changed meanwhile or is gone. */
+export function updateTask(workspace: WorkspaceDb, taskId: string, revision: number, change: Partial<Pick<TaskRecord, "title" | "projectId" | "state">>, at: string): boolean {
+  const current = getTask(workspace, taskId);
+  if (!current || current.revision !== revision) return false;
+  const next = { ...current, ...change };
+  return (
+    Number(
+      workspace.db
+        .prepare("UPDATE tasks SET title = ?, project_id = ?, state = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?")
+        .run(next.title, next.projectId, next.state, at, taskId, revision).changes,
+    ) === 1
+  );
+}
+
+export function getTask(workspace: WorkspaceDb, taskId: string): TaskRecord | null {
+  const row = workspace.db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId);
+  return row ? taskOf(row) : null;
+}
+
+/** Every task, the most recently changed first. */
+export function listTasks(workspace: WorkspaceDb): TaskRecord[] {
+  return workspace.db.prepare("SELECT * FROM tasks ORDER BY updated_at DESC, id").all().map(taskOf);
+}
+
+/** Deletes a task with its briefs and attempts. */
+export function deleteTask(workspace: WorkspaceDb, taskId: string): boolean {
+  const deleted = Number(workspace.db.prepare("DELETE FROM tasks WHERE id = ?").run(taskId).changes) === 1;
+  workspace.checkpoint();
+  return deleted;
+}
+
+/**
+ * Records an attempt at a task (D26): a run link bound to one brief version, which stays that version however the brief
+ * is edited later. Nothing creates one yet: running tasks isn't available. Its run would be the one to start.
+ */
+export function insertAttempt(workspace: WorkspaceDb, attempt: { id: string; taskId: string; briefId: string; sessionId: string; targetId: string; status: TurnStatus; createdAt: string }): void {
+  workspace.db
+    .prepare("INSERT INTO run_links (id, task_id, brief_id, session_id, workflow_id, target_id, status, preferences_json, created_at) VALUES (?, ?, ?, ?, 'task', ?, ?, '[]', ?)")
+    .run(attempt.id, attempt.taskId, attempt.briefId, attempt.sessionId, attempt.targetId, attempt.status, attempt.createdAt);
+}
+
+/** A task's attempts, oldest first, each with the brief version it is bound to. */
+export function attemptsOf(workspace: WorkspaceDb, taskId: string): Array<{ id: string; briefId: string; status: TurnStatus; createdAt: string }> {
+  return workspace.db
+    .prepare("SELECT id, brief_id, status, created_at FROM run_links WHERE task_id = ? ORDER BY created_at, rowid")
+    .all(taskId)
+    .map((row) => ({ id: str(row["id"]), briefId: str(row["brief_id"]), status: str(row["status"]) as TurnStatus, createdAt: str(row["created_at"]) }));
 }

@@ -12,7 +12,7 @@ function files(dir: string): string[] {
 
 describe("desktop source rules", () => {
   it("keeps targets, the supervisor and the host's core free of Electron, so node --test can drive them on any OS (D12)", () => {
-    const plainNode = [...files(join(MAIN, "targets")), ...["supervisor.ts", "host.ts", "host-store.ts", "paths.ts", "preferences.ts", "workspace-db.ts", "workspace.ts", "history.ts", "protect.ts"].map((name) => join(MAIN, name))];
+    const plainNode = [...files(join(MAIN, "targets")), ...["supervisor.ts", "host.ts", "host-store.ts", "paths.ts", "preferences.ts", "workspace-db.ts", "workspace.ts", "history.ts", "protect.ts", "tasks.ts"].map((name) => join(MAIN, name))];
     const offenders = plainNode.filter((file) => /from\s+["']electron["']|require\(\s*["']electron["']\s*\)/.test(readFileSync(file, "utf8")));
     assert.deepEqual(offenders, []);
   });

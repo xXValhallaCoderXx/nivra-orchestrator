@@ -11,6 +11,7 @@ import { isTerminal, type RunEventsPage, type SecretName } from "@nivra/domain";
 import { Host } from "../src/main/host.ts";
 import { HostStore, NO_SHARING } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
+import { RUN_UNAVAILABLE } from "../src/main/tasks.ts";
 import type { TargetFactory } from "../src/main/targets/registry.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
 import type { WslDiscovery } from "../src/main/targets/wsl-discovery.ts";
@@ -1082,5 +1083,121 @@ describe("Host: conversations follow each turn to its end, and never resend one 
     assert.equal(view.messages.at(-1)?.text, "Here is [secret:NEBIUS_API_KEY] and [redacted].");
     await host.shutdown();
     assert.deepEqual([filesHolding(root, KEY), filesHolding(root, token)], [[], []]);
+  });
+});
+
+describe("Host: native tasks, made directly or from a plan, with versioned briefs (D26, NIV-32)", () => {
+  const KEY = "test-key-0123456789";
+  const empty = { goal: "", acceptanceCriteria: [] as string[], scope: "", exclusions: "", context: "", assumptions: [] as string[], checks: [] as string[] };
+  async function stubWith(chat: (request: StubRequest, index: number) => Reply) {
+    const stub = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat });
+    stubs.push(stub);
+    return stub;
+  }
+  const answered = (host: Host, conversationId: string) =>
+    waitFor(() => {
+      const view = host.conversation(conversationId);
+      return view.turns.at(-1)?.status === "answered" ? view.messages.find((m) => m.role === "assistant")! : null;
+    }, "the answer");
+
+  it("gives a direct task and one from a plan the same brief, keeps a brief from v1 while the plan moves on, and keeps it when the conversation goes", async () => {
+    const stub = await stubWith(() => text("Stage it: the parser first, then the cache."));
+    const { host, keys, root } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "How do I stage the refactor?");
+    const answer = await answered(host, conversation.id);
+    const plan = await host.savePlan(conversation.id, answer.id);
+    assert.deepEqual([plan.version, plan.text, plan.latest], [1, "Stage it: the parser first, then the cache.", 1]);
+    const fields = { ...empty, goal: "Stage the refactor", acceptanceCriteria: ["The parser's tests pass"] };
+    const direct = await host.createTask({ title: "Refactor, written directly", fields, projectId: null, planId: null });
+    const planned = await host.createTask({ title: "Refactor, from the plan", fields: { ...fields, context: plan.text }, projectId: null, planId: plan.id });
+    assert.deepEqual(Object.keys(direct.brief.content).sort(), Object.keys(planned.brief.content).sort());
+    assert.deepEqual(
+      [direct.summary.state, direct.brief.version, direct.brief.content.sources, planned.brief.content.sources.map((source) => [source.planVersion, source.conversationId, source.projectId])],
+      ["draft", 1, [], [[1, conversation.id, null]]],
+    );
+    assert.deepEqual([direct.runUnavailable, direct.attempts], [RUN_UNAVAILABLE, []]);
+    const v2 = await host.revisePlan(plan.id, "Stage it: the cache first, then the parser.");
+    assert.deepEqual([v2.version, v2.latest, host.plans(conversation.id).map((p) => p.version)], [2, 2, [1, 2]]);
+    const marked = host.task(planned.summary.id);
+    assert.deepEqual(
+      [marked.brief.version, marked.brief.content.context, marked.sourcePlans],
+      [1, plan.text, [{ planLineage: plan.lineageId, usedVersion: 1, latestVersion: 2, conversationId: conversation.id }]],
+    );
+    const refreshed = host.refreshBriefFromPlan(planned.summary.id, marked.revision, v2.id);
+    assert.deepEqual([refreshed.brief.version, refreshed.brief.content.context, refreshed.brief.content.sources[0]?.planVersion], [2, "Stage it: the cache first, then the parser.", 2]);
+    await host.deleteConversation(conversation.id);
+    const kept = host.task(planned.summary.id);
+    assert.deepEqual([kept.brief.content.context, kept.sourcePlans[0]?.latestVersion, kept.versions.length], ["Stage it: the cache first, then the parser.", null, 2]);
+    // In the file itself: the question lived only in the conversation, so no copy is left; the brief's text stays with the task.
+    await host.shutdown();
+    const workspaceFiles = (needle: string) => filesHolding(root, needle).filter((file) => file.startsWith("workspace.db"));
+    assert.deepEqual([workspaceFiles("How do I stage the refactor?"), workspaceFiles("Stage it: the cache first, then the parser.").length > 0], [[], true]);
+  });
+
+  it("moves a task through its states only as its brief allows, and refuses a change made from an older view", async () => {
+    const { host } = makeHost({});
+    const task = await host.createTask({ title: "Tidy the README", fields: empty, projectId: null, planId: null });
+    assert.throws(() => host.setTaskState(task.summary.id, task.revision, "ready"), /has a goal and at least one acceptance criterion/);
+    const written = await host.reviseBrief(task.summary.id, task.revision, { ...empty, goal: "Tidy it", acceptanceCriteria: ["Every heading is sentence case"] });
+    assert.equal(written.brief.version, 2);
+    assert.throws(() => host.setTaskState(task.summary.id, task.revision, "ready"), /changed since you opened it/);
+    const ready = host.setTaskState(task.summary.id, written.revision, "ready");
+    assert.throws(() => host.setTaskState(task.summary.id, ready.revision, "active"), /^Error: Running tasks isn't available yet, so a task can't be active\.$/);
+    const emptied = await host.reviseBrief(task.summary.id, ready.revision, { ...empty, goal: "Tidy it" });
+    assert.equal(emptied.summary.state, "draft", "a ready task whose brief lost its criteria is a draft again");
+    const again = await host.reviseBrief(task.summary.id, emptied.revision, { ...empty, goal: "Tidy it", acceptanceCriteria: ["Every heading is sentence case"] });
+    const done = host.setTaskState(task.summary.id, host.setTaskState(task.summary.id, again.revision, "ready").revision, "completed");
+    assert.equal(done.summary.state, "completed");
+    await assert.rejects(host.reviseBrief(task.summary.id, done.revision, { ...empty, goal: "More" }), /Reopen it to change its brief/);
+    assert.equal(host.setTaskState(task.summary.id, done.revision, "draft").summary.state, "draft");
+  });
+
+  it("clears what a brief took from one project's conversation when the task moves to another repository", async () => {
+    const stub = await stubWith((request) =>
+      request.raw.includes('"role":"tool"')
+        ? toolCall("submit_reply", { answer: "Add the export beside the list.", evidence: [{ statement: "It has a README.", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }], assumptions: ["Alpha uses Vite"] })
+        : toolCall("read_file", { path: "README.md" }),
+    );
+    const root = mkdtempSync(join(tmpdir(), "nivra task repos "));
+    dirs.push(root);
+    const alpha = makeRepo(join(root, "alpha"), { "README.md": "# Alpha\n" });
+    const beta = makeRepo(join(root, "beta"), { "README.md": "# Beta\n" });
+    const { host, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: alpha }, { targetId: "local", path: beta }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    await host.setSharing(ids[0]!, true);
+    const conversation = host.createConversation({ kind: "project", projectId: ids[0]! });
+    await host.sendMessage(conversation.id, "Plan a CSV export");
+    const answer = await answered(host, conversation.id);
+    const plan = await host.savePlan(conversation.id, answer.id);
+    assert.match(plan.text, /^Add the export beside the list\.\n\nAssumed:\n- Alpha uses Vite$/);
+    const task = await host.createTask({ title: "CSV export", fields: { ...empty, goal: "Export the list", context: plan.text, assumptions: ["Alpha uses Vite"] }, projectId: ids[0]!, planId: plan.id });
+    assert.deepEqual([task.brief.content.sources[0]?.projectId, task.brief.content.sources[0]?.citations], [ids[0], [{ path: "README.md", startLine: 1, endLine: 1 }]]);
+    const moved = host.setTaskProject(task.summary.id, task.revision, ids[1]!);
+    assert.deepEqual(
+      [moved.summary.projectId, moved.brief.version, moved.brief.content.sources, moved.brief.content.context, moved.brief.content.assumptions, moved.brief.content.revalidate, moved.brief.content.goal],
+      [ids[1], 2, [], "", [], ["context", "assumptions"], "Export the list"],
+    );
+    const rewritten = await host.reviseBrief(task.summary.id, moved.revision, { ...empty, goal: "Export the list", context: "Beta's own context." });
+    assert.deepEqual([rewritten.brief.content.revalidate, rewritten.versions.map((v) => v.version)], [["assumptions"], [1, 2, 3]]);
+  });
+
+  it("refuses a credential in any field the person types into, saying which, and saves nothing", async () => {
+    const { host, keys } = makeHost({});
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const token = `ghp_${"y".repeat(36)}`;
+    const base = { ...empty, goal: "Goal", acceptanceCriteria: ["Done"] };
+    const cases: Array<[string, typeof base, string]> = [
+      ["The title", base, `Title ${token}`],
+      ["The goal", { ...base, goal: `Goal ${KEY}` }, "T"],
+      ["An acceptance criterion", { ...base, acceptanceCriteria: [`Done ${token}`] }, "T"],
+      ["The context", { ...base, context: "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----" }, "T"],
+      ["A check", { ...base, checks: [`run it with ${KEY}`] }, "T"],
+    ];
+    for (const [field, fields, title] of cases) {
+      await assert.rejects(host.createTask({ title, fields, projectId: null, planId: null }), new RegExp(`^Error: ${field} (holds your saved Token Factory key|looks like it holds)`));
+    }
+    assert.equal(host.tasks().length, 0);
   });
 });

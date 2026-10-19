@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
-import { deleteConversation, getConversation, getTurn, insertConversation, insertTurn, listConversations, messagesOf, projectAnswer, recordRun, settleTurn, type ConversationRecord } from "../src/main/workspace.ts";
+import { attemptsOf, deleteConversation, getArtifact, getConversation, getTurn, insertArtifact, insertAttempt, insertConversation, insertTask, insertTurn, listConversations, messagesOf, projectAnswer, recordRun, settleTurn, versionsOf, type ConversationRecord } from "../src/main/workspace.ts";
 import { classifyWorkspaceError, openWorkspace, WORKSPACE_MIGRATIONS, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 
 const dirs: string[] = [];
@@ -239,5 +239,21 @@ describe("a conversation's turns and messages (D26)", () => {
     assert.deepEqual([count("conversations"), count("run_links"), count("messages")], [0, 0, 0]);
     const files = readdirSync(dirname(path)).filter((name) => name.startsWith("workspace.db"));
     assert.deepEqual(files.filter((name) => readFileSync(join(dirname(path), name)).includes(canary)), []);
+  });
+});
+
+describe("tasks, brief versions and attempts (D26)", () => {
+  it("keeps every brief version, adds one only on top of the latest, and binds an attempt to the version it was made with", () => {
+    const workspace = ready(join(folder(), "workspace.db"));
+    const taskId = randomUUID();
+    const v1 = { id: randomUUID(), content: { goal: "First goal" }, derivedFrom: null };
+    insertTask(workspace.db, { id: taskId, title: "Export", projectId: null, createdAt: AT, updatedAt: AT }, v1);
+    insertAttempt(workspace.db, { id: randomUUID(), taskId, briefId: v1.id, sessionId: "s", targetId: "local", status: "not-sent", createdAt: AT });
+    const brief = (goal: string) => ({ id: randomUUID(), kind: "brief" as const, lineageId: taskId, content: { goal }, conversationId: null, taskId, messageId: null, runLinkId: null, derivedFrom: v1.id, createdAt: AT });
+    assert.equal(insertArtifact(workspace.db, brief("Second goal"), 1)?.version, 2);
+    assert.equal(insertArtifact(workspace.db, brief("Made from version 1"), 1), null, "an edit from an older version never lands on a newer one");
+    assert.deepEqual(versionsOf(workspace.db, taskId).map((v) => [v.version, (v.content as { goal: string }).goal]), [[1, "First goal"], [2, "Second goal"]]);
+    const [attempt] = attemptsOf(workspace.db, taskId);
+    assert.deepEqual([attempt?.briefId, (getArtifact(workspace.db, attempt!.briefId)?.content as { goal: string }).goal], [v1.id, "First goal"]);
   });
 });

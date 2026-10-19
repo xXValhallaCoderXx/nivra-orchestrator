@@ -23,11 +23,17 @@ import type {
   ConversationSummary,
   ConversationView,
   EngineView,
+  BriefContent,
+  BriefFields,
   ImportEntryView,
   ImportSourceView,
+  PlanView,
   PreferencesView,
   PreferenceView,
   ProjectView,
+  TaskState,
+  TaskSummary,
+  TaskView,
   TurnView,
   WorkspaceView,
   WslView,
@@ -55,17 +61,25 @@ import {
   type PreferenceExport,
 } from "./preferences.ts";
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
+import { BriefContentSchema, BriefFieldsSchema, briefForRepository, briefFrom, briefIsReady, nextState, planFromAnswer, RUN_UNAVAILABLE, sourceFrom, TASK_LIMITS, type PlanContent } from "./tasks.ts";
 import { EngineOfflineError, EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
 import { labelFor, type ExecutionTarget } from "./targets/types.ts";
 import { isHiddenDistro, wslGuidance } from "./targets/wsl-discovery.ts";
 import {
+  attemptsOf,
   deleteConversation,
+  deleteTask,
+  getArtifact,
   getConversation,
+  getTask,
   getTurn,
+  insertArtifact,
   insertConversation,
+  insertTask,
   insertTurn,
   listConversations,
+  listTasks,
   messagesOf,
   openTurns,
   projectAnswer,
@@ -75,9 +89,13 @@ import {
   settleTurn,
   turnByRun,
   turnsOf,
+  updateTask,
+  versionsOf,
   withdrawCancel,
+  type ArtifactRecord,
   type CancelReason,
   type ConversationRecord,
+  type TaskRecord,
   type TurnRecord,
 } from "./workspace.ts";
 import { openWorkspace, type WorkspaceDb, type WorkspaceOpening } from "./workspace-db.ts";
@@ -312,6 +330,178 @@ export class Host {
       throw new Error(`Nivra couldn't stop this conversation's answer on ${this.#labelOf(record.targetId)} (${errorText(failed[0]!.reason)}), so the conversation is still here. Restart that engine, then delete it again.`);
     }
     deleteConversation(workspace, conversationId);
+  }
+
+  /**
+   * Saves an answer as a plan (D26): version 1 of a new lineage, with where it came from. The person's edit of its text,
+   * if any, is checked like anything they type.
+   */
+  async savePlan(conversationId: string, messageId: string, text?: string): Promise<PlanView> {
+    const workspace = this.#workspaceDb();
+    const conversation = getConversation(workspace, conversationId);
+    if (!conversation) throw new Error("That conversation is no longer in the list.");
+    const answer = messagesOf(workspace, conversationId).find((m) => m.id === messageId && m.role === "assistant");
+    if (!answer?.reply) throw new Error("That answer is no longer in this conversation.");
+    const runId = answer.turnId ? (getTurn(workspace, answer.turnId)?.runId ?? null) : null;
+    const content = planFromAnswer(answer.reply, { conversationId, messageId, runId, projectId: conversation.projectId });
+    if (text !== undefined) {
+      const edited = this.#planText(text);
+      refuseCredentials("The plan", edited, await this.#knownSecrets());
+      content.text = edited;
+    }
+    const plan = insertArtifact(workspace, { id: randomUUID(), kind: "plan", lineageId: randomUUID(), content, conversationId, taskId: null, messageId, runLinkId: answer.turnId, derivedFrom: null, createdAt: new Date().toISOString() });
+    return this.#planView(plan!);
+  }
+
+  /** Saves an edit of a plan as its next version; the versions before it, and briefs made from them, stay as they are. */
+  async revisePlan(planId: string, text: string): Promise<PlanView> {
+    const workspace = this.#workspaceDb();
+    const plan = getArtifact(workspace, planId);
+    if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+    const edited = this.#planText(text);
+    refuseCredentials("The plan", edited, await this.#knownSecrets());
+    const latest = versionsOf(workspace, plan.lineageId).at(-1)!;
+    const next = insertArtifact(
+      workspace,
+      { id: randomUUID(), kind: "plan", lineageId: plan.lineageId, content: { ...(latest.content as PlanContent), text: edited }, conversationId: latest.conversationId, taskId: null, messageId: latest.messageId, runLinkId: latest.runLinkId, derivedFrom: latest.id, createdAt: new Date().toISOString() },
+      latest.version,
+    );
+    if (!next) throw new Error("This plan changed since you opened it. Open it again, then make your edit.");
+    return this.#planView(next);
+  }
+
+  /** A conversation's plans: every version, oldest first. */
+  plans(conversationId: string): PlanView[] {
+    const workspace = this.#workspaceDb();
+    const plans = workspace.db.prepare("SELECT id FROM artifacts WHERE kind = 'plan' AND conversation_id = ? ORDER BY created_at, version").all(conversationId);
+    return plans.map((row) => this.#planView(getArtifact(workspace, String(row["id"]))!));
+  }
+
+  /** Every task, the most recently changed first. */
+  tasks(): TaskSummary[] {
+    const workspace = this.#workspace;
+    return workspace.state === "ready" ? listTasks(workspace.db).map((task) => this.#taskSummary(task)) : [];
+  }
+
+  task(taskId: string): TaskView {
+    const workspace = this.#workspaceDb();
+    const task = getTask(workspace, taskId);
+    if (!task) throw new Error("That task is no longer in the list.");
+    const versions = versionsOf(workspace, taskId);
+    const brief = versions.at(-1)!;
+    const content = BriefContentSchema.parse(brief.content);
+    const byId = new Map(versions.map((version) => [version.id, version.version]));
+    return {
+      summary: this.#taskSummary(task),
+      revision: task.revision,
+      brief: { id: brief.id, version: brief.version, sha256: brief.sha256, content, createdAt: brief.createdAt },
+      versions: versions.map(({ id, version, createdAt }) => ({ id, version, createdAt })),
+      sourcePlans: content.sources.map((source) => {
+        const latest = versionsOf(workspace, source.planLineage).at(-1);
+        return { planLineage: source.planLineage, usedVersion: source.planVersion, latestVersion: latest?.version ?? null, conversationId: source.conversationId };
+      }),
+      attempts: attemptsOf(workspace, taskId).map((attempt) => ({ id: attempt.id, briefVersion: byId.get(attempt.briefId) ?? getArtifact(workspace, attempt.briefId)?.version ?? 0, status: attempt.status, createdAt: attempt.createdAt })),
+      runUnavailable: RUN_UNAVAILABLE,
+    };
+  }
+
+  /**
+   * Creates a native task with its first brief (D26, NIV-32): written directly, or from a plan version, which then
+   * gives the brief its source. Either way the brief has the same shape. Needs no tracker and no repository yet.
+   */
+  async createTask(input: { title: string; fields: BriefFields; projectId: string | null; planId: string | null }): Promise<TaskView> {
+    const workspace = this.#workspaceDb();
+    const title = this.#taskTitle(input.title);
+    const fields = BriefFieldsSchema.parse(input.fields);
+    this.#refuseInBrief(title, fields, await this.#knownSecrets());
+    if (input.projectId !== null) this.#project(input.projectId);
+    let sources: BriefContent["sources"] = [];
+    let derivedFrom: string | null = null;
+    if (input.planId !== null) {
+      const plan = getArtifact(workspace, input.planId);
+      if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+      sources = [sourceFrom({ id: plan.id, lineageId: plan.lineageId, version: plan.version, content: plan.content as PlanContent })];
+      derivedFrom = plan.id;
+    }
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    insertTask(workspace, { id, title, projectId: input.projectId, createdAt: now, updatedAt: now }, { id: randomUUID(), content: briefFrom(fields, sources), derivedFrom });
+    return this.task(id);
+  }
+
+  /**
+   * Saves an edit of a task's brief as its next version, from the task's revision as it was read. A ready task whose
+   * brief no longer has a goal and a criterion goes back to draft. A completed task is reopened first.
+   */
+  async reviseBrief(taskId: string, revision: number, input: BriefFields): Promise<TaskView> {
+    const workspace = this.#workspaceDb();
+    const task = this.#taskAt(taskId, revision);
+    if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
+    const fields = BriefFieldsSchema.parse(input);
+    this.#refuseInBrief(task.title, fields, await this.#knownSecrets());
+    const latest = versionsOf(workspace, taskId).at(-1)!;
+    const before = BriefContentSchema.parse(latest.content);
+    // A part marked to be written again for a new repository stays marked until something is written there.
+    const revalidate = before.revalidate.filter((part) => (part === "context" ? fields.context === "" : fields.assumptions.length === 0));
+    const content: BriefContent = { ...before, ...fields, revalidate };
+    this.#commitBrief(task, latest, content, { state: task.state === "ready" && !briefIsReady(content) ? "draft" : task.state });
+    return this.task(taskId);
+  }
+
+  /** Takes a newer version of a plan the brief came from into its next version: the plan's text, assumptions and source. */
+  refreshBriefFromPlan(taskId: string, revision: number, planId: string): TaskView {
+    const workspace = this.#workspaceDb();
+    const task = this.#taskAt(taskId, revision);
+    if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
+    const plan = getArtifact(workspace, planId);
+    if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+    const latest = versionsOf(workspace, taskId).at(-1)!;
+    const before = BriefContentSchema.parse(latest.content);
+    if (!before.sources.some((source) => source.planLineage === plan.lineageId)) throw new Error("This task's brief didn't come from that plan.");
+    const content = plan.content as PlanContent;
+    const source = sourceFrom({ id: plan.id, lineageId: plan.lineageId, version: plan.version, content });
+    const next: BriefContent = { ...before, context: content.text.slice(0, TASK_LIMITS.contextChars), assumptions: content.assumptions.slice(0, TASK_LIMITS.items), sources: before.sources.map((s) => (s.planLineage === plan.lineageId ? source : s)), revalidate: [] };
+    this.#commitBrief(task, latest, next, {});
+    return this.task(taskId);
+  }
+
+  /**
+   * Sets the repository a task will run on, or none. What its brief took from another project's conversation is
+   * cleared in a new version and marked to be written again (D26), so a project's material never moves with a task.
+   */
+  setTaskProject(taskId: string, revision: number, projectId: string | null): TaskView {
+    const workspace = this.#workspaceDb();
+    const task = this.#taskAt(taskId, revision);
+    if (projectId !== null) this.#project(projectId);
+    const latest = versionsOf(workspace, taskId).at(-1)!;
+    const cleared = briefForRepository(BriefContentSchema.parse(latest.content), projectId);
+    if (cleared) this.#commitBrief(task, latest, cleared, { projectId, state: task.state === "ready" && !briefIsReady(cleared) ? "draft" : task.state });
+    else if (!updateTask(workspace, taskId, revision, { projectId }, new Date().toISOString())) throw new Error("This task changed since you opened it. Open it again, then try again.");
+    return this.task(taskId);
+  }
+
+  /** Moves a task to the state the person asked for, when its brief allows it (D26). */
+  setTaskState(taskId: string, revision: number, state: TaskState): TaskView {
+    const workspace = this.#workspaceDb();
+    const task = this.#taskAt(taskId, revision);
+    const brief = BriefContentSchema.parse(versionsOf(workspace, taskId).at(-1)!.content);
+    const next = nextState(task.state, state, brief);
+    if (next !== task.state && !updateTask(workspace, taskId, revision, { state: next }, new Date().toISOString())) throw new Error("This task changed since you opened it. Open it again, then try again.");
+    return this.task(taskId);
+  }
+
+  async renameTask(taskId: string, revision: number, title: string): Promise<TaskView> {
+    const workspace = this.#workspaceDb();
+    this.#taskAt(taskId, revision);
+    const next = this.#taskTitle(title);
+    refuseCredentials("The title", next, await this.#knownSecrets());
+    if (!updateTask(workspace, taskId, revision, { title: next }, new Date().toISOString())) throw new Error("This task changed since you opened it. Open it again, then try again.");
+    return this.task(taskId);
+  }
+
+  /** Deletes a task with its brief versions. */
+  deleteTask(taskId: string): void {
+    if (!deleteTask(this.#workspaceDb(), taskId)) throw new Error("That task is no longer in the list.");
   }
 
   /** What WSL offers on a Windows host, and what to do when it offers nothing; null elsewhere. */
@@ -909,6 +1099,79 @@ export class Host {
       given: { preferences: turn.preferences.length, history: turn.history },
       createdAt: turn.createdAt,
       settledAt: turn.settledAt,
+    };
+  }
+
+  #planText(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed) throw new Error("A plan needs some text.");
+    if (trimmed.length > TASK_LIMITS.planChars) throw new Error(`That plan is ${trimmed.length} characters long, and a plan can hold ${TASK_LIMITS.planChars}. Shorten it, then save it again.`);
+    return trimmed;
+  }
+
+  #taskTitle(title: string): string {
+    const trimmed = title.trim();
+    if (!trimmed) throw new Error("A task needs a title.");
+    if (trimmed.length > TASK_LIMITS.titleChars) throw new Error(`That title is ${trimmed.length} characters long, and a title can hold ${TASK_LIMITS.titleChars}. Shorten it, then save it again.`);
+    return trimmed;
+  }
+
+  /** Every field of a brief the person wrote, through the protection policy (D26). */
+  #refuseInBrief(title: string, fields: BriefFields, known: KnownSecrets): void {
+    refuseCredentials("The title", title, known);
+    refuseCredentials("The goal", fields.goal, known);
+    refuseCredentials("The scope", fields.scope, known);
+    refuseCredentials("The exclusions", fields.exclusions, known);
+    refuseCredentials("The context", fields.context, known);
+    for (const criterion of fields.acceptanceCriteria) refuseCredentials("An acceptance criterion", criterion, known);
+    for (const assumption of fields.assumptions) refuseCredentials("An assumption", assumption, known);
+    for (const check of fields.checks) refuseCredentials("A check", check, known);
+  }
+
+  /** The task, refused when it changed since the person read it (its revision moved) or is gone. */
+  #taskAt(taskId: string, revision: number): TaskRecord {
+    const task = getTask(this.#workspaceDb(), taskId);
+    if (!task) throw new Error("That task is no longer in the list.");
+    if (task.revision !== revision) throw new Error("This task changed since you opened it. Open it again, then try again.");
+    return task;
+  }
+
+  /** A new brief version and the task's change, in one transaction, from the versions the person saw. */
+  #commitBrief(task: TaskRecord, latest: ArtifactRecord, content: BriefContent, change: Partial<Pick<TaskRecord, "projectId" | "state">>): void {
+    const workspace = this.#workspaceDb();
+    const now = new Date().toISOString();
+    workspace.tx(() => {
+      const brief = insertArtifact(workspace, { id: randomUUID(), kind: "brief", lineageId: task.id, content: BriefContentSchema.parse(content), conversationId: null, taskId: task.id, messageId: null, runLinkId: null, derivedFrom: latest.id, createdAt: now }, latest.version);
+      if (!brief || !updateTask(workspace, task.id, task.revision, change, now)) throw new Error("This task changed since you opened it. Open it again, then try again.");
+    });
+  }
+
+  #planView(plan: ArtifactRecord): PlanView {
+    const content = plan.content as PlanContent;
+    return {
+      id: plan.id,
+      lineageId: plan.lineageId,
+      version: plan.version,
+      text: content.text,
+      conversationId: content.conversationId,
+      messageId: content.messageId,
+      latest: versionsOf(this.#workspaceDb(), plan.lineageId).at(-1)?.version ?? plan.version,
+      createdAt: plan.createdAt,
+    };
+  }
+
+  #taskSummary(task: TaskRecord): TaskSummary {
+    const project = task.projectId ? this.#options.store.data.projects.find((p) => p.id === task.projectId) : undefined;
+    return {
+      id: task.id,
+      title: task.title,
+      state: task.state,
+      projectId: task.projectId,
+      projectLabel: project?.label ?? null,
+      projectPresent: task.projectId === null ? null : project !== undefined,
+      briefVersion: versionsOf(this.#workspaceDb(), task.id).at(-1)?.version ?? 0,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
     };
   }
 
