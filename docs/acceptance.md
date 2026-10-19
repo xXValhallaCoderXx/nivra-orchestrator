@@ -364,6 +364,9 @@ re-hashed every packaged runtime file and checked where the DLL sits.
 - `Nivra-0.1.1-amd64.deb`: sha256 `86da07456e6be5d602f6be433d4feb4824b27f8c79acc876cc0330b2d632d1ab`
 - `Nivra-0.1.1-win-x64.zip`: sha256 `df371719c50b9387491e9cccc680233cd4c594340b7cb67858bdd02a9e6d7783`
 - `build-info.json`: sha256 `8885a7875fb85a6a24d332f0b7b7811333cfae7aaead278684ec7dbee9809b5b`
+- **Published** as the [v0.1.1 pre-release](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1)
+  on 19 October, tagged at `cad5eca`, with these files unchanged. Each uploaded file's digest was checked against the
+  local one. v0.1.0 stays published, with its files unchanged and a note saying it is superseded.
 
 **What changed from v0.1.0**
 

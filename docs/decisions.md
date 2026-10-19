@@ -996,7 +996,9 @@ The key saw 28 models, five of them NVIDIA's.
   `docs/acceptance.md`.
   - `verify:windows --zip`: 20/20. On v0.1.0's zip, the same checks give 18/20, failing exactly the two new ones.
   - `test:windows`: 6/6.
-  - `test:packaged`: 16 passed.
-- **v0.1.0 stays published, unchanged.** 0.1.1 goes beside it as a release of its own, never over it.
+  - `test:packaged`: 16 passed. 5 were skipped, because they need the test endpoint switch, which a packaged app
+    ignores.
+- **v0.1.0 stays published, unchanged.** 0.1.1 goes beside it as a release of its own, never over it. It was published
+  as a pre-release on 19 October, and v0.1.0's notes now say it is superseded.
 - **The clean-machine test is still to run.** It needs a Windows PC or VM without the Redistributable, and this machine
   has neither Windows Sandbox nor Hyper-V.
