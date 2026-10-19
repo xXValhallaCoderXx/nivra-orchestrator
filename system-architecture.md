@@ -862,8 +862,8 @@ In short:
 - **No OpenShell bonus.** The rules publish no scoring bonus for NVIDIA OpenShell.
 - **Sandboxes isn't available yet.** Token Factory Sandboxes is in beta and needs an access request. Access is
   requested but not active.
-- **Judge access** must be free until judging ends (16 December, 04:00 SGT). Judges get a dedicated, separately revocable
-  Token Factory key, in the submission's private testing instructions (D24, NIV-16).
+- **Judge access** must be free until judging ends (16 December, 04:00 SGT). Judges use Nate's existing Token Factory
+  key, given only in the submission's private testing instructions (D24, NIV-16).
 - **Effect on the design:** none. The architecture doesn't depend on these answers (D19, D20).
 
 ## 18. Questions for reviewers

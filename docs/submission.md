@@ -24,7 +24,7 @@ A requirement counts as met only when its evidence exists. A plan or a design is
 | 8 | A public YouTube demonstration, under three minutes | Rules §4 | The video link (NIV-17) | Nate | Pending |
 | 9 | Technology feedback (Token Factory, the NVIDIA models) | Rules §4 | The submission form's text | Nate, with a draft from Claude | **Draft below**, for Nate to edit |
 | 10 | An explanation of pre-existing work and substantial updates | Rules §4, FAQ | [provenance.md](provenance.md) | Claude | In place; final wording at submission |
-| 11 | Free judge access until judging ends (16 December, 04:00 SGT) | Rules §4 | A dedicated Token Factory key for judging, in the submission's private testing instructions (NIV-16) | Nate | **Decided** on 18 October; the key is still to create |
+| 11 | Free judge access until judging ends (16 December, 04:00 SGT) | Rules §4 | Nate's existing Token Factory key, in the submission's private testing instructions (D24, NIV-16) | Nate | **Decided** on 19 October |
 | 12 | Eligibility and licensing (entrant eligibility, third-party licences) | Rules | — | Nate | To check; not presumed |
 
 ## The demonstration (D20, Best Apps and Agents)

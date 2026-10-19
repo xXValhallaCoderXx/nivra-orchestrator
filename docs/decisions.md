@@ -916,10 +916,11 @@ The key saw 28 models, five of them NVIDIA's.
   - A candidate is identified by its commit and hashes, and the version stays as it is.
   - The release publishes the accepted files unchanged. An app fix means a new candidate, and renewed evidence for what
     it touches.
-- **Judge access:** a dedicated Token Factory key, revocable on its own, given only in the submission's private testing
-  instructions.
-  - It is kept working until judging ends (16 December, 04:00 SGT).
-  - If exposed, it is replaced and the instructions are updated. The rules require free access, not one particular key.
+- **Judge access:** Nate's existing Token Factory key, given only in the submission's private testing instructions.
+  Nate chose this on 19 October over a second key.
+  - It is kept working until judging ends (16 December, 04:00 SGT). Judges' use shares its quota and cost.
+  - If it is exposed, it is replaced and the instructions are updated at once. Replacing it also changes Nate's own
+    setup. The rules require free access, not one particular key.
   - This supersedes D20's "Judge access remains undecided".
 - **The track:** Best Apps and Agents, chosen by Nate on 18 October from the official rules. The Coding track's "write,
   run, and test code" describes work D20 defers.
