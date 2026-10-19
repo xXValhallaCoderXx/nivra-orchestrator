@@ -1,7 +1,7 @@
 {
   "name": "@nivra/desktop",
   "productName": "Nivra",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Nivra desktop app: the native window over an engine that runs where the repository lives.",
