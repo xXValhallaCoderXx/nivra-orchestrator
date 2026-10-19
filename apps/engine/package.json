@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\"",
     "probe:tokenfactory": "node scripts/probe-tokenfactory.ts",
+    "probe:sandbox": "node scripts/sandbox-probe.ts",
     "rpc": "node scripts/rpc.ts"
   },
   "dependencies": {
