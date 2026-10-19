@@ -112,8 +112,8 @@ a folder on a Windows drive, press **Run hello**, then press **Run checks** unde
 
 | Check | Setup | Release files | Date | Result |
 |---|---|---|---|---|
-| 1. Windows → WSL | a fresh WSL distribution and Nivra profile on Nate's account (see below) | `Nivra-0.1.1-win-x64.zip`, sha256 `df371719…a6d7783` | 19–20 October | **Passed**, 23 of 23 checks |
-| 2. The deb, AppArmor on | an Ubuntu 24.04.5 desktop VM (see below) | `Nivra-0.1.1-amd64.deb`, sha256 `86da0745…d632d1ab` | 19 October | **Passed**, 22 of 22 checks |
+| 1. Windows → WSL | a fresh WSL distribution and Nivra profile on Nate's account, not a fresh Windows account (see below) | `Nivra-0.1.1-win-x64.zip`, sha256 `df371719…a6d7783` | 19–20 October | **Passed**, 23 of 23 checks |
+| 2. The deb, AppArmor on | an Ubuntu 24.04.5 VM: the cloud image with GNOME added (see below) | `Nivra-0.1.1-amd64.deb`, sha256 `86da0745…d632d1ab` | 19 October | **Passed**, 22 of 22 checks |
 | 3. Windows-drive folders, no Visual C++ redistributable | | | | *Not run*; the controlled check passes on 0.1.1 (see 3) |
 
 ### Check 1, 19–20 October
@@ -155,13 +155,17 @@ local debugging ports, and the steps ran as in check 2. Every check passed on th
   421 s.
 
 **The removal.** The extracted folder and the test profile were deleted. `%LOCALAPPDATA%\Nivra` was never created, since
-no native engine started. Unregistering the distribution removes its `~/.nivra`.
+no native engine started. Unregistering the distribution removed its `~/.nivra`.
+
+**What this doesn't establish**
+- A fresh Windows account, or WSL's default networking: the check shared Nate's account and its mirrored networking.
+- A PC without the Visual C++ runtime, or with Smart App Control on.
 
 **Found along the way, both in WSL, not Nivra**
 - **The systemd user session fails.** Opening Ubuntu 26.04.1 under WSL 2.7.8 printed "Failed to start the systemd user
   session". systemd couldn't spawn its executor ("Device or resource busy") on the unified cgroup hierarchy. Nivra starts
-  its engine with `wsl.exe --exec`, which doesn't need that session, and it worked. Any judge on today's default Ubuntu
-  would see the same warning.
+  its engine with `wsl.exe --exec`, which doesn't need that session, and it worked. This was seen on this machine only.
+  Whether other machines or WSL versions show it wasn't checked.
 - **Interop broke more than once.** Using `NivraJudge` from Nate's other distribution, or stopping it, unregistered
   WSL's Windows-interop handler there, so Windows programs stopped running from it until `sudo` re-registered the
   handler. Nivra starts its engines from Windows, so this doesn't affect it.
@@ -217,9 +221,13 @@ passed on the first attempt, with no retry:
   pipe that printed nothing.
 - For the test, screen blanking, locking and automatic suspend were turned off.
 
+**What this doesn't establish:** an installation from Ubuntu's desktop ISO, on hardware or in another hypervisor.
+
 **Found along the way**
 - **The window can stay hidden.** Nivra was launched over SSH while GNOME's screen was locked, and its window never
   appeared: it is created hidden and shown on `ready-to-show`, which never fired. Showing it from the main process
-  worked. A follow-up is proposed: show the window after a timeout as well.
+  worked.
+  - Starting Nivra from Show Apps worked normally.
+  - Filed as NIV-28 (Backlog): show the window through a bounded fallback as well.
 - **A login prompt from `git clone`.** One clone asked for GitHub credentials, likely from a mistyped URL. Both
   repositories are public and clone without a login.

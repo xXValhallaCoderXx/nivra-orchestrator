@@ -465,6 +465,8 @@ The cross-platform foundation is done when all of these were seen to pass:
   - *Checked as a judge would use it, 19–20 October.* The published v0.1.1 zip was downloaded in Edge and extracted with
     Extract All. README steps 4–8 then passed through the UI against a fresh WSL distribution: Ubuntu 26.04.1, today's
     `wsl --install` default, with 23 checks of 23 ([clean-setup.md](clean-setup.md), check 1; NIV-16).
+    - It ran on Nate's existing account, with a fresh Nivra profile and his mirrored networking.
+    - A fresh Windows account with WSL's default networking hasn't been checked.
 - **Packaged Linux app** (`electron-builder --dir`): the same flow on the local target through the real UI, plus the
   preference handoff (`test:packaged`, 11/11). *Seen passing 2026-10-17; on 2026-10-19 against `ead56e8`, 16 passed,
   with 5 skipped that need the test endpoint switch, which a packaged app ignores; latest the same against `cad5eca`.*
