@@ -889,6 +889,7 @@ may go by one hash. On `feature/niv-42`, stacked on B1 (`a53fd36`):
 | `0eaaa4c` | Commit snapshots from the commit's own objects, refusing uncommitted work and unsafe content |
 | `f027403` | Validated patches from a sandbox's result, bound to their destination by one hash |
 | `3957da5` | The review of the first draft: clashes with left-out files, split indexes and hidden edits, exact names, deep paths, the bound policy, refusal codes |
+| `b6be5b7` | The report gives each step's provider status and usage, raw and null when none |
 
 **Nate's three asks of the plan, shown.**
 
@@ -919,7 +920,7 @@ repository's objects through `objects/info/alternates`:
 | Path rules (`workspace-rules.test.ts`) | 3 | A commit's paths that can't be written anywhere; what a new path must also satisfy; git's own files; byte order; case and Unicode folding |
 | Snapshots (`snapshot.test.ts`) | 20 | See below |
 | Patches (`patch.test.ts`) | 18 | See below |
-| Proposals (`proposal.test.ts`) | 6 | Canonical JSON; every binding field changes the hash; the policy taken from the patch, and other rules refused; deletions first in the report, with no file content and bounded output; the verifier |
+| Proposals (`proposal.test.ts`) | 6 | Canonical JSON; every binding field changes the hash; the policy taken from the patch, and other rules refused; deletions first in the report, with no file content and bounded output; each step's provider status and usage, null when none; the verifier |
 
 The snapshot's tests:
 - **Exact bytes from the commit, never the working tree.** CRLF and a file with no final newline are kept, and so is

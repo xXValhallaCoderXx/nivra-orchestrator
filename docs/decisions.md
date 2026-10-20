@@ -1559,10 +1559,17 @@ is NIV-8's.
   - the policy the patch was made under, its version and its limits, taken from the patch itself;
   - the digests of the patch and of the report made before the session closed.
 
-  Cleanup is a record of its own. `verifyProposal` refuses a proposal that isn't intact or isn't the one approved,
-  one checked under other rules than Nivra's current ones, and one for another project, target, folder or commit.
-  The report lists deletions first, then additions and changes, with no file content, and gives each step's outcome
-  with the end of its output.
+  `verifyProposal` refuses a proposal that isn't intact or isn't the one approved, one checked under other rules than
+  Nivra's current ones, and one for another project, target, folder or commit.
+- **The report** (`buildReport`) is made before the session closes, and its digest is bound.
+  - It lists deletions first, then additions and changes, with no file content.
+  - It gives each step's outcome: its exit, signal, timeout, cancellation, truncation, and whether its changes were
+    kept.
+  - It gives each step's provider status and its usage as reported, null when none and never turned into money, with
+    the end of its output.
+
+  Cleanup is a record of its own, B1's `CloseReport`: what was stopped, what stays unresolved and what the provider
+  keeps. It can't change what was approved.
 - **Refusals carry a code** (`RefusalCode`): `uncommitted`, `content`, `change`, `proposal` and the rest. What leaves
   the engine is chosen by the code, from Nivra's own words, as Track A's safe-error rule asks; a refusal's message
   can name paths in the repository. git's and the sandbox's own words go in a `detail` that never leaves the engine.
@@ -1605,7 +1612,8 @@ is NIV-8's.
 **Consequences.**
 - **What comes next.**
   - **B3** runs snapshot, session, steps, collect, patch, report and proposal as one prescribed path: offline with a
-    fake guest, then in one approved live recipe on busybox.
+    fake guest, then in one approved live recipe on busybox. Each step's status and usage come from the session's
+    own records, which B3 reads before closing.
   - **B4** wires it in behind separate upload consent, mapping refusal codes to Nivra's own words.
   - **NIV-8** applies an approved proposal after `verifyProposal`, recording the intent first. **`git apply` isn't
     atomic in a working tree:** when an added file's place holds a folder, it fails after deleting or rewriting
