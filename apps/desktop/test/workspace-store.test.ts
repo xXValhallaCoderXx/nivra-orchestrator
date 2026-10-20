@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -112,6 +113,56 @@ describe("the workspace database (D26)", () => {
     const opening = opened(path, () => 1_700_000_000_001);
     assert.match(opening.state === "ready" ? (opening.notice ?? "") : "", /\(journal files without a database\)/);
     assert.equal(sha(`${path}.unreadable-1700000000001-wal`), before);
+    // An empty file is a new database, unless a journal beside it says it had content.
+    const emptied = join(folder(), "workspace.db");
+    writeFileSync(emptied, "");
+    writeFileSync(`${emptied}-wal`, "a write-ahead log whose database was emptied");
+    const again = opened(emptied, () => 1_700_000_000_004);
+    assert.match(again.state === "ready" ? (again.notice ?? "") : "", /\(journal files without a database\)/);
+    assert.equal(readFileSync(`${emptied}.unreadable-1700000000004-wal`, "utf8"), "a write-ahead log whose database was emptied");
+  });
+
+  /** A workspace whose session wrote one more conversation, then died before it could close: that row is only in the WAL. */
+  function leftByACrash(path: string): void {
+    const seed = ready(path);
+    insertConversation(seed.db, general());
+    seed.db.close();
+    const died = spawnSync(process.execPath, [
+      "-e",
+      `const { DatabaseSync } = require("node:sqlite");
+       const db = new DatabaseSync(${JSON.stringify(path)}, { timeout: 0 });
+       db.exec("PRAGMA locking_mode = EXCLUSIVE; PRAGMA journal_mode = WAL;");
+       db.prepare("INSERT INTO conversations (id, kind, project_id, project_label, target_id, title, created_at, updated_at) VALUES (?, 'general', NULL, NULL, 'local', 'Only in the WAL', ?, ?)").run("${randomUUID()}", "${AT}", "${AT}");
+       process.kill(process.pid, "SIGKILL");`,
+    ]);
+    assert.deepEqual([died.signal, existsSync(`${path}-wal`)], ["SIGKILL", true]);
+  }
+
+  it("opens a workspace a session left a journal beside with every write it holds, and leaves nothing beside it", () => {
+    const dir = folder();
+    const path = join(dir, "workspace.db");
+    leftByACrash(path);
+    const workspace = ready(path);
+    assert.deepEqual([workspace.notice, listConversations(workspace.db).length], [null, 2]);
+    workspace.db.close();
+    assert.deepEqual(readdirSync(dir), ["workspace.db"]);
+  });
+
+  it("keeps a damaged workspace a session left a journal beside exactly as it was found, its journal included", () => {
+    const dir = folder();
+    const path = join(dir, "workspace.db");
+    leftByACrash(path);
+    // The schema page damaged past its header, where only SQLite can see it; the row in the WAL is the newest write.
+    const bytes = readFileSync(path);
+    bytes.fill(0xab, 100, 4096);
+    writeFileSync(path, bytes);
+    const before = [sha(path), sha(`${path}-wal`)];
+    const opening = opened(path, () => 1_700_000_000_003);
+    assert.equal(opening.state, "ready", opening.state === "unavailable" ? opening.reason : "");
+    assert.match(opening.state === "ready" ? (opening.notice ?? "") : "", /^Nivra couldn't read its history file \(SQLite error 11\), so it kept it aside as workspace\.db\.unreadable-1700000000003, with its journal files, and started a new one\./);
+    const aside = `${path}.unreadable-1700000000003`;
+    assert.deepEqual([sha(aside), sha(`${aside}-wal`)], before);
+    assert.deepEqual(readdirSync(dir).filter((name) => name.includes("unreadable")).sort(), ["workspace.db.unreadable-1700000000003", "workspace.db.unreadable-1700000000003-wal"]);
   });
 
   it("keeps aside a database SQLite finds damaged past a good header, and starts again", () => {
@@ -127,7 +178,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path, () => 1_700_000_000_002);
     assert.equal(opening.state, "ready", opening.state === "unavailable" ? opening.reason : "");
-    assert.match(opening.state === "ready" ? (opening.notice ?? "") : "", /^Nivra couldn't read its history file \(SQLite error (11|26)\), so it kept it aside as workspace\.db\.unreadable-1700000000002/);
+    assert.match(opening.state === "ready" ? (opening.notice ?? "") : "", /^Nivra couldn't read its history file \(SQLite error (11|26)\), so it kept it aside as workspace\.db\.unreadable-1700000000002 and started a new one\./);
     assert.equal(sha(`${path}.unreadable-1700000000002`), before);
   });
 

@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, rmSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import { renameRetrying } from "./host-store.ts";
@@ -13,7 +13,9 @@ import { renameRetrying } from "./host-store.ts";
  * Opening never throws. A file that can't be used is reported as state, so everything that doesn't need the workspace
  * keeps working, and only a damaged file is ever moved: kept aside with its journal files, never deleted. A file that
  * isn't a SQLite database at all is recognised by its header before SQLite opens it, because SQLite removes a stray WAL
- * file when it closes such a connection. A schema written by a newer Nivra is refused before anything is changed.
+ * file when it closes such a connection. For the same reason a database that a session left a journal beside (it
+ * didn't close cleanly) is read first through a read-only connection, which can't fold the journal in or remove it, so a
+ * damaged one is kept aside as it was found. A schema written by a newer Nivra is refused before anything is changed.
  */
 
 export type Row = Record<string, SQLOutputValue>;
@@ -203,17 +205,20 @@ export function classifyWorkspaceError(error: unknown): { problem: Problem; code
 
 /** The files SQLite may keep beside a database. */
 const COMPANIONS = ["", "-wal", "-shm", "-journal"] as const;
+/** The journals a session leaves beside the database when it doesn't close cleanly; closing removes them. */
+const JOURNALS = ["-wal", "-journal"] as const;
 const SQLITE_HEADER = "SQLite format 3\0";
 
 /**
  * What is wrong with the files at `path` before SQLite touches them, or null: a main file that isn't a SQLite database
- * (an empty one is a new database), or journal files with no database to belong to.
+ * (an empty one is a new database, unless a journal says it had content), or journal files with no database to belong
+ * to.
  */
 function damageBeforeOpening(path: string): string | null {
   if (!existsSync(path)) return COMPANIONS.some((suffix) => suffix && existsSync(`${path}${suffix}`)) ? "journal files without a database" : null;
   const fd = openSync(path, "r");
   try {
-    if (fstatSync(fd).size === 0) return null;
+    if (fstatSync(fd).size === 0) return JOURNALS.some((suffix) => existsSync(`${path}${suffix}`)) ? "journal files without a database" : null;
     const header = Buffer.alloc(SQLITE_HEADER.length);
     const read = readSync(fd, header, 0, header.length, 0);
     return read < header.length || header.toString("latin1") !== SQLITE_HEADER ? "not a SQLite database" : null;
@@ -241,6 +246,15 @@ export function openWorkspace(path: string, now: () => number = Date.now): Works
     const kept = setAside(path, damage, now);
     if ("reason" in kept) return { state: "unavailable", reason: kept.reason };
     notice = kept.notice;
+  } else {
+    const found = checkLeftBehind(path);
+    if (found) {
+      const { problem, code } = classifyWorkspaceError(found);
+      if (problem !== "corrupt") return { state: "unavailable", reason: unavailableReason(problem, code, folder) };
+      const kept = setAside(path, code, now);
+      if ("reason" in kept) return { state: "unavailable", reason: kept.reason };
+      notice = kept.notice;
+    }
   }
   const first = tryOpen(path);
   if ("db" in first) return { state: "ready", ...first, notice };
@@ -255,15 +269,52 @@ export function openWorkspace(path: string, now: () => number = Date.now): Works
   return { state: "unavailable", reason: `${kept.notice} The new one couldn't be opened either: ${unavailableReason(again.problem, again.code, folder)}` };
 }
 
+/**
+ * Reads a database that a session left a journal beside, through a read-only connection: its schema version and its
+ * schema, which is what opening reads. A writing connection that finds damage would fold the journal into the file, or
+ * remove it, as it closes; a read-only one can do neither, so whatever it finds, the files are as they were. Returns
+ * what went wrong, or null when there is nothing to read first or nothing wrong.
+ */
+function checkLeftBehind(path: string): unknown {
+  if (!existsSync(path) || !JOURNALS.some((suffix) => existsSync(`${path}${suffix}`))) return null;
+  // The connection may make the shared-memory index it reads the journal with. Nothing else uses one (Nivra's own
+  // connection keeps its index in memory), so one it made is removed, and a damaged set is kept as it was found.
+  const index = `${path}-shm`;
+  const hadIndex = existsSync(index);
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(path, { readOnly: true, timeout: 0 });
+    const version = num(db.prepare("PRAGMA user_version").get()?.["user_version"] ?? 0);
+    if (version > WORKSPACE_MIGRATIONS.length) return new NewerSchema(version);
+    db.prepare("SELECT count(*) FROM sqlite_schema").get();
+    return null;
+  } catch (error) {
+    return error;
+  } finally {
+    try {
+      db?.close();
+      if (!hadIndex) rmSync(index, { force: true });
+    } catch {
+      // A read-only connection that can't close, or an index that stays, changes nothing in the files that matter.
+    }
+  }
+}
+
 /** Moves the database and its journal files aside together, under one name, and says so. Nothing is deleted. */
 function setAside(path: string, why: string, now: () => number): { notice: string } | { reason: string } {
   const aside = `${path}.unreadable-${now()}`;
+  let journals = false;
   try {
-    for (const suffix of COMPANIONS) if (existsSync(`${path}${suffix}`)) renameRetrying(`${path}${suffix}`, `${aside}${suffix}`);
+    for (const suffix of COMPANIONS) {
+      if (!existsSync(`${path}${suffix}`)) continue;
+      renameRetrying(`${path}${suffix}`, `${aside}${suffix}`);
+      journals ||= (JOURNALS as readonly string[]).includes(suffix);
+    }
   } catch (error) {
     return { reason: `Nivra couldn't read its history file (${why}) and couldn't move it aside (${classifyWorkspaceError(error).code}). Move ${basename(path)} and the files beside it that start with that name out of ${dirname(path)}, then open Nivra again.` };
   }
-  return { notice: `Nivra couldn't read its history file (${why}), so it kept it aside as ${basename(aside)}, with its journal files, and started a new one. Your projects, preferences and key are kept separately and weren't affected.` };
+  // The journal files are named only when they were there to keep.
+  return { notice: `Nivra couldn't read its history file (${why}), so it kept it aside as ${basename(aside)}${journals ? ", with its journal files," : ""} and started a new one. Your projects, preferences and key are kept separately and weren't affected.` };
 }
 
 function tryOpen(path: string): { db: WorkspaceDb; schemaVersion: number; sqlite: string } | { error: unknown } {
