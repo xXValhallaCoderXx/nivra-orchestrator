@@ -11,7 +11,9 @@ import { z } from "zod";
  * honouring `Retry-After`: their own budget, or the caller's `until` when that comes first, on the client's monotonic
  * clock. No read starts once that deadline has passed, each attempt's timeout is capped by the time left, and no retry
  * waits past it. A POST or DELETE keeps its one request's full timeout, so cutting it short never turns into a lost
- * answer; the caller decides before sending whether there is time. No message ever carries a response body or a
+ * answer; the caller decides before sending whether there is time. A client given a signal stops when it is aborted:
+ * the request under way and the reading of its answer are cut off, a retry's wait ends, and nothing more is sent. A
+ * spawn cut off that way is `uncertain`, like any other lost answer. No message ever carries a response body or a
  * credential.
  */
 
@@ -24,6 +26,8 @@ export interface TransportRequest {
   headers?: Record<string, string>;
   body?: Uint8Array | string;
   timeoutMs: number;
+  /** Stops the request, and the reading of its answer, when aborted. */
+  signal?: AbortSignal;
 }
 
 export interface TransportResponse {
@@ -39,12 +43,14 @@ export function fetchTransport(credentials: { key: string; project: string }, ba
   return async (request) => {
     const url = new URL(`${base}${request.path}`);
     for (const [name, value] of Object.entries(request.query ?? {})) url.searchParams.set(name, value);
+    // AbortSignal.timeout takes whole milliseconds only.
+    const timeout = AbortSignal.timeout(Math.max(1, Math.ceil(request.timeoutMs)));
     const response = await fetch(url, {
       method: request.method,
       headers: { Authorization: `Bearer ${credentials.key}`, Project: credentials.project, ...request.headers },
       ...(request.body !== undefined ? { body: request.body } : {}),
-      // AbortSignal.timeout takes whole milliseconds only.
-      signal: AbortSignal.timeout(Math.max(1, Math.ceil(request.timeoutMs))),
+      // The same signal cuts off reading the answer below.
+      signal: request.signal ? AbortSignal.any([timeout, request.signal]) : timeout,
       redirect: "manual",
     });
     const headers: Record<string, string> = {};
@@ -79,6 +85,14 @@ export class SandboxDeadlineError extends SandboxNetworkError {
     super(what, last);
     this.message = `${what} got no answer before its deadline${last ? ` (its last attempt: ${last.message.replace(/\.$/, "")})` : ""}.`;
     this.name = "SandboxDeadlineError";
+  }
+}
+
+/** The work the request belonged to was cancelled: it was cut off, or never sent. */
+export class SandboxCancelledError extends Error {
+  constructor(what: string) {
+    super(`${what} was cancelled.`);
+    this.name = "SandboxCancelledError";
   }
 }
 
@@ -160,10 +174,12 @@ export interface SandboxApiOptions {
   requestTimeoutMs?: number;
   /** How long reads may keep retrying, in all. */
   readDeadlineMs?: number;
-  /** Waiting between retries; tests replace it. */
-  sleep?: (ms: number) => Promise<void>;
+  /** Waiting between retries, ended early by the signal; tests replace it. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** The monotonic clock every deadline is measured on, in ms; tests share theirs with `sleep`. */
   now?: () => number;
+  /** Cancels the client's work: the request under way is cut off, and nothing more is sent. */
+  signal?: AbortSignal;
 }
 
 /** The latest a read may still be going, on the client's monotonic clock: the caller's own deadline. */
@@ -172,14 +188,27 @@ export interface Until {
 }
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-const sleepFor = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Waits `ms`, or less when the signal aborts first; the caller checks the signal afterwards. */
+export const sleepFor = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 
 export class SandboxApi {
   readonly #transport: Transport;
   readonly #requestTimeoutMs: number;
   readonly #readDeadlineMs: number;
-  readonly #sleep: (ms: number) => Promise<void>;
+  readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly #now: () => number;
+  readonly #signal: AbortSignal | null;
   /** Every POST that created or may have created something, so a test or the evidence can count them. */
   readonly posts: string[] = [];
 
@@ -189,6 +218,7 @@ export class SandboxApi {
     this.#readDeadlineMs = options.readDeadlineMs ?? 120_000;
     this.#sleep = options.sleep ?? sleepFor;
     this.#now = options.now ?? (() => performance.now());
+    this.#signal = options.signal ?? null;
   }
 
   /** Permissions, the account's effective limits and when the token expires (read-only). */
@@ -319,6 +349,7 @@ export class SandboxApi {
       try {
         response = await this.#send(what, request, Math.min(this.#requestTimeoutMs, left));
       } catch (error) {
+        if (error instanceof SandboxCancelledError) throw error;
         lost = error;
       }
       if (response && ((response.status >= 200 && response.status <= 299) || answers.includes(response.status))) return response;
@@ -326,15 +357,18 @@ export class SandboxApi {
       last = response ? this.#httpError(what, response) : lost instanceof Error ? lost : new SandboxNetworkError(what, lost);
       const wait = (response ? retryAfterMs(response) : null) ?? 1_000 * 2 ** Math.min(attempt, 4);
       if (this.#now() + wait >= deadline) throw new SandboxDeadlineError(what, last);
-      await this.#sleep(wait);
+      await this.#sleep(wait, this.#signal ?? undefined);
+      if (this.#signal?.aborted) throw new SandboxCancelledError(what);
     }
   }
 
+  /** One request, with the client's signal: none is sent once it has aborted, and one under way is cut off. */
   async #send(what: string, request: Omit<TransportRequest, "timeoutMs">, timeoutMs = this.#requestTimeoutMs): Promise<TransportResponse> {
+    if (this.#signal?.aborted) throw new SandboxCancelledError(what);
     try {
-      return await this.#transport({ ...request, timeoutMs });
+      return await this.#transport({ ...request, timeoutMs, ...(this.#signal ? { signal: this.#signal } : {}) });
     } catch (error) {
-      throw new SandboxNetworkError(what, error);
+      throw this.#signal?.aborted ? new SandboxCancelledError(what) : new SandboxNetworkError(what, error);
     }
   }
 

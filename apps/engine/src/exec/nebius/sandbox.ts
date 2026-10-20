@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { readStatus, SandboxDeadlineError, SandboxHttpError, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
+import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, sleepFor, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
 
 /**
  * The lifecycle of Nebius Sandboxes operations, as Nivra models it (NIV-29), from the documentation of 20 October 2026:
@@ -14,7 +14,9 @@ import { readStatus, SandboxDeadlineError, SandboxHttpError, TERMINAL, type File
  *   started", and nothing is ever resubmitted.
  * - A lost connection is not a cancellation; a cancel's 202 is not a stop. Cancelling polls to a terminal state.
  * - Every wait has a deadline, and no read is made, or answer taken, once it has passed. An optional cap (the probe's
- *   overall deadline) bounds them all, and no operation or subprocess is started after it.
+ *   overall deadline) bounds them all, read afresh on every pass, and no operation or subprocess is started after it.
+ * - An optional signal cancels the work: the request under way is cut off, a wait ends at once, and nothing more is
+ *   started. Cleanup runs on a sandbox with a signal and a cap of its own, so cancelling the work never cancels it.
  * - Cancelling, or a disposable run, deletes nothing: images are retained for 180 days, after which untagged and
  *   unreferenced ones may be deleted, and there is no API to delete uploads, operation records or logs.
  */
@@ -174,12 +176,15 @@ export interface SandboxOptions {
   search?: { sinceMarginMs: number; pageSize: number; maxPages: number; maxCandidates: number; withinMs?: number };
   /** The longest timeout a step may ask for. */
   maxTimeoutSeconds?: number;
-  sleep?: (ms: number) => Promise<void>;
+  /** Waiting, ended early by the signal; tests replace it. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** A monotonic clock, in ms. */
   now?: () => number;
   wallNow?: () => Date;
-  /** The latest any wait may end, on the same clock: the probe's overall deadline. Cleanup runs on a sandbox without one. */
+  /** The latest any wait may end, on the same clock: the probe's overall deadline, or cleanup's own. */
   cap?: () => number;
+  /** Cancels the work. The sandbox's client should carry the same signal, so a request under way is cut off too. */
+  signal?: AbortSignal;
 }
 
 const CORRELATION = "NIVRA_CORRELATION";
@@ -193,10 +198,11 @@ export class Sandbox {
   readonly #cancelWaitMs: number;
   readonly #search: Required<NonNullable<SandboxOptions["search"]>>;
   readonly #maxTimeoutSeconds: number;
-  readonly #sleep: (ms: number) => Promise<void>;
+  readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly #now: () => number;
   readonly #wallNow: () => Date;
   readonly #cap: (() => number) | null;
+  readonly #signal: AbortSignal | null;
 
   constructor(api: SandboxApi, options: SandboxOptions) {
     this.#api = api;
@@ -206,24 +212,32 @@ export class Sandbox {
     this.#cancelWaitMs = options.cancelWaitMs ?? 60_000;
     this.#search = { withinMs: 120_000, ...(options.search ?? { sinceMarginMs: 24 * 60 * 60 * 1000, pageSize: 100, maxPages: 10, maxCandidates: 50 }) };
     this.#maxTimeoutSeconds = options.maxTimeoutSeconds ?? 180;
-    this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.#sleep = options.sleep ?? sleepFor;
     this.#now = options.now ?? (() => performance.now());
     this.#wallNow = options.wallNow ?? (() => new Date());
     this.#cap = options.cap ?? null;
+    this.#signal = options.signal ?? null;
   }
 
   get journal(): Journal {
     return this.#journal;
   }
 
-  /** A wait's deadline, no later than the cap. */
+  /** A wait's deadline, no later than the cap as it is now: a loop asks again on every pass. */
   #until(deadline: number): number {
     return Math.min(deadline, this.#cap ? this.#cap() : Number.POSITIVE_INFINITY);
   }
 
-  /** Refuses to start anything once the cap has passed: nothing is sent, and nothing journaled. */
+  /** Refuses to start anything once the work is cancelled or the cap has passed: nothing is sent, and nothing journaled. */
   #refuseAfterCap(what: string): void {
+    if (this.#signal?.aborted) throw new SandboxCancelledError(`Starting ${what}`);
     if (this.#now() >= this.#until(Number.POSITIVE_INFINITY)) throw new SandboxRefusal(`The probe's time ran out, so ${what} wasn't started.`);
+  }
+
+  /** A poll's wait, ended at once by the signal, which then stops the loop. */
+  async #pause(ms: number, what: string): Promise<void> {
+    await this.#sleep(ms, this.#signal ?? undefined);
+    if (this.#signal?.aborted) throw new SandboxCancelledError(what);
   }
 
   /**
@@ -311,8 +325,8 @@ export class Sandbox {
    */
   async observe(operationId: string, timeoutSeconds: number): Promise<Outcome> {
     const started = this.#now();
-    const deadline = this.#until(started + timeoutSeconds * 1000 + this.#observeMarginMs);
-    while (this.#now() < deadline) {
+    const end = started + timeoutSeconds * 1000 + this.#observeMarginMs;
+    for (let deadline = this.#until(end); this.#now() < deadline; deadline = this.#until(end)) {
       const operation = await this.#readBy(operationId, deadline);
       if (!operation) break;
       const status = readStatus(operation.status);
@@ -320,32 +334,40 @@ export class Sandbox {
         this.#journal.append({ kind: "terminal", wall: this.#wallNow().toISOString(), operationId, status });
         return classify(operation);
       }
-      await this.#sleep(Math.min(this.#pollMs, deadline - this.#now()));
+      await this.#pause(Math.min(this.#pollMs, deadline - this.#now()), "Observing an operation");
     }
     this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "it wasn't seen to end before observing it ran out of time" });
-    throw new SandboxRefusal(`Operation ${operationId} wasn't seen to end within ${Math.round((deadline - started) / 1000)} s.`);
+    throw new SandboxRefusal(`Operation ${operationId} wasn't seen to end within ${Math.max(0, Math.round((this.#until(end) - started) / 1000))} s.`);
   }
 
   /** Waits until an operation reaches one of `statuses` (or ends), within `withinMs`; the last status seen otherwise. */
   async waitFor(operationId: string, statuses: readonly OperationStatus[], withinMs: number): Promise<OperationStatus | "UNKNOWN"> {
-    const deadline = this.#until(this.#now() + withinMs);
+    const end = this.#now() + withinMs;
     let status: OperationStatus | "UNKNOWN" = "UNKNOWN";
-    while (this.#now() < deadline) {
+    for (let deadline = this.#until(end); this.#now() < deadline; deadline = this.#until(end)) {
       const operation = await this.#readBy(operationId, deadline);
       if (!operation) break;
       status = readStatus(operation.status);
       if (status !== "UNKNOWN" && (statuses.includes(status) || TERMINAL.has(status))) return status;
-      await this.#sleep(Math.min(this.#pollMs, deadline - this.#now()));
+      await this.#pause(Math.min(this.#pollMs, deadline - this.#now()), "Waiting for an operation");
     }
     return status;
   }
 
-  /** Asks an operation to stop, then polls until it has ended; null when it hadn't within the wait (or the cap). */
+  /**
+   * Asks an operation to stop, then polls until it has ended; null when it hadn't within the wait (or the cap). With no
+   * time left under the cap, no cancel is sent: the operation is journaled unresolved, for `--recover`.
+   */
   async cancel(operationId: string): Promise<Outcome | null> {
+    if (this.#signal?.aborted) throw new SandboxCancelledError("Cancelling an operation");
+    if (this.#now() >= this.#until(Number.POSITIVE_INFINITY)) {
+      this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "no time was left to cancel it" });
+      return null;
+    }
     this.#journal.append({ kind: "cancel", wall: this.#wallNow().toISOString(), operationId });
     await this.#api.cancel(operationId);
-    const deadline = this.#until(this.#now() + this.#cancelWaitMs);
-    while (this.#now() < deadline) {
+    const end = this.#now() + this.#cancelWaitMs;
+    for (let deadline = this.#until(end); this.#now() < deadline; deadline = this.#until(end)) {
       const operation = await this.#readBy(operationId, deadline);
       if (!operation) break;
       const status = readStatus(operation.status);
@@ -353,7 +375,7 @@ export class Sandbox {
         this.#journal.append({ kind: "terminal", wall: this.#wallNow().toISOString(), operationId, status });
         return classify(operation);
       }
-      await this.#sleep(Math.min(this.#pollMs, deadline - this.#now()));
+      await this.#pause(Math.min(this.#pollMs, deadline - this.#now()), "Cancelling an operation");
     }
     this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "a cancel didn't reach a terminal state in time" });
     return null;
@@ -369,7 +391,7 @@ export class Sandbox {
     const intent = this.#journal.entries.find((e) => e.kind === "intent" && e.correlation === correlation);
     const wall = intent && "wall" in intent ? Date.parse(intent.wall) : this.#wallNow().getTime();
     const since = new Date(wall - this.#search.sinceMarginMs).toISOString();
-    const deadline = this.#until(this.#now() + this.#search.withinMs);
+    const end = this.#now() + this.#search.withinMs;
     const matches = new Set<string>();
     let candidates = 0;
     let pages = 0;
@@ -378,8 +400,8 @@ export class Sandbox {
     search: for (; pages < this.#search.maxPages; pages++) {
       let page: Operation[];
       try {
-        if (this.#now() >= deadline) throw new SandboxDeadlineError("Listing operations", null);
-        page = await this.#api.list({ kind: "instance", since, limit: this.#search.pageSize, offset: pages * this.#search.pageSize }, { until: deadline });
+        if (this.#now() >= this.#until(end)) throw new SandboxDeadlineError("Listing operations", null);
+        page = await this.#api.list({ kind: "instance", since, limit: this.#search.pageSize, offset: pages * this.#search.pageSize }, { until: this.#until(end) });
       } catch (error) {
         if (!(error instanceof SandboxDeadlineError)) throw error;
         outOfTime = true;
@@ -389,7 +411,7 @@ export class Sandbox {
         if (candidates >= this.#search.maxCandidates) break search;
         let env = summary.metadata?.env ?? null;
         if (env === null) {
-          const operation = await this.#readBy(summary.uuid, deadline);
+          const operation = await this.#readBy(summary.uuid, this.#until(end));
           if (!operation) {
             outOfTime = true;
             break search;
@@ -468,8 +490,8 @@ export class Sandbox {
    * result shows the child ended within the limit: the probe counts it as evidence that a cancel stopped the child.
    */
   async subprocessResult(operationId: string, spid: number, withinMs: number): Promise<{ exitCode: number | null; signal: number | string | null; timedOut: boolean; stdout: string; stderr: string } | null> {
-    const deadline = this.#until(this.#now() + withinMs);
-    while (this.#now() < deadline) {
+    const end = this.#now() + withinMs;
+    for (let deadline = this.#until(end); this.#now() < deadline; deadline = this.#until(end)) {
       let answer: Awaited<ReturnType<SandboxApi["subprocess"]>>;
       try {
         answer = await this.#api.subprocess(operationId, spid, { until: deadline });
@@ -488,7 +510,7 @@ export class Sandbox {
       } else if (answer.retryAfterMs !== null) {
         wait = Math.max(wait, answer.retryAfterMs);
       }
-      await this.#sleep(Math.min(wait, deadline - this.#now()));
+      await this.#pause(Math.min(wait, deadline - this.#now()), "Reading a subprocess");
     }
     return null;
   }

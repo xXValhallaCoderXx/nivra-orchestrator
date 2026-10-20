@@ -14,15 +14,16 @@
 // read once, removed from the environment, and never printed or written: evidence replaces them with placeholders.
 // Evidence goes to ~/nivra-acceptance/sandbox-probe-<UTC>/ (0700): the journal, each step's outcome (outputs cut to
 // 2 KB), the verdicts and a summary. Stage 1 stops at its overall deadline, a hard limit; cleanup then has its own. The
-// first Ctrl+C settles every operation the probe started (reconcile, cancel, confirm); --recover finishes that later
-// from the journal.
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+// first Ctrl+C stops at once whatever is under way (requests, waits, uploads), then settles every operation the probe
+// started (reconcile, cancel, confirm), with cleanup's own budget; a second stops cleanup too, and --recover finishes
+// it later from the journal.
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, parseEnv } from "node:util";
 import { fetchTransport, SandboxApi } from "../src/exec/nebius/api.ts";
-import { CLEANUP_MAX_SECONDS, evaluate, LATENCY, PROBE_LIMITS, probePlan, RETENTION, runStageOne, stageZeroSummary, tokenOutlasts } from "../src/exec/nebius/probe.ts";
+import { CLEANUP_MAX_SECONDS, evaluate, insideRepository, LATENCY, PROBE_LIMITS, probePlan, RETENTION, runStageOne, stageZeroSummary, tokenOutlasts } from "../src/exec/nebius/probe.ts";
 import { Journal, Sandbox } from "../src/exec/nebius/sandbox.ts";
 
 const FIXTURE = fileURLToPath(new URL("../test/fixtures/sandbox-probe/", import.meta.url));
@@ -60,6 +61,7 @@ if (values.plan) {
   console.log(`  Stage 1 stops at ${PROBE_LIMITS.overallMinutes} minutes, a hard limit: no wait goes past it, no read is made after it, and nothing starts after it.`);
   console.log(`  Cleanup then takes at most ${Math.ceil(CLEANUP_MAX_SECONDS / 60)} minutes: two searches for a lost answer (${PROBE_LIMITS.searchSeconds} s each) and two cancels (a request, then ${PROBE_LIMITS.cancelWaitSeconds} s each).`);
   console.log(`  Before anything starts, stage 1 reads the account twice, 15 s apart (GET /v1/whoami). It starts only if the token is renewed with each request, or stays valid for ${Math.ceil((PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS) / 60)} minutes.`);
+  console.log("  Ctrl+C stops every request, wait and upload at once; cleanup then settles what was started, on its own budget. A second Ctrl+C stops cleanup, for --recover.");
   console.log("No model calls, no installs.");
   console.log("\nThresholds, agreed before the run. Each pattern is judged on its own evidence, its checks and its latency together:");
   console.log("  Critical, for each pattern (a failure defers that pattern; if neither qualifies, NIV-34 stays blocked and local containers");
@@ -81,8 +83,8 @@ if (values.plan) {
 function credentials(): { key: string | undefined; project: string | undefined } {
   if (!values.credentials) return { key: process.env["NEBIUS_API_KEY"]?.trim(), project: process.env["NEBIUS_PROJECT_ID"]?.trim() };
   const path = resolve(values.credentials);
-  const inside = relative(REPOSITORY, path);
-  if (!inside.startsWith("..") && !isAbsolute(inside)) {
+  // Judged as it really is: a folder named "..something" inside it, or a link to a file inside, is still inside.
+  if (insideRepository(path, REPOSITORY)) {
     console.error(`${path} is inside the repository, where it could be committed. Move it outside (for example to ~/.config/nivra/), then try again. Nothing was sent.`);
     process.exit(2);
   }
@@ -90,12 +92,14 @@ function credentials(): { key: string | undefined; project: string | undefined }
     console.error(`There's no file at ${path}. Create it with NEBIUS_API_KEY=… and NEBIUS_PROJECT_ID=… lines, run chmod 600 on it, then try again. Nothing was sent.`);
     process.exit(2);
   }
-  const mode = statSync(path).mode & 0o777;
+  // The file that was checked is the one read.
+  const real = realpathSync.native(path);
+  const mode = statSync(real).mode & 0o777;
   if (process.platform !== "win32" && (mode & 0o077) !== 0) {
     console.error(`${path} can be read by others (mode ${mode.toString(8)}). Run chmod 600 on it, then try again. Nothing was sent.`);
     process.exit(2);
   }
-  const parsed = parseEnv(readFileSync(path, "utf8"));
+  const parsed = parseEnv(readFileSync(real, "utf8"));
   return { key: parsed["NEBIUS_API_KEY"]?.trim(), project: parsed["NEBIUS_PROJECT_ID"]?.trim() };
 }
 
@@ -116,21 +120,36 @@ mkdirSync(folder, { recursive: true, mode: 0o700 });
 const started = performance.now();
 const log = (line: string) => console.log(`${String(Math.round(performance.now() - started)).padStart(8)} ms  ${safe(line)}`);
 const transport = fetchTransport({ key, project });
-const api = () => new SandboxApi(transport, { requestTimeoutMs: PROBE_LIMITS.requestTimeoutSeconds * 1000 });
-/** A sandbox over the probe's file-backed journal. Stage 1's is capped by the overall deadline; cleanup's isn't. */
-const sandboxFor = (client: SandboxApi, cap?: () => number) =>
+/** A client whose requests stop when `signal` aborts. */
+const api = (signal?: AbortSignal) => new SandboxApi(transport, { requestTimeoutMs: PROBE_LIMITS.requestTimeoutSeconds * 1000, ...(signal ? { signal } : {}) });
+/**
+ * A sandbox over the probe's file-backed journal, with its client's signal and a cap: stage 1's are the interruption and
+ * the overall deadline; cleanup's are its own, so interrupting stage 1 never interrupts cleanup.
+ */
+const sandboxFor = (client: SandboxApi, bounds: { cap?: () => number; signal?: AbortSignal } = {}) =>
   new Sandbox(client, {
     journal: new Journal(join(folder, "journal.jsonl")),
     observeMarginMs: PROBE_LIMITS.observeMarginSeconds * 1000,
     cancelWaitMs: PROBE_LIMITS.cancelWaitSeconds * 1000,
     search: { sinceMarginMs: 24 * 60 * 60 * 1000, pageSize: 100, maxPages: 10, maxCandidates: 50, withinMs: PROBE_LIMITS.searchSeconds * 1000 },
     maxTimeoutSeconds: PROBE_LIMITS.maxParentTimeoutSeconds,
-    ...(cap ? { cap } : {}),
+    ...bounds,
   });
+/** Cleanup's own signal and budget, from now: at most CLEANUP_MAX_SECONDS. */
+const cleanupSandbox = (settling: AbortController) => {
+  const until = performance.now() + CLEANUP_MAX_SECONDS * 1000;
+  return sandboxFor(api(settling.signal), { cap: () => until, signal: settling.signal });
+};
 
 if (values.recover) {
-  const sandbox = sandboxFor(api());
-  log(`Settling what ${folder} left open.`);
+  const settling = new AbortController();
+  process.on("SIGINT", () => {
+    if (settling.signal.aborted) process.exit(130);
+    settling.abort();
+    log("Stopping: what is still open stays in the journal for the next --recover.");
+  });
+  const sandbox = cleanupSandbox(settling);
+  log(`Settling what ${folder} left open, within ${Math.ceil(CLEANUP_MAX_SECONDS / 60)} minutes.`);
   const settled = await sandbox.cleanup();
   write(join(folder, `recover-${Date.now()}.json`), settled);
   log(`cancelled ${settled.cancelled.length}; unresolved ${settled.unresolved.length}${settled.unresolved.length ? `: ${settled.unresolved.join("; ")}` : ""}`);
@@ -154,7 +173,9 @@ if (values.stage !== "1" || !values.image) {
   process.exit(2);
 }
 
-const client = api();
+const stage = new AbortController();
+const settling = new AbortController();
+const client = api(stage.signal);
 // A token that expires partway would leave the probe unable to read or cancel its own operations: check it first, with
 // two readings 15 s apart, since a token renewed with each request reports an expiry minutes after that request.
 const needed = PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS;
@@ -167,13 +188,21 @@ if (!token.ok) {
   process.exit(2);
 }
 const deadline = { at: performance.now() + PROBE_LIMITS.overallMinutes * 60_000 };
-const sandbox = sandboxFor(client, () => deadline.at);
-let interrupted = false;
+const sandbox = sandboxFor(client, { cap: () => deadline.at, signal: stage.signal });
+// The first Ctrl+C stops stage 1 at once; the second stops cleanup, leaving the rest to --recover; a third quits.
+let interrupts = 0;
 process.on("SIGINT", () => {
-  if (interrupted) process.exit(130);
-  interrupted = true;
-  deadline.at = 0;
-  log("Interrupted: settling every operation the probe started, then stopping. Press Ctrl+C again to leave it to --recover.");
+  interrupts++;
+  if (interrupts === 1) {
+    stage.abort();
+    deadline.at = 0;
+    log(`Interrupted: everything under way is stopped. Settling every operation the probe started, within ${Math.ceil(CLEANUP_MAX_SECONDS / 60)} minutes. Press Ctrl+C again to stop that and leave it to --recover.`);
+  } else if (interrupts === 2) {
+    settling.abort();
+    log(`Stopping cleanup: what is still open is in the journal. Run --recover ${folder}.`);
+  } else {
+    process.exit(130);
+  }
 });
 
 let results: Awaited<ReturnType<typeof runStageOne>> | null = null;
@@ -181,7 +210,7 @@ try {
   results = await runStageOne({
     sandbox,
     api: client,
-    reconnect: () => sandboxFor(api(), () => deadline.at),
+    reconnect: () => sandboxFor(api(stage.signal), { cap: () => deadline.at, signal: stage.signal }),
     baseImage: values.image,
     fixture,
     deny: values.deny ?? [],
@@ -190,11 +219,12 @@ try {
     get deadline() {
       return deadline.at;
     },
+    signal: stage.signal,
     log,
   });
 } finally {
-  // Cleanup runs past the overall deadline, with its own bounds, on the same journal.
-  const settled = await sandboxFor(api()).cleanup();
+  // Cleanup runs past the overall deadline, and past an interruption, with its own signal and budget, on the same journal.
+  const settled = await cleanupSandbox(settling).cleanup();
   write(join(folder, "cleanup.json"), settled);
   log(`Cleanup: cancelled ${settled.cancelled.length}; unresolved ${settled.unresolved.length}${settled.unresolved.length ? ` (run --recover ${folder})` : ""}`);
 }
@@ -231,4 +261,4 @@ const report = [
 ];
 writeFileSync(join(folder, "report.md"), `${safe(report.join("\n"))}\n`, { mode: 0o600 });
 log(`Decision: ${judged.decision}${chosen ? `, on pattern ${chosen.pattern}` : ""}. Evidence: ${folder}`);
-process.exit(interrupted ? 130 : 0);
+process.exit(interrupts ? 130 : 0);

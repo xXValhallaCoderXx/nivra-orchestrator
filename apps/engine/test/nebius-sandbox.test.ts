@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import { SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, type SandboxApiOptions, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
-import { CLEANUP_MAX_SECONDS, evaluate, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, tokenOutlasts, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
+import { fetchTransport, SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, type SandboxApiOptions, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
+import { CLEANUP_MAX_SECONDS, evaluate, insideRepository, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, tokenOutlasts, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
 import { classify, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
 
 /**
@@ -221,13 +223,49 @@ function clock() {
 
 function sandboxOn(
   service: FakeService,
-  options: { journal?: Journal; search?: { sinceMarginMs: number; pageSize: number; maxPages: number; maxCandidates: number; withinMs?: number }; time?: ReturnType<typeof clock>; transport?: Transport; api?: SandboxApiOptions; cap?: () => number } = {},
+  options: {
+    journal?: Journal;
+    search?: { sinceMarginMs: number; pageSize: number; maxPages: number; maxCandidates: number; withinMs?: number };
+    time?: ReturnType<typeof clock>;
+    transport?: Transport;
+    api?: SandboxApiOptions;
+    cap?: () => number;
+    signal?: AbortSignal;
+  } = {},
 ) {
   const time = options.time ?? clock();
-  const api = new SandboxApi(options.transport ?? service.transport, { sleep: time.sleep, now: time.now, readDeadlineMs: 60_000, ...options.api });
+  const signal = options.signal ? { signal: options.signal } : {};
+  const api = new SandboxApi(options.transport ?? service.transport, { sleep: time.sleep, now: time.now, readDeadlineMs: 60_000, ...options.api, ...signal });
   const journal = options.journal ?? new Journal();
-  const sandbox = new Sandbox(api, { journal, sleep: time.sleep, now: time.now, pollMs: 1_000, ...(options.search ? { search: options.search } : {}), ...(options.cap ? { cap: options.cap } : {}) });
+  const sandbox = new Sandbox(api, { journal, sleep: time.sleep, now: time.now, pollMs: 1_000, ...(options.search ? { search: options.search } : {}), ...(options.cap ? { cap: options.cap } : {}), ...signal });
   return { sandbox, api, journal, time };
+}
+
+/**
+ * A transport that holds the requests `hold` picks until their signal aborts, as a connection still waiting would; the
+ * rest go straight to the service. With `answerFirst`, the service acts on a held request before its answer is held.
+ */
+function holding(service: FakeService, hold: (request: TransportRequest) => boolean, options: { answerFirst?: boolean } = {}) {
+  const seen: TransportRequest[] = [];
+  const held: TransportRequest[] = [];
+  const transport: Transport = async (request) => {
+    seen.push(request);
+    if (!hold(request)) return service.transport(request);
+    if (options.answerFirst) await service.transport(request);
+    held.push(request);
+    return new Promise<TransportResponse>((_resolve, reject) => {
+      const stop = () => reject(new DOMException("This operation was aborted", "AbortError"));
+      if (request.signal?.aborted) stop();
+      else request.signal?.addEventListener("abort", stop, { once: true });
+    });
+  };
+  return { transport, seen, held };
+}
+
+/** Lets pending work run until `check` holds; the fake clock means nothing here waits in real time. */
+async function settles(check: () => boolean): Promise<void> {
+  for (let turn = 0; turn < 1_000 && !check(); turn++) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(check(), "the work under test never reached the point it was waited for");
 }
 
 const succeed = (extra: Partial<Behaviour> = {}): Behaviour => ({ statuses: ["PENDING", "EXECUTING", "SUCCESS"], exitCode: 0, ...extra });
@@ -555,6 +593,123 @@ describe("Nebius Sandboxes, offline: every wait ends at its deadline (NIV-29)", 
   });
 });
 
+describe("Nebius Sandboxes, offline: an interruption stops what is under way (NIV-29)", () => {
+  it("cuts off a real request still waiting for its answer, and one whose answer is still arriving", async () => {
+    // On loopback: one path never answers; the other sends its headers, then never finishes its body.
+    const server = createServer((request, response) => {
+      if (request.url?.startsWith("/arriving")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.write("{");
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const transport = fetchTransport({ key: "test-key", project: "test-project" }, `http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+    try {
+      for (const path of ["/waiting", "/arriving"]) {
+        const stage = new AbortController();
+        const started = performance.now();
+        const request = transport({ method: "GET", path, timeoutMs: 30_000, signal: stage.signal });
+        setTimeout(() => stage.abort(), 50);
+        await assert.rejects(request, { name: "AbortError" });
+        assert.ok(performance.now() - started < 5_000, `${path} was cut off at once`);
+      }
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it("cuts off a read under way, sends nothing after it, and cleanup, with its own signal, still settles the operation", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const stage = new AbortController();
+    let holdReads = false;
+    const { transport, seen, held } = holding(service, (request) => holdReads && request.method === "GET");
+    const journal = new Journal();
+    const { sandbox } = sandboxOn(service, { transport, journal, signal: stage.signal });
+    const running = (await sandbox.submit(step("long", { timeoutSeconds: 60 }))) as { operationId: string };
+    holdReads = true;
+    const observing = sandbox.observe(running.operationId, 60);
+    await settles(() => held.length === 1);
+    const sent = seen.length;
+    stage.abort();
+    await assert.rejects(observing, /^SandboxCancelledError: Reading an operation was cancelled\.$/);
+    await assert.rejects(sandbox.submit(step("next")), /^SandboxCancelledError: Starting the next operation was cancelled\.$/);
+    assert.equal(seen.length, sent, "nothing was sent after the interruption");
+    const settled = await sandboxOn(service, { journal }).sandbox.cleanup();
+    assert.deepEqual([settled.cancelled, settled.unresolved, service.operations[0]?.cancelled], [[running.operationId], [], true]);
+  });
+
+  it("keeps a spawn cut off on its way back as uncertain, and cleanup finds it by its correlation id and stops it", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const stage = new AbortController();
+    // The service makes the operation; its answer is still on its way back when the interruption comes.
+    const { transport, held } = holding(service, (request) => request.method === "POST" && request.path === "/v1/instances", { answerFirst: true });
+    const journal = new Journal();
+    const { sandbox } = sandboxOn(service, { transport, journal, signal: stage.signal });
+    const submitting = sandbox.submit(step("cut off"));
+    await settles(() => held.length === 1);
+    stage.abort();
+    const submitted = await submitting;
+    assert.ok("uncertain" in submitted);
+    assert.deepEqual([journal.entries.map((entry) => entry.kind), service.operations.length], [["intent", "uncertain"], 1]);
+    const settled = await sandboxOn(service, { journal }).sandbox.cleanup();
+    assert.deepEqual([settled.cancelled.length, settled.unresolved, service.operations[0]?.cancelled, service.spawns], [1, [], true, 1]);
+  });
+
+  it("stops uploading: the files after the one cut off are never sent, nothing runs, and the reason is kept", async () => {
+    const service = probeService({ controlWorks: true });
+    const stage = new AbortController();
+    let uploads = 0;
+    const { transport, seen, held } = holding(service, (request) => request.path === "/v1/files" && ++uploads === 2);
+    const { sandbox, api, time } = sandboxOn(service, { transport, signal: stage.signal });
+    const running = runStageOne({ sandbox, api, reconnect: () => sandbox, baseImage: "base", fixture, deny: [], networkControl: null, now: time.now, deadline: Number.POSITIVE_INFINITY, signal: stage.signal, log: () => undefined });
+    await settles(() => held.length === 1);
+    const sent = seen.length;
+    stage.abort();
+    const results = await running;
+    assert.deepEqual([seen.length - sent, service.requests.filter((request) => request.path === "/v1/files").length, service.spawns, results.steps.length], [0, 1, 0, 0]);
+    assert.deepEqual(results.errors, [`uploads: Uploading a file was cancelled. (1 of ${fixture.length} sent)`]);
+  });
+
+  it("ends a retry's wait at once, and makes no further attempt", async () => {
+    const service = new FakeService(() => succeed());
+    service.unavailableReads = 1;
+    const stage = new AbortController();
+    const time = clock();
+    // The interruption comes while the read waits the 4 s the service asked for.
+    const sleep = async (ms: number) => {
+      if (ms === 4_000) stage.abort();
+      await time.sleep(ms);
+    };
+    const api = new SandboxApi(service.transport, { sleep, now: time.now, signal: stage.signal });
+    await assert.rejects(api.operation("op"), /^SandboxCancelledError: Reading an operation was cancelled\.$/);
+    assert.equal(service.requests.length, 1);
+  });
+
+  it("stops a wait under way when its cap moves earlier, instead of keeping the deadline it started with", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const base = clock();
+    let cap = Number.POSITIVE_INFINITY;
+    // After the first poll's wait, the cap moves to now, as the probe's Ctrl+C sets it.
+    const time = { ...base, sleep: async (ms: number) => void (await base.sleep(ms), (cap = base.now())) };
+    const { sandbox } = sandboxOn(service, { time, cap: () => cap });
+    const running = (await sandbox.submit(step("long", { timeoutSeconds: 60 }))) as { operationId: string };
+    await assert.rejects(sandbox.observe(running.operationId, 60), /wasn't seen to end within 1 s/);
+    assert.deepEqual([service.requests.filter((request) => request.method === "GET").length, base.now()], [1, 1_000]);
+  });
+
+  it("keeps cleanup to its own budget: with none left it sends no cancel, and a later one with time settles the operation", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = clock();
+    const journal = new Journal();
+    await sandboxOn(service, { time, journal }).sandbox.submit(step("long", { timeoutSeconds: 60 }));
+    const spent = await sandboxOn(service, { time, journal, cap: () => time.now() }).sandbox.cleanup();
+    assert.deepEqual([spent.cancelled, spent.unresolved.length, service.requests.filter((request) => request.method === "DELETE").length], [[], 1, 0]);
+    const later = await sandboxOn(service, { time, journal }).sandbox.cleanup();
+    assert.deepEqual([later.cancelled.length, later.unresolved, service.operations[0]?.cancelled], [1, [], true]);
+  });
+});
+
 describe("Nebius Sandboxes, offline: subprocesses and downloads (NIV-29)", () => {
   it("starts subprocesses in a live parent, settles a 504 from its events, and leaves one with no spawn event uncertain", async () => {
     const service = new FakeService(() => ({ statuses: ["EXECUTING", "SUCCESS"], waits: true, exitCode: 0 }));
@@ -797,6 +952,12 @@ describe("Nebius Sandboxes, offline: the probe's credentials, and what stage 0 s
     assert.deepEqual([missing.status, /^There's no file at .*absent\.env\. Create it with NEBIUS_API_KEY=/.test(missing.stderr)], [2, true]);
     const inside = probe(["--credentials", join(REPOSITORY, "nebius.env"), "--stage", "0"]);
     assert.deepEqual([inside.status, /is inside the repository, where it could be committed/.test(inside.stderr)], [2, true]);
+    // A file inside is still inside under a folder whose name starts with "..", or reached through a link from outside.
+    const dotted = probe(["--credentials", join(REPOSITORY, "..private", "nebius.env"), "--stage", "0"]);
+    assert.deepEqual([dotted.status, /is inside the repository, where it could be committed/.test(dotted.stderr)], [2, true]);
+    symlinkSync(join(REPOSITORY, "README.md"), join(dir, "linked.env"));
+    const linked = probe(["--credentials", join(dir, "linked.env"), "--stage", "0"]);
+    assert.deepEqual([linked.status, /is inside the repository, where it could be committed/.test(linked.stderr)], [2, true]);
     chmodSync(file, 0o600);
     writeFileSync(file, `NEBIUS_API_KEY=${KEY}\n`);
     const half = probe(["--credentials", file, "--stage", "0"]);
@@ -806,6 +967,30 @@ describe("Nebius Sandboxes, offline: the probe's credentials, and what stage 0 s
     const accepted = probe(["--credentials", file, "--evidence", dir, "--stage", "9"]);
     assert.deepEqual([accepted.status, /^Choose --plan/.test(accepted.stderr), `${accepted.stdout}${accepted.stderr}`.includes(KEY)], [2, true, false]);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("finds a file inside the repository by its real path and whole components, however it is reached", { skip: process.platform === "win32" }, () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nivra repository check ")));
+    const repository = join(root, "repo");
+    mkdirSync(join(repository, "..private"), { recursive: true });
+    writeFileSync(join(repository, "..private", "key.env"), "");
+    writeFileSync(join(repository, "secret.env"), "");
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "key.env"), "");
+    symlinkSync(join(repository, "secret.env"), join(outside, "link.env"));
+    symlinkSync(repository, join(outside, "repo-link"));
+    const cases: Array<[string, boolean]> = [
+      [join(repository, "..private", "key.env"), true],
+      [join(outside, "link.env"), true],
+      [join(outside, "repo-link", "secret.env"), true],
+      [join(repository, "not-yet.env"), true],
+      [join(repository, "..not-yet", "key.env"), true],
+      [join(outside, "key.env"), false],
+      [join(root, "repo-sibling.env"), false],
+    ];
+    assert.deepEqual(cases.map(([path]) => insideRepository(path, repository)), cases.map(([, inside]) => inside));
+    rmSync(root, { recursive: true, force: true });
   });
 
   it("shows the permissions, limits, expiry and images stage 1 needs, and never the token's id", () => {

@@ -1,3 +1,5 @@
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FileRef, OperationStatus, SandboxApi } from "./api.ts";
 import { type Outcome, type Sandbox } from "./sandbox.ts";
 
@@ -45,6 +47,27 @@ export function tokenOutlasts(first: { whoami: unknown; atMs: number }, second: 
   // Expiries are whole seconds: one that moved forward by at least a third of the time between readings was renewed.
   if (typeof before === "number" && after - before >= Math.max(1, (second.atMs - first.atMs) / 3000)) return { ok: true, renewed: true, expiresAt };
   return { ok: after * 1000 - second.atMs >= seconds * 1000, renewed: false, expiresAt };
+}
+
+/** A path as it really is: every symlink followed, and for one that doesn't exist yet, its nearest existing folder's. */
+function canonical(path: string): string {
+  let existing = resolve(path);
+  const rest: string[] = [];
+  while (!existsSync(existing) && dirname(existing) !== existing) {
+    rest.unshift(basename(existing));
+    existing = dirname(existing);
+  }
+  return join(realpathSync.native(existing), ...rest);
+}
+
+/**
+ * Whether a credentials file is inside the repository, where it could be committed. Both paths are compared as they
+ * really are, symlinks followed, and by whole components: `repo/..private/key.env` is inside, and so is a link from
+ * outside to a file inside. A file that isn't there yet is judged by where it would be.
+ */
+export function insideRepository(path: string, repository: string): boolean {
+  const within = relative(canonical(repository), canonical(path));
+  return within === "" || (!isAbsolute(within) && within !== ".." && !within.startsWith(`..${sep}`));
 }
 
 /** The permissions stage 1 uses: spawning (disposable or not), listing to find a lost answer, and cancelling. */
@@ -174,6 +197,8 @@ export interface StageOneContext {
   now: () => number;
   /** The overall deadline, on the same monotonic clock. */
   deadline: number;
+  /** The interruption: once aborted, nothing more is sent, and every step not yet run is marked as such. */
+  signal?: AbortSignal;
   log: (line: string) => void;
 }
 
@@ -194,14 +219,17 @@ function holdsExpected(path: string, bytes: Uint8Array): boolean {
 export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   const results: ProbeResults = { steps: [], subprocesses: [], downloads: [], reattach: null, lostAnswer: null, cancel: null, parentCancel: null, errors: [] };
   const { sandbox } = ctx;
+  const interrupted = () => ctx.signal?.aborted === true;
+  // A spawn whose answer didn't come back stays open in the journal, for cleanup to look for and settle.
+  const lostSpawn = () => new Error(interrupted() ? "the probe was interrupted while its spawn was on its way; cleanup settles it" : "its spawn's answer was lost; it is left for cleanup to settle");
   const timed = async <T>(work: () => Promise<T>): Promise<{ value: T; seconds: number }> => {
     const started = ctx.now();
     const value = await work();
     return { value, seconds: (ctx.now() - started) / 1000 };
   };
   const step = async (id: string, label: string, body: () => Promise<{ operationId: string | null; outcome: Outcome | null; note?: string }>) => {
-    if (ctx.now() > ctx.deadline) {
-      results.steps.push({ id, label, operationId: null, outcome: null, seconds: null, note: "not run: the probe's overall deadline had passed" });
+    if (interrupted() || ctx.now() > ctx.deadline) {
+      results.steps.push({ id, label, operationId: null, outcome: null, seconds: null, note: interrupted() ? "not run: the probe was interrupted" : "not run: the probe's overall deadline had passed" });
       return null;
     }
     ctx.log(`step ${id}: ${label}`);
@@ -218,12 +246,20 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   };
   const run = async (spec: Parameters<Sandbox["submit"]>[0]) => {
     const submitted = await sandbox.submit(spec);
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     return { operationId: submitted.operationId, outcome: await sandbox.observe(submitted.operationId, spec.timeoutSeconds) };
   };
 
+  // An upload is never retried; once one fails, or the probe is interrupted, the rest aren't sent and nothing runs.
   const files: Record<string, FileRef> = {};
-  for (const file of ctx.fixture) files[`/fixture/${file.name}`] = { uuid: (await ctx.api.upload(file.bytes)).uuid };
+  for (const file of ctx.fixture) {
+    try {
+      files[`/fixture/${file.name}`] = { uuid: (await ctx.api.upload(file.bytes)).uuid };
+    } catch (error) {
+      results.errors.push(`uploads: ${error instanceof Error ? error.message : String(error)} (${Object.keys(files).length} of ${ctx.fixture.length} sent)`);
+      return results;
+    }
+  }
 
   const edit = await step("1", "edit", () => run({ label: "edit", command: "/bin/sh", args: ["-c", EDIT], image: ctx.baseImage, files, disposable: false, timeoutSeconds: 60 }));
   const imageA = edit?.resultImage ?? null;
@@ -236,7 +272,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   if (ctx.networkControl) {
     await step("3", "network control", async () => {
       const submitted = await sandbox.networkControl({ approvedUrl: ctx.networkControl, url: ctx.networkControl!, image: ctx.baseImage, baseImage: ctx.baseImage });
-      if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+      if ("uncertain" in submitted) throw lostSpawn();
       return { operationId: submitted.operationId, outcome: await sandbox.observe(submitted.operationId, 30) };
     });
   } else {
@@ -250,7 +286,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   await step("6", "timeout", () => run({ label: "timeout", command: "/bin/sleep", args: ["30"], image: ctx.baseImage, disposable: true, timeoutSeconds: 5 }));
   await step("7", "cancel", async () => {
     const submitted = await sandbox.submit({ label: "cancel", command: "/bin/sleep", args: ["60"], image: ctx.baseImage, disposable: true, timeoutSeconds: 90 });
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     await sandbox.waitFor(submitted.operationId, ["EXECUTING"], 30_000);
     const { value: outcome, seconds } = await timed(() => sandbox.cancel(submitted.operationId));
     results.cancel = { reachedTerminal: outcome !== null, status: outcome?.status ?? null, seconds: outcome ? seconds : null };
@@ -258,7 +294,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   });
   await step("8", "reconnect", async () => {
     const submitted = await sandbox.submit({ label: "reconnect", command: "/bin/sh", args: ["-c", "sleep 10; echo done"], image: ctx.baseImage, disposable: true, timeoutSeconds: 60 });
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     await ctx.api.operation(submitted.operationId, { until: ctx.deadline });
     // Everything in memory is dropped; a fresh client reattaches from what the journal holds.
     const fresh = ctx.reconnect();
@@ -277,7 +313,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   });
   await step("10", "parent", async () => {
     const submitted = await sandbox.submit({ label: "parent", command: "/bin/sh", args: ["-c", PARENT], image: ctx.baseImage, files, disposable: false, timeoutSeconds: 180 });
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     await sandbox.waitFor(submitted.operationId, ["EXECUTING"], 60_000);
     let printed = new Map<string, string>();
     const inside: Array<[string, string[], Record<string, string>?]> = [
@@ -323,7 +359,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   });
   await step("11", "parent cancel", async () => {
     const submitted = await sandbox.submit({ label: "parent cancel", command: "/bin/sh", args: ["-c", PARENT], image: ctx.baseImage, files, disposable: true, timeoutSeconds: 180 });
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     await sandbox.waitFor(submitted.operationId, ["EXECUTING"], 60_000);
     const spawned = await sandbox.subprocess(submitted.operationId, { label: "sleeper", command: "/bin/sleep", args: ["60"] });
     const { value: outcome, seconds } = await timed(() => sandbox.cancel(submitted.operationId));
