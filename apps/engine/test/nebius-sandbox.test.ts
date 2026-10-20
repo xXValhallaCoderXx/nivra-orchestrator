@@ -47,6 +47,9 @@ interface FakeOperation {
 
 const encode = (value: unknown, status = 200, headers: Record<string, string> = {}): TransportResponse => ({ status, headers, body: new TextEncoder().encode(value === undefined ? "" : JSON.stringify(value)) });
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+/** What a working edit and test leave behind: the patch holding the edit, and the report holding the passing test. */
+const REPORT = "PASS: Hello, Nivra\n";
+const PATCH = '--- base/greet.sh\n+++ work/greet.sh\n-echo "Hello, world"\n+echo "Hello, Nivra"\n';
 
 /** The service: operations as state machines, with faults a test can switch on. */
 class FakeService {
@@ -185,7 +188,7 @@ class FakeService {
       const next = op.subprocesses.size + 2;
       const args = [body.command, ...body.args].join(" ");
       const exitCode = /test\.sh Hello, world$/.test(args) ? 1 : 0;
-      const stdout = /cat \/work\/greet\.sh/.test(args) ? 'echo "Hello, Nivra"\n' : /sha256sum/.test(args) ? `${sha("PASS: Hello, Nivra\n")}  /out/report.txt\n${sha("--- base/greet.sh\n")}  /out/patch.diff\n` : /wget/.test(args) ? "BLOCKED http://example.test: bad address\n" : "";
+      const stdout = /cat \/work\/greet\.sh/.test(args) ? 'echo "Hello, Nivra"\n' : /sha256sum/.test(args) ? `${sha(REPORT)}  /out/report.txt\n${sha(PATCH)}  /out/patch.diff\n` : /wget/.test(args) ? "BLOCKED http://example.test: bad address\n" : "";
       op.subprocesses.set(next, { args: [body.command, ...body.args], exitCode, stdout, stopped: false, pending: this.subprocessPending });
       op.events.push(`data: ${JSON.stringify({ type: "spawn", spid: next, env: body.env })}`);
       if (/touch \/tmp\/nivra-done/.test(args)) op.finishedBySubprocess = true;
@@ -588,18 +591,10 @@ function probeService(options: { controlWorks: boolean }) {
     if (/sed -i/.test(args) && /ls \/sys\/class\/net/.test(args)) return succeed({ stdout: "interfaces: lo ", resultImage: "img-A" });
     if (/CONTINUED/.test(args)) return succeed({ stdout: "CONTINUED\nBLOCKED http://example.test/: bad address\nBLOCKED http://93.184.215.14/: network is unreachable\n" });
     if (/test\.sh Hello, world/.test(args)) return succeed({ exitCode: 1, stdout: "FAIL: expected 'Hello, world', got 'Hello, Nivra'" });
-    if (/sha256sum/.test(args)) {
-      const report = "PASS: Hello, Nivra\n";
-      const patch = "--- base/greet.sh\n+++ work/greet.sh\n-echo \"Hello, world\"\n+echo \"Hello, Nivra\"\n";
-      return succeed({ stdout: `${sha(report)}  /out/report.txt\n${sha(patch)}  /out/patch.diff\n`, resultImage: "img-D", files: { "/out/report.txt": report, "/out/patch.diff": patch } });
-    }
+    if (/sha256sum/.test(args)) return succeed({ stdout: `${sha(REPORT)}  /out/report.txt\n${sha(PATCH)}  /out/patch.diff\n`, resultImage: "img-D", files: { "/out/report.txt": REPORT, "/out/patch.diff": PATCH } });
     if (/sleep 30/.test(args)) return { statuses: ["EXECUTING", "SUCCESS"], exitCode: null, timedOut: true };
     if (/sleep 60/.test(args)) return { statuses: ["EXECUTING"], waits: true };
-    if (/nivra-done/.test(args)) {
-      const report = "PASS: Hello, Nivra\n";
-      const patch = "--- base/greet.sh\n";
-      return { statuses: ["EXECUTING", "SUCCESS"], waits: true, exitCode: 0, resultImage: "img-P", files: { "/out/report.txt": report, "/out/patch.diff": patch } };
-    }
+    if (/nivra-done/.test(args)) return { statuses: ["EXECUTING", "SUCCESS"], waits: true, exitCode: 0, resultImage: "img-P", files: { "/out/report.txt": REPORT, "/out/patch.diff": PATCH } };
     return succeed({ stdout: "done" });
   });
 }
@@ -669,7 +664,7 @@ function passing(seconds: { a: number; b: number }): ProbeResults {
   const done = (id: string, label: string, result: Outcome): StepResult => ({ id, label, operationId: result.operationId, outcome: result, seconds: seconds.a, note: "" });
   const inside = (label: string, exitCode: number, stdout = ""): SubprocessResult => ({ label, exitCode, seconds: seconds.b, stdout });
   const denied = "CONTINUED\nBLOCKED http://example.test/: bad address\n";
-  const download = (step: string, path: string) => ({ step, path, bytes: 10, sha256: sha(path), matched: true });
+  const download = (step: string, path: string) => ({ step, path, bytes: 10, sha256: sha(path), matched: true, holds: true });
   return {
     steps: [
       done("1", "edit", outcome("interfaces: lo ", { exit_code: 0 }, "SUCCESS", "img-A")),
@@ -713,6 +708,14 @@ describe("Nebius Sandboxes, offline: each pattern judged on its own evidence (NI
     assert.deepEqual([judged.patterns.map((p) => p.outcome), judged.decision, judged.pattern], [["defer", "defer"], "defer", null]);
     const working = evaluate(passing({ a: 45, b: 1 }));
     assert.deepEqual([working.patterns.map((p) => p.outcome), working.decision, working.pattern], [["defer", "adopt"], "adopt", "B"]);
+  });
+
+  it("fails a patch that matches its hash but doesn't hold the edit: an empty or failed diff matches its own hash too", () => {
+    const run = passing({ a: 5, b: 1 });
+    run.downloads = run.downloads.map((d) => (d.step === "10" && d.path.endsWith("patch.diff") ? { ...d, holds: false } : d));
+    const judged = evaluate(run);
+    const patch = judged.patterns[1]?.verdicts.find((v) => v.id === "patch");
+    assert.deepEqual([patch?.outcome, patch?.detail, judged.patterns[1]?.outcome, judged.pattern], ["fail", "2 of 2 download(s) matched their hashes; 1 held what they should", "defer", "A"]);
   });
 
   it("holds a parent whose running subprocess was never reported stopped as inconclusive, never as passed", () => {

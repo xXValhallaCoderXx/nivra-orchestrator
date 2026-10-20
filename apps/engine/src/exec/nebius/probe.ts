@@ -120,7 +120,8 @@ export interface SubprocessResult {
 export interface ProbeResults {
   steps: StepResult[];
   subprocesses: SubprocessResult[];
-  downloads: Array<{ step: string; path: string; bytes: number; sha256: string; matched: boolean }>;
+  /** Each file retrieved: whether it matched the hash the operation printed, and whether it holds what it should. */
+  downloads: Array<{ step: string; path: string; bytes: number; sha256: string; matched: boolean; holds: boolean }>;
   reattach: { sameOperation: boolean; spawns: number } | null;
   lostAnswer: { found: boolean; spawns: number; detail: string } | null;
   cancel: { reachedTerminal: boolean; status: OperationStatus | "UNKNOWN" | null; seconds: number | null } | null;
@@ -145,6 +146,17 @@ export interface StageOneContext {
 }
 
 const shaLines = (stdout: string) => new Map([...stdout.matchAll(/^([0-9a-f]{64})\s+(\S+)$/gm)].map((match) => [match[2]!, match[1]!]));
+
+/**
+ * Whether a retrieved file holds what it should, beyond matching its hash: the patch, the edit (an empty or failed diff
+ * would match its own hash too); the report, the passing test.
+ */
+function holdsExpected(path: string, bytes: Uint8Array): boolean {
+  const text = new TextDecoder().decode(bytes);
+  if (path.endsWith("patch.diff")) return text.includes('-echo "Hello, world"') && text.includes('+echo "Hello, Nivra"');
+  if (path.endsWith("report.txt")) return text.includes("PASS: Hello, Nivra");
+  return false;
+}
 
 /** Runs stage 1. Each step's failure is recorded and the next goes on; the deadline stops it; cleanup is the caller's. */
 export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
@@ -278,7 +290,7 @@ async function fetchFiles(ctx: StageOneContext, results: ProbeResults, step: str
       const expected = printed.get(path) ?? null;
       const { bytes, sha256 } = await ctx.sandbox.download(image, path, left, expected);
       left -= bytes.byteLength;
-      results.downloads.push({ step, path, bytes: bytes.byteLength, sha256, matched: expected !== null && expected === sha256 });
+      results.downloads.push({ step, path, bytes: bytes.byteLength, sha256, matched: expected !== null && expected === sha256, holds: holdsExpected(path, bytes) });
     } catch (error) {
       results.errors.push(`${step} download ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -334,12 +346,12 @@ export function evaluate(results: ProbeResults): { patterns: PatternJudgement[];
     const blocked = (stdout.match(/^BLOCKED /gm) ?? []).length;
     return verdict("network", NETWORK, blocked >= 1 ? "pass" : "inconclusive", `${blocked} attempt(s) blocked${extra}; the control connected`);
   };
-  const PATCH = "The patch and report are retrieved, with matching hashes";
+  const PATCH = "The patch and report are retrieved, with matching hashes, holding the edit and the passing test";
   const patch = (step: string): Verdict => {
     const downloads = results.downloads.filter((d) => d.step === step);
-    const matched = downloads.filter((d) => d.matched);
-    const both = matched.some((d) => d.path.endsWith("patch.diff")) && matched.some((d) => d.path.endsWith("report.txt"));
-    return verdict("patch", PATCH, both ? "pass" : downloads.length ? "fail" : "not-run", `${matched.length} of ${downloads.length} download(s) matched`);
+    const good = downloads.filter((d) => d.matched && d.holds);
+    const both = good.some((d) => d.path.endsWith("patch.diff")) && good.some((d) => d.path.endsWith("report.txt"));
+    return verdict("patch", PATCH, both ? "pass" : downloads.length ? "fail" : "not-run", `${downloads.filter((d) => d.matched).length} of ${downloads.length} download(s) matched their hashes; ${good.length} held what they should`);
   };
 
   const timeout = out("6");
