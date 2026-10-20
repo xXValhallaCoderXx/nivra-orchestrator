@@ -199,6 +199,36 @@ pnpm probe:sandbox --credentials <file> --recover <evidence folder>
   - A second Ctrl+C stops cleanup.
   - `--recover` finishes the rest later from the journal, on the same budget.
 
+The council evaluation (NIV-40) compares the council with a single reviewer on five synthetic plans. It is an explicit
+check, never part of `verify`, and its paid batch runs only after Nate approves its digest:
+
+```bash
+pnpm council:eval --plan                                           # the request for approval: every run, limit and rule; no network
+pnpm council:eval --token-factory-url <loopback url> --out <dir>   # the same batch against a stub, as the tests run it
+pnpm council:eval --credentials <file> --approved <digest>         # the paid batch: 10 runs, at most 20 requests
+pnpm council:eval --resume <dir> [--credentials <file> --approved <digest> | --token-factory-url <url>]
+pnpm council:eval --score <dir>                                    # once the sheet is labelled: the scores and the decision
+```
+
+- **Frozen inputs.** Five plans, `apps/engine/test/fixtures/council-eval/plans/f1…f5.json`, are exactly what both arms
+  are sent: no repository, no path, no conversation, and no preferences. F5 is the control, a sound plan. The rubric
+  (`rubric.json`) and the protocol (`protocol.json`) are never sent. The approval digest covers all three, read as
+  data, and a test pins it.
+- **The paid batch refuses to start** unless the digest is the one approved, the protocol says who labels the sheet,
+  and the working tree is committed, so the revision it records is exact. The credentials file follows the sandbox
+  probe's rules: outside the repository, `chmod 600`, a `NEBIUS_API_KEY=…` line.
+- **Each request is journalled before it is sent,** and nothing is retried or retaken. A batch that was killed is
+  resumed with `--resume`: a run that was out is found by its request id on the same engine home and followed to its
+  end, never sent again.
+- **Scoring doesn't trust the model.**
+  - The rubric's stems read each reviewer finding.
+  - `sheet.json` is the blinded sheet: shuffled by the protocol's seed, with no arm, role or finding id on it. The key
+    is in `sheet-key.json`.
+  - A person (or Claude, blind, with Nate reviewing) fills each line's `label`. `--score` then decides from the labels
+    alone, with the automatic-only scores beside them.
+- **Evidence** goes to `~/nivra-acceptance/council-eval-<UTC>-<revision>/` (0700): the journal, every run's summary,
+  events and report, the engine's home and log, the sheet and its key, the scores and `decision.md`.
+
 ## Where things will live
 
 | What | Where |
