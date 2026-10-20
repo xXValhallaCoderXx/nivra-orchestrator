@@ -1,0 +1,44 @@
+{
+  "version": "nivra.council-eval.protocol.v1",
+  "fixtures": ["f1", "f2", "f3", "f4", "f5"],
+  "order": "Each fixture in turn, f1 to f5, one run at a time. The single reviewer goes first on f1, f3 and f5, the council on f2 and f4.",
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "endpoint": "token-factory",
+  "sampling": { "temperature": null, "topP": null, "maxOutputTokens": 4000, "toolChoice": "forced" },
+  "limits": {
+    "single": { "requests": 1, "totalMs": 180000, "outputTokensPerRequest": 4000, "estimatedInputTokens": 60000 },
+    "council": { "requests": 3, "totalMs": 330000, "outputTokensPerRequest": 4000, "estimatedInputTokens": 120000 }
+  },
+  "requestMs": 150000,
+  "runner": { "cancelMarginMs": 30000, "reconcileMs": 30000, "batchMs": 3600000, "maxRequests": 20 },
+  "preferences": { "revision": 0, "records": [] },
+  "stops": [
+    "Before each run, with no inference request, nothing is sent when: the engine's endpoint (from doctor) isn't Token Factory; the model the engine would pick from Token Factory's listing (read with the engine's own client and pick) isn't the protocol's; or the sampling the engine gives that model isn't the protocol's.",
+    "After each run, as a second check: its recorded route, model or sampling isn't the protocol's.",
+    "A run fails with auth or rate-limit.",
+    "A run makes more requests than its arm allows.",
+    "A run still going when its window to settle after a cancel has passed: it is kept as unresolved, and never sent again.",
+    "The next run, with its windows to cancel and to settle, could not end within the batch's 60 minutes."
+  ],
+  "labelling": "nate",
+  "seed": 20261021,
+  "decision": {
+    "inconclusive": "Fewer than 4 fixtures have a report from both arms.",
+    "defer": "Any of: the council's known defects plus useful novel findings are no more than the single reviewer's; the council has at least 3 more unsupported findings; the council has at least 2 more false alarms on the control; at most 2 of the council's 5 runs are complete.",
+    "adopt": "All of: the council finds at least 2 more known defects; at least 3 more known defects plus useful novel findings; at most 1 more unsupported finding; no more false alarms on the control; at least 4 of its 5 runs complete; a median latency ratio of at most 3.0; a median token ratio of at most 5.0, or unknown and said so; actionability no more than 0.10 below the single reviewer's.",
+    "simplify": "Anything else.",
+    "thresholds": {
+      "minFixturesBothReported": 4,
+      "deferUnsupportedMargin": 3,
+      "deferFalseAlarmMargin": 2,
+      "deferCompleteAtMost": 2,
+      "adoptKnownMargin": 2,
+      "adoptKnownPlusNovelMargin": 3,
+      "adoptUnsupportedMargin": 1,
+      "adoptCompleteAtLeast": 4,
+      "adoptLatencyRatio": 3.0,
+      "adoptTokenRatio": 5.0,
+      "adoptActionabilityMargin": 0.1
+    }
+  }
+}

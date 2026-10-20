@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import type { ChatResult, HistoryRecord } from "@nivra/domain";
+import type { ChatResult, HistoryRecord, ReviewPanel, ReviewReport } from "@nivra/domain";
 import { str, strOrNull, type Row, type WorkspaceDb } from "./workspace-db.ts";
 
 /**
- * The workspace's records (D26), as plain functions over the open database: conversations now, their turns, tasks and
- * the versions of plans and briefs as they arrive. No Electron (D12), so `node --test` drives them directly.
+ * The workspace's records (D26), as plain functions over the open database: conversations, their turns, tasks, the
+ * versions of plans and briefs, and reviews of plan versions (D31). No Electron (D12), so `node --test` drives them
+ * directly.
  */
 
 export interface ConversationRecord {
@@ -62,9 +63,14 @@ export type TurnStatus = "submitting" | "running" | "answered" | "failed" | "can
 export type CancelReason = "person" | "sharing" | "removal" | "deletion";
 const OPEN = "('submitting', 'running')";
 
+/**
+ * A conversation's run link: a turn (`chat`) or a review of a plan version (`review`, D31). Both are sent, followed,
+ * cancelled and stopped the same way; only how an ended run is read differs.
+ */
 export interface TurnRecord {
   id: string;
   conversationId: string;
+  workflowId: string;
   /** The host session that started it: only that session's own submission is ever still in flight. */
   sessionId: string;
   targetId: string;
@@ -100,6 +106,7 @@ export interface MessageRecord {
 const turnOf = (row: Row): TurnRecord => ({
   id: str(row["id"]),
   conversationId: str(row["conversation_id"]),
+  workflowId: str(row["workflow_id"]),
   sessionId: str(row["session_id"]),
   targetId: str(row["target_id"]),
   homeId: strOrNull(row["home_id"]),
@@ -203,7 +210,7 @@ export function settleTurn(
  */
 export function projectAnswer(workspace: WorkspaceDb, turnId: string, answer: { id: string; text: string; reply: ChatResult; createdAt: string }): boolean {
   return workspace.tx((db) => {
-    const row = db.prepare(`SELECT conversation_id FROM run_links WHERE id = ? AND status IN ${OPEN}`).get(turnId);
+    const row = db.prepare(`SELECT conversation_id FROM run_links WHERE id = ? AND workflow_id = 'chat' AND status IN ${OPEN}`).get(turnId);
     if (!row) return false;
     const conversationId = str(row["conversation_id"]);
     db.prepare("INSERT INTO messages (id, conversation_id, seq, role, text, reply_json, run_link_id, created_at) VALUES (?, ?, ?, 'assistant', ?, ?, ?, ?)").run(
@@ -231,12 +238,15 @@ export function turnByRun(workspace: WorkspaceDb, runId: string): TurnRecord | n
   return row ? turnOf(row) : null;
 }
 
-/** A conversation's turns, oldest first. */
+/** A conversation's turns, oldest first: its messages' run links, never its reviews. */
 export function turnsOf(workspace: WorkspaceDb, conversationId: string): TurnRecord[] {
-  return workspace.db.prepare("SELECT * FROM run_links WHERE conversation_id = ? ORDER BY created_at, rowid").all(conversationId).map(turnOf);
+  return workspace.db.prepare("SELECT * FROM run_links WHERE conversation_id = ? AND workflow_id = 'chat' ORDER BY created_at, rowid").all(conversationId).map(turnOf);
 }
 
-/** Turns still submitting or running: of one conversation, or of every conversation about one project. */
+/**
+ * Run links still submitting or running, turns and reviews alike: of one conversation, or of every conversation about
+ * one project. Everything that stops a conversation's work (a cancel, a deletion, consent withdrawn) goes through this.
+ */
 export function openTurns(workspace: WorkspaceDb, of: { conversationId: string } | { projectId: string }): TurnRecord[] {
   const rows =
     "conversationId" in of
@@ -405,4 +415,132 @@ export function attemptsOf(workspace: WorkspaceDb, taskId: string): Array<{ id: 
     .prepare("SELECT id, brief_id, status, created_at FROM run_links WHERE task_id = ? ORDER BY created_at, rowid")
     .all(taskId)
     .map((row) => ({ id: str(row["id"]), briefId: str(row["brief_id"]), status: str(row["status"]) as TurnStatus, createdAt: str(row["created_at"]) }));
+}
+
+/** A review of one saved plan version (D31): what it was bound to, the report its engine saved, and its run link. */
+export interface ReviewRecord {
+  /** The run link's id, sent as the request id. */
+  id: string;
+  conversationId: string;
+  planId: string;
+  planLineage: string;
+  planVersion: number;
+  /** The plan version's own fingerprint, recorded only: the version is immutable. */
+  planSha256: string;
+  panel: ReviewPanel;
+  packetDigest: string;
+  preferencesDigest: string;
+  /** Where the plan came from, frozen when the review was asked for: the project's label is kept after it is removed. */
+  scope: { kind: "general" } | { kind: "project"; projectId: string; projectLabel: string | null; headAtStart: string | null };
+  /** The engine's report, masked again, kept once when the review ended; null until then, or when it ended without one. */
+  report: ReviewReport | null;
+  reportedAt: string | null;
+  createdAt: string;
+  link: TurnRecord;
+}
+
+const REVIEW_COLUMNS =
+  "reviews.id AS review_id, reviews.plan_id, reviews.plan_lineage, reviews.plan_version, reviews.plan_sha256, reviews.panel, reviews.packet_digest, reviews.preferences_digest, reviews.scope_kind, reviews.project_id AS scope_project_id, reviews.project_label AS scope_project_label, reviews.head_at_start, reviews.report_json, reviews.reported_at, run_links.*";
+
+const reviewOf = (row: Row): ReviewRecord => {
+  const link = turnOf(row);
+  return {
+    id: str(row["review_id"]),
+    conversationId: link.conversationId,
+    planId: str(row["plan_id"]),
+    planLineage: str(row["plan_lineage"]),
+    planVersion: Number(row["plan_version"]),
+    planSha256: str(row["plan_sha256"]),
+    panel: str(row["panel"]) === "single" ? "single" : "council",
+    packetDigest: str(row["packet_digest"]),
+    preferencesDigest: str(row["preferences_digest"]),
+    scope:
+      str(row["scope_kind"]) === "project"
+        ? { kind: "project", projectId: str(row["scope_project_id"]), projectLabel: strOrNull(row["scope_project_label"]), headAtStart: strOrNull(row["head_at_start"]) }
+        : { kind: "general" },
+    report: row["report_json"] ? (JSON.parse(str(row["report_json"])) as ReviewReport) : null,
+    reportedAt: strOrNull(row["reported_at"]),
+    createdAt: link.createdAt,
+    link,
+  };
+};
+
+/**
+ * Starts a review (D31): its run link and what it is bound to, in one transaction, before anything is sent. Refused
+ * (false) while the conversation has a turn or a review still open: one at a time, however quickly two arrive.
+ */
+export function insertReview(
+  workspace: WorkspaceDb,
+  review: Omit<ReviewRecord, "report" | "reportedAt" | "link">,
+  link: Pick<TurnRecord, "sessionId" | "targetId" | "preferences">,
+): boolean {
+  return workspace.tx((db) => {
+    if (db.prepare(`SELECT 1 FROM run_links WHERE conversation_id = ? AND status IN ${OPEN}`).get(review.conversationId)) return false;
+    db.prepare("INSERT INTO run_links (id, conversation_id, session_id, workflow_id, target_id, status, preferences_json, created_at) VALUES (?, ?, ?, 'review', ?, 'submitting', ?, ?)").run(
+      review.id,
+      review.conversationId,
+      link.sessionId,
+      link.targetId,
+      JSON.stringify(link.preferences),
+      review.createdAt,
+    );
+    const project = review.scope.kind === "project" ? review.scope : null;
+    db.prepare(
+      "INSERT INTO reviews (id, conversation_id, plan_id, plan_lineage, plan_version, plan_sha256, panel, packet_digest, preferences_digest, scope_kind, project_id, project_label, head_at_start, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      review.id,
+      review.conversationId,
+      review.planId,
+      review.planLineage,
+      review.planVersion,
+      review.planSha256,
+      review.panel,
+      review.packetDigest,
+      review.preferencesDigest,
+      review.scope.kind,
+      project?.projectId ?? null,
+      project?.projectLabel ?? null,
+      project?.headAtStart ?? null,
+      review.createdAt,
+    );
+    db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(review.createdAt, review.conversationId);
+    return true;
+  });
+}
+
+export function getReview(workspace: WorkspaceDb, id: string): ReviewRecord | null {
+  const row = workspace.db.prepare(`SELECT ${REVIEW_COLUMNS} FROM reviews JOIN run_links ON run_links.id = reviews.id WHERE reviews.id = ?`).get(id);
+  return row ? reviewOf(row) : null;
+}
+
+/** A conversation's reviews, oldest first. */
+export function reviewsOf(workspace: WorkspaceDb, conversationId: string): ReviewRecord[] {
+  return workspace.db
+    .prepare(`SELECT ${REVIEW_COLUMNS} FROM reviews JOIN run_links ON run_links.id = reviews.id WHERE reviews.conversation_id = ? ORDER BY reviews.created_at, run_links.rowid`)
+    .all(conversationId)
+    .map(reviewOf);
+}
+
+/**
+ * Ends an open review, in one transaction: its run link's outcome, and the report its engine saved, when there is one.
+ * A complete report ends it as answered. A review that already ended keeps its first outcome and its first report, and
+ * one deleted meanwhile gets nothing.
+ */
+export function settleReview(
+  workspace: WorkspaceDb,
+  id: string,
+  outcome: { status: Exclude<TurnStatus, "submitting" | "running">; errorKind?: string | null; errorMessage?: string | null },
+  report: ReviewReport | null,
+  at: string,
+): boolean {
+  return workspace.tx((db) => {
+    const settled = Number(
+      db
+        .prepare(`UPDATE run_links SET status = ?, error_kind = ?, error_message = ?, settled_at = ? WHERE id = ? AND workflow_id = 'review' AND status IN ${OPEN}`)
+        .run(outcome.status, outcome.errorKind ?? null, outcome.errorMessage ?? null, at, id).changes,
+    );
+    if (settled !== 1) return false;
+    if (report) db.prepare("UPDATE reviews SET report_json = ?, reported_at = ? WHERE id = ? AND report_json IS NULL").run(JSON.stringify(report), at, id);
+    return true;
+  });
 }

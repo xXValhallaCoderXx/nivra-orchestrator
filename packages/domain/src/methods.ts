@@ -3,6 +3,7 @@ import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { RunContext } from "./context.ts";
 import { ExplainResult } from "./explain.ts";
 import { ModelEndpoint, ModelFailureKind } from "./models.ts";
+import { ReviewContext, ReviewInput, ReviewReport } from "./review.ts";
 import { ExplainInput, HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
 
 /**
@@ -74,6 +75,8 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   z.strictObject({ ...RunRequest, workflowId: z.literal("explain"), input: ExplainInput }),
   // A conversation's turn carries the conversation so far as well (D26), held in memory like the snapshot.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ChatContext, workflowId: z.literal("chat"), input: ChatInput }),
+  // A review of a saved plan version carries the frozen packet too (D30), held in memory like the snapshot.
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ReviewContext, workflowId: z.literal("review"), input: ReviewInput }),
 ]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
@@ -158,6 +161,11 @@ export const Methods = {
   "runs.result": { params: z.strictObject({ runId: RunId }), result: ExplainResult.nullable() },
   /** A chat run's stored reply; null until it has one. */
   "runs.reply": { params: z.strictObject({ runId: RunId }), result: ChatResult.nullable() },
+  /**
+   * A review run's report (D30), whatever the run's status: in progress, partial or complete. A report the engine
+   * saved before it stopped reads as interrupted. Null until there is one.
+   */
+  "runs.review": { params: z.strictObject({ runId: RunId }), result: ReviewReport.nullable() },
 } as const satisfies Record<string, { params: z.ZodType; result: z.ZodType }>;
 
 export type MethodName = keyof typeof Methods;

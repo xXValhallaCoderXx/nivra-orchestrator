@@ -82,7 +82,7 @@ export async function buildMap(reader: RepoReader, head: string | null): Promise
       });
     } catch (error) {
       if (!(error instanceof RepoError) && !(error instanceof SyntaxError)) throw error;
-      manifests.push({ path, unreadable: error instanceof SyntaxError ? "not valid JSON" : error.message });
+      manifests.push({ path, unreadable: error instanceof RepoError ? error.message : "not valid JSON" });
     }
   }
 

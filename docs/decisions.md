@@ -1302,3 +1302,341 @@ evidence (D27), against thresholds agreed before it ran.
   Images are kept for 180 days, after which untagged ones may be deleted. No API deletes uploads or records.
 - **Evidence:** `docs/acceptance.md`, *Nebius Sandboxes, live (D28, NIV-29)*. The evidence folders under
   `~/nivra-acceptance/` hold the journals, results and reports, with the key and project id replaced.
+
+## D29. An answer without findings is asked for them once and labelled; only Nivra's own words leave the engine, with one safe diagnostic per failure (2026-10-20)
+
+**Decision.**
+- **NIV-26: a missing `findings` costs at most one refusal.**
+  - `findings` defaults to none. An answer that leaves it out now reaches the gate. Before, the schema refused it, and
+    the whole answer was lost.
+  - The gate asks for findings once, with the shape a finding takes. `MAX_FINDINGS_REFUSALS = 1` is the visible bound.
+  - **It asks only while another answer fits** (`canAnswerAgain`):
+    - a step is left;
+    - the answer isn't due because of the time or the budget;
+    - once the answer is due, the model is one known to honour a forced answer.
+
+    A run allowed one call never makes a repair request.
+  - This departs from D23's "refuse only when the answer isn't due". The answer steps are kept so that a turned-down
+    answer can be given again, and an answer with nothing established is worth one of them.
+  - The next answer is taken as it is. Nothing is made up to fill it.
+- **An answer's standing is recorded and shown.**
+  - The standings:
+    - `established`: a finding cites lines the model was shown;
+    - `unsupported`: there are findings, but none cites such lines;
+    - `no-findings`.
+  - The window never shows the last two as a green "succeeded". A yellow label says what they are, and the status
+    badge says "no findings" or "not supported".
+  - The run itself succeeds, so the standing is what a reader must check.
+- **What refusals cost is recorded:** the steps of the answers turned down, their tokens as reported (null once one
+  didn't say) and their time. A run that ends `malformed` names its refusals by cause.
+- **The summary and each finding are trimmed,** which settles D27's follow-up.
+- **Protocol 6.** The explain result gains fields with defaults, as at protocol 4, so a host and an engine that don't
+  match are refused at `initialize`, never part-way through reading a result.
+- **NIV-27: only Nivra's own words leave the engine.** That means RPC errors, stored failures, step events, logs and
+  `mastra.db`.
+  - **The words** come from Nivra's own messages, chosen by safe codes.
+  - **They are filled only with safe values:** numbers, codes, platform names, the git subcommands Nivra runs, and a
+    repository-relative path the model itself asked for.
+  - **Never:** an error's own message, a command's stderr, a spawn error's text, or an absolute path.
+  - **Allowlisting an error's class doesn't make its message safe.**
+    - `RepoError` now has codes, and its messages carry neither git's stderr nor the project's path.
+    - An execution boundary's errors (`ExecRefusedError`, `BoundaryUnavailableError`, which are Track B's) become
+      fixed refusals at Track A's own boundary. A note on NIV-41 proposes codes for them.
+  - **One guard on every workflow step.** Anything a step throws that isn't a failure Nivra wrote becomes `internal`,
+    named at most by an allowlisted class, with its facts.
+- **One diagnostic per failure.**
+  - A failed run, a failed request or a crash writes one line to the engine's log: `diagnostic {json}`, at most 1,000
+    characters.
+  - The line holds:
+    - a code from a closed list;
+    - the stage;
+    - the run, request, workflow, step or RPC id;
+    - safe counts;
+    - the error's facts: up to four allowlisted classes, a known errno, how deep its causes go, and its message's
+      length, never its words.
+  - The launcher replaces Node's own report of an uncaught error with a diagnostic, and an `engine.fatal` `crashed` in
+    Nivra's words.
+- **The contract for others.** `apps/engine/src/diagnostics.ts` imports neither Mastra nor the model client.
+  - NIV-38 uses it for the review's failures.
+  - Track B can use its codes with stages of its own.
+
+**Why.**
+- **NIV-26's two cases are different.**
+  - D24's live run lost three forced answers (1.8k–2.8k output tokens each) to the schema, then ended `malformed`
+    after 16 steps.
+  - The rehearsal's first answer (20 October) had no findings at all, and showed as a plain success.
+  - Defaulting the list fixes the first and lets the gate see the second. The label keeps both honest.
+- **One refusal, not three.** A model that left `findings` out three times in a row wasn't going to give them on a
+  fourth try. The bound turns a costly loop into one step, and the step's cost is recorded.
+- **Masking known keys isn't enough.**
+  - NIV-27's reproduction, a key holding a newline, is masked only because the key is known.
+  - Git's stderr, a spawn error's path, or a provider's text can hold anything private, and nothing recognises it.
+  - The only safe course is to never carry the words.
+- **A diagnostic says enough to act on.** The provider check that once failed with "(TypeError)" and an empty log now
+  leaves a line naming the stage (`models.list`), the request and the error's class.
+
+**Consequences.**
+- **Amends D22:** "named by its class only" now means an allowlisted class only. Any other reads as unknown.
+- **Supersedes NIV-27's original proposal,** to log an error's name and message after `vault.mask`.
+- **A repair costs one extra step at most,** against three refused answers before. In D24's run a step averaged about
+  11,700 input tokens, and each refused answer had cost 1.8k–2.8k output tokens.
+- **Still not covered: startup failures before `initialize`.**
+  - Their text can carry an error's words: the `engine.fatal` text for a home that can't be opened, or a runtime that
+    can't load, and the supervisor's log tail.
+  - At that point no key or repository is held.
+  - So can Mastra's own validation errors about step data, which is ids and counts only.
+- **Every failed run now writes a diagnostic line,** expected kinds included.
+- **Older engines.** An engine before protocol 6 can't read results stored after it, so development and test homes are
+  per track (`~/.nivra-dev-track-a`, `~/.nivra-dev-track-b`).
+- **`findings` is no longer required** in the schema the model sees. The description and the one refusal make up for
+  it. A3's live runs will show how often an answer comes without findings.
+- **Evidence:** `docs/acceptance.md`, *Answer reliability and safe diagnostics (D29, NIV-26, NIV-27)*.
+
+## D30. Plan review: two independent reviewers and a chair within one reserved budget, bound to the plan version; and an estimated input budget for every run that reads a repository (2026-10-20)
+
+**Decision.**
+- **The review contract** (`packages/domain/src/review.ts`) was recorded before the runtime.
+  - **What a review run takes:**
+    - a saved plan's id and version;
+    - a panel;
+    - two fingerprints: the packet's and the preferences'.
+  - **What travels in the run's context,** held in memory (D21):
+    - the packet: the plan's text, its assumptions, its historical references and its scope;
+    - the preferences.
+
+    No path or project id is in it (D17).
+  - **The packet's fingerprint.** `packetDigest` is a versioned, fixed-order SHA-256 that both sides work out, pinned
+    by a test vector. The engine checks both fingerprints before any request.
+  - **The panel** is `council`, which the window offers, or `single`: one reviewer covering both briefs, the baseline
+    A3 compares the council with.
+  - **The report is self-contained and bounded.** It holds:
+    - what it was bound to;
+    - findings with ids the engine gives;
+    - each finding's basis: `plan` or `assumption`, read from its references. A historical reference is an address
+      and never makes evidence;
+    - the chair's agreements and dissent, by finding id and the reviewers behind them;
+    - `unaddressed`: the findings the chair named nowhere;
+    - each stage's own outcome;
+    - usage as reported;
+    - a budget record that keeps the hard limits apart from the estimate.
+
+    Its outcome says how complete it is, never whether the plan is sound: there is no verdict field.
+  - **Elsewhere in the protocol:** protocol 7; `runs.review`; the kind `budget-exhausted`; the due reason `run-budget`.
+- **The run.**
+  - **Two fixed roles:** architecture, feasibility and scope; and risks, failure behaviour and testability. Both read
+    the same message, byte for byte, and neither sees the other's report. The chair gets the packet and both reports.
+  - **At most three requests:** one per reviewer, one for the chair. No repair call, no retry, no tool loop.
+  - **A reviewer whose answer can't be used** fails its stage as `malformed`: a reply in text, a schema refusal, an
+    empty review, or an answer cut off. A review with no findings and a summary is a valid "no material issues"
+    review. The chair runs only when both reports are in.
+  - **The reviewers settle on their own** (`Promise.allSettled`): a fast failure neither ends the run nor stops the
+    other.
+  - **Saving.** The report is saved at the start, after every stage, and at the end. If a run ended while its report
+    was mid-review, it reads as interrupted, and a request that was out "may have been sent".
+  - **A review that doesn't complete** fails the run with the failing stage's kind and stage, and its report is kept.
+  - **Refusals before any request keep no report:** no consent, no key, no model, a request window too small, or a
+    budget too small.
+  - **A review reaches no repository and changes nothing:** its workflow has no backend, no git and no path.
+  - **A request id reused with other input is refused.** The same input returns the same run.
+- **Hard limits and estimated budgets** (`providers/run-budget.ts`).
+
+| | Council run | Single run | Explain, repository chat |
+|---|---|---|---|
+| **Hard:** requests | 3 (two reviewers together, then the chair) | 1 | 16, unchanged |
+| **Hard:** time, monotonic; a request is aborted at its deadline | 150 s per request, 330 s per run | 150 s, 180 s | 150 s per request, 480 s per run, unchanged |
+| **Hard:** output, sent with every request | 4,000 per request | 4,000 | 4,000 per request, unchanged |
+| **Estimated admission budget:** input per run | 120,000 tokens | 60,000 | **160,000, new** |
+| Estimated input per request, as before | at most 60,000 | at most 60,000 | unchanged |
+
+  - **What is estimated is the whole request:** instructions, message, every tool definition, and an allowance per
+    message, at characters ÷ 3.
+  - **A tokenizer can count more,** so the budget decides what is admitted and promises no ceiling.
+    - Reported counts replace estimates.
+    - An overrun is recorded.
+    - Unknown usage stays null.
+    - No currency is computed.
+  - **Reservations are all or nothing:** both reviewers, and the chair at its largest (the packet and two reports of
+    the largest size the engine keeps). A held reservation is honoured.
+  - **Explain and a repository turn.**
+    - The answer comes due once another request, and a full-window answer after it, would no longer fit.
+    - A request that can't be admitted is never sent, and the run ends `budget-exhausted`.
+    - The window's context view says what was counted, what was reported, and that the estimate is no ceiling.
+
+**Why.**
+- **Nothing bounded a run's total.** A live repository turn sent 219,488 input tokens over 14 calls (checkpoint 2),
+  because each call re-sends what was read so far.
+- **An estimate can't be a ceiling.**
+  - Characters ÷ 3 can undercount, and concurrent requests overrun before they report.
+  - The honest form is to call it a budget and record its overruns. The hard limits stay hard.
+- **A reviewer's failure must not cost the other's work,** nor leave it writing after the run has ended.
+- **The chair is reserved at its largest,** so it still fits however long the reports are.
+- **The single panel is in the contract from the start.** A3 must compare the same packet through the same runtime,
+  and may not change shared code once A2 has merged.
+
+**Consequences.**
+- **The numbers:**
+  - **The largest realistic packet** comes to about 31,900 tokens per reviewer and 45,500 for the chair: 109,300 of
+    the council's 120,000. That is every packet limit filled, with 80-character paths and 50 preferences of 500
+    characters.
+  - **A typical small plan** comes to about 2,000 tokens per reviewer, with 15,700 reserved for the chair.
+  - **A packet with absurdly long paths** is refused before any request.
+- **Explain and repository chat:** the heaviest explain run seen (77,514 tokens) is unchanged. The 219,488-token turn
+  would have answered at about 100,000.
+- **A low-tier key** can draw a 429 on two requests at once. The review is then incomplete, and never retried.
+- **Older engines** can't read reviews, so development homes are per track.
+- **No reference is re-read** at the current HEAD: every reference stays historical.
+- **The host's copy.** A2 keeps reports in the plan's conversation. The engine's copy stays in its store.
+- **Evidence:** `docs/acceptance.md`, *Plan review runtime and run budgets (D30, NIV-38)*.
+
+## D31. Reviews of saved plans in the window: run links with a frozen binding in workspace v2, started only as previewed, never read as approval (2026-10-21)
+
+**Decision.**
+- **Storage: workspace.db v2.** It is `WORKSPACE_MIGRATIONS[1]`, appended; v1's text is pinned by its hash.
+  - **A review is a run link** with `workflow_id = 'review'`, plus a `reviews` row holding:
+    - the plan version it names: artifact id, lineage, version and sha256;
+    - the panel, and the packet's and the preferences' fingerprints;
+    - the frozen scope: general, or the project's id, label and HEAD;
+    - the report, once it ends.
+  - **Plans stay in `artifacts`.** A review references a version and never copies it. The packet's text isn't kept;
+    its fingerprint is.
+  - **Triggers:**
+    - `reviews_bound` refuses a review that isn't bound to a review run and to a plan version of its own conversation;
+    - `reviews_frozen` refuses any change to what a review was bound to, and a second report;
+    - `run_links_fixed` keeps a run link's workflow and owner.
+  - **Every stop path sees reviews.** `turnsOf` reads chat links only, as before. `openTurns` sees reviews too, so a
+    cancel, a deletion, sharing turned off and a project removed stop them as they stop turns.
+  - **One open run per conversation,** turns and reviews together. This amends D26.
+- **The preview is bound to what is sent.**
+  - **`reviews:prepare`** builds what one plan version would send:
+    - the packet: the text; the assumptions, masked again; each historical reference once, in the order cited;
+    - the preference snapshot (D21): a general plan's gets the personal preferences only.
+
+    It returns what is sent, and `expected`: a SHA-256 of the plan's id and version, both fingerprints, the project's
+    sharing and the panel.
+  - **`reviews:start`** works all of it out again. When the fingerprint differs, it refuses ("What this review would
+    send has changed since you opened it. Check the new preview, then start again."), and the window shows the new
+    preview.
+  - **Consent is checked as for a turn:** shown at preview, checked at start, again after that wait against the
+    consent epoch, and by `#submit`'s late check once the request is out. The fingerprint adds to these checks and
+    replaces none.
+  - **Refused before anything is stored:**
+    - a version whose text holds the saved key or a recognised credential: "Edit the plan to remove it, then review
+      the new version";
+    - a version over a review's limits, in words that name the limit.
+- **The lifecycle is a turn's** (D26). A review is stored first, sent through the same `#submit`, followed by the same
+  `#follow`, and never resent. `#finish` hands a review's end to `#finishReview`:
+  - **The report is kept only when it repeats the review's binding:** the plan's id and version, both fingerprints,
+    the panel, the request id and the run id. Otherwise the review's end is `unknown`, and nothing of the report is
+    kept.
+  - **It is masked again and kept once.** A complete report ends the review as answered. A partial one is kept with
+    how it ended: cancelled, interrupted, or failed with its kind.
+- **The window** (`features/reviews.tsx`).
+  - **Review…** on each plan card opens a dialog for any version. It shows what is sent and what isn't, each
+    preference with its meaning (a default, or a project's decision), and the most model calls. A project that
+    doesn't allow sharing asks for its consent there.
+  - **Each review keeps a card under its plan:**
+    - each stage's outcome;
+    - each reviewer's findings, with their basis ("From the plan" or "Assumption"), and historical references marked
+      as such;
+    - the chair's agreements ("Agreement isn't proof"), dissent, gaps and unaddressed findings;
+    - usage as reported, and the run budget;
+    - "The plan is now at vN" once the plan moves on.
+  - **Nothing reads as approval:**
+    - "Complete" isn't green;
+    - a reviewer who raised nothing says so: "That isn't an approval: it saw only the plan";
+    - every card says the review doesn't change the plan, mark a task ready or approve anything.
+  - **The window offers the council only.**
+  - **A running review holds the composer** as an answer does.
+- **Consent copy names reviews** wherever consent is asked: explanations, conversations and reviews.
+
+**Why.**
+- **`run_links` already owns an attempt's lifecycle:** its reconciliation and every stop path. A second lifecycle would
+  need its own. A table beside it keeps the binding immutable, and nothing is rebuilt: `workflow_id` has no CHECK.
+- **A preview that isn't bound can show one thing and send another.** A preference, the consent or the plan can change
+  while the dialog is open (the review of this plan).
+- **An engine's report belongs to the review only when it says so.** The binding check turns a foreign or mismatched
+  report into an unknown end instead of a kept one.
+- **A review reads like an approval all too easily.** The copy and the colours say how complete a review is, never
+  whether the plan is sound.
+
+**Consequences.**
+- **Older builds refuse a v2 profile** ("saved by a newer version of Nivra"). A v1 profile moves to v2 row for row.
+- **The next migration is `[2]`.**
+- **When a conversation is deleted,** each engine keeps its own run records: ids, version and fingerprints, but no
+  plan text; count-only events; and the masked report, which can quote the plan. The delete dialog says so.
+- **Reviews never write** plans, tasks, briefs or preferences. A task can be ready without one.
+- **Packaged and Windows checks seed a plan** through the workspace's own functions. On Windows the staged `node.exe`
+  runs them bundled, so the file is only ever opened on Windows (D7).
+- **Shared files.** Once this merges, the shared files Track A held pass to Track B, with a handoff on NIV-39.
+- **Evidence:** `docs/acceptance.md`, *Plan reviews in the window (D31, NIV-39)*.
+
+## D32. The council against one reviewer, on five synthetic plans: adopt by the frozen rule, at its edge (2026-10-21)
+
+**Decision.**
+- **The outcome is adopt.** The rule was frozen before any paid call, and every adopt rule held, so the window keeps
+  the council of D30 and D31 (two independent reviewers, then a chair) as its review of a saved plan. The single
+  panel stays the contract's baseline, and the window doesn't offer it.
+- **It is evidence from five short synthetic plans,** with one run per arm. It is not a general claim that a council
+  reviews better than one reviewer. It authorises no expansion: no more reviewers, rounds or roles, and no redesign.
+- **The labels are v1.** They were proposed with AI assistance, then reviewed and approved by Nate before the arm
+  mapping was revealed. A later correction keeps v1 and makes a documented v2 that says whether the decision changes.
+
+**The batch** (approved digest `c3b9225a…`, revision `196cad1`, 21 October 2026).
+- **Runs:** 10, all complete, with 20 requests. Nothing was retried or retaken, and no stop rule fired. The checks
+  made before any inference request passed before every run.
+- **Usage:** 31,771 input and 11,750 output tokens, all reported. The runs took about 1.6 minutes in all.
+
+| | Single reviewer | Council |
+|---|---|---|
+| Known defects found, of 12 on F1–F4 | 9 | 11 |
+| Useful novel findings, distinct | 8 | 9 |
+| Unsupported findings | 0 | 1 (U1) |
+| False alarms on the control | 0 | 0 |
+| The control reviewed as sound, substantively | yes | yes |
+| Complete runs | 5 of 5 | 5 of 5 |
+| Findings raised | 17 | 35, of which 15 repeat another |
+| Actionable findings | all | all |
+| Median latency, against the single reviewer's | | 1.90× |
+| Median tokens, against the single reviewer's | | 3.35× |
+
+- **By fixture:**
+  - **F1:** the council found all 3 known defects, the single reviewer 1.
+  - **F2:** 2 each. Neither was credited with the provider-timeout defect.
+  - **F3 and F4:** all 3 each.
+  - **F5, the control:** neither raised a finding.
+
+**Why.**
+- **The rule decides, as frozen.** Every adopt rule held, and no defer rule did.
+- **Three adopt rules held exactly at their edge:**
+  - known defects, 2 above (adopt needs 2);
+  - known defects plus useful novel findings, 3 above (needs 3);
+  - unsupported findings, 1 above (allows 1).
+
+  One label different on any of them would have made it simplify.
+- **The known-defect margin comes from one fixture,** F1.
+
+**Consequences.**
+- **Nothing changes in the window,** which already offers the council. The council costs about 1.9 times the time and
+  3.4 times the tokens of one reviewer here. It gives twice the findings to read, 15 of which repeat
+  another, and agreement between reviewers earns nothing.
+- **What the evidence doesn't show:**
+  - **Variance:** one run per arm on five short plans (365–692 characters). Sampling is the provider's default, so a
+    rerun can differ.
+  - **Labels:** proposed with AI assistance, then reviewed by one person. The protocol named Nate as the labeller.
+    There is no second labeller, so agreement between labellers is unmeasured, and what the assistant saw beyond the
+    sheet isn't recorded. The arm mapping was never written down: it was rebuilt only at scoring, after v1's hash was
+    recorded.
+  - **The automatic pass:** it agreed with the labels on 40 of 52 findings. By the automatic reading alone, the
+    known-defect margin is 1 (single 10, council 11). The single reviewer's F2 finding matched the provider-timeout
+    stems, but was labelled as not naming that defect.
+  - **Actionability** didn't discriminate: every finding was labelled actionable.
+  - **The authoring:** the fixtures and the rubric were written by the agent that built the council, before any run.
+  - **The chair's synthesis** isn't scored.
+  - **The setting:** one model (Nemotron 3 Super), one provider, one day.
+- **Hashes**, of files in the evidence folder:
+  - the labelled sheet, v1: `a899ab9a…5c95`;
+  - the sheet the batch wrote: `479d7f3f…eb8a`;
+  - the scores: `f945c5e2…62d9`;
+  - the decision: `c72c3bbe…b5f1`.
+- **Evidence:** `docs/acceptance.md`, *Council evaluation (D32, NIV-40)*, and
+  `~/nivra-acceptance/council-eval-20261020T202836Z-196cad1/`.

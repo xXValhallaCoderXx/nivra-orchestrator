@@ -14,6 +14,9 @@
 //   pnpm rpc runs.start '{"workflowId":"chat","input":{"message":"How should I stage this?","scope":{"kind":"general"}}}' --follow
 //   pnpm rpc runs.start '{"workflowId":"chat","input":{"message":"Plan a CSV export","scope":{"kind":"repository","repoPath":"/path/to/repo"}},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true},"history":{"exchanges":[],"omitted":{"overLimit":0,"unanswered":0,"preferencesChanged":0}}}}' --follow
 // After --follow, a chat run's stored reply is printed.
+// A review of a saved plan version (D30) needs its context: the preferences, the consent and the packet. Its two
+// fingerprints are worked out here when they are left out; after --follow, its report is printed:
+//   pnpm rpc runs.start '{"workflowId":"review","input":{"planId":"<uuid>","planVersion":1},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":false},"packet":{"scope":{"kind":"general"},"text":"Plan text","assumptions":[],"references":[]}}}' --follow
 //
 // The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, when set, is passed to the engine
 // in `initialize`, the way the app does it (D8).
@@ -23,7 +26,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { isMethodName, isTerminal, LineSplitter, Methods, PROTOCOL_VERSION, RpcCallError, RpcClient, type MethodName } from "@nivra/domain";
+import { isMethodName, isTerminal, LineSplitter, Methods, packetDigest, preferencesDigest, PROTOCOL_VERSION, RpcCallError, RpcClient, type MethodName } from "@nivra/domain";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -42,6 +45,14 @@ try {
   process.exit(2);
 }
 if (method === "runs.start" && params["clientRequestId"] === undefined) params = { clientRequestId: randomUUID(), ...params };
+// A review's fingerprints, worked out from the context it carries when the request leaves them out (D30).
+if (method === "runs.start" && params["workflowId"] === "review") {
+  const context = params["context"] as { preferences?: { records?: Parameters<typeof preferencesDigest>[0] }; packet?: Parameters<typeof packetDigest>[0] } | undefined;
+  const input = (params["input"] ?? {}) as Record<string, unknown>;
+  if (context?.packet && input["packetDigest"] === undefined) input["packetDigest"] = await packetDigest(context.packet);
+  if (context?.preferences?.records && input["preferencesDigest"] === undefined) input["preferencesDigest"] = await preferencesDigest(context.preferences.records);
+  params = { ...params, input };
+}
 // Without a context: no preferences, no consent to send repository content to a model (D22), and for a turn no history.
 if (method === "runs.start" && params["context"] === undefined) {
   const history = params["workflowId"] === "chat" ? { history: { exchanges: [], omitted: { overLimit: 0, unanswered: 0, preferencesChanged: 0 } } } : {};
@@ -90,6 +101,7 @@ try {
         console.log(`status: ${page.status}`);
         if (page.status !== "succeeded") status = 1;
         if ((result as { workflowId?: string }).workflowId === "chat") console.log(JSON.stringify(await client.call("runs.reply", { runId }), null, 2));
+        if ((result as { workflowId?: string }).workflowId === "review") console.log(JSON.stringify(await client.call("runs.review", { runId }), null, 2));
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
