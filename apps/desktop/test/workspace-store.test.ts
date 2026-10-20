@@ -6,8 +6,33 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
-import { attemptsOf, deleteConversation, getArtifact, getConversation, getTurn, insertArtifact, insertAttempt, insertConversation, insertTask, insertTurn, listConversations, messagesOf, projectAnswer, recordRun, settleTurn, versionsOf, type ConversationRecord } from "../src/main/workspace.ts";
-import { classifyWorkspaceError, openWorkspace, WORKSPACE_MIGRATIONS, type WorkspaceOpening } from "../src/main/workspace-db.ts";
+import type { ReviewReport } from "@nivra/domain";
+import {
+  attemptsOf,
+  deleteConversation,
+  getArtifact,
+  getConversation,
+  getReview,
+  getTurn,
+  insertArtifact,
+  insertAttempt,
+  insertConversation,
+  insertReview,
+  insertTask,
+  insertTurn,
+  listConversations,
+  messagesOf,
+  openTurns,
+  projectAnswer,
+  recordRun,
+  reviewsOf,
+  settleReview,
+  settleTurn,
+  turnsOf,
+  versionsOf,
+  type ConversationRecord,
+} from "../src/main/workspace.ts";
+import { classifyWorkspaceError, openWorkspace, WORKSPACE_MIGRATIONS, WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 
 const dirs: string[] = [];
 const open: WorkspaceOpening[] = [];
@@ -48,7 +73,7 @@ describe("the workspace database (D26)", () => {
     assert.deepEqual([workspace.schemaVersion, workspace.notice], [WORKSPACE_MIGRATIONS.length, null]);
     assert.match(workspace.sqlite, /^3\.\d+\.\d+$/);
     const pragma = (name: string) => Object.values(workspace.db.db.prepare(`PRAGMA ${name}`).get() ?? {})[0];
-    assert.deepEqual([pragma("journal_mode"), pragma("foreign_keys"), pragma("secure_delete"), pragma("locking_mode"), pragma("user_version")], ["wal", 1, 1, "exclusive", 1]);
+    assert.deepEqual([pragma("journal_mode"), pragma("foreign_keys"), pragma("secure_delete"), pragma("locking_mode"), pragma("user_version")], ["wal", 1, 1, "exclusive", 2]);
     // The lock is held from the start: no shared-memory file is ever made.
     assert.equal(existsSync(`${path}-shm`), false);
   });
@@ -85,7 +110,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v1\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v2\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -245,7 +270,7 @@ describe("the workspace database (D26)", () => {
   it("creates its folder when it is missing", () => {
     const dir = join(folder(), "nested", "deeper");
     const workspace = ready(join(dir, "workspace.db"));
-    assert.equal(workspace.schemaVersion, 1);
+    assert.equal(workspace.schemaVersion, 2);
     mkdirSync(dir, { recursive: true });
   });
 });
@@ -306,5 +331,184 @@ describe("tasks, brief versions and attempts (D26)", () => {
     assert.deepEqual(versionsOf(workspace.db, taskId).map((v) => [v.version, (v.content as { goal: string }).goal]), [[1, "First goal"], [2, "Second goal"]]);
     const [attempt] = attemptsOf(workspace.db, taskId);
     assert.deepEqual([attempt?.briefId, (getArtifact(workspace.db, attempt!.briefId)?.content as { goal: string }).goal], [v1.id, "First goal"]);
+  });
+});
+
+describe("reviews of plan versions (D31)", () => {
+  const project = (id = randomUUID(), projectId = randomUUID()): ConversationRecord => ({ id, kind: "project", projectId, projectLabel: "shop", targetId: "wsl:Ubuntu", title: "New conversation", createdAt: AT, updatedAt: AT });
+  const planIn = (workspace: WorkspaceDb, conversationId: string, text: string, lineageId: string = randomUUID(), after?: number) =>
+    insertArtifact(workspace, { id: randomUUID(), kind: "plan", lineageId, content: { text }, conversationId, taskId: null, messageId: null, runLinkId: null, derivedFrom: null, createdAt: AT }, after)!;
+  const DIGEST = "a".repeat(64);
+  const reviewOf = (conversation: ConversationRecord, plan: { id: string; lineageId: string; version: number; sha256: string }, id: string = randomUUID()) => ({
+    id,
+    conversationId: conversation.id,
+    planId: plan.id,
+    planLineage: plan.lineageId,
+    planVersion: plan.version,
+    planSha256: plan.sha256,
+    panel: "council" as const,
+    packetDigest: DIGEST,
+    preferencesDigest: "b".repeat(64),
+    scope: conversation.projectId ? { kind: "project" as const, projectId: conversation.projectId, projectLabel: conversation.projectLabel, headAtStart: "c".repeat(40) } : { kind: "general" as const },
+    createdAt: AT,
+  });
+  const LINK = { sessionId: "s", targetId: "wsl:Ubuntu", preferences: [{ id: randomUUID(), revision: 3 }] };
+  /** A report as the engine hands one back: only what the store needs to keep it whole. */
+  const reportFor = (review: ReturnType<typeof reviewOf>, summary: string): ReviewReport => ({
+    panel: review.panel,
+    planId: review.planId,
+    planVersion: review.planVersion,
+    packetDigest: review.packetDigest,
+    preferencesDigest: review.preferencesDigest,
+    outcome: "complete",
+    scope: { kind: "general" },
+    packet: { textChars: 10, assumptions: 0, references: 0 },
+    request: { runId: randomUUID(), clientRequestId: review.id },
+    route: null,
+    sampling: { temperature: null, topP: null, maxOutputTokens: 4_000, toolChoice: "forced" },
+    preferences: { revision: 0, digest: "d", records: [] },
+    reviewers: [{ role: "architecture", summary, findings: [], assumptions: [], gaps: [], adjusted: { dropped: 0, refsDropped: 0, relabelled: 0, shortened: 0 } }],
+    synthesis: null,
+    stages: [],
+    usage: { inputTokens: null, outputTokens: null, calls: 3, reportedCalls: 0 },
+    budget: {
+      limits: { requests: 3, totalMs: 330_000, outputTokensPerRequest: 4_000, estimatedInputTokens: 120_000 },
+      used: { requests: 3, elapsedMs: 1, inputTokens: 1, reportedInputTokens: null, reportedOutputTokens: null, unreportedRequests: 3, overrunTokens: 0 },
+      stopped: null,
+    },
+    elapsedMs: 1,
+    updatedAt: AT,
+    finishedAt: AT,
+  });
+  const refusal = (run: () => unknown) => {
+    try {
+      run();
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    return "not refused";
+  };
+
+  it("keeps the released v1 schema as it was, and moves a v1 file to v2 with every row as it was", () => {
+    // Migrations are append-only: v1's text is pinned, so a released version is never edited.
+    assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[0]!).digest("hex"), "2a9a9cd0cc12393f6975907a3f954c998e9dba9e9e9d70119332c8d09cbcf9cb");
+    const path = join(folder(), "workspace.db");
+    // A v1 file, written as v1 wrote one: its schema alone, then rows through the same functions.
+    const raw = new DatabaseSync(path);
+    raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+    raw.exec("BEGIN IMMEDIATE");
+    raw.exec(WORKSPACE_MIGRATIONS[0]!);
+    raw.exec("PRAGMA user_version = 1; COMMIT;");
+    const v1 = new WorkspaceDb(path, raw);
+    const chat = general();
+    insertConversation(v1, chat);
+    const answered = { id: randomUUID(), conversationId: chat.id, sessionId: "s", targetId: "local", preferences: [], history: null, createdAt: AT };
+    insertTurn(v1, answered, { id: randomUUID(), text: "How do I stage this?" });
+    recordRun(v1, answered.id, randomUUID());
+    projectAnswer(v1, answered.id, { id: randomUUID(), text: "In two steps.", reply: { kind: "general", text: "In two steps.", cutOff: false, context: { preferences: { revision: 0, digest: "d", records: [] }, history: { exchanges: 0, chars: 0, shortened: 0, omitted: { overLimit: 0, unanswered: 0, preferencesChanged: 0 }, digest: "d" } }, finishedAt: AT }, createdAt: AT });
+    const open = { ...answered, id: randomUUID() };
+    insertTurn(v1, open, { id: randomUUID(), text: "And the next step?" });
+    const plan = planIn(v1, chat.id, "Stage it in two steps.");
+    const taskId = randomUUID();
+    const brief = randomUUID();
+    insertTask(v1, { id: taskId, title: "Stage", projectId: null, createdAt: AT, updatedAt: AT }, { id: brief, content: { goal: "Stage" }, derivedFrom: plan.id });
+    insertAttempt(v1, { id: randomUUID(), taskId, briefId: brief, sessionId: "s", targetId: "local", status: "not-sent", createdAt: AT });
+    const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages"];
+    const dump = (db: DatabaseSync) => ({
+      rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
+      schema: db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN ('conversations', 'tasks', 'artifacts', 'run_links', 'messages') AND name <> 'run_links_fixed' ORDER BY name").all(),
+    });
+    const before = dump(raw);
+    assert.deepEqual(before.rows.map((rows) => rows.length), [1, 1, 2, 3, 3]);
+    v1.close();
+
+    const migrated = ready(path);
+    assert.equal(migrated.schemaVersion, 2);
+    assert.deepEqual(dump(migrated.db.db), before);
+    assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM reviews").get()?.["n"]), 0);
+    assert.deepEqual(turnsOf(migrated.db, chat.id).map((turn) => [turn.id, turn.workflowId, turn.status]), [[answered.id, "chat", "answered"], [open.id, "chat", "submitting"]]);
+    assert.deepEqual(openTurns(migrated.db, { conversationId: chat.id }).map((turn) => turn.id), [open.id]);
+  });
+
+  it("binds a review to a review run and a plan version of its own conversation, one open run at a time, and never changes what it was bound to", () => {
+    const workspace = ready(join(folder(), "workspace.db"));
+    const db = workspace.db.db;
+    const conversation = project();
+    const other = general();
+    insertConversation(workspace.db, conversation);
+    insertConversation(workspace.db, other);
+    const v1 = planIn(workspace.db, conversation.id, "Rename the column in place.");
+    const v2 = planIn(workspace.db, conversation.id, "Add the new column first.", v1.lineageId, 1);
+    const elsewhere = planIn(workspace.db, other.id, "Another conversation's plan.");
+    const review = reviewOf(conversation, v1);
+    assert.equal(insertReview(workspace.db, review, LINK), true);
+    assert.equal(insertReview(workspace.db, reviewOf(conversation, v2), LINK), false, "one open run per conversation");
+    assert.equal(insertTurn(workspace.db, { id: randomUUID(), conversationId: conversation.id, sessionId: "s", targetId: "wsl:Ubuntu", preferences: [], history: null, createdAt: AT }, { id: randomUUID(), text: "Meanwhile?" }), false, "a review holds the conversation as a turn does");
+    // Every stop path sees it; the conversation's turns, and so its history, don't.
+    assert.deepEqual([openTurns(workspace.db, { conversationId: conversation.id }).map((turn) => [turn.id, turn.workflowId]), turnsOf(workspace.db, conversation.id).length], [[[review.id, "review"]], 0]);
+    assert.deepEqual(openTurns(workspace.db, { projectId: conversation.projectId! }).map((turn) => turn.id), [review.id]);
+    const stored = getReview(workspace.db, review.id);
+    assert.deepEqual(
+      [stored?.planVersion, stored?.planSha256, stored?.scope, stored?.link.status, stored?.link.preferences, stored?.report],
+      [1, v1.sha256, { kind: "project", projectId: conversation.projectId, projectLabel: "shop", headAtStart: "c".repeat(40) }, "submitting", LINK.preferences, null],
+    );
+
+    // What the triggers refuse, written past the functions.
+    const link = (id: string, workflow: string, conversationId = conversation.id) =>
+      db.prepare("INSERT INTO run_links (id, conversation_id, session_id, workflow_id, target_id, status, preferences_json, created_at) VALUES (?, ?, 's', ?, 'local', 'failed', '[]', ?)").run(id, conversationId, workflow, AT);
+    const row = (values: ReturnType<typeof reviewOf>) =>
+      db
+        .prepare("INSERT INTO reviews (id, conversation_id, plan_id, plan_lineage, plan_version, plan_sha256, panel, packet_digest, preferences_digest, scope_kind, project_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 'council', ?, ?, 'project', ?, ?)")
+        .run(values.id, values.conversationId, values.planId, values.planLineage, values.planVersion, values.planSha256, values.packetDigest, values.preferencesDigest, conversation.projectId, AT);
+    const BOUND = "a review is bound to a review run and to a plan version of its own conversation";
+    const chatLink = randomUUID();
+    link(chatLink, "chat");
+    assert.equal(refusal(() => row(reviewOf(conversation, v2, chatLink))), BOUND, "a turn's run");
+    const reviewLink = () => {
+      const id = randomUUID();
+      link(id, "review");
+      return id;
+    };
+    assert.equal(refusal(() => row({ ...reviewOf(conversation, elsewhere, reviewLink()) })), BOUND, "another conversation's plan");
+    assert.equal(refusal(() => row({ ...reviewOf(conversation, v2, reviewLink()), planVersion: 1 })), BOUND, "a version the plan isn't");
+    assert.equal(refusal(() => row({ ...reviewOf(conversation, v2, reviewLink()), planSha256: v1.sha256 })), BOUND, "another version's fingerprint");
+    const FROZEN = "a review never changes what it was bound to, and keeps its first report";
+    assert.equal(refusal(() => db.prepare("UPDATE reviews SET packet_digest = ? WHERE id = ?").run("e".repeat(64), review.id)), FROZEN);
+    assert.equal(refusal(() => db.prepare("UPDATE reviews SET plan_version = 2, plan_id = ?, plan_sha256 = ? WHERE id = ?").run(v2.id, v2.sha256, review.id)), FROZEN);
+    assert.equal(refusal(() => db.prepare("UPDATE run_links SET workflow_id = 'chat' WHERE id = ?").run(review.id)), "a run link keeps its workflow and its owner");
+    assert.equal(refusal(() => db.prepare("UPDATE run_links SET conversation_id = ? WHERE id = ?").run(other.id, review.id)), "a run link keeps its workflow and its owner");
+
+    // It ends once, with its report; a turn's answer never lands on it, and the report is kept as it first was.
+    assert.equal(projectAnswer(workspace.db, review.id, { id: randomUUID(), text: "x", reply: { kind: "general", text: "x", cutOff: false, context: { preferences: { revision: 0, digest: "d", records: [] }, history: { exchanges: 0, chars: 0, shortened: 0, omitted: { overLimit: 0, unanswered: 0, preferencesChanged: 0 }, digest: "d" } }, finishedAt: AT }, createdAt: AT }), false);
+    const report = reportFor(review, "Nothing material.");
+    assert.equal(settleReview(workspace.db, review.id, { status: "answered" }, report, AT), true);
+    assert.equal(settleReview(workspace.db, review.id, { status: "failed", errorMessage: "late" }, reportFor(review, "A later report."), AT), false);
+    assert.equal(settleTurn(workspace.db, review.id, { status: "interrupted" }, AT), false);
+    assert.equal(refusal(() => db.prepare("UPDATE reviews SET report_json = '{}' WHERE id = ?").run(review.id)), FROZEN);
+    const ended = getReview(workspace.db, review.id);
+    assert.deepEqual([ended?.link.status, ended?.link.errorMessage, ended?.reportedAt, ended?.report], ["answered", null, AT, report]);
+    // The next one can start now, on the newer version; the first is still bound to v1.
+    const again = reviewOf(conversation, v2);
+    assert.equal(insertReview(workspace.db, again, LINK), true);
+    assert.deepEqual(reviewsOf(workspace.db, conversation.id).map((r) => [r.planVersion, r.link.status]), [[1, "answered"], [2, "submitting"]]);
+  });
+
+  it("deletes a conversation's reviews with it, and leaves none of a report's text in the file", () => {
+    const path = join(folder(), "workspace.db");
+    const workspace = ready(path);
+    const conversation = general();
+    insertConversation(workspace.db, conversation);
+    const plan = planIn(workspace.db, conversation.id, "Rename the column in place.");
+    const review = reviewOf(conversation, plan);
+    insertReview(workspace.db, review, LINK);
+    const canary = `nivra-review-canary-${randomUUID()}`;
+    settleReview(workspace.db, review.id, { status: "failed", errorKind: "malformed", errorMessage: "The risks review couldn't be used." }, reportFor(review, `Raised ${canary}`), AT);
+    assert.ok(readFileSync(path).includes(canary) || readFileSync(`${path}-wal`).includes(canary), "the text was there");
+    assert.equal(deleteConversation(workspace.db, conversation.id), true);
+    const db = workspace.db.db;
+    const count = (table: string) => Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
+    assert.deepEqual([count("reviews"), count("run_links"), count("artifacts")], [0, 0, 0]);
+    const files = readdirSync(dirname(path)).filter((name) => name.startsWith("workspace.db"));
+    assert.deepEqual(files.filter((name) => readFileSync(join(dirname(path), name)).includes(canary)), []);
   });
 });
