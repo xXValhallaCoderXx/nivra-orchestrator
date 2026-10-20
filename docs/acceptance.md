@@ -584,6 +584,91 @@ the run's own WSL home and its removal; typecheck covers them. The second review
 which nothing in the app or the engine's RPC uses yet, so the UI, Windows and `rpc.ts` checks above weren't run again
 for it.
 
+### Nebius Sandboxes, live (D28, NIV-29)
+
+NIV-29's live probe, run on 20 October in stages Nate approved one at a time, each with its data and budget. A synthetic
+fixture, no model calls and no installs. Seven commits on `feature/niv-29-live`:
+
+| Commit | What |
+|---|---|
+| `c7622dc` | Every wait and every read ends at its caller's deadline, and stage 1's 20 minutes are a hard limit (the retry-deadline follow-up) |
+| `7918730` | `--credentials`: the key from a file only you can read, outside the repository. Stage 0 prints only what the proof needs |
+| `51027d4` | A patch counts only when it holds the edit, and the report the passing test |
+| `adc391d` | Stage 1 starts only on a token that outlasts it and its cleanup |
+| `c3da9d4` | The token check takes two readings, and tells a token renewed with each request apart |
+| `8334299` | Signal -1 is no signal, and every request gets whole milliseconds: the first run's two bugs |
+| `3e8bd4e` | Each subprocess's signal and stderr, and a failed read's error, are kept: the second run's gaps |
+
+**Stage 0 (04:22 UTC): two reads, `whoami` and `images`.**
+- The key and the project were accepted.
+- Permissions: `spawn`, `spawn_disposable`, `list`, `cancel`, `import` and `set_image_tag`.
+- Limits: a 3,600 s maximum timeout and 50 instances at once, plus limits on importing images.
+- The token's expiry: about 5 minutes after the request.
+- 100 public images were listed, among them `alpine:3.20` and `busybox:latest`.
+
+**Stage 1.** It used the image `alpine:3.20`. It denied `http://example.com/`, by name and as `http://104.20.23.154/`,
+and its positive control was `http://example.com/`.
+
+| Run | At | What happened |
+|---|---|---|
+| An attempt | 04:28 UTC, at `adc391d` | Refused before any operation: one reading put the token's expiry 5 minutes away |
+| The first run | 04:34 UTC, at `c3da9d4` | Steps 1 to 6 ran, and every outcome was read as "signalled". Step 7's reads failed with a RangeError, so it stopped before its cancel, and steps 8 to 11 were refused before spawning. Cleanup cancelled 1 operation and saw it end `CANCELLED`, with nothing unresolved. Decision: inconclusive |
+| The second run | 09:58 UTC, at `8334299` | All 11 steps ran, with no errors. Cleanup: nothing to cancel, nothing unresolved. Decision: adopt, on pattern A |
+
+The first run's stored outcomes, read again with `8334299`'s fix, pass pattern A's network, continuation, exit, patch
+and timeout checks. Its cancel and reattaching didn't run, so it stays inconclusive.
+
+The second run, step by step:
+
+| Step | For | Seconds | What the service reported |
+|---|---|---|---|
+| 1. Edit | A | 1.6 | `SUCCESS`, exit 0. Only `lo` |
+| 2. Network denied | A | 5.3 | `SUCCESS`. It saw step 1's edit. Both attempts blocked: "bad address", and "Network unreachable" |
+| 3. Network control | both | 0.7 | `SUCCESS`, exit 0: connected, with networking on |
+| 4. Failing test | A | 1.6 | `SUCCESS`, exit 1: told apart as a failed command |
+| 5. Patch | A | 1.6 | `SUCCESS`. The patch (105 bytes) and the report (19 bytes) matched their hashes and held the edit and the passing test |
+| 6. Timeout | both | 5.2 | `SUCCESS`, exit -1, signal 9, `timed_out`: told apart as a timeout |
+| 7. Cancel | A | 1.1 | `CANCELLED`, 0.4 s after the cancel |
+| 8. Reconnect | both | 10.3 | A fresh client reattached to the same operation. One spawn |
+| 9. Lost answer | recorded | 4.1 | Found by its correlation id. One spawn |
+| 10. Parent | B | 4.2 | Seven subprocesses, about 0.4 s each. The network attempt ended with exit -1 after "CONTINUED". The patch and the report matched and held |
+| 11. Parent cancel | B | 1.2 | The parent `CANCELLED`, 0.4 s after the cancel. The read of its running child failed |
+
+| Check | Pattern A, one operation per step | Pattern B, a parent with subprocesses |
+|---|---|---|
+| Network denial, against a working control | Pass | Inconclusive: no attempt was seen refused |
+| State continues | Pass, through the image | Pass, between subprocesses |
+| A cancel reaches `CANCELLED` within 60 s | Pass, in 0.4 s | Inconclusive: the parent in 0.4 s, but its child wasn't seen to end |
+| A failing exit code told apart | Pass | Pass |
+| The patch and the report | Pass | Pass |
+| Reattaching (for both) | Pass | Pass |
+| A timeout told apart (for both) | Pass | Pass |
+| The median step | 2.9 s: adopt | 0.4 s: adopt |
+| **Outcome** | **Adopt** | **Inconclusive** |
+
+The probe didn't keep the network attempt's signal or the child read's error. It does now (`3e8bd4e`), with a test that
+reproduces both gaps on the fake service.
+
+**Budget and cost**
+- Operations: 7 in the first run and 11 in the second, one at a time, of at most 12.
+- Uploads: 642 bytes of synthetic files in each run. Downloads: 124 bytes in the first run, and 248 in the second.
+- The second run took about a minute, inside stage 1's 20 minutes.
+- Cost: the service gave a cost for 9 of the second run's operations, from 0.0000465 to 0.0000828 each, 0.00059 in all.
+  It doesn't say in what unit, so it isn't turned into money here.
+- What stays on Nebius: six uploads of the three fixture files, the result images the steps left, and the operation
+  records. Images are kept for 180 days, after which untagged ones may be deleted. No API deletes uploads or records.
+
+**Evidence.** The folders under `~/nivra-acceptance/` (0700, each file 0600) hold the journals, results, verdicts and
+reports, with the key and the project id replaced: `sandbox-probe-2026-10-20T042222871Z` (stage 0),
+`…T043434287Z` (the first run, with `reevaluated-8334299.json`) and `…T095807550Z` (the second run). The attempt at
+04:28 UTC left its folder empty.
+
+**Checks**
+- `pnpm verify`: domain 36, engine 194, desktop 176. All passed.
+- `pnpm probe:sandbox --plan`: the same steps, data and limits as approved. Only the token check's line changed, in
+  `c3da9d4`, which was approved too.
+- **Not run:** `rpc.ts` and the UI checks. The client isn't wired into the engine or the app, and nothing else changed.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

@@ -5,7 +5,7 @@
 - Node 24.21.0 (`nvm use` reads `.nvmrc`) and pnpm 10.4.1 (`corepack enable`).
 - git.
 - For live checks: a Nebius Token Factory API key in `NEBIUS_API_KEY` (never committed, never written to a file in the
-  repository).
+  repository). The Sandboxes probe also needs `NEBIUS_PROJECT_ID`, and takes both from a private file (below).
 
 ## Commands
 
@@ -136,24 +136,34 @@ wsl.exe --unregister NivraTest   # deletes the distribution and its disk
 
 `probe:tokenfactory` takes `--model <id>`, passed after `--`, to pick the Nemotron model.
 
-The Nebius Sandboxes probe (NIV-29) is an explicit live check, never part of `verify`. Each stage runs only after Nate
-approves it, with its data and budget:
+The Nebius Sandboxes probe (NIV-29, D28) is an explicit live check, never part of `verify`. Each stage runs only after
+Nate approves it, with its data and budget:
 
 ```bash
-pnpm probe:sandbox --plan                 # every step, the data it carries, the limits and the thresholds; no network
-NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --stage 0       # read-only: the account and the public images
-NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --stage 1 --image <uuid|tag:name> --deny <url> [--deny <url>] [--network-control <url>]
-NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --recover <evidence folder>
+pnpm probe:sandbox --plan                                  # every step, the data it carries, the limits and the thresholds; no network
+pnpm probe:sandbox --credentials <file> --stage 0          # read-only: the account and the public images
+pnpm probe:sandbox --credentials <file> --stage 1 --image <uuid|tag:name> --deny <url> [--deny <url>] [--network-control <url>]
+pnpm probe:sandbox --credentials <file> --recover <evidence folder>
 ```
 
-- **Credentials.** Set the variables in your own terminal, never in a chat. The script removes them when it reads them,
-  and never prints or writes them.
+- **Credentials.** A file holding `NEBIUS_API_KEY=…` and `NEBIUS_PROJECT_ID=…` lines, outside the repository and
+  readable only by you (`chmod 600`), for example `~/.config/nivra/nebius-probe.env`. The probe refuses one inside the
+  repository or readable by others, and sends nothing. The two variables set in your own terminal also work. Never put
+  them in a chat. They are removed from the environment once read, and never printed or written: evidence replaces
+  them with placeholders.
+- **Stage 0** prints only what the proof needs: the permissions, the limits, the token's expiry and the public busybox
+  or alpine images. The full answers go to the evidence file.
 - **What stage 1 runs:**
   - at most twelve operations, one at a time, on the synthetic fixture in `apps/engine/test/fixtures/sandbox-probe/`;
   - networking off, except the one approved control;
   - no model calls and no installs.
-- **Evidence** goes to `~/nivra-acceptance/sandbox-probe-<UTC>/` (0700): the journal, each step's outcome, the
-  verdicts and a summary.
+- **The token.** Stage 1 first reads the account twice, 15 s apart. It starts only if the token is renewed with each
+  request (as it was on 20 October), or stays valid long enough for stage 1 and its cleanup.
+- **Deadlines.** Stage 1 stops at 20 minutes, a hard limit: no wait goes past it, no read is made after it, and nothing
+  starts after it. Cleanup then takes at most 7 minutes. Every request's timeout is capped by the time its caller has
+  left.
+- **Evidence** goes to `~/nivra-acceptance/sandbox-probe-<UTC>/` (0700): the journal, each step's outcome, how each of
+  pattern B's subprocesses ended, the verdicts and a summary.
 - **Interruption.** The first Ctrl+C settles every operation the probe started. `--recover` finishes that later from the
   journal.
 

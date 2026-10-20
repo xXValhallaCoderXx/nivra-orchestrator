@@ -539,7 +539,7 @@ for coding work.
 | Backend | Role | What it would enforce | Availability |
 |---|---|---|---|
 | **Docker or Podman container** | Intended local default | Only a copy of the workspace is mounted, never the person's checkout. No network. A non-root user with all capabilities dropped, no new privileges, and process and memory limits. | Needs Docker Desktop's WSL integration, Docker Engine or Podman. Not built. |
-| **Token Factory Sandboxes** | Cloud option | A disposable remote VM with network on or off. Commands run as subprocesses of a live instance. | **Beta, access by request.** Requested, not active: not an available path today. Not built. |
+| **Token Factory Sandboxes** | Cloud option | A remote VM for each step, with networking off. State moves between steps through the image each one leaves (D28). | **Beta.** Access is active. A bounded live probe on 20 October passed every critical check for one operation per step, on a synthetic fixture (D28). Not built into the engine: the adapter is NIV-34. |
 | **NVIDIA OpenShell** | Optional, stricter local sandbox | Landlock filesystem rules, a per-host network allow-list, credential placeholders | Linux and WSL with Docker or Podman. Not built; first to cut if time runs short. |
 
 **Network**
@@ -807,7 +807,7 @@ docs changed afterwards.
 - the Windows zip on a clean machine without the Visual C++ redistributable;
 - a public pair of repositories for showing the preference contrast in the demonstration (fixture B is private);
 - Token Factory from the native Windows engine: the stronger provider probes ran live on 18 October from the WSL engine;
-- Token Factory Sandboxes;
+- Token Factory Sandboxes from the engine: only the probe script has used them (D28);
 - macOS.
 
 ---
@@ -824,7 +824,7 @@ docs changed afterwards.
 | Acceptance on packaged builds | **Passed** (D24): live on the Linux deb and on the Windows zip driving WSL, from candidate `ead56e8`. It carries over to candidate 0.1.1 (D25), whose Windows checks ran again. Native Windows is reported from offline evidence and a controlled check | NIV-14 |
 | Release, clean-setup checks, video, submission | In progress. v0.1.1 (D25) is the latest release, with `SHA256SUMS`, and v0.1.0 is marked superseded. Clean-setup checks 1 and 2 passed on its files; check 3, a PC without the Visual C++ Redistributable, is still to run. The install and testing instructions are written, the synthetic demo repository is published, and the video (NIV-17) and the submission text (NIV-15) are next | NIV-15 – NIV-17 |
 | Planning workspace: durable conversations, conversation turns, native tasks | **Checkpoint 1 built** (D26): the workspace, protocol 5's `chat` workflow, the host's conversation service and the task records, tested offline and in the packaged apps. The window and the live checks are checkpoint 2 | NIV-30, NIV-31, NIV-32 |
-| Nebius Sandboxes feasibility | **Offline client and probe built** (D26, corrected by D27): the live probe waits for approval; the adopt-or-defer decision will be D28 | NIV-29 |
+| Nebius Sandboxes feasibility | **Proved live** (D28): one operation per step is adopted for the workspace-to-patch adapter; a parent with subprocesses was inconclusive. The client isn't wired into the engine | NIV-29, then NIV-34 |
 | New-app creation, coding worker, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
 The estimates are not commitments. None of the planned work is a precondition for committing the foundation.
@@ -860,6 +860,7 @@ The estimates are not commitments. None of the planned work is a precondition fo
 | D25 | The Visual C++ runtime beside the addon that imports it, and candidate 0.1.1 |
 | D26 | The planning workspace: a workspace the host owns, conversation turns that are never resent, and native tasks with versioned briefs |
 | D27 | What the review of checkpoint 1 changed: seven corrections, and engine homes of their own for development and tests |
+| D28 | Nebius Sandboxes: one operation per step proved live and adopted for the adapter; a parent with subprocesses not yet |
 
 The planned work in §§10–12 will be recorded in new decisions as it is built.
 
@@ -873,8 +874,8 @@ In short:
 - **The track is Best Apps and Agents** (D24), chosen by Nate on 18 October from the official rules. The Coding and
   Agentic Engineering track's "write, run, and test code in Token Factory" describes work D20 defers.
 - **No OpenShell bonus.** The rules publish no scoring bonus for NVIDIA OpenShell.
-- **Sandboxes isn't available yet.** Token Factory Sandboxes is in beta and needs an access request. Access is
-  requested but not active.
+- **Sandboxes access is active** (D28, superseding D19's "not available yet"). Token Factory Sandboxes is in beta. The
+  submission doesn't use it: coding work is deferred there (D24).
 - **Judge access** must be free until judging ends (16 December, 04:00 SGT). Judges use Nate's existing Token Factory
   key, given only in the submission's private testing instructions (D24, NIV-16).
 - **Effect on the design:** none. The architecture doesn't depend on these answers (D19, D20).
