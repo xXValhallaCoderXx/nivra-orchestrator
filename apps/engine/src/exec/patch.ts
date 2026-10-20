@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { hiddenReason, OUTPUT_DIRS } from "../repo/deny.ts";
-import { ExecRefusedError, type ExecRequest, type ExecutionSession } from "./backend.ts";
+import { ExecRefusedError, type ExecRequest, type ExecResult, type ExecutionSession } from "./backend.ts";
 import { runGitBytes, WorkspaceCancelled, WorkspaceRefusal, type GitTool, type RefusalCode } from "./git-tool.ts";
 import { credentialKinds, isLfsPointer, type Counted, type Snapshot, type SnapshotFile } from "./snapshot.ts";
 import { readTar, TarRefusal, type TarLimits } from "./tar.ts";
@@ -169,7 +169,7 @@ export function checkCollected(stdout: string, archive: { bytes: Uint8Array; sha
 }
 
 /** Runs the collect step in `session` and reads its archive and listing back, checked against each other. */
-export async function collectResult(session: ExecutionSession, options: { workspace: string; applets?: string; timeoutMs?: number; limits?: Partial<CollectLimits>; signal?: AbortSignal }): Promise<Collected> {
+export async function collectResult(session: ExecutionSession, options: { workspace: string; applets?: string; timeoutMs?: number; limits?: Partial<CollectLimits>; signal?: AbortSignal }): Promise<{ collected: Collected; ran: ExecResult }> {
   const limits: CollectLimits = { ...COLLECT_LIMITS, ...options.limits };
   if (!session.download) throw new WorkspaceRefusal("This execution session can't hand files back, so the result can't be collected.", "collect");
   const ran = await session.exec({ ...collectRequest(options.workspace, options), ...(options.signal ? { signal: options.signal } : {}) });
@@ -181,7 +181,7 @@ export async function collectResult(session: ExecutionSession, options: { worksp
   try {
     const archive = await session.download(RESULT_ARCHIVE, limits.maxBytes);
     const listing = await session.download(RESULT_LISTING, limits.maxListingBytes);
-    return checkCollected(ran.stdout, archive, listing, limits);
+    return { collected: checkCollected(ran.stdout, archive, listing, limits), ran };
   } catch (error) {
     if (error instanceof ExecRefusedError) throw new WorkspaceRefusal("The sandbox's result couldn't be read back, so no change was proposed.", "collect", error.message);
     throw error;

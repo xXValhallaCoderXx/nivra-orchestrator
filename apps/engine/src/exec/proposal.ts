@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ExecResult, SessionStep } from "./backend.ts";
 import { WorkspaceRefusal } from "./git-tool.ts";
 import { PATCH_POLICY, type PatchPolicy, type PatchResult } from "./patch.ts";
 import type { Snapshot } from "./snapshot.ts";
@@ -130,6 +131,24 @@ export interface StepRecord {
 
 const TAIL = 2_000;
 const tail = (text: string) => (text.length > TAIL ? text.slice(-TAIL) : text);
+
+/** A step's record from its result, and from the session's own record of it when there is one (status, usage). */
+export function stepRecord(label: string, ran: ExecResult, recorded: SessionStep | undefined): StepRecord {
+  return {
+    label,
+    exitCode: ran.exitCode,
+    signal: ran.signal,
+    timedOut: ran.timedOut,
+    cancelled: ran.cancelled,
+    truncated: ran.truncated,
+    persisted: ran.persisted,
+    durationMs: ran.durationMs,
+    status: recorded?.status ?? null,
+    usage: recorded?.usage ?? null,
+    stdoutTail: tail(ran.stdout),
+    stderrTail: tail(ran.stderr),
+  };
+}
 
 /**
  * The report the person reads before approving, as canonical JSON, so its digest can be bound. It holds what the

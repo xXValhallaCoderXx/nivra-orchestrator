@@ -114,6 +114,8 @@ export interface ExecutionSession {
   exec(request: ExecRequest): Promise<ExecResult>;
   /** A file from the workspace's machine as it now stands, refused past `maxBytes`, with its sha256. */
   download?(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; sha256: string }>;
+  /** The steps recorded so far, as `close` will report them: for a report made before the session closes. */
+  steps?(): readonly SessionStep[];
   /**
    * Stops anything still running and releases the session, within one budget (its own, or the one given), which
    * includes waiting for the command under way to stop. A second call gives the first one's report. It never rejects:

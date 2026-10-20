@@ -609,6 +609,10 @@ class NebiusSession implements ExecutionSession {
     }
   }
 
+  steps(): readonly SessionStep[] {
+    return [...this.#steps];
+  }
+
   close(options: { signal?: AbortSignal; budgetMs?: number } = {}): Promise<CloseReport> {
     this.#closing ??= this.#close(options).catch((error: unknown) => this.#report([`Closing the session failed (${error instanceof Error ? error.message : String(error)}); what it started may still be running.`]));
     return this.#closing;
