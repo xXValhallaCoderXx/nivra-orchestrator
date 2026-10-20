@@ -189,6 +189,22 @@ cd apps/engine && node --test test/nebius-session.test.ts test/nebius-transport.
     couldn't read.
   - `reconcileJournals` settles what the scan found in one bounded pass.
 
+Commit snapshots and validated patches (NIV-42, D34) are in `apps/engine/src/exec/`: `tar.ts`, `snapshot.ts`,
+`patch.ts` and `proposal.ts`, with the engine's own git in `git-tool.ts` and the path rules in `workspace-rules.ts`.
+Nothing runs them yet: B3 puts them together, and B4 wires them in. Their tests make real repositories in the temp
+folder, and stand in for the sandbox's machine by running the real prepare and collect scripts with this machine's
+`sh` and GNU tools (busybox runs them in B3's live check):
+
+```bash
+cd apps/engine && node --test test/tar.test.ts test/workspace-rules.test.ts test/snapshot.test.ts test/patch.test.ts test/proposal.test.ts
+```
+
+- **Nothing writes a checkout.** A snapshot reads only the commit's objects, and its one `git status` runs with every
+  filter driver switched off. A patch is built in a temporary bare store, under the temp folder, that holds nothing of
+  the repository. Applying a patch is NIV-8's.
+- **The tests compare each checkout before and after** by every name's kind, mode, size, time and bytes, `.git`
+  included (`changedSince` in `test/workspace-fixtures.ts`).
+
 ## Where things will live
 
 | What | Where |
@@ -217,5 +233,5 @@ distribution. One engine holds a home at a time (D7), so the second to start is 
 - Capturing the login shell's PATH for tools the engine starts. Until then, tools are looked up in the engine's own
   PATH, with WSL's leaked Windows folders removed. **Required before agents run builds (D15)**: nvm and similar are
   invisible to `wsl.exe --exec`.
-- Workspaces, patch checks and approved apply for agent writes (D15). The Nebius execution session they will run in is
-  built (D33), but not wired into the engine.
+- Approved apply for agent writes (D15, NIV-8). Commit snapshots, patch checks and proposals bound by one hash are
+  built (D34), and so is the Nebius execution session they run with (D33), but none of them is wired into the engine.

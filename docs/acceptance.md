@@ -878,6 +878,154 @@ It found no defect in the prepare script or in `listingDigest`'s order.
   - the upload API's size limit (the cap is 8 MiB).
 - **Usage** is kept raw, and null when absent. No cost is turned into money.
 
+### Commit snapshots and validated patches, B2 (D34, NIV-42)
+
+Track B's second checkpoint, offline: one commit's own bytes into a sandbox, and a checked patch out, bound to where it
+may go by one hash. On `feature/niv-42`, stacked on B1 (`a53fd36`):
+
+| Commit | What |
+|---|---|
+| `07a6972` | One tar format both ways, written exactly and read back strictly |
+| `0eaaa4c` | Commit snapshots from the commit's own objects, refusing uncommitted work and unsafe content |
+| `f027403` | Validated patches from a sandbox's result, bound to their destination by one hash |
+| `3957da5` | The review of the first draft: clashes with left-out files, split indexes and hidden edits, exact names, deep paths, the bound policy, refusal codes |
+
+**Nate's three asks of the plan, shown.**
+
+| Ask | Test | What it shows |
+|---|---|---|
+| Every file's content scanned before upload; an unsafe snapshot refused, never redacted; a secret that isn't in the vault | `snapshot.test.ts`, "refuses a commit holding a private key, a token Nivra was never given, or a value from its vault…" | One refusal names three files and their kinds: `src/config.ts` (a private-key block and a GitHub-shaped token), `assets/blob.bin` (an AWS-shaped key between NUL bytes) and `notes.md` (a vault value). No archive is made, and the refusal quotes none of the values. Without the vault's values, the key and the token alone still refuse it |
+| The deny rules again on returned changes | `patch.test.ts`, "refuses secrets by name and by content…" | A new `.env` holding `HELLO=world`, and a new `config/credentials.json` holding `{}`, are refused by name |
+| A subfolder of a larger repository, round trip | `patch.test.ts`, "takes only the picked folder of a larger repository…" | Only `apps/web`'s two files are archived. All three of the patch's headers are under `apps/web/`. `git apply --check` and `git apply` pass from the top level of a fresh clone, which then differs in exactly those three paths. The top level's `.gitattributes` holds for the folder's files |
+
+**The dirty check runs nothing a repository configures.** The repository in the test sets marker scripts for clean,
+smudge, process, textconv, an external diff, fsmonitor, hooks, a pager and gpg. The check then runs on a touched
+file, a racily clean file (the index older than the files) and an edited one, and the edited one is refused. No marker
+ran, and the checkout, `.git` included, kept every name, mode, size, time and byte. A plain `git status` on the same
+repository ran fsmonitor, clean and process.
+
+**The first draft wrote to the person's `.git`, and a test caught it before it was committed.** Its patch store read the
+repository's objects through `objects/info/alternates`:
+
+| Case | First draft | Now |
+|---|---|---|
+| A mode change (`run.sh`, 100644 to 100755) | `apply --cached` wrote `run.sh`'s blob again, and git refreshed the time of the copy it found in the repository, `.git/objects/85/ba14…` | The store holds nothing of the repository, which is only read: every name, mode, size, time and byte is unchanged |
+
+**What the tests show**, all offline, against real repositories made in the temp folder:
+
+| Area | Tests | What they cover |
+|---|---|---|
+| The tar format (`tar.test.ts`) | 6 | Our archives, extracted by GNU tar; GNU tar's gnu and ustar archives read back, and its posix (pax) header refused by name; an archive laid out as busybox writes one; a set of malformed headers, in either order; a deep archive read in time linear in its paths |
+| Path rules (`workspace-rules.test.ts`) | 3 | A commit's paths that can't be written anywhere; what a new path must also satisfy; git's own files; byte order; case and Unicode folding |
+| Snapshots (`snapshot.test.ts`) | 20 | See below |
+| Patches (`patch.test.ts`) | 18 | See below |
+| Proposals (`proposal.test.ts`) | 6 | Canonical JSON; every binding field changes the hash; the policy taken from the patch, and other rules refused; deletions first in the report, with no file content and bounded output; the verifier |
+
+The snapshot's tests:
+- **Exact bytes from the commit, never the working tree.** CRLF and a file with no final newline are kept, and so is
+  a file whose working copy git converted to CRLF. Binaries, executables, links, a UTF-8 name and a path over 100 bytes
+  are covered. The archive, extracted by the real prepare script, lists to the snapshot's digest.
+- **Left out and counted:** secret-named files, output, a submodule, and the engine home inside the repository. A
+  folder inside the engine home is refused, and so is a home that holds the repository. Picking `.ssh` makes nothing
+  sendable.
+- **Refused:**
+  - tracked changes, staged, unstaged or deleted, with untracked and ignored files left out;
+  - a real partial clone (`--filter=blob:none`);
+  - a repository with no commits, and a baseline that isn't HEAD;
+  - over each limit;
+  - crafted `GIT~1` and newline paths, with the index and the working tree following the crafted commit;
+  - a git older than 2.18;
+  - after the review: a split index, before git reads it; assume-unchanged and skip-worktree files; a newline in the
+    picked folder's path; a committed path that isn't UTF-8; a filter driver whose name isn't UTF-8, which never runs.
+- **Also:**
+  - only the picked folder, with its paths relative to it;
+  - a SHA-256 repository;
+  - Git LFS pointers named;
+  - the same fingerprint for the same commit and folder, and another when either changes;
+  - git's own words kept out of a refusal's message;
+  - keys and tokens found in UTF-16, inside base64, as PGP blocks and from a key's first line, while a public
+    certificate and an image in base64 pass.
+
+The patch's tests. The sandbox's machine is stood in for by the real prepare and collect scripts, with this machine's
+tools, and every patch is applied in a fresh clone from its top level:
+- An add (with a path over 100 bytes), an edit, a delete, a mode change and a binary edit. The clone ends with the
+  result tree exactly, and dependency output never leaves the workspace.
+- An empty change gives an empty patch.
+- **Refused:**
+  - a new link (one leading out of the workspace), a retargeted link, and a file and a link swapped. Deleting a link
+    is allowed;
+  - a path with `..`, a hard link, a pipe, a file the archive skipped while its listing names it, and a download that
+    isn't what the guest wrote;
+  - reserved, short-name, forbidden-character and case-colliding new names. A repository's own `aux.c`, and its
+    `README` and `readme`, can still be edited;
+  - a new `.env` or `credentials.json`, a token, a vault value, an edited `.gitattributes`, a deleted `.gitmodules`,
+    LFS pointers edited or added, and a file under a submodule. No refusal quotes a secret;
+  - CRLF where `.gitattributes` keeps it out, and a change of a file's own style;
+  - each limit, and a baseline commit that is no longer there.
+- **Left out and listed:** new generated output.
+- **The checkout stays exactly as it is** while the patch is built, even when it moved on and is dirty.
+- **Also:** names git quotes (`"` and `\`), a file and a folder that swap places, and a SHA-256 repository.
+- **Line endings, as rules:** text, eol, text=auto and nothing said. Only new bytes are held to them: a mode change,
+  or CRLF the commit already held, never refuses.
+- **After the review:**
+  - new paths that clash with what the snapshot left out: under a left-out `.env`, over a left-out `dist/`, over a
+    submodule's folder and over the engine home on disk;
+  - a name with a line break, named as such;
+  - a deep result checked in time linear in its paths, the number of changes first.
+
+**The independent review of the first draft (`f027403`)** found eight gaps and two concerns. Each was reproduced
+against that commit with the reviewer's scripts and run again on the fix, `3957da5`, which adds a regression test for
+each:
+
+| Finding | At `f027403` | Now |
+|---|---|---|
+| 1. A new path that clashes with a left-out file or folder | A file `dist` over a left-out `dist/index.js`, with `src/a.ts` edited, was proposed. In a fresh clone `git apply --check` passed, then `git apply` exited 128 and left `src/a.ts` deleted. `.env/notes.md` under a left-out `.env`, and a file `libs` over submodule `libs/foo`, did the same | Each is refused, naming the clash. The engine home on disk counts too |
+| 2. A newline in the picked folder's path | Picking `a\nb` gave the prefix `a`, and the sibling's `one.txt` | Refused: the folder's path holds a control character |
+| 3. A committed path that isn't UTF-8 | `caf\xE9.txt` became `caf�.txt`, and its patch failed in a clone | Refused, naming the path |
+| (Found next to 3) A filter driver whose name isn't UTF-8 | Never switched off: the snapshot ran the repository's filter, then was taken | Refused before git status runs, and the filter never runs. A plain git status runs it |
+| 4. Device names followed by spaces | `con .txt`, `aux .h` and `NUL  .js` were accepted. Git for Windows refuses them | Refused |
+| 5. A deep result | 7,000 files 505 folders deep: `readTar` took 7,095 ms and `findChanges` 10,511 ms, both on the event loop | 144 ms and 186 ms. The number of changes is checked first |
+| 6. A split index | The dirty check refreshed `.git/sharedindex.<id>`'s time | Refused, from the index's own bytes, with nothing in `.git` changed |
+| 7. Assume-unchanged and skip-worktree files | Edits to them were hidden, and the snapshot was taken | Refused, saying what to run |
+| 8. The policy version | A patch made under version 7 was bound as version 1, and passed the verifier | The policy is taken from the patch, and other rules are refused |
+| 9. *(Concern)* What the upload scan missed | A token in UTF-16, a key in a Kubernetes secret's base64 and a PGP private key: no kind found | Each is found, and a public certificate still passes |
+| 10. *(Concern)* Refusal text | Messages quoted git's stderr and an absolute path | A code on every refusal. git's words are kept in a detail that never leaves the engine, and no message holds an absolute path |
+
+It also led to two smaller changes:
+- a byte-order mark at the start of a name or link target is kept;
+- a failure in the tar test compares bytes cheaply.
+
+The newline-name refusal used to blame a hard link; it now names the line break.
+
+**Checks**
+- `pnpm verify`: 536 passed (domain 36, engine 319, desktop 181), none skipped. Before the review's fixes it was 524,
+  and B1 ended at 483.
+- A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`, before the review's fixes and again after
+  them:
+  - `doctor` answered;
+  - a `hello` run succeeded, on a throwaway repository.
+- **Not run:**
+  - the Windows and packaged checks: no target, supervisor, staging, main or preload code changed;
+  - any live Nebius call: B2 needs none. B3's approved recipe is the first.
+
+**Limits**
+- **Not wired into the engine or the app.** No run takes a snapshot or proposes a patch yet (B3 puts them together, B4
+  wires them in), and nothing applies one (NIV-8).
+- **Not shown on busybox yet:** the collect step's `find -prune`, `tar -T` and padded `wc`. This machine's GNU tools ran
+  it; B3's live run will show busybox.
+- **Only git 2.43 was run.** The minimum, 2.18, comes from the flags used.
+- **Recorded simplifications (D34):**
+  - case collisions are refused on every target;
+  - attributes come from the committed `.gitattributes` files only;
+  - a checkout smudged by Git LFS is refused as changed;
+  - a repository that commits test keys is refused;
+  - a split index, and files marked for git not to look at, are refused rather than checked another way.
+- **Detection is by pattern:** a password in a URL isn't recognised.
+- **For NIV-8:** `git apply` isn't atomic in a working tree (finding 1). Applying must check every added path's place
+  first, and leave the checkout as it was if it fails.
+- **"Exactly as it is"** means every name, kind, mode, size, modification time and byte, `.git` included. Access times
+  aren't compared.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
