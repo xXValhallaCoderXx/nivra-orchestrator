@@ -216,16 +216,32 @@ pnpm council:eval --score <dir>                                    # once the sh
   data, and a test pins it.
 - **The paid batch refuses to start** unless the digest is the one approved, the protocol says who labels the sheet,
   and the working tree is committed, so the revision it records is exact. The credentials file follows the sandbox
-  probe's rules: outside the repository, `chmod 600`, a `NEBIUS_API_KEY=…` line.
+  probe's rules: outside the repository, `chmod 600`, a `NEBIUS_API_KEY=…` line. The batch uses the key to read the
+  model listing before each run, and the engine gets it only through `initialize`.
+- **Before each run, with no inference request,** the batch checks three things against the protocol, using the
+  engine's own code:
+  - where the engine sends its requests, from its doctor;
+  - the model it would pick, from the endpoint's model listing (`GET /models`), read with the engine's own client and
+    pick;
+  - the sampling it gives that model, from the engine's own policy.
+
+  A mismatch stops the batch with nothing sent. The engine reads the listing again inside its run, so each run's
+  recorded route, model and sampling are checked again after it ends.
 - **Each request is journalled before it is sent,** and nothing is retried or retaken. A batch that was killed is
   resumed with `--resume`: a run that was out is found by its request id on the same engine home and followed to its
   end, never sent again.
+- **Every wait is bounded.** A run is cancelled at its limit plus 30 s and given 30 s more to settle. One still going
+  then is kept as unresolved, and the batch stops; resuming never sends it again. A run that couldn't end within the
+  batch's 60 minutes, windows included, isn't started.
 - **Scoring doesn't trust the model.**
   - The rubric's stems read each reviewer finding.
-  - `sheet.json` is the blinded sheet: shuffled by the protocol's seed, with no arm, role or finding id on it. The key
-    is in `sheet-key.json`.
-  - A person (or Claude, blind, with Nate reviewing) fills each line's `label`. `--score` then decides from the labels
-    alone, with the automatic-only scores beside them.
+  - `sheet.json` is the blinded sheet: shuffled by the protocol's seed, with no arm, role or finding id on it.
+    Which arm and reviewer each line came from is never written down. `--score` works it out again from the runs,
+    and refuses a sheet that isn't the one those runs made.
+  - Nate labels each line's `label`, from `sheet.md` alone: the runs folder, `batch.json` and the journal name each
+    run's arm. `--score` then decides from the labels alone, with the automatic-only scores beside them.
+- **Test-only options,** refused for a paid batch: `--only`, `--deadline-ms`, `--reconcile-ms`, `--engine` (a
+  stand-in engine) and `--fixtures` (another copy of the frozen inputs).
 - **Evidence** goes to `~/nivra-acceptance/council-eval-<UTC>-<revision>/` (0700): the journal, every run's summary,
   events and report, the engine's home and log, the sheet and its key, the scores and `decision.md`.
 
