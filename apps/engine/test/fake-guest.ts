@@ -3,7 +3,7 @@ import { listingDigest, PREPARE_SCRIPT, type ListingEntry } from "../src/exec/ne
 import { COLLECT_SCRIPT, RESULT_ARCHIVE, RESULT_LISTING } from "../src/exec/patch.ts";
 import { readTar, writeTar, type TarEntry } from "../src/exec/tar.ts";
 import { OUTPUT_DIRS } from "../src/repo/deny.ts";
-import { applyFixedEdit, checkOutcome, EDIT_SCRIPT, NETWORK_SCRIPT, type GuestNode } from "../scripts/sandbox-fixture.ts";
+import { applyFixedEdit, CHECK_SCRIPT, checkOutcome, EDIT_SCRIPT, FAIL_SCRIPT, NETWORK_SCRIPT, type GuestNode } from "../scripts/sandbox-fixture.ts";
 import { FakeService, succeed, type Behaviour } from "./fake-sandboxes.ts";
 
 /**
@@ -56,8 +56,8 @@ export class FakeGuest {
       return succeed();
     }
     if (program === "/bin/sh" && script === NETWORK_SCRIPT) return this.#network(args, body);
-    if (program === "/bin/sh" && args[0] === "bin/check.sh") return succeed(checkOutcome(workspace));
-    if (program === "/bin/sh" && args[0] === "bin/fail.sh") return succeed({ exitCode: 1, stdout: "FAIL: this check fails on purpose\n" });
+    if (program === "/bin/sh" && script === CHECK_SCRIPT) return succeed(checkOutcome(workspace));
+    if (program === "/bin/sh" && script === FAIL_SCRIPT) return succeed({ exitCode: 1, stdout: "FAIL: this check fails on purpose\n" });
     // A sleep longer than its timeout is ended by the service, as live (SUCCESS, exit -1, signal 9); a shorter one
     // runs until something stops it.
     if (program === "/bin/sleep") return Number(args[0]) > Number(body["timeout"]) ? succeed({ timedOut: true }) : { ...succeed(), waits: true };
@@ -91,11 +91,12 @@ export class FakeGuest {
     return succeed({ stdout: `entries ${kept.length}\nlisting ${sha(listing)}\narchive ${sha(archive)}\n`, files: { [RESULT_ARCHIVE]: archive, [RESULT_LISTING]: listing } });
   }
 
-  /** The network attempt: refused with networking off, as live; reached with it on, which fails the step. */
+  /** The network attempt: refused with networking off, as D28 saw live; reached with it on, which fails the step. */
   #network(args: readonly string[], body: Record<string, unknown>): Behaviour {
     const [byName, byIp] = [args[3] ?? "", args[4] ?? ""];
-    const head = "busybox: BusyBox v1.36.1 (the fake guest)";
-    if ((body["networking"] as { enabled?: boolean } | undefined)?.enabled === true) return succeed({ exitCode: 1, stdout: `interfaces: eth0 lo \n${head}\nREACHED ${byName}\nREACHED ${byIp}\n` });
-    return succeed({ stdout: `interfaces: lo \n${head}\nBLOCKED ${byName}: wget: bad address 'example.com'\nBLOCKED ${byIp}: wget: can't connect to remote host: Network unreachable\n` });
+    const head = `cwd: ${String(body["cwd"] ?? "/")}\n`;
+    const busybox = "busybox: BusyBox v1.36.1 (the fake guest)";
+    if ((body["networking"] as { enabled?: boolean } | undefined)?.enabled === true) return succeed({ exitCode: 1, stdout: `${head}interfaces: eth0 lo \n${busybox}\nREACHED ${byName}\nREACHED ${byIp}\n` });
+    return succeed({ stdout: `${head}interfaces: lo \n${busybox}\nBLOCKED ${byName}: wget: bad address 'example.com'\nBLOCKED ${byIp}: wget: can't connect to remote host: Network unreachable\n` });
   }
 }

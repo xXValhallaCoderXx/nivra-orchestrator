@@ -75,9 +75,21 @@ export function buildFixture(root: string, git: string): { root: string; baselin
   return { root, baseline: run(["rev-parse", "HEAD"]).trim() };
 }
 
-/** The fixed edit: a fixed script, run from the workspace. It edits, deletes, changes a mode, edits a binary and adds a long path. */
+/** What the approved recipe sends, pinned: the run is refused if the fixture it builds isn't this one. */
+export const APPROVED = {
+  baseline: "b04b10aac088fd96d440b05a1b56813fcf6471ac",
+  archiveSha256: "7e575cbbc775b42241e9d0c41052110e223f1a04df9a9e71c70095716677d77a",
+  listingDigest: "279fce560cbe72977234ad7245df9dc5096e545a07653173279d17a5acb00dfa",
+  archiveBytes: 18_944,
+} as const;
+
+/**
+ * The fixed edit: a fixed script, given the workspace as $1 and run from it, so it never relies on the service's own
+ * working folder. It edits, deletes, changes a mode, edits a binary and adds a long path.
+ */
 export const EDIT_SCRIPT = [
   "set -e",
+  'cd "$1"',
   `printf '#!/bin/sh\\necho "Hello, Nivra"\\n' > src/greet.sh`,
   "rm old.txt",
   "chmod 0755 tool.sh",
@@ -86,19 +98,49 @@ export const EDIT_SCRIPT = [
   `printf 'added by the fixed edit\\n' > "${LONG_ADDED}"`,
 ].join("\n");
 
+/** The checks: each a fixed script, given the workspace as $1. */
+export const CHECK_SCRIPT = 'cd "$1" && exec sh bin/check.sh';
+export const FAIL_SCRIPT = 'cd "$1" && exec sh bin/fail.sh';
+
 /**
- * The network attempt: the interfaces there are, busybox's version, then the two targets by name and by IP. It
- * succeeds only when both attempts fail: with networking off, neither may connect.
+ * The errors an attempt gives when there is no network to try: no name resolves, and no route leads anywhere. Any
+ * other failure (an HTTP error, a refused connection, a missing wget) proves nothing about the network.
+ */
+export const NETWORK_FAILURE = /bad address|Network unreachable|Network is unreachable|No route to host/;
+
+/**
+ * The network attempt. It prints the folder it runs in (recorded, to show whether the service honours a step's
+ * folder), the interfaces there are, busybox's version, then the two targets, by name and by IP. It succeeds only
+ * when loopback is the one interface and each attempt failed for want of a network.
  */
 export const NETWORK_SCRIPT = [
-  'echo "interfaces: $(ls /sys/class/net | tr "\\n" " ")"',
+  'echo "cwd: $(pwd)"',
+  'interfaces="$(ls /sys/class/net | tr "\\n" " ")"',
+  'echo "interfaces: $interfaces"',
   'echo "busybox: $(busybox 2>&1 | head -n 1)"',
   "blocked=0",
   'for target in "$1" "$2"; do',
-  '  if wget -q -T 5 -O /dev/null "$target" 2>/tmp/nivra-network; then echo "REACHED $target"; else blocked=$((blocked + 1)); echo "BLOCKED $target: $(head -c 200 /tmp/nivra-network)"; fi',
+  '  if wget -q -T 5 -O /dev/null "$target" 2>/tmp/nivra-network; then echo "REACHED $target"',
+  `  elif grep -qE "${NETWORK_FAILURE.source}" /tmp/nivra-network; then blocked=$((blocked + 1)); echo "BLOCKED $target: $(head -c 200 /tmp/nivra-network)"`,
+  '  else echo "UNCLEAR $target: $(head -c 200 /tmp/nivra-network)"; fi',
   "done",
-  '[ "$blocked" -eq 2 ]',
+  '[ "$interfaces" = "lo " ] && [ "$blocked" -eq 2 ]',
 ].join("\n");
+
+/**
+ * Whether the network step showed networking off, by behaviour: loopback alone, and both targets failing for want of a
+ * network, nothing reached and nothing unclear. The positive control that those targets connect with networking on is
+ * D28's (the name; the IP's "Network unreachable" needs none: there is no route at all).
+ */
+export function networkVerdict(exitCode: number | null, stdout: string, deny: { byName: string; byIp: string } = DENY): { pass: boolean; detail: string } {
+  const lines = stdout.split("\n");
+  const blocked = (target: string) => lines.find((line) => line.startsWith(`BLOCKED ${target}: `));
+  const only = lines.includes("interfaces: lo ");
+  const both = [deny.byName, deny.byIp].map(blocked);
+  const stray = lines.filter((line) => line.startsWith("REACHED ") || line.startsWith("UNCLEAR "));
+  const pass = exitCode === 0 && only && both.every((line) => line !== undefined && NETWORK_FAILURE.test(line)) && stray.length === 0;
+  return { pass, detail: [lines.find((line) => line.startsWith("interfaces: ")) ?? "no interfaces line", ...both.map((line, index) => line ?? `no BLOCKED line for ${index ? deny.byIp : deny.byName}`), ...stray].join(" | ") };
+}
 
 /** The targets D28 denied, and connected to with networking on (its positive control, 20 October). */
 export const DENY = { byName: "http://example.com/", byIp: "http://104.20.23.154/" } as const;
@@ -110,12 +152,14 @@ export const IMAGE = { uuid: "befe20f2-5c2c-3027-9961-314b5f218ea4", tag: "alpin
  * The recipe's steps, in order; the composition opens the session first (the prepare step) and collects last. A
  * timeout and a prescribed stop are there to be seen through the adapter.
  */
-export function fixtureRecipe(deny: { byName: string; byIp: string } = DENY): PrescribedStep[] {
+export function fixtureRecipe(options: { workspace?: string; deny?: { byName: string; byIp: string } } = {}): PrescribedStep[] {
+  const workspace = options.workspace ?? "/workspace";
+  const deny = options.deny ?? DENY;
   return [
-    { label: "edit", argv: ["/bin/sh", "-c", EDIT_SCRIPT, "nivra-edit"], timeoutMs: 60_000, keeps: true },
+    { label: "edit", argv: ["/bin/sh", "-c", EDIT_SCRIPT, "nivra-edit", workspace], timeoutMs: 60_000, keeps: true },
     { label: "network", argv: ["/bin/sh", "-c", NETWORK_SCRIPT, "nivra-network", deny.byName, deny.byIp], timeoutMs: 60_000, keeps: false },
-    { label: "check", argv: ["/bin/sh", "bin/check.sh"], timeoutMs: 30_000, keeps: false },
-    { label: "failing check", argv: ["/bin/sh", "bin/fail.sh"], timeoutMs: 30_000, keeps: false },
+    { label: "check", argv: ["/bin/sh", "-c", CHECK_SCRIPT, "nivra-check", workspace], timeoutMs: 30_000, keeps: false },
+    { label: "failing check", argv: ["/bin/sh", "-c", FAIL_SCRIPT, "nivra-failing-check", workspace], timeoutMs: 30_000, keeps: false },
     { label: "timeout", argv: ["/bin/sleep", "30"], timeoutMs: 5_000, keeps: false },
     { label: "stop", argv: ["/bin/sleep", "60"], timeoutMs: 60_000, keeps: false, stopAfterMs: 5_000 },
   ];

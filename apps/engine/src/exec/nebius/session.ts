@@ -299,6 +299,8 @@ class NebiusSession implements ExecutionSession {
   /** Stops cleanup itself, stopping a cancelled command included: closing's own signal. Never the work's. */
   readonly #cleanup = new AbortController();
   readonly #specSignal: AbortSignal | null;
+  /** How a failed open cleans up after itself: the spec's own closing signal and budget. */
+  readonly #openClosing: { signal?: AbortSignal; budgetMs?: number };
   readonly #onSpecAbort = () => this.#work.abort(this.#specSignal?.reason);
   readonly #deadline: number;
   readonly #steps: SessionStep[] = [];
@@ -323,6 +325,7 @@ class NebiusSession implements ExecutionSession {
     this.#deadline = this.#now() + (spec.budgetMs ?? limits.sessionBudgetMs);
     this.#image = options.baseImage;
     this.#specSignal = spec.signal ?? null;
+    this.#openClosing = spec.closing ?? {};
     this.#specSignal?.addEventListener("abort", this.#onSpecAbort, { once: true });
     mkdirSync(options.journalDir, { recursive: true, mode: 0o700 });
     this.#journalPath = join(options.journalDir, `${this.#sessionId}.jsonl`);
@@ -400,9 +403,9 @@ class NebiusSession implements ExecutionSession {
     this.#image = image;
   }
 
-  /** Closes the session after a failed start, and gives the error that carries its report. */
+  /** Closes the session after a failed start, on the spec's closing signal and budget, and gives the error that carries its report. */
   async #failOpen(message: string): Promise<SessionOpenError> {
-    return new SessionOpenError(message, await this.close());
+    return new SessionOpenError(message, await this.close(this.#openClosing));
   }
 
   exec(request: ExecRequest): Promise<ExecResult> {
@@ -462,7 +465,7 @@ class NebiusSession implements ExecutionSession {
     };
     let ran: Ran;
     try {
-      ran = await this.#runStep(step, signal, request.onStart);
+      ran = await this.#runStep(step, signal, request.onStart, request.onRunning);
     } catch (error) {
       if (error instanceof NotStarted) return notStarted();
       throw error;
@@ -512,7 +515,7 @@ class NebiusSession implements ExecutionSession {
    * stops the operation on a client of its own, within the stop budget (or closing's), so the cancel isn't cut off with
    * the work. What can't be settled leaves the session unsettled, and is never sent again.
    */
-  async #runStep(step: StepSpec, signal: AbortSignal, onStart?: ExecRequest["onStart"]): Promise<Ran> {
+  async #runStep(step: StepSpec, signal: AbortSignal, onStart?: ExecRequest["onStart"], onRunning?: ExecRequest["onRunning"]): Promise<Ran> {
     const sandbox = this.#sandbox(this.#client(signal), () => this.#deadline, signal);
     const started = this.#now();
     let submitted: { operationId: string } | { uncertain: string };
@@ -541,8 +544,19 @@ class NebiusSession implements ExecutionSession {
     } catch (error) {
       callbackError = error ?? new Error("onStart failed");
     }
+    // The first read that finds it executing: the command is running.
+    let running = false;
+    const onStatus = (status: string) => {
+      if (running || status !== "EXECUTING") return;
+      running = true;
+      try {
+        onRunning?.();
+      } catch (error) {
+        callbackError ??= error ?? new Error("onRunning failed");
+      }
+    };
     try {
-      return { operationId, outcome: await sandbox.observe(operationId, step.timeoutSeconds), durationMs: this.#now() - started, callbackError };
+      return { operationId, outcome: await sandbox.observe(operationId, step.timeoutSeconds, onStatus), durationMs: this.#now() - started, callbackError };
     } catch (error) {
       if (signal.aborted) return { ...(await this.#stopped(operationId, step, started)), callbackError };
       this.#state = { kind: "unsettled", why: `${step.label} wasn't seen to end` };
