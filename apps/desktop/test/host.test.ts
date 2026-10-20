@@ -933,6 +933,28 @@ describe("Host: conversations follow each turn to its end, and never resend one 
     assert.equal(stub.chats().length, 1, "nothing was sent again");
   });
 
+  it("restarts a general conversation's stopped engine: the turn it cut off is interrupted, nothing is resent, and the next turn is answered", async () => {
+    const stub = await stubWith((_request, index) => (index === 0 ? { ...text("Too late."), delayMs: 15_000 } : text("Answered.")));
+    const { host, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Slow?");
+    await waitFor(() => host.conversation(conversation.id).turns[0]?.runId && stub.chats().length === 1, "the request to reach the stub");
+    const { pid } = await online(host, "local");
+    process.kill(pid, "SIGKILL");
+    await waitFor(() => !isAlive(pid) && stateOf(host, "local")?.status !== "online", "the engine to stop");
+    const waiting = host.conversation(conversation.id).turns[0]!;
+    assert.deepEqual([waiting.status, waiting.unresolved !== null], ["running", true], "it waits, unresolved, while its engine is away");
+    const restarted = await host.restartConversationEngine(conversation.id);
+    assert.equal(restarted.engine.state.status, "online");
+    const { turn } = await settled(host, conversation.id);
+    assert.deepEqual([turn.status, turn.note], ["interrupted", "Interrupted: Nivra or its engine stopped before the answer arrived. Nothing was resent."]);
+    await host.sendMessage(conversation.id, "Slow?");
+    const next = await settled(host, conversation.id);
+    assert.deepEqual([next.turn.status, next.view.turns.length, stub.chats().length], ["answered", 2, 2], "only the new turn was sent");
+    await assert.rejects(host.restartConversationEngine(randomUUID()), { message: "That conversation is no longer in the list." });
+  });
+
   it("finds a send whose answer was lost: adopted from the same store, not sent when that store has no record, unknown from another store", async () => {
     async function lost(options: { accept: boolean; replaceStore?: boolean }) {
       const { host, root, keys } = makeHost({ localEntry: GATED });
@@ -1143,7 +1165,7 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
     await host.sendMessage(conversation.id, "How do I stage the refactor?");
     const answer = await answered(host, conversation.id);
     const plan = await host.savePlan(conversation.id, answer.id);
-    assert.deepEqual([plan.version, plan.text, plan.latest], [1, "Stage it: the parser first, then the cache.", 1]);
+    assert.deepEqual([plan.version, plan.text, plan.latest, plan.projectId, plan.assumptions], [1, "Stage it: the parser first, then the cache.", 1, null, []]);
     const fields = { ...empty, goal: "Stage the refactor", acceptanceCriteria: ["The parser's tests pass"] };
     const direct = await host.createTask({ title: "Refactor, written directly", fields, projectId: null, planId: null });
     const planned = await host.createTask({ title: "Refactor, from the plan", fields: { ...fields, context: plan.text }, projectId: null, planId: plan.id });
@@ -1158,13 +1180,15 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
     const marked = host.task(planned.summary.id);
     assert.deepEqual(
       [marked.brief.version, marked.brief.content.context, marked.sourcePlans],
-      [1, plan.text, [{ planLineage: plan.lineageId, usedVersion: 1, latestVersion: 2, conversationId: conversation.id }]],
+      [1, plan.text, [{ planLineage: plan.lineageId, usedVersion: 1, latestVersion: 2, latestPlanId: v2.id, conversationId: conversation.id }]],
     );
     const refreshed = host.refreshBriefFromPlan(planned.summary.id, marked.revision, v2.id);
     assert.deepEqual([refreshed.brief.version, refreshed.brief.content.context, refreshed.brief.content.sources[0]?.planVersion], [2, "Stage it: the cache first, then the parser.", 2]);
+    const listed = host.tasks();
+    assert.deepEqual([listed.workspace.state, listed.tasks.map((t) => t.title)], ["ready", ["Refactor, from the plan", "Refactor, written directly"]], "the most recently changed first");
     await host.deleteConversation(conversation.id);
     const kept = host.task(planned.summary.id);
-    assert.deepEqual([kept.brief.content.context, kept.sourcePlans[0]?.latestVersion, kept.versions.length], ["Stage it: the cache first, then the parser.", null, 2]);
+    assert.deepEqual([kept.brief.content.context, kept.sourcePlans[0]?.latestVersion, kept.sourcePlans[0]?.latestPlanId, kept.versions.length], ["Stage it: the cache first, then the parser.", null, null, 2]);
     // In the file itself: the question lived only in the conversation, so no copy is left; the brief's text stays with the task.
     await host.shutdown();
     const workspaceFiles = (needle: string) => filesHolding(root, needle).filter((file) => file.startsWith("workspace.db"));
@@ -1207,6 +1231,7 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
     const answer = await answered(host, conversation.id);
     const plan = await host.savePlan(conversation.id, answer.id);
     assert.match(plan.text, /^Add the export beside the list\.\n\nAssumed:\n- Alpha uses Vite$/);
+    assert.deepEqual([plan.projectId, plan.assumptions], [ids[0], ["Alpha uses Vite"]], "what a task made from it starts with");
     const task = await host.createTask({ title: "CSV export", fields: { ...empty, goal: "Export the list", context: plan.text, assumptions: ["Alpha uses Vite"] }, projectId: ids[0]!, planId: plan.id });
     assert.deepEqual([task.brief.content.sources[0]?.projectId, task.brief.content.sources[0]?.citations], [ids[0], [{ path: "README.md", startLine: 1, endLine: 1 }]]);
     // Made from alpha's plan for beta, or for no repository yet: the same rule as moving a task.
@@ -1226,6 +1251,25 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
     assert.deepEqual([rewritten.brief.content.revalidate, rewritten.versions.map((v) => v.version)], [["assumptions"], [1, 2, 3]]);
   });
 
+  it("refuses an oversized brief in words that name the field, its size and the limit, and keeps what fits, trimmed", async () => {
+    const { host } = makeHost({});
+    const cases: Array<[Partial<typeof empty>, string]> = [
+      [{ goal: "g".repeat(4_001) }, "The goal is 4001 characters long, and it can hold 4000. Shorten it, then save it again."],
+      [{ context: ` ${"c".repeat(20_001)} ` }, "The context is 20001 characters long, and it can hold 20000. Shorten it, then save it again."],
+      [{ acceptanceCriteria: Array.from({ length: 21 }, (_, i) => `Criterion ${i + 1}`) }, "There are 21 acceptance criteria, and a brief can hold 20. Remove some, then save it again."],
+      [{ checks: ["Lint", "", "k".repeat(1_001)] }, "Check 3 is 1001 characters long, and each can hold 1000. Shorten it, then save it again."],
+    ];
+    for (const [fields, message] of cases) {
+      await assert.rejects(host.createTask({ title: "Sized", fields: { ...empty, ...fields }, projectId: null, planId: null }), { message });
+    }
+    assert.equal(host.tasks().tasks.length, 0);
+    // Padding doesn't count against a limit, and empty rows are dropped.
+    const fits = await host.createTask({ title: "Sized", fields: { ...empty, goal: `  ${"g".repeat(4_000)}  `, acceptanceCriteria: ["", "  Done  ", " "] }, projectId: null, planId: null });
+    assert.deepEqual([fits.brief.content.goal.length, fits.brief.content.acceptanceCriteria], [4_000, ["Done"]]);
+    await assert.rejects(host.reviseBrief(fits.summary.id, fits.revision, { ...empty, assumptions: ["a".repeat(1_001)] }), { message: "Assumption 1 is 1001 characters long, and each can hold 1000. Shorten it, then save it again." });
+    assert.equal(host.task(fits.summary.id).versions.length, 1);
+  });
+
   it("refuses a credential in any field the person types into, saying which, and saves nothing", async () => {
     const { host, keys } = makeHost({});
     keys.current = { NEBIUS_API_KEY: KEY };
@@ -1241,6 +1285,6 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
     for (const [field, fields, title] of cases) {
       await assert.rejects(host.createTask({ title, fields, projectId: null, planId: null }), new RegExp(`^Error: ${field} (holds your saved Token Factory key|looks like it holds)`));
     }
-    assert.equal(host.tasks().length, 0);
+    assert.equal(host.tasks().tasks.length, 0);
   });
 });

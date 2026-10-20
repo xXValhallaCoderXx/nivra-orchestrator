@@ -1,6 +1,7 @@
 import type { ChatResult } from "@nivra/domain";
 import { z } from "zod";
-import type { BriefContent, BriefFields, BriefSource, TaskState } from "../shared/ipc.ts";
+import { TASK_LIMITS, type BriefContent, type BriefFields, type BriefSource, type TaskState } from "../shared/ipc.ts";
+import { planText } from "../shared/plans.ts";
 
 /**
  * Native tasks and plans (D26, NIV-32), as plain functions: what a brief and a plan hold, how a plan is made from an
@@ -13,7 +14,7 @@ export const RUN_UNAVAILABLE =
 
 export const EXECUTION_POLICY = { concurrency: 1, network: "off", approval: "required" } as const;
 
-export const TASK_LIMITS = { titleChars: 200, textChars: 4_000, contextChars: 20_000, itemChars: 1_000, items: 20, planChars: 20_000 } as const;
+export { TASK_LIMITS };
 
 const Text = (max: number) => z.string().max(max);
 const Items = z.array(z.string().trim().min(1).max(TASK_LIMITS.itemChars)).max(TASK_LIMITS.items);
@@ -74,12 +75,9 @@ export interface PlanContent {
  * detail, and what it assumed. Only citations to lines the model was shown come with it.
  */
 export function planFromAnswer(reply: ChatResult, at: { conversationId: string; messageId: string; runId: string | null; projectId: string | null }): PlanContent {
-  if (reply.kind === "general") return { text: reply.text, ...at, kind: "general", headAtStart: null, citations: [], assumptions: [] };
-  const parts = [reply.answer];
-  if (reply.proposals.length) parts.push(`Proposed:\n${reply.proposals.map((p) => `- ${p.title}: ${p.detail}`).join("\n")}`);
-  if (reply.assumptions.length) parts.push(`Assumed:\n${reply.assumptions.map((a) => `- ${a}`).join("\n")}`);
+  if (reply.kind === "general") return { text: planText(reply), ...at, kind: "general", headAtStart: null, citations: [], assumptions: [] };
   const shown = [...reply.evidence, ...reply.proposals].flatMap((item) => item.citations.filter((citation) => citation.checked).map(({ path, startLine, endLine }) => ({ path, startLine, endLine })));
-  return { text: parts.join("\n\n"), ...at, kind: "repository", headAtStart: reply.headAtStart, citations: shown, assumptions: reply.assumptions };
+  return { text: planText(reply), ...at, kind: "repository", headAtStart: reply.headAtStart, citations: shown, assumptions: reply.assumptions };
 }
 
 /** A brief from what the person wrote, with Nivra's fixed policy. A direct task has no sources. */

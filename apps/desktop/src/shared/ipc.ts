@@ -38,7 +38,31 @@ export const IPC = {
   checkTokenFactory: "providers:check",
   listConversations: "conversations:list",
   createConversation: "conversations:create",
+  getConversation: "conversations:get",
+  openConversation: "conversations:open",
+  sendMessage: "conversations:send",
+  cancelTurn: "conversations:cancel-turn",
+  deleteConversation: "conversations:delete",
+  restartConversationEngine: "conversations:restart-engine",
+  savePlan: "plans:save",
+  revisePlan: "plans:revise",
+  listPlans: "plans:list",
+  listTasks: "tasks:list",
+  getTask: "tasks:get",
+  createTask: "tasks:create",
+  reviseBrief: "tasks:revise-brief",
+  refreshBriefFromPlan: "tasks:refresh-brief",
+  setTaskProject: "tasks:project",
+  setTaskState: "tasks:state",
+  renameTask: "tasks:rename",
+  deleteTask: "tasks:delete",
 } as const;
+
+/** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
+export const MESSAGE_CHARS = 8_000;
+
+/** What the host takes in a task's title, brief and plan (D26); the window counts a plan's characters as they are typed. */
+export const TASK_LIMITS = { titleChars: 200, textChars: 4_000, contextChars: 20_000, itemChars: 1_000, items: 20, planChars: 20_000 } as const;
 
 export interface AppInfo {
   name: string;
@@ -236,8 +260,9 @@ export interface ConversationView {
   closed: string | null;
 }
 
-/** A task's state (D26). `active` and `review` come only from attempts, which can't start yet. */
-export type TaskState = "draft" | "ready" | "active" | "review" | "completed";
+/** A task's states (D26). `active` and `review` come only from attempts, which can't start yet. */
+export const TASK_STATES = ["draft", "ready", "active", "review", "completed"] as const;
+export type TaskState = (typeof TASK_STATES)[number];
 
 /** Where a brief came from: a version of a plan saved from a conversation's answer. */
 export interface BriefSource {
@@ -280,6 +305,10 @@ export interface PlanView {
   text: string;
   conversationId: string;
   messageId: string;
+  /** The conversation's project, which a task made from this plan starts on; null for a general conversation. */
+  projectId: string | null;
+  /** What the answer it came from took as true without checking; a task made from it starts with them. */
+  assumptions: string[];
   /** The latest version in its lineage. */
   latest: number;
   createdAt: string;
@@ -303,11 +332,17 @@ export interface TaskView {
   revision: number;
   brief: { id: string; version: number; sha256: string; content: BriefContent; createdAt: string };
   versions: Array<{ id: string; version: number; createdAt: string }>;
-  /** Each plan the brief came from: the version it used, the latest there is, or that it was deleted. */
-  sourcePlans: Array<{ planLineage: string; usedVersion: number; latestVersion: number | null; conversationId: string | null }>;
+  /** Each plan the brief came from: the version it used, and the latest there is (its id to update from), or that it was deleted. */
+  sourcePlans: Array<{ planLineage: string; usedVersion: number; latestVersion: number | null; latestPlanId: string | null; conversationId: string | null }>;
   attempts: Array<{ id: string; briefVersion: number; status: TurnStatus; createdAt: string }>;
   /** Why the task can't run, in plain words; running tasks isn't available yet. */
   runUnavailable: string;
+}
+
+/** The workspace's state and every task, the most recently changed first; none while the workspace can't be used. */
+export interface TasksView {
+  workspace: WorkspaceView;
+  tasks: TaskSummary[];
 }
 
 export interface NivraApi {
@@ -373,4 +408,36 @@ export interface NivraApi {
   listConversations(): Promise<ConversationsView>;
   /** Starts a conversation, general or about one project; its scope never changes afterwards. Starts no engine. */
   createConversation(scope: ConversationScope): Promise<ConversationSummary>;
+  /** One conversation as it is now. Reading starts no engine and asks none. */
+  getConversation(conversationId: string): Promise<ConversationView>;
+  /** Opens a conversation: a turn left open is followed on its own engine, which starts if needed. Nothing is resent. */
+  openConversation(conversationId: string): Promise<ConversationView>;
+  /** Sends a message as a new turn. Refused at once, with nothing stored, when it can't go; the answer comes later. */
+  sendMessage(conversationId: string, text: string): Promise<ConversationView>;
+  /** Stops a turn that is being sent or is running; its end is recorded as cancelled by the person. */
+  cancelTurn(conversationId: string, turnId: string): Promise<ConversationView>;
+  /** Deletes a conversation with its turns, messages and plans; its open turn is stopped first. */
+  deleteConversation(conversationId: string): Promise<void>;
+  /** Restarts the engine a conversation's turns run on (a general one has no project to restart it from). */
+  restartConversationEngine(conversationId: string): Promise<ConversationView>;
+  /** Saves an answer as plan v1 of a new lineage; null text keeps the answer's own. */
+  savePlan(conversationId: string, messageId: string, text: string | null): Promise<PlanView>;
+  /** Saves an edit of a plan as its next version; earlier versions, and briefs made from them, stay as they are. */
+  revisePlan(planId: string, text: string): Promise<PlanView>;
+  /** A conversation's plans, every version, oldest first. */
+  listPlans(conversationId: string): Promise<PlanView[]>;
+  listTasks(): Promise<TasksView>;
+  getTask(taskId: string): Promise<TaskView>;
+  /** Creates a task and its brief v1, written directly or from a plan version; either way the brief has the same shape. */
+  createTask(input: { title: string; fields: BriefFields; projectId: string | null; planId: string | null }): Promise<TaskView>;
+  /** Saves a brief edit as its next version, from the task's revision as read. */
+  reviseBrief(taskId: string, revision: number, fields: BriefFields): Promise<TaskView>;
+  /** Takes a newer version of the plan a brief came from into its next version. */
+  refreshBriefFromPlan(taskId: string, revision: number, planId: string): Promise<TaskView>;
+  /** Sets the repository a task will run on, or none; what came from another project's conversation is cleared. */
+  setTaskProject(taskId: string, revision: number, projectId: string | null): Promise<TaskView>;
+  /** Moves a task to the state asked for, when its brief allows it. */
+  setTaskState(taskId: string, revision: number, state: TaskState): Promise<TaskView>;
+  renameTask(taskId: string, revision: number, title: string): Promise<TaskView>;
+  deleteTask(taskId: string): Promise<void>;
 }
