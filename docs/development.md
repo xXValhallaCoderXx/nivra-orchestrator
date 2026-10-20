@@ -21,6 +21,7 @@ pnpm rpc runs.start '{"workflowId":"hello","input":{"repoPath":"/path/to/repo","
 pnpm rpc runs.start '{"workflowId":"explain","input":{"repoPath":"/path/to/repo","question":""},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true}}}' --follow
 pnpm rpc runs.result '{"runId":"<id>"}'
 pnpm rpc runs.start '{"workflowId":"chat","input":{"message":"How should I stage this?","scope":{"kind":"general"}}}' --follow
+pnpm rpc runs.start '{"workflowId":"review","input":{"planId":"<uuid>","planVersion":1},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":false},"packet":{"scope":{"kind":"general"},"text":"Plan text","assumptions":[],"references":[]}}}' --follow
 ```
 
 The explain example sends the repository's excerpts to Token Factory when `NEBIUS_API_KEY` is set, and uses tokens.
@@ -75,6 +76,10 @@ A third switch, `--nivra-token-factory-url=<loopback url>`, points the local eng
 - Only an unpackaged app honours it; a packaged app ignores it.
 - The engine accepts only `127.0.0.1`, `[::1]` or `localhost`.
 - Doctor then reports a test endpoint, and each run records its route as `loopback-test`.
+- **A plan to review without a model** (D31). A packaged app can't make one, so `review.spec.ts` (`test:packaged`) and
+  `workspace-windows.spec.ts` (`test:windows`) seed one into the profile before launch through
+  `e2e/seed-workspace.ts`, which uses the workspace's own functions. On Windows the staged `node.exe` runs it, bundled,
+  so the file is only ever opened on Windows (D7): run `pnpm stage:runtime all` first.
 
 Cross-platform checks (D14; there is no CI):
 
@@ -134,6 +139,29 @@ wsl.exe --unregister NivraTest   # deletes the distribution and its disk
   repository turn needs consent, like explain:
   `{"workflowId":"chat","input":{"message":"…","scope":{"kind":"repository","repoPath":"/path/to/repo"}},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true},"history":{"exchanges":[],"omitted":{"overLimit":0,"unanswered":0,"preferencesChanged":0}}}}`.
 
+**The engine's log (NIV-27, D29).** Every failure writes one line to it, `diagnostic {json}`, at most 1,000
+characters. The line never holds an error's own words:
+- `code`: what kind of failure, from a closed list (`unexpected-error`, `model-failure`, `git-failed`, `exec-refused`,
+  `refused` and so on);
+- `stage`: where, such as `models.list`, `read_file` or `explain.prepare`;
+- `reason`: a refusal's own code;
+- the run, request, workflow and step, or the RPC id and method;
+- `error`: up to four allowlisted classes from the cause chain, a known errno, how many causes, and the message's
+  length;
+- `counts`, such as `elapsedMs`.
+
+The app keeps each engine's log in its logs folder (`<user data>/logs/<target>.log`). A diagnostic says what kind of
+failure it was and where; it never says what the error said. To see that, reproduce the failure. For example, a key
+holding a newline makes `fetch` throw a TypeError that quotes it:
+
+```bash
+NEBIUS_API_KEY="$(printf '%s\n%s' "canary-one" "canary-two")" pnpm rpc providers.check --home ~/.nivra-dev-track-a/<check> --token-factory-url http://127.0.0.1:9/v1
+```
+
+- A review (D30) needs its context: the preferences, the consent and the packet. `rpc.ts` works out the two
+  fingerprints when the input leaves them out; pass `"panel":"single"` for the one-reviewer baseline. After `--follow`,
+  its report is printed.
+
 `probe:tokenfactory` takes `--model <id>`, passed after `--`, to pick the Nemotron model.
 
 The Nebius Sandboxes probe (NIV-29, D28) is an explicit live check, never part of `verify`. Each stage runs only after
@@ -173,7 +201,73 @@ pnpm probe:sandbox --credentials <file> --recover <evidence folder>
   - A second Ctrl+C stops cleanup.
   - `--recover` finishes the rest later from the journal, on the same budget.
 
-The Nebius execution session (NIV-41, D33) is the probe's client and journal behind the execution contract, in
+The council evaluation (NIV-40) compares the council with a single reviewer on five synthetic plans. It is an explicit
+check, never part of `verify`, and its paid batch runs only after Nate approves its digest:
+
+```bash
+pnpm council:eval --plan                                           # the request for approval: every run, limit and rule; no network
+pnpm council:eval --token-factory-url <loopback url> --out <dir>   # the same batch against a stub, as the tests run it
+pnpm council:eval --credentials <file> --approved <digest>         # the paid batch: 10 runs, at most 20 requests
+pnpm council:eval --resume <dir> [--credentials <file> --approved <digest> | --token-factory-url <url>]
+pnpm council:eval --score <dir>                                    # once the sheet is labelled: the scores and the decision
+```
+
+- **Frozen inputs.** Five plans, `apps/engine/test/fixtures/council-eval/plans/f1…f5.json`, are exactly what both arms
+  are sent: no repository, no path, no conversation, and no preferences. F5 is the control, a sound plan. The rubric
+  (`rubric.json`) and the protocol (`protocol.json`) are never sent. The approval digest covers all three, read as
+  data, and a test pins it.
+- **The paid batch refuses to start** unless the digest is the one approved, the protocol says who labels the sheet,
+  and the working tree is committed, so the revision it records is exact. The credentials file follows the sandbox
+  probe's rules: outside the repository, `chmod 600`, a `NEBIUS_API_KEY=…` line. The batch uses the key to read the
+  model listing before each run, and the engine gets it only through `initialize`.
+- **Before each run, with no inference request,** the batch checks three things against the protocol, using the
+  engine's own code:
+  - where the engine sends its requests, from its doctor;
+  - the model it would pick, from the endpoint's model listing (`GET /models`), read with the engine's own client and
+    pick;
+  - the sampling it gives that model, from the engine's own policy.
+
+  A mismatch stops the batch with nothing sent. The engine reads the listing again inside its run, so each run's
+  recorded route, model and sampling are checked again after it ends.
+- **Each request is journalled before it is sent,** and nothing is retried or retaken. A batch that was killed is
+  resumed with `--resume`:
+  - a run that was out is found by its request id on the same engine home and followed to its end, never sent again;
+  - the protocol's stops are checked again on every run the journal kept, so a stop lost with the batch (killed after
+    a run's end was written, before its stop was) stops it again before anything more is sent.
+- **Every wait is bounded,** and the batch's 60 minutes count them all from its engine's start:
+  - the engine's start, its doctor, and before each run, the model listing, the run's start and reading its record;
+  - a run is cancelled at its limit plus 30 s and given 30 s more to settle. One still going then is kept as
+    unresolved, and the batch stops; resuming never sends it again.
+
+  A run is started only if all of that, each wait at its limit, could end within the 60 minutes, and no wait goes past
+  them. Only stopping the engine comes after, in at most 15 s. With every run and every wait at its limit, a batch
+  would need 74 minutes, so it would stop before its last runs.
+- **Scoring doesn't trust the model.**
+  - The rubric's stems read each reviewer finding.
+  - `sheet.json` is the blinded sheet: shuffled by the protocol's seed, with no arm, role or finding id on it.
+    Which arm and reviewer each line came from is never written down. `--score` works it out again from the runs,
+    and refuses a sheet that isn't the one those runs made.
+  - Nate labels each line's `label`, from `sheet.md` alone: the runs folder, `batch.json` and the journal name each
+    run's arm. `--score` then decides from the labels alone, with the automatic-only scores beside them.
+  - `--score` scores only under the protocol the batch ran under: the journal's approval digest must be this one's,
+    as for `--resume`. Changed rules can't rescore a batch, or overwrite what it scored.
+  - It refuses labels it can't use, naming each: a defect that isn't one of that plan's known ones (misspelled, or
+    another plan's), a value outside a field's allowed ones, a field set where it doesn't apply, or a label without
+    its seven fields. These are the checks v1 passed when it was frozen.
+- **Label versions.** A labelled sheet is frozen before it is scored, and never edited afterwards:
+  - **v1:** `sheet.v1.json`, read-only, is the sheet the batch wrote with the approved labels copied in. Each row is
+    checked first, and only the label fields are copied.
+  - **Its record:** `labels.v1.json` holds its hash, who labelled it, and the hash of the sheet the batch wrote (kept
+    as `sheet.original.json`). The script that did the checking and freezing is kept beside them, as
+    `freeze-labels.ts`.
+  - **Its scores:** `scores.v1.json` and `decision.v1.md`, with their hashes in `score.v1.json`.
+  - **A correction** makes v2 the same way, scores it, and records whether the decision changed. v1 stays as it was.
+- **Test-only options,** refused for a paid batch: `--only`, `--deadline-ms`, `--reconcile-ms`, `--engine` (a
+  stand-in engine) and `--fixtures` (another copy of the frozen inputs).
+- **Evidence** goes to `~/nivra-acceptance/council-eval-<UTC>-<revision>/` (0700): the journal, every run's summary,
+  events and report, the engine's home and log, the sheet, the scores and `decision.md`.
+
+The Nebius execution session (NIV-41, D33) is the sandbox probe's client and journal behind the execution contract, in
 `apps/engine/src/exec/nebius/session.ts`. Nothing runs on it yet: it isn't wired into the engine or the app (B4,
 NIV-44). Its tests run offline, against the fake service in `apps/engine/test/fake-sandboxes.ts` and a loopback server:
 

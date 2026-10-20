@@ -68,9 +68,10 @@ export interface EngineProcess {
 }
 
 /** Starts the engine as the host would, over stdio, with `--home` (never the environment) for isolation (D3). */
-export function startEngine(home: string, options: { heartbeatMs?: number; instanceId?: string; args?: string[] } = {}): EngineProcess {
+export function startEngine(home: string, options: { heartbeatMs?: number; instanceId?: string; args?: string[]; env?: NodeJS.ProcessEnv } = {}): EngineProcess {
   const args = options.args ?? ["--stdio", "--home", home, "--instance", options.instanceId ?? randomUUID(), "--heartbeat-ms", String(options.heartbeatMs ?? 0)];
-  const child = spawn(process.execPath, [MAIN, ...args], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  // `env` is for a test that changes where the engine finds its tools, such as a fake git first on PATH.
+  const child = spawn(process.execPath, [MAIN, ...args], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, ...(options.env ? { env: options.env } : {}) });
   const lines: string[] = [];
   const notifications: Array<{ method: string; params: unknown }> = [];
   const protocolErrors: string[] = [];

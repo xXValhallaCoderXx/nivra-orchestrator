@@ -4,6 +4,8 @@ import {
   CHAT_LIMITS,
   ErrorCode,
   isTerminal,
+  packetDigest,
+  preferencesDigest,
   RpcCallError,
   type ChatContext,
   type ChatInput,
@@ -11,6 +13,10 @@ import {
   type ExplainResult,
   type PreferenceIntent,
   type ProviderCheck,
+  type ReviewContext,
+  type ReviewInput,
+  type ReviewPanel,
+  type ReviewReport,
   type RunEventsPage,
   type RunStatus,
   type RunSummary,
@@ -31,6 +37,8 @@ import type {
   PreferencesView,
   PreferenceView,
   ProjectView,
+  ReviewPreview,
+  ReviewView,
   TasksView,
   TaskState,
   TaskSummary,
@@ -62,6 +70,7 @@ import {
   type PreferenceExport,
 } from "./preferences.ts";
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
+import { historicalReferences, packetFor, previewFingerprint, reportMatches, REVIEW_REQUESTS, reviewNoteFor } from "./reviews.ts";
 import { BriefContentSchema, BriefFieldsSchema, briefForRepository, briefFrom, briefIsReady, nextState, planFromAnswer, RUN_UNAVAILABLE, sourceFrom, TASK_LIMITS, type PlanContent } from "./tasks.ts";
 import { EngineOfflineError, EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
@@ -73,10 +82,12 @@ import {
   deleteTask,
   getArtifact,
   getConversation,
+  getReview,
   getTask,
   getTurn,
   insertArtifact,
   insertConversation,
+  insertReview,
   insertTask,
   insertTurn,
   listConversations,
@@ -86,7 +97,9 @@ import {
   projectAnswer,
   recordRun,
   requestCancel,
+  reviewsOf,
   setTurnHome,
+  settleReview,
   settleTurn,
   turnByRun,
   turnsOf,
@@ -96,6 +109,7 @@ import {
   type ArtifactRecord,
   type CancelReason,
   type ConversationRecord,
+  type ReviewRecord,
   type TaskRecord,
   type TurnRecord,
 } from "./workspace.ts";
@@ -124,6 +138,8 @@ export interface HostOptions {
 
 /** Why a conversation can't continue once its project is gone. */
 const CLOSED = "This conversation's project was removed, so it can't continue. Its history stays here until you delete it.";
+/** Why a plan can't be reviewed once its project is gone. */
+const REVIEW_CLOSED = "This plan's project was removed, so it can't be reviewed. Its history stays here until you delete it.";
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const isRunNotFound = (error: unknown) => error instanceof RpcCallError && error.code === ErrorCode.RunNotFound;
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref?.());
@@ -135,6 +151,16 @@ interface Engine {
 }
 
 type WslLookup = { target: ExecutionTarget } | { notReady: string } | { notFound: true };
+
+/** What a conversation's run link sends: a turn, or a review of a plan version (D31). */
+type LinkRequest = { workflowId: "chat"; input: ChatInput; context: ChatContext } | { workflowId: "review"; input: ReviewInput; context: ReviewContext };
+
+/** A plan version to review, its conversation, and the project that conversation is about (null for a general one). */
+interface ReviewSubject {
+  plan: ArtifactRecord;
+  conversation: ConversationRecord;
+  project: ProjectRecord | null;
+}
 
 /**
  * The host's core, without Electron (D12): the project registry, one engine per target, and the calls the window
@@ -232,6 +258,7 @@ export class Host {
       turns: turnsOf(workspace, conversationId).map((turn) => this.#turnView(turn, engine)),
       engine,
       closed: summary.projectPresent === false ? CLOSED : null,
+      openReview: openTurns(workspace, { conversationId }).find((link) => link.workflowId === "review")?.id ?? null,
     };
   }
 
@@ -266,8 +293,8 @@ export class Host {
     refuseCredentials("Your message", message, await this.#knownSecrets(), "send");
     const conversation = getConversation(workspace, conversationId);
     if (!conversation) throw new Error("That conversation is no longer in the list.");
-    const busy = "This conversation is still waiting for an answer. Wait for it, or cancel it, then send again.";
-    if (openTurns(workspace, { conversationId }).length) throw new Error(busy);
+    const busy = () => this.#busyReason(conversationId, "send again") ?? "This conversation is still waiting for an answer. Wait for it, or cancel it, then send again.";
+    if (openTurns(workspace, { conversationId }).length) throw new Error(busy());
     let input: ChatInput = { message, scope: { kind: "general" } };
     let epoch = 0;
     if (conversation.projectId !== null) {
@@ -284,10 +311,10 @@ export class Host {
     const turnId = randomUUID();
     const turn = { id: turnId, conversationId, sessionId: this.#sessionId, targetId: conversation.targetId, preferences: preferences.records.map(({ id, revision }) => ({ id, revision })), history: record, createdAt: new Date().toISOString() };
     if (!getConversation(workspace, conversationId)) throw new Error("That conversation is no longer in the list.");
-    if (!insertTurn(workspace, turn, { id: randomUUID(), text: message })) throw new Error(busy);
+    if (!insertTurn(workspace, turn, { id: randomUUID(), text: message })) throw new Error(busy());
     this.#submissions.set(turnId, { cancel: null });
     const context: ChatContext = { preferences, sharing: { modelContext: conversation.projectId !== null }, history };
-    void this.#submit(turnId, conversation, input, context, epoch).catch((error: unknown) => this.#options.log(`A turn couldn't be sent: ${errorText(error)}`));
+    void this.#submit(turnId, conversation, { workflowId: "chat", input, context }, epoch).catch((error: unknown) => this.#options.log(`A turn couldn't be sent: ${errorText(error)}`));
     return this.conversation(conversationId);
   }
 
@@ -296,16 +323,9 @@ export class Host {
    * as its engine answers; a running one is cancelled on its engine. Its end is recorded as cancelled by the person.
    */
   async cancelTurn(conversationId: string, turnId: string): Promise<ConversationView> {
-    const workspace = this.#workspaceDb();
-    const turn = getTurn(workspace, turnId);
-    if (!turn || turn.conversationId !== conversationId) throw new Error("That message is no longer in this conversation.");
-    if (turn.status === "submitting" || turn.status === "running") {
-      requestCancel(workspace, turnId, "person");
-      const pending = this.#submissions.get(turnId);
-      if (pending) pending.cancel ??= "person";
-      if (turn.runId) await this.cancelRun(turn.runId);
-      else if (!pending) this.#follow(turnId);
-    }
+    const turn = getTurn(this.#workspaceDb(), turnId);
+    if (!turn || turn.conversationId !== conversationId || turn.workflowId !== "chat") throw new Error("That message is no longer in this conversation.");
+    await this.#cancelLink(turn);
     return this.conversation(conversationId);
   }
 
@@ -385,6 +405,77 @@ export class Host {
     const workspace = this.#workspaceDb();
     const plans = workspace.db.prepare("SELECT id FROM artifacts WHERE kind = 'plan' AND conversation_id = ? ORDER BY created_at, version").all(conversationId);
     return plans.map((row) => this.#planView(getArtifact(workspace, String(row["id"]))!));
+  }
+
+  /**
+   * What a review of one saved plan version would send (D31), and the fingerprint that binds it: the version's text,
+   * assumptions and historical references, and the preferences that apply to its conversation. Reads only: nothing is
+   * stored or sent, and no engine starts. A plan whose project was removed can't be reviewed; one whose project doesn't
+   * allow sharing is previewed, and says so.
+   */
+  async prepareReview(planId: string, panel: ReviewPanel): Promise<ReviewPreview> {
+    return (await this.#reviewRequest(this.#reviewSubject(planId), panel)).preview;
+  }
+
+  /**
+   * Starts the review the person previewed (D31). Everything is worked out again from the records as they are now and
+   * refused when its fingerprint isn't the one previewed, so a review sends exactly what was shown. Consent is checked
+   * as for a turn: now, again after that wait against the consent epoch, and once more when its request is out. The
+   * review is stored first, then sent in the background on its conversation's engine; its report is kept when it ends.
+   * A review writes no plan, task, brief or preference.
+   */
+  async startReview(planId: string, panel: ReviewPanel, expected: string): Promise<ReviewView> {
+    const workspace = this.#workspaceDb();
+    const subject = this.#reviewSubject(planId);
+    const epoch = subject.project ? this.#epochOf(subject.project.id) : 0;
+    const request = await this.#reviewRequest(subject, panel);
+    if (request.preview.blocked) throw new Error(request.preview.blocked);
+    if (request.preview.expected !== expected) throw new Error("What this review would send has changed since you opened it. Check the new preview, then start again.");
+    const { plan, conversation, project } = subject;
+    if (project) {
+      const now = this.#options.store.data.projects.find((p) => p.id === project.id);
+      if (!now || this.#removing.has(project.id)) throw new Error(REVIEW_CLOSED);
+      if (!now.sharing.modelContext || this.#epochOf(project.id) !== epoch) throw new Error("Sharing for this project was turned off, so the review wasn't started.");
+    }
+    if (!getConversation(workspace, conversation.id) || !getArtifact(workspace, plan.id)) throw new Error("That plan is no longer here.");
+    const id = randomUUID();
+    const review = {
+      id,
+      conversationId: conversation.id,
+      planId: plan.id,
+      planLineage: plan.lineageId,
+      planVersion: plan.version,
+      planSha256: plan.sha256,
+      panel,
+      packetDigest: request.input.packetDigest,
+      preferencesDigest: request.input.preferencesDigest,
+      scope: project ? { kind: "project" as const, projectId: project.id, projectLabel: project.label, headAtStart: request.preview.scope.kind === "project" ? request.preview.scope.headAtStart : null } : { kind: "general" as const },
+      createdAt: new Date().toISOString(),
+    };
+    const given = request.context.preferences.records.map(({ id: preferenceId, revision }) => ({ id: preferenceId, revision }));
+    if (!insertReview(workspace, review, { sessionId: this.#sessionId, targetId: conversation.targetId, preferences: given })) {
+      throw new Error(this.#busyReason(conversation.id, "start the review") ?? "This conversation is busy. Wait for it, then start the review.");
+    }
+    this.#submissions.set(id, { cancel: null });
+    void this.#submit(id, conversation, { workflowId: "review", input: request.input, context: request.context }, epoch).catch((error: unknown) => this.#options.log(`A review couldn't be sent: ${errorText(error)}`));
+    return this.#reviewView(getReview(workspace, id)!, this.#engineView(conversation.targetId));
+  }
+
+  /** A conversation's reviews, oldest first, read from the workspace. Asks no engine and starts nothing. */
+  reviews(conversationId: string): ReviewView[] {
+    const workspace = this.#workspaceDb();
+    const record = getConversation(workspace, conversationId);
+    if (!record) throw new Error("That conversation is no longer in the list.");
+    const engine = this.#engineView(record.targetId);
+    return reviewsOf(workspace, conversationId).map((review) => this.#reviewView(review, engine));
+  }
+
+  /** Stops a review the person no longer wants, as a turn is stopped; its end is recorded as cancelled by the person. */
+  async cancelReview(conversationId: string, reviewId: string): Promise<ReviewView[]> {
+    const review = getReview(this.#workspaceDb(), reviewId);
+    if (!review || review.conversationId !== conversationId) throw new Error("That review is no longer in this conversation.");
+    await this.#cancelLink(review.link);
+    return this.reviews(conversationId);
   }
 
   /** The workspace's state and every task, the most recently changed first. */
@@ -912,6 +1003,80 @@ export class Host {
     return Object.entries(await this.#options.credentials()).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
   }
 
+  /** Why a conversation can't take another run now (D31): a turn or a review still going, in the person's terms; null when it can. */
+  #busyReason(conversationId: string, then: string): string | null {
+    const open = openTurns(this.#workspaceDb(), { conversationId });
+    if (!open.length) return null;
+    return open.some((link) => link.workflowId === "review")
+      ? `A review of a plan is running in this conversation. Wait for it, or cancel it, then ${then}.`
+      : `This conversation is still waiting for an answer. Wait for it, or cancel it, then ${then}.`;
+  }
+
+  /**
+   * Stops a run link the person no longer wants. One being sent stops before its request is written, or is cancelled as
+   * soon as its engine answers; a running one is cancelled on its engine.
+   */
+  async #cancelLink(link: TurnRecord): Promise<void> {
+    if (link.status !== "submitting" && link.status !== "running") return;
+    requestCancel(this.#workspaceDb(), link.id, "person");
+    const pending = this.#submissions.get(link.id);
+    if (pending) pending.cancel ??= "person";
+    if (link.runId) await this.cancelRun(link.runId);
+    else if (!pending) this.#follow(link.id);
+  }
+
+  /** A plan version to review, with its conversation and project; refused in plain words when it can't be reviewed. */
+  #reviewSubject(planId: string): ReviewSubject {
+    const workspace = this.#workspaceDb();
+    const plan = getArtifact(workspace, planId);
+    const conversation = plan?.kind === "plan" && plan.conversationId ? getConversation(workspace, plan.conversationId) : null;
+    if (!plan || !conversation) throw new Error("That plan is no longer here.");
+    if (conversation.projectId === null) return { plan, conversation, project: null };
+    const project = this.#options.store.data.projects.find((p) => p.id === conversation.projectId);
+    if (!project) throw new Error(REVIEW_CLOSED);
+    if (this.#removing.has(project.id)) throw new Error("This plan's project is being removed, so it can't be reviewed.");
+    return { plan, conversation, project };
+  }
+
+  /**
+   * Everything a review of `subject` would send, worked out from the records as they are now (D31): the packet, the
+   * preference snapshot (D21: a general plan's gets the personal preferences only), their fingerprints, and the preview
+   * that shows them, with the fingerprint that binds it.
+   */
+  async #reviewRequest({ plan, conversation, project }: ReviewSubject, panel: ReviewPanel): Promise<{ preview: ReviewPreview; input: ReviewInput; context: ReviewContext }> {
+    const preferences = snapshotFor(this.#options.store.data, conversation.projectId);
+    const sharing = project ? project.sharing.modelContext : null;
+    const packet = packetFor(plan, conversation, await this.#knownSecrets());
+    const [packetFingerprint, preferencesFingerprint] = await Promise.all([packetDigest(packet), preferencesDigest(preferences.records)]);
+    const blocked =
+      this.#busyReason(conversation.id, "start the review") ??
+      (project && !sharing ? "This project doesn't allow sending its content to Token Factory. Allow sharing for it, then start the review." : null);
+    const preview: ReviewPreview = {
+      planId: plan.id,
+      planLineage: plan.lineageId,
+      planVersion: plan.version,
+      latestVersion: versionsOf(this.#workspaceDb(), plan.lineageId).at(-1)?.version ?? plan.version,
+      panel,
+      scope: project
+        ? { kind: "project", projectLabel: project.label, targetLabel: this.#labelOf(project.targetId), headAtStart: packet.scope.kind === "project" ? packet.scope.headAtStart : null, sharing: sharing === true }
+        : { kind: "general" },
+      sends: {
+        textChars: packet.text.length,
+        assumptions: packet.assumptions.length,
+        references: packet.references.length,
+        preferences: preferences.records.map(({ statement, scope, intent }) => ({ statement, scope, intent })),
+      },
+      requests: REVIEW_REQUESTS[panel],
+      blocked,
+      expected: previewFingerprint({ planId: plan.id, planVersion: plan.version, packetDigest: packetFingerprint, preferencesDigest: preferencesFingerprint, sharing, panel }),
+    };
+    return {
+      preview,
+      input: { panel, planId: plan.id, planVersion: plan.version, packetDigest: packetFingerprint, preferencesDigest: preferencesFingerprint },
+      context: { preferences, sharing: { modelContext: project !== null }, packet },
+    };
+  }
+
   /** Why a turn must not be sent now (a cancel, or its project's consent gone since it was asked for); null when it may. */
   #stopReason(turnId: string, conversation: ConversationRecord, epoch: number): CancelReason | null {
     const asked = this.#submissions.get(turnId)?.cancel ?? null;
@@ -930,14 +1095,15 @@ export class Host {
   }
 
   /**
-   * Sends a stored turn (D26). The request is written only after the engine's store is recorded with the turn, so a turn
-   * with none was never sent. A failure known to come before writing is "not sent"; anything after it (no answer, a
-   * closed connection, an error answer: the engine may have started the run first) leaves the turn to be found by its
+   * Sends a stored turn or review (D26, D31). The request is written only after the engine's store is recorded with it,
+   * so one with none was never sent. A failure known to come before writing is "not sent"; anything after it (no answer,
+   * a closed connection, an error answer: the engine may have started the run first) leaves it to be found by its
    * request id.
    */
-  async #submit(turnId: string, conversation: ConversationRecord, input: ChatInput, context: ChatContext, epoch: number): Promise<void> {
+  async #submit(turnId: string, conversation: ConversationRecord, request: LinkRequest, epoch: number): Promise<void> {
     const workspace = this.#workspaceDb();
     const label = this.#labelOf(conversation.targetId);
+    const what = request.workflowId === "review" ? "this review" : "this message";
     const notSent = (why: string) => {
       this.#submissions.delete(turnId);
       this.#settle(turnId, { status: "not-sent", errorMessage: why });
@@ -947,12 +1113,12 @@ export class Host {
       engine = await this.#ensure(conversation.targetId);
       if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
     } catch (error) {
-      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so this message wasn't sent and nothing reached the model.`);
+      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so ${what} wasn't sent and nothing reached the model.`);
       return;
     }
     const state = engine.supervisor.state;
     if (state.status !== "online") {
-      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so this message wasn't sent and nothing reached the model.`);
+      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so ${what} wasn't sent and nothing reached the model.`);
       return;
     }
     const before = this.#stopReason(turnId, conversation, epoch);
@@ -969,11 +1135,11 @@ export class Host {
     }
     let run: RunSummary;
     try {
-      run = await engine.supervisor.call("runs.start", { clientRequestId: turnId, workflowId: "chat", input, context });
+      run = await engine.supervisor.call("runs.start", { clientRequestId: turnId, ...request });
     } catch (error) {
       // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
       if (error instanceof EngineOfflineError || error instanceof TypeError) {
-        notSent(`The engine on ${label} didn't take this message (${errorText(error)}), so nothing reached the model.`);
+        notSent(`The engine on ${label} didn't take ${what} (${errorText(error)}), so nothing reached the model.`);
         return;
       }
       this.#options.log(`A turn's request got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
@@ -1114,6 +1280,8 @@ export class Host {
    */
   async #finish(turnId: string, engine: Engine, summary: RunSummary): Promise<void> {
     const workspace = this.#workspaceDb();
+    const link = getTurn(workspace, turnId);
+    if (link?.workflowId === "review") return this.#finishReview(link, engine, summary);
     const known = await this.#knownSecrets();
     if (summary.status === "succeeded") {
       const reply = await engine.supervisor.call("runs.reply", { runId: summary.id });
@@ -1133,10 +1301,48 @@ export class Host {
       else this.#settle(turnId, { status: "interrupted" });
       return;
     }
+    const { interrupted, kind } = await this.#failureOf(engine, summary.id);
+    if (interrupted) this.#settle(turnId, { status: "interrupted" });
+    else this.#settle(turnId, { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The run failed.", known) });
+  }
+
+  /**
+   * Records how a review's run ended (D31), with the report its engine saved, masked again. A report that isn't the one
+   * this review asked for (another plan version, fingerprint, panel, request or run) is kept nowhere, and the review's
+   * end is unknown. A partial report is kept with how it ended: cancelled, interrupted, or failed with its kind.
+   */
+  async #finishReview(link: TurnRecord, engine: Engine, summary: RunSummary): Promise<void> {
+    const review = getReview(this.#workspaceDb(), link.id);
+    if (!review) return;
+    const known = await this.#knownSecrets();
+    const report = await engine.supervisor.call("runs.review", { runId: summary.id });
+    if (report && !reportMatches(report, review, summary.id)) {
+      this.#settle(link.id, { status: "unknown", errorMessage: "its engine's report is about something other than what this review sent, so none of it was kept" });
+      return;
+    }
+    const kept = report ? maskValue(report, known) : null;
+    const end = (outcome: Parameters<typeof settleReview>[2], with_: ReviewReport | null) => {
+      if (this.#workspace.state === "ready") settleReview(this.#workspace.db, link.id, outcome, with_, new Date().toISOString());
+    };
+    if (summary.status === "succeeded") {
+      if (kept?.outcome === "complete") end({ status: "answered" }, kept);
+      else this.#settle(link.id, { status: "unknown", errorMessage: "its run finished, but its engine has no complete report stored for it" });
+      return;
+    }
+    if (summary.status === "cancelled") {
+      end({ status: getTurn(this.#workspaceDb(), link.id)?.cancelReason ? "cancelled" : "interrupted" }, kept);
+      return;
+    }
+    const { interrupted, kind } = await this.#failureOf(engine, summary.id);
+    end(interrupted ? { status: "interrupted" } : { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The review failed.", known) }, kept);
+  }
+
+  /** How a failed run ended, from its events: interrupted by its engine stopping, or failed, with the kind it gave. */
+  async #failureOf(engine: Engine, runId: string): Promise<{ interrupted: boolean; kind: string | null }> {
     let interrupted = false;
     let kind: string | null = null;
     for (let after = 0; ; ) {
-      const page = await engine.supervisor.call("runs.events", { runId: summary.id, after, limit: 500 });
+      const page = await engine.supervisor.call("runs.events", { runId, after, limit: 500 });
       for (const event of page.events) {
         if (event.type === "run.interrupted") interrupted = true;
         if (event.type === "run.failed" && typeof event.data?.["kind"] === "string") kind = event.data["kind"];
@@ -1144,8 +1350,7 @@ export class Host {
       if (page.events.length < 500) break;
       after = page.next;
     }
-    if (interrupted) this.#settle(turnId, { status: "interrupted" });
-    else this.#settle(turnId, { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The run failed.", known) });
+    return { interrupted, kind };
   }
 
   #turnView(turn: TurnRecord, engine: EngineView): TurnView {
@@ -1161,6 +1366,36 @@ export class Host {
       given: { preferences: turn.preferences.length, history: turn.history },
       createdAt: turn.createdAt,
       settledAt: turn.settledAt,
+    };
+  }
+
+  #reviewView(review: ReviewRecord, engine: EngineView): ReviewView {
+    const { link } = review;
+    const workspace = this.#workspaceDb();
+    const open = link.status === "submitting" || link.status === "running";
+    const away = open && !this.#submissions.has(link.id) && engine.state.status !== "online";
+    const plan = getArtifact(workspace, review.planId);
+    return {
+      id: review.id,
+      conversationId: review.conversationId,
+      planId: review.planId,
+      planLineage: review.planLineage,
+      planVersion: review.planVersion,
+      latestVersion: versionsOf(workspace, review.planLineage).at(-1)?.version ?? review.planVersion,
+      panel: review.panel,
+      status: link.status,
+      note: reviewNoteFor(link),
+      unresolved: away ? (engine.state.status === "failed" ? engine.state.reason : `The engine on ${engine.label} isn't running, so Nivra can't check this review yet. It checks again when you open the conversation.`) : null,
+      runId: link.runId,
+      cancelRequested: link.cancelRequested,
+      scope: review.scope.kind === "project" ? { kind: "project", projectLabel: review.scope.projectLabel, headAtStart: review.scope.headAtStart } : { kind: "general" },
+      packetDigest: review.packetDigest,
+      preferencesDigest: review.preferencesDigest,
+      given: { preferences: link.preferences.length },
+      references: review.scope.kind === "project" && plan ? historicalReferences(plan.content as PlanContent) : [],
+      report: review.report,
+      createdAt: review.createdAt,
+      settledAt: link.settledAt,
     };
   }
 

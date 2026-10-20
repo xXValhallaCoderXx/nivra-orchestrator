@@ -22,15 +22,17 @@ const SHAPE_WORDS: Readonly<Record<string, string>> = {
 
 /**
  * Throws when text the person typed into `field` holds a saved key or a recognised credential, saying what to do.
- * `field` reads as the start of a sentence ("Your message", "The goal"); `action` is what they were doing.
+ * `field` reads as the start of a sentence ("Your message", "The goal"); `action` is what they were doing. A plan
+ * version can't change, so for a review the way out is a new version.
  */
-export function refuseCredentials(field: string, text: string, known: KnownSecrets, action: "send" | "save" = "save"): void {
-  const nothing = action === "send" ? "nothing was sent" : "nothing was saved";
+export function refuseCredentials(field: string, text: string, known: KnownSecrets, action: "send" | "save" | "review" = "save"): void {
+  const nothing = action === "save" ? "nothing was saved" : "nothing was sent";
+  const then = action === "review" ? "Edit the plan to remove it, then review the new version." : `Remove it, then ${action} again.`;
   if (known.some(([, value]) => value.length > 0 && text.includes(value))) {
-    throw new Error(`${field} holds your saved Token Factory key, so ${nothing}. Remove it, then ${action} again.`);
+    throw new Error(`${field} holds your saved Token Factory key, so ${nothing}. ${then}`);
   }
   const [shape] = secretShapes(text);
-  if (shape) throw new Error(`${field} looks like it holds ${SHAPE_WORDS[shape] ?? "a credential"}, so ${nothing}. Remove it, then ${action} again.`);
+  if (shape) throw new Error(`${field} looks like it holds ${SHAPE_WORDS[shape] ?? "a credential"}, so ${nothing}. ${then}`);
 }
 
 /** Masks text the engine or a model produced before the workspace keeps it: saved keys, then credential shapes. */

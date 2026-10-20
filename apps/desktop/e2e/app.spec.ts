@@ -15,6 +15,7 @@ const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_API = [
   "addPreference",
   "addProject",
+  "cancelReview",
   "cancelRun",
   "cancelTurn",
   "checkTokenFactory",
@@ -38,9 +39,11 @@ const EXPECTED_API = [
   "listPlans",
   "listPreferences",
   "listProjects",
+  "listReviews",
   "listTasks",
   "openConversation",
   "openProject",
+  "prepareReview",
   "previewImport",
   "refreshBriefFromPlan",
   "removeProject",
@@ -60,6 +63,7 @@ const EXPECTED_API = [
   "setTaskState",
   "startExplain",
   "startHello",
+  "startReview",
   "supersedePreference",
 ];
 

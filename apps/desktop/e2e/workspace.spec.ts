@@ -264,7 +264,7 @@ test("deleting a conversation asks first, says what stays, and takes it out of t
   await openConversation("No key yet?");
   await page.getByTestId("conversation-delete").click();
   await expect(page.getByTestId("conversation-delete-confirm")).toBeVisible();
-  await expect(page.getByText("each engine keeps its own record of these runs, your messages included")).toBeVisible();
+  await expect(page.getByText("each engine keeps its own record of these runs, your messages and the reviews' reports included")).toBeVisible();
   await page.getByTestId("conversation-delete-confirm").click();
   await expect(listed).toHaveCount(0);
   await expect(page.getByTestId("planning-new-general")).toBeVisible();

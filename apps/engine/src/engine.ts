@@ -3,21 +3,25 @@ import {
   ChatInput,
   ChatResult,
   combinedMask,
+  ReviewReport,
   ErrorCode,
   ExplainInput,
   ExplainResult,
   HelloInput,
+  isTerminal,
   LineSplitter,
   PROTOCOL_VERSION,
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
   type JsonObject,
+  type ReviewContext,
   type RunContext,
   type SecretName,
   type WorkflowId,
 } from "@nivra/domain";
 import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
+import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, type Diagnostic } from "./diagnostics.ts";
 import { Database, EngineLockedError } from "./db/database.ts";
 import { libsqlFileUrl } from "./db/libsql-url.ts";
 import { runDoctor } from "./doctor/doctor.ts";
@@ -26,6 +30,7 @@ import { findGit } from "./exec/find-executable.ts";
 import { createLocalBackend } from "./exec/local.ts";
 import { ChatUnreadable, readChatTask } from "./chat/task.ts";
 import { readTask, TaskUnreadable } from "./explain/task.ts";
+import { asEnded, readReviewTask, ReviewUnreadable } from "./review/task.ts";
 import { launcherWrite, ProtocolOutput, type RawWrite } from "./rpc/output.ts";
 import { RpcFailure, RpcServer } from "./rpc/server.ts";
 import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
@@ -33,6 +38,18 @@ import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/sc
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
+
+/** What the engine says when it stops because something inside it failed (NIV-27): Nivra's own words only. */
+const CRASH_MESSAGE = "The engine stopped because something inside it failed. Start it again; if it keeps happening, report it with the engine log.";
+
+/**
+ * What the launcher writes when an error reaches no handler (NIV-27): one diagnostic line, and the message for the
+ * app's `engine.fatal`. Node's own report of an uncaught error prints its message and properties, which can quote the
+ * key or the repository, so it never runs.
+ */
+export function crashReport(error: unknown): { line: string; message: string } {
+  return { line: formatDiagnostic({ code: "crashed", stage: "process", error: errorFacts(error) }), message: CRASH_MESSAGE };
+}
 
 /** A dependency of the engine could not load: the runtime is damaged or incomplete (D5, D6). */
 export class RuntimeBrokenError extends Error {
@@ -74,6 +91,23 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
       },
     },
   ],
+  [
+    "review",
+    {
+      id: "review",
+      title: (input: unknown) => {
+        const task = readReviewTask(input);
+        return task ? `${task.panel === "single" ? "Single review" : "Council review"} · plan v${task.planVersion}` : "Review";
+      },
+      // Mastra gets the panel alone: the plan's id, version and fingerprints stay in the run store, and the packet in
+      // memory (D21, D30).
+      mastraInput: (input: unknown) => {
+        const task = readReviewTask(input);
+        if (!task) throw new ReviewUnreadable();
+        return { panel: task.panel };
+      },
+    },
+  ],
 ]);
 
 export interface EngineOptions extends EngineArgs {
@@ -110,18 +144,35 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/hello.ts"),
     typeof import("./workflows/explain.ts"),
     typeof import("./workflows/chat.ts"),
+    typeof import("./workflows/review.ts"),
   ];
   try {
-    mastraModules = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts"), import("./workflows/chat.ts")]);
+    mastraModules = await Promise.all([
+      import("@mastra/core/mastra"),
+      import("@mastra/libsql"),
+      import("./workflows/hello.ts"),
+      import("./workflows/explain.ts"),
+      import("./workflows/chat.ts"),
+      import("./workflows/review.ts"),
+    ]);
   } catch (error) {
     database.close();
     throw new RuntimeBrokenError("workflow runtime", error);
   }
-  const [{ Mastra }, { LibSQLStore }, { createHelloWorkflow, HELLO_WORKFLOW_ID }, { createExplainWorkflow, EXPLAIN_WORKFLOW_ID }, { createChatWorkflow, CHAT_WORKFLOW_ID }] = mastraModules;
+  const [
+    { Mastra },
+    { LibSQLStore },
+    { createHelloWorkflow, HELLO_WORKFLOW_ID },
+    { createExplainWorkflow, EXPLAIN_WORKFLOW_ID },
+    { createChatWorkflow, CHAT_WORKFLOW_ID },
+    { createReviewWorkflow, REVIEW_WORKFLOW_ID },
+  ] = mastraModules;
 
   const vault = new SecretVault();
   // Known key values and credential shapes are masked in everything stored (D8, D22).
   const mask = combinedMask(vault.mask);
+  // Every failure the engine logs, as one bounded line that never holds an error's own words (NIV-27).
+  const diagnose = (diagnostic: Diagnostic) => log(mask(formatDiagnostic(diagnostic)));
   const store = new RunStore({ database, mask: (text) => mask(text) });
   // Names this home's store for the host (D26), as its path can't.
   const homeId = store.homeId();
@@ -147,7 +198,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // Each workflow reads the context its own kind of run carries (D21, D26).
   const runContext = (runId: string): RunContext | null => {
     const given = scheduler.contextOf(runId);
-    return given && !("history" in given) ? given : null;
+    return given && !("history" in given) && !("packet" in given) ? given : null;
+  };
+  const reviewContext = (runId: string): ReviewContext | null => {
+    const given = scheduler.contextOf(runId);
+    return given && "packet" in given ? given : null;
   };
   const chatContext = (runId: string): ChatContext | null => {
     const given = scheduler.contextOf(runId);
@@ -162,6 +217,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     workflows: {
       [HELLO_WORKFLOW_ID]: createHelloWorkflow({
         backend,
+        mask,
         platform: process.platform,
         findGit: locateGit,
         engineInfo: () => info() as unknown as JsonObject,
@@ -199,6 +255,17 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         saveResult: (runId, result) => store.saveArtifact(runId, "chat", JSON.stringify(result)),
         recorder,
       }),
+      [REVIEW_WORKFLOW_ID]: createReviewWorkflow({
+        context: reviewContext,
+        task: (runId) => readReviewTask(store.summary(runId)?.input),
+        requestId: (runId) => store.requestIdOf(runId),
+        apiKey: () => vault.get("NEBIUS_API_KEY"),
+        endpoint,
+        mask,
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        saveResult: (runId, report) => store.saveArtifact(runId, "review", JSON.stringify(report)),
+        recorder,
+      }),
     },
     storage: new LibSQLStore({ id: "nivra-engine", url: libsqlFileUrl(join(home, "mastra.db")) }),
     logger: false,
@@ -209,6 +276,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     workflows: WORKFLOWS,
     instanceId,
     log: { info: log, warn: (m) => log(`warning: ${m}`), error: (m) => log(`error: ${m}`) },
+    diagnose,
   });
   scheduler.attach(mastra as unknown as WorkflowSource);
   // This process holds the home's lock, so no other engine can be running these runs (D7).
@@ -225,7 +293,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const server = new RpcServer({
     output,
     log,
-    mask: vault.mask,
+    diagnose,
+    mask,
     initialized: () => initialized,
     stopping: () => stopping !== null,
     handlers: {
@@ -260,19 +329,33 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         if (!key) throw new RpcFailure(ErrorCode.InvalidParams, "No Nebius key is set. Add it in Settings, then check again.");
         const { runProviderCheck } = await import("./providers/tool-call.ts");
         try {
-          const result = await runProviderCheck({ apiKey: key, endpoint, ...(model ? { model } : {}) });
+          const result = await runProviderCheck({
+            apiKey: key,
+            endpoint,
+            ...(model ? { model } : {}),
+            onDiagnostic: (facts) => diagnose({ ...facts, kind: "internal", method: "providers.check" }),
+          });
           return {
             ...result,
-            call: result.call ? { ...result.call, answer: vault.mask(result.call.answer) } : null,
-            problem: result.problem === null ? null : vault.mask(result.problem),
+            call: result.call ? { ...result.call, answer: mask(result.call.answer) } : null,
+            problem: result.problem === null ? null : mask(result.problem),
           };
         } catch (error) {
-          // Only listing the models throws: everything after it is reported in the result.
-          const kind = error instanceof Error && "kind" in error ? String(error.kind) : "internal";
-          throw new RpcFailure(ErrorCode.InternalError, vault.mask(error instanceof Error ? error.message : String(error)), { kind });
+          // Only listing the models throws: everything after it is reported in the result. Only Nivra's own words go
+          // back, and the diagnostic says what happened (NIV-27).
+          const known = publicFailure(error);
+          throw new RpcFailure(ErrorCode.InternalError, known?.message ?? internalMessage(), { kind: known?.kind ?? "internal" }, { cause: error });
         }
       },
-      "runs.start": (params) => store.summary(scheduler.submit(params)) ?? notFound("just created"),
+      "runs.start": (params) => {
+        try {
+          return store.summary(scheduler.submit(params)) ?? notFound("just created");
+        } catch (error) {
+          // The same request id with other work: refused, in Nivra's words, and nothing is started (D30).
+          if (error instanceof Refusal && error.code === "request-conflict") throw new RpcFailure(ErrorCode.InvalidParams, error.message);
+          throw error;
+        }
+      },
       "runs.get": ({ runId }) => store.summary(runId) ?? notFound(runId),
       "runs.find": ({ clientRequestId }) => store.findByRequest(clientRequestId),
       "runs.list": ({ limit, cursor }) => store.list({ limit, cursor }),
@@ -287,6 +370,15 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         if (!store.status(runId)) notFound(runId);
         const stored = store.artifact(runId, "chat");
         return stored === null ? null : ChatResult.parse(JSON.parse(stored));
+      },
+      "runs.review": ({ runId }) => {
+        const status = store.status(runId);
+        if (!status) notFound(runId);
+        const stored = store.artifact(runId, "review");
+        if (stored === null) return null;
+        // A report saved mid-review, of a run that has ended, reads as interrupted (D30).
+        const report = ReviewReport.parse(JSON.parse(stored));
+        return status && isTerminal(status) ? asEnded(report) : report;
       },
     },
   });
@@ -342,7 +434,14 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
   try {
     const { DatabaseSync } = await import("node:sqlite");
     new DatabaseSync(":memory:").close();
-    const [, { LibSQLStore }] = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts"), import("./workflows/chat.ts")]);
+    const [, { LibSQLStore }] = await Promise.all([
+      import("@mastra/core/mastra"),
+      import("@mastra/libsql"),
+      import("./workflows/hello.ts"),
+      import("./workflows/explain.ts"),
+      import("./workflows/chat.ts"),
+      import("./workflows/review.ts"),
+    ]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {
     await fatal(output, log, "runtime-broken", new RuntimeBrokenError("runtime", error).message);

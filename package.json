@@ -12,6 +12,7 @@
     "probe:tokenfactory": "pnpm --filter @nivra/engine --fail-if-no-match probe:tokenfactory",
     "probe:sandbox": "pnpm --filter @nivra/engine --fail-if-no-match probe:sandbox",
     "rpc": "pnpm --filter @nivra/engine --fail-if-no-match rpc",
+    "council:eval": "pnpm --filter @nivra/engine --fail-if-no-match council:eval",
     "stage:runtime": "pnpm --filter @nivra/desktop --fail-if-no-match stage:runtime",
     "verify:windows": "pnpm --filter @nivra/desktop --fail-if-no-match verify:windows",
     "dev": "pnpm --filter @nivra/desktop --fail-if-no-match dev",

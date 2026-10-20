@@ -1,0 +1,289 @@
+{
+  "version": "nivra.council-eval.rubric.v1",
+  "matching": "A known defect matches a reviewer's finding when every group in `all` has at least one stem in the finding's title, detail or recommendation, read in lower case with spaces collapsed and curly quotes straightened. A stem matches at the start of a word; a stem written with a leading '=' must be the whole word. The chair's synthesis is never scored: only reviewers' findings are.",
+  "defects": {
+    "f1": [
+      {
+        "id": "f1-mixed-versions",
+        "severity": "high",
+        "summary": "Servers still on release 40 read users.fullname after the rename lands, so they fail during the rollout.",
+        "match": {
+          "all": [
+            ["old", "older", "previous", "prior", "release 40", "existing", "stale", "mixed", "remaining", "not yet", "un-upgraded", "unupgraded", "during the roll", "mid-rollout", "mid-deploy", "while the deploy", "while the roll", "during the deploy", "during deploy", "in-flight", "rolling deploy"],
+            ["server", "instance", "=node", "=nodes", "=pod", "=pods", "release", "version", "code", "=app", "=apps", "batch", "deploy", "rollout"],
+            ["fullname", "old column", "old name", "renamed column", "column", "the rename", "rename"],
+            ["break", "broken", "fail", "error", "crash", "missing", "no longer exist", "doesn't exist", "does not exist", "can't find", "cannot find", "outage", "downtime", "=500", "unavailable", "incompatib", "not found", "unknown column"]
+          ]
+        },
+        "positive": [
+          "Servers still on release 40 will query users.fullname after the migration renames it, and fail until the rollout finishes.",
+          "During the rolling deploy, old app servers break because the column they read no longer exists.",
+          "The migration runs before the servers are replaced, so for about ten minutes the remaining release 40 instances hit an unknown column error."
+        ],
+        "negative": [
+          "The rename itself is quick on a small table.",
+          "Update the API serializer to use display_name.",
+          "Batch the rollout in groups of five servers, as planned."
+        ]
+      },
+      {
+        "id": "f1-rollback",
+        "severity": "high",
+        "summary": "Redeploying release 40 doesn't roll back: the column is already renamed, and release 40 reads fullname.",
+        "match": {
+          "all": [
+            ["rollback", "roll back", "roll-back", "rolling back", "revert", "redeploy", "re-deploy", "going back"],
+            ["release 40", "old release", "previous release", "prior release", "old code", "old version", "previous version", "column", "schema", "migration", "rename", "fullname"],
+            ["fail", "break", "broken", "won't work", "will not work", "doesn't work", "does not work", "invalid", "can't", "cannot", "no longer", "still renamed", "missing", "not restore", "doesn't restore", "does not restore", "won't restore", "will not restore", "not undo", "doesn't undo", "does not undo", "won't undo", "irreversible", "isn't reversible", "not reversible", "incompatib", "unsafe", "isn't a rollback", "is not a rollback"]
+          ]
+        },
+        "positive": [
+          "Rolling back by redeploying release 40 fails, because the column has already been renamed.",
+          "The rollback plan is invalid: release 40 expects fullname, which no longer exists after migration 0042.",
+          "Redeploying release 40 doesn't undo the migration, so the rollback leaves old code on the renamed column."
+        ],
+        "negative": [
+          "Keep release 40's artifacts around for a quick redeploy.",
+          "Announce the rename in the release notes.",
+          "Redeploy release 40 if the error rate rises."
+        ]
+      },
+      {
+        "id": "f1-untested-mixed",
+        "severity": "medium",
+        "summary": "Nothing tests old code against the new schema, or the mixed-version window: the tests run only the new code on the new schema.",
+        "match": {
+          "all": [
+            ["test", "suite", "=ci", "verify", "verified", "check", "exercise", "staging"],
+            ["old code", "release 40", "old release", "previous release", "old version", "previous version", "mixed", "both versions", "compatib", "backward", "old servers", "old schema", "new schema", "against the new", "against the old", "during the rollout", "during the deploy", "rollout window", "deploy window"]
+          ]
+        },
+        "positive": [
+          "Nothing tests release 40's code against the renamed schema, so the mixed-version window is never exercised.",
+          "Add a compatibility test that runs the previous release against the new schema.",
+          "The unit tests only cover the new code on the new schema, not old servers during the rollout."
+        ],
+        "negative": [
+          "Run the full suite before merging.",
+          "Update the unit tests for the model.",
+          "The test for the serializer should use display_name."
+        ]
+      }
+    ],
+    "f2": [
+      {
+        "id": "f2-idempotency",
+        "severity": "high",
+        "summary": "The retries aren't idempotent: an attempt that marked the order paid or sent the receipt before failing repeats it, and the provider's own redelivery repeats it again.",
+        "match": {
+          "all": [
+            ["idempot", "duplicate", "twice", "double", "more than once", "multiple times", "repeat", "re-run", "rerun", "again", "re-sent", "resent", "re-send", "resend"],
+            ["receipt", "email", "markorderpaid", "mark the order", "marks the order", "marking the order", "order paid", "paid", "charge", "side effect", "side-effect", "fulfil", "fulfill"]
+          ]
+        },
+        "positive": [
+          "Retrying the whole handler can send the receipt email twice if markOrderPaid succeeded and the email step failed.",
+          "The handler isn't idempotent: a retry repeats markOrderPaid and sendReceiptEmail.",
+          "A failure after sendReceiptEmail makes the next attempt send a duplicate receipt."
+        ],
+        "negative": [
+          "Retry only on database timeouts, not on every exception.",
+          "Send the receipt asynchronously through a queue.",
+          "Return 200 only after the order is recorded."
+        ]
+      },
+      {
+        "id": "f2-provider-timeout",
+        "severity": "high",
+        "summary": "Five immediate retries inside the request can outlast the provider's 10 s wait, so it marks the delivery failed and sends it again while the handler is still retrying.",
+        "match": {
+          "all": [
+            ["10 s", "10s", "10-second", "10 second", "ten second", "ten-second", "provider's timeout", "provider timeout", "provider's wait", "provider's limit", "provider waits", "response time", "respond within", "within 10", "within ten", "deadline", "time limit"],
+            ["redeliver", "re-deliver", "resend", "re-send", "sends it again", "send it again", "marks the delivery failed", "mark the delivery failed", "marked failed", "provider retries", "provider will retry", "provider's retr", "overlap", "concurrent", "too late", "outlast", "longer than", "exceed", "past the", "run over", "runs over"]
+          ]
+        },
+        "positive": [
+          "Five immediate retries can take longer than the provider's 10-second limit, so the provider redelivers while we are still retrying.",
+          "The retry loop can exceed the 10 s the provider waits, after which it marks the delivery failed and sends it again.",
+          "With retries inside the request, the response can arrive too late: the provider waits only ten seconds."
+        ],
+        "negative": [
+          "Most failures are database timeouts, so retrying immediately may not help.",
+          "Add a short backoff between attempts.",
+          "Use a timeout on the database call."
+        ]
+      },
+      {
+        "id": "f2-body-logging",
+        "severity": "high",
+        "summary": "Logging the full request body at INFO writes payment and personal data to the logs.",
+        "match": {
+          "all": [
+            ["=log", "logs", "logging", "logged"],
+            ["full body", "full request", "request body", "payload", "=body", "=bodies", "entire request", "whole request", "raw request"],
+            ["pii", "personal", "sensitive", "card", "payment data", "payment details", "customer data", "customers' data", "secret", "privacy", "gdpr", "=pci", "email address", "leak", "expos", "confidential", "compliance"]
+          ]
+        },
+        "positive": [
+          "Logging the full request body at INFO puts customers' payment details in the logs.",
+          "Don't log webhook payloads in full: they carry personal data.",
+          "The raw request body may contain card data; logging it every attempt is a PCI problem."
+        ],
+        "negative": [
+          "Log each attempt's error at WARN with the order id.",
+          "Add structured logging to the handler.",
+          "Keep the logs for 30 days."
+        ]
+      }
+    ],
+    "f3": [
+      {
+        "id": "f3-big-bang",
+        "severity": "high",
+        "summary": "Everyone moves at once: no flag, percentage rollout or kill switch.",
+        "match": {
+          "all": [
+            ["flag", "toggle", "kill switch", "kill-switch", "killswitch", "gradual", "percentage", "canary", "phased", "staged", "incremental", "ramp", "rollout", "roll out", "roll-out", "dark launch", "shadow", "=a/b", "subset", "some users", "small share", "one region first", "single region first"],
+            ["=all", "everyone", "every region", "all regions", "at once", "big bang", "big-bang", "all users", "every user", "single switch", "one step", "one go", "no way", "without", "=no", "lacks", "missing"]
+          ]
+        },
+        "positive": [
+          "Switching every region at once leaves no gradual rollout or kill switch if SearchLite misbehaves.",
+          "There's no feature flag: all users move to SearchLite in one step.",
+          "Roll out to a small share of traffic first instead of everyone at 09:00."
+        ],
+        "negative": [
+          "Monday at 09:00 is a busy time to deploy.",
+          "Document SEARCH_BACKEND in the runbook.",
+          "SearchLite's index must be built before the switch."
+        ]
+      },
+      {
+        "id": "f3-success-metric",
+        "severity": "medium",
+        "summary": "Success is the error rate alone, so worse relevance or latency would still count as success.",
+        "match": {
+          "all": [
+            ["relevan", "quality", "latency", "slow", "response time", "=p95", "=p99", "ranking", "accuracy", "click", "conversion", "result"],
+            ["success", "metric", "measure", "criteria", "criterion", "error rate", "=1%", "signal", "monitor", "kpi"]
+          ]
+        },
+        "positive": [
+          "An error rate under 1% says nothing about search relevance or latency, so a worse ranking would count as success.",
+          "Add latency and result-quality metrics to the success criteria.",
+          "Measure p95 latency and click-through, not only the error rate."
+        ],
+        "negative": [
+          "Watch the error rate closely in the first hour.",
+          "Alert if the error rate passes 1%.",
+          "The first hour after a Monday deploy is when traffic peaks."
+        ]
+      },
+      {
+        "id": "f3-no-fallback",
+        "severity": "high",
+        "summary": "Deleting Elasticsearch the next day removes the way back.",
+        "match": {
+          "all": [
+            ["fallback", "fall back", "fall-back", "roll back", "rollback", "roll-back", "revert", "way back", "switch back", "go back", "recover", "escape hatch", "safety net"],
+            ["delete", "deleting", "decommission", "remove", "removing", "tear down", "teardown", "tearing down", "shut down", "shutting down", "tuesday", "elasticsearch", "old cluster", "next day"]
+          ]
+        },
+        "positive": [
+          "Deleting the Elasticsearch cluster on Tuesday leaves no way to fall back if SearchLite has problems.",
+          "Keep Elasticsearch running until SearchLite has proven itself; deleting it removes the rollback path.",
+          "Decommissioning the old cluster the next day means you can't switch back."
+        ],
+        "negative": [
+          "Elasticsearch costs too much to keep running.",
+          "Back up the Elasticsearch index settings.",
+          "Delete the old dashboards on Tuesday."
+        ]
+      }
+    ],
+    "f4": [
+      {
+        "id": "f4-one-pr",
+        "severity": "medium",
+        "summary": "One pull request with 140 call sites and a format change is hard to review and can't be reverted in part.",
+        "match": {
+          "all": [
+            ["one pull request", "one pr", "single pull request", "single pr", "one change", "same pull request", "same pr", "all 140", "140 call sites", "big bang", "big-bang", "all at once", "one go", "large", "huge", "massive", "bundl", "combin", "mixing", "mixes", "smaller pull request", "smaller pr", "split the", "split it", "split into", "separate pull request", "separate pr"],
+            ["review", "revert", "roll back", "rollback", "roll-back", "bisect", "split", "smaller", "staged", "incremental", "separate", "risk", "blast radius"]
+          ]
+        },
+        "positive": [
+          "Changing 140 call sites and the date format in one pull request makes it hard to review and impossible to revert in part.",
+          "Split the upgrade into smaller pull requests, separate from the format change.",
+          "Bundling the library upgrade with an API change raises the blast radius of a single revert."
+        ],
+        "negative": [
+          "v2's API may not map one to one onto v1's.",
+          "Ship it with the next release.",
+          "Search for every call site with the compiler's help."
+        ]
+      },
+      {
+        "id": "f4-client-format",
+        "severity": "high",
+        "summary": "Changing the public API's date format breaks clients that parse MM/DD/YYYY, such as older mobile app versions.",
+        "match": {
+          "all": [
+            ["client", "consumer", "mobile", "=app", "=apps", "caller", "integration", "partner", "downstream", "older version", "old version", "third part", "external", "user"],
+            ["format", "=iso", "iso 8601", "mm/dd", "parse", "parsing", "date"],
+            ["break", "broken", "fail", "incompatib", "breaking change", "crash", "can't parse", "cannot parse", "contract", "version the", "versioned", "deprecat", "backward"]
+          ]
+        },
+        "positive": [
+          "Switching the public API to ISO 8601 breaks older mobile app versions that parse MM/DD/YYYY.",
+          "The date format change is a breaking change for API clients; version the API or keep the old format.",
+          "Any consumer that parses MM/DD/YYYY will fail once the API returns ISO 8601 dates."
+        ],
+        "negative": [
+          "ISO 8601 is the better format for dates.",
+          "Update the API docs to show the new format.",
+          "Check the timezone handling of v2's parser."
+        ]
+      },
+      {
+        "id": "f4-tests-last",
+        "severity": "medium",
+        "summary": "Tests for the new format come after the release, so the change ships untested.",
+        "match": {
+          "all": [
+            ["test", "coverage"],
+            ["after the release", "after release", "post-release", "post release", "later", "=last", "once things settle", "before merg", "before the merge", "before release", "before the release", "before shipping", "first", "untested", "without test", "deferred", "defer"]
+          ]
+        },
+        "positive": [
+          "Writing the tests after the release means the format change ships without them.",
+          "Add tests for the new date format before merging, not after.",
+          "Deferring tests until things settle ships the change untested."
+        ],
+        "negative": [
+          "Run the existing tests on every call site.",
+          "Add a test for the timezone handling.",
+          "The tests should cover v2's parser."
+        ]
+      }
+    ],
+    "f5": []
+  },
+  "control": {
+    "fixture": "f5",
+    "rule": "A substantive review that raises nothing material is the correct outcome. Low-severity nits are allowed. A finding of high or medium severity is a false alarm, unless the sheet says it is not material. A review that ends without a usable report is incomplete and never counts as correct.",
+    "noIssues": [
+      "The plan is sound: the dry run shares the real run's selection, is tested against it, and changes nothing unless the option is passed.",
+      "No material issues: the option is opt-in, the selection code is shared, and the tests compare the dry run with a real run."
+    ],
+    "nits": ["Print the oldest and newest entry the run would remove.", "Offer JSON output for scripts.", "Say which TTL was used in the dry run's output."],
+    "falseAlarms": ["The change needs a feature flag.", "A dry run risks deleting data.", "The command needs a database migration.", "Existing callers will break."]
+  },
+  "unsupported": {
+    "U1": "A finding presents as a fact something the packet doesn't hold: about the code, the system, the team or the users. A finding whose basis is 'assumption' is labelled as one, and is not U1.",
+    "U2": "A reference to something the packet doesn't hold. The engine drops these and counts them (adjusted.refsDropped); each dropped reference counts once.",
+    "U3": "A finding that contradicts the plan: it says the plan does something it doesn't, or doesn't do something it does."
+  },
+  "actionable": "A finding is actionable when it says what to change or test, specifically enough to act on without asking.",
+  "novel": "A finding that matches no known defect of its fixture is novel. It is useful when it names a real problem with the plan that an engineer would want to fix before starting. Novel findings are deduplicated within each fixture and arm by the key the labeller gives them; a known defect never counts as novel, whether it was counted already or not."
+}

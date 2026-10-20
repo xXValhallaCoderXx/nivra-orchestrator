@@ -1,10 +1,40 @@
 import { isAbsolute, posix, relative, sep, win32 } from "node:path";
 
-/** A request the repository tools refuse; the message goes back to the model and says why. */
+/** Why the repository tools refused (NIV-27): a safe code a diagnostic can record, never the message. */
+export type RepoRefusalCode =
+  | "not-a-repository-path"
+  | "path-escapes"
+  | "bad-glob"
+  | "root-missing"
+  | "too-many-files"
+  | "too-many-hidden"
+  | "bad-query"
+  | "hidden"
+  | "untracked"
+  | "deleted"
+  | "outside"
+  | "hidden-target"
+  | "untracked-target"
+  | "not-a-file"
+  | "too-large"
+  | "binary"
+  | "unmaskable"
+  | "git-missing"
+  | "git-timeout"
+  | "git-failed";
+
+/**
+ * A request the repository tools refuse; the message goes back to the model and says why. It is public, so it is
+ * written only from fixed text and safe values: numbers, a path the model itself asked for, never what git or the
+ * system said, and never an absolute path (NIV-27).
+ */
 export class RepoError extends Error {
-  constructor(message: string) {
+  readonly code: RepoRefusalCode;
+
+  constructor(code: RepoRefusalCode, message: string) {
     super(message);
     this.name = "RepoError";
+    this.code = code;
   }
 }
 
@@ -22,10 +52,10 @@ export const isInsideWin32 = (root: string, path: string): boolean => isInside(r
 /** A model-given path as a repository-relative POSIX path, or a refusal. Absolute, drive and `..` paths never pass. */
 export function checkRelativePath(input: string): string {
   if (!input || input.length > 500 || input.includes("\0") || /^[\\/]/.test(input) || isAbsolute(input) || /^[A-Za-z]:/.test(input)) {
-    throw new RepoError("That isn't a path inside the repository. Use a path relative to it, as list_files shows.");
+    throw new RepoError("not-a-repository-path", "That isn't a path inside the repository. Use a path relative to it, as list_files shows.");
   }
   const normalised = posix.normalize(input.replaceAll("\\", "/"));
-  if (normalised === ".." || normalised.startsWith("../") || normalised.split("/").includes("..")) throw new RepoError("Paths must stay inside the repository.");
+  if (normalised === ".." || normalised.startsWith("../") || normalised.split("/").includes("..")) throw new RepoError("path-escapes", "Paths must stay inside the repository.");
   return normalised.replace(/^\.\//, "");
 }
 

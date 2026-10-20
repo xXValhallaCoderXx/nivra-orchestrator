@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
-import { ExplainResult } from "../src/explain.ts";
+import { answerStanding, ExplainResult } from "../src/explain.ts";
 import { ExplainInput, MAX_CHOICE_CHARS, MAX_CHOICES, StoredExplainInput } from "../src/runs.ts";
 
 describe("ExplainInput choices (NIV-11, D23)", () => {
@@ -55,5 +55,34 @@ describe("ExplainResult", () => {
     // What the context view adds is unknown for such a result: null, never zero.
     const { mapChars, preferences, hidden, budget, answer } = result.context;
     assert.deepEqual([mapChars, preferences, hidden, budget, answer], [null, null, null, null, null]);
+    assert.equal(result.standing, null, "how far its findings are established wasn't recorded: unknown, never guessed");
+  });
+
+  it("reads an answer record from before NIV-26: no findings refusal was ever made, and what refusals cost wasn't recorded", () => {
+    const answer = { dueReasons: ["last-steps"], refusals: { citations: 1, conflicts: 0, schema: 2 }, acceptedAfterRefusals: 3, conflictsDropped: 0, suggestionsDropped: 0 };
+    const stored = {
+      question: "q",
+      headAtStart: null,
+      headAtEnd: null,
+      summary: "s",
+      findings: [],
+      gaps: [],
+      context: { map: [], reads: [], searches: 0, searchHits: 0, chars: 0, changedFiles: [], answer },
+      checks: { citations: 0, checked: 0 },
+      answeredAtStep: 1,
+      finishedAt: new Date().toISOString(),
+    };
+    const read = ExplainResult.parse(stored).context.answer;
+    assert.deepEqual([read?.refusals, read?.turnedDown], [{ citations: 1, conflicts: 0, schema: 2, findings: 0 }, null]);
+  });
+});
+
+describe("answerStanding (NIV-26)", () => {
+  it("calls findings established only when one cites lines the model was shown", () => {
+    const finding = (...checked: boolean[]) => ({ citations: checked.map((c) => ({ checked: c })) });
+    assert.deepEqual(
+      [answerStanding([]), answerStanding([finding()]), answerStanding([finding(false, false)]), answerStanding([finding(false), finding(true)])],
+      ["no-findings", "unsupported", "unsupported", "established"],
+    );
   });
 });

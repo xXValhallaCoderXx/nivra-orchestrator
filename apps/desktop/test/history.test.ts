@@ -19,6 +19,7 @@ function conversation(entries: Array<{ q: string; a: string | null; status?: Tur
     turns.push({
       id,
       conversationId: "c",
+      workflowId: "chat",
       sessionId: "s",
       targetId: "local",
       homeId: "h",
