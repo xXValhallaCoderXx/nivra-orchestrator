@@ -1,91 +1,22 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
-import { findGit } from "../src/exec/find-executable.ts";
 import { WorkspaceRefusal } from "../src/exec/git-tool.ts";
-import { createLocalBackend } from "../src/exec/local.ts";
 import { PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
-import { takeSnapshot, type SnapshotOptions } from "../src/exec/snapshot.ts";
 import { readTar } from "../src/exec/tar.ts";
-import { removeDir, tempDir } from "./helpers.ts";
+import { tempDir } from "./helpers.ts";
+import { changedSince, cleanUp, folderState, GIT, git, put, refusal, repoWith, scratch, snap, track } from "./workspace-fixtures.ts";
 
 /**
  * Commit snapshots (NIV-42, D34) against real repositories made here: exact bytes from the commit, never the working
  * tree; what is left out and why; refusals for uncommitted work, unsafe content, partial clones and crafted paths;
  * and a checkout that is byte-identical afterwards, `.git` included. Nothing here reaches the network.
  */
-const dirs: string[] = [];
-after(() => {
-  for (const dir of dirs) removeDir(dir);
-});
-
-const GIT = findGit({ env: process.env })!;
-function git(cwd: string, args: string[], input?: string): string {
-  const result = spawnSync(GIT, ["-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "-c", "core.autocrlf=false", "-c", "protocol.file.allow=always", ...args], { cwd, input, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
-  return result.stdout;
-}
-
-type Content = string | Uint8Array | { link: string } | { executable: string };
-function put(root: string, path: string, content: Content): void {
-  const full = join(root, path);
-  mkdirSync(dirname(full), { recursive: true });
-  if (typeof content === "object" && "link" in content) symlinkSync(content.link, full);
-  else if (typeof content === "object" && "executable" in content) {
-    writeFileSync(full, content.executable);
-    chmodSync(full, 0o755);
-  } else writeFileSync(full, content);
-}
-
-/** A repository whose one commit holds `files`, in a folder whose name holds awkward characters. */
-function repoWith(files: Record<string, Content>, options: { objectFormat?: "sha256" } = {}): string {
-  const parent = tempDir();
-  dirs.push(parent);
-  const root = join(parent, "repo ü%#");
-  mkdirSync(root, { recursive: true });
-  git(root, ["init", "-q", "-b", "main", ...(options.objectFormat ? [`--object-format=${options.objectFormat}`] : [])]);
-  for (const [path, content] of Object.entries(files)) put(root, path, content);
-  git(root, ["add", "-A", "-f"]);
-  git(root, ["commit", "-q", "-m", "fixture"]);
-  return root;
-}
-
-/** Every name, kind, mode, size, time and byte under a folder, `.git` included: an equal hash means nothing changed. */
-function folderState(root: string): string {
-  const hash = createHash("sha256");
-  const walk = (dir: string) => {
-    for (const name of readdirSync(dir).sort()) {
-      const path = join(dir, name);
-      const info = lstatSync(path, { bigint: true });
-      hash.update(`${relative(root, path)}\0${info.mode}\0${info.size}\0${info.mtimeNs}\0`);
-      if (info.isDirectory()) walk(path);
-      else hash.update(info.isSymbolicLink() ? readlinkSync(path) : readFileSync(path));
-    }
-  };
-  hash.update(String(lstatSync(root, { bigint: true }).mtimeNs));
-  walk(root);
-  return hash.digest("hex");
-}
-
-async function snap(folder: string, extra: Partial<SnapshotOptions> = {}) {
-  const session = await createLocalBackend({ baseEnv: process.env }).open({ workspace: folder });
-  try {
-    return await takeSnapshot({ folder, session, git: GIT, ...extra });
-  } finally {
-    await session.close();
-  }
-}
-
-/** A refusal whose words match `pattern`. */
-const refusal = (pattern: RegExp) => (error: unknown) => {
-  assert.ok(error instanceof WorkspaceRefusal, `expected a refusal, got ${String(error)}`);
-  assert.match(error.message, pattern);
-  return true;
-};
+after(cleanUp);
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 const CRLF = "one\r\ntwo\r\n";
 const LONG = `deep/${"a-folder-with-a-long-name/".repeat(4)}and-a-file-name-past-100-bytes.txt`;
@@ -145,8 +76,7 @@ describe("commit snapshots", () => {
       if (entry.kind === "link") assert.equal(entry.target, text(file.bytes));
       else if (entry.kind === "file") assert.deepEqual([entry.path, entry.executable, Buffer.from(entry.bytes).equals(Buffer.from(file.bytes))], [file.path, file.mode === "100755", true]);
     }
-    const guest = mkdtempSync(join(tmpdir(), "nivra snapshot guest "));
-    dirs.push(guest);
+    const guest = scratch("snapshot guest");
     const archive = join(guest, "snapshot.tar");
     writeFileSync(archive, snapshot.archive.archive);
     const ran = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", join(guest, "workspace"), archive, "", join(guest, "listing")], { encoding: "utf8" });
@@ -154,7 +84,7 @@ describe("commit snapshots", () => {
     assert.equal(ran.stdout, `entries ${snapshot.files.length}\ndigest ${snapshot.archive.listingDigest}\n`);
     assert.equal(readFileSync(join(guest, "workspace", "crlf.txt"), "utf8"), CRLF);
 
-    assert.equal(folderState(root), before, "the checkout changed");
+    assert.deepEqual(changedSince(before, root), [], "the checkout changed");
   });
 
   it("leaves out secret-named files, dependency and build output, submodules and the engine home, and counts each", async () => {
@@ -189,7 +119,7 @@ describe("commit snapshots", () => {
       sent.map((entry) => entry.path),
       [".env.example", ".gitmodules", "src/app.ts"],
     );
-    assert.equal(folderState(root), before, "the checkout changed");
+    assert.deepEqual(changedSince(before, root), [], "the checkout changed");
 
     // A folder inside the engine home, or a home that holds the repository, is refused: there is nothing safe to send.
     await assert.rejects(snap(join(root, ".nivra-home"), { exclude: [join(root, ".nivra-home")] }), refusal(/inside Nivra's own data folder/));
@@ -224,7 +154,7 @@ describe("commit snapshots", () => {
     for (const value of [token, awsKey, vaultValue, keyBody]) assert.ok(!message.includes(value), "the refusal quoted a credential");
     // Without the vault's values, the shapes alone still refuse it: the key and the token were never given to Nivra.
     await assert.rejects(snap(root), refusal(/src\/config\.ts in this commit holds what looks like a private key and a GitHub token/));
-    assert.equal(folderState(root), before, "the checkout changed");
+    assert.deepEqual(changedSince(before, root), [], "the checkout changed");
   });
 
   it("refuses tracked changes, staged or not, and leaves untracked and ignored files out, changing nothing", async () => {
@@ -239,12 +169,12 @@ describe("commit snapshots", () => {
       clean.files.map((file) => file.path),
       [".gitignore", "a.txt", "b.txt"],
     );
-    assert.equal(folderState(root), before, "the checkout changed");
+    assert.deepEqual(changedSince(before, root), [], "the checkout changed");
 
     const refused = async (pattern: RegExp) => {
       before = folderState(root);
       await assert.rejects(snap(root), refusal(pattern));
-      assert.equal(folderState(root), before, "the checkout changed");
+      assert.deepEqual(changedSince(before, root), [], "the checkout changed");
     };
     const WORDS = /Nivra works from a commit\. Commit or stash them, then try again\.$/;
     writeFileSync(join(root, "a.txt"), "edited\n");
@@ -261,8 +191,8 @@ describe("commit snapshots", () => {
 
   it("runs no filter, fsmonitor, hook or pager the repository configures and writes nothing to .git, where plain git status does", async () => {
     const root = repoWith({ "a.txt": "a\n", "b.dat": "b\n", ".gitattributes": "*.txt filter=mark diff=mark\n*.dat filter=proc\n" });
-    const markerDir = mkdtempSync(join(tmpdir(), "nivra-markers-"));
-    dirs.push(markerDir);
+    // No space in its name: git runs filter commands through a shell.
+    const markerDir = track(mkdtempSync(join(tmpdir(), "nivra-markers-")));
     const markers = join(markerDir, "markers");
     const script = (kind: string, passThrough = false) => {
       const path = join(markerDir, `mark-${kind}`);
@@ -291,7 +221,7 @@ describe("commit snapshots", () => {
       if (expected === "taken") assert.equal((await snap(root)).files.length, 3, state);
       else await assert.rejects(snap(root), refusal(expected));
       assert.equal(existsSync(markers) ? readFileSync(markers, "utf8") : "", "", `${state}: something the repository configures ran`);
-      assert.equal(folderState(root), before, `${state}: the checkout changed`);
+      assert.deepEqual(changedSince(before, root), [], `${state}: the checkout changed`);
     };
     // A touched file: its times changed and its content didn't, so git looks at the content again.
     utimesSync(join(root, "a.txt"), new Date(), new Date(Date.now() + 5_000));
@@ -322,12 +252,11 @@ describe("commit snapshots", () => {
     assert.equal(git(clone, ["config", "--get", "remote.origin.promisor"]).trim(), "true");
     const before = folderState(clone);
     await assert.rejects(snap(clone), refusal(/^This repository is a partial clone: .* Clone it in full, then try again\.$/));
-    assert.equal(folderState(clone), before, "the checkout changed");
+    assert.deepEqual(changedSince(before, clone), [], "the checkout changed");
   });
 
   it("refuses a repository with no commits, and a baseline that isn't HEAD", async () => {
-    const parent = tempDir();
-    dirs.push(parent);
+    const parent = track(tempDir());
     const unborn = join(parent, "unborn");
     mkdirSync(unborn);
     git(unborn, ["init", "-q", "-b", "main"]);
@@ -359,7 +288,7 @@ describe("commit snapshots", () => {
       ["package.json", "src/a.ts"],
     );
     assert.deepEqual([snapshot.untracked.count, snapshot.untracked.sample], [1, ["u.ts"]]);
-    assert.equal(folderState(root), before, "the checkout changed");
+    assert.deepEqual(changedSince(before, root), [], "the checkout changed");
     // A change inside the picked folder still refuses.
     writeFileSync(join(root, "apps/web/src/a.ts"), "export const a = 2;\n");
     await assert.rejects(snap(join(root, "apps", "web")), refusal(/uncommitted changes in 1 file\./));
@@ -390,6 +319,13 @@ describe("commit snapshots", () => {
       git(root, ["-c", "core.protectNTFS=false", "checkout-index", "-a", "-f"]);
       await assert.rejects(snap(root), refusal(new RegExp(`^The commit holds a path Nivra won't send \\(.*: ${words.source}\\)\\. Rename it in a new commit, then try again\\.$`)));
     }
+  });
+
+  it("refuses a git older than the one whose commands it uses, saying what it found", async () => {
+    const root = repoWith({ "a.txt": "a\n" });
+    const old = join(scratch("old git"), "git");
+    writeFileSync(old, "#!/bin/sh\necho 'git version 2.17.1'\n", { mode: 0o755 });
+    await assert.rejects(snap(root, { git: old }), refusal(/^Snapshots need git 2\.18 or newer, and this target has git version 2\.17\.1\. Update git, then try again\.$/));
   });
 
   it("reads a SHA-256 repository and reports Git LFS pointers", async () => {

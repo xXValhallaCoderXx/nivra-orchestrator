@@ -87,6 +87,11 @@ export interface Snapshot {
   /** Every included file and link, sorted by its path's bytes. */
   files: SnapshotFile[];
   leftOut: { secret: Counted; output: Counted; submodule: Counted; excluded: Counted };
+  /** Every path left out, whatever the reason, sorted by its bytes: a change may not collide with one. */
+  leftOutPaths: string[];
+  /** The submodules and the excluded folders inside the picked folder: a change may add nothing at or under one. */
+  submodules: string[];
+  excludedFolders: string[];
   untracked: Counted;
   /** Files that are Git LFS pointers: they go as pointers, and a change may not edit them. */
   lfsPointers: Counted;
@@ -120,6 +125,9 @@ const add = (counter: Counted, path: string) => {
 };
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 const LFS_POINTER = "version https://git-lfs.github.com/spec/v1";
+
+/** Whether a file is a Git LFS pointer: its first line names the LFS spec. */
+export const isLfsPointer = (bytes: Uint8Array) => Buffer.from(bytes.subarray(0, LFS_POINTER.length)).toString("latin1") === LFS_POINTER;
 
 /** Credential shapes in words a person reads. */
 const SHAPE_WORDS: Readonly<Record<string, string>> = {
@@ -260,12 +268,15 @@ export async function takeSnapshot(options: SnapshotOptions): Promise<Snapshot> 
     add(counter, rel);
     leftOutPaths.push(rel);
   };
+  const submodules: string[] = [];
+  const excludedFolders = excluded.filter((place) => prefix === "" || isUnder(place, prefix)).map((place) => (prefix ? place.slice(prefix.length + 1) : place));
   const wanted: Array<TreeEntry & { rel: string }> = [];
   const tree = parseTree(listed.text);
   for (const entry of tree) {
     const rel = prefix ? entry.path.slice(prefix.length + 1) : entry.path;
     if (entry.mode === "160000") {
       leave(leftOut.submodule, rel);
+      submodules.push(rel);
       continue;
     }
     if (excluded.some((place) => isUnder(entry.path, place))) {
@@ -307,7 +318,7 @@ export async function takeSnapshot(options: SnapshotOptions): Promise<Snapshot> 
   for (const file of files) {
     const kinds = credentialKinds(file.bytes, options.knownValues);
     if (kinds.length) unsafe.push(`${file.path} in this commit holds what looks like ${kinds.join(" and ")}`);
-    if (file.kind === "file" && Buffer.from(file.bytes.subarray(0, LFS_POINTER.length)).toString("latin1") === LFS_POINTER) add(lfsPointers, file.path);
+    if (file.kind === "file" && isLfsPointer(file.bytes)) add(lfsPointers, file.path);
   }
   if (unsafe.length) {
     const more = unsafe.length > 3 ? ` (and ${plural(unsafe.length - 3, "more file")})` : "";
@@ -353,6 +364,9 @@ export async function takeSnapshot(options: SnapshotOptions): Promise<Snapshot> 
     objectFormat,
     files,
     leftOut,
+    leftOutPaths,
+    submodules,
+    excludedFolders,
     untracked,
     lfsPointers,
     archive: { archive, sha256: sha256(archive), listingDigest: listingDigest(listing).digest },

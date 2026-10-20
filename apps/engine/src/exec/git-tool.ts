@@ -36,8 +36,11 @@ export interface GitTool {
   signal?: AbortSignal | undefined;
 }
 
-/** One git command, its output as bytes and text. A timeout, a cut-off output or an exit not in `okCodes` is a refusal. */
-export async function runGitBytes(tool: GitTool, args: readonly string[], options: { stdin?: Uint8Array; timeoutMs?: number; maxBytes?: number; okCodes?: readonly number[] } = {}): Promise<{ bytes: Uint8Array; text: string; exitCode: number }> {
+/**
+ * One git command, its output as bytes and text. A timeout, a cut-off output (refused with `tooBig` when given) or an
+ * exit not in `okCodes` is a refusal.
+ */
+export async function runGitBytes(tool: GitTool, args: readonly string[], options: { stdin?: Uint8Array; timeoutMs?: number; maxBytes?: number; okCodes?: readonly number[]; tooBig?: string } = {}): Promise<{ bytes: Uint8Array; text: string; exitCode: number }> {
   const timeoutMs = options.timeoutMs ?? 60_000;
   const maxBytes = options.maxBytes ?? 4 * 1024 * 1024;
   const result = await tool.session.exec({
@@ -54,7 +57,7 @@ export async function runGitBytes(tool: GitTool, args: readonly string[], option
   const what = `git ${args[0] ?? ""}`;
   if (result.cancelled) throw new WorkspaceCancelled();
   if (result.timedOut) throw new WorkspaceRefusal(`${what} took longer than ${Math.round(timeoutMs / 1000)} s, so it was stopped.`);
-  if (result.truncated) throw new WorkspaceRefusal(`${what} gave more than the ${maxBytes} bytes Nivra reads, so it was stopped.`);
+  if (result.truncated) throw new WorkspaceRefusal(options.tooBig ?? `${what} gave more than the ${maxBytes} bytes Nivra reads, so it was stopped.`);
   const exitCode = result.exitCode ?? -1;
   if (exitCode !== 0 && !(options.okCodes ?? []).includes(exitCode)) {
     const said = result.stderr.trim().split("\n").at(-1)?.slice(0, 300) ?? "";
