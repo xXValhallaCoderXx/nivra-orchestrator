@@ -21,6 +21,7 @@ pnpm rpc runs.start '{"workflowId":"hello","input":{"repoPath":"/path/to/repo","
 pnpm rpc runs.start '{"workflowId":"explain","input":{"repoPath":"/path/to/repo","question":""},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true}}}' --follow
 pnpm rpc runs.result '{"runId":"<id>"}'
 pnpm rpc runs.start '{"workflowId":"chat","input":{"message":"How should I stage this?","scope":{"kind":"general"}}}' --follow
+pnpm rpc runs.start '{"workflowId":"review","input":{"planId":"<uuid>","planVersion":1},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":false},"packet":{"scope":{"kind":"general"},"text":"Plan text","assumptions":[],"references":[]}}}' --follow
 ```
 
 The explain example sends the repository's excerpts to Token Factory when `NEBIUS_API_KEY` is set, and uses tokens.
@@ -152,6 +153,10 @@ holding a newline makes `fetch` throw a TypeError that quotes it:
 ```bash
 NEBIUS_API_KEY="$(printf '%s\n%s' "canary-one" "canary-two")" pnpm rpc providers.check --home ~/.nivra-dev-track-a/<check> --token-factory-url http://127.0.0.1:9/v1
 ```
+
+- A review (D30) needs its context: the preferences, the consent and the packet. `rpc.ts` works out the two
+  fingerprints when the input leaves them out; pass `"panel":"single"` for the one-reviewer baseline. After `--follow`,
+  its report is printed.
 
 `probe:tokenfactory` takes `--model <id>`, passed after `--`, to pick the Nemotron model.
 

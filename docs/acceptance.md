@@ -829,6 +829,71 @@ Track A's first checkpoint (A0, NIV-22): two commits on `feature/niv-26-27-relia
     A1, which contains A0.
   - No live model call: none is needed.
 
+### Plan review runtime and run budgets (D30, NIV-38)
+
+Track A's second checkpoint (A1, NIV-22): commits on `feature/niv-38-council`, stacked on A0.
+
+| Commit | What |
+|---|---|
+| `b12d242` | The review contract, recorded before the runtime: packet, fingerprints, report, protocol 7 |
+| `fee717a` | The shared run budget, for explain and repository chat |
+| `046ef76` | The review workflow: two reviewers and a chair, or one reviewer |
+| `bab22b2` | Each stage's message names the stage once |
+
+**Through a real engine over stdio** (`apps/engine/test/review.test.ts`, the loopback stub playing each role):
+
+| Case | Shown |
+|---|---|
+| A council review | 3 requests. Both reviewers read the same message, byte for byte, and neither saw the other's report; the chair saw both. The report is bound to the plan's id and version and both fingerprints. Findings got their ids, and each basis was read from its references: an unknown reference was dropped, and a finding resting only on an address was relabelled as an assumption. Agreements and dissent name their findings and reviewers. Usage and the budget record are kept |
+| The single panel | 1 request, on the same message as the council's reviewers; no chair |
+| No material issues | A review with a summary and no findings is complete |
+| Unusable answers | A reply in text, an empty review, or a form refusal: the stage fails `malformed`, the chair isn't asked, 2 requests are made, and the other report is kept |
+| The chair fails | Both reports kept; `run.failed` names the chair |
+| A fast failure beside a slow success | The run waits for the slow reviewer and keeps its report: 2 requests |
+| Cancel | No further request. The finished review is kept, and the report reads cancelled by the time the run ends |
+| The engine killed mid-review | After a restart: interrupted. The finished review is kept; the request that was out "may have been sent"; nothing is sent again |
+| Usage not reported | Totals null, with the estimate kept apart |
+| Refusals before any request | A window too small for the chair at its largest, a packet over its limits, no key, no consent, no model |
+| Bindings | A wrong fingerprint refused before any request; a request id reused for another version refused; the same request returns the same run |
+| Isolation and masking | A general plan's review sent a project preference is refused. An override is said to be one. A key in the plan is never sent, and is masked in the report. Mastra's records never hold the plan |
+
+- **In process** (`review-units.test.ts`, `run-budget.test.ts`):
+  - **Normalisation:** ids, the first eight findings, references, the basis, clipping, masking, and an empty review
+    told from a valid one.
+  - **Prompts:** the role on each first line; preferences by scope and intent.
+  - **Estimates:** the whole request, tool definitions included.
+  - **Sizes:**
+    - the largest realistic packet fits the request window and the council's budget, with about 31,900 tokens per
+      reviewer and 45,500 for the chair;
+    - absurd paths are refused before any request;
+    - a worst-case report, in characters of three bytes each, stays well under the store's 256 KB.
+  - **The run:** both reviewers in flight at once; the chair sent in its reserved room after reviewers reported far
+    over their estimates; a late reviewer stopped at its deadline; nothing sent when the budget can't hold every
+    request.
+  - **The budget:** reservations all or nothing; underestimation recorded; missing usage; time held back for the
+    chair; cancel and the deadline.
+- **Explain and repository chat** (`explain.test.ts`, `chat.test.ts`):
+  - with 30,000 tokens reported per request, the answer is forced at the 4th request (`run-budget`);
+  - with 50,000 and a refused answer, the run ends `budget-exhausted` after 3 requests and sends nothing more.
+
+**Checks (20 October)**
+- `pnpm verify`: domain 43, engine 259, desktop 181. All passed.
+- `test:e2e` (the built app): 33 passed. 1 was skipped, because it applies only to a packaged app. The context view
+  now shows the run's budget.
+- `pnpm stage:runtime all`: the protocol 7 runtime's smoke test passed on linux-x64, and win-x64 was cross-staged.
+- `rpc.ts`, a real engine on homes under `~/.nivra-dev-track-a`, against a scratch stub:
+
+| Run | Requests | Outcome |
+|---|---|---|
+| Council | 3 | complete; the same request id again returned the same run, with no new request |
+| Single | 1 | complete |
+| A reviewer answering in plain text | 2 | incomplete; "The risks review couldn't be used: it answered in plain text…" |
+| A project's plan without consent | 0 | `sharing-refused` |
+| A wrong fingerprint | 0 | refused before any request |
+| A fast failure beside a slow success | 2 | incomplete; the slow review kept; usage unknown; the failed request counted at its estimate |
+
+- **Not run yet:** `verify:windows`, which needs a turn on the shared Windows folders.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

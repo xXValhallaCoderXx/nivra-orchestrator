@@ -1391,3 +1391,99 @@ evidence (D27), against thresholds agreed before it ran.
 - **`findings` is no longer required** in the schema the model sees. The description and the one refusal make up for
   it. A3's live runs will show how often an answer comes without findings.
 - **Evidence:** `docs/acceptance.md`, *Answer reliability and safe diagnostics (D29, NIV-26, NIV-27)*.
+
+## D30. Plan review: two independent reviewers and a chair within one reserved budget, bound to the plan version; and an estimated input budget for every run that reads a repository (2026-10-20)
+
+**Decision.**
+- **The review contract** (`packages/domain/src/review.ts`) was recorded before the runtime.
+  - **What a review run takes:**
+    - a saved plan's id and version;
+    - a panel;
+    - two fingerprints: the packet's and the preferences'.
+  - **What travels in the run's context,** held in memory (D21):
+    - the packet: the plan's text, its assumptions, its historical references and its scope;
+    - the preferences.
+
+    No path or project id is in it (D17).
+  - **The packet's fingerprint.** `packetDigest` is a versioned, fixed-order SHA-256 that both sides work out, pinned
+    by a test vector. The engine checks both fingerprints before any request.
+  - **The panel** is `council`, which the window offers, or `single`: one reviewer covering both briefs, the baseline
+    A3 compares the council with.
+  - **The report is self-contained and bounded.** It holds:
+    - what it was bound to;
+    - findings with ids the engine gives;
+    - each finding's basis: `plan` or `assumption`, read from its references. A historical reference is an address
+      and never makes evidence;
+    - the chair's agreements and dissent, by finding id and the reviewers behind them;
+    - `unaddressed`: the findings the chair named nowhere;
+    - each stage's own outcome;
+    - usage as reported;
+    - a budget record that keeps the hard limits apart from the estimate.
+
+    Its outcome says how complete it is, never whether the plan is sound: there is no verdict field.
+  - **Elsewhere in the protocol:** protocol 7; `runs.review`; the kind `budget-exhausted`; the due reason `run-budget`.
+- **The run.**
+  - **Two fixed roles:** architecture, feasibility and scope; and risks, failure behaviour and testability. Both read
+    the same message, byte for byte, and neither sees the other's report. The chair gets the packet and both reports.
+  - **At most three requests:** one per reviewer, one for the chair. No repair call, no retry, no tool loop.
+  - **A reviewer whose answer can't be used** fails its stage as `malformed`: a reply in text, a schema refusal, an
+    empty review, or an answer cut off. A review with no findings and a summary is a valid "no material issues"
+    review. The chair runs only when both reports are in.
+  - **The reviewers settle on their own** (`Promise.allSettled`): a fast failure neither ends the run nor stops the
+    other.
+  - **Saving.** The report is saved at the start, after every stage, and at the end. If a run ended while its report
+    was mid-review, it reads as interrupted, and a request that was out "may have been sent".
+  - **A review that doesn't complete** fails the run with the failing stage's kind and stage, and its report is kept.
+  - **Refusals before any request keep no report:** no consent, no key, no model, a request window too small, or a
+    budget too small.
+  - **A review reaches no repository and changes nothing:** its workflow has no backend, no git and no path.
+  - **A request id reused with other input is refused.** The same input returns the same run.
+- **Hard limits and estimated budgets** (`providers/run-budget.ts`).
+
+| | Council run | Single run | Explain, repository chat |
+|---|---|---|---|
+| **Hard:** requests | 3 (two reviewers together, then the chair) | 1 | 16, unchanged |
+| **Hard:** time, monotonic; a request is aborted at its deadline | 150 s per request, 330 s per run | 150 s, 180 s | 150 s per request, 480 s per run, unchanged |
+| **Hard:** output, sent with every request | 4,000 per request | 4,000 | 4,000 per request, unchanged |
+| **Estimated admission budget:** input per run | 120,000 tokens | 60,000 | **160,000, new** |
+| Estimated input per request, as before | at most 60,000 | at most 60,000 | unchanged |
+
+  - **What is estimated is the whole request:** instructions, message, every tool definition, and an allowance per
+    message, at characters ÷ 3.
+  - **A tokenizer can count more,** so the budget decides what is admitted and promises no ceiling.
+    - Reported counts replace estimates.
+    - An overrun is recorded.
+    - Unknown usage stays null.
+    - No currency is computed.
+  - **Reservations are all or nothing:** both reviewers, and the chair at its largest (the packet and two reports of
+    the largest size the engine keeps). A held reservation is honoured.
+  - **Explain and a repository turn.**
+    - The answer comes due once another request, and a full-window answer after it, would no longer fit.
+    - A request that can't be admitted is never sent, and the run ends `budget-exhausted`.
+    - The window's context view says what was counted, what was reported, and that the estimate is no ceiling.
+
+**Why.**
+- **Nothing bounded a run's total.** A live repository turn sent 219,488 input tokens over 14 calls (checkpoint 2),
+  because each call re-sends what was read so far.
+- **An estimate can't be a ceiling.**
+  - Characters ÷ 3 can undercount, and concurrent requests overrun before they report.
+  - The honest form is to call it a budget and record its overruns. The hard limits stay hard.
+- **A reviewer's failure must not cost the other's work,** nor leave it writing after the run has ended.
+- **The chair is reserved at its largest,** so it still fits however long the reports are.
+- **The single panel is in the contract from the start.** A3 must compare the same packet through the same runtime,
+  and may not change shared code once A2 has merged.
+
+**Consequences.**
+- **The numbers:**
+  - **The largest realistic packet** comes to about 31,900 tokens per reviewer and 45,500 for the chair: 109,300 of
+    the council's 120,000. That is every packet limit filled, with 80-character paths and 50 preferences of 500
+    characters.
+  - **A typical small plan** comes to about 2,000 tokens per reviewer, with 15,700 reserved for the chair.
+  - **A packet with absurdly long paths** is refused before any request.
+- **Explain and repository chat:** the heaviest explain run seen (77,514 tokens) is unchanged. The 219,488-token turn
+  would have answered at about 100,000.
+- **A low-tier key** can draw a 429 on two requests at once. The review is then incomplete, and never retried.
+- **Older engines** can't read reviews, so development homes are per track.
+- **No reference is re-read** at the current HEAD: every reference stays historical.
+- **The host's copy.** A2 keeps reports in the plan's conversation. The engine's copy stays in its store.
+- **Evidence:** `docs/acceptance.md`, *Plan review runtime and run budgets (D30, NIV-38)*.
