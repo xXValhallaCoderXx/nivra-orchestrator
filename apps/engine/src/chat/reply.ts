@@ -6,8 +6,8 @@ import { AnswerConflict, Citation } from "../explain/answer.ts";
  * apart: evidence (what the code does now, each statement citing lines read in this turn), proposals (changes or
  * options, never facts, each citing the current lines it builds on when there are any) and assumptions (what was taken
  * as true without checking). Lenient on purpose, like explain's answer (D23): only the reply itself is required and
- * every list defaults to empty, so a list the model leaves out never costs an answer step. The engine checks ids,
- * sources and citations itself.
+ * every list defaults to empty, so a list the model leaves out never costs an answer step. Text is trimmed before it is
+ * checked, so a reply of spaces is turned down like an empty one. The engine checks ids, sources and citations itself.
  */
 
 export const REPLY_LIMITS = {
@@ -26,11 +26,11 @@ export const REPLY_LIMITS = {
 } as const;
 
 export const ReplyInput = z.object({
-  answer: z.string().min(1).max(REPLY_LIMITS.answerChars).describe("Your reply to the engineer, in plain text"),
+  answer: z.string().trim().min(1).max(REPLY_LIMITS.answerChars).describe("Your reply to the engineer, in plain text"),
   evidence: z
     .array(
       z.object({
-        statement: z.string().min(1).max(REPLY_LIMITS.statementChars).describe("One fact about what the code does now"),
+        statement: z.string().trim().min(1).max(REPLY_LIMITS.statementChars).describe("One fact about what the code does now"),
         citations: z.array(Citation).max(REPLY_LIMITS.citations).default([]).describe("The lines you read in this turn that show it"),
       }),
     )
@@ -40,8 +40,8 @@ export const ReplyInput = z.object({
   proposals: z
     .array(
       z.object({
-        title: z.string().min(1).max(REPLY_LIMITS.titleChars).describe("The change, or the option, in a few words"),
-        detail: z.string().min(1).max(REPLY_LIMITS.detailChars).describe("What it involves and why, in plain text"),
+        title: z.string().trim().min(1).max(REPLY_LIMITS.titleChars).describe("The change, or the option, in a few words"),
+        detail: z.string().trim().min(1).max(REPLY_LIMITS.detailChars).describe("What it involves and why, in plain text"),
         citations: z.array(Citation).max(REPLY_LIMITS.citations).default([]).describe("The current lines it builds on or would change, read in this turn"),
       }),
     )
@@ -49,7 +49,7 @@ export const ReplyInput = z.object({
     .default([])
     .describe("Changes you propose, or options to compare: never facts about the code"),
   assumptions: z
-    .array(z.string().min(1).max(REPLY_LIMITS.assumptionChars))
+    .array(z.string().trim().min(1).max(REPLY_LIMITS.assumptionChars))
     .max(REPLY_LIMITS.assumptions)
     .default([])
     .describe("What you took as true without checking it"),
@@ -59,7 +59,7 @@ export const ReplyInput = z.object({
     .default([])
     .describe("Where the repository and the engineer's preferences disagree, one topic each"),
   gaps: z
-    .array(z.string().min(1).max(REPLY_LIMITS.gapChars))
+    .array(z.string().trim().min(1).max(REPLY_LIMITS.gapChars))
     .max(REPLY_LIMITS.gaps)
     .default([])
     .describe("What you could not establish from what you read"),

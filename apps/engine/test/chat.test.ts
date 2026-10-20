@@ -259,6 +259,26 @@ describe("a repository conversation's turn over stdio (D26)", () => {
     assert.deepEqual(reply?.kind === "repository" ? reply.evidence.map((e) => e.citations.map((c) => [c.checked, c.problem])) : [], [[[false, "file not read"]], []]);
   });
 
+  it("turns down a reply of spaces like an empty one, and keeps the reply the model sends next, trimmed", async () => {
+    const repo = makeRepo();
+    const script = [toolCall("submit_reply", { answer: "   " }), toolCall("submit_reply", { answer: "  It is a small timer app.  " })];
+    const { engine } = await setup((_request, index) => script[index] ?? httpError(500, "the script ran out"));
+    const run = await repository(engine, repo, "What is this?");
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
+    assert.ok(page.events.some((e) => e.type === "tool.called" && e.message.startsWith("submit_reply refused: its input didn't match the tool's schema")));
+    const reply = await engine.client.call("runs.reply", { runId: run.id });
+    assert.deepEqual(reply?.kind === "repository" ? [reply.answer, reply.evidence] : [], ["It is a small timer app.", []]);
+  });
+
+  it("never succeeds with a reply of spaces: one the model never fixes fails as malformed, with no reply", async () => {
+    const repo = makeRepo();
+    const { engine } = await setup(() => toolCall("submit_reply", { answer: " \n\t " }));
+    const run = await repository(engine, repo, "What is this?");
+    const page = await finished(engine, run.id);
+    assert.deepEqual([page.status, failureOf(page), await engine.client.call("runs.reply", { runId: run.id })], ["failed", "malformed", null]);
+  });
+
   it("refuses a repository turn without the project's consent, before any request (D20, D22)", async () => {
     const repo = makeRepo();
     const { stub, engine } = await setup(() => text("never"));
