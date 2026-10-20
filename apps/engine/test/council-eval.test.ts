@@ -109,7 +109,7 @@ describe("the council evaluation's frozen inputs (NIV-40)", () => {
     assert.deepEqual(limitMismatches(frozen), []);
     assert.equal(EMPTY_PREFERENCES_DIGEST, await preferencesDigest([]));
     // Frozen: a change to any fixture, the rubric or the protocol moves this, and needs a new approval.
-    assert.equal(frozen.approvalDigest, "8175cb17931dced6d3889a386ff7fa826feedb2ee4c4f33321018d1319175959");
+    assert.equal(frozen.approvalDigest, "c3b9225a9c41e4c9cde2a90c029682796886817f463e7e5286eab23082fc6683");
     assert.deepEqual(ORDER, ["f1:single", "f1:council", "f2:council", "f2:single", "f3:single", "f3:council", "f4:council", "f4:single", "f5:single", "f5:council"]);
   });
 
@@ -306,7 +306,7 @@ describe("the batch on a real engine, against the stub (NIV-40)", () => {
       "Before each run, with no inference request",
       "gives it 30 s more to settle",
       "the batch takes 52.5 minutes",
-      "Labelling: not chosen yet.",
+      "Labelling: you label the blinded sheet. Which arm and reviewer each line came from is never written down",
     ]) {
       assert.ok(stdout.includes(needle), needle);
     }

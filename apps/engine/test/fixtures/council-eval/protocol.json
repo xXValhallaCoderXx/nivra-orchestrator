@@ -20,7 +20,7 @@
     "A run still going when its window to settle after a cancel has passed: it is kept as unresolved, and never sent again.",
     "The next run, with its windows to cancel and to settle, could not end within the batch's 60 minutes."
   ],
-  "labelling": "pending",
+  "labelling": "nate",
   "seed": 20261021,
   "decision": {
     "inconclusive": "Fewer than 4 fixtures have a report from both arms.",
