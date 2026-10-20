@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, type SandboxApiOptions, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
-import { evaluate, probePlan, PROBE_LIMITS, runStageOne, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
+import { evaluate, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
 import { classify, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
 
 /**
@@ -719,5 +720,62 @@ describe("Nebius Sandboxes, offline: each pattern judged on its own evidence (NI
     run.parentCancel = { parent: "CANCELLED", seconds: 2, child: "not ended" };
     const judged = evaluate(run);
     assert.deepEqual([judged.patterns[1]?.verdicts.find((v) => v.id === "cancel")?.outcome, judged.decision, judged.pattern], ["inconclusive", "inconclusive", null]);
+  });
+});
+
+describe("Nebius Sandboxes, offline: the probe's credentials, and what stage 0 shows (NIV-29)", () => {
+  const SCRIPT = fileURLToPath(new URL("../scripts/sandbox-probe.ts", import.meta.url));
+  const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
+  const KEY = `nivra-probe-key-${"k".repeat(16)}`;
+  // Every case here stops before the probe sends anything: no case reaches stage 0's requests.
+  const probe = (args: string[]) => spawnSync(process.execPath, [SCRIPT, ...args], { env: { PATH: process.env["PATH"] ?? "", HOME: tmpdir() }, encoding: "utf8" });
+
+  it("takes the key only from a file only you can read, outside the repository, and sends nothing otherwise", { skip: process.platform === "win32" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "nivra probe credentials "));
+    const file = join(dir, "nebius.env");
+    writeFileSync(file, `NEBIUS_API_KEY=${KEY}\nNEBIUS_PROJECT_ID=project-1\n`);
+    chmodSync(file, 0o644);
+    const readable = probe(["--credentials", file, "--stage", "0"]);
+    assert.deepEqual([readable.status, /can be read by others \(mode 644\)\. Run chmod 600 on it, then try again\. Nothing was sent\./.test(readable.stderr)], [2, true]);
+    const missing = probe(["--credentials", join(dir, "absent.env"), "--stage", "0"]);
+    assert.deepEqual([missing.status, /^There's no file at .*absent\.env\. Create it with NEBIUS_API_KEY=/.test(missing.stderr)], [2, true]);
+    const inside = probe(["--credentials", join(REPOSITORY, "nebius.env"), "--stage", "0"]);
+    assert.deepEqual([inside.status, /is inside the repository, where it could be committed/.test(inside.stderr)], [2, true]);
+    chmodSync(file, 0o600);
+    writeFileSync(file, `NEBIUS_API_KEY=${KEY}\n`);
+    const half = probe(["--credentials", file, "--stage", "0"]);
+    assert.deepEqual([half.status, /must both be set, in /.test(half.stderr)], [2, true]);
+    // Accepted: it gets as far as choosing a stage, and the key appears nowhere.
+    writeFileSync(file, `NEBIUS_API_KEY=${KEY}\nNEBIUS_PROJECT_ID=project-1\n`);
+    const accepted = probe(["--credentials", file, "--evidence", dir, "--stage", "9"]);
+    assert.deepEqual([accepted.status, /^Choose --plan/.test(accepted.stderr), `${accepted.stdout}${accepted.stderr}`.includes(KEY)], [2, true, false]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("shows the permissions, limits, expiry and images stage 1 needs, and never the token's id", () => {
+    // The shapes are the documented WhoAmIResponse and ImageListResponse.
+    const whoami = {
+      token_uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      token_expiration: 1735689600,
+      permissions: { import: true, spawn: true, spawn_disposable: true, list: true, cancel: true, set_image_tag: false },
+      limits: { instance_max_timeout: 3600, instance_max_concurrency: 10 },
+      operations_stat: {},
+    };
+    const images = { images: [{ uuid: "u-busybox", tag: "busybox:latest", created_at: "2026-01-01T00:00:00Z", operation_uuid: null }, { uuid: "u-python", tag: "python:3.12" }] };
+    const summary = stageZeroSummary(whoami, images);
+    assert.equal(summary.ready, true);
+    assert.deepEqual(summary.lines, [
+      "The key and project were accepted.",
+      "Permissions granted: import, spawn, spawn_disposable, list, cancel.",
+      "Limits: instance_max_timeout 3600, instance_max_concurrency 10.",
+      "The token expires: 2025-01-01T00:00:00.000Z.",
+      "2 public image(s); busybox or alpine: busybox:latest (u-busybox).",
+    ]);
+    assert.equal(summary.lines.join("\n").includes("a1b2c3d4"), false);
+    const short = stageZeroSummary({ ...whoami, permissions: { ...whoami.permissions, cancel: false }, limits: { instance_max_timeout: 120 } }, { images: [] });
+    assert.deepEqual(
+      [short.ready, short.lines[1], short.lines[2], short.lines[4]],
+      [false, "Permissions granted: import, spawn, spawn_disposable, list. Stage 1 also needs: cancel.", "Limits: instance_max_timeout 120. Stage 1's longest operation needs 180 s.", "0 public image(s); busybox or alpine: none."],
+    );
   });
 });

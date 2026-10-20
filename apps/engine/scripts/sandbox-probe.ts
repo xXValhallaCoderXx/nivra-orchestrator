@@ -5,28 +5,32 @@
 //
 // Usage:
 //   pnpm probe:sandbox --plan
-//   NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --stage 0
-//   NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --stage 1 --image <uuid|tag:name> --deny <url> [--deny <url>] [--network-control <url>]
-//   NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --recover <evidence folder>
+//   pnpm probe:sandbox --credentials <file> --stage 0
+//   pnpm probe:sandbox --credentials <file> --stage 1 --image <uuid|tag:name> --deny <url> [--deny <url>] [--network-control <url>]
+//   pnpm probe:sandbox --credentials <file> --recover <evidence folder>
 //
-// Set the variables in your own terminal; never paste them into a chat. They are removed from the environment when
-// read, and never printed or written: evidence replaces them with placeholders. Evidence goes to ~/nivra-acceptance/sandbox-probe-<UTC>/ (0700): the journal, each step's outcome (outputs cut to
+// The key and project id come from a file only you can read, outside the repository, holding NEBIUS_API_KEY=… and
+// NEBIUS_PROJECT_ID=… lines (or from those variables, set in your own terminal). Never paste them into a chat. They are
+// read once, removed from the environment, and never printed or written: evidence replaces them with placeholders.
+// Evidence goes to ~/nivra-acceptance/sandbox-probe-<UTC>/ (0700): the journal, each step's outcome (outputs cut to
 // 2 KB), the verdicts and a summary. Stage 1 stops at its overall deadline, a hard limit; cleanup then has its own. The
 // first Ctrl+C settles every operation the probe started (reconcile, cancel, confirm); --recover finishes that later
 // from the journal.
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseArgs } from "node:util";
+import { parseArgs, parseEnv } from "node:util";
 import { fetchTransport, SandboxApi } from "../src/exec/nebius/api.ts";
-import { CLEANUP_MAX_SECONDS, evaluate, LATENCY, PROBE_LIMITS, probePlan, RETENTION, runStageOne } from "../src/exec/nebius/probe.ts";
+import { CLEANUP_MAX_SECONDS, evaluate, LATENCY, PROBE_LIMITS, probePlan, RETENTION, runStageOne, stageZeroSummary } from "../src/exec/nebius/probe.ts";
 import { Journal, Sandbox } from "../src/exec/nebius/sandbox.ts";
 
 const FIXTURE = fileURLToPath(new URL("../test/fixtures/sandbox-probe/", import.meta.url));
+const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
 const { values } = parseArgs({
   options: {
     plan: { type: "boolean", default: false },
+    credentials: { type: "string" },
     stage: { type: "string" },
     image: { type: "string" },
     deny: { type: "string", multiple: true, default: [] },
@@ -72,12 +76,33 @@ if (values.plan) {
   process.exit(0);
 }
 
-const key = process.env["NEBIUS_API_KEY"]?.trim();
-const project = process.env["NEBIUS_PROJECT_ID"]?.trim();
+/** The key and project id: from a file only you can read, outside the repository, or from your own terminal. */
+function credentials(): { key: string | undefined; project: string | undefined } {
+  if (!values.credentials) return { key: process.env["NEBIUS_API_KEY"]?.trim(), project: process.env["NEBIUS_PROJECT_ID"]?.trim() };
+  const path = resolve(values.credentials);
+  const inside = relative(REPOSITORY, path);
+  if (!inside.startsWith("..") && !isAbsolute(inside)) {
+    console.error(`${path} is inside the repository, where it could be committed. Move it outside (for example to ~/.config/nivra/), then try again. Nothing was sent.`);
+    process.exit(2);
+  }
+  if (!existsSync(path)) {
+    console.error(`There's no file at ${path}. Create it with NEBIUS_API_KEY=… and NEBIUS_PROJECT_ID=… lines, run chmod 600 on it, then try again. Nothing was sent.`);
+    process.exit(2);
+  }
+  const mode = statSync(path).mode & 0o777;
+  if (process.platform !== "win32" && (mode & 0o077) !== 0) {
+    console.error(`${path} can be read by others (mode ${mode.toString(8)}). Run chmod 600 on it, then try again. Nothing was sent.`);
+    process.exit(2);
+  }
+  const parsed = parseEnv(readFileSync(path, "utf8"));
+  return { key: parsed["NEBIUS_API_KEY"]?.trim(), project: parsed["NEBIUS_PROJECT_ID"]?.trim() };
+}
+
+const { key, project } = credentials();
 delete process.env["NEBIUS_API_KEY"];
 delete process.env["NEBIUS_PROJECT_ID"];
 if (!key || !project) {
-  console.error("NEBIUS_API_KEY and NEBIUS_PROJECT_ID must both be set in your own terminal. Nothing was sent.");
+  console.error(`NEBIUS_API_KEY and NEBIUS_PROJECT_ID must both be set, ${values.credentials ? `in ${values.credentials}` : "in your own terminal, or in a file passed with --credentials"}. Nothing was sent.`);
   process.exit(2);
 }
 /** Text with the key and the project id taken out, for everything printed or written. */
@@ -114,13 +139,13 @@ if (values.recover) {
 if (values.stage === "0") {
   const client = api();
   const [whoami, images] = await Promise.all([client.whoami(), client.images()]);
+  // The full answers go to the private evidence file; the terminal gets only what the proof needs.
   write(join(folder, "stage0.json"), { whoami, images });
-  log(`Account: ${JSON.stringify(whoami)}`);
-  const listed = Array.isArray(images) ? images : ((images as { images?: unknown[] } | null)?.images ?? []);
-  const candidates = listed.filter((image) => /busybox|alpine/i.test(JSON.stringify(image)));
-  log(`${listed.length} public image(s); busybox or alpine: ${candidates.map((image) => JSON.stringify(image)).join(", ") || "none"}`);
+  const summary = stageZeroSummary(whoami, images);
+  for (const line of summary.lines) log(line);
+  log(summary.ready ? "Stage 1 could run on this account." : "Stage 1 couldn't run as planned on this account: see above.");
   log(`Evidence: ${folder}`);
-  process.exit(0);
+  process.exit(summary.ready ? 0 : 1);
 }
 
 if (values.stage !== "1" || !values.image) {

@@ -28,6 +28,35 @@ export const PROBE_LIMITS = {
  */
 export const CLEANUP_MAX_SECONDS = 2 * PROBE_LIMITS.searchSeconds + 2 * (PROBE_LIMITS.requestTimeoutSeconds + PROBE_LIMITS.cancelWaitSeconds);
 
+/** The permissions stage 1 uses: spawning (disposable or not), listing to find a lost answer, and cancelling. */
+export const STAGE_ONE_PERMISSIONS = ["spawn", "spawn_disposable", "list", "cancel"] as const;
+
+/**
+ * What stage 0 says about the account and the images, from `GET /v1/whoami` and `GET /v1/images`: the permissions, the
+ * limits and when the token expires, and the public busybox or alpine images. Nothing else is printed (not the token's
+ * id); the full answers go to the private evidence file only. `ready` says whether stage 1 could run on them.
+ */
+export function stageZeroSummary(whoami: unknown, images: unknown): { lines: string[]; ready: boolean } {
+  const account = (whoami ?? {}) as { permissions?: unknown; limits?: unknown; token_expiration?: unknown };
+  const permissions = account.permissions && typeof account.permissions === "object" ? Object.entries(account.permissions as Record<string, unknown>) : [];
+  const granted = permissions.filter(([, value]) => value === true).map(([name]) => name);
+  const missing = STAGE_ONE_PERMISSIONS.filter((name) => !granted.includes(name));
+  const limits = account.limits && typeof account.limits === "object" ? Object.entries(account.limits as Record<string, unknown>).filter(([, value]) => typeof value === "number") : [];
+  const maxTimeout = limits.find(([name]) => name === "instance_max_timeout")?.[1] as number | undefined;
+  const expiry = typeof account.token_expiration === "number" ? new Date(account.token_expiration * 1000).toISOString() : account.token_expiration === null ? "never" : "not reported";
+  const listed = Array.isArray((images as { images?: unknown } | null)?.images) ? ((images as { images: unknown[] }).images as Array<{ uuid?: unknown; tag?: unknown }>) : [];
+  const candidates = listed.filter((image) => typeof image.tag === "string" && /^(busybox|alpine)(:|$)/.test(image.tag));
+  const timeoutFits = maxTimeout === undefined || maxTimeout >= PROBE_LIMITS.maxParentTimeoutSeconds;
+  const lines = [
+    "The key and project were accepted.",
+    `Permissions granted: ${granted.length ? granted.join(", ") : "none"}.${missing.length ? ` Stage 1 also needs: ${missing.join(", ")}.` : ""}`,
+    `Limits: ${limits.length ? limits.map(([name, value]) => `${name} ${String(value)}`).join(", ") : "none reported"}.${timeoutFits ? "" : ` Stage 1's longest operation needs ${PROBE_LIMITS.maxParentTimeoutSeconds} s.`}`,
+    `The token expires: ${expiry}.`,
+    `${listed.length} public image(s); busybox or alpine: ${candidates.length ? candidates.map((image) => `${String(image.tag)} (${String(image.uuid)})`).join(", ") : "none"}.`,
+  ];
+  return { lines, ready: missing.length === 0 && timeoutFits && candidates.length > 0 };
+}
+
 export const LATENCY = { adoptSeconds: 10, concernSeconds: 30 } as const;
 
 export const RETENTION =
