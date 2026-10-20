@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { checkNetwork, ExecRefusedError, type ExecRequest, type ExecResult, type ExecutionBackend, type ExecutionCapabilities, type ExecutionSession } from "./backend.ts";
+import { checkRequirements, EMPTY_CLOSE_REPORT, ExecRefusedError, type CloseReport, type ExecRequest, type ExecResult, type ExecutionBackend, type ExecutionCapabilities, type ExecutionSession } from "./backend.ts";
 import { childEnv, insideWsl } from "./child-env.ts";
 import { killTree } from "./kill.ts";
 
@@ -16,6 +16,8 @@ export interface LocalBackendOptions {
   platform?: NodeJS.Platform;
   /** How long a stopped command gets between SIGTERM and SIGKILL (POSIX). */
   graceMs?: number;
+  /** The monotonic clock a session's budget is measured on; tests replace it. */
+  now?: () => number;
 }
 
 export function createLocalBackend(options: LocalBackendOptions = {}): ExecutionBackend {
@@ -24,8 +26,10 @@ export function createLocalBackend(options: LocalBackendOptions = {}): Execution
     label: "No isolation",
     capabilities: LOCAL_CAPABILITIES,
     open: async (spec) => {
-      checkNetwork(backend, spec.network ?? "open");
-      return new LocalSession(options);
+      checkRequirements(backend, spec);
+      if (spec.snapshot) throw new ExecRefusedError(`"No isolation" runs commands in a folder on this computer, so it can't take a snapshot to run elsewhere. Choose a sandbox for this run.`);
+      const now = options.now ?? (() => performance.now());
+      return new LocalSession(options, { deadline: spec.budgetMs === undefined ? Number.POSITIVE_INFINITY : now() + spec.budgetMs, now, signal: spec.signal ?? null });
     },
   };
   return backend;
@@ -40,6 +44,7 @@ const notStarted = (cancelled: boolean): ExecResult => ({
   timedOut: false,
   cancelled,
   durationMs: 0,
+  persisted: true,
 });
 
 /** Collects one stream's bytes up to a cap, then drops the rest while still draining it. */
@@ -65,8 +70,12 @@ class Capped {
     this.#size += kept.length;
   }
 
+  bytes(): Buffer {
+    return Buffer.concat(this.#chunks);
+  }
+
   text(): string {
-    return Buffer.concat(this.#chunks).toString("utf8");
+    return this.bytes().toString("utf8");
   }
 }
 
@@ -80,20 +89,26 @@ class LocalSession implements ExecutionSession {
    * closing the session must stop it too.
    */
   readonly #groups = new Set<number>();
-  #closed = false;
+  /** The session's own bounds: when its budget ends, and the signal that stops its work. */
+  readonly #bounds: { deadline: number; now: () => number; signal: AbortSignal | null };
+  #closing: Promise<CloseReport> | null = null;
 
-  constructor(options: LocalBackendOptions) {
+  constructor(options: LocalBackendOptions, bounds: { deadline: number; now: () => number; signal: AbortSignal | null }) {
     this.#options = options;
+    this.#bounds = bounds;
   }
 
   exec(request: ExecRequest): Promise<ExecResult> {
-    if (this.#closed) return Promise.reject(new ExecRefusedError("This session is closed."));
+    if (this.#closing) return Promise.reject(new ExecRefusedError("This session is closed."));
     const platform = this.#options.platform ?? process.platform;
     const [program, ...args] = request.argv;
     if (platform === "win32" && /\.(cmd|bat)$/i.test(program)) {
       return Promise.reject(new ExecRefusedError(`${program} is a batch file. Nivra starts programs without a shell, so it can't run it on this target.`));
     }
-    if (request.signal?.aborted) return Promise.resolve(notStarted(true));
+    if (request.persist === false) return Promise.reject(new ExecRefusedError(`"No isolation" runs commands in the folder itself, so it can't throw a command's changes away. ${program} wasn't run.`));
+    if (request.timeoutMs > this.#bounds.deadline - this.#bounds.now()) return Promise.reject(new ExecRefusedError(`There isn't enough time left in this run to give ${program} its ${Math.ceil(request.timeoutMs / 1000)} s, so it wasn't run.`));
+    const signal = request.signal && this.#bounds.signal ? AbortSignal.any([request.signal, this.#bounds.signal]) : (request.signal ?? this.#bounds.signal ?? undefined);
+    if (signal?.aborted) return Promise.resolve(notStarted(true));
 
     const env = childEnv(this.#options.baseEnv ?? process.env, request.env ?? {}, { platform, stripWindowsPaths: platform === "linux" && insideWsl() });
     const started = performance.now();
@@ -103,7 +118,7 @@ class LocalSession implements ExecutionSession {
         child = spawn(program, args, {
           cwd: request.cwd,
           env,
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: [request.stdin ? "pipe" : "ignore", "pipe", "pipe"],
           windowsHide: true,
           // POSIX: its own process group, so the whole tree can be stopped. Windows: inside libuv's job object (D4).
           detached: platform !== "win32",
@@ -131,14 +146,14 @@ class LocalSession implements ExecutionSession {
         cancelled = true;
         stop();
       };
-      request.signal?.addEventListener("abort", onAbort, { once: true });
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       const finish = (outcome: { result: ExecResult } | { error: Error }) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         clearTimeout(exitFallback);
-        request.signal?.removeEventListener("abort", onAbort);
+        signal?.removeEventListener("abort", onAbort);
         this.#running.delete(child);
         if ("error" in outcome) reject(outcome.error);
         else resolve(outcome.result);
@@ -146,6 +161,9 @@ class LocalSession implements ExecutionSession {
 
       child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
       child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+      // A command that stops reading early closes its end; that is the command's business, not a failure here.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(request.stdin);
       child.once("spawn", () => request.onStart?.({ pid: child.pid ?? null }));
       child.once("error", (error: NodeJS.ErrnoException) => {
         // Only a process that never started reports here (ENOENT, EACCES): nothing ran.
@@ -160,6 +178,8 @@ class LocalSession implements ExecutionSession {
         timedOut,
         cancelled,
         durationMs: Math.round(performance.now() - started),
+        persisted: true,
+        ...(request.output === "bytes" ? { stdoutBytes: new Uint8Array(stdout.bytes()) } : {}),
       });
       child.once("close", (code, signal) => finish({ result: result(code, signal) }));
       // A descendant holding the pipes open must not keep the result waiting after the process itself has gone.
@@ -178,9 +198,17 @@ class LocalSession implements ExecutionSession {
    * leader already exited (SIGTERM, then SIGKILL after the grace period). On Windows a finished command's background
    * descendants cannot be found from its process id once it has exited; they sit in libuv's kill-on-close job object
    * and die with the engine (D4). That is why general coding commands do not run unconfined on native Windows (D15).
+   * Nothing left the target, so the report is empty. A second call gives the first one's.
    */
-  async close(): Promise<void> {
-    this.#closed = true;
+  close(): Promise<CloseReport> {
+    this.#closing ??= this.#stopAll().then(
+      () => EMPTY_CLOSE_REPORT,
+      () => EMPTY_CLOSE_REPORT,
+    );
+    return this.#closing;
+  }
+
+  async #stopAll(): Promise<void> {
     const platform = this.#options.platform ?? process.platform;
     await Promise.all([...this.#running].map((child) => killTree(child, { platform })));
     if (platform === "win32") return;
