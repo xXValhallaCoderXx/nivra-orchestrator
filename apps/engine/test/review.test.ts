@@ -229,7 +229,7 @@ describe("a review's outcomes, stops and bindings over stdio (NIV-38, D30)", () 
     const page = await finished(engine, run.id);
     const report = await reportOf(engine, run.id);
     assert.deepEqual([failed(page)?.data?.["kind"], failed(page)?.data?.["stage"], report?.outcome, report?.reviewers.length], ["provider", "chair", "incomplete", 2]);
-    assert.match(failed(page)?.message ?? "", /^This review is incomplete\. The chair: .*What the reviewers found is kept\. Start a new review to try again\.$/);
+    assert.match(failed(page)?.message ?? "", /^This review is incomplete\. The chair's synthesis failed: Token Factory had a problem answering \(HTTP 500\)\..* What the reviewers found is kept\. Start a new review to try again\.$/);
 
     const narrow = await setup(scripted({ ...COUNCIL, chair: toolCall(REVIEW_TOOLS.chair, { summary: "Only one thing matters.", priorities: ["arch-1"] }) }));
     const narrowRun = await startReview(narrow.engine);

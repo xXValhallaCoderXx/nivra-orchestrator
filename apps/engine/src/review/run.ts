@@ -52,6 +52,8 @@ export function estimateRequest(instructions: string, message: string, tools: "r
 }
 
 const ROLE_LABEL: Readonly<Record<ReviewRole | "chair", string>> = { architecture: "Architecture review", risks: "Risks review", single: "Review", chair: "The chair" };
+/** Each stage as a sentence names it, so a stage's message stands alone, in the report and in a run's failure. */
+const ROLE_NOUN: Readonly<Record<ReviewRole | "chair", string>> = { architecture: "The architecture review", risks: "The risks review", single: "The review", chair: "The chair's synthesis" };
 
 export interface ReviewRunOptions {
   runId: string;
@@ -215,7 +217,12 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
     } catch (error) {
       const failed = error instanceof ModelFailure ? error : failure("internal", "");
       if (failed.failedStep) own.push(failed.failedStep);
-      Object.assign(entry, failed.kind === "cancelled" ? { status: "failed", kind: "cancelled", reason: "cancelled", message: "Cancelled while its request was out." } : { status: "failed", kind: failed.kind, message: failed.message.slice(0, 400) });
+      Object.assign(
+        entry,
+        failed.kind === "cancelled"
+          ? { status: "failed", kind: "cancelled", reason: "cancelled", message: "Cancelled while its request was out." }
+          : { status: "failed", kind: failed.kind, message: `${ROLE_NOUN[spec.role]} failed: ${failed.message}`.slice(0, 400) },
+      );
     }
     for (const step of own) {
       steps.push(step);
@@ -243,7 +250,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
     if (entry.status === "failed") return null;
     if (handedIn === null) {
       const problems = own.flatMap((step) => step.rejectedTools.filter((rejected) => rejected.tool === spec.tool).flatMap((rejected) => rejected.problems));
-      Object.assign(entry, { status: "failed", kind: "malformed", message: `${ROLE_LABEL[spec.role]} couldn't be used: ${unusable(own, problems)}.`, problems: problems.slice(0, 10) });
+      Object.assign(entry, { status: "failed", kind: "malformed", message: `${ROLE_NOUN[spec.role]} couldn't be used: ${unusable(own, problems)}.`, problems: problems.slice(0, 10) });
       return null;
     }
     return handedIn as A;
@@ -276,7 +283,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
           reports.set(role, kept);
           entry.status = "answered";
         } else {
-          Object.assign(entry, { status: "failed", kind: "malformed", message: `${ROLE_LABEL[role]} couldn't be used: it handed in an empty review.` });
+          Object.assign(entry, { status: "failed", kind: "malformed", message: `${ROLE_NOUN[role]} couldn't be used: it handed in an empty review.` });
         }
       }
       options.progress(
@@ -304,7 +311,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
       if (answer) {
         synthesis = normaliseSynthesis(answer, roles.map((role) => reports.get(role)!), mask);
         if (synthesis) chairStage.status = "answered";
-        else Object.assign(chairStage, { status: "failed", kind: "malformed", message: "The chair couldn't be used: it handed in an empty synthesis." });
+        else Object.assign(chairStage, { status: "failed", kind: "malformed", message: "The chair's synthesis couldn't be used: it handed in an empty one." });
       }
       options.progress(chairStage.status === "answered" ? "The chair's synthesis is in" : `The chair didn't finish: ${chairStage.message ?? chairStage.status}`, {
         stage: "chair",
@@ -338,7 +345,7 @@ export function incompleteFailure(final: ReviewReport): ModelFailure {
   const failed = final.stages.find((entry) => entry.status === "failed") ?? final.stages.find((entry) => entry.status === "skipped" && entry.reason !== "single-panel");
   const kind: ModelFailureKind = failed?.kind ?? (failed?.reason === "budget" ? "budget-exhausted" : failed?.reason === "deadline" ? "timeout" : "malformed");
   const kept = final.reviewers.length ? `What ${final.reviewers.length === 1 ? "the other reviewer" : "the reviewers"} found is kept. ` : "";
-  const what = failed ? `${ROLE_LABEL[failed.role]}: ${failed.message ?? failed.status}` : "a stage didn't finish";
+  const what = failed?.message ?? `${failed ? ROLE_NOUN[failed.role] : "A stage"} didn't finish.`;
   const error = new ModelFailure(kind, `This review is incomplete. ${what} ${kept}Start a new review to try again.`.replace(/\s+/g, " ").trim());
   (error as ModelFailure & { stage?: string }).stage = failed?.stage === "chair" ? "chair" : failed?.role ?? "review";
   return error;
