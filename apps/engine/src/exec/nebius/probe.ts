@@ -16,9 +16,17 @@ export const PROBE_LIMITS = {
   overallMinutes: 20,
   requestTimeoutSeconds: 30,
   observeMarginSeconds: 60,
+  cancelWaitSeconds: 60,
+  searchSeconds: 120,
   maxUploadBytes: 2_048,
   maxDownloadBytes: 65_536,
 } as const;
+
+/**
+ * The longest cleanup can take once stage 1 has stopped. One operation runs at a time, so at most one spawn is uncertain
+ * and one operation open: two searches for a lost answer, and two cancels, each a request and then its wait.
+ */
+export const CLEANUP_MAX_SECONDS = 2 * PROBE_LIMITS.searchSeconds + 2 * (PROBE_LIMITS.requestTimeoutSeconds + PROBE_LIMITS.cancelWaitSeconds);
 
 export const LATENCY = { adoptSeconds: 10, concernSeconds: 30 } as const;
 
@@ -178,7 +186,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   await step("8", "reconnect", async () => {
     const submitted = await sandbox.submit({ label: "reconnect", command: "/bin/sh", args: ["-c", "sleep 10; echo done"], image: ctx.baseImage, disposable: true, timeoutSeconds: 60 });
     if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
-    await ctx.api.operation(submitted.operationId);
+    await ctx.api.operation(submitted.operationId, { until: ctx.deadline });
     // Everything in memory is dropped; a fresh client reattaches from what the journal holds.
     const fresh = ctx.reconnect();
     const known = fresh.journal.open().operations;

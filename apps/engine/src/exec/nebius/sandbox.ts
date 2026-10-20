@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { readStatus, SandboxHttpError, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
+import { readStatus, SandboxDeadlineError, SandboxHttpError, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
 
 /**
  * The lifecycle of Nebius Sandboxes operations, as Nivra models it (NIV-29), from the documentation of 20 October 2026:
@@ -13,6 +13,8 @@ import { readStatus, SandboxHttpError, TERMINAL, type FileRef, type Operation, t
  *   a spawn whose answer was lost can be looked for. A bounded search that finds nothing leaves it unknown, never "not
  *   started", and nothing is ever resubmitted.
  * - A lost connection is not a cancellation; a cancel's 202 is not a stop. Cancelling polls to a terminal state.
+ * - Every wait has a deadline, and no read is made, or answer taken, once it has passed. An optional cap (the probe's
+ *   overall deadline) bounds them all, and no operation or subprocess is started after it.
  * - Cancelling, or a disposable run, deletes nothing: images are retained for 180 days, after which untagged and
  *   unreferenced ones may be deleted, and there is no API to delete uploads, operation records or logs.
  */
@@ -161,14 +163,16 @@ export interface SandboxOptions {
   pollMs?: number;
   /** How long a cancel may take to reach a terminal state. */
   cancelWaitMs?: number;
-  /** Bounds on looking for a spawn whose answer was lost. */
-  search?: { sinceMarginMs: number; pageSize: number; maxPages: number; maxCandidates: number };
+  /** Bounds on looking for a spawn whose answer was lost, its time among them (120 s unless given). */
+  search?: { sinceMarginMs: number; pageSize: number; maxPages: number; maxCandidates: number; withinMs?: number };
   /** The longest timeout a step may ask for. */
   maxTimeoutSeconds?: number;
   sleep?: (ms: number) => Promise<void>;
   /** A monotonic clock, in ms. */
   now?: () => number;
   wallNow?: () => Date;
+  /** The latest any wait may end, on the same clock: the probe's overall deadline. Cleanup runs on a sandbox without one. */
+  cap?: () => number;
 }
 
 const CORRELATION = "NIVRA_CORRELATION";
@@ -180,11 +184,12 @@ export class Sandbox {
   readonly #observeMarginMs: number;
   readonly #pollMs: number;
   readonly #cancelWaitMs: number;
-  readonly #search: NonNullable<SandboxOptions["search"]>;
+  readonly #search: Required<NonNullable<SandboxOptions["search"]>>;
   readonly #maxTimeoutSeconds: number;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #now: () => number;
   readonly #wallNow: () => Date;
+  readonly #cap: (() => number) | null;
 
   constructor(api: SandboxApi, options: SandboxOptions) {
     this.#api = api;
@@ -192,15 +197,40 @@ export class Sandbox {
     this.#observeMarginMs = options.observeMarginMs ?? 60_000;
     this.#pollMs = options.pollMs ?? 1_000;
     this.#cancelWaitMs = options.cancelWaitMs ?? 60_000;
-    this.#search = options.search ?? { sinceMarginMs: 24 * 60 * 60 * 1000, pageSize: 100, maxPages: 10, maxCandidates: 50 };
+    this.#search = { withinMs: 120_000, ...(options.search ?? { sinceMarginMs: 24 * 60 * 60 * 1000, pageSize: 100, maxPages: 10, maxCandidates: 50 }) };
     this.#maxTimeoutSeconds = options.maxTimeoutSeconds ?? 180;
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#now = options.now ?? (() => performance.now());
     this.#wallNow = options.wallNow ?? (() => new Date());
+    this.#cap = options.cap ?? null;
   }
 
   get journal(): Journal {
     return this.#journal;
+  }
+
+  /** A wait's deadline, no later than the cap. */
+  #until(deadline: number): number {
+    return Math.min(deadline, this.#cap ? this.#cap() : Number.POSITIVE_INFINITY);
+  }
+
+  /** Refuses to start anything once the cap has passed: nothing is sent, and nothing journaled. */
+  #refuseAfterCap(what: string): void {
+    if (this.#now() >= this.#until(Number.POSITIVE_INFINITY)) throw new SandboxRefusal(`The probe's time ran out, so ${what} wasn't started.`);
+  }
+
+  /**
+   * An operation as read before `deadline`; null when the read was cut off by it, or answered only once it had passed. A
+   * read that gave up on its own budget while the deadline is still ahead is a failure, and is thrown as one.
+   */
+  async #readBy(operationId: string, deadline: number): Promise<Operation | null> {
+    try {
+      const operation = await this.#api.operation(operationId, { until: deadline });
+      return this.#now() < deadline ? operation : null;
+    } catch (error) {
+      if (error instanceof SandboxDeadlineError && this.#now() >= deadline) return null;
+      throw error;
+    }
   }
 
   /** Starts one step's operation with networking off. Refused while another operation is open: one at a time. */
@@ -247,6 +277,7 @@ export class Sandbox {
   async #spawn(label: string, body: SpawnBody, options: { discardAnswer?: boolean } = {}): Promise<{ operationId: string } | { uncertain: string }> {
     if (body.networking.enabled && label !== "network control") throw new SandboxRefusal("Networking stays off for every operation but the approved network control.");
     if (typeof body.disposable !== "boolean") throw new SandboxRefusal("Every spawn says whether it is disposable.");
+    this.#refuseAfterCap(`the ${label} operation`);
     const open = this.#journal.open();
     if (open.operations.length || open.uncertain.length) throw new SandboxRefusal("One operation at a time: an earlier one hasn't ended, or a spawn whose answer was lost hasn't been settled.");
     const correlation = randomUUID();
@@ -267,74 +298,98 @@ export class Sandbox {
     return { uncertain: correlation };
   }
 
-  /** Polls an operation until it ends, or until its own timeout plus the margin has passed. */
+  /**
+   * Polls an operation until it ends, within its own timeout plus the margin, or the cap if that comes first. An
+   * operation not seen to end by then is journaled as unresolved, for cleanup to settle.
+   */
   async observe(operationId: string, timeoutSeconds: number): Promise<Outcome> {
-    const deadline = this.#now() + timeoutSeconds * 1000 + this.#observeMarginMs;
-    for (;;) {
-      const operation = await this.#api.operation(operationId);
+    const started = this.#now();
+    const deadline = this.#until(started + timeoutSeconds * 1000 + this.#observeMarginMs);
+    while (this.#now() < deadline) {
+      const operation = await this.#readBy(operationId, deadline);
+      if (!operation) break;
       const status = readStatus(operation.status);
       if (status !== "UNKNOWN" && TERMINAL.has(status)) {
         this.#journal.append({ kind: "terminal", wall: this.#wallNow().toISOString(), operationId, status });
         return classify(operation);
       }
-      if (this.#now() > deadline) {
-        this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "it hadn't ended when observing it ran out of time" });
-        throw new SandboxRefusal(`Operation ${operationId} hadn't ended ${Math.round((timeoutSeconds * 1000 + this.#observeMarginMs) / 1000)} s after it started.`);
-      }
-      await this.#sleep(this.#pollMs);
+      await this.#sleep(Math.min(this.#pollMs, deadline - this.#now()));
     }
+    this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "it wasn't seen to end before observing it ran out of time" });
+    throw new SandboxRefusal(`Operation ${operationId} wasn't seen to end within ${Math.round((deadline - started) / 1000)} s.`);
   }
 
-  /** Waits until an operation reaches one of `statuses` (or ends), within `withinMs`. */
+  /** Waits until an operation reaches one of `statuses` (or ends), within `withinMs`; the last status seen otherwise. */
   async waitFor(operationId: string, statuses: readonly OperationStatus[], withinMs: number): Promise<OperationStatus | "UNKNOWN"> {
-    const deadline = this.#now() + withinMs;
-    for (;;) {
-      const status = readStatus((await this.#api.operation(operationId)).status);
+    const deadline = this.#until(this.#now() + withinMs);
+    let status: OperationStatus | "UNKNOWN" = "UNKNOWN";
+    while (this.#now() < deadline) {
+      const operation = await this.#readBy(operationId, deadline);
+      if (!operation) break;
+      status = readStatus(operation.status);
       if (status !== "UNKNOWN" && (statuses.includes(status) || TERMINAL.has(status))) return status;
-      if (this.#now() > deadline) return status;
-      await this.#sleep(this.#pollMs);
+      await this.#sleep(Math.min(this.#pollMs, deadline - this.#now()));
     }
+    return status;
   }
 
-  /** Asks an operation to stop, then polls until it has ended; null when it hadn't within the wait. */
+  /** Asks an operation to stop, then polls until it has ended; null when it hadn't within the wait (or the cap). */
   async cancel(operationId: string): Promise<Outcome | null> {
     this.#journal.append({ kind: "cancel", wall: this.#wallNow().toISOString(), operationId });
     await this.#api.cancel(operationId);
-    const deadline = this.#now() + this.#cancelWaitMs;
-    for (;;) {
-      const operation = await this.#api.operation(operationId);
+    const deadline = this.#until(this.#now() + this.#cancelWaitMs);
+    while (this.#now() < deadline) {
+      const operation = await this.#readBy(operationId, deadline);
+      if (!operation) break;
       const status = readStatus(operation.status);
       if (status !== "UNKNOWN" && TERMINAL.has(status)) {
         this.#journal.append({ kind: "terminal", wall: this.#wallNow().toISOString(), operationId, status });
         return classify(operation);
       }
-      if (this.#now() > deadline) {
-        this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "a cancel didn't reach a terminal state in time" });
-        return null;
-      }
-      await this.#sleep(this.#pollMs);
+      await this.#sleep(Math.min(this.#pollMs, deadline - this.#now()));
     }
+    this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "a cancel didn't reach a terminal state in time" });
+    return null;
   }
 
   /**
    * Looks for the operation a spawn with a lost answer may have created, by its correlation id, within bounds: a window
    * starting a day before the intent (so a stepped or skewed clock can't hide it), up to `maxPages` pages and
-   * `maxCandidates` operations read in full. Exactly one match is adopted; otherwise it stays unknown, with the bounds.
+   * `maxCandidates` operations read in full, and `withinMs` of searching (or the cap). Exactly one match is adopted;
+   * otherwise it stays unknown, with the bounds it was searched within.
    */
   async reconcile(correlation: string): Promise<{ operationId: string } | { unknown: string }> {
     const intent = this.#journal.entries.find((e) => e.kind === "intent" && e.correlation === correlation);
     const wall = intent && "wall" in intent ? Date.parse(intent.wall) : this.#wallNow().getTime();
     const since = new Date(wall - this.#search.sinceMarginMs).toISOString();
+    const deadline = this.#until(this.#now() + this.#search.withinMs);
     const matches = new Set<string>();
     let candidates = 0;
     let pages = 0;
     let exhausted = false;
+    let outOfTime = false;
     search: for (; pages < this.#search.maxPages; pages++) {
-      const page = await this.#api.list({ kind: "instance", since, limit: this.#search.pageSize, offset: pages * this.#search.pageSize });
+      let page: Operation[];
+      try {
+        if (this.#now() >= deadline) throw new SandboxDeadlineError("Listing operations", null);
+        page = await this.#api.list({ kind: "instance", since, limit: this.#search.pageSize, offset: pages * this.#search.pageSize }, { until: deadline });
+      } catch (error) {
+        if (!(error instanceof SandboxDeadlineError)) throw error;
+        outOfTime = true;
+        break;
+      }
       for (const summary of page) {
         if (candidates >= this.#search.maxCandidates) break search;
+        let env = summary.metadata?.env ?? null;
+        if (env === null) {
+          const operation = await this.#readBy(summary.uuid, deadline);
+          if (!operation) {
+            outOfTime = true;
+            break search;
+          }
+          env = operation.metadata?.env ?? null;
+        }
         candidates++;
-        const env = summary.metadata?.env ?? (await this.#api.operation(summary.uuid)).metadata?.env ?? null;
         if (env?.[CORRELATION] === correlation) matches.add(summary.uuid);
       }
       if (page.length < this.#search.pageSize) {
@@ -348,7 +403,8 @@ export class Sandbox {
       return { operationId };
     }
     const bounds = `${pages + (exhausted ? 1 : 0)} page(s) of ${this.#search.pageSize}, ${candidates} operation(s) read, since ${since}`;
-    const reason = matches.size > 1 ? `${matches.size} operations carry its correlation id (${bounds})` : `no operation with its correlation id was found within ${bounds}${exhausted ? "" : "; the search stopped at its bounds"}`;
+    const stopped = exhausted ? "" : outOfTime ? "; the search stopped at its time limit" : "; the search stopped at its bounds";
+    const reason = matches.size > 1 ? `${matches.size} operations carry its correlation id (${bounds})` : `no operation with its correlation id was found within ${bounds}${stopped}`;
     this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation, operationId: null, reason });
     return { unknown: reason };
   }
@@ -381,10 +437,11 @@ export class Sandbox {
    * events are read for a spawn carrying that id; without one it stays uncertain, and is never started again.
    */
   async subprocess(operationId: string, input: { label: string; command: string; args: string[]; env?: Record<string, string> }): Promise<{ spid: number } | { uncertain: string }> {
+    this.#refuseAfterCap(`the subprocess ${input.label}`);
     const correlation = randomUUID();
     const answer = await this.#api.spawnSubprocess(operationId, { command: input.command, args: input.args, shell: false, env: { ...input.env, [CORRELATION]: correlation } });
     if (answer.status === "created") return { spid: answer.spid };
-    const events = await this.#api.events(operationId).catch(() => "");
+    const events = await this.#api.events(operationId, { until: this.#until(Number.POSITIVE_INFINITY) }).catch(() => "");
     for (const line of events.split("\n")) {
       if (!line.startsWith("data:") || !line.includes(correlation)) continue;
       try {
@@ -404,9 +461,15 @@ export class Sandbox {
    * result shows the child ended within the limit: the probe counts it as evidence that a cancel stopped the child.
    */
   async subprocessResult(operationId: string, spid: number, withinMs: number): Promise<{ exitCode: number | null; signal: number | string | null; timedOut: boolean; stdout: string; stderr: string } | null> {
-    const deadline = this.#now() + withinMs;
+    const deadline = this.#until(this.#now() + withinMs);
     while (this.#now() < deadline) {
-      const answer = await this.#api.subprocess(operationId, spid);
+      let answer: Awaited<ReturnType<SandboxApi["subprocess"]>>;
+      try {
+        answer = await this.#api.subprocess(operationId, spid, { until: deadline });
+      } catch (error) {
+        if (error instanceof SandboxDeadlineError && this.#now() >= deadline) return null;
+        throw error;
+      }
       // An answer that arrives once the time is up says nothing about the limit.
       if (this.#now() >= deadline) return null;
       let wait = this.#pollMs;
@@ -425,7 +488,7 @@ export class Sandbox {
 
   /** A file from an image, bounded, and checked against the hash the operation printed when there is one. */
   async download(image: string, path: string, maxBytes: number, expectedSha256: string | null): Promise<{ bytes: Uint8Array; sha256: string }> {
-    const bytes = await this.#api.download(image, path, maxBytes);
+    const bytes = await this.#api.download(image, path, maxBytes, { until: this.#until(Number.POSITIVE_INFINITY) });
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     if (expectedSha256 !== null && sha256 !== expectedSha256) throw new SandboxRefusal(`The downloaded ${path} doesn't match the hash the operation printed.`);
     return { bytes, sha256 };

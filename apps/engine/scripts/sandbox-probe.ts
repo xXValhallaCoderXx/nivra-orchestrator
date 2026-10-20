@@ -10,17 +10,17 @@
 //   NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --recover <evidence folder>
 //
 // Set the variables in your own terminal; never paste them into a chat. They are removed from the environment when
-// read, and never printed or written: evidence replaces them with placeholders. Evidence goes to
-// ~/nivra-acceptance/sandbox-probe-<UTC>/ (0700): the journal, each step's outcome (outputs cut to 2 KB), the
-// verdicts and a summary. The first Ctrl+C settles every operation the probe started (reconcile, cancel, confirm);
-// --recover finishes that later from the journal.
+// read, and never printed or written: evidence replaces them with placeholders. Evidence goes to ~/nivra-acceptance/sandbox-probe-<UTC>/ (0700): the journal, each step's outcome (outputs cut to
+// 2 KB), the verdicts and a summary. Stage 1 stops at its overall deadline, a hard limit; cleanup then has its own. The
+// first Ctrl+C settles every operation the probe started (reconcile, cancel, confirm); --recover finishes that later
+// from the journal.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { fetchTransport, SandboxApi } from "../src/exec/nebius/api.ts";
-import { evaluate, LATENCY, PROBE_LIMITS, probePlan, RETENTION, runStageOne } from "../src/exec/nebius/probe.ts";
+import { CLEANUP_MAX_SECONDS, evaluate, LATENCY, PROBE_LIMITS, probePlan, RETENTION, runStageOne } from "../src/exec/nebius/probe.ts";
 import { Journal, Sandbox } from "../src/exec/nebius/sandbox.ts";
 
 const FIXTURE = fileURLToPath(new URL("../test/fixtures/sandbox-probe/", import.meta.url));
@@ -52,7 +52,9 @@ if (values.plan) {
   for (const step of plan.steps) console.log(`${step.id.padStart(3)}  [${step.pattern}] network ${step.network}; timeout ${step.timeoutSeconds === null ? "n/a" : `${step.timeoutSeconds} s`}; data: ${step.data}\n     ${step.what}`);
   console.log(`\nOperations: ${plan.operations} (at most ${PROBE_LIMITS.maxOperations}, plus one image import only if no public image fits), one at a time.`);
   console.log(`Uploads: ${plan.uploads}. Downloads: at most ${PROBE_LIMITS.maxDownloadBytes} bytes.`);
-  console.log(`Deadlines: ${PROBE_LIMITS.requestTimeoutSeconds} s per request; each operation's timeout plus ${PROBE_LIMITS.observeMarginSeconds} s to observe it; ${PROBE_LIMITS.overallMinutes} minutes in all.`);
+  console.log(`Deadlines: ${PROBE_LIMITS.requestTimeoutSeconds} s per request; each operation's timeout plus ${PROBE_LIMITS.observeMarginSeconds} s to observe it.`);
+  console.log(`  Stage 1 stops at ${PROBE_LIMITS.overallMinutes} minutes, a hard limit: no wait goes past it, no read is made after it, and nothing starts after it.`);
+  console.log(`  Cleanup then takes at most ${Math.ceil(CLEANUP_MAX_SECONDS / 60)} minutes: two searches for a lost answer (${PROBE_LIMITS.searchSeconds} s each) and two cancels (a request, then ${PROBE_LIMITS.cancelWaitSeconds} s each).`);
   console.log("No model calls, no installs.");
   console.log("\nThresholds, agreed before the run. Each pattern is judged on its own evidence, its checks and its latency together:");
   console.log("  Critical, for each pattern (a failure defers that pattern; if neither qualifies, NIV-34 stays blocked and local containers");
@@ -89,8 +91,16 @@ const started = performance.now();
 const log = (line: string) => console.log(`${String(Math.round(performance.now() - started)).padStart(8)} ms  ${safe(line)}`);
 const transport = fetchTransport({ key, project });
 const api = () => new SandboxApi(transport, { requestTimeoutMs: PROBE_LIMITS.requestTimeoutSeconds * 1000 });
-const sandboxFor = (client: SandboxApi) =>
-  new Sandbox(client, { journal: new Journal(join(folder, "journal.jsonl")), observeMarginMs: PROBE_LIMITS.observeMarginSeconds * 1000, maxTimeoutSeconds: PROBE_LIMITS.maxParentTimeoutSeconds });
+/** A sandbox over the probe's file-backed journal. Stage 1's is capped by the overall deadline; cleanup's isn't. */
+const sandboxFor = (client: SandboxApi, cap?: () => number) =>
+  new Sandbox(client, {
+    journal: new Journal(join(folder, "journal.jsonl")),
+    observeMarginMs: PROBE_LIMITS.observeMarginSeconds * 1000,
+    cancelWaitMs: PROBE_LIMITS.cancelWaitSeconds * 1000,
+    search: { sinceMarginMs: 24 * 60 * 60 * 1000, pageSize: 100, maxPages: 10, maxCandidates: 50, withinMs: PROBE_LIMITS.searchSeconds * 1000 },
+    maxTimeoutSeconds: PROBE_LIMITS.maxParentTimeoutSeconds,
+    ...(cap ? { cap } : {}),
+  });
 
 if (values.recover) {
   const sandbox = sandboxFor(api());
@@ -119,8 +129,8 @@ if (values.stage !== "1" || !values.image) {
 }
 
 const client = api();
-const sandbox = sandboxFor(client);
 const deadline = { at: performance.now() + PROBE_LIMITS.overallMinutes * 60_000 };
+const sandbox = sandboxFor(client, () => deadline.at);
 let interrupted = false;
 process.on("SIGINT", () => {
   if (interrupted) process.exit(130);
@@ -134,7 +144,7 @@ try {
   results = await runStageOne({
     sandbox,
     api: client,
-    reconnect: () => sandboxFor(api()),
+    reconnect: () => sandboxFor(api(), () => deadline.at),
     baseImage: values.image,
     fixture,
     deny: values.deny ?? [],
@@ -146,7 +156,8 @@ try {
     log,
   });
 } finally {
-  const settled = await sandbox.cleanup();
+  // Cleanup runs past the overall deadline, with its own bounds, on the same journal.
+  const settled = await sandboxFor(api()).cleanup();
   write(join(folder, "cleanup.json"), settled);
   log(`Cleanup: cancelled ${settled.cancelled.length}; unresolved ${settled.unresolved.length}${settled.unresolved.length ? ` (run --recover ${folder})` : ""}`);
 }
