@@ -228,11 +228,18 @@ pnpm council:eval --score <dir>                                    # once the sh
   A mismatch stops the batch with nothing sent. The engine reads the listing again inside its run, so each run's
   recorded route, model and sampling are checked again after it ends.
 - **Each request is journalled before it is sent,** and nothing is retried or retaken. A batch that was killed is
-  resumed with `--resume`: a run that was out is found by its request id on the same engine home and followed to its
-  end, never sent again.
-- **Every wait is bounded.** A run is cancelled at its limit plus 30 s and given 30 s more to settle. One still going
-  then is kept as unresolved, and the batch stops; resuming never sends it again. A run that couldn't end within the
-  batch's 60 minutes, windows included, isn't started.
+  resumed with `--resume`:
+  - a run that was out is found by its request id on the same engine home and followed to its end, never sent again;
+  - the protocol's stops are checked again on every run the journal kept, so a stop lost with the batch (killed after
+    a run's end was written, before its stop was) stops it again before anything more is sent.
+- **Every wait is bounded,** and the batch's 60 minutes count them all from its engine's start:
+  - the engine's start, its doctor, and before each run, the model listing, the run's start and reading its record;
+  - a run is cancelled at its limit plus 30 s and given 30 s more to settle. One still going then is kept as
+    unresolved, and the batch stops; resuming never sends it again.
+
+  A run is started only if all of that, each wait at its limit, could end within the 60 minutes, and no wait goes past
+  them. Only stopping the engine comes after, in at most 15 s. With every run and every wait at its limit, a batch
+  would need 74 minutes, so it would stop before its last runs.
 - **Scoring doesn't trust the model.**
   - The rubric's stems read each reviewer finding.
   - `sheet.json` is the blinded sheet: shuffled by the protocol's seed, with no arm, role or finding id on it.
@@ -240,6 +247,11 @@ pnpm council:eval --score <dir>                                    # once the sh
     and refuses a sheet that isn't the one those runs made.
   - Nate labels each line's `label`, from `sheet.md` alone: the runs folder, `batch.json` and the journal name each
     run's arm. `--score` then decides from the labels alone, with the automatic-only scores beside them.
+  - `--score` scores only under the protocol the batch ran under: the journal's approval digest must be this one's,
+    as for `--resume`. Changed rules can't rescore a batch, or overwrite what it scored.
+  - It refuses labels it can't use, naming each: a defect that isn't one of that plan's known ones (misspelled, or
+    another plan's), a value outside a field's allowed ones, a field set where it doesn't apply, or a label without
+    its seven fields. These are the checks v1 passed when it was frozen.
 - **Label versions.** A labelled sheet is frozen before it is scored, and never edited afterwards:
   - **v1:** `sheet.v1.json`, read-only, is the sheet the batch wrote with the approved labels copied in. Each row is
     checked first, and only the label fields are copied.
@@ -251,7 +263,7 @@ pnpm council:eval --score <dir>                                    # once the sh
 - **Test-only options,** refused for a paid batch: `--only`, `--deadline-ms`, `--reconcile-ms`, `--engine` (a
   stand-in engine) and `--fixtures` (another copy of the frozen inputs).
 - **Evidence** goes to `~/nivra-acceptance/council-eval-<UTC>-<revision>/` (0700): the journal, every run's summary,
-  events and report, the engine's home and log, the sheet and its key, the scores and `decision.md`.
+  events and report, the engine's home and log, the sheet, the scores and `decision.md`.
 
 ## Where things will live
 
