@@ -9,7 +9,9 @@ import { REMOVE_TEST_HOME, testWslHome } from "../scripts/test-homes.ts";
  * it: `node:sqlite` opens in Electron's main process on Windows, a conversation survives a relaunch, starting one starts
  * no engine, and a file that isn't a database is kept aside with its journal files (renamed on NTFS) while the app still
  * starts. The same check as workspace-store.spec.ts. Then, on NTFS: a damaged workspace that a killed app left its WAL
- * beside is kept aside exactly as it was found. Any WSL engine would use a home of this run's own (D27); none starts.
+ * beside is kept aside exactly as it was found. Then the window itself, with no key (no model is ever called): its
+ * places, a turn refused on the native engine before any request, and a task, all kept across a relaunch. Any WSL engine
+ * would use a home of this run's own (D27); none starts.
  */
 test.skip(process.platform !== "linux" || !existsSync("/mnt/c/Windows/System32/cmd.exe"), "runs from WSL on a Windows machine");
 
@@ -95,6 +97,41 @@ test("keeps a damaged workspace that a killed app left its WAL beside exactly as
   expect(aside.length).toBe(2);
   expect(aside.map((name) => sha(`${userData}/${name}`))).toEqual(before);
   expect(recovered.conversations).toEqual([]);
+  await app.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("the window on Windows: a turn with no key is refused on the native engine before any request, and a task keeps its state across a relaunch", async () => {
+  const { root, launch } = setUp("e2e-window");
+  let { app, page } = await launch();
+  expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");
+  await page.getByTestId("nav-planning").click();
+  await page.getByTestId("planning-new-general").click();
+  await expect(page.getByTestId("conversation-scope")).toHaveText("General · no repository access");
+  await page.getByTestId("composer").fill("No key on Windows?");
+  await page.getByTestId("composer-send").click();
+  await expect(page.getByTestId("turn-status")).toHaveText("Failed", { timeout: 120_000 });
+  await expect(page.getByTestId("turn-note")).toHaveText("No Nebius key is set, so nothing was sent. Add your key in Settings, then try again. Nothing was resent.");
+  // A general conversation runs on the app's own OS: here, the native Windows engine, and no other.
+  const engines = await page.evaluate(() => window.nivra.listEngines());
+  expect(engines.map((engine) => [engine.targetId, engine.state.status, engine.state.status === "online" ? engine.state.info.platform : null])).toEqual([["local", "online", "win32"]]);
+  await page.getByTestId("nav-tasks").click();
+  await page.getByTestId("tasks-new").click();
+  await page.getByTestId("task-form-title").fill("Tidy the README");
+  await page.getByTestId("brief-goal").fill("Tidy it");
+  await page.getByTestId("brief-criteria").fill("Every heading is sentence case");
+  await page.getByTestId("task-form-create").click();
+  await page.getByTestId("task-mark-ready").click();
+  await expect(page.getByTestId("task-state")).toHaveText("Ready");
+  await expect(page.getByTestId("task-run")).toBeDisabled();
+  await app.close();
+
+  ({ app, page } = await launch());
+  await page.getByTestId("nav-conversation").filter({ hasText: "No key on Windows?" }).click();
+  await expect(page.getByTestId("conversation-title")).toHaveText("No key on Windows?");
+  await expect(page.getByTestId("turn-status")).toHaveText("Failed");
+  await page.getByTestId("nav-tasks").click();
+  await expect(page.getByTestId("task-row").filter({ hasText: "Tidy the README" })).toContainText("Ready");
   await app.close();
   rmSync(root, { recursive: true, force: true });
 });
