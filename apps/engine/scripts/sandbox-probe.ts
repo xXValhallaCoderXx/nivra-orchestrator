@@ -218,6 +218,13 @@ const report = [
   "",
   ...judged.recorded.map((v) => `- ${v.criterion}: **${v.outcome}** (${v.detail})`),
   "",
+  "## Pattern B's subprocesses, as the service reported them",
+  "",
+  ...(results.subprocesses.length
+    ? results.subprocesses.map((s) => `- ${s.label}: ${s.error ?? `exit ${s.exitCode ?? "none"}, signal ${s.signal ?? "none"}${s.timedOut ? ", timed out" : ""}`}${s.seconds !== null ? `, ${s.seconds.toFixed(1)} s` : ""}`)
+    : ["- none ran"]),
+  `- The cancelled parent's child: ${results.parentCancel ? `${results.parentCancel.child}${results.parentCancel.childDetail ? ` (${results.parentCancel.childDetail})` : ""}` : "step 11 didn't run"}`,
+  "",
   `Retention: ${RETENTION}`,
   "",
   `Errors: ${results.errors.length ? results.errors.join("; ") : "none"}`,

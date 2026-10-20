@@ -132,9 +132,19 @@ export interface StepResult {
 export interface SubprocessResult {
   label: string;
   exitCode: number | null;
+  /** As the service reported it: -1, or none, when no signal ended the child. */
+  signal: number | string | null;
+  timedOut: boolean | null;
   seconds: number | null;
   stdout: string;
+  stderr: string;
+  /** Why there is no result: its spawn's answer was lost, it hadn't ended within the wait, or its read failed. */
+  error: string | null;
 }
+
+/** How a subprocess ended, as the service reported it. Evidence written before signals were kept says so. */
+const endedAs = (result: Pick<SubprocessResult, "exitCode" | "signal" | "timedOut">) =>
+  `exit ${result.exitCode ?? "none"}, signal ${result.signal === undefined ? "not recorded" : (result.signal ?? "none")}${result.timedOut ? ", timed out" : ""}`;
 
 export interface ProbeResults {
   steps: StepResult[];
@@ -144,8 +154,11 @@ export interface ProbeResults {
   reattach: { sameOperation: boolean; spawns: number } | null;
   lostAnswer: { found: boolean; spawns: number; detail: string } | null;
   cancel: { reachedTerminal: boolean; status: OperationStatus | "UNKNOWN" | null; seconds: number | null } | null;
-  /** The parent's end after the cancel, and whether the service reported its running child's end within 5 s. */
-  parentCancel: { parent: OperationStatus | "UNKNOWN" | null; seconds: number | null; child: "ended" | "not ended" | "unknown" } | null;
+  /**
+   * The parent's end after the cancel, and whether the service reported its running child's end within 5 s: how it
+   * ended, or why it couldn't be read.
+   */
+  parentCancel: { parent: OperationStatus | "UNKNOWN" | null; seconds: number | null; child: "ended" | "not ended" | "unknown"; childDetail: string | null } | null;
   errors: string[];
 }
 
@@ -279,8 +292,29 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
     for (const [label, [command, ...args], env] of inside) {
       const started = ctx.now();
       const spawned = await sandbox.subprocess(submitted.operationId, { label, command: command!, args, ...(env ? { env } : {}) });
-      const result = "spid" in spawned ? await sandbox.subprocessResult(submitted.operationId, spawned.spid, 60_000) : null;
-      results.subprocesses.push({ label, exitCode: result?.exitCode ?? null, seconds: result ? (ctx.now() - started) / 1000 : null, stdout: (result?.stdout ?? ("uncertain" in spawned ? spawned.uncertain : "")).slice(0, 2_000) });
+      const entry = (result: Awaited<ReturnType<Sandbox["subprocessResult"]>>, error: string | null): SubprocessResult => ({
+        label,
+        exitCode: result?.exitCode ?? null,
+        signal: result?.signal ?? null,
+        timedOut: result ? result.timedOut : null,
+        seconds: result ? (ctx.now() - started) / 1000 : null,
+        stdout: (result?.stdout ?? "").slice(0, 2_000),
+        stderr: (result?.stderr ?? "").slice(0, 2_000),
+        error,
+      });
+      if (!("spid" in spawned)) {
+        results.subprocesses.push(entry(null, spawned.uncertain));
+        continue;
+      }
+      let result: Awaited<ReturnType<Sandbox["subprocessResult"]>>;
+      try {
+        result = await sandbox.subprocessResult(submitted.operationId, spawned.spid, 60_000);
+      } catch (error) {
+        // Recorded, then the step stops as before: cleanup settles the parent.
+        results.subprocesses.push(entry(null, `its read failed: ${error instanceof Error ? error.message : String(error)}`));
+        throw error;
+      }
+      results.subprocesses.push(entry(result, result ? null : "it hadn't ended within 60 s"));
       if (label === "patch" && result) printed = shaLines(result.stdout);
     }
     const outcome = await sandbox.observe(submitted.operationId, 180);
@@ -294,9 +328,19 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
     const spawned = await sandbox.subprocess(submitted.operationId, { label: "sleeper", command: "/bin/sleep", args: ["60"] });
     const { value: outcome, seconds } = await timed(() => sandbox.cancel(submitted.operationId));
     // The child counts as stopped only when the service reports its end: silence, or a read that fails, shows nothing.
+    // Either way, what the service answered is kept.
     let child: "ended" | "not ended" | "unknown" = "unknown";
-    if ("spid" in spawned) child = await sandbox.subprocessResult(submitted.operationId, spawned.spid, 5_000).then((result) => (result ? "ended" : "not ended"), () => "unknown");
-    results.parentCancel = { parent: outcome?.status ?? null, seconds: outcome ? seconds : null, child };
+    let childDetail = "uncertain" in spawned ? spawned.uncertain : null;
+    if ("spid" in spawned) {
+      try {
+        const result = await sandbox.subprocessResult(submitted.operationId, spawned.spid, 5_000);
+        child = result ? "ended" : "not ended";
+        childDetail = result ? endedAs(result) : null;
+      } catch (error) {
+        childDetail = `its read failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    results.parentCancel = { parent: outcome?.status ?? null, seconds: outcome ? seconds : null, child, childDetail };
     return { operationId: submitted.operationId, outcome };
   });
   return results;
@@ -402,13 +446,15 @@ export function evaluate(results: ProbeResults): { patterns: PatternJudgement[];
   const parent = results.parentCancel;
   const exitsInside = !failingInside || !passingInside ? "not-run" : failingInside.exitCode === null || passingInside.exitCode === null ? "inconclusive" : failingInside.exitCode === 1 && passingInside.exitCode === 0 ? "pass" : "fail";
   const b = [
-    network(attempt?.stdout ?? null, "the network attempt didn't run", false),
+    network(attempt?.stdout ?? null, "the network attempt didn't run", false, attempt ? `; the attempt: ${attempt.error ?? endedAs(attempt)}` : ""),
     verdict("continuation", "State continues between subprocesses inside the parent", !inspect ? "not-run" : /Hello, Nivra/.test(inspect.stdout) ? "pass" : "fail", !inspect ? "the inspection didn't run" : /Hello, Nivra/.test(inspect.stdout) ? "the inspection saw the edit" : "the inspection didn't see the edit"),
     verdict(
       "cancel",
       "A cancel reaches CANCELLED within 60 s, and stops the parent's running subprocess",
       !parent ? "not-run" : parent.parent !== "CANCELLED" || (parent.seconds ?? Infinity) > 60 ? "fail" : parent.child === "ended" ? "pass" : "inconclusive",
-      parent ? `the parent ended ${parent.parent ?? "not at all within the wait"}${parent.seconds !== null ? `, ${parent.seconds.toFixed(1)} s after the cancel` : ""}; its subprocess ${parent.child === "ended" ? "was reported ended" : parent.child === "not ended" ? "wasn't reported ended within 5 s" : "couldn't be read"}` : "step 11 didn't run",
+      parent
+        ? `the parent ended ${parent.parent ?? "not at all within the wait"}${parent.seconds !== null ? `, ${parent.seconds.toFixed(1)} s after the cancel` : ""}; its subprocess ${parent.child === "ended" ? "was reported ended" : parent.child === "not ended" ? "wasn't reported ended within 5 s" : "couldn't be read"}${parent.childDetail ? ` (${parent.childDetail})` : ""}`
+        : "step 11 didn't run",
     ),
     verdict("exit", "A failing command's exit code is told apart from a passing one", exitsInside, `failing test: exit ${failingInside?.exitCode ?? "?"}; passing test: exit ${passingInside?.exitCode ?? "?"}`),
     patch("10"),
