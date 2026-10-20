@@ -1218,3 +1218,87 @@ And the WSL home is no longer shared:
 - **Follow-up:** explain's own `submit_answer` still accepts a summary of spaces. Explain's behaviour stays unchanged in
   this stretch, so it is proposed separately.
 - **Evidence:** `docs/acceptance.md`, *Planning workspace: the review of checkpoint 1*.
+
+## D28. Nebius Sandboxes: one operation per step proved live and adopted for the adapter; a parent with subprocesses not yet (2026-10-20)
+
+**Decision.** NIV-29's live probe ran on 20 October, in stages Nate approved one at a time, each with its data and
+budget. It used a synthetic fixture, and made no model calls and no installs. Each pattern was judged on its own
+evidence (D27), against thresholds agreed before it ran.
+- **Pattern A, one operation per step, is adopted.** State moves between steps through the image each operation
+  leaves. In the second stage 1 run, every critical check passed, and the median step took 2.9 s (adopting needs 10 s
+  or less):
+  - **Network denial, shown by behaviour.** Only `lo` existed. With networking off, `wget` of `http://example.com/`
+    failed with "bad address", and of its IP with "Network unreachable". The positive control, the same URL with
+    networking on, connected.
+  - **Continuation.** A step saw the previous step's edit through its image.
+  - **Cancel.** The operation reached `CANCELLED` 0.4 s after the cancel.
+  - **Exit codes.** A failing test came back as `SUCCESS` with exit 1, and was told apart. So was a timeout: exit -1,
+    signal 9, `timed_out`.
+  - **The patch and the report** (105 and 19 bytes) came back from the image with the hashes the operation printed,
+    holding the edit and the passing test.
+  - **Reattaching.** A fresh client reattached from the journal to the same operation, with one spawn.
+  - **A lost answer.** A spawn whose answer was thrown away on purpose was found by its correlation id, with one spawn.
+- **Pattern B, a parent with subprocesses, is not adopted: inconclusive.** Its continuation, exit codes and patch
+  passed, at 0.4 s a step. Two of its own critical checks showed nothing:
+  - its network attempt ended with exit -1 after printing only its first line, so no attempt was seen refused;
+  - after its parent was cancelled (in 0.4 s), the read of its running child failed, so the child wasn't seen to end.
+
+  The probe kept neither the signal nor the read's error. It does now (`3e8bd4e`), so a later approved run can settle
+  B.
+- **Sandboxes access is active.** This supersedes D19's "Sandboxes isn't available yet". Stage 0 showed:
+  - the key's permissions: `spawn`, `spawn_disposable`, `list`, `cancel`, `import` and `set_image_tag`;
+  - its limits: a 3,600 s maximum timeout, and 50 instances at once;
+  - public images, among them `alpine:3.20`, which stage 1 used.
+- **Nothing is wired in yet.** The client stays in `apps/engine/src/exec/nebius/`, outside the engine's RPC, and no
+  backend claims anything from it (D9).
+
+**Why.**
+- **The thresholds came first.** A pattern qualifies only on its own critical checks and its own median step.
+- **The first stage 1 run found two client bugs, and stopped safely** (04:34 UTC, at `c3da9d4`).
+  - The service reports `signal: -1` when no signal ended a command. The client read it as a signal, so every outcome
+    was "signalled".
+  - The time left before a deadline could be a fractional number of milliseconds, and Node's `AbortSignal.timeout`
+    refuses one with a RangeError. Every read in step 7 failed, so the step stopped before its cancel. Steps 8 to 11
+    were refused before spawning, since one operation runs at a time. Cleanup cancelled the open operation and saw it
+    end; nothing was left unresolved.
+
+  Both were fixed, with tests, in `8334299`. Read again with the fix, that run's stored outcomes pass pattern A's
+  network, continuation, exit, patch and timeout checks. Cancel and reattaching didn't run, so it stays inconclusive.
+- **The token check.** The service renews the token with each request: `token_expiration` sits about 5 minutes after
+  each answer. The first guard read it once, and at 04:28 UTC refused stage 1 before any operation. It now takes two
+  readings 15 s apart, and a token renewed between them is taken to last as long as the key (`c3da9d4`).
+- **The budget, as approved.**
+  - Stage 0: two reads, `whoami` and `images`.
+  - Stage 1: at most 12 operations, one at a time. The first run made 7 and the second 11.
+  - 642 bytes of synthetic files uploaded in each run, and at most 64 KB downloaded: 124 bytes in the first run, and
+    248 in the second.
+  - Stage 1 is stopped at 20 minutes, a hard limit, and cleanup then takes at most 7. The second run took about a
+    minute.
+- **Cost.** The service gave a cost for 9 of the second run's operations: from 0.0000465 to 0.0000828 each, 0.00059 in
+  all. It doesn't say in what unit, so Nivra doesn't turn it into money.
+
+**Consequences.**
+- **NIV-34** (the workspace-to-patch adapter) can be planned on pattern A after the checkpoint review: each step its
+  own operation, networking off, state carried by the image it leaves. Its backend claims only what its contract tests
+  show (D9).
+- **Local containers (NIV-37)** aren't needed as this adapter's alternative. They stay a later option.
+- **Pattern B isn't used.** A later approved run of the probe, as it is now, can settle its two gaps.
+- **The submission doesn't change** (D24): coding work is still deferred there.
+- **The review of PR 5** found two gaps in the probe itself, fixed before it merged (`d3a0c62`). Neither touches the
+  measurements, and pattern A's adoption stands.
+  1. **An interruption didn't stop the work under way.** Ctrl+C only moved the deadline, which the polling loops had
+     already taken. Requests went on after it, the remaining fixture files were still uploaded, and cleanup waited for
+     all of it. Now one signal reaches every request, the reading of every answer, every retry's wait and every poll,
+     and the loops read their cap afresh. A spawn cut off in flight stays uncertain, for cleanup to find. Cleanup has
+     its own signal and budget.
+  2. **The credentials check could pass a file inside the repository.** `repo/..private/key.env` passed as outside,
+     by its prefix, and so did a link from outside to a file inside. Now both paths are compared as they really are,
+     links followed, by whole components.
+- **What stays on Nebius** from the two runs:
+  - six uploads of the three fixture files;
+  - the result images the steps left;
+  - the operation records.
+
+  Images are kept for 180 days, after which untagged ones may be deleted. No API deletes uploads or records.
+- **Evidence:** `docs/acceptance.md`, *Nebius Sandboxes, live (D28, NIV-29)*. The evidence folders under
+  `~/nivra-acceptance/` hold the journals, results and reports, with the key and project id replaced.

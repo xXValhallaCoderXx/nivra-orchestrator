@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import { SandboxApi, SandboxHttpError, SandboxNetworkError, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
-import { evaluate, probePlan, PROBE_LIMITS, runStageOne, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
+import { fetchTransport, SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, type SandboxApiOptions, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
+import { CLEANUP_MAX_SECONDS, evaluate, insideRepository, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, tokenOutlasts, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
 import { classify, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
 
 /**
@@ -40,12 +43,15 @@ interface FakeOperation {
   status: string;
   cancelled: boolean;
   finishedBySubprocess: boolean;
-  subprocesses: Map<number, { args: string[]; exitCode: number; stdout: string; stopped: boolean; pending: number }>;
+  subprocesses: Map<number, { args: string[]; exitCode: number; stdout: string; stopped: boolean; pending: number; ends?: { state: Record<string, unknown>; stderr: string } }>;
   events: string[];
 }
 
 const encode = (value: unknown, status = 200, headers: Record<string, string> = {}): TransportResponse => ({ status, headers, body: new TextEncoder().encode(value === undefined ? "" : JSON.stringify(value)) });
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+/** What a working edit and test leave behind: the patch holding the edit, and the report holding the passing test. */
+const REPORT = "PASS: Hello, Nivra\n";
+const PATCH = '--- base/greet.sh\n+++ work/greet.sh\n-echo "Hello, world"\n+echo "Hello, Nivra"\n';
 
 /** The service: operations as state machines, with faults a test can switch on. */
 class FakeService {
@@ -59,6 +65,8 @@ class FakeService {
   failNextSpawn: { create: boolean } | null = null;
   /** The next spawn is turned down (400), creating nothing. */
   refuseNextSpawn = false;
+  /** How many reads of an operation answer 503 (with Retry-After: 4) before it is read again. */
+  unavailableReads = 0;
   /** How many times each new subprocess answers "not ready yet" (425) before its result, and the wait it asks for. */
   subprocessPending = 0;
   subprocessRetryAfter = 3;
@@ -68,6 +76,10 @@ class FakeService {
   hidden = new Set<string>();
   /** The next subprocess spawn answers 504, having started it or not. */
   timeoutNextSubprocess: { started: boolean } | null = null;
+  /** Subprocesses whose command matches end this way instead, with this output. */
+  endSubprocess: { match: RegExp; state: Record<string, unknown>; stdout: string; stderr: string } | null = null;
+  /** Reading a subprocess of a cancelled operation answers this status instead of the child's end. */
+  childReadAfterCancel: number | null = null;
   lowercase = false;
   readonly behave: (body: Record<string, unknown>) => Behaviour;
   constructor(behave: (body: Record<string, unknown>) => Behaviour) {
@@ -89,6 +101,10 @@ class FakeService {
     const events = /^\/v1\/operations\/([^/]+)\/events$/.exec(path);
     if (events) return { status: 200, headers: {}, body: new TextEncoder().encode(this.#find(events[1]!)?.events.join("\n") ?? "") };
     const one = /^\/v1\/operations\/([^/]+)$/.exec(path);
+    if (one && request.method === "GET" && this.unavailableReads > 0) {
+      this.unavailableReads--;
+      return encode({ error: "unavailable" }, 503, { "retry-after": "4" });
+    }
     if (one && request.method === "GET") return this.#read(one[1]!);
     if (one && request.method === "DELETE") return this.#cancel(one[1]!);
     if (request.method === "GET" && path === "/v1/operations") {
@@ -153,7 +169,8 @@ class FakeService {
       result_image_uuid: image,
       metadata: {
         env: op.env,
-        result: ended && !op.cancelled ? { state: { exit_code: op.behaviour.exitCode ?? 0, signal: null, timed_out: op.behaviour.timedOut ?? false }, stdout: { value: op.behaviour.stdout ?? "", encoding: "ascii" }, stderr: { value: "" } } : null,
+        // As the live service reports it: signal -1 when none ended the command; exit code -1 and SIGKILL on a timeout.
+        result: ended && !op.cancelled ? { state: { exit_code: op.behaviour.timedOut ? -1 : (op.behaviour.exitCode ?? 0), signal: op.behaviour.timedOut ? 9 : -1, timed_out: op.behaviour.timedOut ?? false }, stdout: { value: op.behaviour.stdout ?? "", encoding: "ascii" }, stderr: { value: "" } } : null,
       },
     });
   }
@@ -178,8 +195,9 @@ class FakeService {
       const next = op.subprocesses.size + 2;
       const args = [body.command, ...body.args].join(" ");
       const exitCode = /test\.sh Hello, world$/.test(args) ? 1 : 0;
-      const stdout = /cat \/work\/greet\.sh/.test(args) ? 'echo "Hello, Nivra"\n' : /sha256sum/.test(args) ? `${sha("PASS: Hello, Nivra\n")}  /out/report.txt\n${sha("--- base/greet.sh\n")}  /out/patch.diff\n` : /wget/.test(args) ? "BLOCKED http://example.test: bad address\n" : "";
-      op.subprocesses.set(next, { args: [body.command, ...body.args], exitCode, stdout, stopped: false, pending: this.subprocessPending });
+      const custom = this.endSubprocess?.match.test(args) ? this.endSubprocess : null;
+      const stdout = custom ? custom.stdout : /cat \/work\/greet\.sh/.test(args) ? 'echo "Hello, Nivra"\n' : /sha256sum/.test(args) ? `${sha(REPORT)}  /out/report.txt\n${sha(PATCH)}  /out/patch.diff\n` : /wget/.test(args) ? "BLOCKED http://example.test: bad address\n" : "";
+      op.subprocesses.set(next, { args: [body.command, ...body.args], exitCode, stdout, stopped: false, pending: this.subprocessPending, ...(custom ? { ends: { state: custom.state, stderr: custom.stderr } } : {}) });
       op.events.push(`data: ${JSON.stringify({ type: "spawn", spid: next, env: body.env })}`);
       if (/touch \/tmp\/nivra-done/.test(args)) op.finishedBySubprocess = true;
       if (timeout?.started) return encode({ error: "gateway timeout" }, 504);
@@ -188,8 +206,10 @@ class FakeService {
     const sub = op.subprocesses.get(spid ?? -1);
     if (!sub) return encode({ error: "no such subprocess" }, 404);
     // As documented: a signalled child reports exit code -1 and its signal; one still running is "not ready yet".
+    if (sub.stopped && op.cancelled && this.childReadAfterCancel !== null) return encode({ error: "the operation isn't running" }, this.childReadAfterCancel);
     if (sub.stopped) return encode({ state: { exit_code: -1, signal: 9 } });
     if (/sleep 60/.test(sub.args.join(" ")) || sub.pending-- > 0) return encode({ error: "not ready" }, 425, { "retry-after": String(this.subprocessRetryAfter) });
+    if (sub.ends) return encode({ state: sub.ends.state, stdout: { value: sub.stdout }, stderr: { value: sub.ends.stderr } });
     return encode({ state: { exit_code: sub.exitCode }, stdout: { value: sub.stdout } });
   }
 }
@@ -201,12 +221,51 @@ function clock() {
   return { now: () => now, sleep: async (ms: number) => void (waits.push(ms), (now += ms)), waits };
 }
 
-function sandboxOn(service: FakeService, options: { journal?: Journal; search?: { sinceMarginMs: number; pageSize: number; maxPages: number; maxCandidates: number } } = {}) {
-  const time = clock();
-  const api = new SandboxApi(service.transport, { sleep: time.sleep, readDeadlineMs: 60_000 });
+function sandboxOn(
+  service: FakeService,
+  options: {
+    journal?: Journal;
+    search?: { sinceMarginMs: number; pageSize: number; maxPages: number; maxCandidates: number; withinMs?: number };
+    time?: ReturnType<typeof clock>;
+    transport?: Transport;
+    api?: SandboxApiOptions;
+    cap?: () => number;
+    signal?: AbortSignal;
+  } = {},
+) {
+  const time = options.time ?? clock();
+  const signal = options.signal ? { signal: options.signal } : {};
+  const api = new SandboxApi(options.transport ?? service.transport, { sleep: time.sleep, now: time.now, readDeadlineMs: 60_000, ...options.api, ...signal });
   const journal = options.journal ?? new Journal();
-  const sandbox = new Sandbox(api, { journal, sleep: time.sleep, now: time.now, pollMs: 1_000, ...(options.search ? { search: options.search } : {}) });
+  const sandbox = new Sandbox(api, { journal, sleep: time.sleep, now: time.now, pollMs: 1_000, ...(options.search ? { search: options.search } : {}), ...(options.cap ? { cap: options.cap } : {}), ...signal });
   return { sandbox, api, journal, time };
+}
+
+/**
+ * A transport that holds the requests `hold` picks until their signal aborts, as a connection still waiting would; the
+ * rest go straight to the service. With `answerFirst`, the service acts on a held request before its answer is held.
+ */
+function holding(service: FakeService, hold: (request: TransportRequest) => boolean, options: { answerFirst?: boolean } = {}) {
+  const seen: TransportRequest[] = [];
+  const held: TransportRequest[] = [];
+  const transport: Transport = async (request) => {
+    seen.push(request);
+    if (!hold(request)) return service.transport(request);
+    if (options.answerFirst) await service.transport(request);
+    held.push(request);
+    return new Promise<TransportResponse>((_resolve, reject) => {
+      const stop = () => reject(new DOMException("This operation was aborted", "AbortError"));
+      if (request.signal?.aborted) stop();
+      else request.signal?.addEventListener("abort", stop, { once: true });
+    });
+  };
+  return { transport, seen, held };
+}
+
+/** Lets pending work run until `check` holds; the fake clock means nothing here waits in real time. */
+async function settles(check: () => boolean): Promise<void> {
+  for (let turn = 0; turn < 1_000 && !check(); turn++) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(check(), "the work under test never reached the point it was waited for");
 }
 
 const succeed = (extra: Partial<Behaviour> = {}): Behaviour => ({ statuses: ["PENDING", "EXECUTING", "SUCCESS"], exitCode: 0, ...extra });
@@ -230,6 +289,22 @@ describe("Nebius Sandboxes, offline: the operation's status apart from its comma
       ["passed", "command-failed", "timed-out", "signalled", "operation-failed", "timed-out", "cancelled", "UNKNOWN"],
     );
     assert.deepEqual([classify(op("FAILED", { exit_code: 1 })).resultImage, classify(op("SUCCESS", { exit_code: 0 })).resultImage], [null, "img"]);
+  });
+
+  it("reads signal -1 as no signal, as the live service reports a command that simply exited", () => {
+    const op = (state: Record<string, unknown>) => ({ uuid: "u", status: "SUCCESS", metadata: { result: { state } } });
+    // Seen live on 20 October 2026: exits 0 and 1 with signal -1, and a timeout as exit -1 with signal 9.
+    assert.deepEqual(
+      [
+        classify(op({ exit_code: 0, signal: -1, timed_out: false })).verdict,
+        classify(op({ exit_code: 1, signal: -1, timed_out: false })).verdict,
+        classify(op({ exit_code: -1, signal: 9, timed_out: true })).verdict,
+        classify(op({ exit_code: -1, signal: 9, timed_out: false })).verdict,
+        classify(op({ exit_code: -1, signal: "SIGTERM" })).verdict,
+      ],
+      ["passed", "command-failed", "timed-out", "signalled", "signalled"],
+    );
+    assert.equal(classify(op({ exit_code: 0, signal: -1 })).signal, -1, "the evidence keeps the service's own value");
   });
 });
 
@@ -337,7 +412,7 @@ describe("Nebius Sandboxes, offline: lost answers, reconnects and cancels (NIV-2
     const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
     const { sandbox } = sandboxOn(service);
     const stuck = (await sandbox.submit(step("stuck", { timeoutSeconds: 5 }))) as { operationId: string };
-    await assert.rejects(sandbox.observe(stuck.operationId, 5), /hadn't ended 65 s after it started/);
+    await assert.rejects(sandbox.observe(stuck.operationId, 5), /wasn't seen to end within 65 s/);
     assert.ok(sandbox.journal.entries.some((e) => e.kind === "unresolved" && e.operationId === stuck.operationId));
   });
 });
@@ -417,6 +492,224 @@ describe("Nebius Sandboxes, offline: deadlines, retries and cleanup (NIV-29)", (
   });
 });
 
+describe("Nebius Sandboxes, offline: every wait ends at its deadline (NIV-29)", () => {
+  it("starts no read at or after its deadline, caps each attempt's timeout by the time left, and says how the last one went", async () => {
+    const service = new FakeService(() => succeed());
+    const { sandbox, api, time } = sandboxOn(service);
+    const submitted = (await sandbox.submit(step("busy"))) as { operationId: string };
+    service.unavailableReads = 10;
+    const before = service.requests.length;
+    const start = time.now();
+    await assert.rejects(
+      api.operation(submitted.operationId, { until: start + 10_000 }),
+      (error: Error) => error instanceof SandboxDeadlineError && /^Reading an operation got no answer before its deadline \(its last attempt: Reading an operation was answered with HTTP 503; try again in 4 s\)\.$/.test(error.message),
+    );
+    assert.deepEqual([service.requests.slice(before).map((r) => r.timeoutMs), time.now() - start], [[10_000, 6_000, 2_000], 8_000]);
+  });
+
+  it("gives every request a whole number of milliseconds, however the deadline falls (the live run's RangeError)", async () => {
+    let now = 0.5;
+    const time = { now: () => now, sleep: async (ms: number) => void (now += ms) };
+    const timeouts: number[] = [];
+    const busy: Transport = async (request) => (timeouts.push(request.timeoutMs), encode({ error: "unavailable" }, 503, { "retry-after": "1" }));
+    const api = new SandboxApi(busy, { sleep: time.sleep, now: time.now });
+    await assert.rejects(api.operation("op", { until: 2_500.7 }), SandboxDeadlineError);
+    assert.deepEqual([timeouts, timeouts.every((ms) => Number.isInteger(ms) && ms >= 1)], [[2_500, 1_500, 500], true]);
+  });
+
+  it("cuts off a read whose connection hangs at the deadline, never after it", async () => {
+    const time = clock();
+    // Every request hangs until its own timeout, as a dead connection would.
+    const hanging: Transport = async (request) => {
+      await time.sleep(request.timeoutMs);
+      throw new Error("timed out");
+    };
+    const api = new SandboxApi(hanging, { sleep: time.sleep, now: time.now });
+    await assert.rejects(api.operation("op", { until: 5_000 }), SandboxDeadlineError);
+    assert.equal(time.now(), 5_000);
+  });
+
+  it("ends observing, and a cancel's wait, at their deadline when reads hang, and journals the operation unresolved", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = clock();
+    let hang = false;
+    const flaky: Transport = async (request) => {
+      if (hang && request.method === "GET") {
+        await time.sleep(request.timeoutMs);
+        throw new Error("timed out");
+      }
+      return service.transport(request);
+    };
+    const { sandbox } = sandboxOn(service, { time, transport: flaky, api: { readDeadlineMs: 600_000 } });
+    const running = (await sandbox.submit(step("stuck", { timeoutSeconds: 5 }))) as { operationId: string };
+    hang = true;
+    let start = time.now();
+    await assert.rejects(sandbox.observe(running.operationId, 5), /wasn't seen to end within 65 s/);
+    assert.equal(time.now() - start, 65_000);
+    start = time.now();
+    assert.equal(await sandbox.cancel(running.operationId), null);
+    assert.equal(time.now() - start, 60_000);
+    assert.equal(sandbox.journal.entries.filter((e) => e.kind === "unresolved").length, 2);
+  });
+
+  it("stops looking for a lost spawn at its time limit, and leaves it unknown", async () => {
+    const service = new FakeService(() => succeed());
+    service.dropNextSpawnAnswer = true;
+    const time = clock();
+    // Every listing takes 50 s; one given less time than that is cut off.
+    const slow: Transport = async (request) => {
+      if (request.method === "GET" && request.path === "/v1/operations") {
+        await time.sleep(Math.min(request.timeoutMs, 50_000));
+        if (request.timeoutMs < 50_000) throw new Error("timed out");
+      }
+      return service.transport(request);
+    };
+    const search = { sinceMarginMs: 86_400_000, pageSize: 1, maxPages: 10, maxCandidates: 50, withinMs: 120_000 };
+    const { sandbox } = sandboxOn(service, { time, transport: slow, search, api: { readDeadlineMs: 600_000, requestTimeoutMs: 60_000 } });
+    const submitted = await sandbox.submit(step("buried"));
+    assert.ok("uncertain" in submitted);
+    // Five newer operations come before it in the listing.
+    for (let i = 0; i < 5; i++) await service.transport({ method: "POST", path: "/v1/instances", body: JSON.stringify({ env: {} }), timeoutMs: 1 });
+    const start = time.now();
+    const found = await sandbox.reconcile(submitted.uncertain);
+    assert.ok("unknown" in found);
+    assert.match(found.unknown, /within 2 page\(s\) of 1, 2 operation\(s\) read, since .*; the search stopped at its time limit$/);
+    assert.equal(time.now() - start, 120_000);
+  });
+
+  it("stops a stage-1 step at the probe's cap and starts nothing after it, then cleanup without the cap settles the operation", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = clock();
+    const path = join(mkdtempSync(join(tmpdir(), "nivra probe ")), "journal.jsonl");
+    const capped = sandboxOn(service, { time, journal: new Journal(path), cap: () => 10_000 });
+    const running = (await capped.sandbox.submit(step("long", { timeoutSeconds: 60 }))) as { operationId: string };
+    await assert.rejects(capped.sandbox.observe(running.operationId, 60), /wasn't seen to end within 10 s/);
+    assert.equal(time.now(), 10_000);
+    const entries = new Journal(path).entries.length;
+    await assert.rejects(capped.sandbox.submit(step("late")), /^SandboxRefusal: The probe's time ran out, so the late operation wasn't started\.$/);
+    assert.deepEqual([new Journal(path).entries.length, service.spawns], [entries, 1]);
+    const settled = await sandboxOn(service, { time, journal: new Journal(path) }).sandbox.cleanup();
+    assert.deepEqual([settled.cancelled.length, settled.unresolved, service.operations[0]?.cancelled], [1, [], true]);
+  });
+});
+
+describe("Nebius Sandboxes, offline: an interruption stops what is under way (NIV-29)", () => {
+  it("cuts off a real request still waiting for its answer, and one whose answer is still arriving", async () => {
+    // On loopback: one path never answers; the other sends its headers, then never finishes its body.
+    const server = createServer((request, response) => {
+      if (request.url?.startsWith("/arriving")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.write("{");
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const transport = fetchTransport({ key: "test-key", project: "test-project" }, `http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+    try {
+      for (const path of ["/waiting", "/arriving"]) {
+        const stage = new AbortController();
+        const started = performance.now();
+        const request = transport({ method: "GET", path, timeoutMs: 30_000, signal: stage.signal });
+        setTimeout(() => stage.abort(), 50);
+        await assert.rejects(request, { name: "AbortError" });
+        assert.ok(performance.now() - started < 5_000, `${path} was cut off at once`);
+      }
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it("cuts off a read under way, sends nothing after it, and cleanup, with its own signal, still settles the operation", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const stage = new AbortController();
+    let holdReads = false;
+    const { transport, seen, held } = holding(service, (request) => holdReads && request.method === "GET");
+    const journal = new Journal();
+    const { sandbox } = sandboxOn(service, { transport, journal, signal: stage.signal });
+    const running = (await sandbox.submit(step("long", { timeoutSeconds: 60 }))) as { operationId: string };
+    holdReads = true;
+    const observing = sandbox.observe(running.operationId, 60);
+    await settles(() => held.length === 1);
+    const sent = seen.length;
+    stage.abort();
+    await assert.rejects(observing, /^SandboxCancelledError: Reading an operation was cancelled\.$/);
+    await assert.rejects(sandbox.submit(step("next")), /^SandboxCancelledError: Starting the next operation was cancelled\.$/);
+    assert.equal(seen.length, sent, "nothing was sent after the interruption");
+    const settled = await sandboxOn(service, { journal }).sandbox.cleanup();
+    assert.deepEqual([settled.cancelled, settled.unresolved, service.operations[0]?.cancelled], [[running.operationId], [], true]);
+  });
+
+  it("keeps a spawn cut off on its way back as uncertain, and cleanup finds it by its correlation id and stops it", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const stage = new AbortController();
+    // The service makes the operation; its answer is still on its way back when the interruption comes.
+    const { transport, held } = holding(service, (request) => request.method === "POST" && request.path === "/v1/instances", { answerFirst: true });
+    const journal = new Journal();
+    const { sandbox } = sandboxOn(service, { transport, journal, signal: stage.signal });
+    const submitting = sandbox.submit(step("cut off"));
+    await settles(() => held.length === 1);
+    stage.abort();
+    const submitted = await submitting;
+    assert.ok("uncertain" in submitted);
+    assert.deepEqual([journal.entries.map((entry) => entry.kind), service.operations.length], [["intent", "uncertain"], 1]);
+    const settled = await sandboxOn(service, { journal }).sandbox.cleanup();
+    assert.deepEqual([settled.cancelled.length, settled.unresolved, service.operations[0]?.cancelled, service.spawns], [1, [], true, 1]);
+  });
+
+  it("stops uploading: the files after the one cut off are never sent, nothing runs, and the reason is kept", async () => {
+    const service = probeService({ controlWorks: true });
+    const stage = new AbortController();
+    let uploads = 0;
+    const { transport, seen, held } = holding(service, (request) => request.path === "/v1/files" && ++uploads === 2);
+    const { sandbox, api, time } = sandboxOn(service, { transport, signal: stage.signal });
+    const running = runStageOne({ sandbox, api, reconnect: () => sandbox, baseImage: "base", fixture, deny: [], networkControl: null, now: time.now, deadline: Number.POSITIVE_INFINITY, signal: stage.signal, log: () => undefined });
+    await settles(() => held.length === 1);
+    const sent = seen.length;
+    stage.abort();
+    const results = await running;
+    assert.deepEqual([seen.length - sent, service.requests.filter((request) => request.path === "/v1/files").length, service.spawns, results.steps.length], [0, 1, 0, 0]);
+    assert.deepEqual(results.errors, [`uploads: Uploading a file was cancelled. (1 of ${fixture.length} sent)`]);
+  });
+
+  it("ends a retry's wait at once, and makes no further attempt", async () => {
+    const service = new FakeService(() => succeed());
+    service.unavailableReads = 1;
+    const stage = new AbortController();
+    const time = clock();
+    // The interruption comes while the read waits the 4 s the service asked for.
+    const sleep = async (ms: number) => {
+      if (ms === 4_000) stage.abort();
+      await time.sleep(ms);
+    };
+    const api = new SandboxApi(service.transport, { sleep, now: time.now, signal: stage.signal });
+    await assert.rejects(api.operation("op"), /^SandboxCancelledError: Reading an operation was cancelled\.$/);
+    assert.equal(service.requests.length, 1);
+  });
+
+  it("stops a wait under way when its cap moves earlier, instead of keeping the deadline it started with", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const base = clock();
+    let cap = Number.POSITIVE_INFINITY;
+    // After the first poll's wait, the cap moves to now, as the probe's Ctrl+C sets it.
+    const time = { ...base, sleep: async (ms: number) => void (await base.sleep(ms), (cap = base.now())) };
+    const { sandbox } = sandboxOn(service, { time, cap: () => cap });
+    const running = (await sandbox.submit(step("long", { timeoutSeconds: 60 }))) as { operationId: string };
+    await assert.rejects(sandbox.observe(running.operationId, 60), /wasn't seen to end within 1 s/);
+    assert.deepEqual([service.requests.filter((request) => request.method === "GET").length, base.now()], [1, 1_000]);
+  });
+
+  it("keeps cleanup to its own budget: with none left it sends no cancel, and a later one with time settles the operation", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = clock();
+    const journal = new Journal();
+    await sandboxOn(service, { time, journal }).sandbox.submit(step("long", { timeoutSeconds: 60 }));
+    const spent = await sandboxOn(service, { time, journal, cap: () => time.now() }).sandbox.cleanup();
+    assert.deepEqual([spent.cancelled, spent.unresolved.length, service.requests.filter((request) => request.method === "DELETE").length], [[], 1, 0]);
+    const later = await sandboxOn(service, { time, journal }).sandbox.cleanup();
+    assert.deepEqual([later.cancelled.length, later.unresolved, service.operations[0]?.cancelled], [1, [], true]);
+  });
+});
+
 describe("Nebius Sandboxes, offline: subprocesses and downloads (NIV-29)", () => {
   it("starts subprocesses in a live parent, settles a 504 from its events, and leaves one with no spawn event uncertain", async () => {
     const service = new FakeService(() => ({ statuses: ["EXECUTING", "SUCCESS"], waits: true, exitCode: 0 }));
@@ -487,18 +780,10 @@ function probeService(options: { controlWorks: boolean }) {
     if (/sed -i/.test(args) && /ls \/sys\/class\/net/.test(args)) return succeed({ stdout: "interfaces: lo ", resultImage: "img-A" });
     if (/CONTINUED/.test(args)) return succeed({ stdout: "CONTINUED\nBLOCKED http://example.test/: bad address\nBLOCKED http://93.184.215.14/: network is unreachable\n" });
     if (/test\.sh Hello, world/.test(args)) return succeed({ exitCode: 1, stdout: "FAIL: expected 'Hello, world', got 'Hello, Nivra'" });
-    if (/sha256sum/.test(args)) {
-      const report = "PASS: Hello, Nivra\n";
-      const patch = "--- base/greet.sh\n+++ work/greet.sh\n-echo \"Hello, world\"\n+echo \"Hello, Nivra\"\n";
-      return succeed({ stdout: `${sha(report)}  /out/report.txt\n${sha(patch)}  /out/patch.diff\n`, resultImage: "img-D", files: { "/out/report.txt": report, "/out/patch.diff": patch } });
-    }
+    if (/sha256sum/.test(args)) return succeed({ stdout: `${sha(REPORT)}  /out/report.txt\n${sha(PATCH)}  /out/patch.diff\n`, resultImage: "img-D", files: { "/out/report.txt": REPORT, "/out/patch.diff": PATCH } });
     if (/sleep 30/.test(args)) return { statuses: ["EXECUTING", "SUCCESS"], exitCode: null, timedOut: true };
     if (/sleep 60/.test(args)) return { statuses: ["EXECUTING"], waits: true };
-    if (/nivra-done/.test(args)) {
-      const report = "PASS: Hello, Nivra\n";
-      const patch = "--- base/greet.sh\n";
-      return { statuses: ["EXECUTING", "SUCCESS"], waits: true, exitCode: 0, resultImage: "img-P", files: { "/out/report.txt": report, "/out/patch.diff": patch } };
-    }
+    if (/nivra-done/.test(args)) return { statuses: ["EXECUTING", "SUCCESS"], waits: true, exitCode: 0, resultImage: "img-P", files: { "/out/report.txt": REPORT, "/out/patch.diff": PATCH } };
     return succeed({ stdout: "done" });
   });
 }
@@ -547,7 +832,26 @@ describe("Nebius Sandboxes, offline: the whole probe against the fake service (N
     assert.ok(bodies.length <= PROBE_LIMITS.maxOperations);
     assert.deepEqual(bodies.filter((b) => b.networking.enabled).length, 1, "only the control has networking on");
     assert.deepEqual(service.requests.filter((r) => r.path === "/v1/files").length, fixture.length, "the fixture's files, and nothing else, are uploaded");
-    assert.deepEqual(results.subprocesses.map((s) => [s.label, s.exitCode]), [["edit", 0], ["inspect", 0], ["network attempt", 0], ["failing test", 1], ["passing test", 0], ["patch", 0], ["done", 0]]);
+    assert.deepEqual(results.subprocesses.map((s) => [s.label, s.exitCode, s.error]), [["edit", 0, null], ["inspect", 0, null], ["network attempt", 0, null], ["failing test", 1, null], ["passing test", 0, null], ["patch", 0, null], ["done", 0, null]]);
+    assert.deepEqual(results.parentCancel, { parent: "CANCELLED", seconds: results.parentCancel?.seconds, child: "ended", childDetail: "exit -1, signal 9" });
+  });
+
+  it("keeps how each subprocess ended, its signal and its stderr, and why a cancelled parent's child couldn't be read", async () => {
+    const service = probeService({ controlWorks: true });
+    // As in stage 1's second run: the network attempt ends with exit -1 after its first line, and the child of the
+    // cancelled parent can't be read. Here the service also says why, as the evidence now keeps.
+    service.endSubprocess = { match: /wget/, state: { exit_code: -1, signal: 9, timed_out: false }, stdout: "CONTINUED\n", stderr: "Killed\n" };
+    service.childReadAfterCancel = 404;
+    const { results, judged } = await stageOne(service, "http://example.test/");
+    assert.deepEqual(results.errors, []);
+    const attempt = results.subprocesses.find((s) => s.label === "network attempt");
+    assert.deepEqual([attempt?.exitCode, attempt?.signal, attempt?.timedOut, attempt?.stderr, attempt?.error], [-1, 9, false, "Killed\n", null]);
+    const b = judged.patterns.find((p) => p.pattern === "B");
+    const network = b?.verdicts.find((v) => v.id === "network");
+    assert.deepEqual([network?.outcome, network?.detail], ["inconclusive", "0 attempt(s) blocked; the attempt: exit -1, signal 9; the control connected"]);
+    assert.deepEqual([results.parentCancel?.child, results.parentCancel?.childDetail], ["unknown", "its read failed: Reading a subprocess was answered with HTTP 404."]);
+    const cancel = b?.verdicts.find((v) => v.id === "cancel");
+    assert.deepEqual([cancel?.outcome, cancel?.detail.endsWith("its subprocess couldn't be read (its read failed: Reading a subprocess was answered with HTTP 404.)")], ["inconclusive", true]);
   });
 
   it("calls the network result inconclusive, and adopts nothing, when the positive control doesn't connect or doesn't run", async () => {
@@ -566,9 +870,9 @@ const outcome = (stdout: string, state: { exit_code?: number | null; timed_out?:
 /** Results in which both patterns pass every check, each at its own pace; a test then breaks what it is about. */
 function passing(seconds: { a: number; b: number }): ProbeResults {
   const done = (id: string, label: string, result: Outcome): StepResult => ({ id, label, operationId: result.operationId, outcome: result, seconds: seconds.a, note: "" });
-  const inside = (label: string, exitCode: number, stdout = ""): SubprocessResult => ({ label, exitCode, seconds: seconds.b, stdout });
+  const inside = (label: string, exitCode: number, stdout = ""): SubprocessResult => ({ label, exitCode, signal: null, timedOut: false, seconds: seconds.b, stdout, stderr: "", error: null });
   const denied = "CONTINUED\nBLOCKED http://example.test/: bad address\n";
-  const download = (step: string, path: string) => ({ step, path, bytes: 10, sha256: sha(path), matched: true });
+  const download = (step: string, path: string) => ({ step, path, bytes: 10, sha256: sha(path), matched: true, holds: true });
   return {
     steps: [
       done("1", "edit", outcome("interfaces: lo ", { exit_code: 0 }, "SUCCESS", "img-A")),
@@ -588,7 +892,7 @@ function passing(seconds: { a: number; b: number }): ProbeResults {
     reattach: { sameOperation: true, spawns: 1 },
     lostAnswer: { found: true, spawns: 1, detail: "adopted" },
     cancel: { reachedTerminal: true, status: "CANCELLED", seconds: 2 },
-    parentCancel: { parent: "CANCELLED", seconds: 2, child: "ended" },
+    parentCancel: { parent: "CANCELLED", seconds: 2, child: "ended", childDetail: "exit -1, signal 9" },
     errors: [],
   };
 }
@@ -598,7 +902,7 @@ describe("Nebius Sandboxes, offline: each pattern judged on its own evidence (NI
     const run = passing({ a: 25, b: 1 });
     // B is quick and broken: a connection got through, the failing test passed, and its cancel never ended the parent.
     run.subprocesses = run.subprocesses.map((s) => (s.label === "network attempt" ? { ...s, stdout: "CONTINUED\nREACHED http://example.test/\n" } : s.label === "failing test" ? { ...s, exitCode: 0 } : s));
-    run.parentCancel = { parent: null, seconds: null, child: "unknown" };
+    run.parentCancel = { parent: null, seconds: null, child: "unknown", childDetail: null };
     const judged = evaluate(run);
     assert.deepEqual(judged.patterns.map((p) => [p.pattern, p.outcome, p.latency.outcome]), [["A", "adopt with concern", "concern"], ["B", "defer", "adopt"]]);
     assert.deepEqual(judged.patterns[1]?.verdicts.filter((v) => v.outcome !== "pass").map((v) => v.id), ["network", "cancel", "exit"]);
@@ -614,10 +918,118 @@ describe("Nebius Sandboxes, offline: each pattern judged on its own evidence (NI
     assert.deepEqual([working.patterns.map((p) => p.outcome), working.decision, working.pattern], [["defer", "adopt"], "adopt", "B"]);
   });
 
+  it("fails a patch that matches its hash but doesn't hold the edit: an empty or failed diff matches its own hash too", () => {
+    const run = passing({ a: 5, b: 1 });
+    run.downloads = run.downloads.map((d) => (d.step === "10" && d.path.endsWith("patch.diff") ? { ...d, holds: false } : d));
+    const judged = evaluate(run);
+    const patch = judged.patterns[1]?.verdicts.find((v) => v.id === "patch");
+    assert.deepEqual([patch?.outcome, patch?.detail, judged.patterns[1]?.outcome, judged.pattern], ["fail", "2 of 2 download(s) matched their hashes; 1 held what they should", "defer", "A"]);
+  });
+
   it("holds a parent whose running subprocess was never reported stopped as inconclusive, never as passed", () => {
     const run = passing({ a: 45, b: 1 });
-    run.parentCancel = { parent: "CANCELLED", seconds: 2, child: "not ended" };
+    run.parentCancel = { parent: "CANCELLED", seconds: 2, child: "not ended", childDetail: null };
     const judged = evaluate(run);
     assert.deepEqual([judged.patterns[1]?.verdicts.find((v) => v.id === "cancel")?.outcome, judged.decision, judged.pattern], ["inconclusive", "inconclusive", null]);
+  });
+});
+
+describe("Nebius Sandboxes, offline: the probe's credentials, and what stage 0 shows (NIV-29)", () => {
+  const SCRIPT = fileURLToPath(new URL("../scripts/sandbox-probe.ts", import.meta.url));
+  const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
+  const KEY = `nivra-probe-key-${"k".repeat(16)}`;
+  // Every case here stops before the probe sends anything: no case reaches stage 0's requests.
+  const probe = (args: string[]) => spawnSync(process.execPath, [SCRIPT, ...args], { env: { PATH: process.env["PATH"] ?? "", HOME: tmpdir() }, encoding: "utf8" });
+
+  it("takes the key only from a file only you can read, outside the repository, and sends nothing otherwise", { skip: process.platform === "win32" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "nivra probe credentials "));
+    const file = join(dir, "nebius.env");
+    writeFileSync(file, `NEBIUS_API_KEY=${KEY}\nNEBIUS_PROJECT_ID=project-1\n`);
+    chmodSync(file, 0o644);
+    const readable = probe(["--credentials", file, "--stage", "0"]);
+    assert.deepEqual([readable.status, /can be read by others \(mode 644\)\. Run chmod 600 on it, then try again\. Nothing was sent\./.test(readable.stderr)], [2, true]);
+    const missing = probe(["--credentials", join(dir, "absent.env"), "--stage", "0"]);
+    assert.deepEqual([missing.status, /^There's no file at .*absent\.env\. Create it with NEBIUS_API_KEY=/.test(missing.stderr)], [2, true]);
+    const inside = probe(["--credentials", join(REPOSITORY, "nebius.env"), "--stage", "0"]);
+    assert.deepEqual([inside.status, /is inside the repository, where it could be committed/.test(inside.stderr)], [2, true]);
+    // A file inside is still inside under a folder whose name starts with "..", or reached through a link from outside.
+    const dotted = probe(["--credentials", join(REPOSITORY, "..private", "nebius.env"), "--stage", "0"]);
+    assert.deepEqual([dotted.status, /is inside the repository, where it could be committed/.test(dotted.stderr)], [2, true]);
+    symlinkSync(join(REPOSITORY, "README.md"), join(dir, "linked.env"));
+    const linked = probe(["--credentials", join(dir, "linked.env"), "--stage", "0"]);
+    assert.deepEqual([linked.status, /is inside the repository, where it could be committed/.test(linked.stderr)], [2, true]);
+    chmodSync(file, 0o600);
+    writeFileSync(file, `NEBIUS_API_KEY=${KEY}\n`);
+    const half = probe(["--credentials", file, "--stage", "0"]);
+    assert.deepEqual([half.status, /must both be set, in /.test(half.stderr)], [2, true]);
+    // Accepted: it gets as far as choosing a stage, and the key appears nowhere.
+    writeFileSync(file, `NEBIUS_API_KEY=${KEY}\nNEBIUS_PROJECT_ID=project-1\n`);
+    const accepted = probe(["--credentials", file, "--evidence", dir, "--stage", "9"]);
+    assert.deepEqual([accepted.status, /^Choose --plan/.test(accepted.stderr), `${accepted.stdout}${accepted.stderr}`.includes(KEY)], [2, true, false]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("finds a file inside the repository by its real path and whole components, however it is reached", { skip: process.platform === "win32" }, () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "nivra repository check ")));
+    const repository = join(root, "repo");
+    mkdirSync(join(repository, "..private"), { recursive: true });
+    writeFileSync(join(repository, "..private", "key.env"), "");
+    writeFileSync(join(repository, "secret.env"), "");
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "key.env"), "");
+    symlinkSync(join(repository, "secret.env"), join(outside, "link.env"));
+    symlinkSync(repository, join(outside, "repo-link"));
+    const cases: Array<[string, boolean]> = [
+      [join(repository, "..private", "key.env"), true],
+      [join(outside, "link.env"), true],
+      [join(outside, "repo-link", "secret.env"), true],
+      [join(repository, "not-yet.env"), true],
+      [join(repository, "..not-yet", "key.env"), true],
+      [join(outside, "key.env"), false],
+      [join(root, "repo-sibling.env"), false],
+    ];
+    assert.deepEqual(cases.map(([path]) => insideRepository(path, repository)), cases.map(([, inside]) => inside));
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("shows the permissions, limits, expiry and images stage 1 needs, and never the token's id", () => {
+    // The shapes are the documented WhoAmIResponse and ImageListResponse.
+    const whoami = {
+      token_uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      token_expiration: 1735689600,
+      permissions: { import: true, spawn: true, spawn_disposable: true, list: true, cancel: true, set_image_tag: false },
+      limits: { instance_max_timeout: 3600, instance_max_concurrency: 10 },
+      operations_stat: {},
+    };
+    const images = { images: [{ uuid: "u-busybox", tag: "busybox:latest", created_at: "2026-01-01T00:00:00Z", operation_uuid: null }, { uuid: "u-python", tag: "python:3.12" }] };
+    const summary = stageZeroSummary(whoami, images);
+    assert.equal(summary.ready, true);
+    assert.deepEqual(summary.lines, [
+      "The key and project were accepted.",
+      "Permissions granted: import, spawn, spawn_disposable, list, cancel.",
+      "Limits: instance_max_timeout 3600, instance_max_concurrency 10.",
+      "The token expires: 2025-01-01T00:00:00.000Z.",
+      "2 public image(s); busybox or alpine: busybox:latest (u-busybox).",
+    ]);
+    assert.equal(summary.lines.join("\n").includes("a1b2c3d4"), false);
+    const short = stageZeroSummary({ ...whoami, permissions: { ...whoami.permissions, cancel: false }, limits: { instance_max_timeout: 120 } }, { images: [] });
+    assert.deepEqual(
+      [short.ready, short.lines[1], short.lines[2], short.lines[4]],
+      [false, "Permissions granted: import, spawn, spawn_disposable, list. Stage 1 also needs: cancel.", "Limits: instance_max_timeout 120. Stage 1's longest operation needs 180 s.", "0 public image(s); busybox or alpine: none."],
+    );
+  });
+
+  it("starts stage 1 only on a token that outlasts it and its cleanup, or one renewed with each request", () => {
+    const needed = PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS;
+    const at = Date.parse("2026-10-20T04:28:22Z");
+    const reading = (expiration: number | null | undefined, offsetMs = 0) => ({ whoami: expiration === undefined ? {} : { token_expiration: expiration }, atMs: at + offsetMs });
+    // As both of stage 0's keys showed: an expiry minutes after each request, moving forward with it, is renewed.
+    assert.deepEqual(tokenOutlasts(reading(at / 1000 + 300), reading(at / 1000 + 315, 15_000), needed), { ok: true, renewed: true, expiresAt: "2026-10-20T04:33:37.000Z" });
+    // A fixed expiry must outlast stage 1 and its cleanup.
+    assert.deepEqual(tokenOutlasts(reading(at / 1000 + 300), reading(at / 1000 + 300, 15_000), needed), { ok: false, renewed: false, expiresAt: "2026-10-20T04:33:22.000Z" });
+    assert.equal(tokenOutlasts(reading(at / 1000 + 3_600), reading(at / 1000 + 3_600, 15_000), needed).ok, true);
+    assert.deepEqual([tokenOutlasts(reading(null), reading(null, 15_000), needed).ok, tokenOutlasts(reading(undefined), reading(undefined, 15_000), needed).ok], [true, false]);
+    assert.equal(needed, 27 * 60);
   });
 });

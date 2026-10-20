@@ -43,7 +43,7 @@ The target demonstration for the current milestone is read-only:
   fixed, read-only tools that Nivra runs; it never runs anything itself.
 - *Planned:* coding work runs in a sandbox. Nemotron only proposes actions; the engine carries them out:
   - a local Docker or Podman container by default;
-  - **Nebius Token Factory Sandboxes** as a cloud option (in beta; access requested);
+  - **Nebius Token Factory Sandboxes** as a cloud option (in beta; access is active);
   - **NVIDIA OpenShell** as an optional, stricter local sandbox.
   
   Only the `Local` backend exists today. It provides no isolation and runs only the built-in hello check and git

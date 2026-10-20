@@ -8,7 +8,13 @@ import { z } from "zod";
  * Responses are read leniently, since the API is in beta: fields Nivra needs are checked, the rest pass through.
  * Statuses are compared ignoring case. A spawn is never retried: when its answer is lost or is a server error, the
  * operation may exist, so the result is `uncertain` and the caller reconciles. Reads are retried within their deadline,
- * honouring `Retry-After`. No message ever carries a response body or a credential.
+ * honouring `Retry-After`: their own budget, or the caller's `until` when that comes first, on the client's monotonic
+ * clock. No read starts once that deadline has passed, each attempt's timeout is capped by the time left, and no retry
+ * waits past it. A POST or DELETE keeps its one request's full timeout, so cutting it short never turns into a lost
+ * answer; the caller decides before sending whether there is time. A client given a signal stops when it is aborted:
+ * the request under way and the reading of its answer are cut off, a retry's wait ends, and nothing more is sent. A
+ * spawn cut off that way is `uncertain`, like any other lost answer. No message ever carries a response body or a
+ * credential.
  */
 
 export const SANDBOXES_BASE_URL = "https://api.tokenfactory.nebius.com/sandboxes";
@@ -20,6 +26,8 @@ export interface TransportRequest {
   headers?: Record<string, string>;
   body?: Uint8Array | string;
   timeoutMs: number;
+  /** Stops the request, and the reading of its answer, when aborted. */
+  signal?: AbortSignal;
 }
 
 export interface TransportResponse {
@@ -35,11 +43,14 @@ export function fetchTransport(credentials: { key: string; project: string }, ba
   return async (request) => {
     const url = new URL(`${base}${request.path}`);
     for (const [name, value] of Object.entries(request.query ?? {})) url.searchParams.set(name, value);
+    // AbortSignal.timeout takes whole milliseconds only.
+    const timeout = AbortSignal.timeout(Math.max(1, Math.ceil(request.timeoutMs)));
     const response = await fetch(url, {
       method: request.method,
       headers: { Authorization: `Bearer ${credentials.key}`, Project: credentials.project, ...request.headers },
       ...(request.body !== undefined ? { body: request.body } : {}),
-      signal: AbortSignal.timeout(request.timeoutMs),
+      // The same signal cuts off reading the answer below.
+      signal: request.signal ? AbortSignal.any([timeout, request.signal]) : timeout,
       redirect: "manual",
     });
     const headers: Record<string, string> = {};
@@ -65,6 +76,23 @@ export class SandboxNetworkError extends Error {
   constructor(what: string, cause: unknown) {
     super(`${what} got no answer (${cause instanceof Error ? cause.name : "an unknown error"}).`);
     this.name = "SandboxNetworkError";
+  }
+}
+
+/** A read given up because its deadline came first, saying how its last attempt went. */
+export class SandboxDeadlineError extends SandboxNetworkError {
+  constructor(what: string, last: Error | null) {
+    super(what, last);
+    this.message = `${what} got no answer before its deadline${last ? ` (its last attempt: ${last.message.replace(/\.$/, "")})` : ""}.`;
+    this.name = "SandboxDeadlineError";
+  }
+}
+
+/** The work the request belonged to was cancelled: it was cut off, or never sent. */
+export class SandboxCancelledError extends Error {
+  constructor(what: string) {
+    super(`${what} was cancelled.`);
+    this.name = "SandboxCancelledError";
   }
 }
 
@@ -146,18 +174,41 @@ export interface SandboxApiOptions {
   requestTimeoutMs?: number;
   /** How long reads may keep retrying, in all. */
   readDeadlineMs?: number;
-  /** Waiting between retries; tests replace it. */
-  sleep?: (ms: number) => Promise<void>;
+  /** Waiting between retries, ended early by the signal; tests replace it. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** The monotonic clock every deadline is measured on, in ms; tests share theirs with `sleep`. */
+  now?: () => number;
+  /** Cancels the client's work: the request under way is cut off, and nothing more is sent. */
+  signal?: AbortSignal;
+}
+
+/** The latest a read may still be going, on the client's monotonic clock: the caller's own deadline. */
+export interface Until {
+  until?: number;
 }
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-const sleepFor = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Waits `ms`, or less when the signal aborts first; the caller checks the signal afterwards. */
+export const sleepFor = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 
 export class SandboxApi {
   readonly #transport: Transport;
   readonly #requestTimeoutMs: number;
   readonly #readDeadlineMs: number;
-  readonly #sleep: (ms: number) => Promise<void>;
+  readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly #now: () => number;
+  readonly #signal: AbortSignal | null;
   /** Every POST that created or may have created something, so a test or the evidence can count them. */
   readonly posts: string[] = [];
 
@@ -166,16 +217,18 @@ export class SandboxApi {
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
     this.#readDeadlineMs = options.readDeadlineMs ?? 120_000;
     this.#sleep = options.sleep ?? sleepFor;
+    this.#now = options.now ?? (() => performance.now());
+    this.#signal = options.signal ?? null;
   }
 
   /** Permissions, the account's effective limits and when the token expires (read-only). */
-  async whoami(): Promise<unknown> {
-    return this.#json(await this.#read("Checking the account", { method: "GET", path: "/v1/whoami" }));
+  async whoami(options: Until = {}): Promise<unknown> {
+    return this.#json(await this.#read("Checking the account", { method: "GET", path: "/v1/whoami" }, [], options.until));
   }
 
   /** The public images (read-only). */
-  async images(): Promise<unknown> {
-    return this.#json(await this.#read("Listing public images", { method: "GET", path: "/v1/images" }));
+  async images(options: Until = {}): Promise<unknown> {
+    return this.#json(await this.#read("Listing public images", { method: "GET", path: "/v1/images" }, [], options.until));
   }
 
   /** Uploads one file's bytes; returns its id. Not retried: a repeat upload of the same bytes is only a duplicate. */
@@ -206,17 +259,17 @@ export class SandboxApi {
     return { status: "created", id: Created.parse(this.#json(response)).uuid };
   }
 
-  async operation(id: string, options: { inflight?: boolean } = {}): Promise<Operation> {
-    const response = await this.#read("Reading an operation", { method: "GET", path: `/v1/operations/${encodeURIComponent(id)}`, ...(options.inflight ? { query: { inflight: "1" } } : {}) });
+  async operation(id: string, options: { inflight?: boolean } & Until = {}): Promise<Operation> {
+    const response = await this.#read("Reading an operation", { method: "GET", path: `/v1/operations/${encodeURIComponent(id)}`, ...(options.inflight ? { query: { inflight: "1" } } : {}) }, [], options.until);
     return Operation.parse(this.#json(response));
   }
 
   /** One page of operations, as the service orders them. */
-  async list(query: { kind?: string; since?: string; limit: number; offset: number }): Promise<Operation[]> {
+  async list(query: { kind?: string; since?: string; limit: number; offset: number }, options: Until = {}): Promise<Operation[]> {
     const params: Record<string, string> = { limit: String(query.limit), offset: String(query.offset) };
     if (query.kind) params["kind"] = query.kind;
     if (query.since) params["since"] = query.since;
-    const response = await this.#read("Listing operations", { method: "GET", path: "/v1/operations", query: params });
+    const response = await this.#read("Listing operations", { method: "GET", path: "/v1/operations", query: params }, [], options.until);
     const body = this.#json(response);
     const items = Array.isArray(body) ? body : [];
     return items.flatMap((item) => {
@@ -255,8 +308,8 @@ export class SandboxApi {
    * the service answers 425 with when to ask again: that is `pending`, never a failure, for the caller to poll within
    * its own deadline.
    */
-  async subprocess(operationId: string, spid: number): Promise<{ status: "ready"; result: unknown } | { status: "pending"; retryAfterMs: number | null }> {
-    const response = await this.#read("Reading a subprocess", { method: "GET", path: `/v1/operations/${encodeURIComponent(operationId)}/subprocesses/${spid}` }, [425]);
+  async subprocess(operationId: string, spid: number, options: Until = {}): Promise<{ status: "ready"; result: unknown } | { status: "pending"; retryAfterMs: number | null }> {
+    const response = await this.#read("Reading a subprocess", { method: "GET", path: `/v1/operations/${encodeURIComponent(operationId)}/subprocesses/${spid}` }, [425], options.until);
     if (response.status === 425) return { status: "pending", retryAfterMs: retryAfterMs(response) };
     return { status: "ready", result: this.#json(response) };
   }
@@ -267,47 +320,55 @@ export class SandboxApi {
   }
 
   /** The operation's event log so far, as text (server-sent events), without following it. */
-  async events(operationId: string): Promise<string> {
-    return decode((await this.#read("Reading an operation's events", { method: "GET", path: `/v1/operations/${encodeURIComponent(operationId)}/events`, query: { follow: "0" } })).body);
+  async events(operationId: string, options: Until = {}): Promise<string> {
+    return decode((await this.#read("Reading an operation's events", { method: "GET", path: `/v1/operations/${encodeURIComponent(operationId)}/events`, query: { follow: "0" } }, [], options.until)).body);
   }
 
   /** A file from a stored image, refused past `maxBytes`. */
-  async download(image: string, path: string, maxBytes: number): Promise<Uint8Array> {
-    const response = await this.#read("Downloading a file", { method: "GET", path: `/v1/inspect/${encodeURIComponent(image)}/download`, query: { path } });
+  async download(image: string, path: string, maxBytes: number, options: Until = {}): Promise<Uint8Array> {
+    const response = await this.#read("Downloading a file", { method: "GET", path: `/v1/inspect/${encodeURIComponent(image)}/download`, query: { path } }, [], options.until);
     if (response.body.byteLength > maxBytes) throw new Error(`The file ${path} is ${response.body.byteLength} bytes, over the ${maxBytes} Nivra takes.`);
     return response.body;
   }
 
   /**
-   * A read, retried after a 429 or a server error, or a lost answer, within the read deadline. A status in `answers` is
-   * an answer the endpoint documents, handed back as it is.
+   * A read, retried after a 429, a server error or a lost answer, until the earlier of its own budget and `until`. A
+   * status in `answers` is an answer the endpoint documents, handed back as it is. No attempt starts once the deadline
+   * has passed, each attempt's timeout is capped by the time left, and a retry that would have to wait past it is given
+   * up: a `SandboxDeadlineError`, which says how the last attempt went.
    */
-  async #read(what: string, request: Omit<TransportRequest, "timeoutMs">, answers: readonly number[] = []): Promise<TransportResponse> {
-    const deadline = performance.now() + this.#readDeadlineMs;
+  async #read(what: string, request: Omit<TransportRequest, "timeoutMs">, answers: readonly number[] = [], until?: number): Promise<TransportResponse> {
+    const deadline = Math.min(this.#now() + this.#readDeadlineMs, until ?? Number.POSITIVE_INFINITY);
+    let last: Error | null = null;
     for (let attempt = 0; ; attempt++) {
+      // Whole milliseconds, as a request's timeout must be; less than one left is none.
+      const left = Math.floor(deadline - this.#now());
+      if (left < 1) throw new SandboxDeadlineError(what, last);
       let response: TransportResponse | null = null;
       let lost: unknown = null;
       try {
-        response = await this.#send(what, request);
+        response = await this.#send(what, request, Math.min(this.#requestTimeoutMs, left));
       } catch (error) {
+        if (error instanceof SandboxCancelledError) throw error;
         lost = error;
       }
       if (response && ((response.status >= 200 && response.status <= 299) || answers.includes(response.status))) return response;
-      const retryable = !response || response.status === 429 || response.status >= 500;
-      const wait = response ? retryAfterMs(response) ?? 1_000 * 2 ** Math.min(attempt, 4) : 1_000 * 2 ** Math.min(attempt, 4);
-      if (!retryable || performance.now() + wait > deadline) {
-        if (response) throw this.#httpError(what, response);
-        throw lost instanceof SandboxNetworkError ? lost : new SandboxNetworkError(what, lost);
-      }
-      await this.#sleep(wait);
+      if (response && response.status !== 429 && response.status < 500) throw this.#httpError(what, response);
+      last = response ? this.#httpError(what, response) : lost instanceof Error ? lost : new SandboxNetworkError(what, lost);
+      const wait = (response ? retryAfterMs(response) : null) ?? 1_000 * 2 ** Math.min(attempt, 4);
+      if (this.#now() + wait >= deadline) throw new SandboxDeadlineError(what, last);
+      await this.#sleep(wait, this.#signal ?? undefined);
+      if (this.#signal?.aborted) throw new SandboxCancelledError(what);
     }
   }
 
-  async #send(what: string, request: Omit<TransportRequest, "timeoutMs">): Promise<TransportResponse> {
+  /** One request, with the client's signal: none is sent once it has aborted, and one under way is cut off. */
+  async #send(what: string, request: Omit<TransportRequest, "timeoutMs">, timeoutMs = this.#requestTimeoutMs): Promise<TransportResponse> {
+    if (this.#signal?.aborted) throw new SandboxCancelledError(what);
     try {
-      return await this.#transport({ ...request, timeoutMs: this.#requestTimeoutMs });
+      return await this.#transport({ ...request, timeoutMs, ...(this.#signal ? { signal: this.#signal } : {}) });
     } catch (error) {
-      throw new SandboxNetworkError(what, error);
+      throw this.#signal?.aborted ? new SandboxCancelledError(what) : new SandboxNetworkError(what, error);
     }
   }
 

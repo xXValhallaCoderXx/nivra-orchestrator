@@ -1,3 +1,5 @@
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FileRef, OperationStatus, SandboxApi } from "./api.ts";
 import { type Outcome, type Sandbox } from "./sandbox.ts";
 
@@ -16,9 +18,86 @@ export const PROBE_LIMITS = {
   overallMinutes: 20,
   requestTimeoutSeconds: 30,
   observeMarginSeconds: 60,
+  cancelWaitSeconds: 60,
+  searchSeconds: 120,
   maxUploadBytes: 2_048,
   maxDownloadBytes: 65_536,
 } as const;
+
+/**
+ * The longest cleanup can take once stage 1 has stopped. One operation runs at a time, so at most one spawn is uncertain
+ * and one operation open: two searches for a lost answer, and two cancels, each a request and then its wait.
+ */
+export const CLEANUP_MAX_SECONDS = 2 * PROBE_LIMITS.searchSeconds + 2 * (PROBE_LIMITS.requestTimeoutSeconds + PROBE_LIMITS.cancelWaitSeconds);
+
+/**
+ * Whether the token stays valid long enough for stage 1 and its cleanup: a token that expires partway would leave the
+ * probe unable to read, or cancel, its own operations. It takes two readings of the whoami answer, some seconds apart,
+ * each with the wall-clock time it was taken (`token_expiration` is Unix seconds; null means none). An expiry that moved
+ * forward between them belongs to a token renewed with each request, so the key's own lifetime is what counts; a fixed
+ * one must outlast `seconds` from the second reading.
+ */
+export function tokenOutlasts(first: { whoami: unknown; atMs: number }, second: { whoami: unknown; atMs: number }, seconds: number): { ok: boolean; renewed: boolean; expiresAt: string | null } {
+  const read = (whoami: unknown) => (whoami as { token_expiration?: unknown } | null)?.token_expiration;
+  const before = read(first.whoami);
+  const after = read(second.whoami);
+  if (after === null) return { ok: true, renewed: false, expiresAt: null };
+  if (typeof after !== "number") return { ok: false, renewed: false, expiresAt: null };
+  const expiresAt = new Date(after * 1000).toISOString();
+  // Expiries are whole seconds: one that moved forward by at least a third of the time between readings was renewed.
+  if (typeof before === "number" && after - before >= Math.max(1, (second.atMs - first.atMs) / 3000)) return { ok: true, renewed: true, expiresAt };
+  return { ok: after * 1000 - second.atMs >= seconds * 1000, renewed: false, expiresAt };
+}
+
+/** A path as it really is: every symlink followed, and for one that doesn't exist yet, its nearest existing folder's. */
+function canonical(path: string): string {
+  let existing = resolve(path);
+  const rest: string[] = [];
+  while (!existsSync(existing) && dirname(existing) !== existing) {
+    rest.unshift(basename(existing));
+    existing = dirname(existing);
+  }
+  return join(realpathSync.native(existing), ...rest);
+}
+
+/**
+ * Whether a credentials file is inside the repository, where it could be committed. Both paths are compared as they
+ * really are, symlinks followed, and by whole components: `repo/..private/key.env` is inside, and so is a link from
+ * outside to a file inside. A file that isn't there yet is judged by where it would be.
+ */
+export function insideRepository(path: string, repository: string): boolean {
+  const within = relative(canonical(repository), canonical(path));
+  return within === "" || (!isAbsolute(within) && within !== ".." && !within.startsWith(`..${sep}`));
+}
+
+/** The permissions stage 1 uses: spawning (disposable or not), listing to find a lost answer, and cancelling. */
+export const STAGE_ONE_PERMISSIONS = ["spawn", "spawn_disposable", "list", "cancel"] as const;
+
+/**
+ * What stage 0 says about the account and the images, from `GET /v1/whoami` and `GET /v1/images`: the permissions, the
+ * limits and when the token expires, and the public busybox or alpine images. Nothing else is printed (not the token's
+ * id); the full answers go to the private evidence file only. `ready` says whether stage 1 could run on them.
+ */
+export function stageZeroSummary(whoami: unknown, images: unknown): { lines: string[]; ready: boolean } {
+  const account = (whoami ?? {}) as { permissions?: unknown; limits?: unknown; token_expiration?: unknown };
+  const permissions = account.permissions && typeof account.permissions === "object" ? Object.entries(account.permissions as Record<string, unknown>) : [];
+  const granted = permissions.filter(([, value]) => value === true).map(([name]) => name);
+  const missing = STAGE_ONE_PERMISSIONS.filter((name) => !granted.includes(name));
+  const limits = account.limits && typeof account.limits === "object" ? Object.entries(account.limits as Record<string, unknown>).filter(([, value]) => typeof value === "number") : [];
+  const maxTimeout = limits.find(([name]) => name === "instance_max_timeout")?.[1] as number | undefined;
+  const expiry = typeof account.token_expiration === "number" ? new Date(account.token_expiration * 1000).toISOString() : account.token_expiration === null ? "never" : "not reported";
+  const listed = Array.isArray((images as { images?: unknown } | null)?.images) ? ((images as { images: unknown[] }).images as Array<{ uuid?: unknown; tag?: unknown }>) : [];
+  const candidates = listed.filter((image) => typeof image.tag === "string" && /^(busybox|alpine)(:|$)/.test(image.tag));
+  const timeoutFits = maxTimeout === undefined || maxTimeout >= PROBE_LIMITS.maxParentTimeoutSeconds;
+  const lines = [
+    "The key and project were accepted.",
+    `Permissions granted: ${granted.length ? granted.join(", ") : "none"}.${missing.length ? ` Stage 1 also needs: ${missing.join(", ")}.` : ""}`,
+    `Limits: ${limits.length ? limits.map(([name, value]) => `${name} ${String(value)}`).join(", ") : "none reported"}.${timeoutFits ? "" : ` Stage 1's longest operation needs ${PROBE_LIMITS.maxParentTimeoutSeconds} s.`}`,
+    `The token expires: ${expiry}.`,
+    `${listed.length} public image(s); busybox or alpine: ${candidates.length ? candidates.map((image) => `${String(image.tag)} (${String(image.uuid)})`).join(", ") : "none"}.`,
+  ];
+  return { lines, ready: missing.length === 0 && timeoutFits && candidates.length > 0 };
+}
 
 export const LATENCY = { adoptSeconds: 10, concernSeconds: 30 } as const;
 
@@ -76,19 +155,33 @@ export interface StepResult {
 export interface SubprocessResult {
   label: string;
   exitCode: number | null;
+  /** As the service reported it: -1, or none, when no signal ended the child. */
+  signal: number | string | null;
+  timedOut: boolean | null;
   seconds: number | null;
   stdout: string;
+  stderr: string;
+  /** Why there is no result: its spawn's answer was lost, it hadn't ended within the wait, or its read failed. */
+  error: string | null;
 }
+
+/** How a subprocess ended, as the service reported it. Evidence written before signals were kept says so. */
+const endedAs = (result: Pick<SubprocessResult, "exitCode" | "signal" | "timedOut">) =>
+  `exit ${result.exitCode ?? "none"}, signal ${result.signal === undefined ? "not recorded" : (result.signal ?? "none")}${result.timedOut ? ", timed out" : ""}`;
 
 export interface ProbeResults {
   steps: StepResult[];
   subprocesses: SubprocessResult[];
-  downloads: Array<{ step: string; path: string; bytes: number; sha256: string; matched: boolean }>;
+  /** Each file retrieved: whether it matched the hash the operation printed, and whether it holds what it should. */
+  downloads: Array<{ step: string; path: string; bytes: number; sha256: string; matched: boolean; holds: boolean }>;
   reattach: { sameOperation: boolean; spawns: number } | null;
   lostAnswer: { found: boolean; spawns: number; detail: string } | null;
   cancel: { reachedTerminal: boolean; status: OperationStatus | "UNKNOWN" | null; seconds: number | null } | null;
-  /** The parent's end after the cancel, and whether the service reported its running child's end within 5 s. */
-  parentCancel: { parent: OperationStatus | "UNKNOWN" | null; seconds: number | null; child: "ended" | "not ended" | "unknown" } | null;
+  /**
+   * The parent's end after the cancel, and whether the service reported its running child's end within 5 s: how it
+   * ended, or why it couldn't be read.
+   */
+  parentCancel: { parent: OperationStatus | "UNKNOWN" | null; seconds: number | null; child: "ended" | "not ended" | "unknown"; childDetail: string | null } | null;
   errors: string[];
 }
 
@@ -104,23 +197,39 @@ export interface StageOneContext {
   now: () => number;
   /** The overall deadline, on the same monotonic clock. */
   deadline: number;
+  /** The interruption: once aborted, nothing more is sent, and every step not yet run is marked as such. */
+  signal?: AbortSignal;
   log: (line: string) => void;
 }
 
 const shaLines = (stdout: string) => new Map([...stdout.matchAll(/^([0-9a-f]{64})\s+(\S+)$/gm)].map((match) => [match[2]!, match[1]!]));
 
+/**
+ * Whether a retrieved file holds what it should, beyond matching its hash: the patch, the edit (an empty or failed diff
+ * would match its own hash too); the report, the passing test.
+ */
+function holdsExpected(path: string, bytes: Uint8Array): boolean {
+  const text = new TextDecoder().decode(bytes);
+  if (path.endsWith("patch.diff")) return text.includes('-echo "Hello, world"') && text.includes('+echo "Hello, Nivra"');
+  if (path.endsWith("report.txt")) return text.includes("PASS: Hello, Nivra");
+  return false;
+}
+
 /** Runs stage 1. Each step's failure is recorded and the next goes on; the deadline stops it; cleanup is the caller's. */
 export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   const results: ProbeResults = { steps: [], subprocesses: [], downloads: [], reattach: null, lostAnswer: null, cancel: null, parentCancel: null, errors: [] };
   const { sandbox } = ctx;
+  const interrupted = () => ctx.signal?.aborted === true;
+  // A spawn whose answer didn't come back stays open in the journal, for cleanup to look for and settle.
+  const lostSpawn = () => new Error(interrupted() ? "the probe was interrupted while its spawn was on its way; cleanup settles it" : "its spawn's answer was lost; it is left for cleanup to settle");
   const timed = async <T>(work: () => Promise<T>): Promise<{ value: T; seconds: number }> => {
     const started = ctx.now();
     const value = await work();
     return { value, seconds: (ctx.now() - started) / 1000 };
   };
   const step = async (id: string, label: string, body: () => Promise<{ operationId: string | null; outcome: Outcome | null; note?: string }>) => {
-    if (ctx.now() > ctx.deadline) {
-      results.steps.push({ id, label, operationId: null, outcome: null, seconds: null, note: "not run: the probe's overall deadline had passed" });
+    if (interrupted() || ctx.now() > ctx.deadline) {
+      results.steps.push({ id, label, operationId: null, outcome: null, seconds: null, note: interrupted() ? "not run: the probe was interrupted" : "not run: the probe's overall deadline had passed" });
       return null;
     }
     ctx.log(`step ${id}: ${label}`);
@@ -137,12 +246,20 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   };
   const run = async (spec: Parameters<Sandbox["submit"]>[0]) => {
     const submitted = await sandbox.submit(spec);
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     return { operationId: submitted.operationId, outcome: await sandbox.observe(submitted.operationId, spec.timeoutSeconds) };
   };
 
+  // An upload is never retried; once one fails, or the probe is interrupted, the rest aren't sent and nothing runs.
   const files: Record<string, FileRef> = {};
-  for (const file of ctx.fixture) files[`/fixture/${file.name}`] = { uuid: (await ctx.api.upload(file.bytes)).uuid };
+  for (const file of ctx.fixture) {
+    try {
+      files[`/fixture/${file.name}`] = { uuid: (await ctx.api.upload(file.bytes)).uuid };
+    } catch (error) {
+      results.errors.push(`uploads: ${error instanceof Error ? error.message : String(error)} (${Object.keys(files).length} of ${ctx.fixture.length} sent)`);
+      return results;
+    }
+  }
 
   const edit = await step("1", "edit", () => run({ label: "edit", command: "/bin/sh", args: ["-c", EDIT], image: ctx.baseImage, files, disposable: false, timeoutSeconds: 60 }));
   const imageA = edit?.resultImage ?? null;
@@ -155,7 +272,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   if (ctx.networkControl) {
     await step("3", "network control", async () => {
       const submitted = await sandbox.networkControl({ approvedUrl: ctx.networkControl, url: ctx.networkControl!, image: ctx.baseImage, baseImage: ctx.baseImage });
-      if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+      if ("uncertain" in submitted) throw lostSpawn();
       return { operationId: submitted.operationId, outcome: await sandbox.observe(submitted.operationId, 30) };
     });
   } else {
@@ -169,7 +286,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   await step("6", "timeout", () => run({ label: "timeout", command: "/bin/sleep", args: ["30"], image: ctx.baseImage, disposable: true, timeoutSeconds: 5 }));
   await step("7", "cancel", async () => {
     const submitted = await sandbox.submit({ label: "cancel", command: "/bin/sleep", args: ["60"], image: ctx.baseImage, disposable: true, timeoutSeconds: 90 });
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     await sandbox.waitFor(submitted.operationId, ["EXECUTING"], 30_000);
     const { value: outcome, seconds } = await timed(() => sandbox.cancel(submitted.operationId));
     results.cancel = { reachedTerminal: outcome !== null, status: outcome?.status ?? null, seconds: outcome ? seconds : null };
@@ -177,8 +294,8 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   });
   await step("8", "reconnect", async () => {
     const submitted = await sandbox.submit({ label: "reconnect", command: "/bin/sh", args: ["-c", "sleep 10; echo done"], image: ctx.baseImage, disposable: true, timeoutSeconds: 60 });
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
-    await ctx.api.operation(submitted.operationId);
+    if ("uncertain" in submitted) throw lostSpawn();
+    await ctx.api.operation(submitted.operationId, { until: ctx.deadline });
     // Everything in memory is dropped; a fresh client reattaches from what the journal holds.
     const fresh = ctx.reconnect();
     const known = fresh.journal.open().operations;
@@ -196,7 +313,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   });
   await step("10", "parent", async () => {
     const submitted = await sandbox.submit({ label: "parent", command: "/bin/sh", args: ["-c", PARENT], image: ctx.baseImage, files, disposable: false, timeoutSeconds: 180 });
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     await sandbox.waitFor(submitted.operationId, ["EXECUTING"], 60_000);
     let printed = new Map<string, string>();
     const inside: Array<[string, string[], Record<string, string>?]> = [
@@ -211,8 +328,29 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
     for (const [label, [command, ...args], env] of inside) {
       const started = ctx.now();
       const spawned = await sandbox.subprocess(submitted.operationId, { label, command: command!, args, ...(env ? { env } : {}) });
-      const result = "spid" in spawned ? await sandbox.subprocessResult(submitted.operationId, spawned.spid, 60_000) : null;
-      results.subprocesses.push({ label, exitCode: result?.exitCode ?? null, seconds: result ? (ctx.now() - started) / 1000 : null, stdout: (result?.stdout ?? ("uncertain" in spawned ? spawned.uncertain : "")).slice(0, 2_000) });
+      const entry = (result: Awaited<ReturnType<Sandbox["subprocessResult"]>>, error: string | null): SubprocessResult => ({
+        label,
+        exitCode: result?.exitCode ?? null,
+        signal: result?.signal ?? null,
+        timedOut: result ? result.timedOut : null,
+        seconds: result ? (ctx.now() - started) / 1000 : null,
+        stdout: (result?.stdout ?? "").slice(0, 2_000),
+        stderr: (result?.stderr ?? "").slice(0, 2_000),
+        error,
+      });
+      if (!("spid" in spawned)) {
+        results.subprocesses.push(entry(null, spawned.uncertain));
+        continue;
+      }
+      let result: Awaited<ReturnType<Sandbox["subprocessResult"]>>;
+      try {
+        result = await sandbox.subprocessResult(submitted.operationId, spawned.spid, 60_000);
+      } catch (error) {
+        // Recorded, then the step stops as before: cleanup settles the parent.
+        results.subprocesses.push(entry(null, `its read failed: ${error instanceof Error ? error.message : String(error)}`));
+        throw error;
+      }
+      results.subprocesses.push(entry(result, result ? null : "it hadn't ended within 60 s"));
       if (label === "patch" && result) printed = shaLines(result.stdout);
     }
     const outcome = await sandbox.observe(submitted.operationId, 180);
@@ -221,14 +359,24 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
   });
   await step("11", "parent cancel", async () => {
     const submitted = await sandbox.submit({ label: "parent cancel", command: "/bin/sh", args: ["-c", PARENT], image: ctx.baseImage, files, disposable: true, timeoutSeconds: 180 });
-    if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
+    if ("uncertain" in submitted) throw lostSpawn();
     await sandbox.waitFor(submitted.operationId, ["EXECUTING"], 60_000);
     const spawned = await sandbox.subprocess(submitted.operationId, { label: "sleeper", command: "/bin/sleep", args: ["60"] });
     const { value: outcome, seconds } = await timed(() => sandbox.cancel(submitted.operationId));
     // The child counts as stopped only when the service reports its end: silence, or a read that fails, shows nothing.
+    // Either way, what the service answered is kept.
     let child: "ended" | "not ended" | "unknown" = "unknown";
-    if ("spid" in spawned) child = await sandbox.subprocessResult(submitted.operationId, spawned.spid, 5_000).then((result) => (result ? "ended" : "not ended"), () => "unknown");
-    results.parentCancel = { parent: outcome?.status ?? null, seconds: outcome ? seconds : null, child };
+    let childDetail = "uncertain" in spawned ? spawned.uncertain : null;
+    if ("spid" in spawned) {
+      try {
+        const result = await sandbox.subprocessResult(submitted.operationId, spawned.spid, 5_000);
+        child = result ? "ended" : "not ended";
+        childDetail = result ? endedAs(result) : null;
+      } catch (error) {
+        childDetail = `its read failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    results.parentCancel = { parent: outcome?.status ?? null, seconds: outcome ? seconds : null, child, childDetail };
     return { operationId: submitted.operationId, outcome };
   });
   return results;
@@ -241,7 +389,7 @@ async function fetchFiles(ctx: StageOneContext, results: ProbeResults, step: str
       const expected = printed.get(path) ?? null;
       const { bytes, sha256 } = await ctx.sandbox.download(image, path, left, expected);
       left -= bytes.byteLength;
-      results.downloads.push({ step, path, bytes: bytes.byteLength, sha256, matched: expected !== null && expected === sha256 });
+      results.downloads.push({ step, path, bytes: bytes.byteLength, sha256, matched: expected !== null && expected === sha256, holds: holdsExpected(path, bytes) });
     } catch (error) {
       results.errors.push(`${step} download ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -297,12 +445,12 @@ export function evaluate(results: ProbeResults): { patterns: PatternJudgement[];
     const blocked = (stdout.match(/^BLOCKED /gm) ?? []).length;
     return verdict("network", NETWORK, blocked >= 1 ? "pass" : "inconclusive", `${blocked} attempt(s) blocked${extra}; the control connected`);
   };
-  const PATCH = "The patch and report are retrieved, with matching hashes";
+  const PATCH = "The patch and report are retrieved, with matching hashes, holding the edit and the passing test";
   const patch = (step: string): Verdict => {
     const downloads = results.downloads.filter((d) => d.step === step);
-    const matched = downloads.filter((d) => d.matched);
-    const both = matched.some((d) => d.path.endsWith("patch.diff")) && matched.some((d) => d.path.endsWith("report.txt"));
-    return verdict("patch", PATCH, both ? "pass" : downloads.length ? "fail" : "not-run", `${matched.length} of ${downloads.length} download(s) matched`);
+    const good = downloads.filter((d) => d.matched && d.holds);
+    const both = good.some((d) => d.path.endsWith("patch.diff")) && good.some((d) => d.path.endsWith("report.txt"));
+    return verdict("patch", PATCH, both ? "pass" : downloads.length ? "fail" : "not-run", `${downloads.filter((d) => d.matched).length} of ${downloads.length} download(s) matched their hashes; ${good.length} held what they should`);
   };
 
   const timeout = out("6");
@@ -334,13 +482,15 @@ export function evaluate(results: ProbeResults): { patterns: PatternJudgement[];
   const parent = results.parentCancel;
   const exitsInside = !failingInside || !passingInside ? "not-run" : failingInside.exitCode === null || passingInside.exitCode === null ? "inconclusive" : failingInside.exitCode === 1 && passingInside.exitCode === 0 ? "pass" : "fail";
   const b = [
-    network(attempt?.stdout ?? null, "the network attempt didn't run", false),
+    network(attempt?.stdout ?? null, "the network attempt didn't run", false, attempt ? `; the attempt: ${attempt.error ?? endedAs(attempt)}` : ""),
     verdict("continuation", "State continues between subprocesses inside the parent", !inspect ? "not-run" : /Hello, Nivra/.test(inspect.stdout) ? "pass" : "fail", !inspect ? "the inspection didn't run" : /Hello, Nivra/.test(inspect.stdout) ? "the inspection saw the edit" : "the inspection didn't see the edit"),
     verdict(
       "cancel",
       "A cancel reaches CANCELLED within 60 s, and stops the parent's running subprocess",
       !parent ? "not-run" : parent.parent !== "CANCELLED" || (parent.seconds ?? Infinity) > 60 ? "fail" : parent.child === "ended" ? "pass" : "inconclusive",
-      parent ? `the parent ended ${parent.parent ?? "not at all within the wait"}${parent.seconds !== null ? `, ${parent.seconds.toFixed(1)} s after the cancel` : ""}; its subprocess ${parent.child === "ended" ? "was reported ended" : parent.child === "not ended" ? "wasn't reported ended within 5 s" : "couldn't be read"}` : "step 11 didn't run",
+      parent
+        ? `the parent ended ${parent.parent ?? "not at all within the wait"}${parent.seconds !== null ? `, ${parent.seconds.toFixed(1)} s after the cancel` : ""}; its subprocess ${parent.child === "ended" ? "was reported ended" : parent.child === "not ended" ? "wasn't reported ended within 5 s" : "couldn't be read"}${parent.childDetail ? ` (${parent.childDetail})` : ""}`
+        : "step 11 didn't run",
     ),
     verdict("exit", "A failing command's exit code is told apart from a passing one", exitsInside, `failing test: exit ${failingInside?.exitCode ?? "?"}; passing test: exit ${passingInside?.exitCode ?? "?"}`),
     patch("10"),
