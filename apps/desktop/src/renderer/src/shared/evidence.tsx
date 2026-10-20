@@ -152,6 +152,13 @@ const DUE: Record<AnswerDueReason, string> = { "last-steps": "the last steps wer
 const KIND_LABEL = { "personal-default": "personal default", "project-default": "project default", override: "project decision" } as const;
 const NOT_RECORDED = "Not recorded for this run.";
 
+/** What the answers turned down cost (NIV-26), when there were any: tokens only as reported, never 0 for unknown. */
+function turnedDownText(cost: NonNullable<ExplainResult["context"]["answer"]>["turnedDown"]): string {
+  if (!cost || cost.steps === 0) return "";
+  const tokens = cost.inputTokens !== null && cost.outputTokens !== null ? `${plural(cost.inputTokens, "token")} in / ${cost.outputTokens.toLocaleString()} out` : "tokens not reported";
+  return ` Answers turned down took ${plural(cost.steps, "model step")}: ${tokens}, ${(cost.elapsedMs / 1000).toFixed(1)} s.`;
+}
+
 /** The preferences a run received, by kind, with the store's revision and the fingerprint; never zero when unrecorded. */
 export function receivedText(received: PreferencesReceived | null): string {
   if (!received) return NOT_RECORDED;
@@ -210,7 +217,7 @@ export function ContextDetails({ context, choices, prefix = "explain" }: { conte
         </Text>
         <Text size="xs" data-testid={`${prefix}-context-answer`}>
           {answer
-            ? `${answer.dueReasons.length ? `The answer was due because ${answer.dueReasons.map((reason) => DUE[reason]).join(" and ")}.` : "The model answered before it had to."} Turned down before it was accepted: ${answer.refusals.citations} for citations, ${answer.refusals.conflicts} for conflicts, ${answer.refusals.schema} for its shape. Dropped from the accepted answer: ${plural(answer.conflictsDropped, "conflict")}, ${plural(answer.suggestionsDropped, "suggestion")}.`
+            ? `${answer.dueReasons.length ? `The answer was due because ${answer.dueReasons.map((reason) => DUE[reason]).join(" and ")}.` : "The model answered before it had to."} Turned down before it was accepted: ${answer.refusals.citations} for citations, ${answer.refusals.conflicts} for conflicts, ${answer.refusals.schema} for its shape${answer.refusals.findings ? `, ${answer.refusals.findings} for having no findings` : ""}. Dropped from the accepted answer: ${plural(answer.conflictsDropped, "conflict")}, ${plural(answer.suggestionsDropped, "suggestion")}.${turnedDownText(answer.turnedDown)}`
             : NOT_RECORDED}
         </Text>
       </Stack>

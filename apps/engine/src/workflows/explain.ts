@@ -1,16 +1,16 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { preferencesDigest, type ExplainResult, type JsonObject, type Mask, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
+import { answerStanding, preferencesDigest, type ExplainResult, type JsonObject, type Mask, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
 import { Budget } from "../explain/budget.ts";
 import { checkCitation } from "../explain/citations.ts";
 import { Ledger } from "../explain/ledger.ts";
-import { EXPLAIN_LIMITS } from "../explain/limits.ts";
+import { canAnswerAgain, EXPLAIN_LIMITS } from "../explain/limits.ts";
 import { rankConflict } from "../explain/precedence.ts";
 import { DEFAULT_QUESTION, explainPrompt, INSTRUCTIONS } from "../explain/prompt.ts";
 import { TaskUnreadable, type ExplainTask } from "../explain/task.ts";
-import { Reading, readUntilAnswered, usageOf } from "../explain/reading.ts";
+import { Reading, readUntilAnswered, turnedDownCost, turnedDownText, usageOf } from "../explain/reading.ts";
 import { createExplainTools, toolDefinitionChars } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
 import { createModelClient, failure, InternalFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
@@ -163,6 +163,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         const internal = new InternalFailure();
         // Shared with the tools: how many steps have finished, and whether this one must give the answer (D22).
         const reading = new Reading();
+        const policy = policyFor(inputData.model);
         const { tools, state } = createExplainTools({
           reader,
           ledger,
@@ -171,6 +172,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           internal,
           step: () => reading.finished,
           answerDue: () => reading.answerDue,
+          answerAgain: () => canAnswerAgain({ stepNumber: reading.finished, dueReasons: reading.dueReasons, forced: policy.forceAnswer }, EXPLAIN_LIMITS),
           preferences: context.preferences,
           choices: choiceIds,
           signal: abortSignal,
@@ -184,7 +186,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           tools,
           answerTool: "submit_answer",
           accepted: () => state.accepted !== null,
-          policy: policyFor(inputData.model),
+          policy,
           budget,
           reading,
           state,
@@ -196,9 +198,9 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         });
         deps.setMeta(runId, { usage: usageOf(steps) });
         if (failed) throw failed;
+        const refusals = { citations: state.citationRefusals, conflicts: state.conflictRefusals, findings: state.findingsRefusals, schema: reading.invalidAnswers };
         if (!state.accepted || state.answerStep === null) {
-          const turnedDown = state.rejected + reading.invalidAnswers;
-          throw failure("malformed", `no answer was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDown ? `; ${turnedDown} turned down` : ""}`);
+          throw failure("malformed", `no answer was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDownText(refusals)}`);
         }
         const answer = state.accepted;
         const answerStep = state.answerStep;
@@ -212,6 +214,9 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           return shown.length ? [{ statement: suggestion.statement, citations: shown }] : [];
         });
         const suggestionsDropped = answer.suggestions.length - suggestions.length;
+        // Only findings citing lines the model was shown make an explanation with evidence (NIV-26): an answer with none,
+        // or none of them shown, is labelled for what it is, never presented as one.
+        const standing = answerStanding(findings);
         const all = [...findings, ...conflicts].flatMap((item) => item.citations);
         const checked = all.filter((citation) => citation.checked).length;
         const records = context.preferences.records;
@@ -222,10 +227,11 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
           answer: {
             dueReasons: reading.dueReasons,
-            refusals: { citations: state.citationRefusals, conflicts: state.conflictRefusals, schema: reading.invalidAnswers },
+            refusals,
             acceptedAfterRefusals: state.rejected + reading.invalidAnswers,
             conflictsDropped: state.conflictsDropped,
             suggestionsDropped,
+            turnedDown: turnedDownCost(steps, [...state.refusedSteps, ...reading.invalidAnswerSteps]),
           },
         };
         const result: ExplainResult = {
@@ -241,11 +247,14 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           gaps: answer.gaps,
           context: { ...ledger.context(), ...details },
           checks: { citations: all.length, checked },
+          standing,
           answeredAtStep: answerStep,
           finishedAt: new Date().toISOString(),
         };
         deps.saveResult(runId, result);
-        deps.recorder.output(runId, "explain", `${checked} of ${all.length} citations point to lines the model was shown`, {
+        const standingNote = standing === "no-findings" ? "No findings established. " : standing === "unsupported" ? "No finding cites lines the model was shown. " : "";
+        deps.recorder.output(runId, "explain", `${standingNote}${checked} of ${all.length} citations point to lines the model was shown`, {
+          standing,
           citations: all.length,
           checked,
           changedFiles: result.context.changedFiles,

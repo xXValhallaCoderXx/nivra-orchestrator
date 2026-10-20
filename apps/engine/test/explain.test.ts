@@ -631,3 +631,99 @@ describe("explain over stdio: the small-context budget (NIV-11, D23)", () => {
     assert.deepEqual([mastra, engine.stderr().includes(CHOICE_CANARY)], [[], false]);
   });
 });
+
+describe("explain over stdio: answers without findings (NIV-26)", () => {
+  /** ANSWER as the live run's forced answers came: no findings at all, conflicts and gaps kept. */
+  const { findings: _left, ...WITHOUT_FINDINGS } = ANSWER;
+  const forced = (request: StubRequest) => JSON.stringify(request.body?.tool_choice ?? "").includes("submit_answer");
+  /** Reads README.md first, then lists files until the answer is forced; then each forced answer comes from `answers`. */
+  const untilForced = (answers: Array<Record<string, unknown>>) => {
+    let given = 0;
+    const reply = (request: StubRequest, index: number): Reply => {
+      if (!forced(request)) return index === 0 ? toolCall("read_file", { path: "README.md" }, { id: "c0" }) : toolCall("list_files", {}, { id: `c${index}` });
+      return toolCall("submit_answer", answers[given++] ?? ANSWER, { id: `c${index}` });
+    };
+    return { reply, given: () => given };
+  };
+  const answerOutput = (page: RunEventsPage) => page.events.find((e) => e.stepId === "explain" && e.type === "step.output" && e.data?.["standing"] !== undefined);
+
+  it("asks once for the findings three forced answers left out, then takes the next as it is, labelled: the original regression", async () => {
+    const repo = makeRepo();
+    const script = untilForced([WITHOUT_FINDINGS, WITHOUT_FINDINGS, WITHOUT_FINDINGS, ANSWER]);
+    const { stub, engine } = await setup(script.reply);
+    const run = await explain(engine, repo);
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
+    const chats = stub.chats();
+    // Forced from step 13: one refusal, one more answer, then nothing: answers three and four are never asked for.
+    assert.deepEqual([chats.length, script.given()], [15, 2]);
+    const refused = page.events.filter((e) => e.type === "tool.called" && e.data?.["refused"] === "no findings");
+    assert.deepEqual(refused.map((e) => [e.message, e.data?.["step"]]), [["submit_answer refused: no findings", 13]]);
+    assert.ok(JSON.stringify(chats[14]?.body?.messages).includes("findings: your answer has none"), "the refusal shows the model the shape a finding takes");
+    assert.equal(page.events.filter((e) => e.type === "model.call").length, chats.length, "every request is recorded once");
+
+    const result = await engine.client.call("runs.result", { runId: run.id });
+    assert.deepEqual([result?.standing, result?.findings, result?.answeredAtStep], ["no-findings", [], 14]);
+    assert.deepEqual(result?.context.answer?.refusals, { citations: 0, conflicts: 0, findings: 1, schema: 0 });
+    assert.deepEqual([result?.context.answer?.turnedDown?.steps, result?.context.answer?.turnedDown?.inputTokens !== null], [1, true]);
+    // The conflict the answer reported is kept: it isn't lost with a refused answer, and nothing is made up to fill the findings.
+    assert.equal(result?.conflicts.length, 1);
+    assert.match(answerOutput(page)?.message ?? "", /^No findings established\. 1 of 1 citations point to lines the model was shown$/);
+  });
+
+  it("asks for findings when the first answer has none, and takes the one that gives them: the rehearsal's case", async () => {
+    const repo = makeRepo();
+    const script = [toolCall("read_file", { path: "README.md" }, { id: "c0" }), toolCall("submit_answer", { ...ANSWER, findings: [] }, { id: "c1" }), toolCall("submit_answer", ANSWER, { id: "c2" })];
+    const { stub, engine } = await setup((_request, index) => script[index] ?? httpError(500, "done"));
+    const run = await explain(engine, repo);
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
+    const result = await engine.client.call("runs.result", { runId: run.id });
+    assert.deepEqual([result?.standing, result?.findings.length, result?.context.answer?.refusals.findings, result?.context.answer?.turnedDown?.steps, stub.chats().length], ["established", 1, 1, 1, 3]);
+  });
+
+  it("takes an answer without findings at once when no step is left for another, labelled, after answers refused for their shape", async () => {
+    const repo = makeRepo();
+    const broken = { ...ANSWER, gaps: ["x".repeat(400)] };
+    const script = untilForced([broken, broken, WITHOUT_FINDINGS]);
+    const { stub, engine } = await setup(script.reply);
+    const run = await explain(engine, repo);
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
+    const result = await engine.client.call("runs.result", { runId: run.id });
+    assert.deepEqual([stub.chats().length, result?.standing, result?.answeredAtStep], [16, "no-findings", 15]);
+    assert.deepEqual(result?.context.answer?.refusals, { citations: 0, conflicts: 0, findings: 0, schema: 2 });
+    assert.equal(result?.context.answer?.turnedDown?.steps, 2);
+  });
+
+  it("fails an answer whose summary is blank every time as malformed, naming why, and stores no result; a padded one is trimmed", async () => {
+    const repo = makeRepo();
+    const script = untilForced([{ ...ANSWER, summary: "   " }, { ...ANSWER, summary: "\n\t" }, { ...ANSWER, summary: " " }]);
+    const { engine } = await setup(script.reply);
+    const run = await explain(engine, repo);
+    const page = await finished(engine, run.id);
+    assert.deepEqual([page.status, failureOf(page)], ["failed", "malformed"]);
+    assert.match(page.events.find((e) => e.type === "run.failed")?.message ?? "", /no answer was accepted within 16 model steps; 3 turned down \(3 for their shape\)/);
+    assert.equal(await engine.client.call("runs.result", { runId: run.id }), null);
+
+    const padded = [toolCall("read_file", { path: "README.md" }, { id: "c0" }), toolCall("submit_answer", { ...ANSWER, summary: " \n" }, { id: "c1" }), toolCall("submit_answer", { ...ANSWER, summary: "  A small timer app.  " }, { id: "c2" })];
+    const second = await setup((_request, index) => padded[index] ?? httpError(500, "done"));
+    const secondRun = await explain(second.engine, repo);
+    assert.equal((await finished(second.engine, secondRun.id)).status, "succeeded");
+    const result = await second.engine.client.call("runs.result", { runId: secondRun.id });
+    assert.deepEqual([result?.summary, result?.context.answer?.refusals.schema], ["A small timer app.", 1]);
+  });
+
+  it("labels findings that cite only lines the model wasn't shown as unsupported, never as an explanation with evidence", async () => {
+    const repo = makeRepo();
+    const unread = { summary: "A timer app.", findings: [UNREAD_FINDING], gaps: [] };
+    const script = [toolCall("read_file", { path: "README.md" }, { id: "c0" }), ...[1, 2, 3].map((n) => toolCall("submit_answer", unread, { id: `c${n}` }))];
+    const { engine } = await setup((_request, index) => script[index] ?? httpError(500, "done"));
+    const run = await explain(engine, repo);
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
+    const result = await engine.client.call("runs.result", { runId: run.id });
+    assert.deepEqual([result?.standing, result?.checks, result?.context.answer?.refusals.citations], ["unsupported", { citations: 1, checked: 0 }, 2]);
+    assert.match(answerOutput(page)?.message ?? "", /^No finding cites lines the model was shown\. 0 of 1 citations point to lines the model was shown$/);
+  });
+});

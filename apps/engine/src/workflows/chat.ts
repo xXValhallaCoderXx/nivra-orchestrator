@@ -8,9 +8,9 @@ import type { ExecutionBackend } from "../exec/backend.ts";
 import { Budget } from "../explain/budget.ts";
 import { checkCitation } from "../explain/citations.ts";
 import { Ledger } from "../explain/ledger.ts";
-import { EXPLAIN_LIMITS } from "../explain/limits.ts";
+import { canAnswerAgain, EXPLAIN_LIMITS } from "../explain/limits.ts";
 import { rankConflict } from "../explain/precedence.ts";
-import { Reading, readUntilAnswered, usageOf } from "../explain/reading.ts";
+import { Reading, readUntilAnswered, turnedDownCost, turnedDownText, usageOf } from "../explain/reading.ts";
 import { createReplyTools, REPLY_TOOL_SPECS, toolDefinitionChars } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
 import { createModelClient, failure, InternalFailure, ModelFailure, type Endpoint, type ModelClient, type StepRecord } from "../providers/model.ts";
@@ -274,6 +274,7 @@ export function createChatWorkflow(deps: ChatDeps) {
       }
       const internal = new InternalFailure();
       const reading = new Reading();
+      const policy = policyFor(prepared.model);
       const { tools, state } = createReplyTools({
         reader,
         ledger,
@@ -282,6 +283,8 @@ export function createChatWorkflow(deps: ChatDeps) {
         internal,
         step: () => reading.finished,
         answerDue: () => reading.answerDue,
+        // A reply has no findings check of its own, so this is asked of nothing yet; it is the same rule as explain's.
+        answerAgain: () => canAnswerAgain({ stepNumber: reading.finished, dueReasons: reading.dueReasons, forced: policy.forceAnswer }, EXPLAIN_LIMITS),
         preferences: turn.preferences,
         choices: new Set(),
         signal,
@@ -295,7 +298,7 @@ export function createChatWorkflow(deps: ChatDeps) {
         tools,
         answerTool: "submit_reply",
         accepted: () => state.accepted !== null,
-        policy: policyFor(prepared.model),
+        policy,
         budget,
         reading,
         state,
@@ -307,9 +310,9 @@ export function createChatWorkflow(deps: ChatDeps) {
       });
       deps.setMeta(runId, { usage: usageOf(steps) });
       if (failed) throw failed;
+      const refusals = { citations: state.citationRefusals, conflicts: state.conflictRefusals, findings: state.findingsRefusals, schema: reading.invalidAnswers };
       if (!state.accepted || state.answerStep === null) {
-        const turnedDown = state.rejected + reading.invalidAnswers;
-        throw failure("malformed", `no reply was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDown ? `; ${turnedDown} turned down` : ""}`);
+        throw failure("malformed", `no reply was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDownText(refusals)}`);
       }
       const accepted = state.accepted;
       const answerStep = state.answerStep;
@@ -337,10 +340,11 @@ export function createChatWorkflow(deps: ChatDeps) {
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
           answer: {
             dueReasons: reading.dueReasons,
-            refusals: { citations: state.citationRefusals, conflicts: state.conflictRefusals, schema: reading.invalidAnswers },
+            refusals,
             acceptedAfterRefusals: state.rejected + reading.invalidAnswers,
             conflictsDropped: state.conflictsDropped,
             suggestionsDropped: 0,
+            turnedDown: turnedDownCost(steps, [...state.refusedSteps, ...reading.invalidAnswerSteps]),
           },
           history: recorded.history,
         },

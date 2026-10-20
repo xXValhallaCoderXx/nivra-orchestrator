@@ -6,7 +6,7 @@ import { LIMITS, type Delivered, type RepoReader } from "../repo/files.ts";
 import { RepoCancelled } from "../repo/git.ts";
 import { RepoError } from "../repo/paths.ts";
 import { REPLY_TOOL_DESCRIPTION, ReplyInput } from "../chat/reply.ts";
-import { ANSWER_TOOL_DESCRIPTION, AnswerInput, type AnswerConflict, type Citation } from "./answer.ts";
+import { ANSWER_TOOL_DESCRIPTION, AnswerInput, NO_FINDINGS, type AnswerConflict, type Citation } from "./answer.ts";
 import type { Budget } from "./budget.ts";
 import { checkCitation, type CheckedCitation } from "./citations.ts";
 import type { Ledger, LedgerKind } from "./ledger.ts";
@@ -24,7 +24,9 @@ import { conflictProblems, conventionOf } from "./precedence.ts";
  * Both hand-in tools share one gate (D23). An answer whose conflicts name ids the run doesn't have, that cites lines the
  * model wasn't shown, or that makes a claim needing lines with none, is turned down, naming them, while there is time
  * to fix it; when the answer is due, or after two such refusals of each kind, it is accepted: unusable conflicts are
- * dropped and counted, citations are labelled for what they are, and a claim with no lines decides nothing.
+ * dropped and counted, citations are labelled for what they are, and a claim with no lines decides nothing. An
+ * explanation with no findings is turned down once, while it can still be given again (NIV-26), then accepted and
+ * labelled: the gate never fills it with findings of its own.
  */
 
 export interface ToolEvent {
@@ -44,6 +46,10 @@ export interface ToolsState<A> {
   citationRefusals: number;
   /** Answers turned down for conflicts naming ids the run doesn't have, or fewer than two sides. */
   conflictRefusals: number;
+  /** Answers turned down for having no findings (NIV-26): at most once. */
+  findingsRefusals: number;
+  /** The step of each answer the gate turned down, so what they cost can be counted. */
+  refusedSteps: number[];
   /** Conflicts dropped from the accepted answer because they couldn't be used. */
   conflictsDropped: number;
   /** Whether the budget ran out, however it did. */
@@ -67,6 +73,8 @@ export interface ExplainToolsOptions {
   step: () => number;
   /** Whether this step must give the answer: then it is accepted whatever it cites. */
   answerDue: () => boolean;
+  /** Whether an answer turned down now could still be given again, within the run's steps, time and budget (NIV-26). */
+  answerAgain: () => boolean;
   preferences: RunContext["preferences"];
   /** The task's choice ids, `c1` to `c5`; none in a conversation. */
   choices: ReadonlySet<string>;
@@ -78,6 +86,8 @@ const BUDGET_NOTE = "The context budget for this run is used up: submit your ans
 /** How many times an answer is turned down for its citations, and for its conflicts, before it is accepted as it is. */
 export const MAX_CITATION_REFUSALS = 2;
 export const MAX_CONFLICT_REFUSALS = 2;
+/** How many times an answer is turned down for having no findings before it is accepted, labelled, as it is (NIV-26). */
+export const MAX_FINDINGS_REFUSALS = 1;
 /** The problems a model can fix by reading, or by dropping the citation. */
 const FIXABLE: ReadonlySet<CheckedCitation["problem"]> = new Set(["file not read", "lines not shown", "not a repository path"]);
 
@@ -146,7 +156,19 @@ export function turnsNote(step: number): string {
 }
 
 function newState<A>(): ToolsState<A> {
-  return { accepted: null, answerStep: null, rejected: 0, citationRefusals: 0, conflictRefusals: 0, conflictsDropped: 0, budgetExhausted: false, resultsLimited: 0, resultsReplaced: 0 };
+  return {
+    accepted: null,
+    answerStep: null,
+    rejected: 0,
+    citationRefusals: 0,
+    conflictRefusals: 0,
+    findingsRefusals: 0,
+    refusedSteps: [],
+    conflictsDropped: 0,
+    budgetExhausted: false,
+    resultsLimited: 0,
+    resultsReplaced: 0,
+  };
 }
 
 /** The explain run's tools: the read tools and `submit_answer`. */
@@ -164,6 +186,8 @@ export function createExplainTools(options: ExplainToolsOptions): { tools: Recor
           suggestion.citations.length ? [] : [`suggestions[${index}]: it cites no lines that show the convention. Read them with read_file and cite them, or drop the suggestion.`],
         ),
       ],
+      // An explanation is its findings: one with none is asked for them once, never given any (NIV-26).
+      essential: (answer) => (answer.findings.length ? null : NO_FINDINGS),
       accepted: (answer, dropped) => {
         const count = answer.findings.length;
         return {
@@ -336,6 +360,8 @@ interface AnswerSpec<A extends { conflicts: AnswerConflict[] }> {
   citations(answer: A): Citation[];
   /** Claims that need lines and cite none, as problems the model can fix, given the conflicts that will be dropped. */
   uncited(input: A, dropped: ReadonlySet<number>): string[];
+  /** What the answer lacks to be one at all, asked for once while it can still be given again; null when nothing. */
+  essential?(answer: A): string | null;
   /** What the timeline records once it is accepted. */
   accepted(answer: A, conflictsDropped: number): { message: string; data: JsonObject };
 }
@@ -367,6 +393,7 @@ function createAnswerTool<A extends { conflicts: AnswerConflict[] }>(options: Ex
         if (unusable.length && !options.answerDue() && state.conflictRefusals < MAX_CONFLICT_REFUSALS) {
           state.rejected++;
           state.conflictRefusals++;
+          state.refusedSteps.push(options.step());
           // The event counts them: a conflict's topic is model text, which the timeline never keeps.
           options.onTool({
             message: `${spec.id} refused: ${unusable.length} ${unusable.length === 1 ? "conflict" : "conflicts"} that can't be used`,
@@ -382,6 +409,7 @@ function createAnswerTool<A extends { conflicts: AnswerConflict[] }>(options: Ex
         if ((unshown.length || uncited.length) && !options.answerDue() && state.citationRefusals < MAX_CITATION_REFUSALS) {
           state.rejected++;
           state.citationRefusals++;
+          state.refusedSteps.push(options.step());
           const counts = [
             unshown.length ? `${unshown.length} ${unshown.length === 1 ? "citation" : "citations"} of lines the model wasn't shown` : null,
             uncited.length ? `${uncited.length} ${uncited.length === 1 ? "claim" : "claims"} citing no lines` : null,
@@ -391,6 +419,16 @@ function createAnswerTool<A extends { conflicts: AnswerConflict[] }>(options: Ex
             data: { tool: spec.id, step: options.step(), refused: "citations", citations: unshown.length, uncited: uncited.length },
           });
           return { accepted: false, problems: [...uncited, ...unshown.map(describeUnshown)].slice(0, 12) };
+        }
+        // Last, so every other refusal stays as it was (D23). Asked even when the answer is due, while it can still be
+        // given again: an answer with nothing established is worth one more step, and then is taken, labelled, as it is.
+        const missing = spec.essential?.(answer) ?? null;
+        if (missing !== null && state.findingsRefusals < MAX_FINDINGS_REFUSALS && options.answerAgain()) {
+          state.rejected++;
+          state.findingsRefusals++;
+          state.refusedSteps.push(options.step());
+          options.onTool({ message: `${spec.id} refused: no findings`, data: { tool: spec.id, step: options.step(), refused: "no findings" } });
+          return { accepted: false, problems: [missing] };
         }
         state.accepted = answer;
         state.answerStep = options.step();

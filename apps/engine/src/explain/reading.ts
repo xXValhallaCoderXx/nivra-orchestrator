@@ -19,6 +19,8 @@ export class Reading {
   dueReasons: AnswerDueReason[] = [];
   /** Answers Mastra turned down because they didn't match the schema: the tool never saw them. */
   invalidAnswers = 0;
+  /** The steps that gave those answers, so what they cost can be counted. */
+  invalidAnswerSteps: number[] = [];
 }
 
 export interface ReadingOptions {
@@ -54,6 +56,36 @@ export function usageOf(steps: readonly StepRecord[]): RunUsage {
   };
 }
 
+/**
+ * What the answers turned down cost (NIV-26): the steps that gave them, by step number, with their tokens as reported
+ * (null once one of them didn't say, never 0) and their time. A step that gave two refused answers counts once.
+ */
+export function turnedDownCost(steps: readonly StepRecord[], stepNumbers: readonly number[]): { steps: number; inputTokens: number | null; outputTokens: number | null; elapsedMs: number } {
+  const wanted = new Set(stepNumbers);
+  const refused = steps.filter((step) => wanted.has(step.stepNumber));
+  const reported = refused.every((step) => step.inputTokens !== null && step.outputTokens !== null);
+  return {
+    steps: refused.length,
+    inputTokens: reported ? refused.reduce((sum, step) => sum + step.inputTokens!, 0) : null,
+    outputTokens: reported ? refused.reduce((sum, step) => sum + step.outputTokens!, 0) : null,
+    elapsedMs: Math.round(refused.reduce((sum, step) => sum + step.elapsedMs, 0)),
+  };
+}
+
+/** The answers turned down before none was accepted, by cause, for a failure's message: empty when there were none. */
+export function turnedDownText(refusals: { citations: number; conflicts: number; findings: number; schema: number }): string {
+  const causes: Array<[number, string]> = [
+    [refusals.citations, "citations"],
+    [refusals.conflicts, "conflicts"],
+    [refusals.findings, "findings"],
+    [refusals.schema, "shape"],
+  ];
+  const total = causes.reduce((sum, [n]) => sum + n, 0);
+  if (!total) return "";
+  const parts = causes.filter(([n]) => n > 0).map(([n, cause]) => (cause === "findings" ? `${n} for having no findings` : `${n} for ${n === 1 ? "its" : "their"} ${cause}`));
+  return `; ${total} turned down (${parts.join(", ")})`;
+}
+
 /** Runs the loop. Returns every request made, a failed one included, and the failure that ended it, if one did. */
 export async function readUntilAnswered(options: ReadingOptions): Promise<{ steps: StepRecord[]; failed: ModelFailure | null }> {
   const { client, reading, budget, state, policy, model } = options;
@@ -84,7 +116,10 @@ export async function readUntilAnswered(options: ReadingOptions): Promise<{ step
         steps.push(step);
         budget.observe(step);
         for (const rejected of step.rejectedTools) {
-          if (rejected.tool === options.answerTool) reading.invalidAnswers++;
+          if (rejected.tool === options.answerTool) {
+            reading.invalidAnswers++;
+            reading.invalidAnswerSteps.push(step.stepNumber);
+          }
           const count = rejected.problems.length;
           options.event("tool.called", `${rejected.tool} refused: its input didn't match the tool's schema (${count} ${count === 1 ? "problem" : "problems"})`, {
             tool: rejected.tool,

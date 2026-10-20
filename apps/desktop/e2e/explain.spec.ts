@@ -173,6 +173,24 @@ test("a suggestion can be kept, in the person's own wording, as the project's ow
   await expect(row.getByTestId("preference-revision")).toContainText("kept from a suggestion");
 });
 
+test("an answer with no findings is asked for them once, then shown labelled, never as an explanation with evidence (NIV-26)", async () => {
+  test.skip(packaged, "a packaged app ignores the test endpoint switch");
+  const before = stub.chats().length;
+  more = (request) => (request.raw.includes('"role":"tool"') ? toolCall("submit_answer", { ...ANSWER, findings: [] }, { id: "n1" }) : toolCall("read_file", { path: "README.md" }, { id: "n0" }));
+  while (await page.getByTestId("explain-choice-remove").count()) await page.getByTestId("explain-choice-remove").first().click();
+  await page.getByTestId("explain-start").click();
+  await expect(page.getByTestId("explain-standing")).toHaveAttribute("data-standing", "no-findings");
+  await expect(page.getByTestId("explain-standing")).toContainText("No findings established.");
+  await expect(page.getByTestId("explain-status")).toHaveText("no findings");
+  await expect(page.getByTestId("explain-finding")).toHaveCount(0);
+  await expect(page.getByTestId("explain-timeline")).toContainText("submit_answer refused: no findings");
+  await page.getByTestId("explain-context").click();
+  await expect(page.getByTestId("explain-context-answer")).toContainText("0 for its shape, 1 for having no findings.");
+  await expect(page.getByTestId("explain-context-answer")).toContainText("Answers turned down took 1 model step");
+  // A read, the answer turned down, the answer taken: no request beyond the one repair.
+  expect(stub.chats().length - before).toBe(3);
+});
+
 test("a packaged app ignores the test endpoint switch, and explaining without a key fails before any request", async () => {
   test.skip(!packaged, "only a packaged app ignores the switch");
   await page.getByTestId("doctor-run").click();

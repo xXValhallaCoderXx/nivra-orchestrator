@@ -23,6 +23,18 @@ export function mustAnswer(state: { stepNumber: number; elapsedMs: number; budge
 }
 
 /**
+ * Whether an answer turned down now could be given again (NIV-26): there must be a step left for it, the clock and the
+ * budget must not have made the answer due (the time rule holds back one whole call only while it hasn't fired), and
+ * once the answer is due the model must be one known to honour a forced answer, so the next one can't be lost to a
+ * reply in text. With one step allowed it is never true, so a single-call run makes no repair request.
+ */
+export function canAnswerAgain(state: { stepNumber: number; dueReasons: readonly AnswerDueReason[]; forced: boolean }, limits: ExplainLimits = EXPLAIN_LIMITS): boolean {
+  if (state.stepNumber + 1 >= limits.maxSteps) return false;
+  if (state.dueReasons.includes("time") || state.dueReasons.includes("budget")) return false;
+  return state.dueReasons.length === 0 || state.forced;
+}
+
+/**
  * How many more exploring turns the model has after the one in progress, `step` (0-based), before the answer is due by
  * the step count (D23). Turns are model steps, not tool calls: one step can carry several calls.
  */
