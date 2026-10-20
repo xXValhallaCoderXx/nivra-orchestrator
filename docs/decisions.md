@@ -1569,3 +1569,74 @@ evidence (D27), against thresholds agreed before it ran.
   runs them bundled, so the file is only ever opened on Windows (D7).
 - **Shared files.** Once this merges, the shared files Track A held pass to Track B, with a handoff on NIV-39.
 - **Evidence:** `docs/acceptance.md`, *Plan reviews in the window (D31, NIV-39)*.
+
+## D32. The council against one reviewer, on five synthetic plans: adopt by the frozen rule, at its edge (2026-10-21)
+
+**Decision.**
+- **The outcome is adopt.** The rule was frozen before any paid call, and every adopt rule held, so the window keeps
+  the council of D30 and D31 (two independent reviewers, then a chair) as its review of a saved plan. The single
+  panel stays the contract's baseline, and the window doesn't offer it.
+- **It is evidence from five short synthetic plans,** with one run per arm. It is not a general claim that a council
+  reviews better than one reviewer. It authorises no expansion: no more reviewers, rounds or roles, and no redesign.
+- **The labels are v1.** They were proposed with AI assistance, then reviewed and approved by Nate before the arm
+  mapping was revealed. A later correction keeps v1 and makes a documented v2 that says whether the decision changes.
+
+**The batch** (approved digest `c3b9225a…`, revision `196cad1`, 21 October 2026).
+- **Runs:** 10, all complete, with 20 requests. Nothing was retried or retaken, and no stop rule fired. The checks
+  made before any inference request passed before every run.
+- **Usage:** 31,771 input and 11,750 output tokens, all reported. The runs took about 1.6 minutes in all.
+
+| | Single reviewer | Council |
+|---|---|---|
+| Known defects found, of 12 on F1–F4 | 9 | 11 |
+| Useful novel findings, distinct | 8 | 9 |
+| Unsupported findings | 0 | 1 (U1) |
+| False alarms on the control | 0 | 0 |
+| The control reviewed as sound, substantively | yes | yes |
+| Complete runs | 5 of 5 | 5 of 5 |
+| Findings raised | 17 | 35, of which 15 repeat another |
+| Actionable findings | all | all |
+| Median latency, against the single reviewer's | | 1.90× |
+| Median tokens, against the single reviewer's | | 3.35× |
+
+- **By fixture:**
+  - **F1:** the council found all 3 known defects, the single reviewer 1.
+  - **F2:** 2 each. Neither was credited with the provider-timeout defect.
+  - **F3 and F4:** all 3 each.
+  - **F5, the control:** neither raised a finding.
+
+**Why.**
+- **The rule decides, as frozen.** Every adopt rule held, and no defer rule did.
+- **Three adopt rules held exactly at their edge:**
+  - known defects, 2 above (adopt needs 2);
+  - known defects plus useful novel findings, 3 above (needs 3);
+  - unsupported findings, 1 above (allows 1).
+
+  One label different on any of them would have made it simplify.
+- **The known-defect margin comes from one fixture,** F1.
+
+**Consequences.**
+- **Nothing changes in the window,** which already offers the council. The council costs about 1.9 times the time and
+  3.4 times the tokens of one reviewer here. It gives twice the findings to read, 15 of which repeat
+  another, and agreement between reviewers earns nothing.
+- **What the evidence doesn't show:**
+  - **Variance:** one run per arm on five short plans (365–692 characters). Sampling is the provider's default, so a
+    rerun can differ.
+  - **Labels:** proposed with AI assistance, then reviewed by one person. The protocol named Nate as the labeller.
+    There is no second labeller, so agreement between labellers is unmeasured, and what the assistant saw beyond the
+    sheet isn't recorded. The arm mapping was never written down: it was rebuilt only at scoring, after v1's hash was
+    recorded.
+  - **The automatic pass:** it agreed with the labels on 40 of 52 findings. By the automatic reading alone, the
+    known-defect margin is 1 (single 10, council 11). The single reviewer's F2 finding matched the provider-timeout
+    stems, but was labelled as not naming that defect.
+  - **Actionability** didn't discriminate: every finding was labelled actionable.
+  - **The authoring:** the fixtures and the rubric were written by the agent that built the council, before any run.
+  - **The chair's synthesis** isn't scored.
+  - **The setting:** one model (Nemotron 3 Super), one provider, one day.
+- **Hashes**, of files in the evidence folder:
+  - the labelled sheet, v1: `a899ab9a…5c95`;
+  - the sheet the batch wrote: `479d7f3f…eb8a`;
+  - the scores: `f945c5e2…62d9`;
+  - the decision: `c72c3bbe…b5f1`.
+- **Evidence:** `docs/acceptance.md`, *Council evaluation (D32, NIV-40)*, and
+  `~/nivra-acceptance/council-eval-20261020T202836Z-196cad1/`.

@@ -240,6 +240,14 @@ pnpm council:eval --score <dir>                                    # once the sh
     and refuses a sheet that isn't the one those runs made.
   - Nate labels each line's `label`, from `sheet.md` alone: the runs folder, `batch.json` and the journal name each
     run's arm. `--score` then decides from the labels alone, with the automatic-only scores beside them.
+- **Label versions.** A labelled sheet is frozen before it is scored, and never edited afterwards:
+  - **v1:** `sheet.v1.json`, read-only, is the sheet the batch wrote with the approved labels copied in. Each row is
+    checked first, and only the label fields are copied.
+  - **Its record:** `labels.v1.json` holds its hash, who labelled it, and the hash of the sheet the batch wrote (kept
+    as `sheet.original.json`). The script that did the checking and freezing is kept beside them, as
+    `freeze-labels.ts`.
+  - **Its scores:** `scores.v1.json` and `decision.v1.md`, with their hashes in `score.v1.json`.
+  - **A correction** makes v2 the same way, scores it, and records whether the decision changed. v1 stays as it was.
 - **Test-only options,** refused for a paid batch: `--only`, `--deadline-ms`, `--reconcile-ms`, `--engine` (a
   stand-in engine) and `--fixtures` (another copy of the frozen inputs).
 - **Evidence** goes to `~/nivra-acceptance/council-eval-<UTC>-<revision>/` (0700): the journal, every run's summary,

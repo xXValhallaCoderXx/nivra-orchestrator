@@ -965,6 +965,147 @@ for the shared files Track B's NIV-44 waits on.
 - **Not run yet:** `test:windows`, with its new check of a plan seeded by the staged `node.exe`. It needs a turn on the
   shared Windows folders, after `pnpm dev:win --no-launch`.
 
+### Council evaluation (D32, NIV-40)
+
+Track A's fourth checkpoint (A3, NIV-22): commits on `feature/niv-40-council-eval`, stacked on A2. It is evidence from
+five short synthetic plans, one run per arm, not a general claim about councils.
+
+| Commit | What |
+|---|---|
+| `66a85ed` | The evaluator, offline: five frozen plans, the rubric, the protocol, scoring and the batch |
+| `1210c54` | How to run it |
+| `6fe7fe4` | From Nate's review: model, route and sampling checked before any inference request; every wait bounded |
+| `be14fc8` | Nate labels the sheet, as chosen at the freeze |
+| `f8d440e`, `196cad1` | The docs and the request for approval's wording |
+
+**Offline** (`apps/engine/test/council-eval.test.ts`, 16 tests, a real engine against the stub):
+- **The frozen inputs:**
+  - the five plans pass the packet's own schema;
+  - both arms get the same packet, with no preferences, no path and no repository;
+  - the protocol's limits are the engine's;
+  - the approval digest is pinned.
+- **The rubric:** every known defect matches its positive examples and none of its negatives, and nothing matches
+  the control's.
+- **The scoring:**
+  - each known defect counts once per fixture and arm, however many findings name it;
+  - novelty is judged only where no known defect is named;
+  - the control's correct outcome is a substantive "no material issues", told apart from an incomplete review;
+  - every edge of the decision rule is tested.
+- **The batch:**
+  - exactly 20 requests in the protocol's order;
+  - a reviewer's 500 kept and never retaken;
+  - a batch killed mid-review resumed by request id, with nothing sent again;
+  - the deadline and the 60-minute cap held.
+- **Before any inference request:** another model, another sampling or another endpoint each stops the batch with
+  not one inference request.
+- **A run that keeps running after it is cancelled:** kept as unresolved within its bound, the batch stopped, and it
+  is never sent again on resume.
+
+**The paid batch** (approved on 21 October: digest `c3b9225a9c41e4c9cde2a90c029682796886817f463e7e5286eab23082fc6683`,
+revision `196cad1`, a committed tree).
+- **When and where:** 20:28:37 to 20:30:25 UTC, in
+  `~/nivra-acceptance/council-eval-20261020T202836Z-196cad1/` (0700). The key came from a file outside the repository
+  (0600).
+- **The outcome:** every check before an inference request passed. No stop rule fired, and nothing was retried or
+  retaken.
+
+| Fixture | Arm | Run | End | Requests | Time | Tokens in / out |
+|---|---|---|---|---|---|---|
+| F1 | single | `16a748c5-4f9f-4146-b650-70d85fab316f` | succeeded, complete | 1 | 6.0 s | 1,405 / 647 |
+| F1 | council | `df1a6af7-063c-416a-b012-ef96ccaffba0` | succeeded, complete | 3 | 16.1 s | 5,160 / 1,979 |
+| F2 | council | `d8635dc5-e495-4aca-adbe-2c19b3df0c86` | succeeded, complete | 3 | 16.3 s | 5,360 / 2,268 |
+| F2 | single | `2ad6eb27-8022-4ceb-acee-49c5e5274405` | succeeded, complete | 1 | 8.6 s | 1,504 / 772 |
+| F3 | single | `fe7b2f8b-5132-465e-a49b-813d4bd7575a` | succeeded, complete | 1 | 6.5 s | 1,369 / 749 |
+| F3 | council | `2686320e-ea94-4fa5-ae42-afe89e9887ba` | succeeded, complete | 3 | 12.1 s | 4,954 / 1,946 |
+| F4 | council | `617184bd-9a4d-46dc-99c9-5fa210980ad7` | succeeded, complete | 3 | 12.6 s | 4,903 / 2,039 |
+| F4 | single | `52a48f69-70cd-499b-aa83-1201ab759d85` | succeeded, complete | 1 | 9.0 s | 1,383 / 673 |
+| F5 | single | `333b24c9-df75-4325-bc43-24a425f41440` | succeeded, complete | 1 | 2.0 s | 1,427 / 188 |
+| F5 | council | `52244ab8-0927-42ef-94dc-6450ed3a55b7` | succeeded, complete | 3 | 4.6 s | 4,306 / 489 |
+
+**The labels, v1.**
+- **Who:** proposed with AI assistance, then reviewed and approved by Nate as v1.
+- **What was copied:** each of the 55 rows was checked against the sheet the batch wrote (item, order, finding and
+  every other field outside the label). Only the seven label fields were copied.
+- **When:** v1 was frozen, read-only, and its hash recorded (`labels.v1.json`) before scoring rebuilt the arm mapping,
+  which was never written down. The script that checked and froze it is kept beside it, as `freeze-labels.ts`.
+- **Hashes:**
+  - the sheet the batch wrote (`sheet.original.json`): `479d7f3f57e60731095c55c72eca6711f5968327193404852c788bea2aeaeb8a`;
+  - v1 (`sheet.v1.json`, the same bytes as the approved file): `a899ab9a8a4b6387b6c2de2bc87ba1f40d8d318be128ebca4434b633ee025c95`;
+  - the scores (`scores.v1.json`): `f945c5e2d040c6e26f884a8496a1a9b1df73b2cec90c21a0b7564894954062d9`;
+  - the decision (`decision.v1.md`): `c72c3bbe6a3fe1e6650dd8a077a4cb5f3d680cd028fc4cf51553925be2cdb5f1`.
+- **A later correction** keeps v1 and makes a v2 the same way, with its own hashes and whether the decision changed.
+
+**Scores** (`pnpm council:eval --score`, offline, from v1):
+
+| | Single reviewer | Council |
+|---|---|---|
+| Known defects found, of 12 on F1–F4 | 9 (F1 1, F2 2, F3 3, F4 3) | 11 (F1 3, F2 2, F3 3, F4 3) |
+| Useful novel findings, distinct | 8 | 9 |
+| Unsupported findings | 0 | 1 (U1, the architecture reviewer on F3) |
+| False alarms on the control | 0 | 0 |
+| The control reviewed as sound, substantively | yes | yes |
+| Complete runs | 5 of 5 | 5 of 5 |
+| Findings raised | 17, each a distinct known defect or useful point | 35 (architecture 14, risks 21), of which 15 repeat another |
+| Actionable findings | 17 of 17 | 35 of 35 |
+| Median latency ratio | | 1.90 |
+| Median token ratio | | 3.35 |
+
+- **The decision, by the frozen rule: adopt.** Every adopt rule held, and no defer rule did.
+- **Three adopt rules held exactly at their edge:**
+  - known defects, 2 above (adopt needs 2);
+  - known defects plus useful novel findings, 3 above (needs 3);
+  - unsupported findings, 1 above (allows 1).
+
+  The whole known-defect margin comes from F1.
+- **The automatic pass alone** credits the single reviewer with F2's provider-timeout defect: 10 against the
+  council's 11.
+- **The limitations** are D32's: one run per arm, the labels' provenance, actionability that didn't discriminate,
+  authoring by the council's builder, and an unscored chair.
+
+### Track A completion record (NIV-22)
+
+Prepared 21 October 2026, at `196cad1` with this record's docs commit. **The parent stays open:** item 8 isn't met yet
+(below).
+
+| NIV-22 acceptance item | Evidence | Where it stands |
+|---|---|---|
+| 1. Two reviewers, the same frozen packet, neither seeing the other's report; the two roles | A1: `review.test.ts` (byte-identical messages, each blind to the other). Live: five council runs, all complete | Evidenced |
+| 2. A chair keeps finding ids, evidence, assumptions and dissent; agreement is no proof; a missing reviewer gives an incomplete review, never approval | A1: dissent, a failed chair, a fast failure beside a slow success, unusable answers. A2: the cards' "Agreement isn't proof" and "Incomplete" (`review.spec.ts`) | Evidenced |
+| 3. ModelClient reused; scoped context; aggregate limits and cancellation; at most three calls; no hidden retries | A1: `run-budget.test.ts`, `review-units.test.ts`, `review.test.ts` (cancel, deadline, no resend); real-engine council: 3 requests. Live: 20 requests for 10 runs | Evidenced |
+| 4. A shared budget guard for explain and repository chat; estimates apart from reported usage; unknown stays null | A1: explain and chat over stdio (`run-budget`, `budget-exhausted`); the context view's run budget | Evidenced |
+| 5. A report saved in its conversation, bound to the plan version and context; a revision makes a new review; nothing replayed; evidence never overwritten | A2: workspace v2's triggers; host tests (a stale version's report byte-equal, a quit and a kill interrupted, the lost answer, a mismatched binding kept nowhere); `review.spec.ts` (relaunch) | Evidenced |
+| 6. Five synthetic plans with a sound control, against the same-input single reviewer, frozen before live calls | A3: this record's previous section; D32 | Evidenced: adopt, at its edge |
+| 7. Reports inform a person; they never change readiness, memory, patches or external tickets | A2: a task is ready without a review; the store and the plan unchanged by a review; the cards' copy | Evidenced |
+| 8. Every child and the original requirements have reviewable evidence before the parent is ready for review | Each checkpoint's section above | Not yet: see what is missing |
+
+**Platform matrix, as run:**
+
+| Check | A0 | A1 | A2 | A3 |
+|---|---|---|---|---|
+| `pnpm verify` | passed (domain 38, engine 226, desktop 181) | passed (43, 259, 181) | passed (43, 259, 199) | passed at `196cad1` (43, 275, 199) |
+| `test:e2e`, the built app | 33 passed, 1 skipped (packaged only) | 33 passed, 1 skipped | 43 passed, 1 skipped | not affected |
+| `test:packaged`, Linux | 21 passed, 13 skipped (the test endpoint) | not required | 24 passed, 20 skipped (the test endpoint) | not affected |
+| Real engine | `rpc.ts`: the regression, the key and plain-text canaries | `rpc.ts`: council, single, refusals, a fast failure | the engine didn't change | the paid batch |
+| `pnpm stage:runtime all` | passed | passed (protocol 7) | not rerun: the engine didn't change | not affected |
+| `verify:windows` | not required | **not run** | n/a | n/a |
+| `test:windows` | n/a | n/a | **not run** | n/a |
+
+**What is missing before the parent is ready for review:**
+- **A Windows turn:** A1's `verify:windows`, then `pnpm dev:win --no-launch` and A2's `test:windows`.
+- **The four checkpoint branches:** pushed, with their PRs opened and reviewed, and merged by Nate. NIV-26, NIV-27,
+  NIV-38, NIV-39 and NIV-40 are accepted with them.
+- **Track B's handoff:** after NIV-39 merges, the shared-file handoff for NIV-44.
+
+**Limitations the parent carries:**
+- **D29:** the engine's text before `initialize` (startup `engine.fatal`, the supervisor's log tail), and Mastra's own
+  validation errors about id-only step data.
+- **D30:** input budgets are estimates, never ceilings. Two concurrent requests on a low-tier key can draw a 429,
+  which leaves the review incomplete.
+- **D31:** older builds refuse a v2 profile.
+- **D32:** its limitations, above.
+- **A follow-up, NIV-46:** the engine creates Mastra's database files readable by others (0644). `nivra.db` is 0600.
+  The development home is 0755, so other local users can read `~/.nivra-dev/mastra.db*`.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
