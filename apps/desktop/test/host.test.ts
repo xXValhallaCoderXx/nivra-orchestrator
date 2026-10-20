@@ -11,6 +11,7 @@ import { isTerminal, type RunEventsPage, type SecretName } from "@nivra/domain";
 import { Host } from "../src/main/host.ts";
 import { HostStore, NO_SHARING } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
+import { previewFingerprint } from "../src/main/reviews.ts";
 import { RUN_UNAVAILABLE } from "../src/main/tasks.ts";
 import type { TargetFactory } from "../src/main/targets/registry.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
@@ -1286,5 +1287,331 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
       await assert.rejects(host.createTask({ title, fields, projectId: null, planId: null }), new RegExp(`^Error: ${field} (holds your saved Token Factory key|looks like it holds)`));
     }
     assert.equal(host.tasks().tasks.length, 0);
+  });
+});
+
+describe("Host: reviews of saved plan versions, bound to what their preview showed (D31)", () => {
+  const KEY = "test-key-0123456789";
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const PLAN = "Rename users.fullname to display_name in place during a rolling deploy, then roll back by redeploying release 40.";
+  type Role = "architecture" | "risks" | "single" | "chair";
+  const roleOf = (request: StubRequest): Role | null => (/Nivra review role: (architecture|risks|single|chair)/.exec(JSON.stringify(request.body?.messages ?? []))?.[1] as Role | undefined) ?? null;
+  const userMessage = (request: StubRequest | undefined) => JSON.stringify(((request?.body?.messages ?? []) as Array<{ role: string; content: unknown }>).find((m) => m.role === "user")?.content ?? null);
+  const reviewBy = (role: string, summary = `The ${role} reviewer's summary.`) =>
+    toolCall("submit_review", {
+      summary,
+      findings: [{ title: `${role}: old servers break mid-rollout`, detail: "Servers on the old release still read the old column.", recommendation: "Expand, then contract.", severity: "high", refs: ["plan"] }],
+      assumptions: [],
+      gaps: [],
+    });
+  const SYNTHESIS = toolCall("submit_synthesis", { summary: "Both say the rename breaks a rolling deploy.", priorities: ["arch-1", "risk-1"], agreements: [{ statement: "Old servers break mid-rollout.", findingIds: ["arch-1", "risk-1"] }], dissent: [], gaps: [] });
+  const SLOW = { ...reviewBy("slow"), delayMs: 15_000 };
+  /** A stub that answers a conversation's turns with `answer`, and plays each reviewer and the chair as `script` says. */
+  async function stubFor(script: Partial<Record<Role, Reply>> & { answer?: (request: StubRequest) => Reply } = {}) {
+    const council: Partial<Record<Role, Reply>> = { architecture: reviewBy("architecture"), risks: reviewBy("risks"), single: reviewBy("single"), chair: SYNTHESIS, ...script };
+    const stub = await startStub({
+      models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }],
+      chat: (request) => {
+        const role = roleOf(request);
+        if (!role) return script.answer ? script.answer(request) : text("Rename it in place, then redeploy.");
+        return council[role] ?? httpError(500, `no script for ${role}`);
+      },
+    });
+    stubs.push(stub);
+    return stub;
+  }
+  const reviewRequests = (stub: Stub) => stub.chats().filter((chat) => roleOf(chat) !== null);
+  const reposRoot = () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra review repos "));
+    dirs.push(root);
+    return root;
+  };
+  const calls = (home: string) => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter(Boolean) : []);
+  /** The latest answer in a conversation, once its last turn is answered. */
+  const answered = (host: Host, conversationId: string) =>
+    waitFor(() => {
+      const view = host.conversation(conversationId);
+      return view.turns.at(-1)?.status === "answered" ? view.messages.filter((m) => m.role === "assistant").at(-1)! : null;
+    }, "the answer");
+  /** A plan saved from the conversation's next answer, with `text` as its text (the answer's own when undefined). */
+  async function planIn(host: Host, conversationId: string, text: string | undefined = PLAN) {
+    await host.sendMessage(conversationId, "How do I rename the column?");
+    const answer = await answered(host, conversationId);
+    return host.savePlan(conversationId, answer.id, text);
+  }
+  /** The conversation's latest review, once it has ended. */
+  const ended = (host: Host, conversationId: string) =>
+    waitFor(() => {
+      const last = host.reviews(conversationId).at(-1);
+      return last && last.status !== "submitting" && last.status !== "running" ? last : null;
+    }, "the review to end", 30_000);
+  const start = async (host: Host, planId: string) => host.startReview(planId, "council", (await host.prepareReview(planId, "council")).expected);
+  const CHANGED = /^Error: What this review would send has changed since you opened it\. Check the new preview, then start again\.$/;
+
+  it("previews what a review sends, sends exactly that once, keeps the report bound to its version, and changes nothing else", async () => {
+    const stub = await stubFor();
+    const { host, root, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: "/nowhere/other" }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const personal = host.addPreference({ statement: `Prefer reversible changes ${randomUUID()}`, scope: "personal", projectId: null, intent: "default" });
+    const elsewhere = host.addPreference({ statement: `Another project's own ${randomUUID()}`, scope: "project", projectId: ids[0]!, intent: "default" });
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    const preview = await host.prepareReview(plan.id, "council");
+    assert.deepEqual(
+      [preview.planVersion, preview.latestVersion, preview.scope, preview.sends, preview.requests, preview.blocked],
+      [1, 1, { kind: "general" }, { textChars: PLAN.length, assumptions: 0, references: 0, preferences: [{ statement: personal.statement, scope: "personal", intent: "default" }] }, 3, null],
+    );
+    assert.equal(stub.chats().length, 1, "a preview sends nothing");
+    const store = readFileSync(join(root, "nivra.json"), "utf8");
+    const started = await host.startReview(plan.id, "council", preview.expected);
+    assert.deepEqual([started.status, started.planVersion, host.conversation(conversation.id).openReview, host.conversation(conversation.id).turns.length], ["submitting", 1, started.id, 1]);
+    const review = await ended(host, conversation.id);
+    assert.equal(review.status, "answered", review.note ?? "");
+    const report = review.report!;
+    assert.deepEqual(
+      [report.outcome, report.planId, report.planVersion, report.panel, report.request.clientRequestId, report.reviewers.map((r) => r.role), report.synthesis?.agreements.length, review.note],
+      ["complete", plan.id, 1, "council", review.id, ["architecture", "risks"], 1, null],
+    );
+    // What was kept, and what the engine checked it received, are what the preview was bound by.
+    assert.equal(previewFingerprint({ planId: plan.id, planVersion: 1, packetDigest: review.packetDigest, preferencesDigest: review.preferencesDigest, sharing: null, panel: "council" }), preview.expected);
+    assert.deepEqual([report.packetDigest, report.preferencesDigest, review.given.preferences], [review.packetDigest, review.preferencesDigest, 1]);
+    const sent = reviewRequests(stub);
+    assert.deepEqual(sent.map(roleOf).sort(), ["architecture", "chair", "risks"]);
+    const all = JSON.stringify(sent.map((chat) => chat.body?.messages));
+    assert.deepEqual([userMessage(sent[0]).includes(PLAN), all.includes(personal.statement), all.includes(elsewhere.statement), all.includes("How do I rename the column?")], [true, true, false, false]);
+    // A review writes nothing else: not the store, not the plan; a task made from the plan is ready without one.
+    assert.equal(readFileSync(join(root, "nivra.json"), "utf8"), store);
+    assert.deepEqual(host.plans(conversation.id).map((p) => [p.version, p.text]), [[1, PLAN]]);
+    const fields = { goal: "Rename the column", acceptanceCriteria: ["Old servers keep working"], scope: "", exclusions: "", context: "", assumptions: [], checks: [] };
+    const task = await host.createTask({ title: "Rename", fields, projectId: null, planId: plan.id });
+    assert.equal(host.setTaskState(task.summary.id, task.revision, "ready").summary.state, "ready");
+    // The plan moves on: v1's review stays as it was, and says so; reviewing v2 makes a new review.
+    const kept = JSON.stringify(report);
+    const v2 = await host.revisePlan(plan.id, `${PLAN} Add the new column first.`);
+    const [first] = host.reviews(conversation.id);
+    assert.deepEqual([first?.planVersion, first?.latestVersion, JSON.stringify(first?.report)], [1, 2, kept]);
+    await start(host, v2.id);
+    const second = await ended(host, conversation.id);
+    assert.deepEqual([second.status, second.planVersion, host.reviews(conversation.id).length, reviewRequests(stub).length], ["answered", 2, 2, 6]);
+    assert.equal(JSON.stringify(host.reviews(conversation.id)[0]?.report), kept);
+  });
+
+  it("refuses to start when what it would send changed since the preview, sends nothing, and the next preview shows the change", async () => {
+    const readThenReply = (request: StubRequest): Reply =>
+      request.raw.includes('"role":"tool"')
+        ? toolCall("submit_reply", { answer: "Rename it in place.", evidence: [{ statement: "It has a README.", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }] }, { id: "r1" })
+        : toolCall("read_file", { path: "README.md" }, { id: "r0" });
+    const stub = await stubFor({ answer: readThenReply });
+    const repo = makeRepo(join(reposRoot(), "shop"), { "README.md": "# Shop\n" });
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+    const { host, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: repo }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    await host.setSharing(ids[0]!, true);
+    const own = host.addPreference({ statement: "Ship behind a flag", scope: "project", projectId: ids[0]!, intent: "default" });
+    const decision = host.addPreference({ statement: "Replace Jest with Vitest", scope: "project", projectId: ids[0]!, intent: "override" });
+    const conversation = host.createConversation({ kind: "project", projectId: ids[0]! });
+    const plan = await planIn(host, conversation.id);
+    const first = await host.prepareReview(plan.id, "council");
+    assert.deepEqual(
+      [first.scope, first.sends.references, first.sends.preferences.map((p) => [p.statement, p.scope, p.intent])],
+      [{ kind: "project", projectLabel: "shop", targetLabel: first.scope.kind === "project" ? first.scope.targetLabel : "", headAtStart: head, sharing: true }, 1, [["Ship behind a flag", "project", "default"], ["Replace Jest with Vitest", "project", "override"]]],
+    );
+    host.editPreference(own.id, { statement: "Ship behind a feature flag", intent: "default" });
+    await assert.rejects(host.startReview(plan.id, "council", first.expected), CHANGED, "a preference edited");
+    const edited = await host.prepareReview(plan.id, "council");
+    assert.deepEqual(edited.sends.preferences.map((p) => p.statement), ["Ship behind a feature flag", "Replace Jest with Vitest"]);
+    host.deletePreference(decision.id);
+    await assert.rejects(host.startReview(plan.id, "council", edited.expected), CHANGED, "a preference deleted");
+    const deleted = await host.prepareReview(plan.id, "council");
+    assert.deepEqual(deleted.sends.preferences.map((p) => p.statement), ["Ship behind a feature flag"]);
+    await host.setSharing(ids[0]!, false);
+    await assert.rejects(host.startReview(plan.id, "council", deleted.expected), /^Error: This project doesn't allow sending its content to Token Factory\. Allow sharing for it, then start the review\.$/);
+    const off = await host.prepareReview(plan.id, "council");
+    assert.deepEqual([off.scope.kind === "project" && off.scope.sharing, off.blocked !== null, off.expected === deleted.expected], [false, true, false]);
+    await host.setSharing(ids[0]!, true);
+    await assert.rejects(host.startReview(plan.id, "council", "0".repeat(64)), CHANGED, "a fingerprint no preview gave");
+    assert.deepEqual([reviewRequests(stub).length, host.reviews(conversation.id).length], [0, 0], "nothing was sent or stored");
+    // Nothing changed since this preview: it starts, and sends what it showed, bound to the project's commit.
+    const fresh = await host.prepareReview(plan.id, "council");
+    await host.startReview(plan.id, "council", fresh.expected);
+    const review = await ended(host, conversation.id);
+    assert.equal(review.status, "answered", review.note ?? "");
+    assert.deepEqual([review.scope, review.references], [{ kind: "project", projectLabel: "shop", headAtStart: head }, [{ path: "README.md", startLine: 1, endLine: 1 }]]);
+    const sent = JSON.stringify(reviewRequests(stub).map((chat) => chat.body?.messages));
+    assert.deepEqual([sent.includes("Ship behind a feature flag"), sent.includes("Replace Jest with Vitest"), sent.includes("README.md"), sent.includes(repo)], [true, false, true, false]);
+    // Its project removed: refused before anything is worked out.
+    await host.removeProject(ids[0]!);
+    await assert.rejects(host.prepareReview(plan.id, "council"), /^Error: This plan's project was removed, so it can't be reviewed\. Its history stays here until you delete it\.$/);
+    await assert.rejects(host.startReview(plan.id, "council", fresh.expected), /^Error: This plan's project was removed/);
+    assert.equal(reviewRequests(stub).length, 3);
+  });
+
+  it("keeps the report of the reviewer that answered when the other fails, skips the chair, and sends nothing again", async () => {
+    const stub = await stubFor({ architecture: httpError(500, "the architecture reviewer is down") });
+    const { host, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    await start(host, plan.id);
+    const review = await ended(host, conversation.id);
+    assert.deepEqual(
+      [review.status, review.report?.outcome, review.report?.stages.map((s) => [s.role, s.status]), review.report?.reviewers.map((r) => r.role)],
+      ["failed", "incomplete", [["architecture", "failed"], ["risks", "answered"], ["chair", "skipped"]], ["risks"]],
+    );
+    assert.match(review.note ?? "", /^This review is incomplete\. The architecture review failed: Token Factory had a problem answering \(HTTP 500\)\..* Nothing was resent\.$/);
+    await pause(300);
+    assert.equal(reviewRequests(stub).length, 2);
+  });
+
+  it("holds the conversation while a review runs, cancels it on request with what it saved, and then takes a message again", async () => {
+    const stub = await stubFor({ architecture: SLOW, risks: SLOW });
+    const { host, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    const started = await start(host, plan.id);
+    await waitFor(() => reviewRequests(stub).length === 2, "both reviewers to be asked");
+    assert.equal(host.conversation(conversation.id).openReview, started.id);
+    await assert.rejects(host.sendMessage(conversation.id, "Meanwhile?"), /^Error: A review of a plan is running in this conversation\. Wait for it, or cancel it, then send again\.$/);
+    assert.equal((await host.prepareReview(plan.id, "council")).blocked, "A review of a plan is running in this conversation. Wait for it, or cancel it, then start the review.");
+    await assert.rejects(host.cancelTurn(conversation.id, started.id), /^Error: That message is no longer in this conversation\.$/, "a review isn't a message");
+    await host.cancelReview(conversation.id, started.id);
+    const review = await ended(host, conversation.id);
+    assert.deepEqual([review.status, review.note, review.report?.outcome, host.conversation(conversation.id).openReview], ["cancelled", "Cancelled. Nothing was resent.", "cancelled", null]);
+    await host.sendMessage(conversation.id, "And now?");
+    await answered(host, conversation.id);
+    assert.deepEqual([reviewRequests(stub).length, host.conversation(conversation.id).turns.length], [2, 2], "nothing was sent again");
+  });
+
+  it("stops a review asked to stop while it was being sent, by the person or by consent withdrawn, as soon as its engine answers", async () => {
+    for (const how of ["person", "sharing"] as const) {
+      const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+      keys.current = { NEBIUS_API_KEY: KEY };
+      const home = join(root, "local home");
+      mkdirSync(home, { recursive: true });
+      writeFileSync(join(home, "release"), "");
+      await host.setSharing(ids[0]!, true);
+      const conversation = host.createConversation({ kind: "project", projectId: ids[0]! });
+      const plan = await planIn(host, conversation.id, undefined);
+      rmSync(join(home, "release"));
+      const started = await start(host, plan.id);
+      await waitFor(() => calls(home).filter((call) => call === "runs.start").length === 2, "the review's request to reach the engine");
+      if (how === "person") await host.cancelReview(conversation.id, started.id);
+      else await host.setSharing(ids[0]!, false);
+      assert.deepEqual([how, host.reviews(conversation.id)[0]?.status, host.reviews(conversation.id)[0]?.cancelRequested], [how, "submitting", true]);
+      writeFileSync(join(home, "release"), "");
+      const review = await ended(host, conversation.id);
+      // Its run is cancelled once (turning sharing off also cancels the conversation's earlier run, long finished).
+      const cancelled = readFileSync(join(home, "cancelled.log"), "utf8").split("\n").filter((runId) => runId === review.runId);
+      assert.deepEqual(
+        [how, review.status, review.note, cancelled.length],
+        [how, "cancelled", how === "person" ? "Cancelled. Nothing was resent." : "Stopped: sharing for this project was turned off. Nothing was resent.", 1],
+      );
+    }
+  });
+
+  it("reports a review cut off by a quit or a killed engine as interrupted after a restart, keeps what it saved, and sends nothing again", async () => {
+    for (const how of ["quit", "kill"] as const) {
+      const stub = await stubFor({ architecture: SLOW, risks: SLOW });
+      const { host, root, keys } = makeHost({ tokenFactoryUrl: stub.url });
+      keys.current = { NEBIUS_API_KEY: KEY };
+      const conversation = host.createConversation({ kind: "general" });
+      const plan = await planIn(host, conversation.id);
+      await start(host, plan.id);
+      await waitFor(() => reviewRequests(stub).length === 2, "both reviewers to be asked");
+      if (how === "kill") {
+        const { pid } = await online(host, "local");
+        process.kill(pid, "SIGKILL");
+        await waitFor(() => !isAlive(pid), "the engine to die");
+      }
+      await host.shutdown();
+      const again = hostAt(root, { tokenFactoryUrl: stub.url }).host;
+      await again.openConversation(conversation.id);
+      const review = await ended(again, conversation.id);
+      assert.deepEqual([how, review.status, review.note], [how, "interrupted", "Interrupted: Nivra or its engine stopped before the review finished. Nothing was resent."]);
+      // A killed engine saved nothing after the reviewers were asked, so its report reads as interrupted. A quit lets the
+      // engine cancel the review and save that, unless the host stops it first.
+      const outcome = review.report?.outcome;
+      assert.ok(how === "kill" ? outcome === "interrupted" : outcome === "cancelled" || outcome === "interrupted", `${how}: ${outcome}`);
+      assert.deepEqual([how, review.report?.reviewers.length, review.report?.stages.map((s) => s.status)], [how, 0, ["failed", "failed", "skipped"]]);
+      await pause(300);
+      assert.equal(reviewRequests(stub).length, 2, `${how}: nothing was sent again`);
+    }
+  });
+
+  it("finds a review whose answer was lost by its request id and keeps its report, sent once; keeps nothing of a report bound to something else", async () => {
+    for (const how of ["lost", "wrong"] as const) {
+      const { host, root, keys } = makeHost({ localEntry: GATED });
+      keys.current = { NEBIUS_API_KEY: KEY };
+      const home = join(root, "local home");
+      mkdirSync(home, { recursive: true });
+      writeFileSync(join(home, "release"), "");
+      const conversation = host.createConversation({ kind: "general" });
+      const plan = await planIn(host, conversation.id, undefined);
+      let review;
+      if (how === "lost") {
+        rmSync(join(home, "release"));
+        writeFileSync(join(home, "accept"), "");
+        await start(host, plan.id);
+        await waitFor(() => calls(home).filter((call) => call === "runs.start").length === 2, "the review's request to reach the engine");
+        await host.shutdown();
+        const again = hostAt(root, { localEntry: GATED }).host;
+        await again.openConversation(conversation.id);
+        review = await ended(again, conversation.id);
+        assert.deepEqual([review.status, review.report?.reviewers[0]?.summary, calls(home).includes("runs.find")], ["answered", "A gated review.", true]);
+      } else {
+        writeFileSync(join(home, "wrong-report"), "");
+        await start(host, plan.id);
+        review = await ended(host, conversation.id);
+        assert.deepEqual(
+          [review.status, review.report, review.note],
+          ["unknown", null, "Nivra can't tell whether this review reached the model: its engine's report is about something other than what this review sent, so none of it was kept. Nothing was resent."],
+        );
+      }
+      assert.equal(calls(home).filter((call) => call === "runs.start").length, 2, `${how}: the review was sent once`);
+    }
+  });
+
+  it("deletes a conversation while its review runs: the run stops, and the workspace keeps nothing of the review", async () => {
+    const stub = await stubFor({ architecture: SLOW, risks: SLOW });
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const canary = `nivra-review-plan-canary-${randomUUID()}`;
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id, `${PLAN} ${canary}`);
+    await start(host, plan.id);
+    await waitFor(() => reviewRequests(stub).length === 2, "both reviewers to be asked");
+    const runId = await waitFor(() => host.reviews(conversation.id)[0]?.runId ?? null, "the review's run");
+    await host.deleteConversation(conversation.id);
+    assert.throws(() => host.reviews(conversation.id), /no longer in the list/);
+    await waitFor(async () => (await host.runEvents(runId, 0)).status === "cancelled", "the review's run to stop");
+    await host.shutdown();
+    const workspace = new DatabaseSync(join(root, "workspace.db"), { readOnly: true });
+    try {
+      const count = (table: string) => Number(workspace.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
+      assert.deepEqual([count("reviews"), count("run_links"), count("artifacts")], [0, 0, 0]);
+    } finally {
+      workspace.close();
+    }
+    assert.deepEqual(filesHolding(root, canary).filter((file) => file.startsWith("workspace.db")), []);
+  });
+
+  it("refuses a plan version holding the saved key before anything is stored, and keeps no key anywhere a review writes", async () => {
+    const stub = await stubFor({ architecture: reviewBy("architecture", `The key ${KEY} works.`) });
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    const later = `later-key-${randomUUID()}`;
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id, `${PLAN} Use ${later} until the switch.`);
+    keys.current = { NEBIUS_API_KEY: later };
+    await assert.rejects(host.prepareReview(plan.id, "council"), /^Error: This plan version holds your saved Token Factory key, so nothing was sent\. Edit the plan to remove it, then review the new version\.$/);
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const clean = await host.revisePlan(plan.id, PLAN);
+    await start(host, clean.id);
+    const review = await ended(host, conversation.id);
+    assert.equal(review.status, "answered", review.note ?? "");
+    assert.equal(review.report?.reviewers.find((r) => r.role === "architecture")?.summary, "The key [secret:NEBIUS_API_KEY] works.");
+    await host.shutdown();
+    assert.deepEqual(filesHolding(root, KEY), []);
   });
 });

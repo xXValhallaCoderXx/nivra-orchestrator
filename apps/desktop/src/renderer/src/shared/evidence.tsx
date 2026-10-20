@@ -148,9 +148,32 @@ export function ConflictItem({
 }
 
 export const plural = (count: number, one: string, many = `${one}s`) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
-const DUE: Record<AnswerDueReason, string> = { "last-steps": "the last steps were reached", time: "time ran short", budget: "the budget ran out" };
+const DUE: Record<AnswerDueReason, string> = {
+  "last-steps": "the last steps were reached",
+  time: "time ran short",
+  budget: "the budget ran out",
+  "run-budget": "the run's input budget had room for one more answer only",
+};
 const KIND_LABEL = { "personal-default": "personal default", "project-default": "project default", override: "project decision" } as const;
 const NOT_RECORDED = "Not recorded for this run.";
+
+/**
+ * A run's limits and what it used (D30): the calls and time are enforced; the input budget is Nivra's estimate, never a
+ * ceiling, so what was counted, what the provider reported and any overrun are said apart.
+ */
+export function runBudgetText(record: NonNullable<ExplainResult["context"]["runBudget"]>): string {
+  const { limits, used } = record;
+  const reported = used.reportedInputTokens !== null ? `${plural(used.reportedInputTokens, "token")} reported` : "not every call reported its tokens";
+  const overrun = used.overrunTokens ? `; ${plural(used.overrunTokens, "token")} more than Nivra estimated` : "";
+  return `Run budget: ${used.requests} of ${limits.requests} model calls. Input: ${plural(used.inputTokens, "token")} counted against an estimated ${plural(limits.estimatedInputTokens, "token")} (${reported}${overrun}). The input budget is an estimate, not a ceiling.`;
+}
+
+/** What the answers turned down cost (NIV-26), when there were any: tokens only as reported, never 0 for unknown. */
+function turnedDownText(cost: NonNullable<ExplainResult["context"]["answer"]>["turnedDown"]): string {
+  if (!cost || cost.steps === 0) return "";
+  const tokens = cost.inputTokens !== null && cost.outputTokens !== null ? `${plural(cost.inputTokens, "token")} in / ${cost.outputTokens.toLocaleString()} out` : "tokens not reported";
+  return ` Answers turned down took ${plural(cost.steps, "model step")}: ${tokens}, ${(cost.elapsedMs / 1000).toFixed(1)} s.`;
+}
 
 /** The preferences a run received, by kind, with the store's revision and the fingerprint; never zero when unrecorded. */
 export function receivedText(received: PreferencesReceived | null): string {
@@ -208,9 +231,12 @@ export function ContextDetails({ context, choices, prefix = "explain" }: { conte
             ? `Request limit: ${plural(budget.tokens, "token")}; by the end of the run, about ${plural(budget.estimatedTokens, "token")} were in use (Nivra's estimate). Results given less room than usual because of the budget: ${budget.resultsLimited}; results too large to send: ${budget.resultsReplaced}. The budget ${budget.ranOut ? "ran out" : "didn't run out"}.`
             : NOT_RECORDED}
         </Text>
+        <Text size="xs" data-testid={`${prefix}-context-run-budget`}>
+          {context.runBudget ? runBudgetText(context.runBudget) : NOT_RECORDED}
+        </Text>
         <Text size="xs" data-testid={`${prefix}-context-answer`}>
           {answer
-            ? `${answer.dueReasons.length ? `The answer was due because ${answer.dueReasons.map((reason) => DUE[reason]).join(" and ")}.` : "The model answered before it had to."} Turned down before it was accepted: ${answer.refusals.citations} for citations, ${answer.refusals.conflicts} for conflicts, ${answer.refusals.schema} for its shape. Dropped from the accepted answer: ${plural(answer.conflictsDropped, "conflict")}, ${plural(answer.suggestionsDropped, "suggestion")}.`
+            ? `${answer.dueReasons.length ? `The answer was due because ${answer.dueReasons.map((reason) => DUE[reason]).join(" and ")}.` : "The model answered before it had to."} Turned down before it was accepted: ${answer.refusals.citations} for citations, ${answer.refusals.conflicts} for conflicts, ${answer.refusals.schema} for its shape${answer.refusals.findings ? `, ${answer.refusals.findings} for having no findings` : ""}. Dropped from the accepted answer: ${plural(answer.conflictsDropped, "conflict")}, ${plural(answer.suggestionsDropped, "suggestion")}.${turnedDownText(answer.turnedDown)}`
             : NOT_RECORDED}
         </Text>
       </Stack>
@@ -243,9 +269,12 @@ export function HistoryDetails({ history, prefix }: { history: HistoryRecord; pr
   );
 }
 
+/** What a project's consent covers (D20, D31), said wherever it is asked for. */
+export const CONSENT_COVERS = "This is for the whole project: its explanations, its conversations and the reviews of its plans. You can turn it off at any time, which stops them all.";
+
 /**
  * The project's consent to send its content to Token Factory (D20), asked once, the first time it is needed. It covers
- * the whole project: its explanations and its conversations.
+ * the whole project: its explanations, its conversations and the reviews of its plans.
  */
 export function ConsentModal({
   opened,

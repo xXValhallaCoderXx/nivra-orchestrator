@@ -45,6 +45,20 @@ describe("runProviderCheck, in-process (D22)", () => {
     assert.deepEqual(choices.slice(2), [{ type: "required" }, { type: "tool", toolName: "note_busy" }, { type: "tool", toolName: "submit_answer" }]);
   });
 
+  it("reports a failure inside Nivra in its own words, and tells the diagnostic its facts, never the error's text (NIV-27)", async () => {
+    const canary = `Private provider text ${randomUUID()}`;
+    const model = new MastraLanguageModelV2Mock({
+      doGenerate: (async () => {
+        throw new RangeError(canary);
+      }) as never,
+    });
+    const told: unknown[] = [];
+    const result = await runProviderCheck({ apiKey: KEY, endpoint: { url: "http://127.0.0.1:9/v1", kind: "loopback-test" }, fetch: modelsFetch, agentModel: () => model, onDiagnostic: (facts) => told.push(facts) });
+    assert.deepEqual([result.problemKind, result.call, /^The call to nvidia\/nemotron-3-super-120b-a12b failed\. Something inside Nivra failed \(RangeError\)\./.test(result.problem ?? "")], ["internal", null, true]);
+    assert.deepEqual(told, [{ code: "unexpected-error", stage: "model.call", error: { classes: ["RangeError"], errno: null, causes: 0, messageChars: canary.length } }]);
+    assert.equal(JSON.stringify([result, told]).includes(canary), false);
+  });
+
   it("reports a forced choice the model ignored, and an answer that failed the schema", async () => {
     const badAnswer = { summary: "x", findings: [{ statement: "y", citations: [{ path: "README.md", startLine: 3, endLine: 2 }] }] };
     const replies = [called("read_project_fact", { name: "build_command" }), said("pnpm verify"), said("ready"), called("note_ready", {}), called("submit_answer", badAnswer)];

@@ -1,4 +1,5 @@
-import { isTerminal, type ChatContext, type JsonObject, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { isTerminal, type ChatContext, type JsonObject, type ReviewContext, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { errorFacts, internalMessage, publicFailure, Refusal, type Diagnostic, type DiagnosticCode, type ErrorFacts } from "../diagnostics.ts";
 import type { NewEvent, RunStore } from "./store.ts";
 
 /**
@@ -53,6 +54,8 @@ export interface SchedulerOptions {
   instanceId: string;
   maxConcurrent?: number;
   log: SchedulerLog;
+  /** Writes one safe diagnostic line (NIV-27): how each failure is logged, never by an error's own words. */
+  diagnose: (diagnostic: Diagnostic) => void;
 }
 
 interface Slot {
@@ -61,40 +64,56 @@ interface Slot {
   done: Promise<void>;
   /** When the run started, on the monotonic clock. */
   startedAt: number;
+  /** The step whose failure the run reported, for the diagnostic. */
+  failedStep: string | null;
 }
 
-type Settled = { status: Extract<RunStatus, "succeeded" | "failed" | "cancelled">; event: NewEvent; error: string | null };
+/** What a failed run's diagnostic says, before the run's own ids are added. */
+type FailureDiagnostic = { code: DiagnosticCode; stage: string | null; reason: string | null; kind: string | null; error: ErrorFacts | null };
+type Settled = { status: Extract<RunStatus, "succeeded" | "failed" | "cancelled">; event: NewEvent; error: string | null; diagnostic: FailureDiagnostic | null };
 
-/** A failure's kind (D22), when the error carries one, wherever Mastra wrapped it. */
-function failureData(error: unknown): JsonObject | null {
-  for (let current = error, depth = 0; current && typeof current === "object" && depth < 6; current = (current as { cause?: unknown }).cause, depth++) {
-    const { kind, retryAfterSeconds } = current as { kind?: unknown; retryAfterSeconds?: unknown };
-    if (typeof kind === "string") return { kind, ...(typeof retryAfterSeconds === "number" ? { retryAfterSeconds } : {}) };
+/**
+ * A failure as it is stored and shown (D22, NIV-27): Nivra's own message, with its kind when it has one; `internal` and
+ * the one internal message for anything whose message Nivra didn't write, which is never kept.
+ */
+function failureOf(error: unknown): { message: string; data: JsonObject | null; diagnostic: FailureDiagnostic } {
+  const known = publicFailure(error);
+  if (!known) {
+    return { message: internalMessage(), data: { kind: "internal" }, diagnostic: { code: "unexpected-error", stage: null, reason: null, kind: "internal", error: errorFacts(error) } };
   }
-  return null;
+  const data = known.kind
+    ? { kind: known.kind, ...(known.retryAfterSeconds !== null ? { retryAfterSeconds: known.retryAfterSeconds } : {}), ...(known.stage ? { stage: known.stage } : {}) }
+    : null;
+  return {
+    message: known.message,
+    data,
+    diagnostic: { code: known.code, stage: known.facts?.stage ?? null, reason: known.reason, kind: known.kind, error: known.facts?.error ?? null },
+  };
 }
 
-export const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : typeof error === "object" && error && "message" in error ? String(error.message) : String(error);
+/** Whether a stored review input names the same panel, plan version and fingerprints as a new one. */
+function sameReview(stored: unknown, input: unknown): boolean {
+  const keys = ["panel", "planId", "planVersion", "packetDigest", "preferencesDigest"] as const;
+  const a = (stored ?? {}) as Record<string, unknown>;
+  const b = (input ?? {}) as Record<string, unknown>;
+  return keys.every((key) => a[key] === (b[key] ?? (key === "panel" ? "council" : undefined)));
+}
 
 /**
  * Maps how a Mastra run ended onto Nivra's statuses. Anything but success is a failure, except a cancel that was asked
- * for: an aborted step can surface as `failed`, and it is still a cancellation.
+ * for: an aborted step can surface as `failed`, and it is still a cancellation. A failure keeps Nivra's own words only.
  */
 export function settleOutcome(outcome: unknown, cancelRequested: boolean, cancelMessage = "Cancelled"): Settled {
-  const result = (outcome ?? {}) as { status?: string; error?: unknown; tripwire?: { reason?: string } };
-  if (result.status === "success") return { status: "succeeded", event: { type: "run.succeeded", message: "Succeeded" }, error: null };
-  if (result.status === "canceled" || cancelRequested) return { status: "cancelled", event: { type: "run.cancelled", message: cancelMessage }, error: null };
-  const error =
-    result.status === "failed"
-      ? errorMessage(result.error ?? "Run failed")
-      : result.status === "tripwire"
-        ? `Stopped by a guardrail: ${result.tripwire?.reason ?? "no reason given"}`
-        : result.status === "suspended"
-          ? "Suspended runs are not supported yet"
-          : `Run ended with status "${String(result.status)}"`;
-  const data = result.status === "failed" ? failureData(result.error) : null;
-  return { status: "failed", event: { type: "run.failed", message: error, ...(data ? { data } : {}) }, error };
+  const result = (outcome ?? {}) as { status?: string; error?: unknown };
+  if (result.status === "success") return { status: "succeeded", event: { type: "run.succeeded", message: "Succeeded" }, error: null, diagnostic: null };
+  if (result.status === "canceled" || cancelRequested) return { status: "cancelled", event: { type: "run.cancelled", message: cancelMessage }, error: null, diagnostic: null };
+  if (result.status === "failed") {
+    const failed = failureOf(result.error);
+    return { status: "failed", event: { type: "run.failed", message: failed.message, ...(failed.data ? { data: failed.data } : {}) }, error: failed.message, diagnostic: failed.diagnostic };
+  }
+  // A guardrail's reason, or a status Nivra doesn't know, is the library's text: neither is kept.
+  const message = result.status === "tripwire" ? "Stopped by a guardrail." : result.status === "suspended" ? "Suspended runs are not supported yet." : internalMessage();
+  return { status: "failed", event: { type: "run.failed", message }, error: message, diagnostic: { code: "unexpected-error", stage: "run", reason: null, kind: null, error: null } };
 }
 
 export class RunScheduler {
@@ -103,8 +122,11 @@ export class RunScheduler {
   readonly #instanceId: string;
   readonly #maxConcurrent: number;
   readonly #log: SchedulerLog;
+  readonly #diagnose: (diagnostic: Diagnostic) => void;
   readonly #slots = new Map<string, Slot>();
-  readonly #contexts = new Map<string, RunContext | ChatContext>();
+  readonly #contexts = new Map<string, RunContext | ChatContext | ReviewContext>();
+  /** Each live run's request id, for its diagnostic. */
+  readonly #requests = new Map<string, string>();
   #source: WorkflowSource | null = null;
   #recovered = false;
   #stopping: string | null = null;
@@ -115,6 +137,7 @@ export class RunScheduler {
     this.#instanceId = options.instanceId;
     this.#maxConcurrent = options.maxConcurrent ?? MAX_CONCURRENT_RUNS;
     this.#log = options.log;
+    this.#diagnose = options.diagnose;
   }
 
   attach(source: WorkflowSource): void {
@@ -142,14 +165,24 @@ export class RunScheduler {
       clientRequestId: request.clientRequestId,
       instanceId: this.#instanceId,
     });
-    // A repeated request returns the run it already created, which keeps the context it came with.
-    if (created) this.#contexts.set(id, request.context);
+    // A repeated request returns the run it already created, which keeps the context it came with. The same id with
+    // other work is refused: a review is bound to its plan version and fingerprints (D30), and nothing is sent twice.
+    if (!created) {
+      const existing = this.#store.summary(id);
+      if (existing && (existing.workflowId !== request.workflowId || (request.workflowId === "review" && !sameReview(existing.input, request.input)))) {
+        throw new Refusal("request-conflict", "This request id already started another run, with other input. Send the new request with a new id.");
+      }
+    }
+    if (created) {
+      this.#contexts.set(id, request.context);
+      this.#requests.set(id, request.clientRequestId);
+    }
     this.pump();
     return id;
   }
 
   /** The context the host sent with a run, while the run lasts; null once it has ended. Steps read it by run id. */
-  contextOf(runId: string): RunContext | ChatContext | null {
+  contextOf(runId: string): RunContext | ChatContext | ReviewContext | null {
     return this.#contexts.get(runId) ?? null;
   }
 
@@ -164,11 +197,12 @@ export class RunScheduler {
     const slot = this.#slots.get(runId);
     if (slot) {
       slot.cancelRequested = true;
-      slot.run?.cancel().catch((error: unknown) => this.#log.error(`Cancelling run ${runId} failed: ${errorMessage(error)}`));
+      slot.run?.cancel().catch((error: unknown) => this.#diagnose({ code: "cancel-failed", stage: "run.cancel", run: runId, error: errorFacts(error) }));
     } else {
       // Queued, or running in no live process of ours: nothing is executing here, so record the cancellation.
       this.#store.transition(runId, "cancelled", { type: "run.cancelled", message: status === "queued" ? `${message} before it started` : message });
       this.#contexts.delete(runId);
+      this.#requests.delete(runId);
     }
     return { status: this.#store.status(runId) ?? status, wasTerminal: false };
   }
@@ -193,20 +227,22 @@ export class RunScheduler {
       const runId = this.#store.nextQueued();
       if (!runId) return;
       if (!this.#store.transition(runId, "running", { type: "run.started", message: "Started", instanceId: this.#instanceId })) return;
-      const slot: Slot = { cancelRequested: false, run: null, done: Promise.resolve(), startedAt: performance.now() };
+      const slot: Slot = { cancelRequested: false, run: null, done: Promise.resolve(), startedAt: performance.now(), failedStep: null };
       this.#slots.set(runId, slot);
-      slot.done = this.#execute(runId, slot).catch((error: unknown) => this.#log.error(`Run ${runId} could not be recorded: ${errorMessage(error)}`));
+      slot.done = this.#execute(runId, slot).catch((error: unknown) => this.#diagnose({ code: "record-failed", stage: "run.settle", run: runId, error: errorFacts(error) }));
     }
   }
 
   async #execute(runId: string, slot: Slot): Promise<void> {
     let unwatch = (): void => undefined;
     let settled: Settled;
+    let workflow: string | null = null;
     const cancelMessage = () => (this.#stopping ? `Cancelled: ${this.#stopping}` : "Cancelled");
     try {
       const run = this.#store.summary(runId);
-      if (!run) throw new Error(`Run ${runId} disappeared from the store`);
-      if (!this.#contexts.has(runId)) throw new Error("This run's context is missing, so it was not started. Start it again.");
+      if (!run) throw new Refusal("run-missing", "This run is no longer in the engine's store, so it was not started.");
+      workflow = run.workflowId;
+      if (!this.#contexts.has(runId)) throw new Refusal("context-missing", "This run's context is missing, so it was not started. Start it again.");
       const handle = await this.#source!.getWorkflow(run.workflowId).createRun({ runId });
       slot.run = handle;
       unwatch = handle.watch((event) => this.#onWatch(runId, slot, event));
@@ -218,16 +254,23 @@ export class RunScheduler {
     }
     try {
       unwatch();
-      this.#store.setMeta(runId, { durationMs: performance.now() - slot.startedAt });
+      const elapsedMs = performance.now() - slot.startedAt;
+      this.#store.setMeta(runId, { durationMs: elapsedMs });
       this.#store.transition(runId, settled.status, { ...settled.event, error: settled.error });
+      // One line per failed run, with what can safely be said about it (NIV-27).
+      if (settled.diagnostic) {
+        const { code, stage, reason, kind, error } = settled.diagnostic;
+        this.#diagnose({ code, stage: stage ?? slot.failedStep ?? "run", reason, kind, error, run: runId, request: this.#requests.get(runId) ?? null, workflow, step: slot.failedStep, counts: { elapsedMs } });
+      }
     } finally {
       this.#slots.delete(runId);
       this.#contexts.delete(runId);
+      this.#requests.delete(runId);
       this.pump();
     }
   }
 
-  /** Step lifecycle from Mastra's run events. Only ids, statuses and error messages are kept. */
+  /** Step lifecycle from Mastra's run events. Only ids, statuses and Nivra's own failure messages are kept (NIV-27). */
   #onWatch(runId: string, slot: Slot, event: { type: string; payload?: unknown }): void {
     try {
       const payload = (event.payload ?? {}) as { id?: unknown; status?: unknown; error?: unknown };
@@ -241,12 +284,13 @@ export class RunScheduler {
         } else if (payload.status === "failed" && slot.cancelRequested) {
           this.#store.append(runId, { type: "step.cancelled", stepId, message: `Cancelled ${stepId}` });
         } else if (payload.status === "failed") {
-          const error = payload.error === undefined ? "Step failed" : errorMessage(payload.error);
+          slot.failedStep ??= stepId;
+          const error = publicFailure(payload.error)?.message ?? internalMessage();
           this.#store.append(runId, { type: "step.failed", stepId, message: `${stepId} failed: ${error}`, data: { error } });
         }
       }
     } catch (error) {
-      this.#log.error(`Recording a step event for run ${runId} failed: ${errorMessage(error)}`);
+      this.#diagnose({ code: "record-failed", stage: "run.events", run: runId, error: errorFacts(error) });
     }
   }
 }

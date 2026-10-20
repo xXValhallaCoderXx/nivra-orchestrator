@@ -188,6 +188,8 @@ describe("ModelClient (D22)", () => {
     assert.equal(failure.kind, "internal");
     // Named by its class, never its words: those can quote the repository, and a failure's message is persisted.
     assert.deepEqual([/\(Error\)/.test(failure.message), failure.message.includes("the repository disappeared")], [true, false]);
+    // What the diagnostic will say (NIV-27): a code, where, and the error's facts, never its words.
+    assert.deepEqual([failure.facts?.code, failure.facts?.stage, failure.facts?.error?.classes, JSON.stringify(failure.facts).includes("disappeared")], ["unexpected-error", "model.call", ["Error"], false]);
   });
 
   it("prints nothing about a failed request, prompt included (Mastra's logger is silenced)", async () => {

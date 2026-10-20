@@ -109,7 +109,7 @@ function fitItems<T>(items: readonly T[], budget: number): T[] {
 
 function checkGlob(glob: string | undefined): string | undefined {
   if (glob === undefined || glob === "") return undefined;
-  if (glob.length > 200 || glob.includes("\0") || glob.startsWith("/")) throw new RepoError("That glob isn't valid: use a relative pattern such as src/**/*.ts.");
+  if (glob.length > 200 || glob.includes("\0") || glob.startsWith("/")) throw new RepoError("bad-glob", "That glob isn't valid: use a relative pattern such as src/**/*.ts.");
   return glob;
 }
 
@@ -154,12 +154,13 @@ export class RepoReader {
     try {
       root = await realpath(options.root);
     } catch {
-      throw new RepoError(`${options.root} doesn't exist on this target.`);
+      // The folder's path stays out of the message: what leaves the engine is Nivra's own words (NIV-27).
+      throw new RepoError("root-missing", "The project's folder doesn't exist on this target. Check it is still there, or remove the project and add it again.");
     }
     const git: GitCall = { session: options.session, git: options.git, cwd: root, signal: options.signal };
     const { stdout, truncated } = await runGit(git, ["ls-files", "-z", "--cached", "--", "."], { maxBytes: 50_000_000, timeoutMs: 30_000 });
     // A cut-off list would also be a cut-off list of hidden files: refuse rather than search with it.
-    if (truncated) throw new RepoError("This repository has more tracked files than Nivra can list. Add a smaller folder of it as the project.");
+    if (truncated) throw new RepoError("too-many-files", "This repository has more tracked files than Nivra can list. Add a smaller folder of it as the project.");
     const readable = new Set<string>();
     const hidden = new Map<string, HiddenReason>();
     for (const path of stdout.split("\0")) {
@@ -211,7 +212,7 @@ export class RepoReader {
     for (const [path, reason] of this.hidden) specs.add(`:(exclude,literal)${reason === "output" ? (outputRoot(path) ?? path) : path}`);
     for (const path of this.oversized) specs.add(`:(exclude,literal)${path}`);
     const chars = [...specs].reduce((sum, spec) => sum + spec.length + 1, 0);
-    if (chars > EXCLUDE_CHARS) throw new RepoError(`This repository has too many hidden or oversized files (${specs.size}) to search safely. Use list_files and read_file instead.`);
+    if (chars > EXCLUDE_CHARS) throw new RepoError("too-many-hidden", `This repository has too many hidden or oversized files (${specs.size}) to search safely. Use list_files and read_file instead.`);
     this.#excludes = [...specs];
     return this.#excludes;
   }
@@ -226,7 +227,7 @@ export class RepoReader {
     cap: number = LIMITS.resultChars,
   ): Promise<{ result: SearchResult; delivered: Delivered[] }> {
     const query = input.query;
-    if (!query || query.length > LIMITS.queryChars || /[\0\n\r]/.test(query)) throw new RepoError(`The query must be one line of 1-${LIMITS.queryChars} characters.`);
+    if (!query || query.length > LIMITS.queryChars || /[\0\n\r]/.test(query)) throw new RepoError("bad-query", `The query must be one line of 1-${LIMITS.queryChars} characters.`);
     const glob = checkGlob(input.glob);
     const limit = Math.min(Math.max(input.limit ?? LIMITS.searchResults, 1), LIMITS.searchResults);
     const regex = input.regex === true;
@@ -234,7 +235,7 @@ export class RepoReader {
     const { stdout, truncated: capped } = await runGit(
       this.#git,
       ["grep", "-n", "-I", "-z", "--no-color", regex ? "-E" : "-F", ...(ignoreCase ? ["-i"] : []), "-e", query, "--", ".", ...this.#searchExcludes()],
-      { maxBytes: 1_000_000, okCodes: [1], timeoutMs: 30_000 },
+      { maxBytes: 1_000_000, okCodes: [1], timeoutMs: 30_000, hint: "If you used regex, check the pattern is a POSIX extended regular expression (no \\d, \\w or lookaround), or search for literal text instead." },
     );
     const records = stdout.split("\n");
     // Output cut at the cap may end mid-record: the last one is dropped rather than misread.
@@ -356,36 +357,36 @@ export class RepoReader {
   async #load(path: string): Promise<Loaded> {
     const requested = checkRelativePath(path);
     const reason = this.hidden.get(requested) ?? hiddenReason(requested);
-    if (reason) throw new RepoError(`${requested} ${HIDDEN_WHY[reason]}.`);
-    if (!this.readable.has(requested)) throw new RepoError(`${requested} isn't a tracked file here. Untracked files are never read; list_files shows the tracked ones.`);
+    if (reason) throw new RepoError("hidden", `${requested} ${HIDDEN_WHY[reason]}.`);
+    if (!this.readable.has(requested)) throw new RepoError("untracked", `${requested} isn't a tracked file here. Untracked files are never read; list_files shows the tracked ones.`);
     let real: string;
     try {
       real = await realpath(join(this.root, requested));
     } catch {
-      throw new RepoError(`${requested} isn't in the working tree (it may have been deleted).`);
+      throw new RepoError("deleted", `${requested} isn't in the working tree (it may have been deleted).`);
     }
-    if (!isInside(this.root, real)) throw new RepoError(`${requested} points outside the repository, so it isn't read.`);
+    if (!isInside(this.root, real)) throw new RepoError("outside", `${requested} points outside the repository, so it isn't read.`);
     const resolved = relative(this.root, real).split(sep).join("/");
     // A link is only as readable as its target: it never exposes a hidden file behind it.
     const resolvedReason = this.hidden.get(resolved) ?? hiddenReason(resolved);
-    if (resolvedReason) throw new RepoError(`${requested} points to ${resolved}, which ${HIDDEN_WHY[resolvedReason]}.`);
-    if (!this.readable.has(resolved)) throw new RepoError(`${requested} points to a file that isn't tracked, so it isn't read.`);
+    if (resolvedReason) throw new RepoError("hidden-target", `${requested} points to ${resolved}, which ${HIDDEN_WHY[resolvedReason]}.`);
+    if (!this.readable.has(resolved)) throw new RepoError("untracked-target", `${requested} points to a file that isn't tracked, so it isn't read.`);
     const handle = await open(real, "r");
     let bytes: Buffer;
     try {
       const info = await handle.stat();
-      if (!info.isFile()) throw new RepoError(`${requested} isn't a file.`);
-      if (info.size > LIMITS.readBytes) throw new RepoError(`${requested} is ${kb(info.size)}, larger than the ${kb(LIMITS.readBytes)} Nivra reads.`);
+      if (!info.isFile()) throw new RepoError("not-a-file", `${requested} isn't a file.`);
+      if (info.size > LIMITS.readBytes) throw new RepoError("too-large", `${requested} is ${kb(info.size)}, larger than the ${kb(LIMITS.readBytes)} Nivra reads.`);
       bytes = await handle.readFile();
     } finally {
       await handle.close();
     }
-    if (bytes.includes(0)) throw new RepoError(`${requested} is a binary file.`);
+    if (bytes.includes(0)) throw new RepoError("binary", `${requested} is a binary file.`);
     const text = bytes.toString("utf8");
     const masked = this.#mask(text, { keepLines: true });
     const lines = masked.split("\n");
     // A mask that changed the line count would shift every line after it, and every citation with it.
-    if (lines.length !== text.split("\n").length) throw new RepoError(`${requested} couldn't be masked line by line, so it isn't read.`);
+    if (lines.length !== text.split("\n").length) throw new RepoError("unmaskable", `${requested} couldn't be masked line by line, so it isn't read.`);
     if (lines.length > 1 && lines.at(-1) === "") lines.pop();
     return { path: requested, lines, sha256: createHash("sha256").update(bytes).digest("hex") };
   }

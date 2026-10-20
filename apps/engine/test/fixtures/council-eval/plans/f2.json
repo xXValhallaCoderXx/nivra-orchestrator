@@ -1,0 +1,15 @@
+{
+  "id": "f2",
+  "title": "Five immediate retries in a payment webhook",
+  "control": false,
+  "packet": {
+    "scope": { "kind": "project", "headAtStart": "4c1d9e2b7a0f3e5d6c8b9a0e1f2d3c4b5a6e7f80" },
+    "text": "Stop losing payment confirmations when our webhook handler throws.\n\n1. Wrap the body of handlePaymentWebhook in a loop: on any exception, try again at once, up to five attempts in all, then return 200 so the provider stops sending.\n2. Each attempt calls markOrderPaid(orderId) and then sendReceiptEmail(orderId), as the handler does today.\n3. Log the full request body at INFO on every attempt, so failures can be debugged from the logs.\n4. Nothing else changes: the provider keeps calling the same endpoint.",
+    "assumptions": ["The provider waits at most 10 seconds for a response, then marks the delivery failed and sends it again later.", "Most failures are short database timeouts."],
+    "references": [
+      { "path": "src/webhooks/payment.ts", "startLine": 12, "endLine": 48 },
+      { "path": "src/orders/markPaid.ts", "startLine": 1, "endLine": 34 },
+      { "path": "src/email/receipt.ts", "startLine": 5, "endLine": 27 }
+    ]
+  }
+}

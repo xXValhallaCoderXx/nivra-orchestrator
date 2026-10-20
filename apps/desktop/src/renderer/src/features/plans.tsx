@@ -4,6 +4,7 @@ import { useState } from "react";
 import { TASK_LIMITS, type PlanView } from "../../../shared/ipc";
 import { planText } from "../../../shared/plans";
 import { errorMessage } from "../shared/ui";
+import { PlanReviews, type PlanReviewing } from "./reviews";
 
 /** Plan versions grouped by lineage, each lineage oldest first. */
 function lineages(plans: PlanView[]): PlanView[][] {
@@ -55,8 +56,8 @@ function PlanEditor({ initial, saveLabel, onSave, onCancel }: { initial: string;
   );
 }
 
-/** One plan: its latest version, editing into the next one, its earlier versions, and a task made from it. */
-function PlanCard({ versions, onSaved, onCreateTask }: { versions: PlanView[]; onSaved(): void; onCreateTask(plan: PlanView): void }) {
+/** One plan: its latest version, editing into the next one, its earlier versions, a task made from it, and its reviews. */
+function PlanCard({ versions, reviewing, onSaved, onCreateTask }: { versions: PlanView[]; reviewing: PlanReviewing; onSaved(): void; onCreateTask(plan: PlanView): void }) {
   const latest = versions.at(-1)!;
   const [editing, setEditing] = useState(false);
   const [earlier, setEarlier] = useState(false);
@@ -115,6 +116,7 @@ function PlanCard({ versions, onSaved, onCreateTask }: { versions: PlanView[]; o
                 </Text>
               </Stack>
             ))}
+        <PlanReviews versions={versions} reviewing={reviewing} />
       </Stack>
     </Paper>
   );
@@ -123,13 +125,14 @@ function PlanCard({ versions, onSaved, onCreateTask }: { versions: PlanView[]; o
 /**
  * The plans saved from one answer (D26). Save as plan shows the plan's text to edit first; an edit of a saved plan is
  * its next version, and earlier versions, with any brief made from them, stay as they were. A task can be made from a
- * plan's latest version.
+ * plan's latest version, and any version can be reviewed (D31).
  */
 export function AnswerPlans({
   conversationId,
   messageId,
   reply,
   plans,
+  reviewing,
   onSaved,
   onCreateTask,
 }: {
@@ -138,6 +141,7 @@ export function AnswerPlans({
   reply: ChatResult;
   /** Every version of the plans saved from this answer. */
   plans: PlanView[];
+  reviewing: PlanReviewing;
   onSaved(): void;
   onCreateTask(plan: PlanView): void;
 }) {
@@ -146,7 +150,7 @@ export function AnswerPlans({
   return (
     <Stack gap="xs">
       {lineages(plans).map((versions) => (
-        <PlanCard key={versions[0]!.lineageId} versions={versions} onSaved={onSaved} onCreateTask={onCreateTask} />
+        <PlanCard key={versions[0]!.lineageId} versions={versions} reviewing={reviewing} onSaved={onSaved} onCreateTask={onCreateTask} />
       ))}
       {saving ? (
         <PlanEditor

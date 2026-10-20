@@ -3,6 +3,7 @@ import { resolveModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
 import { isMastraTimeoutError } from "@mastra/core/loop";
 import type { ModelEndpoint, ModelFailureKind } from "@nivra/domain";
+import { errorFacts, internalMessage, safeClass, type DiagnosticCode, type FailureFacts } from "../diagnostics.ts";
 import { listModels as fetchModels, TOKEN_FACTORY_BASE_URL, TokenFactoryError, type ModelEntry } from "./tokenfactory.ts";
 
 /**
@@ -36,6 +37,11 @@ export class ModelFailure extends Error {
   failedStep: StepRecord | null = null;
   /** On a 429: how long Token Factory asked us to wait (`Retry-After`), when it said. */
   readonly retryAfterSeconds: number | null;
+  /**
+   * What the engine's diagnostic says about this failure (NIV-27): a code, where it happened, and the facts of the error
+   * that caused it, never its words. Enumerable, so it survives Mastra's serialising of a step's error.
+   */
+  facts: FailureFacts | null = null;
 
   constructor(kind: ModelFailureKind, message: string, status: number | null = null, retryAfterSeconds: number | null = null) {
     super(message);
@@ -43,6 +49,12 @@ export class ModelFailure extends Error {
     this.kind = kind;
     this.status = status;
     this.retryAfterSeconds = retryAfterSeconds;
+  }
+
+  /** Records why, for the diagnostic: `stage` is an application-owned token, and `cause` is only ever described by its facts. */
+  because(code: DiagnosticCode, stage: string, cause?: unknown): this {
+    this.facts = { code, stage, error: cause === undefined ? null : errorFacts(cause) };
+    return this;
   }
 }
 
@@ -116,9 +128,10 @@ export class InternalFailure {
     return this.#failure;
   }
 
-  fail(error: unknown): void {
+  /** `at` says where, for the diagnostic (NIV-27); an unknown error is named by an allowlisted class only. */
+  fail(error: unknown, at: { code?: DiagnosticCode; stage: string } = { stage: "model.call" }): void {
     if (this.#failure) return;
-    this.#failure = error instanceof ModelFailure ? error : failure("internal", errorName(error));
+    this.#failure = error instanceof ModelFailure ? error : failure("internal", safeClass(error) ?? "").because(at.code ?? "unexpected-error", at.stage, error);
     this.#controller.abort(this.#failure);
   }
 }
@@ -130,6 +143,7 @@ export interface CallOptions {
   maxOutputTokens: number;
   toolChoice?: ToolChoice;
   stopWhen?: () => boolean;
+  /** Before each request. A failure it records through `internal` ends the call there, and the request is never sent. */
   prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice } | undefined;
   /** The person's cancel. */
   signal?: AbortSignal;
@@ -187,7 +201,7 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
         if (timeout.aborted) throw new ModelFailure("timeout", `Token Factory didn't list its models within ${Math.round(timeoutMs / 1000)} s. Check the network on this target, then try again.`);
         // The status names the failure; Token Factory's own words never enter it (they can quote the key or the request).
         if (error instanceof TokenFactoryError) throw failure(kindForStatus(error.status), "", error.status);
-        throw toModelFailure(error);
+        throw toModelFailure(error, "models.list");
       }
       const contextLengths = new Map<string, number>();
       for (const entry of entries) if (entry.contextLength !== null) contextLengths.set(entry.id, entry.contextLength);
@@ -265,7 +279,16 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
           maxSteps: call.maxSteps,
           ...(call.stopWhen ? { stopWhen: () => call.stopWhen!() } : {}),
           ...(call.toolChoice ? { toolChoice: call.toolChoice } : {}),
-          ...(call.prepareStep ? { prepareStep: ({ stepNumber }: { stepNumber: number }) => call.prepareStep!({ stepNumber }) } : {}),
+          ...(call.prepareStep
+            ? {
+                prepareStep: ({ stepNumber, abort }: { stepNumber: number; abort: (reason: string) => never }) => {
+                  const prepared = call.prepareStep!({ stepNumber });
+                  // Mastra's tripwire ends the loop before the request, quietly: a throw here would be logged with its stack.
+                  if (internal.failure) abort("stopped before its request");
+                  return prepared;
+                },
+              }
+            : {}),
           toolCallConcurrency: 1,
           modelSettings: { maxOutputTokens: call.maxOutputTokens, timeout: { stepMs: Math.max(1, Math.floor(call.deadlines.stepMs)), totalMs: Math.max(1, Math.floor(call.deadlines.totalMs)) } },
           abortSignal,
@@ -281,7 +304,7 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
               steps.push(record);
               call.onStep?.(record);
             } catch (error) {
-              internal.fail(error);
+              internal.fail(error, { code: "callback-threw", stage: "model.step" });
             }
           },
         } as never)) as typeof output;
@@ -442,6 +465,8 @@ const MESSAGES: Record<ModelFailureKind, (detail: string, status: number | null)
   "no-key": () => "No Nebius key is set, so nothing was sent. Add your key in Settings, then try again.",
   "context-too-small": (d) =>
     `The model's context is too small for Nivra's instructions, the preferences this project's runs get and this repository's starting map${d ? ` (${d})` : ""}, so nothing was sent to it. Shorten the question or the choices, or delete preferences you don't need; if that isn't enough, this key needs a model with a larger context: Check Token Factory in Settings shows what it can use.`,
+  "budget-exhausted": (d) =>
+    `This run used its input budget${d ? ` (${d})` : ""}, so it stopped before sending more to the model. Ask a narrower question, or start again.`,
   auth: (_d, s) => `Token Factory refused the API key (HTTP ${s ?? "401"}). Check the key in Settings, or create a new one in the Token Factory console.`,
   "rate-limit": (d) => `Token Factory is rate-limiting this key (HTTP 429). ${d ? `Try again in ${d}.` : "Wait a minute, then try again."}`,
   "model-unavailable": (d) => `The model isn't available to this key${d ? ` (${d})` : ""}. Check Token Factory in Settings to see which models the key can use.`,
@@ -452,16 +477,10 @@ const MESSAGES: Record<ModelFailureKind, (detail: string, status: number | null)
   timeout: (d) => `The model didn't answer in time${d ? ` (${d})` : ""}. Try again, or ask a narrower question.`,
   cancelled: () => "Cancelled.",
   malformed: (d) => `The model didn't give a usable answer${d ? ` (${d})` : ""}. Try again, or ask a narrower question.`,
-  internal: (d) => `Something inside Nivra failed${d ? ` (${d})` : ""}. Try again; if it keeps happening, report it with the engine log.`,
+  // Named by an allowlisted class at most: an error's own text, and an unknown class's name, can quote the provider,
+  // the model's output or the repository, and a failure's message is persisted, in Mastra's records too (NIV-27).
+  internal: (d) => internalMessage(d),
 };
-
-/**
- * An error that isn't one Nivra expects, named by its class only. Its own text can quote the provider, the model's output
- * or the repository, and a failure's message is persisted (in Mastra's records too), so it never carries that text.
- */
-function errorName(error: unknown): string {
-  return error instanceof Error ? error.name || "Error" : typeof error;
-}
 
 export function failure(kind: ModelFailureKind, detail = "", status: number | null = null, retryAfterSeconds: number | null = null): ModelFailure {
   return new ModelFailure(kind, MESSAGES[kind](detail, status), status, retryAfterSeconds);
@@ -472,7 +491,7 @@ export function failure(kind: ModelFailureKind, detail = "", status: number | nu
  * provider errors. `@ai-sdk/provider` isn't a dependency, so errors are recognised by name. The message is Nivra's own:
  * the provider's text can echo the key, the question or the repository, and a failure's message is persisted.
  */
-export function toModelFailure(error: unknown): ModelFailure {
+export function toModelFailure(error: unknown, stage = "model.call"): ModelFailure {
   if (error instanceof ModelFailure) return error;
   const seen = new Set<unknown>();
   let fetchFailed = false;
@@ -497,5 +516,5 @@ export function toModelFailure(error: unknown): ModelFailure {
     current = e.cause;
   }
   if (fetchFailed) return failure("network", "fetch failed");
-  return failure("internal", errorName(error));
+  return failure("internal", safeClass(error) ?? "").because("unexpected-error", stage, error);
 }

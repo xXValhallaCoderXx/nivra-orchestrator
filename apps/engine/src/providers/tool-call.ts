@@ -2,7 +2,8 @@ import { createTool } from "@mastra/core/tools";
 import type { AnswerSchemaProbe, ProviderCheck, ToolChoiceProbe } from "@nivra/domain";
 import { z } from "zod";
 import { ANSWER_TOOL_DESCRIPTION, AnswerInput } from "../explain/answer.ts";
-import { belowPauseThreshold, createModelClient, failure, ModelFailure, type Endpoint, type ModelClientOptions, type ToolChoice } from "./model.ts";
+import type { FailureFacts } from "../diagnostics.ts";
+import { belowPauseThreshold, createModelClient, ModelFailure, toModelFailure, type Endpoint, type ModelClientOptions, type ToolChoice } from "./model.ts";
 import { isNvidiaModel, pickNemotron } from "./tokenfactory.ts";
 
 /** The fact the probe tool hands back; the model's answer should repeat it. */
@@ -21,6 +22,8 @@ export interface CheckOptions {
   /** Tests only. */
   fetch?: ModelClientOptions["fetch"];
   agentModel?: ModelClientOptions["model"];
+  /** Told what can safely be said about a failure inside Nivra that the result reports as its problem (NIV-27). */
+  onDiagnostic?: (facts: FailureFacts) => void;
 }
 
 /**
@@ -94,7 +97,9 @@ export async function runProviderCheck(options: CheckOptions): Promise<ProviderC
     };
   } catch (error) {
     if (signalled(error)) throw error;
-    const failed = error instanceof ModelFailure ? error : failure("internal", String(error));
+    // Never the error's own words: they can quote the key (a header error does) or the provider (NIV-27).
+    const failed = error instanceof ModelFailure ? error : toModelFailure(error, "providers.check.call");
+    if (failed.kind === "internal" && failed.facts) options.onDiagnostic?.(failed.facts);
     return { ...base, call: null, probes: null, problem: `The call to ${chosen} failed. ${failed.message}`, problemKind: failed.kind, retryAfterSeconds: failed.retryAfterSeconds };
   }
 
@@ -113,6 +118,8 @@ export async function runProviderCheck(options: CheckOptions): Promise<ProviderC
       return { outcome: "answered" as const, called: result.steps.flatMap((step) => step.toolNames), ran: ran() };
     } catch (error) {
       if (signalled(error)) throw error;
+      const failed = toModelFailure(error, "providers.check.probe");
+      if (failed.kind === "internal" && failed.facts) options.onDiagnostic?.(failed.facts);
       return { outcome: "failed" as const, called: [] as string[] };
     }
   };

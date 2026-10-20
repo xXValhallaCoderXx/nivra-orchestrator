@@ -4,8 +4,8 @@ import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import { renameRetrying } from "./host-store.ts";
 
 /**
- * The host's workspace (D26): conversations, their messages and turns, native tasks and the versions of plans and
- * briefs, in one SQLite file beside `nivra.json`. The host is its only owner and opens it only on its own OS (D7); the
+ * The host's workspace (D26): conversations, their messages and turns, native tasks, the versions of plans and briefs,
+ * and the reviews of plan versions (D31), in one SQLite file beside `nivra.json`. The host is its only owner and opens it only on its own OS (D7); the
  * engines keep their own run records. Built on Node's own `node:sqlite`, so Electron's main process loads no addon
  * (D6). Opened like an engine's database: WAL, SQLite's exclusive lock taken at once and held until close (so a second
  * Nivra on the same profile is refused instead of waiting), foreign keys enforced, and deleted rows overwritten.
@@ -109,6 +109,50 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   ) STRICT;
   -- A turn has one question and at most one answer, so projecting an answer twice still leaves one.
   CREATE UNIQUE INDEX messages_one_per_turn ON messages(run_link_id, role) WHERE run_link_id IS NOT NULL;
+  `,
+  `
+  -- A review of one saved plan version (D31): a run link with workflow 'review', and what it was bound to when it was
+  -- asked for. The plan is referenced, never copied (its versions are immutable), and the packet's text isn't kept: its
+  -- fingerprint is. The engine's report, masked again, is kept once, when the review ends.
+  CREATE TABLE reviews (
+    id TEXT PRIMARY KEY REFERENCES run_links(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    plan_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    plan_lineage TEXT NOT NULL,
+    plan_version INTEGER NOT NULL CHECK (plan_version >= 1),
+    plan_sha256 TEXT NOT NULL,
+    panel TEXT NOT NULL CHECK (panel IN ('council', 'single')),
+    packet_digest TEXT NOT NULL,
+    preferences_digest TEXT NOT NULL,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('general', 'project')),
+    project_id TEXT,
+    project_label TEXT,
+    head_at_start TEXT,
+    report_json TEXT,
+    reported_at TEXT,
+    created_at TEXT NOT NULL,
+    CHECK ((scope_kind = 'general') = (project_id IS NULL)),
+    CHECK ((report_json IS NULL) = (reported_at IS NULL))
+  ) STRICT;
+  CREATE INDEX reviews_conversation ON reviews(conversation_id, created_at);
+  CREATE TRIGGER reviews_bound BEFORE INSERT ON reviews
+  WHEN NOT EXISTS (SELECT 1 FROM run_links WHERE id = NEW.id AND workflow_id = 'review' AND conversation_id = NEW.conversation_id)
+    OR NOT EXISTS (
+      SELECT 1 FROM artifacts
+      WHERE id = NEW.plan_id AND kind = 'plan' AND conversation_id = NEW.conversation_id AND lineage_id = NEW.plan_lineage AND version = NEW.plan_version AND sha256 = NEW.plan_sha256
+    )
+  BEGIN SELECT RAISE(ABORT, 'a review is bound to a review run and to a plan version of its own conversation'); END;
+  CREATE TRIGGER reviews_frozen BEFORE UPDATE ON reviews
+  WHEN NEW.id IS NOT OLD.id OR NEW.conversation_id IS NOT OLD.conversation_id OR NEW.plan_id IS NOT OLD.plan_id OR NEW.plan_lineage IS NOT OLD.plan_lineage
+    OR NEW.plan_version IS NOT OLD.plan_version OR NEW.plan_sha256 IS NOT OLD.plan_sha256 OR NEW.panel IS NOT OLD.panel OR NEW.packet_digest IS NOT OLD.packet_digest
+    OR NEW.preferences_digest IS NOT OLD.preferences_digest OR NEW.scope_kind IS NOT OLD.scope_kind OR NEW.project_id IS NOT OLD.project_id
+    OR NEW.project_label IS NOT OLD.project_label OR NEW.head_at_start IS NOT OLD.head_at_start OR NEW.created_at IS NOT OLD.created_at
+    OR OLD.report_json IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'a review never changes what it was bound to, and keeps its first report'); END;
+  -- A run link's workflow and owner are set once: a turn never becomes a review, or moves to another conversation.
+  CREATE TRIGGER run_links_fixed BEFORE UPDATE OF workflow_id, conversation_id, task_id, brief_id ON run_links
+  WHEN NEW.workflow_id IS NOT OLD.workflow_id OR NEW.conversation_id IS NOT OLD.conversation_id OR NEW.task_id IS NOT OLD.task_id OR NEW.brief_id IS NOT OLD.brief_id
+  BEGIN SELECT RAISE(ABORT, 'a run link keeps its workflow and its owner'); END;
   `,
 ];
 

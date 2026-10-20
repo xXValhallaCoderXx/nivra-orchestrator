@@ -279,6 +279,25 @@ describe("a repository conversation's turn over stdio (D26)", () => {
     assert.deepEqual([page.status, failureOf(page), await engine.client.call("runs.reply", { runId: run.id })], ["failed", "malformed", null]);
   });
 
+  it("gives its reply sooner once its reading has grown past the turn's estimated input budget (D30)", async () => {
+    const repo = makeRepo();
+    const forcedReply = (request: StubRequest) => JSON.stringify(request.body?.tool_choice ?? "").includes("submit_reply");
+    const { stub, engine } = await setup((request, index) =>
+      forcedReply(request)
+        ? toolCall("submit_reply", REPLY, { id: `c${index}`, tokens: [30_000, 5] })
+        : index === 0
+          ? toolCall("read_file", { path: "README.md" }, { id: "c0", tokens: [30_000, 5] })
+          : toolCall("list_files", {}, { id: `c${index}`, tokens: [30_000, 5] }),
+    );
+    const run = await repository(engine, repo, "Plan a CSV export of the timer list");
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
+    const reply = await engine.client.call("runs.reply", { runId: run.id });
+    assert.equal(reply?.kind, "repository");
+    if (reply?.kind !== "repository") return;
+    assert.deepEqual([stub.chats().length, reply.context.answer?.dueReasons, reply.context.runBudget?.used.requests], [4, ["run-budget"], 4]);
+  });
+
   it("refuses a repository turn without the project's consent, before any request (D20, D22)", async () => {
     const repo = makeRepo();
     const { stub, engine } = await setup(() => text("never"));

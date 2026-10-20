@@ -1,12 +1,13 @@
 import { Accordion, Alert, Badge, Button, Group, List, Modal, Paper, Stack, Text, Textarea, Title } from "@mantine/core";
 import type { ChatResult, CheckedCitation, RunSummary } from "@nivra/domain";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { MESSAGE_CHARS, type ConversationView, type MessageView, type PlanView, type PreferencesView, type ProjectView, type TurnStatus, type TurnView } from "../../../shared/ipc";
-import { CitationChip, ConflictItem, ConsentModal, ContextDetails, HistoryDetails, receivedText, runLine } from "../shared/evidence";
+import { MESSAGE_CHARS, type ConversationView, type MessageView, type PlanView, type PreferencesView, type ProjectView, type ReviewView, type TurnStatus, type TurnView } from "../../../shared/ipc";
+import { CitationChip, ConflictItem, CONSENT_COVERS, ConsentModal, ContextDetails, HistoryDetails, receivedText, runLine } from "../shared/evidence";
 import { useRunEvents } from "../shared/runs";
 import { errorMessage, usePoll } from "../shared/ui";
 import { EngineDot, EngineNotices } from "./engine";
 import { AnswerPlans } from "./plans";
+import { isOpenReview } from "./reviews";
 
 type RepositoryReply = Extract<ChatResult, { kind: "repository" }>;
 
@@ -60,11 +61,14 @@ export function Conversation({
       opened.current = true;
       return window.nivra.openConversation(conversationId);
     },
-    (current) => (current && (current.turns.some(isOpen) || current.engine.state.status === "starting") ? 700 : 2_500),
+    (current) => (current && (current.turns.some(isOpen) || current.openReview || current.engine.state.status === "starting") ? 700 : 2_500),
     [conversationId],
   );
   const [plansRead, setPlansRead] = useState(0);
   const plans = usePoll<PlanView[]>(() => window.nivra.listPlans(conversationId), () => null, [conversationId, plansRead]);
+  // Reviews are read again while one goes, and whenever the conversation says one started or ended (D31).
+  const [reviewsRead, setReviewsRead] = useState(0);
+  const reviews = usePoll<ReviewView[]>(() => window.nivra.listReviews(conversationId), (current) => (current?.some(isOpenReview) ? 700 : null), [conversationId, reviewsRead, poll.value?.openReview ?? null]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +94,19 @@ export function Conversation({
   const online = view.engine.state.status === "online";
   const trimmed = text.trim();
   const over = trimmed.length > MESSAGE_CHARS;
-  const canSend = !view.closed && !openTurn && !busy;
+  const canSend = !view.closed && !openTurn && !view.openReview && !busy;
+  const reviewing = {
+    reviews: reviews.value ?? [],
+    blocked: view.closed ?? (openTurn ? "Wait for the answer, or cancel it, before starting a review." : view.openReview ? "A review is already running in this conversation." : null),
+    project,
+    online,
+    onChanged: () => {
+      setReviewsRead((n) => n + 1);
+      poll.refresh();
+      onChanged();
+    },
+    onSharingChanged,
+  };
   const scope =
     summary.kind === "general"
       ? "General · no repository access"
@@ -211,7 +227,11 @@ export function Conversation({
                       messageId={answer.id}
                       reply={answer.reply}
                       plans={(plans.value ?? []).filter((plan) => plan.messageId === answer.id)}
-                      onSaved={() => setPlansRead((n) => n + 1)}
+                      reviewing={reviewing}
+                      onSaved={() => {
+                        setPlansRead((n) => n + 1);
+                        setReviewsRead((n) => n + 1);
+                      }}
                       onCreateTask={(plan) => onCreateTask(plan, summary.title)}
                     />
                   )}
@@ -263,6 +283,11 @@ export function Conversation({
             Wait for the answer, or cancel it, before sending another message.
           </Text>
         )}
+        {view.openReview && (
+          <Text size="xs" c="var(--nivra-text-3)" data-testid="composer-review-running">
+            A review of a plan is running in this conversation. Wait for it, or cancel it, before sending a message.
+          </Text>
+        )}
         {error && (
           <Text size="sm" c="var(--nivra-error)" data-testid="conversation-error">
             {error}
@@ -275,14 +300,15 @@ export function Conversation({
         onAllow={() => void allowAndSend()}
         intro={`To answer in this conversation about ${summary.projectLabel ?? "this repository"}, Nivra sends Nebius Token Factory:`}
         sends={["excerpts and paths from the project's tracked files;", "your message, and the conversation so far;", "your confirmed preferences that apply to this project."]}
-        after="This is for the whole project: its explanations and its conversations. You can turn it off at any time, which stops both."
+        after={CONSENT_COVERS}
         testId="conversation-consent"
       />
       <Modal opened={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete this conversation?" data-testid="conversation-delete-dialog">
         <Stack gap="sm">
-          <Text size="sm">Its messages, turns and plans are deleted from Nivra. A message still being answered is stopped first.</Text>
+          <Text size="sm">Its messages, turns, plans and reviews are deleted from Nivra. A message or a review still going is stopped first.</Text>
           <Text size="sm">
-            What stays: each engine keeps its own record of these runs, your messages included, and a task keeps the text its brief copied from a plan.
+            What stays: each engine keeps its own record of these runs, your messages and the reviews' reports included (a report can quote the plan), and a task keeps
+            the text its brief copied from a plan.
           </Text>
           <Group justify="flex-end" gap="sm">
             <Button variant="default" onClick={() => setConfirmDelete(false)}>

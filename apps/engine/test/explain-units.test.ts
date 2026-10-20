@@ -6,9 +6,11 @@ import { after, describe, it } from "node:test";
 import { combinedMask } from "@nivra/domain";
 import { createLocalBackend } from "../src/exec/local.ts";
 import { findGit } from "../src/exec/find-executable.ts";
-import { mustAnswer, turnsBeforeAnswer } from "../src/explain/limits.ts";
+import { canAnswerAgain, mustAnswer, turnsBeforeAnswer } from "../src/explain/limits.ts";
 import { requestBudget } from "../src/providers/policy.ts";
-import { createExplainTools } from "../src/explain/tools.ts";
+import { createExplainTools, createReplyTools, type ExplainToolsOptions } from "../src/explain/tools.ts";
+import { NO_FINDINGS } from "../src/explain/answer.ts";
+import { turnedDownCost, turnedDownText } from "../src/explain/reading.ts";
 import { InternalFailure } from "../src/providers/model.ts";
 import { RepoReader } from "../src/repo/files.ts";
 import { makeRepo, removeDir, tempDir } from "./helpers.ts";
@@ -23,6 +25,8 @@ const cite = (path: string, startLine: number, endLine = startLine) => ({ path, 
 /** The tools tests' snapshot: a personal default and a project's decision to change its conventions. */
 const PERSONAL = "11111111-1111-4111-8111-111111111111";
 const DECISION = "33333333-3333-4333-8333-333333333333";
+/** A finding with no lines, for answers whose other parts are under test: one with no findings is asked for them (NIV-26). */
+const FILLER = { statement: "A filler fact.", citations: [] };
 
 describe("checkCitation (D22)", () => {
   const ledger = new Ledger();
@@ -129,10 +133,32 @@ describe("mustAnswer and turnsBeforeAnswer (D22, D23)", () => {
     assert.deepEqual(due(3, 180_000, false), [], "exactly room for one more call and the answer");
     assert.deepEqual(due(3, 180_001, false), ["time"]);
     assert.deepEqual(due(14, 300_000, true), ["last-steps", "time", "budget"]);
+    assert.deepEqual(mustAnswer({ stepNumber: 3, elapsedMs: 10_000, budgetExhausted: false, runBudgetLow: true }, limits), ["run-budget"], "the run's input budget (D30)");
   });
 
   it("counts the exploring turns left after the one in progress, never below none", () => {
     assert.deepEqual([0, 9, 10, 11, 12, 13, 15].map((step) => turnsBeforeAnswer(step, limits)), [12, 3, 2, 1, 0, 0, 0]);
+  });
+
+  it("lets a turned-down answer be given again only with a step left, never when time or the budget made it due, and once due only for a forced answer (NIV-26)", () => {
+    const again = (stepNumber: number, dueReasons: Array<"last-steps" | "time" | "budget" | "run-budget">, forced: boolean) => canAnswerAgain({ stepNumber, dueReasons, forced }, limits);
+    assert.deepEqual(
+      [again(3, [], false), again(13, ["last-steps"], true), again(14, ["last-steps"], true), again(15, ["last-steps"], true), again(13, ["last-steps"], false)],
+      [true, true, true, false, false],
+      "the last step has none after it, and a model that may answer in text could lose the answer",
+    );
+    assert.deepEqual([again(3, ["time"], true), again(3, ["budget"], true), again(13, ["last-steps", "budget"], true), again(3, ["run-budget"], true)], [false, false, false, false]);
+    assert.equal(canAnswerAgain({ stepNumber: 0, dueReasons: [], forced: true }, { ...limits, maxSteps: 1 }), false, "a run of one call makes no repair request");
+  });
+
+  it("counts what the answers turned down cost, by step, with tokens null once one didn't say, and names refusals by cause (NIV-26)", () => {
+    const step = (stepNumber: number, inputTokens: number | null, outputTokens: number | null, elapsedMs: number) => ({ stepNumber, inputTokens, outputTokens, elapsedMs }) as unknown as StepRecord;
+    const steps = [step(0, 100, 10, 1_000), step(1, 200, 20, 2_000.4), step(2, null, null, 500)];
+    assert.deepEqual(turnedDownCost(steps, [1, 1]), { steps: 1, inputTokens: 200, outputTokens: 20, elapsedMs: 2_000 });
+    assert.deepEqual(turnedDownCost(steps, [1, 2]), { steps: 2, inputTokens: null, outputTokens: null, elapsedMs: 2_500 });
+    assert.deepEqual(turnedDownCost(steps, []), { steps: 0, inputTokens: 0, outputTokens: 0, elapsedMs: 0 });
+    assert.equal(turnedDownText({ citations: 0, conflicts: 0, findings: 0, schema: 0 }), "");
+    assert.equal(turnedDownText({ citations: 2, conflicts: 0, findings: 1, schema: 1 }), "; 4 turned down (2 for their citations, 1 for having no findings, 1 for its shape)");
   });
 });
 
@@ -148,7 +174,7 @@ describe("explain tools (D22)", () => {
     for (const dir of dirs) removeDir(dir);
   });
 
-  async function setupTools(options: { reader?: RepoReader; budgetTokens?: number; fixedChars?: number; answerDue?: () => boolean; choices?: string[] } = {}) {
+  async function setupTools(options: { reader?: RepoReader; budgetTokens?: number; fixedChars?: number; answerDue?: () => boolean; answerAgain?: () => boolean; choices?: string[] } = {}) {
     let reader = options.reader;
     if (!reader) {
       const root = tempDir();
@@ -172,7 +198,7 @@ describe("explain tools (D22)", () => {
         { id: DECISION, statement: "Replace Jest with Vitest", scope: "project" as const, intent: "override" as const, revision: 2 },
       ],
     };
-    const { tools, state } = createExplainTools({
+    const toolOptions: ExplainToolsOptions = {
       reader,
       ledger,
       budget,
@@ -180,12 +206,14 @@ describe("explain tools (D22)", () => {
       internal,
       step: () => step,
       answerDue: options.answerDue ?? (() => false),
+      answerAgain: options.answerAgain ?? (() => true),
       preferences,
       choices: new Set(options.choices ?? []),
       onTool: (event) => events.push(event.message),
-    });
+    };
+    const { tools, state } = createExplainTools(toolOptions);
     const call = (name: keyof typeof tools, input: unknown) => (tools[name] as unknown as { execute: (input: unknown, context: unknown) => Promise<Record<string, unknown>> }).execute(input, {});
-    return { call, ledger, budget, internal, events, state, next: () => step++ };
+    return { call, ledger, budget, internal, events, state, toolOptions, next: () => step++ };
   }
 
   it("keeps an unexpected error an internal failure, never a cancellation, and tells the model the run is stopping", async () => {
@@ -196,6 +224,8 @@ describe("explain tools (D22)", () => {
     assert.equal(internal.failure?.kind, "internal");
     // Named by its class: an error's own words can quote the repository, and a failure's message is persisted.
     assert.deepEqual([/TypeError/.test(internal.failure?.message ?? ""), (internal.failure?.message ?? "").includes("disk vanished")], [true, false]);
+    // The diagnostic says which tool it was, by its facts only (NIV-27).
+    assert.deepEqual([internal.failure?.facts?.code, internal.failure?.facts?.stage, internal.failure?.facts?.error?.classes], ["unexpected-error", "read_file", ["TypeError"]]);
   });
 
   it("sends a refusal back to the model and records it", async () => {
@@ -287,7 +317,7 @@ describe("explain tools (D22)", () => {
 
   it("freezes the first accepted answer, and turns down one whose conflict names a preference it wasn't given", async () => {
     const { call, state, next } = await setupTools();
-    const answer = { summary: "x", findings: [], gaps: [] };
+    const answer = { summary: "x", findings: [FILLER], gaps: [] };
     const invented = await call("submit_answer", { ...answer, conflicts: [{ topic: "package manager", repositoryConvention: "npm", preferenceIds: ["22222222-2222-4222-8222-222222222222"] }] });
     assert.equal(invented["accepted"], false);
     assert.match((invented["problems"] as string[])[0]!, /^conflicts\[0\]: 22222222-2222-4222-8222-222222222222 isn't one of the engineer's preferences you were given/);
@@ -305,7 +335,7 @@ describe("explain tools (D22)", () => {
     const usable = { topic: "test runner", repositoryConvention: null, citations: [], preferenceIds: [DECISION], choiceIds: ["c1"] };
     const answer = {
       summary: "x",
-      findings: [],
+      findings: [FILLER],
       conflicts: [usable, { topic: "style", repositoryConvention: null, choiceIds: ["c2", "c1"] }, { topic: "alone", repositoryConvention: "tabs" }],
     };
     const outcomes: unknown[] = [];
@@ -323,28 +353,28 @@ describe("explain tools (D22)", () => {
       next();
     }
     assert.deepEqual([outcomes, state.conflictRefusals, state.conflictsDropped, state.accepted?.conflicts], [[false, false, true], 2, 2, [usable]]);
-    assert.match(events.at(-1) ?? "", /^submit_answer accepted: 0 findings; 2 unusable conflicts dropped$/);
+    assert.match(events.at(-1) ?? "", /^submit_answer accepted: 1 finding; 2 unusable conflicts dropped$/);
   });
 
   it("drops unusable conflicts at once when the answer is due, unknown preference ids included", async () => {
     const { call, state } = await setupTools({ answerDue: () => true });
     const invented = { topic: "package manager", repositoryConvention: "npm", preferenceIds: ["22222222-2222-4222-8222-222222222222"] };
     const kept = { topic: "package manager", repositoryConvention: "npm", preferenceIds: [PERSONAL] };
-    const result = await call("submit_answer", { summary: "x", findings: [], conflicts: [invented, kept] });
+    const result = await call("submit_answer", { summary: "x", findings: [FILLER], conflicts: [invented, kept] });
     assert.deepEqual([result["accepted"], state.conflictRefusals, state.rejected, state.conflictsDropped, state.accepted?.conflicts.length], [true, 0, 0, 1, 1]);
   });
 
   it("turns down conflicts and suggestions citing lines the model wasn't shown, like findings", async () => {
     const { call, state } = await setupTools();
-    const conflict = await call("submit_answer", { summary: "x", findings: [], conflicts: [{ topic: "t", repositoryConvention: "y", citations: [cite("big.ts", 9)], preferenceIds: [PERSONAL] }] });
-    const suggestion = await call("submit_answer", { summary: "x", findings: [], suggestions: [{ statement: "Use tabs", citations: [cite("big.ts", 9)] }] });
+    const conflict = await call("submit_answer", { summary: "x", findings: [FILLER], conflicts: [{ topic: "t", repositoryConvention: "y", citations: [cite("big.ts", 9)], preferenceIds: [PERSONAL] }] });
+    const suggestion = await call("submit_answer", { summary: "x", findings: [FILLER], suggestions: [{ statement: "Use tabs", citations: [cite("big.ts", 9)] }] });
     assert.deepEqual([conflict["accepted"], suggestion["accepted"], state.citationRefusals], [false, false, 2]);
   });
 
   it("turns down a repository convention or a suggestion citing no lines while there is time, so it can't quietly lose to a default (D23)", async () => {
     const { call, state, events, next } = await setupTools();
     // As the schema hands them over: citations default to none.
-    const uncited = { summary: "x", findings: [], conflicts: [{ topic: "test runner", repositoryConvention: "Jest", citations: [], preferenceIds: [PERSONAL], choiceIds: [] }], suggestions: [{ statement: "Use Jest", citations: [] }] };
+    const uncited = { summary: "x", findings: [FILLER], conflicts: [{ topic: "test runner", repositoryConvention: "Jest", citations: [], preferenceIds: [PERSONAL], choiceIds: [] }], suggestions: [{ statement: "Use Jest", citations: [] }] };
     const first = await call("submit_answer", uncited);
     assert.deepEqual([first["accepted"], first["problems"]], [
       false,
@@ -361,5 +391,39 @@ describe("explain tools (D22)", () => {
 
     const due = await setupTools({ answerDue: () => true });
     assert.deepEqual([(await due.call("submit_answer", uncited))["accepted"], due.state.citationRefusals, due.state.accepted?.conflicts.length], [true, 0, 1], "when the answer is due it is taken as it is");
+  });
+
+  it("turns down an answer with no findings once, with the shape a finding takes, then takes the next as it is, inventing nothing (NIV-26)", async () => {
+    const { call, state, events, next } = await setupTools();
+    const empty = { summary: "x", findings: [], gaps: ["Nothing read shows how the timer is tested."] };
+    const first = await call("submit_answer", empty);
+    assert.deepEqual([first["accepted"], first["problems"], state.findingsRefusals, state.refusedSteps, state.rejected], [false, [NO_FINDINGS], 1, [0], 1]);
+    assert.equal(events.at(-1), "submit_answer refused: no findings");
+    next();
+    const second = await call("submit_answer", empty);
+    assert.deepEqual([second["accepted"], state.findingsRefusals, state.answerStep, state.accepted?.findings, state.accepted?.gaps], [true, 1, 1, [], empty.gaps]);
+    assert.equal(events.at(-1), "submit_answer accepted: 0 findings");
+  });
+
+  it("asks for findings only after the conflict and citation checks, and never when no answer could follow (NIV-26)", async () => {
+    const { call, state, next } = await setupTools();
+    const unread = { summary: "x", findings: [], suggestions: [{ statement: "Use tabs", citations: [cite("big.ts", 9)] }] };
+    const first = await call("submit_answer", unread);
+    assert.deepEqual([first["accepted"], state.citationRefusals, state.findingsRefusals], [false, 1, 0], "the citation is turned down first, as before");
+    next();
+    const second = await call("submit_answer", { summary: "x", findings: [] });
+    assert.deepEqual([second["accepted"], state.citationRefusals, state.findingsRefusals, state.refusedSteps], [false, 1, 1, [0, 1]]);
+
+    const last = await setupTools({ answerAgain: () => false });
+    const taken = await last.call("submit_answer", { summary: "x", findings: [] });
+    assert.deepEqual([taken["accepted"], last.state.findingsRefusals, last.state.rejected], [true, 0, 0], "with no step for another answer it is taken at once");
+  });
+
+  it("never asks a repository conversation's reply for findings: it keeps evidence, proposals and assumptions apart instead (D26)", async () => {
+    const { toolOptions } = await setupTools();
+    const reply = createReplyTools(toolOptions);
+    const submit = reply.tools["submit_reply"] as unknown as { execute: (input: unknown, context: unknown) => Promise<Record<string, unknown>> };
+    const result = await submit.execute({ answer: "Nothing in this repository tests the timer.", evidence: [], proposals: [], assumptions: [], conflicts: [], gaps: [] }, {});
+    assert.deepEqual([result["accepted"], reply.state.findingsRefusals], [true, 0]);
   });
 });

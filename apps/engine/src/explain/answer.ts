@@ -56,15 +56,19 @@ export const AnswerConflict = z.object({
 export type AnswerConflict = z.infer<typeof AnswerConflict>;
 
 export const AnswerInput = z.object({
-  summary: z.string().min(1).max(ANSWER_LIMITS.summaryChars).describe("A short explanation that answers the question, in plain text"),
+  summary: z.string().trim().min(1).max(ANSWER_LIMITS.summaryChars).describe("A short explanation that answers the question, in plain text"),
+  // A missing list defaults to none, so the answer reaches the gate, which asks for findings once (NIV-26): refused by
+  // the schema instead, an answer that is due would be lost, and with it its conflicts and suggestions.
   findings: z
     .array(
       z.object({
-        statement: z.string().min(1).max(ANSWER_LIMITS.statementChars).describe("One fact about the repository"),
+        statement: z.string().trim().min(1).max(ANSWER_LIMITS.statementChars).describe("One fact about the repository"),
         citations: z.array(Citation).max(ANSWER_LIMITS.citations).describe("The lines you read that show it"),
       }),
     )
-    .max(ANSWER_LIMITS.findings),
+    .max(ANSWER_LIMITS.findings)
+    .default([])
+    .describe("Each fact you established from what you read, with the lines that show it. Leave it empty only when what you read established nothing, and say why in gaps"),
   conflicts: z
     .array(AnswerConflict)
     .max(ANSWER_LIMITS.conflicts)
@@ -89,4 +93,11 @@ export const AnswerInput = z.object({
 export type AnswerInput = z.infer<typeof AnswerInput>;
 
 export const ANSWER_TOOL_DESCRIPTION =
-  "Submit your answer. Call this once, when you have read enough. Cite only lines read_file or search_code showed you in an earlier step, and name only the preference and choice ids you were given: an answer that doesn't is turned down while there is time to fix it. The first accepted answer is final.";
+  "Submit your answer. Call this once, when you have read enough. Cite only lines read_file or search_code showed you in an earlier step, and name only the preference and choice ids you were given: an answer that doesn't is turned down while there is time to fix it, and so, once, is an answer with no findings. The first accepted answer is final.";
+
+/**
+ * What an answer with no findings is told, once (NIV-26): the shape a finding takes, and that inventing one is worse
+ * than saying nothing was established.
+ */
+export const NO_FINDINGS =
+  'findings: your answer has none. Give each fact you established as {"statement": "<one fact about the repository>", "citations": [{"path": "<the path as the tools showed it>", "startLine": <first line>, "endLine": <last line>}]}, citing only lines read_file or search_code showed you, then submit the whole answer again. Don\'t invent one: if what you read established nothing, submit it again with findings: [] and say why in gaps.';

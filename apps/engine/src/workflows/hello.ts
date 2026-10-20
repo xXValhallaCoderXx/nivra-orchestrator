@@ -1,9 +1,11 @@
 import { realpath, stat } from "node:fs/promises";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { HelloInput, type JsonObject, type RunContext } from "@nivra/domain";
+import { HelloInput, type JsonObject, type Mask, type RunContext } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecResult, ExecutionBackend } from "../exec/backend.ts";
+import { Refusal } from "../diagnostics.ts";
+import { guard } from "./guard.ts";
 import { describePreferences } from "./preferences-record.ts";
 
 export const HELLO_WORKFLOW_ID = "hello";
@@ -23,6 +25,8 @@ export interface HelloDeps {
   platform: NodeJS.Platform;
   /** What the host sent with the run, held in memory by the scheduler (D21); null once the run has ended. */
   context: (runId: string) => RunContext | null;
+  /** Known keys and credential shapes, masked in anything a failure says (NIV-27). */
+  mask: Mask;
 }
 
 const GIT_CONFIG = ["-c", "color.ui=never", "-c", "core.quotePath=false", "-c", "core.fsmonitor=false"];
@@ -76,11 +80,11 @@ export function createHelloWorkflow(deps: HelloDeps) {
     description: "Report where the engine runs",
     inputSchema: HelloInput,
     outputSchema: HelloInput,
-    execute: async ({ inputData, runId }) => {
+    execute: async ({ inputData, runId }) => guard("hello.engine-info", deps.mask, async () => {
       const info = deps.engineInfo();
       recorder.output(runId, "engine-info", `Engine ${String(info["engineVersion"])} on ${String(info["platform"])}/${String(info["arch"])}, Node ${String(info["node"])}`, info);
       return inputData;
-    },
+    }),
   });
 
   // The context never passes through Mastra: steps read it by run id, and only ids and a fingerprint are recorded.
@@ -89,13 +93,13 @@ export function createHelloWorkflow(deps: HelloDeps) {
     description: "Report the context the app sent with the run, without its text",
     inputSchema: HelloInput,
     outputSchema: HelloInput,
-    execute: async ({ inputData, runId }) => {
+    execute: async ({ inputData, runId }) => guard("hello.context", deps.mask, async () => {
       const given = deps.context(runId);
-      if (!given) throw new Error("This run's context is missing, so it stopped. Start it again.");
+      if (!given) throw new Refusal("context-missing", "This run's context is missing, so it stopped. Start it again.");
       const { message, data } = await describePreferences(given.preferences);
       recorder.output(runId, "context", message, data);
       return inputData;
-    },
+    }),
   });
 
   const repository = createStep({
@@ -103,17 +107,18 @@ export function createHelloWorkflow(deps: HelloDeps) {
     description: "Resolve the repository folder on this target",
     inputSchema: HelloInput,
     outputSchema: Repo,
-    execute: async ({ inputData, runId }) => {
+    execute: async ({ inputData, runId }) => guard("hello.repository", deps.mask, async () => {
       let resolved: string;
       try {
         resolved = await realpath(inputData.repoPath);
       } catch {
-        throw new Error(`${inputData.repoPath} does not exist on this target.`);
+        // A failure says what happened in Nivra's own words, never with the path (NIV-27): the app knows the project.
+        throw new Refusal("folder-missing", "The project's folder doesn't exist on this target. Check it is still there, or remove the project and add it again.");
       }
-      if (!(await stat(resolved)).isDirectory()) throw new Error(`${resolved} is not a folder.`);
+      if (!(await stat(resolved)).isDirectory()) throw new Refusal("not-a-folder", "The project's path isn't a folder on this target. Remove the project and add its folder again.");
       recorder.output(runId, "repository", `Repository folder: ${resolved}`, { requested: inputData.repoPath, resolved, engineCwd: process.cwd() });
       return { repo: resolved, holdMs: inputData.holdMs };
-    },
+    }),
   });
 
   const gitVersion = createStep({
@@ -121,16 +126,16 @@ export function createHelloWorkflow(deps: HelloDeps) {
     description: "Find git and read its version",
     inputSchema: Repo,
     outputSchema: RepoWithGit,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("hello.git-version", deps.mask, async () => {
       const git = deps.findGit();
-      if (!git) throw new Error(`Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
+      if (!git) throw new Refusal("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
       const result = await run(backend, inputData.repo, [git, "--version"], { timeoutMs: 10_000, signal: abortSignal });
-      if (result.cancelled) throw new Error("Cancelled");
-      if (result.exitCode !== 0) throw new Error(`${git} --version failed (exit ${String(result.exitCode)}).`);
+      if (result.cancelled) throw new Refusal("cancelled", "Cancelled");
+      if (result.exitCode !== 0) throw new Refusal("git-failed", `git --version failed (exit ${String(result.exitCode)}). Check the Git installation on this target, then try again.`);
       const version = result.stdout.trim();
       recorder.output(runId, "git-version", version, { path: git, version });
       return { ...inputData, git };
-    },
+    }),
   });
 
   const gitStatus = createStep({
@@ -138,15 +143,15 @@ export function createHelloWorkflow(deps: HelloDeps) {
     description: "Read the repository's branch and changes",
     inputSchema: RepoWithGit,
     outputSchema: RepoStatus,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("hello.git-status", deps.mask, async () => {
       const { git, repo } = inputData;
       // Git's exit code decides, never its words: 0 inside a work tree, 128 outside one.
       const top = await run(backend, repo, [git, ...GIT_CONFIG, "rev-parse", "--show-toplevel"], { timeoutMs: 10_000, signal: abortSignal, env: GIT_ENV });
-      if (top.cancelled) throw new Error("Cancelled");
-      if (top.exitCode !== 0) throw new Error(`${repo} is not inside a git repository.`);
+      if (top.cancelled) throw new Refusal("cancelled", "Cancelled");
+      if (top.exitCode !== 0) throw new Refusal("not-a-repository", "The project's folder is not inside a git repository. Run git init there, or add a folder that is a repository.");
       const status = await run(backend, repo, [git, ...GIT_CONFIG, "status", "--porcelain=v2", "--branch"], { timeoutMs: 30_000, signal: abortSignal, env: GIT_ENV });
-      if (status.cancelled) throw new Error("Cancelled");
-      if (status.exitCode !== 0) throw new Error(`git status failed in ${repo} (exit ${String(status.exitCode)}).`);
+      if (status.cancelled) throw new Refusal("cancelled", "Cancelled");
+      if (status.exitCode !== 0) throw new Refusal("git-failed", `git status failed (exit ${String(status.exitCode)}). Run git status in the project's folder to see what's wrong, then try again.`);
       const parsed = parseStatus(status.stdout);
       const where = parsed.branch ? `on ${parsed.branch}` : "with a detached HEAD";
       recorder.output(runId, "git-status", `${where}, ${parsed.changes} changed ${parsed.changes === 1 ? "entry" : "entries"}`, {
@@ -155,7 +160,7 @@ export function createHelloWorkflow(deps: HelloDeps) {
         truncated: status.truncated,
       });
       return { ...inputData, branch: parsed.branch, changes: parsed.changes };
-    },
+    }),
   });
 
   const hold = createStep({
@@ -163,7 +168,7 @@ export function createHelloWorkflow(deps: HelloDeps) {
     description: "Hold a child process, so cancellation can be seen to stop it",
     inputSchema: RepoStatus,
     outputSchema: HelloOutput,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("hello.hold", deps.mask, async () => {
       const result = { repo: inputData.repo, branch: inputData.branch, changes: inputData.changes };
       if (inputData.holdMs === 0) return result;
       const argv = [process.execPath, "-e", "setTimeout(() => {}, Number(process.argv[1]))", String(inputData.holdMs), "--nivra-hold"] as const;
@@ -183,12 +188,12 @@ export function createHelloWorkflow(deps: HelloDeps) {
           cancelled: outcome.cancelled,
           durationMs: outcome.durationMs,
         });
-        if (outcome.cancelled) throw new Error("Cancelled");
+        if (outcome.cancelled) throw new Refusal("cancelled", "Cancelled");
       } finally {
         await session.close();
       }
       return result;
-    },
+    }),
   });
 
   return createWorkflow({
