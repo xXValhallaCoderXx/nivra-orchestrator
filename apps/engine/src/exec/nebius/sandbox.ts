@@ -101,12 +101,19 @@ export interface Outcome {
 const text = (stream: { value?: string | undefined; encoding?: string | undefined } | null | undefined): string =>
   !stream?.value ? "" : stream.encoding === "base64" ? Buffer.from(stream.value, "base64").toString("utf8") : stream.value;
 
+/**
+ * Whether a reported signal means one ended the command. The service reports -1 when none did, and the signal's
+ * number when one did, with exit code -1 (seen live on 20 October 2026); a name counts too.
+ */
+const ended = (signal: number | string | null): boolean => (typeof signal === "number" ? signal > 0 : typeof signal === "string" ? signal.trim() !== "" && Number(signal) !== -1 && signal !== "0" : false);
+
 /** What an operation's answer says happened, the operation's status kept apart from its command's outcome. */
 export function classify(operation: Operation): Outcome {
   const status = readStatus(operation.status);
   const result = operation.metadata?.result ?? null;
   const state = result?.state ?? null;
   const exitCode = typeof state?.exit_code === "number" ? state.exit_code : null;
+  // Kept as the service reported it, for the evidence; only `ended` decides whether a signal stopped the command.
   const signal = state?.signal ?? null;
   const timedOut = state?.timed_out === true;
   const verdict: Outcome["verdict"] =
@@ -119,7 +126,7 @@ export function classify(operation: Operation): Outcome {
         : status === "SUCCESS"
           ? timedOut
             ? "timed-out"
-            : signal !== null && signal !== 0
+            : ended(signal)
               ? "signalled"
               : exitCode === 0
                 ? "passed"

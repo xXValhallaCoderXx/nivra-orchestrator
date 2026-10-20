@@ -163,7 +163,8 @@ class FakeService {
       result_image_uuid: image,
       metadata: {
         env: op.env,
-        result: ended && !op.cancelled ? { state: { exit_code: op.behaviour.exitCode ?? 0, signal: null, timed_out: op.behaviour.timedOut ?? false }, stdout: { value: op.behaviour.stdout ?? "", encoding: "ascii" }, stderr: { value: "" } } : null,
+        // As the live service reports it: signal -1 when none ended the command; exit code -1 and SIGKILL on a timeout.
+        result: ended && !op.cancelled ? { state: { exit_code: op.behaviour.timedOut ? -1 : (op.behaviour.exitCode ?? 0), signal: op.behaviour.timedOut ? 9 : -1, timed_out: op.behaviour.timedOut ?? false }, stdout: { value: op.behaviour.stdout ?? "", encoding: "ascii" }, stderr: { value: "" } } : null,
       },
     });
   }
@@ -243,6 +244,22 @@ describe("Nebius Sandboxes, offline: the operation's status apart from its comma
       ["passed", "command-failed", "timed-out", "signalled", "operation-failed", "timed-out", "cancelled", "UNKNOWN"],
     );
     assert.deepEqual([classify(op("FAILED", { exit_code: 1 })).resultImage, classify(op("SUCCESS", { exit_code: 0 })).resultImage], [null, "img"]);
+  });
+
+  it("reads signal -1 as no signal, as the live service reports a command that simply exited", () => {
+    const op = (state: Record<string, unknown>) => ({ uuid: "u", status: "SUCCESS", metadata: { result: { state } } });
+    // Seen live on 20 October 2026: exits 0 and 1 with signal -1, and a timeout as exit -1 with signal 9.
+    assert.deepEqual(
+      [
+        classify(op({ exit_code: 0, signal: -1, timed_out: false })).verdict,
+        classify(op({ exit_code: 1, signal: -1, timed_out: false })).verdict,
+        classify(op({ exit_code: -1, signal: 9, timed_out: true })).verdict,
+        classify(op({ exit_code: -1, signal: 9, timed_out: false })).verdict,
+        classify(op({ exit_code: -1, signal: "SIGTERM" })).verdict,
+      ],
+      ["passed", "command-failed", "timed-out", "signalled", "signalled"],
+    );
+    assert.equal(classify(op({ exit_code: 0, signal: -1 })).signal, -1, "the evidence keeps the service's own value");
   });
 });
 
@@ -443,6 +460,16 @@ describe("Nebius Sandboxes, offline: every wait ends at its deadline (NIV-29)", 
       (error: Error) => error instanceof SandboxDeadlineError && /^Reading an operation got no answer before its deadline \(its last attempt: Reading an operation was answered with HTTP 503; try again in 4 s\)\.$/.test(error.message),
     );
     assert.deepEqual([service.requests.slice(before).map((r) => r.timeoutMs), time.now() - start], [[10_000, 6_000, 2_000], 8_000]);
+  });
+
+  it("gives every request a whole number of milliseconds, however the deadline falls (the live run's RangeError)", async () => {
+    let now = 0.5;
+    const time = { now: () => now, sleep: async (ms: number) => void (now += ms) };
+    const timeouts: number[] = [];
+    const busy: Transport = async (request) => (timeouts.push(request.timeoutMs), encode({ error: "unavailable" }, 503, { "retry-after": "1" }));
+    const api = new SandboxApi(busy, { sleep: time.sleep, now: time.now });
+    await assert.rejects(api.operation("op", { until: 2_500.7 }), SandboxDeadlineError);
+    assert.deepEqual([timeouts, timeouts.every((ms) => Number.isInteger(ms) && ms >= 1)], [[2_500, 1_500, 500], true]);
   });
 
   it("cuts off a read whose connection hangs at the deadline, never after it", async () => {

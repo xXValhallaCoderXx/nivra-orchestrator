@@ -43,7 +43,8 @@ export function fetchTransport(credentials: { key: string; project: string }, ba
       method: request.method,
       headers: { Authorization: `Bearer ${credentials.key}`, Project: credentials.project, ...request.headers },
       ...(request.body !== undefined ? { body: request.body } : {}),
-      signal: AbortSignal.timeout(request.timeoutMs),
+      // AbortSignal.timeout takes whole milliseconds only.
+      signal: AbortSignal.timeout(Math.max(1, Math.ceil(request.timeoutMs))),
       redirect: "manual",
     });
     const headers: Record<string, string> = {};
@@ -310,8 +311,9 @@ export class SandboxApi {
     const deadline = Math.min(this.#now() + this.#readDeadlineMs, until ?? Number.POSITIVE_INFINITY);
     let last: Error | null = null;
     for (let attempt = 0; ; attempt++) {
-      const left = deadline - this.#now();
-      if (left <= 0) throw new SandboxDeadlineError(what, last);
+      // Whole milliseconds, as a request's timeout must be; less than one left is none.
+      const left = Math.floor(deadline - this.#now());
+      if (left < 1) throw new SandboxDeadlineError(what, last);
       let response: TransportResponse | null = null;
       let lost: unknown = null;
       try {
