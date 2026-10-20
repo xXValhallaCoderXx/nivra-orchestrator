@@ -23,6 +23,8 @@ export interface RunRecord {
   /** Requests the run made, from its report's budget; null when it can't be told. */
   requests: number | null;
   events: number;
+  /** Why it ended as it did, when Nivra has more to say than its status: a run kept as unresolved says so here. */
+  note: string | null;
 }
 
 const SEVERE = new Set(["high", "medium"]);

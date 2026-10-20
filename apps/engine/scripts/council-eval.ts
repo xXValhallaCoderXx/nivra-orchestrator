@@ -18,8 +18,9 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { readRecord, runBatch, type JournalEntry, Journal } from "./council-eval/batch.ts";
-import { FixtureId, loadFrozen, readCredentials, REPOSITORY, runOrder, type Frozen } from "./council-eval/files.ts";
+import { canonical, FixtureId, loadFrozen, readCredentials, REPOSITORY, runOrder, type Frozen } from "./council-eval/files.ts";
 import { approvalRequest, limitMismatches } from "./council-eval/plan.ts";
+import { paidBatchRefusal } from "./council-eval/preflight.ts";
 import { buildSheet, missingLabels, scoreBatch, type RunRecord, type SheetItem, type SheetKey } from "./council-eval/score.ts";
 
 const { values } = parseArgs({
@@ -34,6 +35,9 @@ const { values } = parseArgs({
     // Tests only: refused for a paid batch.
     only: { type: "string" },
     "deadline-ms": { type: "string" },
+    "reconcile-ms": { type: "string" },
+    engine: { type: "string" },
+    fixtures: { type: "string" },
   },
   allowPositionals: false,
 });
@@ -44,7 +48,7 @@ const refuse = (message: string, code = 2): never => {
 };
 const write = (path: string, value: unknown) => writeFileSync(path, typeof value === "string" ? value : `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 
-const frozen = await loadFrozen().catch((error: unknown) => refuse(`The evaluation's fixtures, rubric or protocol can't be read: ${error instanceof Error ? error.message : String(error)}`));
+const frozen = await loadFrozen(...(values.fixtures ? [resolve(values.fixtures)] : [])).catch((error: unknown) => refuse(`The evaluation's fixtures, rubric or protocol can't be read: ${error instanceof Error ? error.message : String(error)}`));
 const mismatches = limitMismatches(frozen);
 if (mismatches.length) refuse(`The protocol's limits aren't the engine's (${mismatches.join("; ")}). Freeze the protocol again from the engine's limits.`);
 
@@ -65,11 +69,11 @@ const live = values.credentials !== undefined;
 if (live === (values["token-factory-url"] !== undefined)) refuse("Give either --credentials and --approved for the paid batch, or --token-factory-url for a stub. Run --plan to see the request for approval.");
 const only = values.only ? values.only.split(",").map((id) => FixtureId.parse(id.trim())) : undefined;
 const deadlineMs = values["deadline-ms"] ? Number(values["deadline-ms"]) : undefined;
+const reconcileMs = values["reconcile-ms"] ? Number(values["reconcile-ms"]) : undefined;
 if (live) {
-  if (only || deadlineMs !== undefined) refuse("--only and --deadline-ms are for tests against a stub, never for the paid batch.");
-  if (values.approved !== frozen.approvalDigest) refuse(`The approved digest isn't this protocol's (${frozen.approvalDigest}): the fixtures, the rubric or the protocol changed since. Run --plan, and approve what it shows.`);
-  if (frozen.protocol.labelling === "pending") refuse("The protocol doesn't say who labels the sheet yet. Choose it in protocol.json, then approve the new digest --plan shows.");
-  if (dirty || !commit) refuse("The working tree has uncommitted changes, so the revision this batch runs wouldn't be exact. Commit them, then run it again. Nothing was sent.");
+  const testOptions = Boolean(only || deadlineMs !== undefined || reconcileMs !== undefined || values.engine || values.fixtures);
+  const refusal = paidBatchRefusal(frozen, { approved: values.approved, commit, dirty, testOptions });
+  if (refusal) refuse(refusal);
 } else {
   const url = new URL(values["token-factory-url"]!);
   if (!["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)) refuse("A stub must be on this computer (127.0.0.1, [::1] or localhost).");
@@ -96,7 +100,20 @@ const apiKey = live ? (() => {
 })() : "stub-key-for-council-eval";
 
 console.log(`Council evaluation, ${live ? "paid" : "against a stub"}: evidence in ${out}`);
-const { records, stopped } = await runBatch({ frozen, out, mode: live ? "live" : "stub", tokenFactoryUrl: values["token-factory-url"] ?? null, apiKey, revision: commit, dirty, ...(only ? { only } : {}), ...(deadlineMs !== undefined ? { deadlineMs } : {}), log: (line) => console.log(line) }).catch((error: unknown) =>
+const { records, stopped } = await runBatch({
+  frozen,
+  out,
+  mode: live ? "live" : "stub",
+  tokenFactoryUrl: values["token-factory-url"] ?? null,
+  apiKey,
+  revision: commit,
+  dirty,
+  ...(only ? { only } : {}),
+  ...(deadlineMs !== undefined ? { deadlineMs } : {}),
+  ...(reconcileMs !== undefined ? { reconcileMs } : {}),
+  ...(values.engine ? { engineEntry: resolve(values.engine) } : {}),
+  log: (line) => console.log(line),
+}).catch((error: unknown) =>
   // The engine stopped, or couldn't start. What was journalled stands; resuming finds the run that was out.
   refuse(`The batch couldn't go on (${error instanceof Error ? error.message : String(error)}). Its journal is in ${out}: resume it with --resume ${out} once the cause is fixed. Nothing is sent twice.`, 1),
 );
@@ -111,12 +128,27 @@ function brief(record: RunRecord) {
   return { fixture: record.fixture, arm: record.arm, runId: record.runId, status: record.status, outcome: record.report?.outcome ?? null, requests: record.requests, durationMs: record.summary?.durationMs ?? null, usage: record.report?.usage ?? null, failureKind: record.failureKind };
 }
 
-/** The automatic pass and the blinded sheet, with its key kept in a file of its own. */
+/**
+ * The automatic pass and the blinded sheet. Which arm and reviewer each line came from is never written: `--score`
+ * works it out again from the runs, with the protocol's seed, once every line is labelled.
+ */
 function writeSheet(dir: string, kept: readonly RunRecord[], frozenInputs: Frozen): void {
-  const { sheet, key } = buildSheet(kept, frozenInputs);
+  const { sheet } = buildSheet(kept, frozenInputs);
   write(join(dir, "sheet.json"), sheet);
-  write(join(dir, "sheet-key.json"), key);
-  const lines = [`# Council evaluation: the blinded sheet`, "", frozenInputs.rubric.matching, "", `Unsupported: U1 ${frozenInputs.rubric.unsupported.U1} U3 ${frozenInputs.rubric.unsupported.U3}`, "", frozenInputs.rubric.novel, "", frozenInputs.rubric.control.rule, ""];
+  const lines = [
+    `# Council evaluation: the blinded sheet`,
+    "",
+    "Label each line in sheet.json (its \"label\"), from this sheet alone. The runs folder, batch.json and the journal say which arm each run was, so leave them until you have finished.",
+    "",
+    frozenInputs.rubric.matching,
+    "",
+    `Unsupported: U1 ${frozenInputs.rubric.unsupported.U1} U3 ${frozenInputs.rubric.unsupported.U3}`,
+    "",
+    frozenInputs.rubric.novel,
+    "",
+    frozenInputs.rubric.control.rule,
+    "",
+  ];
   for (const line of sheet) {
     lines.push(`## ${line.item} · ${line.fixture} · ${line.kind}`);
     if (line.finding) {
@@ -134,12 +166,19 @@ function score(dir: string, frozenInputs: Frozen): number {
   const journal = new Journal(dir).read();
   const kept = journal.filter((entry): entry is Extract<JournalEntry, { type: "end" }> => entry.type === "end").map((entry) => readRecord(dir, entry.fixture, entry.arm));
   const sheet = JSON.parse(readFileSync(join(dir, "sheet.json"), "utf8")) as SheetItem[];
-  const key = JSON.parse(readFileSync(join(dir, "sheet-key.json"), "utf8")) as SheetKey;
   const missing = missingLabels(sheet, frozenInputs.rubric);
   if (missing.length) {
     console.error(`${missing.length} lines of the sheet still need a label: ${missing.join(", ")}. Label them, then score again.`);
     return 2;
   }
+  // The key, worked out again from the runs and the seed; the labelled sheet must be the one these runs made.
+  const rebuilt = buildSheet(kept, frozenInputs);
+  const same = (a: SheetItem, b: SheetItem | undefined) => b !== undefined && canonical([a.item, a.fixture, a.kind, a.finding, a.summary]) === canonical([b.item, b.fixture, b.kind, b.finding, b.summary]);
+  if (rebuilt.sheet.length !== sheet.length || sheet.some((line, index) => !same(line, rebuilt.sheet[index]))) {
+    console.error("The sheet isn't the one these runs made: a line was added, removed, moved or changed beyond its label. Label the sheet the batch wrote, then score again.");
+    return 2;
+  }
+  const key: SheetKey = rebuilt.key;
   const scored = scoreBatch(kept, sheet, key, frozenInputs);
   write(join(dir, "scores.json"), scored);
   const lines = [

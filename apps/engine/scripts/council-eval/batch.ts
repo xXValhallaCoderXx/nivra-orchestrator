@@ -5,12 +5,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTerminal, LineSplitter, PROTOCOL_VERSION, RpcCallError, RpcClient, type ReviewReport, type RunEvent, type RunSummary } from "@nivra/domain";
 import { canonical, requestFor, runOrder, type Arm, type FixtureId, type Frozen } from "./files.ts";
+import { endpointFor, endpointFromDoctor, modelNow, preflightProblem } from "./preflight.ts";
 import type { RunRecord } from "./score.ts";
 
 /**
  * The evaluation's batch (NIV-40): every run, one at a time, on a real engine over stdio, in a home inside the evidence
- * folder. Each request is journalled before it is sent, so a batch that was killed is resumed by finding each run by its
- * request id: never sent twice. Nothing is retried or retaken, and every run is kept, whatever its end.
+ * folder. Before each run, with no inference request, the engine's endpoint, the model it would pick and that model's
+ * sampling are checked against the protocol. Each request is journalled before it is sent, so a batch that was killed
+ * is resumed by finding each run by its request id: never sent twice. Every wait is bounded: a run is cancelled at its
+ * deadline, and one still going when its window to settle has passed is kept as unresolved, and the batch stops.
+ * Nothing is retried or retaken, and every run is kept, whatever its end.
  */
 
 const ENTRY = fileURLToPath(new URL("../../src/main.mjs", import.meta.url));
@@ -20,8 +24,8 @@ export type JournalEntry =
   | { type: "session"; at: string; homeId: string; pid: number; mode: "stub" | "live"; revision: string | null; dirty: boolean; approvalDigest: string }
   | { type: "start"; at: string; fixture: FixtureId; arm: Arm; clientRequestId: string; homeId: string; batchElapsedMs: number }
   | { type: "run"; at: string; fixture: FixtureId; arm: Arm; clientRequestId: string; runId: string | null; how: "started" | "found" | "not-sent" | "unknown" }
-  | { type: "cancel"; at: string; fixture: FixtureId; arm: Arm; runId: string; why: "deadline" }
-  | { type: "end"; at: string; fixture: FixtureId; arm: Arm; clientRequestId: string; runId: string | null; status: RunRecord["status"]; requests: number | null; batchElapsedMs: number }
+  | { type: "cancel"; at: string; fixture: FixtureId; arm: Arm; runId: string; why: "deadline" | "batch" }
+  | { type: "end"; at: string; fixture: FixtureId; arm: Arm; clientRequestId: string; runId: string | null; status: RunRecord["status"]; requests: number | null; note: string | null; batchElapsedMs: number }
   | { type: "stop"; at: string; why: string };
 
 /** The batch's journal: one JSON line per entry, each written through to disk before the batch goes on. */
@@ -58,11 +62,14 @@ export interface EvalEngine {
   close(): Promise<void>;
 }
 
-/** Starts the engine on `home` and initializes it with the key (D8): the key reaches it only through `initialize`. */
-export async function startEngine(home: string, options: { tokenFactoryUrl: string | null; apiKey: string; logPath: string }): Promise<EvalEngine> {
+/**
+ * Starts the engine on `home` and initializes it with the key (D8). `entry` is a test's stand-in for the engine. Closing
+ * is bounded: shutdown, then its input closed, then killed (D4).
+ */
+export async function startEngine(home: string, options: { tokenFactoryUrl: string | null; apiKey: string; logPath: string; entry?: string }): Promise<EvalEngine> {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const stub = options.tokenFactoryUrl ? ["--token-factory-url", options.tokenFactoryUrl] : [];
-  const child = spawn(process.execPath, [ENTRY, "--stdio", "--home", home, "--heartbeat-ms", "0", "--nivra-engine", ...stub], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: process.platform !== "win32" });
+  const child = spawn(process.execPath, [options.entry ?? ENTRY, "--stdio", "--home", home, "--heartbeat-ms", "0", "--nivra-engine", ...stub], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: process.platform !== "win32" });
   const client = new RpcClient({
     send: (line) => void child.stdin.write(line),
     onProtocolError: (problem) => appendFileSync(options.logPath, `protocol error: ${problem}\n`, { mode: 0o600 }),
@@ -85,7 +92,7 @@ export async function startEngine(home: string, options: { tokenFactoryUrl: stri
     homeId: info.homeId,
     pid: info.pid,
     close: async () => {
-      await client.call("shutdown", {}).catch(() => undefined);
+      await client.call("shutdown", {}, { timeoutMs: 5_000 }).catch(() => undefined);
       child.stdin.end();
       await Promise.race([exited, pause(10_000)]);
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -102,16 +109,18 @@ export interface BatchOptions {
   apiKey: string;
   revision: string | null;
   dirty: boolean;
-  /** Tests only: these fixtures, and each run's deadline instead of the protocol's. */
+  /** Tests only: these fixtures; each run's deadline and window to settle instead of the protocol's; a stand-in engine. */
   only?: readonly FixtureId[];
   deadlineMs?: number;
+  reconcileMs?: number;
+  engineEntry?: string;
   log: (line: string) => void;
 }
 
 /** Why the batch must stop after this run, in Nivra's words; null when it goes on (the protocol's stops). */
 export function stopFor(record: RunRecord, frozen: Frozen, mode: "stub" | "live"): string | null {
   const { protocol } = frozen;
-  if (record.status === "unknown") return `Nivra can't tell whether the ${record.fixture} ${record.arm} run started, so the batch stopped: nothing more is sent.`;
+  if (record.status === "unknown") return record.note ?? `Nivra can't tell whether the ${record.fixture} ${record.arm} run started, so the batch stopped: nothing more is sent.`;
   const route = record.report?.route ?? record.summary?.route ?? null;
   if (route && route.model !== protocol.model) return `The engine picked ${route.model}, not ${protocol.model}, so the batch stopped.`;
   if (mode === "live" && route && route.endpoint !== protocol.endpoint) return `A run went to ${route.endpoint}, not Token Factory, so the batch stopped.`;
@@ -122,16 +131,16 @@ export function stopFor(record: RunRecord, frozen: Frozen, mode: "stub" | "live"
 }
 
 /** How a run ended, as the evaluation keeps it, read from its own engine: summary, every event and the report. */
-async function collect(engine: EvalEngine, fixture: FixtureId, arm: Arm, clientRequestId: string, runId: string): Promise<{ record: RunRecord; events: RunEvent[] }> {
-  const summary: RunSummary = await engine.client.call("runs.get", { runId });
+async function collect(engine: EvalEngine, fixture: FixtureId, arm: Arm, clientRequestId: string, runId: string, timeoutMs: number): Promise<{ record: RunRecord; events: RunEvent[] }> {
+  const summary: RunSummary = await engine.client.call("runs.get", { runId }, { timeoutMs });
   const events: RunEvent[] = [];
   for (let after = 0; ; ) {
-    const page = await engine.client.call("runs.events", { runId, after, limit: 500 });
+    const page = await engine.client.call("runs.events", { runId, after, limit: 500 }, { timeoutMs });
     events.push(...page.events);
     if (page.events.length < 500) break;
     after = page.next;
   }
-  const report: ReviewReport | null = await engine.client.call("runs.review", { runId });
+  const report: ReviewReport | null = await engine.client.call("runs.review", { runId }, { timeoutMs });
   const failed = events.find((event) => event.type === "run.failed");
   const kind = failed?.data?.["kind"];
   return {
@@ -146,10 +155,14 @@ async function collect(engine: EvalEngine, fixture: FixtureId, arm: Arm, clientR
       report,
       requests: report ? report.budget.used.requests : 0,
       events: events.length,
+      note: null,
     },
     events,
   };
 }
+
+/** At most `capMs`, and never past `until` on the monotonic clock: what a call may wait. 0 when `until` has passed. */
+const within = (until: number, capMs: number) => Math.max(0, Math.min(capMs, Math.floor(until - performance.now())));
 
 /**
  * Runs the batch, or resumes it from its journal. A run journalled as started but never ended is looked for by its
@@ -162,44 +175,67 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
   mkdirSync(join(out, "runs"), { recursive: true, mode: 0o700 });
   const journal = new Journal(out);
   const before = journal.read();
-  const engine = await startEngine(join(out, "engine home"), { tokenFactoryUrl: options.tokenFactoryUrl, apiKey: options.apiKey, logPath: join(out, "engine.log") });
+  const engine = await startEngine(join(out, "engine home"), { tokenFactoryUrl: options.tokenFactoryUrl, apiKey: options.apiKey, logPath: join(out, "engine.log"), ...(options.engineEntry ? { entry: options.engineEntry } : {}) });
   const sessionStart = performance.now();
-  // Time the batch already used, and, for a run cut off mid-way, its whole deadline: the batch's cap is never undercounted.
+  const { runner } = frozen.protocol;
+  const deadlineOf = (arm: Arm) => options.deadlineMs ?? frozen.protocol.limits[arm].totalMs + runner.cancelMarginMs;
+  const reconcileMs = options.reconcileMs ?? runner.reconcileMs;
+  // Time the batch already used, and, for a run cut off mid-way, the whole of its windows: the cap is never undercounted.
   const previous = Math.max(0, ...before.filter((entry) => entry.type === "start" || entry.type === "end").map((entry) => entry.batchElapsedMs));
-  const deadlineOf = (arm: Arm) => options.deadlineMs ?? frozen.protocol.limits[arm].totalMs + frozen.protocol.runner.cancelMarginMs;
   const ended = new Set(before.filter((entry) => entry.type === "end").map((entry) => `${entry.fixture}:${entry.arm}`));
   const inflight = before.filter((entry): entry is Extract<JournalEntry, { type: "start" }> => entry.type === "start" && !ended.has(`${entry.fixture}:${entry.arm}`));
-  let carried = previous + inflight.reduce((sum, entry) => sum + deadlineOf(entry.arm), 0);
+  let carried = previous + inflight.reduce((sum, entry) => sum + deadlineOf(entry.arm) + reconcileMs, 0);
   const elapsed = () => carried + (performance.now() - sessionStart);
+  /** The batch's own end, on this session's monotonic clock. */
+  const batchEnd = () => sessionStart - carried + runner.batchMs;
   journal.append({ type: "session", at: new Date().toISOString(), homeId: engine.homeId, pid: engine.pid, mode: options.mode, revision: options.revision, dirty: options.dirty, approvalDigest: frozen.approvalDigest });
 
   const records: RunRecord[] = before.filter((entry) => entry.type === "end").map((entry) => readRecord(out, entry.fixture, entry.arm));
   const usedRequests = () => records.reduce((sum, record) => sum + (record.requests ?? frozen.protocol.limits[record.arm].requests), 0);
   let stopped: string | null = before.find((entry): entry is Extract<JournalEntry, { type: "stop" }> => entry.type === "stop")?.why ?? null;
 
+  /**
+   * Follows a run to its end within its bounds: cancelled at its deadline (or sooner, to leave the batch room to settle
+   * it), then given its window to settle. Every call waits only as long as is left. False when it is still going.
+   */
+  const follow = async (fixture: FixtureId, arm: Arm, runId: string): Promise<boolean> => {
+    const startedAt = performance.now();
+    const cancelAt = Math.min(startedAt + deadlineOf(arm), batchEnd() - reconcileMs);
+    const giveUpAt = Math.min(cancelAt + reconcileMs, batchEnd());
+    let cancelled = false;
+    for (;;) {
+      const now = performance.now();
+      if (now >= giveUpAt) return false;
+      if (!cancelled && now >= cancelAt) {
+        cancelled = true;
+        journal.append({ type: "cancel", at: new Date().toISOString(), fixture, arm, runId, why: now >= startedAt + deadlineOf(arm) ? "deadline" : "batch" });
+        await engine.client.call("runs.cancel", { runId }, { timeoutMs: Math.max(1, within(giveUpAt, 10_000)) }).catch(() => undefined);
+        continue;
+      }
+      const wait = within(cancelled ? giveUpAt : cancelAt, 10_000);
+      const summary = wait > 0 ? await engine.client.call("runs.get", { runId }, { timeoutMs: wait }).catch(() => null) : null;
+      if (summary && isTerminal(summary.status)) return true;
+      await pause(Math.min(250, within(giveUpAt, 250)));
+    }
+  };
+
   const finish = async (fixture: FixtureId, arm: Arm, clientRequestId: string, runId: string | null, status: RunRecord["status"] | null) => {
     let record: RunRecord;
-    if (runId) {
-      const startedAt = performance.now();
-      let cancelled = false;
-      for (;;) {
-        const summary = await engine.client.call("runs.get", { runId });
-        if (isTerminal(summary.status)) break;
-        if (!cancelled && performance.now() - startedAt > deadlineOf(arm)) {
-          cancelled = true;
-          journal.append({ type: "cancel", at: new Date().toISOString(), fixture, arm, runId, why: "deadline" });
-          await engine.client.call("runs.cancel", { runId }).catch(() => undefined);
-        }
-        await pause(250);
-      }
-      const collected = await collect(engine, fixture, arm, clientRequestId, runId);
+    if (runId && (await follow(fixture, arm, runId))) {
+      const collected = await collect(engine, fixture, arm, clientRequestId, runId, 30_000);
       record = collected.record;
       writeFileSync(join(out, "runs", `${fixture}-${arm}.json`), `${JSON.stringify({ ...record, eventList: collected.events }, null, 2)}\n`, { mode: 0o600 });
+    } else if (runId) {
+      // Still going after its window to settle: kept as unresolved, with whatever the engine says of it now, never resent.
+      const seen = await collect(engine, fixture, arm, clientRequestId, runId, 5_000).catch(() => null);
+      const note = `The ${fixture} ${arm} run was still going ${Math.round(reconcileMs / 1000)} s after it was cancelled, so it is kept as unresolved, and the batch stopped. It is never sent again.`;
+      record = { ...(seen?.record ?? { fixture, arm, clientRequestId, runId, failureKind: null, summary: null, report: null, events: 0 }), status: "unknown", requests: null, note };
+      writeFileSync(join(out, "runs", `${fixture}-${arm}.json`), `${JSON.stringify({ ...record, eventList: seen?.events ?? [] }, null, 2)}\n`, { mode: 0o600 });
     } else {
-      record = { fixture, arm, clientRequestId, runId: null, status: status ?? "unknown", failureKind: null, summary: null, report: null, requests: status === "not-sent" ? 0 : null, events: 0 };
+      record = { fixture, arm, clientRequestId, runId: null, status: status ?? "unknown", failureKind: null, summary: null, report: null, requests: status === "not-sent" ? 0 : null, events: 0, note: null };
       writeFileSync(join(out, "runs", `${fixture}-${arm}.json`), `${JSON.stringify({ ...record, eventList: [] }, null, 2)}\n`, { mode: 0o600 });
     }
-    journal.append({ type: "end", at: new Date().toISOString(), fixture, arm, clientRequestId, runId: record.runId, status: record.status, requests: record.requests, batchElapsedMs: Math.round(elapsed()) });
+    journal.append({ type: "end", at: new Date().toISOString(), fixture, arm, clientRequestId, runId: record.runId, status: record.status, requests: record.requests, note: record.note, batchElapsedMs: Math.round(elapsed()) });
     records.push(record);
     options.log(`${fixture} ${arm.padEnd(7)} ${record.status}${record.report ? ` (${record.report.outcome})` : ""}: ${record.requests ?? "unknown"} requests, ${record.summary?.durationMs ?? "?"} ms`);
     return record;
@@ -217,18 +253,27 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
       journal.append({ type: "run", at: new Date().toISOString(), fixture: entry.fixture, arm: entry.arm, clientRequestId: entry.clientRequestId, runId: found?.id ?? null, how: found ? "found" : "not-sent" });
       if (found) stopped ??= stopFor(await finish(entry.fixture, entry.arm, entry.clientRequestId, found.id, null), frozen, options.mode);
     }
-    carried -= inflight.filter((entry) => !records.some((record) => record.clientRequestId === entry.clientRequestId)).reduce((sum, entry) => sum + deadlineOf(entry.arm), 0);
+    carried -= inflight.filter((entry) => !records.some((record) => record.clientRequestId === entry.clientRequestId)).reduce((sum, entry) => sum + deadlineOf(entry.arm) + reconcileMs, 0);
     const done = new Set(records.map((record) => `${record.fixture}:${record.arm}`));
+    // Where this engine sends its requests: asked once, from its doctor, which reaches no network.
+    const endpoint = stopped ? null : endpointFromDoctor(await engine.client.call("doctor", {}, { timeoutMs: 30_000 }));
     for (const { fixture, arm } of runOrder()) {
       if (stopped) break;
       if (options.only && !options.only.includes(fixture)) continue;
       if (done.has(`${fixture}:${arm}`)) continue;
-      if (elapsed() + deadlineOf(arm) > frozen.protocol.runner.batchMs) {
-        stopped = "The next run could not end within the batch's 60 minutes, so the batch stopped.";
+      if (elapsed() + deadlineOf(arm) + reconcileMs > runner.batchMs) {
+        stopped = "The next run, with its windows to cancel and to settle, could not end within the batch's 60 minutes, so the batch stopped.";
         break;
       }
-      if (usedRequests() + frozen.protocol.limits[arm].requests > frozen.protocol.runner.maxRequests) {
-        stopped = `The next run could take the batch past its ${frozen.protocol.runner.maxRequests} requests, so the batch stopped.`;
+      if (usedRequests() + frozen.protocol.limits[arm].requests > runner.maxRequests) {
+        stopped = `The next run could take the batch past its ${runner.maxRequests} requests, so the batch stopped.`;
+        break;
+      }
+      // Before any inference request: the model the engine would pick, from the listing it reads, and its sampling.
+      const listed = await modelNow(options.apiKey, endpointFor(options.tokenFactoryUrl));
+      const refused = "problem" in listed ? listed.problem : preflightProblem({ endpoint, model: listed.model, arm }, frozen, options.mode);
+      if (refused) {
+        stopped = refused;
         break;
       }
       const clientRequestId = randomUUID();

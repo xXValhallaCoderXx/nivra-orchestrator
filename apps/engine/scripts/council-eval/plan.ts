@@ -46,7 +46,7 @@ export function approvalRequest(frozen: Frozen, revision: { commit: string | nul
     `Revision: ${revision.commit ?? "unknown"}${revision.dirty ? " (the working tree has uncommitted changes: a paid batch refuses to run until they are committed)" : ""}`,
     `Approval digest: ${frozen.approvalDigest}`,
     "  It covers the five fixtures, the rubric and the protocol, read as data. A change to any of them changes it.",
-    `Model: ${protocol.model}, as the engine picks it. Any other stops the batch after the run that used it.`,
+    `Model: ${protocol.model}, as the engine picks it.`,
     `Sampling: temperature and top_p left to the provider; at most ${n(protocol.sampling.maxOutputTokens)} output tokens a request; the answer tool ${protocol.sampling.toolChoice}.`,
     "",
     `Runs, one at a time, in this order: at most ${protocol.runner.maxRequests} requests, no retries and no retakes.`,
@@ -66,14 +66,22 @@ export function approvalRequest(frozen: Frozen, revision: { commit: string | nul
     const estimate = estimates(frozen, id);
     lines.push(`  ${id} ${frozen.packetDigests[id].slice(0, 16)}  ${fixture.title}: about ${n(estimate.reviewer)} tokens per reviewer, ${n(estimate.chair)} reserved for the chair`);
   }
+  const worstMs = runOrder().reduce((sum, { arm }) => sum + limits(arm).totalMs + protocol.runner.cancelMarginMs + protocol.runner.reconcileMs, 0);
   lines.push(
+    "",
+    "Before each run, with no inference request (the batch stops, and nothing is sent, on a mismatch):",
+    "  - where the engine sends its requests, from its doctor, which reaches no network;",
+    "  - the model it would pick, from Token Factory's model listing (GET /models), read with the engine's own client and its own pick;",
+    "  - the sampling it gives that model, from the engine's own policy.",
+    "  The engine reads the listing again inside its run. A listing that changed in the moment between is caught by the check after the run, which stops the batch.",
     "",
     "Hard limits, per run:",
     `  single:  ${limits("single").requests} request, ${limits("single").totalMs / 1000} s, ${n(limits("single").outputTokensPerRequest)} output tokens a request`,
     `  council: ${limits("council").requests} requests (two reviewers together, then the chair), ${limits("council").totalMs / 1000} s, ${n(limits("council").outputTokensPerRequest)} output tokens a request`,
-    `  Each request is aborted at ${protocol.requestMs / 1000} s. The runner cancels a run still going at its limit plus ${protocol.runner.cancelMarginMs / 1000} s.`,
+    `  Each request is aborted at ${protocol.requestMs / 1000} s. The runner cancels a run still going at its limit plus ${protocol.runner.cancelMarginMs / 1000} s, and gives it ${protocol.runner.reconcileMs / 1000} s more to settle.`,
+    "  A run still going after that is kept as unresolved, the batch stops, and it is never sent again. Every wait while following a run is bounded.",
     `Estimated input budgets (estimates that decide admission, not ceilings): single ${n(limits("single").estimatedInputTokens)} tokens, council ${n(limits("council").estimatedInputTokens)}.`,
-    `The batch: at most ${protocol.runner.batchMs / 60_000} minutes; a run that couldn't end within them isn't started.`,
+    `The batch: at most ${protocol.runner.batchMs / 60_000} minutes; a run that couldn't end within them, windows included, isn't started. With every run at its limit, the batch takes ${(worstMs / 60_000).toFixed(1)} minutes.`,
     "",
     "Stops:",
     ...protocol.stops.map((stop) => `  - ${stop}`),
@@ -86,14 +94,17 @@ export function approvalRequest(frozen: Frozen, revision: { commit: string | nul
     "",
     protocol.labelling === "pending"
       ? "Labelling: not chosen yet. Before approving, choose who labels the blinded sheet: you (about 30 minutes), or me, blind, with you reviewing my labels. The choice goes in protocol.json, which changes the approval digest."
-      : `Labelling: ${protocol.labelling === "nate" ? "you label the blinded sheet" : "I label the blinded sheet, blind, and you review my labels"}.`,
+      : protocol.labelling === "nate"
+        ? "Labelling: you label the blinded sheet. Which arm and reviewer each line came from is never written down: it is worked out again only when the labelled sheet is scored."
+        : "Labelling: I label the blinded sheet, blind, and you review my labels.",
     "",
     "Evidence: ~/nivra-acceptance/council-eval-<UTC>-<revision>/ (0700): the journal, written before each request; every run's summary, events and",
     "report; the engine's home and log; the blinded sheet and its key; the scores; decision.md.",
     "",
     "Once approved, the batch runs with:",
     `  pnpm council:eval --credentials <file> --approved ${frozen.approvalDigest}`,
-    "The file holds a NEBIUS_API_KEY=… line, outside the repository, readable only by you (chmod 600). The key reaches the engine only through initialize.",
+    "The file holds a NEBIUS_API_KEY=… line, outside the repository, readable only by you (chmod 600). The batch uses the key to read the model listing",
+    "before each run, and the engine gets it only through initialize. It is never printed or written.",
   );
   return lines;
 }

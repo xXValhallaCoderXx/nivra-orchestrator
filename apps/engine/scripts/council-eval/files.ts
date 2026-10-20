@@ -55,7 +55,8 @@ export const Protocol = z.strictObject({
   sampling: z.strictObject({ temperature: z.null(), topP: z.null(), maxOutputTokens: z.number().int().positive(), toolChoice: z.enum(["forced", "auto"]) }),
   limits: z.strictObject({ single: Limits, council: Limits }),
   requestMs: z.number().int().positive(),
-  runner: z.strictObject({ cancelMarginMs: z.number().int().nonnegative(), batchMs: z.number().int().positive(), maxRequests: z.number().int().positive() }),
+  /** A run is cancelled at its limit plus `cancelMarginMs`, and given `reconcileMs` more to end before it is kept as unresolved. */
+  runner: z.strictObject({ cancelMarginMs: z.number().int().nonnegative(), reconcileMs: z.number().int().nonnegative(), batchMs: z.number().int().positive(), maxRequests: z.number().int().positive() }),
   preferences: z.strictObject({ revision: z.literal(0), records: z.array(z.never()).length(0) }),
   stops: z.array(z.string()).min(1),
   /** Who labels the blinded sheet: chosen when the protocol is frozen, before approval. */

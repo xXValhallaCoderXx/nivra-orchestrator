@@ -10,15 +10,15 @@
     "council": { "requests": 3, "totalMs": 330000, "outputTokensPerRequest": 4000, "estimatedInputTokens": 120000 }
   },
   "requestMs": 150000,
-  "runner": { "cancelMarginMs": 30000, "batchMs": 3600000, "maxRequests": 20 },
+  "runner": { "cancelMarginMs": 30000, "reconcileMs": 30000, "batchMs": 3600000, "maxRequests": 20 },
   "preferences": { "revision": 0, "records": [] },
   "stops": [
-    "The engine picks a model other than the protocol's: checked after each run, from its recorded route.",
-    "A run's route is not Token Factory.",
-    "A run's sampling differs from the protocol's.",
+    "Before each run, with no inference request, nothing is sent when: the engine's endpoint (from doctor) isn't Token Factory; the model the engine would pick from Token Factory's listing (read with the engine's own client and pick) isn't the protocol's; or the sampling the engine gives that model isn't the protocol's.",
+    "After each run, as a second check: its recorded route, model or sampling isn't the protocol's.",
     "A run fails with auth or rate-limit.",
     "A run makes more requests than its arm allows.",
-    "The next run could not end within the batch's 60 minutes."
+    "A run still going when its window to settle after a cancel has passed: it is kept as unresolved, and never sent again.",
+    "The next run, with its windows to cancel and to settle, could not end within the batch's 60 minutes."
   ],
   "labelling": "pending",
   "seed": 20261021,
