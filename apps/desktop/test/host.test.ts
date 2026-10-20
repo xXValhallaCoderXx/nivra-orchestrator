@@ -1189,7 +1189,7 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
     assert.equal(host.setTaskState(task.summary.id, done.revision, "draft").summary.state, "draft");
   });
 
-  it("clears what a brief took from one project's conversation when the task moves to another repository", async () => {
+  it("clears what a brief took from one project's conversation when the task is made for, or moved to, another repository", async () => {
     const stub = await stubWith((request) =>
       request.raw.includes('"role":"tool"')
         ? toolCall("submit_reply", { answer: "Add the export beside the list.", evidence: [{ statement: "It has a README.", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }], assumptions: ["Alpha uses Vite"] })
@@ -1209,6 +1209,14 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
     assert.match(plan.text, /^Add the export beside the list\.\n\nAssumed:\n- Alpha uses Vite$/);
     const task = await host.createTask({ title: "CSV export", fields: { ...empty, goal: "Export the list", context: plan.text, assumptions: ["Alpha uses Vite"] }, projectId: ids[0]!, planId: plan.id });
     assert.deepEqual([task.brief.content.sources[0]?.projectId, task.brief.content.sources[0]?.citations], [ids[0], [{ path: "README.md", startLine: 1, endLine: 1 }]]);
+    // Made from alpha's plan for beta, or for no repository yet: the same rule as moving a task.
+    for (const projectId of [ids[1]!, null]) {
+      const elsewhere = await host.createTask({ title: "CSV export elsewhere", fields: { ...empty, goal: "Export the list", context: plan.text, assumptions: ["Alpha uses Vite"] }, projectId, planId: plan.id });
+      assert.deepEqual(
+        [elsewhere.summary.projectId, elsewhere.brief.version, elsewhere.brief.content.sources, elsewhere.brief.content.context, elsewhere.brief.content.assumptions, elsewhere.brief.content.revalidate, elsewhere.brief.content.goal, elsewhere.sourcePlans],
+        [projectId, 1, [], "", [], ["context", "assumptions"], "Export the list", []],
+      );
+    }
     const moved = host.setTaskProject(task.summary.id, task.revision, ids[1]!);
     assert.deepEqual(
       [moved.summary.projectId, moved.brief.version, moved.brief.content.sources, moved.brief.content.context, moved.brief.content.assumptions, moved.brief.content.revalidate, moved.brief.content.goal],

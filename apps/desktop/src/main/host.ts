@@ -416,7 +416,9 @@ export class Host {
 
   /**
    * Creates a native task with its first brief (D26, NIV-32): written directly, or from a plan version, which then
-   * gives the brief its source. Either way the brief has the same shape. Needs no tracker and no repository yet.
+   * gives the brief its source. Either way the brief has the same shape. Needs no tracker and no repository yet. A plan
+   * from another project's conversation follows the rule for moving a task: what the brief would take from that project
+   * is cleared and marked to be written again.
    */
   async createTask(input: { title: string; fields: BriefFields; projectId: string | null; planId: string | null }): Promise<TaskView> {
     const workspace = this.#workspaceDb();
@@ -425,16 +427,16 @@ export class Host {
     this.#refuseInBrief(title, fields, await this.#knownSecrets());
     if (input.projectId !== null) this.#project(input.projectId);
     let sources: BriefContent["sources"] = [];
-    let derivedFrom: string | null = null;
     if (input.planId !== null) {
       const plan = getArtifact(workspace, input.planId);
       if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
       sources = [sourceFrom({ id: plan.id, lineageId: plan.lineageId, version: plan.version, content: plan.content as PlanContent })];
-      derivedFrom = plan.id;
     }
+    const drafted = briefFrom(fields, sources);
+    const content = briefForRepository(drafted, input.projectId) ?? drafted;
     const now = new Date().toISOString();
     const id = randomUUID();
-    insertTask(workspace, { id, title, projectId: input.projectId, createdAt: now, updatedAt: now }, { id: randomUUID(), content: briefFrom(fields, sources), derivedFrom });
+    insertTask(workspace, { id, title, projectId: input.projectId, createdAt: now, updatedAt: now }, { id: randomUUID(), content, derivedFrom: content.sources[0]?.planId ?? null });
     return this.task(id);
   }
 
