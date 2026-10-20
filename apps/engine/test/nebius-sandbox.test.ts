@@ -59,8 +59,9 @@ class FakeService {
   failNextSpawn: { create: boolean } | null = null;
   /** The next spawn is turned down (400), creating nothing. */
   refuseNextSpawn = false;
-  /** How many times each new subprocess answers "not ready yet" (425) before its result. */
+  /** How many times each new subprocess answers "not ready yet" (425) before its result, and the wait it asks for. */
   subprocessPending = 0;
+  subprocessRetryAfter = 3;
   /** The next read answers 429 with this Retry-After. */
   rateLimitNextRead: number | null = null;
   /** Operations whose list entries are hidden (as if beyond the search window). */
@@ -188,7 +189,7 @@ class FakeService {
     if (!sub) return encode({ error: "no such subprocess" }, 404);
     // As documented: a signalled child reports exit code -1 and its signal; one still running is "not ready yet".
     if (sub.stopped) return encode({ state: { exit_code: -1, signal: 9 } });
-    if (/sleep 60/.test(sub.args.join(" ")) || sub.pending-- > 0) return encode({ error: "not ready" }, 425, { "retry-after": "3" });
+    if (/sleep 60/.test(sub.args.join(" ")) || sub.pending-- > 0) return encode({ error: "not ready" }, 425, { "retry-after": String(this.subprocessRetryAfter) });
     return encode({ state: { exit_code: sub.exitCode }, stdout: { value: sub.stdout } });
   }
 }
@@ -451,6 +452,21 @@ describe("Nebius Sandboxes, offline: subprocesses and downloads (NIV-29)", () =>
     // Once its parent is cancelled, the child reports the signal that ended it.
     await sandbox.cancel(parent.operationId);
     assert.deepEqual(await sandbox.subprocessResult(parent.operationId, sleeper.spid, 10_000), { exitCode: -1, signal: 9, timedOut: false, stdout: "", stderr: "" });
+  });
+
+  it("makes no request and takes no answer once a subprocess's deadline is reached, however long the service says to wait", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING", "SUCCESS"], waits: true, exitCode: 0 }));
+    const { sandbox, time } = sandboxOn(service);
+    const parent = (await sandbox.submit(step("parent", { disposable: false, timeoutSeconds: 180 }))) as { operationId: string };
+    // Not ready at first, with 10 s to wait; ready from the next read, which would come at the 5 s deadline.
+    service.subprocessPending = 1;
+    service.subprocessRetryAfter = 10;
+    const spawned = await sandbox.subprocess(parent.operationId, { label: "passing", command: "/bin/sh", args: ["/work/test.sh", "Hello, Nivra"] });
+    assert.ok("spid" in spawned);
+    const reads = () => service.requests.filter((r) => r.method === "GET" && r.path.endsWith(`/subprocesses/${spawned.spid}`)).length;
+    const start = time.now();
+    assert.equal(await sandbox.subprocessResult(parent.operationId, spawned.spid, 5_000), null);
+    assert.deepEqual([reads(), time.now() - start], [1, 5_000]);
   });
 
   it("refuses a download over its cap, or one that doesn't match the hash the operation printed", async () => {

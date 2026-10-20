@@ -400,12 +400,15 @@ export class Sandbox {
   /**
    * A subprocess's result, polled until it has ended, within `withinMs`; null when it hadn't by then. A signalled child
    * reports exit code -1 and its signal. While the child runs the service says when to ask again (HTTP 425): that wait
-   * is honoured, never past the deadline.
+   * is honoured, never past the deadline. Once the deadline is reached no request is made and no answer is taken, so a
+   * result shows the child ended within the limit: the probe counts it as evidence that a cancel stopped the child.
    */
   async subprocessResult(operationId: string, spid: number, withinMs: number): Promise<{ exitCode: number | null; signal: number | string | null; timedOut: boolean; stdout: string; stderr: string } | null> {
     const deadline = this.#now() + withinMs;
-    for (;;) {
+    while (this.#now() < deadline) {
       const answer = await this.#api.subprocess(operationId, spid);
+      // An answer that arrives once the time is up says nothing about the limit.
+      if (this.#now() >= deadline) return null;
       let wait = this.#pollMs;
       if (answer.status === "ready") {
         const raw = answer.result as { state?: { exit_code?: unknown; signal?: unknown; timed_out?: unknown } | null; stdout?: { value?: string; encoding?: string } | null; stderr?: { value?: string; encoding?: string } | null } | null;
@@ -415,10 +418,9 @@ export class Sandbox {
       } else if (answer.retryAfterMs !== null) {
         wait = Math.max(wait, answer.retryAfterMs);
       }
-      const left = deadline - this.#now();
-      if (left <= 0) return null;
-      await this.#sleep(Math.min(wait, left));
+      await this.#sleep(Math.min(wait, deadline - this.#now()));
     }
+    return null;
   }
 
   /** A file from an image, bounded, and checked against the hash the operation printed when there is one. */
