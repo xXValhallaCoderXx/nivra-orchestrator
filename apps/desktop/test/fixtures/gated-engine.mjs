@@ -9,6 +9,8 @@
 // runs.find answers for a recorded request id with the run still running (held while a `hold-find` file exists, until a
 // `release-find` file appears); runs.get says "succeeded", or "cancelled" for a run it was asked to cancel; each run it
 // cancels is written to `cancelled.log`; runs.reply gives a general reply; runs.events has no events.
+// For reviews (D31): runs.start records each review's request id and input (`reviews.log`), and runs.review answers
+// with a report that repeats what it was asked for, or names the next plan version while a `wrong-report` file exists.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -29,6 +31,40 @@ const accepted = (clientRequestId) => {
   const line = readFileSync(join(home, "accepted.log"), "utf8").split("\n").find((entry) => entry.startsWith(`${clientRequestId} `));
   return line ? line.split(" ")[1] : null;
 };
+/** A review's report as an engine keeps one, repeating what the review was asked for. */
+const reviewReport = (runId) => {
+  const line = existsSync(join(home, "reviews.log")) ? readFileSync(join(home, "reviews.log"), "utf8").split("\n").find((entry) => entry.startsWith(`${runId} `)) : undefined;
+  if (!line) return null;
+  const { clientRequestId, input } = JSON.parse(line.slice(runId.length + 1));
+  const now = new Date().toISOString();
+  const adjusted = { dropped: 0, refsDropped: 0, relabelled: 0, shortened: 0 };
+  return {
+    panel: input.panel ?? "council",
+    planId: input.planId,
+    planVersion: existsSync(join(home, "wrong-report")) ? input.planVersion + 1 : input.planVersion,
+    packetDigest: input.packetDigest,
+    preferencesDigest: input.preferencesDigest,
+    outcome: cancelled.has(runId) ? "cancelled" : "complete",
+    scope: { kind: "general" },
+    packet: { textChars: 1, assumptions: 0, references: 0 },
+    request: { runId, clientRequestId },
+    route: null,
+    sampling: { temperature: null, topP: null, maxOutputTokens: 4000, toolChoice: "forced" },
+    preferences: { revision: 0, digest: "gated", records: [] },
+    reviewers: [{ role: "architecture", summary: "A gated review.", findings: [], assumptions: [], gaps: [], adjusted }],
+    synthesis: null,
+    stages: [],
+    usage: { inputTokens: null, outputTokens: null, calls: 0, reportedCalls: 0 },
+    budget: {
+      limits: { requests: 3, totalMs: 330000, outputTokensPerRequest: 4000, estimatedInputTokens: 120000 },
+      used: { requests: 0, elapsedMs: 0, inputTokens: 0, reportedInputTokens: null, reportedOutputTokens: null, unreportedRequests: 0, overrunTokens: 0 },
+      stopped: null,
+    },
+    elapsedMs: 0,
+    updatedAt: now,
+    finishedAt: now,
+  };
+};
 let buffer = "";
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -44,6 +80,7 @@ process.stdin.on("data", (chunk) => {
     } else if (request.method === "runs.start") {
       const runId = randomUUID();
       if (existsSync(join(home, "accept"))) appendFileSync(join(home, "accepted.log"), `${request.params.clientRequestId} ${runId}\n`);
+      if (request.params.workflowId === "review") appendFileSync(join(home, "reviews.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
       const held = setInterval(() => {
         if (!existsSync(join(home, "release"))) return;
         clearInterval(held);
@@ -69,6 +106,8 @@ process.stdin.on("data", (chunk) => {
     } else if (request.method === "runs.reply") {
       const record = { exchanges: 0, chars: 0, shortened: 0, omitted: { overLimit: 0, unanswered: 0, preferencesChanged: 0 }, digest: "gated" };
       send({ id: request.id, result: { kind: "general", text: "A gated reply.", cutOff: false, context: { preferences: { revision: 0, digest: "gated", records: [] }, history: record }, finishedAt: new Date().toISOString() } });
+    } else if (request.method === "runs.review") {
+      send({ id: request.id, result: reviewReport(request.params.runId) });
     } else if (request.method === "runs.events") {
       send({ id: request.id, result: { events: [], next: request.params.after ?? 0, status: cancelled.has(request.params.runId) ? "cancelled" : "succeeded" } });
     } else if (request.method === "runs.result") {

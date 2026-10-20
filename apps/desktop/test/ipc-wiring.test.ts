@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { CHAT_LIMITS } from "@nivra/domain";
-import { IPC, MESSAGE_CHARS } from "../src/shared/ipc.ts";
+import { CHAT_LIMITS, ReviewPanel } from "@nivra/domain";
+import { IPC, MESSAGE_CHARS, REVIEW_PANELS } from "../src/shared/ipc.ts";
 
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 const count = (text: string, pattern: RegExp) => text.match(pattern)?.length ?? 0;
@@ -32,5 +32,9 @@ describe("the bridge between the window and main (AGENTS.md, Electron security r
 
   it("tells the window the same message limit the host and the engine use", () => {
     assert.equal(MESSAGE_CHARS, CHAT_LIMITS.messageChars);
+  });
+
+  it("names the same review panels as the engine's protocol (D30)", () => {
+    assert.deepEqual([...REVIEW_PANELS], ReviewPanel.options);
   });
 });

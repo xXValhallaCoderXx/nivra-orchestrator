@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
-import { IPC, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
+import { IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
@@ -217,6 +217,12 @@ function start(): void {
   handle(IPC.savePlan, z.tuple([Id, Id, LongText.nullable()]), (_event, id, messageId, text) => host.savePlan(id, messageId, text ?? undefined));
   handle(IPC.revisePlan, z.tuple([Id, LongText]), (_event, id, text) => host.revisePlan(id, text));
   handle(IPC.listPlans, z.tuple([Id]), (_event, id) => host.plans(id));
+  // Reviews of plan versions (D31). A fingerprint is the preview's own: SHA-256 in hex.
+  const Panel = z.enum(REVIEW_PANELS);
+  handle(IPC.prepareReview, z.tuple([Id, Panel]), (_event, planId, panel) => host.prepareReview(planId, panel));
+  handle(IPC.startReview, z.tuple([Id, Panel, z.string().regex(/^[0-9a-f]{64}$/)]), (_event, planId, panel, expected) => host.startReview(planId, panel, expected));
+  handle(IPC.listReviews, z.tuple([Id]), (_event, id) => host.reviews(id));
+  handle(IPC.cancelReview, z.tuple([Id, Id]), (_event, id, reviewId) => host.cancelReview(id, reviewId));
   handle(IPC.listTasks, none, () => host.tasks());
   handle(IPC.getTask, z.tuple([Id]), (_event, id) => host.task(id));
   handle(IPC.createTask, z.tuple([z.strictObject({ title: LongText, fields: Fields, projectId: Id.nullable(), planId: Id.nullable() })]), (_event, input) => host.createTask(input));

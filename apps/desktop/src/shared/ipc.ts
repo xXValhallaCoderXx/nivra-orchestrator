@@ -1,4 +1,18 @@
-import type { ChatResult, DoctorReport, EngineInfo, ExplainResult, HistoryRecord, PreferenceIntent, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
+import type {
+  ChatResult,
+  DoctorReport,
+  EngineInfo,
+  ExplainResult,
+  HistoryRecord,
+  PreferenceIntent,
+  PreferenceScope,
+  ProviderCheck,
+  ReviewPanel,
+  ReviewReport,
+  RunEventsPage,
+  RunStatus,
+  RunSummary,
+} from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -47,6 +61,10 @@ export const IPC = {
   savePlan: "plans:save",
   revisePlan: "plans:revise",
   listPlans: "plans:list",
+  prepareReview: "reviews:prepare",
+  startReview: "reviews:start",
+  listReviews: "reviews:list",
+  cancelReview: "reviews:cancel",
   listTasks: "tasks:list",
   getTask: "tasks:get",
   createTask: "tasks:create",
@@ -63,6 +81,12 @@ export const MESSAGE_CHARS = 8_000;
 
 /** What the host takes in a task's title, brief and plan (D26); the window counts a plan's characters as they are typed. */
 export const TASK_LIMITS = { titleChars: 200, textChars: 4_000, contextChars: 20_000, itemChars: 1_000, items: 20, planChars: 20_000 } as const;
+
+/**
+ * The review panels (D30), as the domain names them; a test keeps them equal. The window offers the council only: a
+ * single reviewer is the baseline the council is measured against.
+ */
+export const REVIEW_PANELS = ["council", "single"] as const;
 
 export interface AppInfo {
   name: string;
@@ -258,6 +282,8 @@ export interface ConversationView {
   engine: EngineView;
   /** Why it can't continue (its project was removed); null when it can. */
   closed: string | null;
+  /** The review still going in this conversation, which holds it as a turn does (D31); null when none is. */
+  openReview: string | null;
 }
 
 /** A task's states (D26). `active` and `review` come only from attempts, which can't start yet. */
@@ -312,6 +338,61 @@ export interface PlanView {
   /** The latest version in its lineage. */
   latest: number;
   createdAt: string;
+}
+
+/** What a review of one saved plan version would send (D31), worked out from the records as they are now. Nothing is sent. */
+export interface ReviewPreview {
+  planId: string;
+  planLineage: string;
+  planVersion: number;
+  /** The latest version in the plan's lineage. */
+  latestVersion: number;
+  panel: ReviewPanel;
+  /** Where the plan came from: a general conversation, or a project's, with its engine and whether it allows sharing. */
+  scope: { kind: "general" } | { kind: "project"; projectLabel: string; targetLabel: string; headAtStart: string | null; sharing: boolean };
+  /** What the reviewers get: the plan's text, its assumptions and where its answer looked, counted; the preferences in full. */
+  sends: { textChars: number; assumptions: number; references: number; preferences: Array<{ statement: string; scope: PreferenceScope; intent: PreferenceIntent }> };
+  /** The most model calls it makes: two reviewers and a chair, or one reviewer. */
+  requests: number;
+  /** Why it can't start now (a turn or a review still going, or sharing off), in plain words; null when it can. */
+  blocked: string | null;
+  /** The fingerprint of what it would send: starting is refused when that changed since this preview. */
+  expected: string;
+}
+
+/**
+ * A review of a plan version (D31): what it was bound to, how its run went, and the report its engine saved, kept when
+ * it ended. `not-sent` and `unknown` mean what they mean for a turn. Nothing is ever resent: reviewing again makes a new
+ * review.
+ */
+export interface ReviewView {
+  id: string;
+  conversationId: string;
+  planId: string;
+  planLineage: string;
+  planVersion: number;
+  /** The latest version of its plan now, so a review of an older version can say so. */
+  latestVersion: number;
+  panel: ReviewPanel;
+  status: TurnStatus;
+  /** What happened, in Nivra's words, when it ended without a complete report; null while it goes, and once complete. */
+  note: string | null;
+  /** Why its engine can't be reached to check it, while that lasts. */
+  unresolved: string | null;
+  runId: string | null;
+  cancelRequested: boolean;
+  /** Where the plan came from, frozen when the review was asked for. */
+  scope: { kind: "general" } | { kind: "project"; projectLabel: string | null; headAtStart: string | null };
+  packetDigest: string;
+  preferencesDigest: string;
+  /** How many preferences it was sent. */
+  given: { preferences: number };
+  /** The packet's historical references, E1 first: where the answer the plan came from looked, never the lines. */
+  references: Array<{ path: string; startLine: number; endLine: number }>;
+  /** The engine's report, masked again; null while it goes, or when it ended without one. */
+  report: ReviewReport | null;
+  createdAt: string;
+  settledAt: string | null;
 }
 
 export interface TaskSummary {
@@ -426,6 +507,14 @@ export interface NivraApi {
   revisePlan(planId: string, text: string): Promise<PlanView>;
   /** A conversation's plans, every version, oldest first. */
   listPlans(conversationId: string): Promise<PlanView[]>;
+  /** What a review of this plan version would send, with its fingerprint. Reads only: nothing is stored or sent. */
+  prepareReview(planId: string, panel: ReviewPanel): Promise<ReviewPreview>;
+  /** Starts the review previewed; refused when what it would send changed since (`expected` is the preview's fingerprint). */
+  startReview(planId: string, panel: ReviewPanel, expected: string): Promise<ReviewView>;
+  /** A conversation's reviews, oldest first. Reading starts no engine and asks none. */
+  listReviews(conversationId: string): Promise<ReviewView[]>;
+  /** Stops a review being sent or running; its end is recorded as cancelled by the person. */
+  cancelReview(conversationId: string, reviewId: string): Promise<ReviewView[]>;
   listTasks(): Promise<TasksView>;
   getTask(taskId: string): Promise<TaskView>;
   /** Creates a task and its brief v1, written directly or from a plan version; either way the brief has the same shape. */
