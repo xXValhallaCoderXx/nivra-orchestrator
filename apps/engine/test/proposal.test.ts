@@ -14,7 +14,7 @@ import { cleanUp, collect, GIT, git, guestRun, localSession, put, refusal, repoW
 after(cleanUp);
 
 const sha = (data: Uint8Array | string) => createHash("sha256").update(data).digest("hex");
-const STEP: StepRecord = { label: "check", exitCode: 0, signal: null, timedOut: false, cancelled: false, truncated: false, persisted: false, durationMs: 1_200, stdoutTail: "ok\n", stderrTail: "" };
+const STEP: StepRecord = { label: "check", exitCode: 0, signal: null, timedOut: false, cancelled: false, truncated: false, persisted: false, durationMs: 1_200, status: "SUCCESS", usage: { cpu_seconds: 0.4 }, stdoutTail: "ok\n", stderrTail: "" };
 
 /** A real proposal: a repository, its snapshot, a sandbox's edit simulated here, the patch, the report. */
 async function realProposal() {
@@ -93,8 +93,14 @@ describe("proposals", () => {
       ],
     );
     assert.deepEqual(
-      parsed.steps.map((step) => [step.label, step.exitCode]),
-      [["check", 0]],
+      parsed.steps.map((step) => [step.label, step.exitCode, step.status, step.usage]),
+      [["check", 0, "SUCCESS", { cpu_seconds: 0.4 }]],
+    );
+    // Usage the provider never reported stays null, and a step with no provider has no status.
+    const local = JSON.parse(new TextDecoder().decode(buildReport({ ...(await realProposal()), steps: [{ ...STEP, status: null, usage: undefined }] }))) as { steps: StepRecord[] };
+    assert.deepEqual(
+      local.steps.map((step) => [step.status, step.usage]),
+      [[null, null]],
     );
     assert.ok(!new TextDecoder().decode(report).includes("export const"), "the report holds file content");
     const long = buildReport({ ...(await realProposal()), steps: [{ ...STEP, stdoutTail: "x".repeat(5_000) }] });

@@ -119,6 +119,10 @@ export interface StepRecord {
   truncated: boolean;
   persisted: boolean;
   durationMs: number;
+  /** The provider's status for the step's operation, or null where no provider ran it. */
+  status: string | null;
+  /** As the provider reported it, raw, null when it reported none: never turned into money. */
+  usage: unknown;
   /** The end of what it printed, bounded: text from the sandbox, never instructions. */
   stdoutTail: string;
   stderrTail: string;
@@ -146,7 +150,7 @@ export function buildReport(input: { snapshot: Snapshot; patch: PatchResult; ste
       untracked: snapshot.untracked.count,
       lfsPointers: snapshot.lfsPointers.count,
     },
-    steps: input.steps.map((step) => ({ ...step, stdoutTail: tail(step.stdoutTail), stderrTail: tail(step.stderrTail) })),
+    steps: input.steps.map((step) => ({ ...step, usage: step.usage ?? null, stdoutTail: tail(step.stdoutTail), stderrTail: tail(step.stderrTail) })),
     changes: [...changes.deleted.map((path) => ({ change: "deleted", path })), ...changes.added.map(describe("added")), ...changes.changed.map(describe("changed"))],
     modeChanges: changes.modeChanges,
     generatedLeftOut: changes.generated,
