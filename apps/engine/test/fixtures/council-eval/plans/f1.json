@@ -1,0 +1,11 @@
+{
+  "id": "f1",
+  "title": "Rename a column in place during a rolling deploy",
+  "control": false,
+  "packet": {
+    "scope": { "kind": "general" },
+    "text": "Rename users.fullname to users.display_name.\n\n1. Add migration 0042: ALTER TABLE users RENAME COLUMN fullname TO display_name.\n2. In the same pull request, change the User model, every query and the API serializer to display_name.\n3. Ship it with the normal rolling deploy: the migration runs first, then the app servers are replaced in batches of five over about ten minutes.\n4. If anything goes wrong, roll back by redeploying release 40.\n5. Before merging, update the model's unit tests to the new name and run the full suite.",
+    "assumptions": ["The users table is small enough for the rename to be instant.", "Nothing outside the app reads the users table."],
+    "references": []
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "id": "f4",
+  "title": "Move 140 call sites to a library's v2 in one pull request, and change the date format",
+  "control": false,
+  "packet": {
+    "scope": { "kind": "general" },
+    "text": "Upgrade the dates library from v1 to v2.\n\n1. In one pull request, change all 140 call sites to v2's API.\n2. In the same pull request, change the public API's dates from MM/DD/YYYY to ISO 8601, since that is v2's default.\n3. Merge it once it is reviewed, and ship it with the next release.\n4. After the release, once things settle, add tests for the new date format.",
+    "assumptions": ["v2's API maps one to one onto v1's.", "Every client of the public API is ours."],
+    "references": []
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "id": "f5",
+  "title": "A dry run for the cache prune command (control: a sound plan)",
+  "control": true,
+  "packet": {
+    "scope": { "kind": "general" },
+    "text": "Add a --dry-run option to our internal `cache prune` command, which today deletes cache entries older than the configured TTL.\n\n1. With --dry-run, run the same selection query, print how many entries and bytes would be removed, and exit without deleting anything.\n2. Share one selection function between the dry run and the real run, so the dry run reports exactly what a real run would remove.\n3. Tests: a dry run deletes nothing; a dry run's counts equal a real run's on the same fixture; the existing prune tests stay as they are.\n4. Document the option in the command's --help.\n5. It ships without a flag, since nothing changes unless --dry-run is passed. To roll back, revert the commit.",
+    "assumptions": ["Only the platform team runs cache prune."],
+    "references": []
+  }
+}

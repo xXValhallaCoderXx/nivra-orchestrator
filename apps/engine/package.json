@@ -9,7 +9,8 @@
     "test": "node --test \"test/**/*.test.ts\"",
     "probe:tokenfactory": "node scripts/probe-tokenfactory.ts",
     "probe:sandbox": "node scripts/sandbox-probe.ts",
-    "rpc": "node scripts/rpc.ts"
+    "rpc": "node scripts/rpc.ts",
+    "council:eval": "node scripts/council-eval.ts"
   },
   "dependencies": {
     "@mastra/core": "1.75.0",
