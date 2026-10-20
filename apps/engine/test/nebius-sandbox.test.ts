@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, type SandboxApiOptions, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
-import { evaluate, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
+import { CLEANUP_MAX_SECONDS, evaluate, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, tokenOutlasts, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
 import { classify, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
 
 /**
@@ -780,5 +780,15 @@ describe("Nebius Sandboxes, offline: the probe's credentials, and what stage 0 s
       [short.ready, short.lines[1], short.lines[2], short.lines[4]],
       [false, "Permissions granted: import, spawn, spawn_disposable, list. Stage 1 also needs: cancel.", "Limits: instance_max_timeout 120. Stage 1's longest operation needs 180 s.", "0 public image(s); busybox or alpine: none."],
     );
+  });
+
+  it("starts stage 1 only on a token that outlasts it and its cleanup", () => {
+    const needed = PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS;
+    const now = Date.parse("2026-10-20T04:22:59Z");
+    // Stage 0's token expired 4 minutes 24 seconds after that check.
+    assert.deepEqual(tokenOutlasts({ token_expiration: Date.parse("2026-10-20T04:27:23Z") / 1000 }, now, needed), { ok: false, expiresAt: "2026-10-20T04:27:23.000Z" });
+    assert.deepEqual(tokenOutlasts({ token_expiration: now / 1000 + needed }, now, needed).ok, true);
+    assert.deepEqual([tokenOutlasts({ token_expiration: null }, now, needed), tokenOutlasts({}, now, needed)], [{ ok: true, expiresAt: null }, { ok: false, expiresAt: null }]);
+    assert.equal(needed, 27 * 60);
   });
 });

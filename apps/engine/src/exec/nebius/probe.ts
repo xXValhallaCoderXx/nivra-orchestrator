@@ -28,6 +28,18 @@ export const PROBE_LIMITS = {
  */
 export const CLEANUP_MAX_SECONDS = 2 * PROBE_LIMITS.searchSeconds + 2 * (PROBE_LIMITS.requestTimeoutSeconds + PROBE_LIMITS.cancelWaitSeconds);
 
+/**
+ * Whether the token stays valid long enough for stage 1 and its cleanup: a token that expires partway would leave the
+ * probe unable to read, or cancel, its own operations. `expiresAt` is the whoami answer's `token_expiration` (Unix
+ * seconds, null for none), compared with the wall clock, since that is what it is measured on.
+ */
+export function tokenOutlasts(whoami: unknown, nowMs: number, seconds: number): { ok: boolean; expiresAt: string | null } {
+  const expiration = (whoami as { token_expiration?: unknown } | null)?.token_expiration;
+  if (expiration === null) return { ok: true, expiresAt: null };
+  if (typeof expiration !== "number") return { ok: false, expiresAt: null };
+  return { ok: expiration * 1000 - nowMs >= seconds * 1000, expiresAt: new Date(expiration * 1000).toISOString() };
+}
+
 /** The permissions stage 1 uses: spawning (disposable or not), listing to find a lost answer, and cancelling. */
 export const STAGE_ONE_PERMISSIONS = ["spawn", "spawn_disposable", "list", "cancel"] as const;
 

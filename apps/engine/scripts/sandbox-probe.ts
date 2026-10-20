@@ -22,7 +22,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, parseEnv } from "node:util";
 import { fetchTransport, SandboxApi } from "../src/exec/nebius/api.ts";
-import { CLEANUP_MAX_SECONDS, evaluate, LATENCY, PROBE_LIMITS, probePlan, RETENTION, runStageOne, stageZeroSummary } from "../src/exec/nebius/probe.ts";
+import { CLEANUP_MAX_SECONDS, evaluate, LATENCY, PROBE_LIMITS, probePlan, RETENTION, runStageOne, stageZeroSummary, tokenOutlasts } from "../src/exec/nebius/probe.ts";
 import { Journal, Sandbox } from "../src/exec/nebius/sandbox.ts";
 
 const FIXTURE = fileURLToPath(new URL("../test/fixtures/sandbox-probe/", import.meta.url));
@@ -59,6 +59,7 @@ if (values.plan) {
   console.log(`Deadlines: ${PROBE_LIMITS.requestTimeoutSeconds} s per request; each operation's timeout plus ${PROBE_LIMITS.observeMarginSeconds} s to observe it.`);
   console.log(`  Stage 1 stops at ${PROBE_LIMITS.overallMinutes} minutes, a hard limit: no wait goes past it, no read is made after it, and nothing starts after it.`);
   console.log(`  Cleanup then takes at most ${Math.ceil(CLEANUP_MAX_SECONDS / 60)} minutes: two searches for a lost answer (${PROBE_LIMITS.searchSeconds} s each) and two cancels (a request, then ${PROBE_LIMITS.cancelWaitSeconds} s each).`);
+  console.log(`  Before anything starts, stage 1 reads the account once (GET /v1/whoami), and starts only if the token stays valid for ${Math.ceil((PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS) / 60)} minutes.`);
   console.log("No model calls, no installs.");
   console.log("\nThresholds, agreed before the run. Each pattern is judged on its own evidence, its checks and its latency together:");
   console.log("  Critical, for each pattern (a failure defers that pattern; if neither qualifies, NIV-34 stays blocked and local containers");
@@ -154,6 +155,13 @@ if (values.stage !== "1" || !values.image) {
 }
 
 const client = api();
+// A token that expires partway would leave the probe unable to read or cancel its own operations: check it first.
+const needed = PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS;
+const token = tokenOutlasts(await client.whoami(), Date.now(), needed);
+if (!token.ok) {
+  console.error(`Your token ${token.expiresAt ? `expires at ${token.expiresAt}` : "didn't say when it expires"}, and stage 1 with its cleanup can take ${Math.ceil(needed / 60)} minutes. Create a key that stays valid for at least an hour, put it in the credentials file, then try again. Nothing was started.`);
+  process.exit(2);
+}
 const deadline = { at: performance.now() + PROBE_LIMITS.overallMinutes * 60_000 };
 const sandbox = sandboxFor(client, () => deadline.at);
 let interrupted = false;
