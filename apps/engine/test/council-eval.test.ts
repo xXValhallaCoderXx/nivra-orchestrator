@@ -307,9 +307,11 @@ describe("the batch on a real engine, against the stub (NIV-40)", () => {
       "gives it 30 s more to settle",
       "the batch takes 52.5 minutes",
       "Labelling: you label the blinded sheet. Which arm and reviewer each line came from is never written down",
+      "the blinded sheet; and, once it is labelled and scored, the scores and decision.md.",
     ]) {
       assert.ok(stdout.includes(needle), needle);
     }
+    assert.equal(stdout.includes("its key"), false, "the sheet's key is never part of the evidence before scoring");
   });
 
   it("runs the ten runs in the protocol's order, one at a time, with exactly 20 requests, and keeps every one", async () => {

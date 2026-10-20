@@ -99,7 +99,7 @@ export function approvalRequest(frozen: Frozen, revision: { commit: string | nul
         : "Labelling: I label the blinded sheet, blind, and you review my labels.",
     "",
     "Evidence: ~/nivra-acceptance/council-eval-<UTC>-<revision>/ (0700): the journal, written before each request; every run's summary, events and",
-    "report; the engine's home and log; the blinded sheet and its key; the scores; decision.md.",
+    "report; the engine's home and log; the blinded sheet; and, once it is labelled and scored, the scores and decision.md.",
     "",
     "Once approved, the batch runs with:",
     `  pnpm council:eval --credentials <file> --approved ${frozen.approvalDigest}`,
