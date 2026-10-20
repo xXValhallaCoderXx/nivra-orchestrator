@@ -530,7 +530,8 @@ installed v0.1.1 refuses that home until it is put back (D26).
 ### Planning workspace: the review of checkpoint 1 (D27)
 
 A review of PR 4 found seven gaps, and asked for a WSL engine home that development and tests never share with the
-release. Six commits on `feature/chat-managment`:
+release. A second review, at `7155917`, found one more read in finding 7's fix. Seven commits on
+`feature/chat-managment`:
 
 | Commit | What |
 |---|---|
@@ -540,6 +541,7 @@ release. Six commits on `feature/chat-managment`:
 | `22db256` | a task made from another project's plan (5) |
 | `2460259` | a crashed session's damaged workspace (4) |
 | `7ea90a4` | engine homes by channel, and a WSL home for each test run |
+| `483f49d` | a subprocess result read at its deadline (7, the second review) |
 
 **Each finding, reproduced and fixed.** Each has a test that fails on the code before its fix.
 
@@ -551,7 +553,7 @@ release. Six commits on `feature/chat-managment`:
 | 4. A session dies with its last write in the WAL, and the file is damaged past its header | The 4,152-byte WAL was gone, and the file set aside had already changed | The file and its WAL kept aside byte for byte: on ext4 in the tests, and on NTFS in the packaged Windows app |
 | 5. A task for project B made from project A's plan | Brief v1 held A's source, the plan's text and "Alpha uses Vite" | Cleared and marked to be written again, as when moving a task; the same for a task with no repository yet |
 | 6. `submit_reply({answer: " \n\t "})` | The run succeeded with that answer | Turned down; a model that never fixes it ends `malformed`, with no reply stored |
-| 7. HTTP 425 while a subprocess runs | The read threw | Polled as long as `Retry-After` says, never past the deadline; a signalled child (`exit_code` -1) counts as ended |
+| 7. HTTP 425 while a subprocess runs | The read threw. After the first fix, one more read at the deadline was still taken: with 5 s left and `Retry-After: 10`, reads at 0 and 5 s, and the second answer counted | Polled as long as `Retry-After` says. Once the deadline is reached, no request is made and no answer taken: one read, and no result. A signalled child (`exit_code` -1) counts as ended |
 
 Finding 4's read-only check was tried by hand first, with `node:sqlite` on ext4 and on NTFS (the Windows `node.exe`,
 SQLite 3.53.4). It found the damage (SQLite error 11) and left the file and the WAL byte-identical. A writing
@@ -570,7 +572,7 @@ One thing changed afterwards, and it was the hand check itself. A read-only quer
 both comparisons, moved the time of its `-shm` file; the file's content is the same.
 
 **Checks**
-- `pnpm verify`: domain 36, engine 181, desktop 176. All passed.
+- `pnpm verify`: domain 36, engine 182, desktop 176. All passed (after the second review's fix).
 - `test:e2e` (built): 21 passed. 1 was skipped, because it applies only to a packaged app.
 - `test:packaged` (Linux, `--dir`): 17 passed. 5 were skipped, because they need the test endpoint switch.
 - A real engine through `apps/engine/scripts/rpc.ts`, against a loopback stub: the reply of spaces was turned down, and
@@ -578,7 +580,9 @@ both comparisons, moved the time of its `-shm` file; the file's content is the s
 - `pnpm probe:sandbox --plan` prints the thresholds per pattern. No live call has been made.
 
 **Not run:** `verify:interrupt`. This machine has no dedicated test distribution to terminate. Its scripts only gained
-the run's own WSL home and its removal; typecheck covers them.
+the run's own WSL home and its removal; typecheck covers them. The second review's fix is in the offline Nebius client,
+which nothing in the app or the engine's RPC uses yet, so the UI, Windows and `rpc.ts` checks above weren't run again
+for it.
 
 ### Deferred to a later milestone (kept, not dropped)
 

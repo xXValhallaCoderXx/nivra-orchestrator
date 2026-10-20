@@ -1176,9 +1176,10 @@ given a test that fails without the fix.
    marked to be written again.
 6. **A repository reply of spaces is turned down**, like an empty one. Text in `submit_reply` is trimmed before it is
    checked.
-7. **A subprocess that isn't ready yet is polled, not failed.** HTTP 425 from the subprocess endpoint is "pending";
-   the client waits as long as `Retry-After` says, never past its own deadline. The documentation asks for exactly
-   that.
+7. **A subprocess that isn't ready yet is polled, not failed.** HTTP 425 from the subprocess endpoint is "pending",
+   and the client waits as long as `Retry-After` says, as the documentation asks. Once its own deadline is reached it
+   makes no request and takes no answer, so a result shows the child ended within the limit. A second review, at
+   `7155917`, found it still made one read at the deadline and took the answer.
 
 And the WSL home is no longer shared:
 - **A build has a channel**, set when it is built: development for `pnpm dev:win` (`electron-vite build --mode
