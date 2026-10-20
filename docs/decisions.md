@@ -1284,6 +1284,16 @@ evidence (D27), against thresholds agreed before it ran.
 - **Local containers (NIV-37)** aren't needed as this adapter's alternative. They stay a later option.
 - **Pattern B isn't used.** A later approved run of the probe, as it is now, can settle its two gaps.
 - **The submission doesn't change** (D24): coding work is still deferred there.
+- **The review of PR 5** found two gaps in the probe itself, fixed before it merged (`d3a0c62`). Neither touches the
+  measurements, and pattern A's adoption stands.
+  1. **An interruption didn't stop the work under way.** Ctrl+C only moved the deadline, which the polling loops had
+     already taken. Requests went on after it, the remaining fixture files were still uploaded, and cleanup waited for
+     all of it. Now one signal reaches every request, the reading of every answer, every retry's wait and every poll,
+     and the loops read their cap afresh. A spawn cut off in flight stays uncertain, for cleanup to find. Cleanup has
+     its own signal and budget.
+  2. **The credentials check could pass a file inside the repository.** `repo/..private/key.env` passed as outside,
+     by its prefix, and so did a link from outside to a file inside. Now both paths are compared as they really are,
+     links followed, by whole components.
 - **What stays on Nebius** from the two runs:
   - six uploads of the three fixture files;
   - the result images the steps left;

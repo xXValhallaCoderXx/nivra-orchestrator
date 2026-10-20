@@ -587,7 +587,7 @@ for it.
 ### Nebius Sandboxes, live (D28, NIV-29)
 
 NIV-29's live probe, run on 20 October in stages Nate approved one at a time, each with its data and budget. A synthetic
-fixture, no model calls and no installs. Seven commits on `feature/niv-29-live`:
+fixture, no model calls and no installs. Eight commits on `feature/niv-29-live`, the last after review:
 
 | Commit | What |
 |---|---|
@@ -598,6 +598,7 @@ fixture, no model calls and no installs. Seven commits on `feature/niv-29-live`:
 | `c3da9d4` | The token check takes two readings, and tells a token renewed with each request apart |
 | `8334299` | Signal -1 is no signal, and every request gets whole milliseconds: the first run's two bugs |
 | `3e8bd4e` | Each subprocess's signal and stderr, and a failed read's error, are kept: the second run's gaps |
+| `d3a0c62` | The review of PR 5: an interruption stops everything under way at once, and a credentials file is judged by its real path |
 
 **Stage 0 (04:22 UTC): two reads, `whoami` and `images`.**
 - The key and the project were accepted.
@@ -663,11 +664,28 @@ reports, with the key and the project id replaced: `sandbox-probe-2026-10-20T042
 `…T043434287Z` (the first run, with `reevaluated-8334299.json`) and `…T095807550Z` (the second run). The attempt at
 04:28 UTC left its folder empty.
 
+**The review of PR 5** found two gaps in the probe, both reproduced and fixed in `d3a0c62`. Neither touches the
+measurements above.
+
+| Finding | Before | Now |
+|---|---|---|
+| 1. Ctrl+C during stage 1 | It moved the deadline, which every loop under way had already taken. The review saw requests go on 1 and 2 s after it, and the remaining fixture files still uploaded; cleanup waited for that to unwind | One signal reaches every request (`fetchTransport` joins it to the request's timeout), the reading of every answer, every retry's wait and every poll. Loops read their cap afresh. Uploads stop at the first one cut off. A spawn cut off on its way back stays uncertain, for cleanup to find and stop. Cleanup has its own signal (a second Ctrl+C) and its own budget, 7 minutes as a hard cap, and with none left it sends no cancel |
+| 2. A credentials file inside the repository | `repo/..private/key.env` passed as outside, by its prefix, and so did a link from outside to a file inside | Both paths are compared as they really are, links followed, by whole components; the file read is the one checked |
+
+The new tests, each failing on the code before the fix:
+- an interruption during a GET, during a spawn's POST, during the uploads, and during a retry's wait;
+- a cap that moves earlier mid-wait;
+- cleanup's own budget;
+- `fetchTransport` against a loopback server that never answers, and one that never finishes its body;
+- `insideRepository` on temporary folders;
+- through the script: a `..private` path, and a link to the README, refused as inside.
+
 **Checks**
-- `pnpm verify`: domain 36, engine 194, desktop 176. All passed.
+- `pnpm verify`: domain 36, engine 202, desktop 176. All passed (after review).
 - `pnpm probe:sandbox --plan`: the same steps, data and limits as approved. Only the token check's line changed, in
-  `c3da9d4`, which was approved too.
+  `c3da9d4`, which was approved too, and a line on Ctrl+C was added after review.
 - **Not run:** `rpc.ts` and the UI checks. The client isn't wired into the engine or the app, and nothing else changed.
+  The fixes weren't run live: they change how an interruption is handled, not what a run does.
 
 ### Deferred to a later milestone (kept, not dropped)
 

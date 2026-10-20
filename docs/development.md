@@ -148,7 +148,8 @@ pnpm probe:sandbox --credentials <file> --recover <evidence folder>
 
 - **Credentials.** A file holding `NEBIUS_API_KEY=…` and `NEBIUS_PROJECT_ID=…` lines, outside the repository and
   readable only by you (`chmod 600`), for example `~/.config/nivra/nebius-probe.env`. The probe refuses one inside the
-  repository or readable by others, and sends nothing. The two variables set in your own terminal also work. Never put
+  repository (judged by its real path, so a link from outside to a file inside counts as inside) or readable by others,
+  and sends nothing. The two variables set in your own terminal also work. Never put
   them in a chat. They are removed from the environment once read, and never printed or written: evidence replaces
   them with placeholders.
 - **Stage 0** prints only what the proof needs: the permissions, the limits, the token's expiry and the public busybox
@@ -164,8 +165,11 @@ pnpm probe:sandbox --credentials <file> --recover <evidence folder>
   left.
 - **Evidence** goes to `~/nivra-acceptance/sandbox-probe-<UTC>/` (0700): the journal, each step's outcome, how each of
   pattern B's subprocesses ended, the verdicts and a summary.
-- **Interruption.** The first Ctrl+C settles every operation the probe started. `--recover` finishes that later from the
-  journal.
+- **Interruption.**
+  - The first Ctrl+C stops every request, wait and upload at once.
+  - Cleanup then settles every operation the probe started, with its own signal and at most 7 minutes.
+  - A second Ctrl+C stops cleanup.
+  - `--recover` finishes the rest later from the journal, on the same budget.
 
 ## Where things will live
 
