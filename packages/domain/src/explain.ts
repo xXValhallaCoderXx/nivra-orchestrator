@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PreferenceIntent, PreferenceScope } from "./context.ts";
+import { RunBudgetRecord } from "./models.ts";
 
 /**
  * What an explain run produced (NIV-6, NIV-9, D22), as stored in the owning engine's `nivra.db`. Every citation says
@@ -51,8 +52,11 @@ export const ExplainConflict = z.strictObject({
 });
 export type ExplainConflict = z.infer<typeof ExplainConflict>;
 
-/** Why the answer was due when it was given (D22, D23): the last steps were reached, time ran short, or the budget ran out. */
-export const AnswerDueReason = z.enum(["last-steps", "time", "budget"]);
+/**
+ * Why the answer was due when it was given (D22, D23): the last steps were reached, time ran short, the request budget
+ * ran out, or the run's estimated input budget could no longer admit another request and the answer after it (D30).
+ */
+export const AnswerDueReason = z.enum(["last-steps", "time", "budget", "run-budget"]);
 export type AnswerDueReason = z.infer<typeof AnswerDueReason>;
 
 /**
@@ -100,6 +104,8 @@ const ContextDetails = {
     .strictObject({ tokens: z.number().int(), estimatedTokens: count, resultsLimited: count, resultsReplaced: count, ranOut: z.boolean() })
     .nullable()
     .default(null),
+  /** The run's limits and what it used (D30); null for a result stored before it was recorded. */
+  runBudget: RunBudgetRecord.nullable().default(null),
   /**
    * How the answer came to be accepted: why it was due (none when the model answered before it had to), what was turned
    * down first, and what was dropped. An engine before NIV-26 never turned an answer down for having no findings, so

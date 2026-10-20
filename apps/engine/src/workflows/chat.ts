@@ -339,6 +339,7 @@ export function createChatWorkflow(deps: ChatDeps) {
           preferences: recorded.preferences,
           hidden: map.hidden,
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
+          runBudget: null,
           answer: {
             dueReasons: reading.dueReasons,
             refusals,

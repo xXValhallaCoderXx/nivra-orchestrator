@@ -148,7 +148,12 @@ export function ConflictItem({
 }
 
 export const plural = (count: number, one: string, many = `${one}s`) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
-const DUE: Record<AnswerDueReason, string> = { "last-steps": "the last steps were reached", time: "time ran short", budget: "the budget ran out" };
+const DUE: Record<AnswerDueReason, string> = {
+  "last-steps": "the last steps were reached",
+  time: "time ran short",
+  budget: "the budget ran out",
+  "run-budget": "the run's input budget had room for one more answer only",
+};
 const KIND_LABEL = { "personal-default": "personal default", "project-default": "project default", override: "project decision" } as const;
 const NOT_RECORDED = "Not recorded for this run.";
 

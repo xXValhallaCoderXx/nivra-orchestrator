@@ -3,6 +3,7 @@ import {
   ChatInput,
   ChatResult,
   combinedMask,
+  ReviewReport,
   ErrorCode,
   ExplainInput,
   ExplainResult,
@@ -311,6 +312,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         if (!store.status(runId)) notFound(runId);
         const stored = store.artifact(runId, "chat");
         return stored === null ? null : ChatResult.parse(JSON.parse(stored));
+      },
+      "runs.review": ({ runId }) => {
+        if (!store.status(runId)) notFound(runId);
+        const stored = store.artifact(runId, "review");
+        return stored === null ? null : ReviewReport.parse(JSON.parse(stored));
       },
     },
   });

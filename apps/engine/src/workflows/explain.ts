@@ -226,6 +226,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           preferences: { revision: context.preferences.revision, digest: await preferencesDigest(records), records: records.map(({ id, scope, intent, revision }) => ({ id, scope, intent, revision })) },
           hidden: map.hidden,
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
+          runBudget: null,
           answer: {
             dueReasons: reading.dueReasons,
             refusals,

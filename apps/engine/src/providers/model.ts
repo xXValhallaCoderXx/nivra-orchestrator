@@ -455,6 +455,8 @@ const MESSAGES: Record<ModelFailureKind, (detail: string, status: number | null)
   "no-key": () => "No Nebius key is set, so nothing was sent. Add your key in Settings, then try again.",
   "context-too-small": (d) =>
     `The model's context is too small for Nivra's instructions, the preferences this project's runs get and this repository's starting map${d ? ` (${d})` : ""}, so nothing was sent to it. Shorten the question or the choices, or delete preferences you don't need; if that isn't enough, this key needs a model with a larger context: Check Token Factory in Settings shows what it can use.`,
+  "budget-exhausted": (d) =>
+    `This run used its input budget${d ? ` (${d})` : ""}, so it stopped before sending more to the model. Ask a narrower question, or start again.`,
   auth: (_d, s) => `Token Factory refused the API key (HTTP ${s ?? "401"}). Check the key in Settings, or create a new one in the Token Factory console.`,
   "rate-limit": (d) => `Token Factory is rate-limiting this key (HTTP 429). ${d ? `Try again in ${d}.` : "Wait a minute, then try again."}`,
   "model-unavailable": (d) => `The model isn't available to this key${d ? ` (${d})` : ""}. Check Token Factory in Settings to see which models the key can use.`,
