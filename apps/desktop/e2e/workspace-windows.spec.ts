@@ -1,7 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test } from "@playwright/test";
+import { build } from "esbuild";
 import { REMOVE_TEST_HOME, testWslHome } from "../scripts/test-homes.ts";
 
 /**
@@ -10,7 +13,9 @@ import { REMOVE_TEST_HOME, testWslHome } from "../scripts/test-homes.ts";
  * no engine, and a file that isn't a database is kept aside with its journal files (renamed on NTFS) while the app still
  * starts. The same check as workspace-store.spec.ts. Then, on NTFS: a damaged workspace that a killed app left its WAL
  * beside is kept aside exactly as it was found. Then the window itself, with no key (no model is ever called): its
- * places, a turn refused on the native engine before any request, and a task, all kept across a relaunch. Any WSL engine
+ * places, a turn refused on the native engine before any request, and a task, all kept across a relaunch. Last, a plan's
+ * review (D31): the Windows build reaches no model, so a plan is seeded into its profile first, through the workspace's
+ * own functions, bundled and run by the staged node.exe, so the file is only ever opened on Windows (D7). Any WSL engine
  * would use a home of this run's own (D27); none starts.
  */
 test.skip(process.platform !== "linux" || !existsSync("/mnt/c/Windows/System32/cmd.exe"), "runs from WSL on a Windows machine");
@@ -23,6 +28,7 @@ const windows = (exe: string, args: string[]) => {
 const wslpath = (flag: "-u" | "-w", path: string) => windows("/usr/bin/wslpath", [flag, path]);
 const sha = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 const wslHome = testWslHome("e2e-workspace");
+const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 test.afterAll(() => {
   spawnSync("/bin/sh", ["-c", REMOVE_TEST_HOME, "sh", wslHome]);
@@ -132,6 +138,38 @@ test("the window on Windows: a turn with no key is refused on the native engine 
   await expect(page.getByTestId("turn-status")).toHaveText("Failed");
   await page.getByTestId("nav-tasks").click();
   await expect(page.getByTestId("task-row").filter({ hasText: "Tidy the README" })).toContainText("Ready");
+  await app.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a seeded plan's review on Windows shows what it would send, is refused on the native engine before any request with no key, and is kept across a relaunch", async () => {
+  const { root, launch } = setUp("e2e-review");
+  const staged = join(desktop, "build", "stage", "win-x64", "node", "node.exe");
+  if (!existsSync(staged)) throw new Error("No staged Windows runtime: run pnpm stage:runtime all first.");
+  copyFileSync(staged, `${root}/node.exe`);
+  await build({ entryPoints: [join(desktop, "e2e", "seed-workspace-cli.ts")], outfile: `${root}/seed.mjs`, bundle: true, platform: "node", format: "esm", target: "node24", logLevel: "warning" });
+  mkdirSync(`${root}/user data`, { recursive: true });
+  const rootWin = wslpath("-w", root);
+  const seed = { question: "How do we rename the users column safely?", plan: "Rename users.fullname to display_name in place during a rolling deploy." };
+  const seeded = JSON.parse(windows(`${root}/node.exe`, [`${rootWin}\\seed.mjs`, `${rootWin}\\user data\\workspace.db`, seed.question, seed.plan])) as { conversationId: string };
+
+  let { app, page } = await launch();
+  await page.getByTestId("nav-planning").click();
+  await page.getByTestId("nav-conversation").filter({ hasText: seed.question }).click();
+  await page.getByTestId("plan-review").click();
+  await expect(page.getByTestId("review-preview-version")).toHaveText("Reviewing v1, the latest version.");
+  await expect(page.getByTestId("review-preview-sends")).toContainText(`The plan's text: ${seed.plan.length} characters.`);
+  await page.getByTestId("review-start").click();
+  await expect(page.getByTestId("review-status")).toHaveText("Failed", { timeout: 120_000 });
+  await expect(page.getByTestId("review-note")).toHaveText("No Nebius key is set, so nothing was sent. Add your key in Settings, then try again. Nothing was resent.");
+  const engines = await page.evaluate(() => window.nivra.listEngines());
+  expect(engines.map((engine) => [engine.targetId, engine.state.status, engine.state.status === "online" ? engine.state.info.platform : null])).toEqual([["local", "online", "win32"]]);
+  const kept = await page.evaluate((id) => window.nivra.listReviews(id), seeded.conversationId);
+  expect(kept.map((review) => [review.planVersion, review.status, review.report])).toEqual([[1, "failed", null]]);
+  await app.close();
+
+  ({ app, page } = await launch());
+  expect(await page.evaluate((id) => window.nivra.listReviews(id), seeded.conversationId)).toEqual(kept);
   await app.close();
   rmSync(root, { recursive: true, force: true });
 });

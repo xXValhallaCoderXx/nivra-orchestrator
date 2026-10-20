@@ -161,7 +161,7 @@ const NOT_RECORDED = "Not recorded for this run.";
  * A run's limits and what it used (D30): the calls and time are enforced; the input budget is Nivra's estimate, never a
  * ceiling, so what was counted, what the provider reported and any overrun are said apart.
  */
-function runBudgetText(record: NonNullable<ExplainResult["context"]["runBudget"]>): string {
+export function runBudgetText(record: NonNullable<ExplainResult["context"]["runBudget"]>): string {
   const { limits, used } = record;
   const reported = used.reportedInputTokens !== null ? `${plural(used.reportedInputTokens, "token")} reported` : "not every call reported its tokens";
   const overrun = used.overrunTokens ? `; ${plural(used.overrunTokens, "token")} more than Nivra estimated` : "";
@@ -269,9 +269,12 @@ export function HistoryDetails({ history, prefix }: { history: HistoryRecord; pr
   );
 }
 
+/** What a project's consent covers (D20, D31), said wherever it is asked for. */
+export const CONSENT_COVERS = "This is for the whole project: its explanations, its conversations and the reviews of its plans. You can turn it off at any time, which stops them all.";
+
 /**
  * The project's consent to send its content to Token Factory (D20), asked once, the first time it is needed. It covers
- * the whole project: its explanations and its conversations.
+ * the whole project: its explanations, its conversations and the reviews of its plans.
  */
 export function ConsentModal({
   opened,

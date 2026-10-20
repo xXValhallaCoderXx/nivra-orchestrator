@@ -2,7 +2,7 @@ import { Accordion, Alert, Badge, Button, Group, List, Stack, Table, Text, Texta
 import type { ExplainResult, RunSummary } from "@nivra/domain";
 import { useEffect, useState } from "react";
 import type { PreferencesView, ProjectView } from "../../../shared/ipc";
-import { CitationChip, ConflictItem, ConsentModal, ContextDetails, linesByFile, preferenceText, runLine, STATUS_COLOR } from "../shared/evidence";
+import { CitationChip, ConflictItem, CONSENT_COVERS, ConsentModal, ContextDetails, linesByFile, preferenceText, runLine, STATUS_COLOR } from "../shared/evidence";
 import { TERMINAL, useRunEvents } from "../shared/runs";
 import { errorMessage, Section } from "../shared/ui";
 import type { RunRef } from "./hello";
@@ -473,7 +473,7 @@ export function Explain({
         onAllow={() => void allowAndStart()}
         intro={`To explain ${project?.label ?? "this repository"}, Nivra sends Nebius Token Factory:`}
         sends={["excerpts and paths from the project's tracked files;", "your question, and any choices you added for this task;", "your confirmed preferences that apply to this project."]}
-        after="You can turn this off at any time; doing so stops this project's explanations."
+        after={CONSENT_COVERS}
         testId="explain-consent"
       />
     </Section>
