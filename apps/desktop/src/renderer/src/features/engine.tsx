@@ -10,18 +10,8 @@ const LOOK = {
   failed: { dot: "var(--nivra-error-icon)", label: "Engine stopped" },
 } as const;
 
-/**
- * Where the chosen project's work runs (D1: always visible where work starts) and its engine's state at a glance.
- * There is nothing to choose: the folder decides (D17).
- */
-export function EngineBadge({ project, engine }: { project: ProjectView | null; engine: EngineView | null }) {
-  if (!project) {
-    return (
-      <Text size="xs" c="var(--nivra-text-3)" data-testid="engine-badge">
-        No folder chosen
-      </Text>
-    );
-  }
+/** An engine's state at a glance: a dot and a word, with the details on hover. */
+export function EngineDot({ engine, stoppedLabel, testId }: { engine: EngineView | null; stoppedLabel?: string; testId: string }) {
   const state = engine?.state;
   const look = state ? LOOK[state.status] : { dot: "var(--nivra-text-3)", label: "Engine…" };
   const detail = !state
@@ -34,24 +24,44 @@ export function EngineBadge({ project, engine }: { project: ProjectView | null; 
           ? state.reason
           : "The engine isn't running.";
   return (
+    <Tooltip label={detail} multiline maw={460} withArrow>
+      <Group gap={6} wrap="nowrap">
+        <Box w={8} h={8} bg={look.dot} style={{ borderRadius: "50%", flex: "none" }} />
+        <Text size="xs" c="var(--nivra-text-2)" style={{ whiteSpace: "nowrap" }} data-testid={testId}>
+          {state?.status === "stopped" && stoppedLabel ? stoppedLabel : look.label}
+        </Text>
+      </Group>
+    </Tooltip>
+  );
+}
+
+/**
+ * Where the chosen project's work runs (D1: always visible where work starts) and its engine's state at a glance.
+ * There is nothing to choose: the folder decides (D17).
+ */
+export function EngineBadge({ project, engine }: { project: ProjectView | null; engine: EngineView | null }) {
+  if (!project) {
+    return (
+      <Text size="xs" c="var(--nivra-text-3)" data-testid="engine-badge">
+        No folder chosen
+      </Text>
+    );
+  }
+  return (
     <Group gap="sm" wrap="nowrap">
       <Badge variant="light" color="gray" data-testid="engine-target">
         {project.targetLabel}
       </Badge>
-      <Tooltip label={detail} multiline maw={460} withArrow>
-        <Group gap={6} wrap="nowrap">
-          <Box w={8} h={8} bg={look.dot} style={{ borderRadius: "50%", flex: "none" }} />
-          <Text size="xs" c="var(--nivra-text-2)" style={{ whiteSpace: "nowrap" }} data-testid="engine-badge">
-            {look.label}
-          </Text>
-        </Group>
-      </Tooltip>
+      <EngineDot engine={engine} testId="engine-badge" />
     </Group>
   );
 }
 
-/** What is wrong with the chosen project's engine, and what to do: shown above the page while it matters. */
-export function EngineNotices({ projectId, engine }: { projectId: string; engine: EngineView | null }) {
+/**
+ * What is wrong with an engine, and what to do: shown above the page, or a conversation, while it matters. `onRestart`
+ * restarts the engine it is about: a project's, or a conversation's own.
+ */
+export function EngineNotices({ engine, onRestart, testId = "engine" }: { engine: EngineView | null; onRestart(): Promise<unknown>; testId?: string }) {
   const [restarting, setRestarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const state = engine?.state;
@@ -60,7 +70,7 @@ export function EngineNotices({ projectId, engine }: { projectId: string; engine
     setRestarting(true);
     setError(null);
     try {
-      await window.nivra.restartEngine(projectId);
+      await onRestart();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -71,7 +81,7 @@ export function EngineNotices({ projectId, engine }: { projectId: string; engine
   return (
     <Stack gap="sm">
       {state?.status === "failed" && (
-        <Alert color="red" title={`The engine on ${engine!.label} isn't running`} data-testid="engine-failed">
+        <Alert color="red" title={`The engine on ${engine!.label} isn't running`} data-testid={`${testId}-failed`}>
           <Stack gap={6}>
             <Text size="sm">{state.reason}</Text>
             {state.logPath && (
@@ -86,7 +96,7 @@ export function EngineNotices({ projectId, engine }: { projectId: string; engine
             )}
             <Group>
               {/* No log means the engine never got as far as starting (a distribution that can't run it): look again. */}
-              <Button size="xs" variant="default" loading={restarting} onClick={() => void restart()} data-testid="engine-restart">
+              <Button size="xs" variant="default" loading={restarting} onClick={() => void restart()} data-testid={`${testId}-restart`}>
                 {state.logPath ? "Restart engine" : "Check again"}
               </Button>
             </Group>
@@ -94,7 +104,7 @@ export function EngineNotices({ projectId, engine }: { projectId: string; engine
         </Alert>
       )}
       {state?.status === "starting" && (
-        <Text size="sm" c="var(--nivra-text-2)" data-testid="engine-starting">
+        <Text size="sm" c="var(--nivra-text-2)" data-testid={`${testId}-starting`}>
           {state.detail}
         </Text>
       )}
