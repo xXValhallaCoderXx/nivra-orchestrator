@@ -5,7 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
-import { IPC, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
+import { IPC, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
@@ -201,6 +201,31 @@ function start(): void {
     z.tuple([z.discriminatedUnion("kind", [z.strictObject({ kind: z.literal("general") }), z.strictObject({ kind: z.literal("project"), projectId: z.uuid() })])]),
     (_event, scope) => host.createConversation(scope),
   );
+  // Conversations, plans and tasks (D26). The caps here are loose on purpose: the host refuses what's too long in words
+  // the person can act on, and every id is one the host made (randomUUID).
+  const Id = z.uuid();
+  const Revision = z.number().int().positive();
+  const LongText = z.string().max(100_000);
+  const Rows = z.array(z.string().max(10_000)).max(200);
+  const Fields = z.strictObject({ goal: LongText, acceptanceCriteria: Rows, scope: LongText, exclusions: LongText, context: LongText, assumptions: Rows, checks: Rows });
+  handle(IPC.getConversation, z.tuple([Id]), (_event, id) => host.conversation(id));
+  handle(IPC.openConversation, z.tuple([Id]), (_event, id) => host.openConversation(id));
+  handle(IPC.sendMessage, z.tuple([Id, LongText]), (_event, id, text) => host.sendMessage(id, text));
+  handle(IPC.cancelTurn, z.tuple([Id, Id]), (_event, id, turnId) => host.cancelTurn(id, turnId));
+  handle(IPC.deleteConversation, z.tuple([Id]), (_event, id) => host.deleteConversation(id));
+  handle(IPC.restartConversationEngine, z.tuple([Id]), (_event, id) => host.restartConversationEngine(id));
+  handle(IPC.savePlan, z.tuple([Id, Id, LongText.nullable()]), (_event, id, messageId, text) => host.savePlan(id, messageId, text ?? undefined));
+  handle(IPC.revisePlan, z.tuple([Id, LongText]), (_event, id, text) => host.revisePlan(id, text));
+  handle(IPC.listPlans, z.tuple([Id]), (_event, id) => host.plans(id));
+  handle(IPC.listTasks, none, () => host.tasks());
+  handle(IPC.getTask, z.tuple([Id]), (_event, id) => host.task(id));
+  handle(IPC.createTask, z.tuple([z.strictObject({ title: LongText, fields: Fields, projectId: Id.nullable(), planId: Id.nullable() })]), (_event, input) => host.createTask(input));
+  handle(IPC.reviseBrief, z.tuple([Id, Revision, Fields]), (_event, id, revision, fields) => host.reviseBrief(id, revision, fields));
+  handle(IPC.refreshBriefFromPlan, z.tuple([Id, Revision, Id]), (_event, id, revision, planId) => host.refreshBriefFromPlan(id, revision, planId));
+  handle(IPC.setTaskProject, z.tuple([Id, Revision, Id.nullable()]), (_event, id, revision, projectId) => host.setTaskProject(id, revision, projectId));
+  handle(IPC.setTaskState, z.tuple([Id, Revision, z.enum(TASK_STATES)]), (_event, id, revision, state) => host.setTaskState(id, revision, state));
+  handle(IPC.renameTask, z.tuple([Id, Revision, LongText]), (_event, id, revision, title) => host.renameTask(id, revision, title));
+  handle(IPC.deleteTask, z.tuple([Id]), (_event, id) => host.deleteTask(id));
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {

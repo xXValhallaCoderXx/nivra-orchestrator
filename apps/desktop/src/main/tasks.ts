@@ -1,6 +1,6 @@
 import type { ChatResult } from "@nivra/domain";
 import { z } from "zod";
-import type { BriefContent, BriefFields, BriefSource, TaskState } from "../shared/ipc.ts";
+import { TASK_LIMITS, type BriefContent, type BriefFields, type BriefSource, type TaskState } from "../shared/ipc.ts";
 
 /**
  * Native tasks and plans (D26, NIV-32), as plain functions: what a brief and a plan hold, how a plan is made from an
@@ -13,7 +13,7 @@ export const RUN_UNAVAILABLE =
 
 export const EXECUTION_POLICY = { concurrency: 1, network: "off", approval: "required" } as const;
 
-export const TASK_LIMITS = { titleChars: 200, textChars: 4_000, contextChars: 20_000, itemChars: 1_000, items: 20, planChars: 20_000 } as const;
+export { TASK_LIMITS };
 
 const Text = (max: number) => z.string().max(max);
 const Items = z.array(z.string().trim().min(1).max(TASK_LIMITS.itemChars)).max(TASK_LIMITS.items);
