@@ -310,8 +310,9 @@ export class Host {
 
   /**
    * Deletes a conversation with its turns, messages and plans (D26). Its turn still going is stopped first; when it
-   * can't be, the conversation stays, and the person is told why. Text copied into a task's brief stays with the task,
-   * and each engine keeps its own record of the runs.
+   * can't be, the conversation stays, and the person is told why. A turn whose run isn't known yet (still being sent,
+   * or its answer lost) is stopped once its run is: this session keeps its request id until then. Text copied into a
+   * task's brief stays with the task, and each engine keeps its own record of the runs.
    */
   async deleteConversation(conversationId: string): Promise<void> {
     const workspace = this.#workspaceDb();
@@ -329,7 +330,15 @@ export class Host {
     if (failed.length) {
       throw new Error(`Nivra couldn't stop this conversation's answer on ${this.#labelOf(record.targetId)} (${errorText(failed[0]!.reason)}), so the conversation is still here. Restart that engine, then delete it again.`);
     }
+    // Sent by this session to an engine still online, with no run known: its answer was lost. One still being sent is
+    // stopped by its submission, when its engine answers.
+    const lost = open.flatMap((turn) => {
+      const engine = this.#engines.get(turn.targetId);
+      const state = engine?.supervisor.state;
+      return engine && state?.status === "online" && !turn.runId && turn.homeId === state.info.homeId && turn.sessionId === this.#sessionId && !this.#submissions.has(turn.id) ? [{ engine, turn }] : [];
+    });
     deleteConversation(workspace, conversationId);
+    for (const { engine, turn } of lost) this.#stopDeleted(engine, turn.id, turn.homeId!, null);
   }
 
   /**
@@ -952,7 +961,9 @@ export class Host {
       }
       this.#options.log(`A turn's request got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
       this.#submissions.delete(turnId);
-      this.#follow(turnId);
+      // Its conversation was deleted while the request was out: the run the engine may have made is still looked for.
+      if (this.#workspace.state === "ready" && getTurn(this.#workspace.db, turnId) === null) this.#stopDeleted(engine, turnId, state.info.homeId, null);
+      else this.#follow(turnId);
       return;
     }
     this.#runs.set(run.id, conversation.targetId);
@@ -965,13 +976,47 @@ export class Host {
     // Stopped while the request was out (a cancel, a deletion, consent withdrawn): the run stops now.
     const late = this.#stopReason(turnId, conversation, epoch);
     this.#submissions.delete(turnId);
-    const gone = getTurn(workspace, turnId) === null;
-    if (late || gone) {
-      if (!gone && late) requestCancel(workspace, turnId, late);
+    if (getTurn(workspace, turnId) === null) {
+      this.#stopDeleted(engine, turnId, state.info.homeId, run.id);
+      return;
+    }
+    if (late) {
+      requestCancel(workspace, turnId, late);
       await engine.supervisor.call("runs.cancel", { runId: run.id }).catch((error: unknown) => this.#options.log(`A turn stopped while it was being sent couldn't be cancelled: ${errorText(error)}`));
-      if (gone) return;
     }
     this.#follow(turnId);
+  }
+
+  /**
+   * Stops the run of a turn whose conversation was deleted before that run was known to have stopped (D26). The turn's
+   * record is gone, so this session keeps what it needs: the run's id, or the request id to find it by. Only this
+   * session's engine, while it stays online on the same store, can be running it: an engine that stops takes its runs
+   * with it, and one that starts fails them as interrupted (D4).
+   */
+  #stopDeleted(engine: Engine, turnId: string, homeId: string, runId: string | null): void {
+    void (async () => {
+      let known = runId;
+      let delay = 400;
+      for (let attempt = 0; attempt < 12; attempt++) {
+        const state = engine.supervisor.state;
+        if (this.#closing || this.#engines.get(engine.target.descriptor.id) !== engine || state.status !== "online" || state.info.homeId !== homeId) return;
+        try {
+          if (!known) {
+            const found = await engine.supervisor.call("runs.find", { clientRequestId: turnId });
+            if (!found || isTerminal(found.status)) return;
+            known = found.id;
+          }
+          await engine.supervisor.call("runs.cancel", { runId: known });
+          return;
+        } catch (error) {
+          if (isRunNotFound(error)) return;
+          this.#options.log(`A deleted conversation's run couldn't be stopped yet (${errorText(error)}); Nivra tries again.`);
+        }
+        await pause(delay);
+        delay = Math.min(delay * 2, 5_000);
+      }
+      this.#options.log(`A deleted conversation's run on ${this.#labelOf(engine.target.descriptor.id)} couldn't be stopped. It ends at its own time limit, or when that engine restarts.`);
+    })();
   }
 
   /**

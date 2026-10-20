@@ -1002,6 +1002,41 @@ describe("Host: conversations follow each turn to its end, and never resend one 
     assert.equal(host.conversations().conversations.length, 0);
   });
 
+  it("stops the run of a conversation deleted while its turn was out, when the engine made the run but answered with an error", async () => {
+    const { host, root, keys } = makeHost({ localEntry: GATED });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const file of ["accept", "error-start"]) writeFileSync(join(home, file), "");
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Delete me while you answer.");
+    await waitFor(() => calls(home).includes("runs.start"), "the request to reach the engine");
+    await host.deleteConversation(conversation.id);
+    assert.throws(() => host.conversation(conversation.id), /no longer in the list/);
+    writeFileSync(join(home, "release"), "");
+    await waitFor(() => existsSync(join(home, "cancelled.log")), "the deleted conversation's run to be stopped");
+    const made = readFileSync(join(home, "accepted.log"), "utf8").trim().split(" ")[1];
+    assert.deepEqual([calls(home).filter((call) => call === "runs.find").length, readFileSync(join(home, "cancelled.log"), "utf8").trim().split("\n")], [1, [made]]);
+    assert.deepEqual([host.conversations().conversations.length, calls(home).filter((call) => call === "runs.start").length], [0, 1]);
+  });
+
+  it("stops the run of a conversation deleted while its lost answer was still being looked for", async () => {
+    const { host, root, keys } = makeHost({ localEntry: GATED });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const file of ["accept", "error-start", "release", "hold-find"]) writeFileSync(join(home, file), "");
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Lose my answer, then delete me.");
+    await waitFor(() => calls(home).includes("runs.find"), "the lost answer to be looked for");
+    await host.deleteConversation(conversation.id);
+    writeFileSync(join(home, "release-find"), "");
+    await waitFor(() => existsSync(join(home, "cancelled.log")), "the deleted conversation's run to be stopped");
+    const made = readFileSync(join(home, "accepted.log"), "utf8").trim().split(" ")[1];
+    assert.deepEqual(readFileSync(join(home, "cancelled.log"), "utf8").trim().split("\n"), [made]);
+    assert.equal(host.conversations().conversations.length, 0);
+  });
+
   it("deletes a conversation while its answer is being projected, and the answer goes nowhere", async () => {
     const stub = await stubWith(() => text("An answer nobody keeps."));
     let host: Host | undefined;

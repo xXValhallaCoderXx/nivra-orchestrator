@@ -6,8 +6,9 @@
 // until a `release-result` file appears. Its store's id (D26) is kept in its home, so the same home keeps one id.
 // For conversation turns (D26): with an `accept` file, runs.start records the run (`accepted.log`) before it holds its
 // answer, as an engine that created the run would; with an `error-start` file, that answer is then an internal error.
-// runs.find answers for a recorded request id; runs.get says "cancelled" for a run it was asked to cancel; runs.reply
-// gives a general reply; runs.events has no events.
+// runs.find answers for a recorded request id with the run still running (held while a `hold-find` file exists, until a
+// `release-find` file appears); runs.get says "succeeded", or "cancelled" for a run it was asked to cancel; each run it
+// cancels is written to `cancelled.log`; runs.reply gives a general reply; runs.events has no events.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -50,8 +51,18 @@ process.stdin.on("data", (chunk) => {
         else send({ id: request.id, result: summary("running", runId, request.params.workflowId) });
       }, 25);
     } else if (request.method === "runs.find") {
-      const runId = accepted(request.params.clientRequestId);
-      send({ id: request.id, result: runId ? { ...summary(cancelled.has(runId) ? "cancelled" : "succeeded", runId, "chat"), finishedAt: new Date().toISOString() } : null });
+      const answer = () => {
+        const runId = accepted(request.params.clientRequestId);
+        send({ id: request.id, result: runId ? (cancelled.has(runId) ? { ...summary("cancelled", runId, "chat"), finishedAt: new Date().toISOString() } : summary("running", runId, "chat")) : null });
+      };
+      if (!existsSync(join(home, "hold-find"))) answer();
+      else {
+        const held = setInterval(() => {
+          if (!existsSync(join(home, "release-find"))) return;
+          clearInterval(held);
+          answer();
+        }, 25);
+      }
     } else if (request.method === "runs.get") {
       const status = cancelled.has(request.params.runId) ? "cancelled" : "succeeded";
       send({ id: request.id, result: { ...summary(status), id: request.params.runId, finishedAt: new Date().toISOString() } });
@@ -91,6 +102,7 @@ process.stdin.on("data", (chunk) => {
         if (existsSync(join(home, "fail-cancel"))) send({ id: request.id, error: { code: -32000, message: "the run couldn't be stopped" } });
         else {
           cancelled.add(request.params.runId);
+          appendFileSync(join(home, "cancelled.log"), `${request.params.runId}\n`);
           send({ id: request.id, result: { status: "cancelled", wasTerminal: false } });
         }
       };
