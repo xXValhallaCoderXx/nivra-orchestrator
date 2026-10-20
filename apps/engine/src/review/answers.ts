@@ -170,13 +170,13 @@ export function normaliseReview(role: ReviewRole, answer: ReviewAnswer, packet: 
 /**
  * The chair's synthesis as the engine keeps it, or null when it holds nothing. Finding ids are checked against the
  * reports; the roles behind each agreement and position come from its ids, so one backed by a single reviewer shows as
- * one-sided; and every finding the chair named nowhere is listed as unaddressed.
+ * one-sided; and every finding named nowhere in what is kept is listed as unaddressed, so one named only in a part
+ * dropped for the limits is listed too.
  */
 export function normaliseSynthesis(answer: SynthesisAnswer, reports: readonly ReviewerReport[], mask: Mask): ChairSynthesis | null {
   const changes = new Changes();
   const L = REVIEW_REPORT_LIMITS;
   const known = new Set(reports.flatMap((report) => report.findings.map((finding) => finding.id)));
-  const mentioned = new Set<string>();
   const ids = (value: string | string[]) => {
     const kept: string[] = [];
     for (const id of items(value)) {
@@ -186,7 +186,6 @@ export function normaliseSynthesis(answer: SynthesisAnswer, reports: readonly Re
         continue;
       }
       kept.push(normal);
-      mentioned.add(normal);
     }
     return kept;
   };
@@ -227,6 +226,7 @@ export function normaliseSynthesis(answer: SynthesisAnswer, reports: readonly Re
     .filter(Boolean)
     .slice(0, L.notes);
   if (!summary && priorities.length === 0 && agreements.length === 0 && dissent.length === 0) return null;
+  const mentioned = new Set([...priorities, ...agreements.flatMap((agreement) => agreement.findingIds), ...dissent.flatMap((entry) => entry.positions.flatMap((position) => position.findingIds))]);
   const unaddressed = [...known].filter((id) => !mentioned.has(id)).slice(0, L.ids);
   return { summary, priorities, agreements, dissent, gaps, unaddressed, adjusted: changes.record };
 }

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { StepRecord } from "../src/providers/model.ts";
-import { RunBudget, type Hold, type RunLimits } from "../src/providers/run-budget.ts";
+import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
+import { Budget } from "../src/explain/budget.ts";
+import { Reading, readUntilAnswered } from "../src/explain/reading.ts";
+import { createModelClient, InternalFailure, type StepRecord } from "../src/providers/model.ts";
+import { RunBudget, type Ask, type Hold, type Refusal, type RunLimits } from "../src/providers/run-budget.ts";
 
 /**
  * The shared run limits (NIV-38, D30): hard limits on requests, time and output, and an estimated budget for input that
@@ -118,5 +123,121 @@ describe("RunBudget (NIV-38, D30)", () => {
     assert.equal(budget.fits(30_000), null, "the answer itself still fits");
     budget.stop("exhausted");
     assert.deepEqual([budget.fits(1)?.reason, budget.record().stopped], ["exhausted", "exhausted"]);
+  });
+
+  it("holds a reading run's request for its step's time or what is left, whichever is less, so only a run out of time refuses it", () => {
+    const clock = fakeClock();
+    const budget = new RunBudget({ requests: 16, totalMs: 200_000, outputTokensPerRequest: 4_000, estimatedInputTokens: 160_000 }, { now: clock.now });
+    clock.advance(140_000);
+    assert.deepEqual(budget.hold({ inputTokens: 1_000, ms: 150_000 }), { reason: "time", needed: 150_000, available: 60_000 }, "a whole step's time no longer fits");
+    const held = budget.hold({ inputTokens: 1_000, ms: 150_000 }, { upTo: true });
+    assert.ok("admit" in held, JSON.stringify(held));
+    assert.deepEqual(held.admit(), { ok: true, ms: 60_000 });
+    held.settle([reported(1_000)]);
+    clock.advance(60_000);
+    assert.deepEqual(budget.hold({ inputTokens: 1_000, ms: 150_000 }, { upTo: true }), { reason: "deadline", needed: 0, available: 0 });
+  });
+});
+
+/** Everything written to the console or stderr while `body` runs. */
+async function printedDuring(body: () => Promise<unknown>): Promise<string[]> {
+  const written: string[] = [];
+  const originals = { error: console.error, warn: console.warn, log: console.log, info: console.info, debug: console.debug };
+  const write = process.stderr.write.bind(process.stderr);
+  const capture = (...args: unknown[]) => void written.push(args.map(String).join(" "));
+  Object.assign(console, { error: capture, warn: capture, log: capture, info: capture, debug: capture });
+  process.stderr.write = ((chunk: unknown) => (written.push(String(chunk)), true)) as typeof process.stderr.write;
+  try {
+    await body();
+  } finally {
+    Object.assign(console, originals);
+    process.stderr.write = write;
+  }
+  return written;
+}
+
+/** A reading run's loop in process (D30), against Mastra's mock model: no network, no real model. */
+describe("a reading run's requests under its budget (D30)", () => {
+  const READING: RunLimits = { requests: 16, totalMs: 480_000, outputTokensPerRequest: 4_000, estimatedInputTokens: 1_000_000 };
+  /** Every request takes `ms` on the run's clock, reports `inputTokens`, and asks to look again. */
+  async function read(runBudget: RunBudget, clock: ReturnType<typeof fakeClock>, request: { ms: number; inputTokens: number }) {
+    let n = 0;
+    const model = new MastraLanguageModelV2Mock({
+      doGenerate: (async () => {
+        clock.advance(request.ms);
+        return {
+          content: [{ type: "tool-call", toolCallId: `call-${n++}`, toolName: "look", input: "{}" }],
+          finishReason: "tool-calls",
+          usage: { inputTokens: request.inputTokens, outputTokens: 100, totalTokens: request.inputTokens + 100 },
+          warnings: [],
+        };
+      }) as never,
+    });
+    const result = await readUntilAnswered({
+      client: createModelClient({ apiKey: "test-key-0123456789", model: () => model }),
+      agent: { id: "reading", name: "Reading", instructions: "Read, then answer." },
+      model: "nvidia/test",
+      prompt: "Read.",
+      tools: {
+        look: createTool({ id: "look", description: "Look again", inputSchema: z.object({}), execute: async () => ({ ok: true }) }),
+        submit: createTool({ id: "submit", description: "Answer", inputSchema: z.object({}), execute: async () => ({ ok: true }) }),
+      },
+      answerTool: "submit",
+      accepted: () => false,
+      policy: { explore: "auto", forceAnswer: false, evidence: "a test" },
+      budget: new Budget(64_000, 300),
+      runBudget,
+      reading: new Reading(),
+      state: { budgetExhausted: false },
+      internal: new InternalFailure(),
+      limits: { maxSteps: 16, stepMs: 150_000, totalMs: 480_000 },
+      maxOutputTokens: 4_000,
+      event: () => {},
+    });
+    return { sent: model.doGenerateCalls.length, ...result };
+  }
+
+  it("sends only requests it held and admitted room for, so the budget records every request sent, near the run's end too", async () => {
+    // The review's reproduction: 60 s and 50,000 tokens a request, in a run of 200 s. Each request after the first had
+    // less than a step's 150 s left, its room was refused, and it went out anyway, uncounted: 4 sent, 1 recorded.
+    const clock = fakeClock();
+    const runBudget = new RunBudget({ ...READING, totalMs: 200_000 }, { now: clock.now });
+    const { sent, steps, failed } = await read(runBudget, clock, { ms: 60_000, inputTokens: 50_000 });
+    const { used, stopped } = runBudget.record();
+    assert.deepEqual([sent, steps.length, used.requests, used.inputTokens, used.reportedInputTokens], [4, 4, 4, 200_000, 200_000]);
+    assert.deepEqual([failed?.kind, stopped], ["timeout", "deadline"], "once no time is left nothing more is sent, and the run says why");
+  });
+
+  it("sends nothing whose admission is refused, and records no request for it", async () => {
+    // Room held when the loop went on, then refused at admission, as when the run stops in between: the call ends before
+    // the request, with no step for a request that never went.
+    class AdmitsOnce extends RunBudget {
+      #holds = 0;
+      override hold(ask: Ask, options?: { upTo?: boolean }): Hold | Refusal {
+        const held = super.hold(ask, options);
+        if (!("admit" in held) || ++this.#holds === 1) return held;
+        return { ...held, admit: () => ({ ok: false, refusal: { reason: "time", needed: 150_000, available: 0 } }) };
+      }
+    }
+    const clock = fakeClock();
+    const runBudget = new AdmitsOnce(READING, { now: clock.now });
+    let run: Awaited<ReturnType<typeof read>> | undefined;
+    const printed = await printedDuring(async () => void (run = await read(runBudget, clock, { ms: 1_000, inputTokens: 1_000 })));
+    assert.equal(printed.length, 0, `stopping before a request prints nothing: ${printed.join(" | ").slice(0, 400)}`);
+    assert.deepEqual([run?.sent, run?.steps.length, runBudget.record().used.requests], [1, 1, 1]);
+    assert.deepEqual([run?.failed?.kind, run?.failed?.failedStep], ["timeout", null]);
+  });
+
+  it("sends no first request whose room can't be held, and says why", async () => {
+    for (const [label, limits, kind] of [
+      ["no input budget", { ...READING, estimatedInputTokens: 50 }, "budget-exhausted"],
+      ["no requests", { ...READING, requests: 0 }, "budget-exhausted"],
+      ["no time", { ...READING, totalMs: 0 }, "timeout"],
+    ] as const) {
+      const clock = fakeClock();
+      const runBudget = new RunBudget(limits, { now: clock.now });
+      const { sent, steps, failed } = await read(runBudget, clock, { ms: 1_000, inputTokens: 1_000 });
+      assert.deepEqual([sent, steps.length, runBudget.record().used.requests, failed?.kind], [0, 0, 0, kind], label);
+    }
   });
 });

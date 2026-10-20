@@ -133,6 +133,20 @@ export class RunBudget {
    * of a phase together. The time a reservation needs is the sum of each phase's longest request.
    */
   reserve(phases: readonly (readonly Ask[])[]): { ok: true; holds: Hold[][] } | { ok: false; refusal: Refusal } {
+    return this.#reserve(phases, false);
+  }
+
+  /**
+   * Holds room for one request, as a reservation of its own. With `upTo`, its `ms` is the most it may take: it is held
+   * for the time left when that is less, so it is refused for time only once none is left. That is a reading run's next
+   * request, whose own deadline is its call's (D22).
+   */
+  hold(ask: Ask, options: { upTo?: boolean } = {}): Hold | Refusal {
+    const reserved = this.#reserve([[ask]], options.upTo === true);
+    return reserved.ok ? reserved.holds[0]![0]! : reserved.refusal;
+  }
+
+  #reserve(phases: readonly (readonly Ask[])[], upTo: boolean): { ok: true; holds: Hold[][] } | { ok: false; refusal: Refusal } {
     const stopped = this.#refusedNow();
     if (stopped) return { ok: false, refusal: stopped };
     const asks = phases.flat();
@@ -141,18 +155,14 @@ export class RunBudget {
     const input = asks.reduce((sum, ask) => sum + ask.inputTokens, 0);
     const available = this.limits.estimatedInputTokens - this.#committedInput();
     if (input > available) return { ok: false, refusal: { reason: "input", needed: input, available: Math.max(0, available) } };
-    const phaseMs = phases.map((phase) => Math.max(0, ...phase.map((ask) => ask.ms)));
+    // The clock is read once, so a request held for the time left fits in it.
+    const remaining = this.remainingMs();
+    const phaseMs = phases.map((phase) => Math.max(0, ...phase.map((ask) => (upTo ? Math.min(ask.ms, remaining) : ask.ms))));
     const ms = phaseMs.reduce((sum, value) => sum + value, 0);
-    if (ms > this.remainingMs()) return { ok: false, refusal: { reason: "time", needed: Math.round(ms), available: Math.round(this.remainingMs()) } };
+    if (ms > remaining) return { ok: false, refusal: { reason: "time", needed: Math.round(ms), available: Math.round(remaining) } };
     const reservation = this.#reservations++;
     this.#phaseMs.set(reservation, phaseMs);
     return { ok: true, holds: phases.map((phase, index) => phase.map((ask) => this.#hold(ask, reservation, index))) };
-  }
-
-  /** Holds room for one request, as a reservation of its own. */
-  hold(ask: Ask): Hold | Refusal {
-    const reserved = this.reserve([[ask]]);
-    return reserved.ok ? reserved.holds[0]![0]! : reserved.refusal;
   }
 
   #hold(ask: Ask, reservation: number, phase: number): Hold {

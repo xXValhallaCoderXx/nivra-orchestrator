@@ -104,41 +104,61 @@ export function runBudgetFailure(refusal: Refusal): ModelFailure {
 export async function readUntilAnswered(options: ReadingOptions): Promise<{ steps: StepRecord[]; failed: ModelFailure | null }> {
   const { client, reading, budget, state, policy, model, runBudget } = options;
   const steps: StepRecord[] = [];
-  // The first request is refused before it is sent if the run's budget can't admit it (D30).
-  const first = runBudget.fits(budget.used());
-  if (first) {
-    if (first.reason === "input") runBudget.stop("exhausted");
-    return { steps, failed: runBudgetFailure(first) };
-  }
+  /**
+   * Each request's room in the run's budget (D30). The next request's room is held where the loop decides whether to go
+   * on, so a request that can't be held is never sent; it is admitted just before it goes, and settled when it is
+   * reported. `low` says whether a full-window answer would still fit after it; `refused` is why the loop stopped, if
+   * the run's budget stopped it.
+   */
+  const flight: { next: Hold | null; low: boolean; inFlight: Hold | null; refused: Refusal | null } = { next: null, low: false, inFlight: null, refused: null };
+  const holdNext = (): Refusal | null => {
+    if (flight.next) return null;
+    const input = budget.used();
+    flight.low = runBudget.fits(input, Math.max(0, budget.tokens)) !== null;
+    // Its own deadline is its call's (D22), so it is held for its step's time or what is left, whichever is less.
+    const held = runBudget.hold({ inputTokens: input, ms: options.limits.stepMs }, { upTo: true });
+    if ("admit" in held) {
+      flight.next = held;
+      return null;
+    }
+    if (held.reason === "input") runBudget.stop("exhausted");
+    flight.refused = held;
+    return held;
+  };
+  // The first request is refused before it is sent if the run's budget can't hold it (D30).
+  const first = holdNext();
+  if (first) return { steps, failed: runBudgetFailure(first) };
   const agent = client.agent({ id: options.agent.id, name: options.agent.name, modelId: model, instructions: options.agent.instructions, tools: options.tools });
   const started = performance.now();
   let failed: ModelFailure | null = null;
-  // The step in flight's room in the run's budget, settled when the step is reported.
-  const flight: { hold: Hold | null } = { hold: null };
   try {
     await client.call(agent, options.prompt, {
       maxSteps: options.limits.maxSteps,
       deadlines: { stepMs: options.limits.stepMs, totalMs: options.limits.totalMs },
       maxOutputTokens: options.maxOutputTokens,
       toolChoice: policy.explore,
-      // A step that can't be admitted is never sent: the run stops, and ends as having used its budget (D30).
+      // The next request goes only with room held for it: when it can't be held, the run stops and sends nothing more,
+      // and one that couldn't be held for its input ends as having used its budget (D30).
       stopWhen: () => {
         if (options.accepted()) return true;
-        const next = runBudget.fits(budget.used());
-        if (next?.reason === "input") runBudget.stop("exhausted");
-        return next !== null;
+        return holdNext() !== null;
       },
       // An exploring step starts only with time left for it and for the answer after it (D22).
       prepareStep: ({ stepNumber }) => {
-        const next = budget.used();
-        // Room for this request and a full-window answer after it, or the answer is due now (D30).
-        const runBudgetLow = runBudget.fits(next, Math.max(0, budget.tokens)) !== null;
-        const held = runBudget.hold({ inputTokens: next, ms: options.limits.stepMs });
-        if ("admit" in held) {
-          held.admit();
-          flight.hold = held;
+        // Nothing is sent without room held and admitted for it (D30): the room held when the loop went on, or held now.
+        // A refusal here ends the call before its request.
+        const refused = holdNext();
+        const held = flight.next;
+        flight.next = null;
+        const admitted = held ? held.admit() : ({ ok: false, refusal: refused! } as const);
+        if (!admitted.ok) {
+          held?.release();
+          options.internal.fail(runBudgetFailure(admitted.refusal));
+          return undefined;
         }
-        reading.dueReasons = mustAnswer({ stepNumber, elapsedMs: performance.now() - started, budgetExhausted: budget.exhausted(), runBudgetLow }, options.limits);
+        flight.inFlight = held;
+        // Room for this request and a full-window answer after it, or the answer is due now (D30).
+        reading.dueReasons = mustAnswer({ stepNumber, elapsedMs: performance.now() - started, budgetExhausted: budget.exhausted(), runBudgetLow: flight.low }, options.limits);
         reading.answerDue = reading.dueReasons.length > 0;
         // However the budget runs out, the run records that it did.
         if (reading.dueReasons.includes("budget")) state.budgetExhausted = true;
@@ -151,8 +171,8 @@ export async function readUntilAnswered(options: ReadingOptions): Promise<{ step
         reading.finished++;
         steps.push(step);
         budget.observe(step);
-        flight.hold?.settle([step]);
-        flight.hold = null;
+        flight.inFlight?.settle([step]);
+        flight.inFlight = null;
         for (const rejected of step.rejectedTools) {
           if (rejected.tool === options.answerTool) {
             reading.invalidAnswers++;
@@ -184,8 +204,8 @@ export async function readUntilAnswered(options: ReadingOptions): Promise<{ step
     // The request that failed is recorded once, as its own step: its own time, no usage, and why (D22). A failure
     // inside Nivra made no request, so it is the run's failure alone.
     const request = failed.failedStep;
-    flight.hold?.settle(request ? [request] : []);
-    flight.hold = null;
+    flight.inFlight?.settle(request ? [request] : []);
+    flight.inFlight = null;
     if (request) {
       steps.push(request);
       options.event("model.call", `Model call failed: ${failed.message}`, {
@@ -198,9 +218,13 @@ export async function readUntilAnswered(options: ReadingOptions): Promise<{ step
         ...(failed.retryAfterSeconds !== null ? { retryAfterSeconds: failed.retryAfterSeconds } : {}),
       });
     }
+  } finally {
+    // Room held for a request that was never sent goes back.
+    flight.next?.release();
+    flight.next = null;
   }
-  if (!failed && !options.accepted() && runBudget.stopped === "exhausted") {
-    failed = runBudgetFailure(runBudget.fits(budget.used()) ?? { reason: "input", needed: budget.used(), available: 0 });
-  }
+  // A loop the run's budget stopped ends saying why. The last request allowed is the step limit's too, so a run that made
+  // them all ends as one without an answer, as before.
+  if (!failed && !options.accepted() && flight.refused && flight.refused.reason !== "requests") failed = runBudgetFailure(flight.refused);
   return { steps, failed };
 }

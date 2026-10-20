@@ -143,6 +143,7 @@ export interface CallOptions {
   maxOutputTokens: number;
   toolChoice?: ToolChoice;
   stopWhen?: () => boolean;
+  /** Before each request. A failure it records through `internal` ends the call there, and the request is never sent. */
   prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice } | undefined;
   /** The person's cancel. */
   signal?: AbortSignal;
@@ -278,7 +279,16 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
           maxSteps: call.maxSteps,
           ...(call.stopWhen ? { stopWhen: () => call.stopWhen!() } : {}),
           ...(call.toolChoice ? { toolChoice: call.toolChoice } : {}),
-          ...(call.prepareStep ? { prepareStep: ({ stepNumber }: { stepNumber: number }) => call.prepareStep!({ stepNumber }) } : {}),
+          ...(call.prepareStep
+            ? {
+                prepareStep: ({ stepNumber, abort }: { stepNumber: number; abort: (reason: string) => never }) => {
+                  const prepared = call.prepareStep!({ stepNumber });
+                  // Mastra's tripwire ends the loop before the request, quietly: a throw here would be logged with its stack.
+                  if (internal.failure) abort("stopped before its request");
+                  return prepared;
+                },
+              }
+            : {}),
           toolCallConcurrency: 1,
           modelSettings: { maxOutputTokens: call.maxOutputTokens, timeout: { stepMs: Math.max(1, Math.floor(call.deadlines.stepMs)), totalMs: Math.max(1, Math.floor(call.deadlines.totalMs)) } },
           abortSignal,

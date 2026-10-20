@@ -93,6 +93,31 @@ describe("what the engine keeps of a review (D30)", () => {
     assert.deepEqual([synthesis.adjusted.refsDropped, synthesis.adjusted.dropped], [1, 1]);
     assert.equal(normaliseSynthesis(SynthesisAnswer.parse({}), reports, mask), null);
   });
+
+  it("lists as unaddressed a finding named only in a part dropped for the limits", () => {
+    // The review's case: a finding named only in the ninth agreement was in neither the kept synthesis nor unaddressed.
+    const findings = (n: number, title: string) => Array.from({ length: n }, (_, index) => ({ title: `${title}${index + 1}`, detail: "d" }));
+    const reports = [
+      normaliseReview("architecture", answer({ summary: "a", findings: findings(8, "A") }), PACKET, PREFERENCES, mask)!,
+      normaliseReview("risks", answer({ summary: "r", findings: findings(4, "R") }), PACKET, PREFERENCES, mask)!,
+    ];
+    const position = (findingId: string) => ({ position: "p", findingIds: [findingId] });
+    const synthesis = normaliseSynthesis(
+      SynthesisAnswer.parse({
+        summary: "s",
+        agreements: [...Array.from({ length: 8 }, (_, index) => ({ statement: `Agreed ${index + 1}`, findingIds: [`arch-${index + 1}`] })), { statement: "The ninth", findingIds: ["risk-1"] }],
+        dissent: [
+          { topic: "Four positions", positions: [position("arch-1"), position("arch-2"), position("arch-3"), position("risk-4")] },
+          ...Array.from({ length: 5 }, (_, index) => ({ topic: `Topic ${index + 2}`, positions: [position("arch-1")] })),
+          { topic: "The seventh", positions: [position("risk-3")] },
+        ],
+      }),
+      reports,
+      mask,
+    ) as ChairSynthesis;
+    assert.deepEqual([synthesis.agreements.length, synthesis.dissent.length, synthesis.dissent[0]?.positions.length], [8, 6, 3]);
+    assert.deepEqual(synthesis.unaddressed, ["risk-1", "risk-2", "risk-3", "risk-4"], "named only past the limits, or nowhere");
+  });
 });
 
 describe("what a review sends (D30)", () => {
