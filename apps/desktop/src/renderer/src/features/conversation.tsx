@@ -1,11 +1,12 @@
 import { Accordion, Alert, Badge, Button, Group, List, Modal, Paper, Stack, Text, Textarea, Title } from "@mantine/core";
 import type { ChatResult, CheckedCitation, RunSummary } from "@nivra/domain";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { MESSAGE_CHARS, type ConversationView, type MessageView, type PreferencesView, type ProjectView, type TurnStatus, type TurnView } from "../../../shared/ipc";
+import { MESSAGE_CHARS, type ConversationView, type MessageView, type PlanView, type PreferencesView, type ProjectView, type TurnStatus, type TurnView } from "../../../shared/ipc";
 import { CitationChip, ConflictItem, ConsentModal, ContextDetails, HistoryDetails, receivedText, runLine } from "../shared/evidence";
 import { useRunEvents } from "../shared/runs";
 import { errorMessage, usePoll } from "../shared/ui";
 import { EngineDot, EngineNotices } from "./engine";
+import { AnswerPlans } from "./plans";
 
 type RepositoryReply = Extract<ChatResult, { kind: "repository" }>;
 
@@ -39,6 +40,7 @@ export function Conversation({
   onChanged,
   onDeleted,
   onSharingChanged,
+  onCreateTask,
 }: {
   conversationId: string;
   projects: ProjectView[];
@@ -47,6 +49,8 @@ export function Conversation({
   onChanged(): void;
   onDeleted(): void;
   onSharingChanged(): void;
+  /** Opens the new task form from a plan version, titled after the conversation. */
+  onCreateTask(plan: PlanView, title: string): void;
 }) {
   // Opening follows a turn left open on its own engine; after that, the view is only read.
   const opened = useRef(false);
@@ -59,6 +63,8 @@ export function Conversation({
     (current) => (current && (current.turns.some(isOpen) || current.engine.state.status === "starting") ? 700 : 2_500),
     [conversationId],
   );
+  const [plansRead, setPlansRead] = useState(0);
+  const plans = usePoll<PlanView[]>(() => window.nivra.listPlans(conversationId), () => null, [conversationId, plansRead]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -198,7 +204,18 @@ export function Conversation({
             <Stack key={message.id} gap="xs" data-testid="turn" data-turn-id={turn?.id} data-status={turn?.status}>
               <PersonMessage message={message} />
               {answer ? (
-                <Answer message={answer} turn={turn} online={online} preferences={preferences} />
+                <Answer message={answer} turn={turn} online={online} preferences={preferences}>
+                  {answer.reply && (
+                    <AnswerPlans
+                      conversationId={conversationId}
+                      messageId={answer.id}
+                      reply={answer.reply}
+                      plans={(plans.value ?? []).filter((plan) => plan.messageId === answer.id)}
+                      onSaved={() => setPlansRead((n) => n + 1)}
+                      onCreateTask={(plan) => onCreateTask(plan, summary.title)}
+                    />
+                  )}
+                </Answer>
               ) : (
                 turn && (
                   <TurnLine
@@ -362,7 +379,7 @@ function TurnProgress({ runId, online }: { runId: string; online: boolean }) {
   ) : null;
 }
 
-function Answer({ message, turn, online, preferences }: { message: MessageView; turn: TurnView | null; online: boolean; preferences: PreferencesView | null }) {
+function Answer({ message, turn, online, preferences, children }: { message: MessageView; turn: TurnView | null; online: boolean; preferences: PreferencesView | null; children: ReactNode }) {
   const reply = message.reply;
   return (
     <Paper withBorder p="md" radius="md" data-testid="answer" data-kind={reply?.kind ?? "text"}>
@@ -385,6 +402,7 @@ function Answer({ message, turn, online, preferences }: { message: MessageView; 
           </>
         )}
         {reply && turn && <AnswerDetails reply={reply} runId={turn.runId} online={online} />}
+        {children}
       </Stack>
     </Paper>
   );

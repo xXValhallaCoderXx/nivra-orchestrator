@@ -4,12 +4,13 @@ import type { ConversationsView, ConversationSummary, EngineView, PreferencesVie
 import { Conversation } from "../features/conversation";
 import { EngineBadge } from "../features/engine";
 import { Navigation, PlanningHome, type View } from "../features/navigation";
+import { NewTask, TaskDetail, TasksPage } from "../features/tasks";
 import { usePoll } from "../shared/ui";
 import { ProjectsPage } from "./ProjectsPage";
 
 /**
- * The window: a side navigation between Review & planning (conversations, D26) and Projects & settings, the page of
- * repositories, preferences and runs. There is no target to choose anywhere: a project's folder decides where its work
+ * The window: a side navigation between Review & planning (conversations and their plans, D26), Tasks, and Projects &
+ * settings, the page of repositories, preferences and runs. There is no target to choose anywhere: a project's folder decides where its work
  * runs (D17), and a conversation keeps the scope it started with. Projects & settings stays mounted while another place
  * is shown, so its runs and what was typed there are kept.
  */
@@ -110,6 +111,28 @@ export function App() {
                   setView({ kind: "planning" });
                 }}
                 onSharingChanged={() => setProjectsVersion((n) => n + 1)}
+                onCreateTask={(plan, title) => setView({ kind: "new-task", plan, title })}
+              />
+            )}
+            {view.kind === "tasks" && <TasksPage onOpen={(id) => setView({ kind: "task", id })} onNew={() => setView({ kind: "new-task", plan: null, title: "" })} />}
+            {view.kind === "new-task" && (
+              <NewTask
+                // A new form for each plan it starts from.
+                key={view.plan?.id ?? "direct"}
+                projects={list}
+                plan={view.plan}
+                initialTitle={view.title}
+                onCreated={(task) => setView({ kind: "task", id: task.summary.id })}
+                onCancel={() => setView(view.plan ? { kind: "conversation", id: view.plan.conversationId } : { kind: "tasks" })}
+              />
+            )}
+            {view.kind === "task" && (
+              <TaskDetail
+                key={view.id}
+                taskId={view.id}
+                projects={list}
+                onDeleted={() => setView({ kind: "tasks" })}
+                onOpenConversation={(id) => setView({ kind: "conversation", id })}
               />
             )}
           </Stack>

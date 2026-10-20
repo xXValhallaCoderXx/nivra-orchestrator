@@ -61,7 +61,7 @@ export const IPC = {
 /** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
 export const MESSAGE_CHARS = 8_000;
 
-/** What the host takes in a task's title, brief and plan (D26), shown by the window as the person types. */
+/** What the host takes in a task's title, brief and plan (D26); the window counts a plan's characters as they are typed. */
 export const TASK_LIMITS = { titleChars: 200, textChars: 4_000, contextChars: 20_000, itemChars: 1_000, items: 20, planChars: 20_000 } as const;
 
 export interface AppInfo {

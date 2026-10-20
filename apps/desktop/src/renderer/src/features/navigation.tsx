@@ -1,10 +1,16 @@
 import { AppShell, Button, Group, Menu, NavLink, ScrollArea, Text } from "@mantine/core";
 import { useState } from "react";
-import type { ConversationScope, ConversationsView, ConversationSummary, ProjectView } from "../../../shared/ipc";
+import type { ConversationScope, ConversationsView, ConversationSummary, PlanView, ProjectView } from "../../../shared/ipc";
 import { errorMessage, Section } from "../shared/ui";
 
 /** The window's places (D26), kept as state: there is no router. */
-export type View = { kind: "projects" } | { kind: "planning" } | { kind: "conversation"; id: string };
+export type View =
+  | { kind: "projects" }
+  | { kind: "planning" }
+  | { kind: "conversation"; id: string }
+  | { kind: "tasks" }
+  | { kind: "task"; id: string }
+  | { kind: "new-task"; plan: PlanView | null; title: string };
 
 /** Starts a conversation, general or about one project; its scope never changes afterwards. Starts no engine. */
 function useCreate(onCreated: (summary: ConversationSummary) => void) {
@@ -24,8 +30,8 @@ const scopeOf = (conversation: ConversationSummary) =>
   conversation.kind === "general" ? "General" : `${conversation.projectLabel ?? "A project"}${conversation.projectPresent === false ? " · removed" : ""}`;
 
 /**
- * The side navigation: Review & planning, with a new chat and the conversations (the most recent first), and Projects &
- * settings. A project chosen on that page changes no conversation: each keeps the scope it started with.
+ * The side navigation: Review & planning, with a new chat and the conversations (the most recent first), Tasks, and
+ * Projects & settings. A project chosen on that page changes no conversation: each keeps the scope it started with.
  */
 export function Navigation({
   view,
@@ -112,6 +118,13 @@ export function Navigation({
         )}
       </AppShell.Section>
       <AppShell.Section>
+        <NavLink
+          component="button"
+          label="Tasks"
+          active={view.kind === "tasks" || view.kind === "task" || view.kind === "new-task"}
+          onClick={() => onNavigate({ kind: "tasks" })}
+          data-testid="nav-tasks"
+        />
         <NavLink component="button" label="Projects & settings" active={view.kind === "projects"} onClick={() => onNavigate({ kind: "projects" })} data-testid="nav-projects" />
       </AppShell.Section>
     </AppShell.Navbar>

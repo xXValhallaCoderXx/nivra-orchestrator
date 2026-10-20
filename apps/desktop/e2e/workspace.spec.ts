@@ -66,11 +66,22 @@ async function addProject(path: string) {
   await page.getByTestId("project-add").click();
 }
 
+/** Starts a conversation and waits for it, not the one shown before, whose composer would otherwise take the typing. */
 async function newChat(scope: "general" | string) {
+  const shown = page.getByTestId("conversation");
+  const before = (await shown.count()) ? await shown.getAttribute("data-conversation-id") : null;
   await page.getByTestId("new-chat").click();
   if (scope === "general") await page.getByTestId("new-chat-general").click();
   else await page.getByTestId("new-chat-project").filter({ hasText: scope }).click();
-  await expect(page.getByTestId("conversation")).toBeVisible();
+  await expect(shown).toBeVisible();
+  if (before) await expect(shown).not.toHaveAttribute("data-conversation-id", before);
+  await expect(page.getByTestId("conversation-empty")).toBeVisible();
+}
+
+/** Opens a conversation from the list and waits until it is the one shown. */
+async function openConversation(title: string) {
+  await page.getByTestId("nav-conversation").filter({ hasText: title }).click();
+  await expect(page.getByTestId("conversation-title")).toHaveText(title);
 }
 
 async function send(message: string) {
@@ -156,7 +167,6 @@ test("a repository chat asks for its project's consent first, then answers in it
 
 test("choosing another project on Projects & settings changes neither an open conversation's scope nor the repository its next turn reads", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
-  const conversation = page.getByTestId("nav-conversation").filter({ hasText: "Plan a CSV export" });
   await page.getByTestId("nav-projects").click();
   // Choosing the project already chosen would clear the choice: choose alpha, the conversation's own, then beta.
   for (const label of ["alpha", "beta"]) {
@@ -164,7 +174,7 @@ test("choosing another project on Projects & settings changes neither an open co
     await page.getByRole("option", { name: new RegExp(`^${label}`) }).click();
     await expect(page.getByTestId("project-select")).toHaveValue(label);
   }
-  await conversation.click();
+  await openConversation("Plan a CSV export");
   await expect(page.getByTestId("conversation-scope")).toHaveText(/^alpha · /);
   const before = chats();
   await send("And how would we test it?");
@@ -236,10 +246,10 @@ test("conversations are kept across a relaunch, nothing is sent on reopening, an
   await app.close();
   await launch(testInfo);
   await expect(page.getByTestId("nav-conversation")).toHaveCount(count);
-  await page.getByTestId("nav-conversation").filter({ hasText: "No key yet?" }).click();
+  await openConversation("No key yet?");
   await expect(page.getByTestId("turn-status")).toHaveText("Failed");
   if (packaged) return;
-  await page.getByTestId("nav-conversation").filter({ hasText: "Plan a CSV export" }).click();
+  await openConversation("Plan a CSV export");
   await expect(page.getByTestId("answer-repository")).toHaveCount(2);
   expect(chats()).toBe(before);
   await send("What should the first commit hold?");
@@ -251,11 +261,128 @@ test("conversations are kept across a relaunch, nothing is sent on reopening, an
 
 test("deleting a conversation asks first, says what stays, and takes it out of the list", async () => {
   const listed = page.getByTestId("nav-conversation").filter({ hasText: "No key yet?" });
-  await listed.click();
+  await openConversation("No key yet?");
   await page.getByTestId("conversation-delete").click();
   await expect(page.getByTestId("conversation-delete-confirm")).toBeVisible();
   await expect(page.getByText("each engine keeps its own record of these runs, your messages included")).toBeVisible();
   await page.getByTestId("conversation-delete-confirm").click();
   await expect(listed).toHaveCount(0);
   await expect(page.getByTestId("planning-new-general")).toBeVisible();
+});
+
+const BRIEF_FIELDS = ["goal", "criteria", "scope", "exclusions", "context", "assumptions", "checks"].map((field) => `task-brief-${field}`);
+
+async function openTask(title: string) {
+  await page.getByTestId("nav-tasks").click();
+  await page.getByTestId("task-open").filter({ hasText: title }).click();
+  await expect(page.getByTestId("task-title")).toHaveText(title);
+}
+
+test("a plan saved from an answer, as shown first, becomes a task's brief v1, which stays until the plan's v2 is taken in", async () => {
+  test.skip(packaged, "a packaged app ignores the test endpoint switch");
+  await openConversation("Plan a CSV export");
+  const first = page.getByTestId("answer").first();
+  await first.getByTestId("answer-save-plan").click();
+  await expect(first.getByTestId("plan-input")).toHaveValue(
+    "Add the export beside the list.\n\nProposed:\n- A CSV export: An export button that writes the list as CSV.\n\nAssumed:\n- The list fits in memory",
+  );
+  await first.getByTestId("plan-save").click();
+  await expect(first.getByTestId("plan-version")).toHaveText("Plan · v1");
+  await first.getByTestId("plan-create-task").click();
+  // The form starts with the plan's text, its assumptions and its repository; another repository would take none of it.
+  await expect(page.getByTestId("task-form-title")).toHaveValue("Plan a CSV export");
+  await expect(page.getByTestId("brief-context")).toHaveValue(/^Add the export beside the list\./);
+  await expect(page.getByTestId("brief-assumptions")).toHaveValue("The list fits in memory");
+  await expect(page.getByTestId("task-form-repository")).toHaveValue(/^alpha · /);
+  await expect(page.getByTestId("task-form-leaves-plan")).toHaveCount(0);
+  for (const [label, warned] of [["beta", 1], ["No repository yet", 1], ["alpha", 0]] as const) {
+    await page.getByTestId("task-form-repository").click();
+    await page.getByRole("option", { name: new RegExp(`^${label}`) }).click();
+    await expect(page.getByTestId("task-form-leaves-plan")).toHaveCount(warned);
+  }
+  await page.getByTestId("brief-goal").fill("Export the list as CSV");
+  await page.getByTestId("brief-criteria").fill("The export opens in a spreadsheet");
+  await page.getByTestId("task-form-create").click();
+  await expect(page.getByTestId("task-title")).toHaveText("Plan a CSV export");
+  await expect(page.getByTestId("task-brief-version")).toHaveText("· brief v1");
+  await expect(page.getByTestId("task-plan-source")).toContainText("From plan v1");
+  await expect(page.getByTestId("task-repository")).toHaveText("alpha");
+  // The plan moves on in its conversation.
+  await page.getByTestId("task-open-conversation").click();
+  await expect(page.getByTestId("conversation-title")).toHaveText("Plan a CSV export");
+  await page.getByTestId("answer").first().getByTestId("plan-edit").click();
+  await page.getByTestId("answer").first().getByTestId("plan-input").fill("Export as CSV first, then add filters.");
+  await page.getByTestId("answer").first().getByTestId("plan-save").click();
+  await expect(page.getByTestId("answer").first().getByTestId("plan-version")).toHaveText("Plan · v2");
+  await page.getByTestId("answer").first().getByTestId("plan-earlier-toggle").click();
+  await expect(page.getByTestId("answer").first().getByTestId("plan-earlier")).toContainText("Add the export beside the list.");
+  // The task says so, and keeps brief v1 until the change is taken in.
+  await openTask("Plan a CSV export");
+  await expect(page.getByTestId("task-plan-changed")).toContainText("this brief uses v1, and v2 is the latest");
+  await expect(page.getByTestId("task-brief-context")).toContainText("Add the export beside the list.");
+  await page.getByTestId("task-update-from-plan").click();
+  await expect(page.getByTestId("task-brief-version")).toHaveText("· brief v2");
+  await expect(page.getByTestId("task-brief-context")).toHaveText(/Export as CSV first, then add filters\.$/);
+  await expect(page.getByTestId("task-plan-changed")).toHaveCount(0);
+});
+
+test("a task written directly has the same brief; its states follow the rules, a stale view is read again, and Run says why it can't", async () => {
+  await page.getByTestId("nav-tasks").click();
+  await page.getByTestId("tasks-new").click();
+  await expect(page.getByTestId("task-form-repository")).toHaveValue("No repository yet");
+  await page.getByTestId("task-form-title").fill("Tidy the README");
+  await page.getByTestId("task-form-create").click();
+  await expect(page.getByTestId("task-title")).toHaveText("Tidy the README");
+  for (const field of BRIEF_FIELDS) await expect(page.getByTestId(field)).toBeVisible();
+  await expect(page.getByTestId("task-state")).toHaveText("Draft");
+  await page.getByTestId("task-mark-ready").click();
+  await expect(page.getByTestId("task-error")).toHaveText("A task is ready once its brief has a goal and at least one acceptance criterion. Add them, then mark it ready.");
+  await page.getByTestId("task-edit-brief").click();
+  await page.getByTestId("brief-goal").fill("Tidy it");
+  await page.getByTestId("brief-criteria").fill("Every heading is sentence case\n\n");
+  await page.getByTestId("task-brief-save").click();
+  await expect(page.getByTestId("task-brief-version")).toHaveText("· brief v2");
+  await expect(page.getByTestId("task-brief-criteria")).toHaveText(/Every heading is sentence case$/);
+  // Changed behind this view: the next change is refused, and the view reads the task again.
+  const id = await page.getByTestId("task").getAttribute("data-task-id");
+  await page.evaluate(async (taskId) => {
+    const task = await window.nivra.getTask(taskId!);
+    await window.nivra.renameTask(taskId!, task.revision, "Tidy the README files");
+  }, id);
+  await page.getByTestId("task-mark-ready").click();
+  await expect(page.getByTestId("task-error")).toHaveText("This task changed since you opened it. Open it again, then try again.");
+  await expect(page.getByTestId("task-title")).toHaveText("Tidy the README files");
+  await page.getByTestId("task-mark-ready").click();
+  await expect(page.getByTestId("task-state")).toHaveText("Ready");
+  await page.getByTestId("task-complete").click();
+  await expect(page.getByTestId("task-state")).toHaveText("Completed");
+  await expect(page.getByTestId("task-edit-brief")).toBeDisabled();
+  await page.getByTestId("task-reopen").click();
+  await expect(page.getByTestId("task-state")).toHaveText("Draft");
+  await expect(page.getByTestId("task-attempts")).toHaveText("Attempts: none");
+  await expect(page.getByTestId("task-run")).toBeDisabled();
+  await expect(page.getByTestId("task-run-note")).toHaveText(/^Running tasks isn't available yet\. .+ Until then, nothing runs\.$/);
+  await page.getByTestId("nav-tasks").click();
+  await expect(page.getByTestId("task-row").filter({ hasText: "Tidy the README files" })).toContainText("No repository yet");
+});
+
+test("deleting the conversation a plan came from keeps the task's brief, and moving the task to another repository clears what came from it", async () => {
+  test.skip(packaged, "a packaged app ignores the test endpoint switch");
+  await openConversation("Plan a CSV export");
+  await page.getByTestId("conversation-delete").click();
+  await page.getByTestId("conversation-delete-confirm").click();
+  await expect(page.getByTestId("nav-conversation").filter({ hasText: "Plan a CSV export" })).toHaveCount(0);
+  await openTask("Plan a CSV export");
+  await expect(page.getByTestId("task-plan-gone")).toBeVisible();
+  await expect(page.getByTestId("task-brief-context")).toHaveText(/Export as CSV first, then add filters\.$/);
+  await page.getByTestId("task-move").click();
+  await page.getByTestId("task-move-repository").click();
+  await page.getByRole("option", { name: /^beta/ }).click();
+  await expect(page.getByTestId("task-move-clears")).toBeVisible();
+  await page.getByTestId("task-move-save").click();
+  await expect(page.getByTestId("task-repository")).toHaveText("beta");
+  await expect(page.getByTestId("task-brief-version")).toHaveText("· brief v3");
+  await expect(page.getByTestId("task-revalidate")).toContainText("To write again for this repository: the context and the assumptions.");
+  await expect(page.getByTestId("task-brief-context")).toHaveText(/None yet$/);
+  await expect(page.getByTestId("task-brief-goal")).toHaveText(/Export the list as CSV$/);
 });
