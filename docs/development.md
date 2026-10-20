@@ -134,6 +134,25 @@ wsl.exe --unregister NivraTest   # deletes the distribution and its disk
   repository turn needs consent, like explain:
   `{"workflowId":"chat","input":{"message":"…","scope":{"kind":"repository","repoPath":"/path/to/repo"}},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true},"history":{"exchanges":[],"omitted":{"overLimit":0,"unanswered":0,"preferencesChanged":0}}}}`.
 
+**The engine's log (NIV-27, D29).** Every failure writes one line to it, `diagnostic {json}`, at most 1,000
+characters. The line never holds an error's own words:
+- `code`: what kind of failure, from a closed list (`unexpected-error`, `model-failure`, `git-failed`, `exec-refused`,
+  `refused` and so on);
+- `stage`: where, such as `models.list`, `read_file` or `explain.prepare`;
+- `reason`: a refusal's own code;
+- the run, request, workflow and step, or the RPC id and method;
+- `error`: up to four allowlisted classes from the cause chain, a known errno, how many causes, and the message's
+  length;
+- `counts`, such as `elapsedMs`.
+
+The app keeps each engine's log in its logs folder (`<user data>/logs/<target>.log`). A diagnostic says what kind of
+failure it was and where; it never says what the error said. To see that, reproduce the failure. For example, a key
+holding a newline makes `fetch` throw a TypeError that quotes it:
+
+```bash
+NEBIUS_API_KEY="$(printf '%s\n%s' "canary-one" "canary-two")" pnpm rpc providers.check --home ~/.nivra-dev-track-a/<check> --token-factory-url http://127.0.0.1:9/v1
+```
+
 `probe:tokenfactory` takes `--model <id>`, passed after `--`, to pick the Nemotron model.
 
 The Nebius Sandboxes probe (NIV-29, D28) is an explicit live check, never part of `verify`. Each stage runs only after

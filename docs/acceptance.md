@@ -760,6 +760,75 @@ The new tests, each failing on the code before the fix:
 - **Not run:** `rpc.ts` and the UI checks. The client isn't wired into the engine or the app, and nothing else changed.
   The fixes weren't run live: they change how an interruption is handled, not what a run does.
 
+### Answer reliability and safe diagnostics (D29, NIV-26, NIV-27)
+
+Track A's first checkpoint (A0, NIV-22): two commits on `feature/niv-26-27-reliability`, from `dc48874`.
+
+| Commit | What |
+|---|---|
+| `7ba8a07` | NIV-26: a missing `findings` costs one refusal at most, and an answer without findings is labelled, never shown as evidence; protocol 6 |
+| `f780acc` | NIV-27: one safe diagnostic per failure, and only Nivra's own words leave the engine |
+
+**NIV-26, each case through a real engine over stdio** (`apps/engine/test/explain.test.ts`, the loopback stub):
+
+| Case | Shown |
+|---|---|
+| The original regression: forced, then three answers without findings, then one with them | 15 requests. The first answer was refused once, with the template; the next was taken and labelled `no-findings`. Answers 3 and 4 were never asked for. The conflict the answer reported was kept |
+| The rehearsal's case: an answer with `findings: []`, then one with findings | `established` after one refusal, in 3 requests |
+| No step left for another answer, after two answers refused for their shape | Taken at once, labelled `no-findings` |
+| A blank summary every time | `malformed`, naming why ("3 turned down (3 for their shape)"), and no result stored. A padded summary is trimmed |
+| Findings citing only lines the model wasn't shown | Labelled `unsupported`: "0 of 1 citations" |
+
+- **The regression and the rehearsal's case both fail on the code before the fix.**
+  - The first ends `malformed` after 16 steps, its three answers refused for their shape.
+  - The second succeeds with no findings and no label.
+- **What the refusals cost is recorded with the result:** the steps that gave the turned-down answers, their tokens as
+  reported, and their time.
+
+**NIV-27, through a real engine over stdio** (`apps/engine/test/diagnostics-stdio.test.ts`).
+- **The header reproduction.** The key: about 4,000 characters, with a newline between two canaries.
+  - `providers.check` answered "Something inside Nivra failed (TypeError)." with `{kind: "internal"}`.
+  - An explain run failed as `internal`.
+  - Neither made a request.
+  - The log held exactly two diagnostic lines. Both named the stage (`models.list`); one gave the RPC id, the other
+    the run, the request, the workflow and the step.
+  - Neither half of the key was in the log, the answers, the run's records, or any file of the home.
+  - Stdout carried JSON-RPC alone.
+- **Private text that masking can't catch,** in two places:
+  - git's stderr, from a fake git that exits 128;
+  - the path of a git that can't start.
+
+  Each run failed in Nivra's words ("git ls-files failed (exit 128). Run git status …", or the fixed refusal for a
+  program that can't start). Each wrote one `git-failed` or `exec-refused` diagnostic. The private text was nowhere in
+  the home, the log or the run's records.
+- **Before the fix,** git's stderr went into the run's stored failure, and no diagnostic was written.
+- **The unit tests** (`diagnostics.test.ts`) cover:
+  - names, codes and causes that carry canaries;
+  - a cycle, throwing getters, proxies, a 5 MB message, `AggregateError`, and values that aren't errors;
+  - the line's checks and its cap;
+  - spoofed kinds;
+  - the RPC server, the scheduler, the step guard and the crash report.
+
+**Checks (20 October)**
+- `pnpm verify`: domain 38, engine 226, desktop 181. All passed.
+- `test:e2e` (the built app): 33 passed. 1 was skipped, because it applies only to a packaged app.
+  - The new check: an answer without findings is asked for them once, then shown labelled.
+  - Its status reads "no findings", and its context reads "1 for having no findings".
+- `pnpm stage:runtime all`: the new launcher's smoke test passed on linux-x64 (self-check, then initialize and shut
+  down over stdio), and win-x64 was cross-staged.
+- `test:packaged` (electron-builder `--dir`, Linux, runtimes staged afresh): 21 passed. 13 were skipped, because they
+  need the test endpoint switch, which a packaged app ignores.
+- `rpc.ts`: a real engine, on homes under `~/.nivra-dev-track-a`, against a scratch stub.
+  - **The regression:** `no-findings` after one refusal; the refused step cost 20 in / 5 out tokens.
+  - **The rehearsal's case:** `established`.
+  - **`providers.check`, then an explain run, with the newline key:** two diagnostics, and the key nowhere in the
+    output or the home.
+  - **The fake git:** one `git-failed` diagnostic, and the private text nowhere.
+- **Not run.**
+  - `verify:windows` and `test:windows`: no target, supervisor or staging code changed. `verify:windows` runs once at
+    A1, which contains A0.
+  - No live model call: none is needed.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

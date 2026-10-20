@@ -1302,3 +1302,92 @@ evidence (D27), against thresholds agreed before it ran.
   Images are kept for 180 days, after which untagged ones may be deleted. No API deletes uploads or records.
 - **Evidence:** `docs/acceptance.md`, *Nebius Sandboxes, live (D28, NIV-29)*. The evidence folders under
   `~/nivra-acceptance/` hold the journals, results and reports, with the key and project id replaced.
+
+## D29. An answer without findings is asked for them once and labelled; only Nivra's own words leave the engine, with one safe diagnostic per failure (2026-10-20)
+
+**Decision.**
+- **NIV-26: a missing `findings` costs at most one refusal.**
+  - `findings` defaults to none. An answer that leaves it out now reaches the gate. Before, the schema refused it, and
+    the whole answer was lost.
+  - The gate asks for findings once, with the shape a finding takes. `MAX_FINDINGS_REFUSALS = 1` is the visible bound.
+  - **It asks only while another answer fits** (`canAnswerAgain`):
+    - a step is left;
+    - the answer isn't due because of the time or the budget;
+    - once the answer is due, the model is one known to honour a forced answer.
+
+    A run allowed one call never makes a repair request.
+  - This departs from D23's "refuse only when the answer isn't due". The answer steps are kept so that a turned-down
+    answer can be given again, and an answer with nothing established is worth one of them.
+  - The next answer is taken as it is. Nothing is made up to fill it.
+- **An answer's standing is recorded and shown.**
+  - The standings:
+    - `established`: a finding cites lines the model was shown;
+    - `unsupported`: there are findings, but none cites such lines;
+    - `no-findings`.
+  - The window never shows the last two as a green "succeeded". A yellow label says what they are, and the status
+    badge says "no findings" or "not supported".
+  - The run itself succeeds, so the standing is what a reader must check.
+- **What refusals cost is recorded:** the steps of the answers turned down, their tokens as reported (null once one
+  didn't say) and their time. A run that ends `malformed` names its refusals by cause.
+- **The summary and each finding are trimmed,** which settles D27's follow-up.
+- **Protocol 6.** The explain result gains fields with defaults, as at protocol 4, so a host and an engine that don't
+  match are refused at `initialize`, never part-way through reading a result.
+- **NIV-27: only Nivra's own words leave the engine.** That means RPC errors, stored failures, step events, logs and
+  `mastra.db`.
+  - **The words** come from Nivra's own messages, chosen by safe codes.
+  - **They are filled only with safe values:** numbers, codes, platform names, the git subcommands Nivra runs, and a
+    repository-relative path the model itself asked for.
+  - **Never:** an error's own message, a command's stderr, a spawn error's text, or an absolute path.
+  - **Allowlisting an error's class doesn't make its message safe.**
+    - `RepoError` now has codes, and its messages carry neither git's stderr nor the project's path.
+    - An execution boundary's errors (`ExecRefusedError`, `BoundaryUnavailableError`, which are Track B's) become
+      fixed refusals at Track A's own boundary. A note on NIV-41 proposes codes for them.
+  - **One guard on every workflow step.** Anything a step throws that isn't a failure Nivra wrote becomes `internal`,
+    named at most by an allowlisted class, with its facts.
+- **One diagnostic per failure.**
+  - A failed run, a failed request or a crash writes one line to the engine's log: `diagnostic {json}`, at most 1,000
+    characters.
+  - The line holds:
+    - a code from a closed list;
+    - the stage;
+    - the run, request, workflow, step or RPC id;
+    - safe counts;
+    - the error's facts: up to four allowlisted classes, a known errno, how deep its causes go, and its message's
+      length, never its words.
+  - The launcher replaces Node's own report of an uncaught error with a diagnostic, and an `engine.fatal` `crashed` in
+    Nivra's words.
+- **The contract for others.** `apps/engine/src/diagnostics.ts` imports neither Mastra nor the model client.
+  - NIV-38 uses it for the review's failures.
+  - Track B can use its codes with stages of its own.
+
+**Why.**
+- **NIV-26's two cases are different.**
+  - D24's live run lost three forced answers (1.8k–2.8k output tokens each) to the schema, then ended `malformed`
+    after 16 steps.
+  - The rehearsal's first answer (20 October) had no findings at all, and showed as a plain success.
+  - Defaulting the list fixes the first and lets the gate see the second. The label keeps both honest.
+- **One refusal, not three.** A model that left `findings` out three times in a row wasn't going to give them on a
+  fourth try. The bound turns a costly loop into one step, and the step's cost is recorded.
+- **Masking known keys isn't enough.**
+  - NIV-27's reproduction, a key holding a newline, is masked only because the key is known.
+  - Git's stderr, a spawn error's path, or a provider's text can hold anything private, and nothing recognises it.
+  - The only safe course is to never carry the words.
+- **A diagnostic says enough to act on.** The provider check that once failed with "(TypeError)" and an empty log now
+  leaves a line naming the stage (`models.list`), the request and the error's class.
+
+**Consequences.**
+- **Amends D22:** "named by its class only" now means an allowlisted class only. Any other reads as unknown.
+- **Supersedes NIV-27's original proposal,** to log an error's name and message after `vault.mask`.
+- **A repair costs one extra step at most,** against three refused answers before. In D24's run a step averaged about
+  11,700 input tokens, and each refused answer had cost 1.8k–2.8k output tokens.
+- **Still not covered: startup failures before `initialize`.**
+  - Their text can carry an error's words: the `engine.fatal` text for a home that can't be opened, or a runtime that
+    can't load, and the supervisor's log tail.
+  - At that point no key or repository is held.
+  - So can Mastra's own validation errors about step data, which is ids and counts only.
+- **Every failed run now writes a diagnostic line,** expected kinds included.
+- **Older engines.** An engine before protocol 6 can't read results stored after it, so development and test homes are
+  per track (`~/.nivra-dev-track-a`, `~/.nivra-dev-track-b`).
+- **`findings` is no longer required** in the schema the model sees. The description and the one refusal make up for
+  it. A3's live runs will show how often an answer comes without findings.
+- **Evidence:** `docs/acceptance.md`, *Answer reliability and safe diagnostics (D29, NIV-26, NIV-27)*.
