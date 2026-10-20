@@ -76,6 +76,10 @@ A third switch, `--nivra-token-factory-url=<loopback url>`, points the local eng
 - Only an unpackaged app honours it; a packaged app ignores it.
 - The engine accepts only `127.0.0.1`, `[::1]` or `localhost`.
 - Doctor then reports a test endpoint, and each run records its route as `loopback-test`.
+- **A plan to review without a model** (D31). A packaged app can't make one, so `review.spec.ts` (`test:packaged`) and
+  `workspace-windows.spec.ts` (`test:windows`) seed one into the profile before launch through
+  `e2e/seed-workspace.ts`, which uses the workspace's own functions. On Windows the staged `node.exe` runs it, bundled,
+  so the file is only ever opened on Windows (D7): run `pnpm stage:runtime all` first.
 
 Cross-platform checks (D14; there is no CI):
 

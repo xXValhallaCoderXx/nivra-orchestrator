@@ -1487,3 +1487,85 @@ evidence (D27), against thresholds agreed before it ran.
 - **No reference is re-read** at the current HEAD: every reference stays historical.
 - **The host's copy.** A2 keeps reports in the plan's conversation. The engine's copy stays in its store.
 - **Evidence:** `docs/acceptance.md`, *Plan review runtime and run budgets (D30, NIV-38)*.
+
+## D31. Reviews of saved plans in the window: run links with a frozen binding in workspace v2, started only as previewed, never read as approval (2026-10-21)
+
+**Decision.**
+- **Storage: workspace.db v2.** It is `WORKSPACE_MIGRATIONS[1]`, appended; v1's text is pinned by its hash.
+  - **A review is a run link** with `workflow_id = 'review'`, plus a `reviews` row holding:
+    - the plan version it names: artifact id, lineage, version and sha256;
+    - the panel, and the packet's and the preferences' fingerprints;
+    - the frozen scope: general, or the project's id, label and HEAD;
+    - the report, once it ends.
+  - **Plans stay in `artifacts`.** A review references a version and never copies it. The packet's text isn't kept;
+    its fingerprint is.
+  - **Triggers:**
+    - `reviews_bound` refuses a review that isn't bound to a review run and to a plan version of its own conversation;
+    - `reviews_frozen` refuses any change to what a review was bound to, and a second report;
+    - `run_links_fixed` keeps a run link's workflow and owner.
+  - **Every stop path sees reviews.** `turnsOf` reads chat links only, as before. `openTurns` sees reviews too, so a
+    cancel, a deletion, sharing turned off and a project removed stop them as they stop turns.
+  - **One open run per conversation,** turns and reviews together. This amends D26.
+- **The preview is bound to what is sent.**
+  - **`reviews:prepare`** builds what one plan version would send:
+    - the packet: the text; the assumptions, masked again; each historical reference once, in the order cited;
+    - the preference snapshot (D21): a general plan's gets the personal preferences only.
+
+    It returns what is sent, and `expected`: a SHA-256 of the plan's id and version, both fingerprints, the project's
+    sharing and the panel.
+  - **`reviews:start`** works all of it out again. When the fingerprint differs, it refuses ("What this review would
+    send has changed since you opened it. Check the new preview, then start again."), and the window shows the new
+    preview.
+  - **Consent is checked as for a turn:** shown at preview, checked at start, again after that wait against the
+    consent epoch, and by `#submit`'s late check once the request is out. The fingerprint adds to these checks and
+    replaces none.
+  - **Refused before anything is stored:**
+    - a version whose text holds the saved key or a recognised credential: "Edit the plan to remove it, then review
+      the new version";
+    - a version over a review's limits, in words that name the limit.
+- **The lifecycle is a turn's** (D26). A review is stored first, sent through the same `#submit`, followed by the same
+  `#follow`, and never resent. `#finish` hands a review's end to `#finishReview`:
+  - **The report is kept only when it repeats the review's binding:** the plan's id and version, both fingerprints,
+    the panel, the request id and the run id. Otherwise the review's end is `unknown`, and nothing of the report is
+    kept.
+  - **It is masked again and kept once.** A complete report ends the review as answered. A partial one is kept with
+    how it ended: cancelled, interrupted, or failed with its kind.
+- **The window** (`features/reviews.tsx`).
+  - **Review…** on each plan card opens a dialog for any version. It shows what is sent and what isn't, each
+    preference with its meaning (a default, or a project's decision), and the most model calls. A project that
+    doesn't allow sharing asks for its consent there.
+  - **Each review keeps a card under its plan:**
+    - each stage's outcome;
+    - each reviewer's findings, with their basis ("From the plan" or "Assumption"), and historical references marked
+      as such;
+    - the chair's agreements ("Agreement isn't proof"), dissent, gaps and unaddressed findings;
+    - usage as reported, and the run budget;
+    - "The plan is now at vN" once the plan moves on.
+  - **Nothing reads as approval:**
+    - "Complete" isn't green;
+    - a reviewer who raised nothing says so: "That isn't an approval: it saw only the plan";
+    - every card says the review doesn't change the plan, mark a task ready or approve anything.
+  - **The window offers the council only.**
+  - **A running review holds the composer** as an answer does.
+- **Consent copy names reviews** wherever consent is asked: explanations, conversations and reviews.
+
+**Why.**
+- **`run_links` already owns an attempt's lifecycle:** its reconciliation and every stop path. A second lifecycle would
+  need its own. A table beside it keeps the binding immutable, and nothing is rebuilt: `workflow_id` has no CHECK.
+- **A preview that isn't bound can show one thing and send another.** A preference, the consent or the plan can change
+  while the dialog is open (the review of this plan).
+- **An engine's report belongs to the review only when it says so.** The binding check turns a foreign or mismatched
+  report into an unknown end instead of a kept one.
+- **A review reads like an approval all too easily.** The copy and the colours say how complete a review is, never
+  whether the plan is sound.
+
+**Consequences.**
+- **Older builds refuse a v2 profile** ("saved by a newer version of Nivra"). A v1 profile moves to v2 row for row.
+- **The next migration is `[2]`.**
+- **When a conversation is deleted,** each engine keeps its own run records: ids, version and fingerprints, but no
+  plan text; count-only events; and the masked report, which can quote the plan. The delete dialog says so.
+- **Reviews never write** plans, tasks, briefs or preferences. A task can be ready without one.
+- **Packaged and Windows checks seed a plan** through the workspace's own functions. On Windows the staged `node.exe`
+  runs them bundled, so the file is only ever opened on Windows (D7).
+- **Shared files.** Once this merges, the shared files Track A held pass to Track B, with a handoff on NIV-39.
+- **Evidence:** `docs/acceptance.md`, *Plan reviews in the window (D31, NIV-39)*.

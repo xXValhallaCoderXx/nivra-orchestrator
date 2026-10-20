@@ -894,6 +894,77 @@ Track A's second checkpoint (A1, NIV-22): commits on `feature/niv-38-council`, s
 
 - **Not run yet:** `verify:windows`, which needs a turn on the shared Windows folders.
 
+### Plan reviews in the window (D31, NIV-39)
+
+Track A's third checkpoint (A2, NIV-22): commits on `feature/niv-39-review-ui`, stacked on A1. It is the release point
+for the shared files Track B's NIV-44 waits on.
+
+| Commit | What |
+|---|---|
+| `16da342` | Workspace v2: reviews as run links, bound and frozen |
+| `33937c8` | The host: preview, start only as previewed, and keep a report only when it is bound to its review |
+| `c90e14c` | The window: the dialog and the cards; the review e2e; seeded plans for the packaged and Windows checks |
+
+**The workspace** (`workspace-store.test.ts`):
+- **The migration.** A v1 file, made with v1's own schema and the store's functions, moves to v2 with every row and
+  every v1 schema object as they were. v1's migration text is pinned by its hash.
+- **The triggers refuse:**
+  - a review on a turn's run;
+  - a review of another conversation's plan, or of a version or fingerprint the plan isn't;
+  - any change to what a review was bound to, and a second report;
+  - a run link changing its workflow or its conversation.
+- **One open run per conversation,** turns and reviews together. Every stop path sees the review; the conversation's
+  turns, and so its history, don't.
+- **Deletion:** deleting a conversation leaves none of a report's text in the file.
+
+**The host, with real engines** (`host.test.ts`; the stub plays each role, and the gated fixture engine holds a start):
+
+| Case | Shown |
+|---|---|
+| A general plan's review | The preview lists exactly the personal preferences that apply. Another project's own preference isn't sent, and neither is the conversation. 3 requests. The kept report's binding and fingerprints equal the preview's. The host's store and the plan are unchanged, and a task made from the plan is ready without a review. After an edit, v1's report stays byte-equal and says the plan is at v2; reviewing v2 makes a second review |
+| The preview bound to the start | An edited preference, a deleted one, sharing turned off, and a fingerprint no preview gave: each refused, with nothing sent or stored, and the next preview shows the change. From a fresh preview, the review sends the project's own preferences as they are now, the README reference, and no path of the project's. Once the project is removed, preview and start are refused |
+| A reviewer fails | Incomplete: the risks report kept, the chair skipped, 2 requests, nothing resent |
+| Cancel while running | The conversation is held: a message is refused, and the preview says why. The cancelled report is kept; a message is then answered. 2 review requests in all |
+| Stopped while being sent | Cancelled by the person, or by sharing turned off, as soon as the engine answers; its run cancelled once |
+| A quit, or a killed engine | After a restart: interrupted, with what the engine saved and its stages marked; nothing sent again |
+| A lost answer | Found by its request id and kept as complete; sent once |
+| A report bound to something else | The review's end is unknown, and nothing of the report is kept |
+| Deleted while running | The run stops. The workspace keeps no review, run link or plan, and none of the plan's text |
+| Credentials | A version holding the saved key is refused before anything is stored. A key a reviewer echoed is masked, and no file under the profile or the engine home holds it |
+
+- **In process** (`reviews.test.ts`):
+  - **The packet:** the scope and commit; each reference once, in order; none for a general plan; assumptions and
+    paths masked.
+  - **Refusals:** too long, the saved key, a token, over a limit, each in words that say what to do.
+  - **The preview's fingerprint** moves with each part it binds, and only with them.
+  - **The report check** refuses each field of the binding that differs.
+  - **The notes** say how a review ended, and that nothing was resent.
+- **The window** (`e2e/review.spec.ts`, the built app against the stub, 10 tests):
+  - **No key:** a seeded plan's preview (the version, the scope, the counts, what isn't sent, the cost), then
+    "Failed" before any request, saying what to do;
+  - **A general plan:** "Complete" with three stages, findings "From the plan", the synthesis's "Agreement isn't proof",
+    the line saying a review approves nothing, and usage with the run budget. The plan and the preference were sent,
+    and the conversation wasn't;
+  - **A stale preview:** refused, the new preference shown, nothing sent;
+  - **A failed reviewer:** "Incomplete", with its stages; Review again ends "Complete";
+  - **Cancel:** the composer and Review… held, then "Cancelled"; the next message is answered, with no further review
+    request;
+  - **A killed engine:** unresolved, then "Interrupted" after Restart; nothing resent;
+  - **A project's plan:** consent asked in the dialog; the reference shown as "E1 · README.md:1 · historical", its
+    finding an assumption; no path of the project's sent;
+  - **An edit to v2:** every card says the plan moved on, and the dialog offers v1 and v2;
+  - **A relaunch:** every review read back equal; nothing sent;
+  - **Deletion:** the dialog says the reviews go and what each engine keeps; they go.
+
+**Checks (21 October)**
+- `pnpm verify`: domain 43, engine 259, desktop 199. All passed.
+- `test:e2e` (the built app): 43 passed. 1 was skipped, because it applies only to a packaged app.
+- `test:packaged`: 24 passed. The 20 skipped need the test endpoint switch, which a packaged app ignores. The review
+  checks that apply there ran: a seeded plan's review with no key, a relaunch and a deletion.
+- `rpc.ts`: not run again, because the engine didn't change.
+- **Not run yet:** `test:windows`, with its new check of a plan seeded by the staged `node.exe`. It needs a turn on the
+  shared Windows folders, after `pnpm dev:win --no-launch`.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
