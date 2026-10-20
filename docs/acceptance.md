@@ -760,6 +760,97 @@ The new tests, each failing on the code before the fix:
 - **Not run:** `rpc.ts` and the UI checks. The client isn't wired into the engine or the app, and nothing else changed.
   The fixes weren't run live: they change how an interruption is handled, not what a run does.
 
+### Nebius execution session, B1 (D33, NIV-41)
+
+Track B's first checkpoint, offline: D28's pattern A behind the execution contract, with every request inside its
+deadline. On `feature/niv-41`, from `dc48874`:
+
+| Commit | What |
+|---|---|
+| `c9c6755` | Every request, POST and DELETE included, ends by its caller's deadline, and no late answer is taken |
+| `1e065e3` | The execution contract, extended for sessions that run elsewhere; `Local` refuses what coding work needs |
+| `fc82fa1` | The Nebius execution session: one operation per step, with the state moving only on what was kept |
+
+**The P3, before and after.** These three cases were run against the code at `dc48874`, in a throwaway script that was
+then deleted:
+
+| Case | At `dc48874` | Now |
+|---|---|---|
+| The cap 1 ms away | The spawn's POST and the cancel's DELETE were sent with `timeoutMs` 30000 | Nothing is sent, and `SandboxNotSentError` says so; the cancel is journaled unresolved |
+| An answer 3 s after a 2.5 s deadline | Taken: `SUCCESS` | A deadline error; a late spawn answer is only stopped |
+| A journal whose last line a crash cut short | Unreadable (`SyntaxError`), so cleanup couldn't run | The torn line is left out, and its spawn stays uncertain |
+
+**What the tests show**, all offline, with the fake service or a loopback server:
+
+| Area | Tests | What they cover |
+|---|---|---|
+| Deadlines (`nebius-sandbox.test.ts`) | 7 new, besides the 44 the probe had | A POST or DELETE with 1 ms or 1,999 ms left isn't sent; writes get the time left, not 30 s; late answers; an over-cap answer isn't asked for again; a 250 ms minimum between retries; a spawn refused before sending is journaled as not sent; the probe's uploads keep to its deadline; a torn and a damaged journal |
+| The real transport (`nebius-transport.test.ts`) | 6 | A GET and a POST with no headers, and a body that stops partway, end at their 300 ms deadline; an answer over its cap is refused by its declared length, or cut off as it streams; nothing is sent with under 1 ms left; a spawn whose POST reached the server but got no answer is uncertain, never "not sent" |
+| The contract (`session-contract.ts`) | 6 for each backend | Output and exit code without a shell; a time limit; a cancel; the output cap; a missing program never a success; a second close gives the same report |
+| `Local` | 10 of its own | Process trees and background groups; input and byte output; its budget and signal; it refuses isolation, a snapshot and a command thrown away |
+| The session (`nebius-session.test.ts`) | 27, besides the contract | See below |
+
+The session's tests:
+- **What it claims and sends.** Every operation has networking off. Only the prepare step carries the snapshot.
+  Environments hold only the command's own variables and the correlation id. Nothing sent holds the key, the project
+  id or a host path, and the upload is the snapshot's bytes exactly.
+- **Refusals, with nothing sent.**
+  - Sessions: the network not denied; no snapshot, an oversized one, or one with the wrong hash; a bad workspace; a
+    cancelled run; no credentials.
+  - Commands: a relative program; a folder outside the workspace; Nivra's own variable or a bad name in the
+    environment; the key or project id; input or byte output; an over-long timeout; one that doesn't fit the time left;
+    a second command while one runs; more operations than a session may start.
+- **The state.**
+  - Each persisted command's image carries on, and a disposable one leaves the state alone.
+  - A failing exit code is a result, not an error.
+  - A persisted command with no usable image, with an image id that isn't one, that timed out, or that a signal ended
+    leaves the session stale. The next command and any download are then refused, and nothing ran on the older image.
+  - An expired image means the state is lost, with no second upload and no restart from the base image.
+  - Output cut by the service, or by the command's cap, is reported.
+  - A download is bounded, and a missing file is "not found".
+- **Lost and late answers.**
+  - A lost spawn answer is found and followed, with one spawn.
+  - One that can't be found is never sent again; nothing more runs, and closing looks once more.
+  - A spawn answered after the deadline is only stopped.
+  - A `Retry-After` past the deadline gives the command up for closing to stop.
+- **Closing.**
+  - One budget includes stopping the command under way.
+  - A second close gives the same report and sends nothing.
+  - "Stopped" is told from "had already ended".
+  - An operation that never stops is reported unresolved, within the budget.
+  - Retention is counted from the journal.
+  - Closing never rejects, even when every request fails.
+- **An open that fails after something was sent closes itself.** That covers a hash that doesn't match, a listing that
+  differs, a failed prepare, and an upload cut off (counted as possibly stored).
+- **Recovery.**
+  - The scan uses no network.
+  - One pass settles what an earlier engine left. A pass that runs out of budget, or that a shutdown stops partway,
+    leaves the rest for the next.
+  - An operation still queued ten hours after its 60 s timeout stays unresolved, and is stopped once the service lists
+    it again.
+  - A damaged journal is reported.
+- **The prepare script,** run with this machine's `sh` and GNU `tar`, prints the digest `listingDigest` computes for the
+  same files: a link, an executable, a UTF-8 name, a space and an empty file.
+
+**Checks**
+- `pnpm verify`: 472 passed (domain 36, engine 255, desktop 181), none skipped. The baseline at `dc48874` was 419.
+- `pnpm probe:sandbox --plan` prints the same steps and limits. Its deadline line now says that every request, POST and
+  DELETE too, ends by the 20 minutes.
+- A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`:
+  - `doctor` answered;
+  - a `hello` run succeeded, every step through `Local`'s session included.
+- **Not run:**
+  - the Windows and packaged checks: no target, supervisor, staging, main or preload code changed;
+  - any live Nebius call: B1 needs none. B3's approved recipe is the first.
+
+**Limits**
+- **Not wired into the engine or the app.** No run uses the session yet (B4).
+- **Not shown live yet** (B3's run will show them):
+  - that busybox runs the prepare script as this machine's tools do;
+  - the service's answer for an expired image (404 or 410 is assumed);
+  - the upload API's size limit (the cap is 8 MiB).
+- **Usage** is kept raw, and null when absent. No cost is turned into money.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
