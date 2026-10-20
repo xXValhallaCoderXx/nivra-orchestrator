@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
 import type { RunResult } from "../src/main/targets/process.ts";
 import { decodeToolText, engineEnv, wslErrorCode } from "../src/main/targets/process.ts";
+import { channelOf, WSL_HOMES, wslHomeFrom } from "../src/main/targets/homes.ts";
 import { TargetUnavailableError } from "../src/main/targets/types.ts";
 import { discoverWsl, mergeDistros, parseListQuiet, parseLxssRegistry, wslGuidance, type WslDistro } from "../src/main/targets/wsl-discovery.ts";
 import { INSTALL_SCRIPT, instancePattern, parseProbe, problemsOf, PROBE_SCRIPT, WslTarget } from "../src/main/targets/wsl.ts";
@@ -148,6 +153,53 @@ describe("what the person is told about WSL (D17)", () => {
   });
 });
 
+const shellDirs: string[] = [];
+after(() => {
+  for (const dir of shellDirs) rmSync(dir, { recursive: true, force: true });
+});
+
+describe("the WSL scripts in a real shell, each confined to its own engine home (D27)", { skip: process.platform === "win32" }, () => {
+  /** Runs one of the scripts as the WSL target does: `sh -c <script> sh <args…>`, with this $HOME. */
+  const run = (home: string, script: string, args: string[], input?: Buffer) => spawnSync("/bin/sh", ["-c", script, "sh", ...args], { env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: home }, input, encoding: "utf8" });
+
+  it("installs into its own home's runtime folder, prunes only there, and finds the runtime only there", () => {
+    const home = mkdtempSync(join(tmpdir(), "nivra wsl home "));
+    shellDirs.push(home);
+    // A runtime whose Node passes the self-check: a script that exits 0.
+    const staged = join(home, "staged");
+    mkdirSync(join(staged, "node", "bin"), { recursive: true });
+    mkdirSync(join(staged, "engine"));
+    writeFileSync(join(staged, "node", "bin", "node"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(staged, "node", "bin", "node"), 0o755);
+    writeFileSync(join(staged, "engine", "main.mjs"), "");
+    // Packed as stage-runtime.ts packs it: its two folders, with fixed times, so each install is dated by its extraction.
+    const tarball = spawnSync("tar", ["--sort=name", "--mtime=@0", "-czf", "-", "-C", staged, "node", "engine"]).stdout;
+    // The release home holds three runtimes, more than one install keeps: none of them may go.
+    for (const old of ["r1", "r2", "r3"]) mkdirSync(join(home, ".nivra", "runtime", old, "node", "bin"), { recursive: true });
+    const before = readdirSync(join(home, ".nivra", "runtime")).sort();
+    for (const hash of ["d1", "d2", "d3"]) assert.equal(run(home, INSTALL_SCRIPT, [hash, "keep", ".nivra-dev"], tarball).stdout.trim(), "installed");
+    assert.deepEqual([readdirSync(join(home, ".nivra", "runtime")).sort(), readdirSync(join(home, ".nivra-dev", "runtime")).sort()], [before, ["d2", "d3"]]);
+    assert.equal(existsSync(join(home, ".nivra-dev", "runtime", "d3", "node", "bin", "node")), true);
+    const facts = (engineHome: string) => parseProbe(run(home, PROBE_SCRIPT, ["d3", engineHome]).stdout);
+    assert.deepEqual([facts(".nivra-dev")["runtime"], facts(".nivra")["runtime"], facts(".nivra-dev")["home"]], ["present", "absent", home]);
+    assert.equal(readFileSync(join(home, ".nivra-dev", "runtime", "d3", "node", "bin", "node"), "utf8"), "#!/bin/sh\nexit 0\n");
+  });
+});
+
+describe("engine homes by channel (D27)", () => {
+  it("keeps a development build, packaged or not, out of the release's homes", () => {
+    assert.deepEqual([channelOf(true, "release"), channelOf(true, "development"), channelOf(false, "release")], ["release", "development", "development"]);
+    assert.deepEqual(WSL_HOMES, { release: ".nivra", development: ".nivra-dev" });
+  });
+
+  it("takes a test run's WSL home only as plain folders below $HOME", () => {
+    assert.equal(wslHomeFrom(".nivra-test/verify-20261020T120000Z-1a2b"), ".nivra-test/verify-20261020T120000Z-1a2b");
+    for (const bad of ["", "/home/odin/.nivra", "~/.nivra", ".nivra-test/../.nivra", "./.nivra", ".nivra test", ".nivra/", "a;rm -rf ~"]) {
+      assert.throws(() => wslHomeFrom(bad), /--nivra-wsl-home takes a folder below your home in WSL/, bad);
+    }
+  });
+});
+
 describe("WSL probe rules", () => {
   it("reads the probe's facts", () => {
     assert.deepEqual(parseProbe(probeText(HEALTHY)), HEALTHY);
@@ -173,12 +225,13 @@ describe("WSL probe rules", () => {
 });
 
 describe("WslTarget", () => {
-  function target(responses: { probe: Record<string, string> | RunResult; install?: RunResult }) {
+  function target(responses: { probe: Record<string, string> | RunResult; install?: RunResult }, engineHome = WSL_HOMES.release) {
     const calls: Array<{ args: readonly string[]; input: boolean }> = [];
     const wsl = new WslTarget({
       distro: UBUNTU,
       wslExe: "C:\\Program Files\\WSL\\wsl.exe",
       runtime: { tarball: process.execPath, contentHash: "abc123" },
+      engineHome,
       runWsl: async (args, options) => {
         calls.push({ args, input: Boolean(options.input) });
         options.input?.destroy();
@@ -195,7 +248,7 @@ describe("WslTarget", () => {
     const { wsl, calls } = target({ probe: HEALTHY });
     const launch = await wsl.prepare({ instanceId: "11111111-1111-4111-8111-111111111111", heartbeatMs: 30_000 });
     const install = calls.find((call) => call.args.includes(INSTALL_SCRIPT))!;
-    assert.deepEqual(install.args.slice(-3), ["sh", "abc123", "keep"]);
+    assert.deepEqual(install.args.slice(-4), ["sh", "abc123", "keep", ".nivra"]);
     assert.equal(install.input, true);
     assert.equal(launch.command, "C:\\Program Files\\WSL\\wsl.exe");
     assert.deepEqual(launch.args.slice(0, 6), ["-d", "Ubuntu", "--cd", "/home/odin", "--exec", "/home/odin/.nivra/runtime/abc123/node/bin/node"]);
@@ -211,7 +264,17 @@ describe("WslTarget", () => {
     assert.equal(present.calls.some((call) => call.args.includes(INSTALL_SCRIPT)), false);
     const forced = target({ probe: { ...HEALTHY, runtime: "present" } });
     await forced.wsl.prepare({ instanceId: "11111111-1111-4111-8111-111111111111", heartbeatMs: 0, reprovision: true });
-    assert.deepEqual(forced.calls.find((call) => call.args.includes(INSTALL_SCRIPT))!.args.slice(-1), ["force"]);
+    assert.deepEqual(forced.calls.find((call) => call.args.includes(INSTALL_SCRIPT))!.args.slice(-2), ["force", ".nivra"]);
+  });
+
+  it("probes, provisions and launches in the engine home it was given, never the release's (D27)", async () => {
+    const { wsl, calls } = target({ probe: HEALTHY }, ".nivra-test/run-1");
+    const launch = await wsl.prepare({ instanceId: "11111111-1111-4111-8111-111111111111", heartbeatMs: 0 });
+    const probe = calls.find((call) => call.args.includes(PROBE_SCRIPT))!;
+    const install = calls.find((call) => call.args.includes(INSTALL_SCRIPT))!;
+    assert.deepEqual([probe.args.slice(-2), install.args.slice(-2)], [["abc123", ".nivra-test/run-1"], ["keep", ".nivra-test/run-1"]]);
+    assert.deepEqual([launch.home, launch.args[5], launch.args[launch.args.indexOf("--home") + 1]], ["/home/odin/.nivra-test/run-1", "/home/odin/.nivra-test/run-1/runtime/abc123/node/bin/node", "/home/odin/.nivra-test/run-1"]);
+    assert.equal(launch.args.some((arg) => arg.includes("/.nivra/")), false);
   });
 
   it("refuses to start on a blocking problem or a failed install, saying what to do", async () => {

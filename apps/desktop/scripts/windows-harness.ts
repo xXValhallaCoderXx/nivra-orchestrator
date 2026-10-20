@@ -2,7 +2,9 @@
 // drives the native Windows engine and a WSL engine through the same target and supervisor modules Electron's main
 // process uses, and checks what CI would have: start, hello, cancel, a clean stop, and that an engine dies with its
 // parent when the parent is killed (libuv's kill-on-close job object, D4). It also checks that the native engine's
-// storage driver loads the Visual C++ runtime shipped beside it, not one installed on this machine (D25).
+// storage driver loads the Visual C++ runtime shipped beside it, not one installed on this machine (D25). The WSL engine
+// runs in a home of this run's own (--wsl-home, below the distribution's $HOME), which is removed at the end, and the
+// release's home, ~/.nivra, must be left exactly as it was (D27).
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -15,9 +17,11 @@ import { EngineStartError, EngineSupervisor } from "../src/main/supervisor.ts";
 import { LocalTarget, runtimeIn } from "../src/main/targets/local.ts";
 import { runTool } from "../src/main/targets/process.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
+import { wslHomeFrom } from "../src/main/targets/homes.ts";
 import { discoverWsl, type WslDistro } from "../src/main/targets/wsl-discovery.ts";
 import { instancePattern, WslTarget } from "../src/main/targets/wsl.ts";
 import { renameDllImport, VC_RUNTIME_DLL, vcRuntimeAddons } from "./runtime-files.ts";
+import { RELEASE_HOME_STATE, releaseHomeChange, REMOVE_TEST_HOME, STALE_TEST_HOMES } from "./test-homes.ts";
 
 const { values } = parseArgs({
   options: {
@@ -26,6 +30,7 @@ const { values } = parseArgs({
     hash: { type: "string" },
     work: { type: "string" },
     distro: { type: "string" },
+    "wsl-home": { type: "string" },
     // Child mode: start one engine, print its pid and instance, then wait to be killed.
     "hold-engine": { type: "string" },
   },
@@ -34,6 +39,7 @@ const runtimeDir = values.runtime!;
 const work = values.work!;
 const tarball = values.tarball!;
 const linuxHash = values.hash!;
+const wslHome = values["wsl-home"] ? wslHomeFrom(values["wsl-home"]) : null;
 const AWKWARD = "ü%#";
 
 const isAlive = (pid: number): boolean => {
@@ -64,7 +70,8 @@ async function wslTarget(): Promise<{ target: WslTarget; distro: WslDistro; wslE
   if (discovery.status !== "ready") throw new Error(`WSL: ${discovery.message}`);
   const distro = values.distro ? discovery.distros.find((d) => d.name === values.distro) : (discovery.distros.find((d) => d.isDefault) ?? discovery.distros[0]);
   if (!distro) throw new Error(`No usable WSL distribution${values.distro ? ` named ${values.distro}` : ""} (found: ${discovery.distros.map((d) => d.name).join(", ") || "none"})`);
-  return { target: new WslTarget({ distro, wslExe: discovery.wslExe, runtime: { tarball, contentHash: linuxHash } }), distro, wslExe: discovery.wslExe };
+  if (!wslHome) throw new Error("No --wsl-home: verify:windows gives each run a home of its own, so the release's ~/.nivra is never used.");
+  return { target: new WslTarget({ distro, wslExe: discovery.wslExe, runtime: { tarball, contentHash: linuxHash }, engineHome: wslHome }), distro, wslExe: discovery.wslExe };
 }
 
 function supervisorFor(target: ExecutionTarget, name: string): EngineSupervisor {
@@ -336,6 +343,14 @@ async function main(): Promise<void> {
   if (wsl) {
     const { target, distro, wslExe } = wsl as Awaited<ReturnType<typeof wslTarget>>;
     const inDistro = (args: string[], timeoutMs = 60_000) => runTool(wslExe, ["-d", distro.name, "--cd", "/", "--exec", ...args], { env: { ...process.env, WSL_UTF8: "1" } as Record<string, string>, timeoutMs });
+    const releaseState = async () => {
+      const read = await inDistro(["/bin/sh", "-c", RELEASE_HOME_STATE]);
+      if (read.code !== 0) throw new Error(`couldn't read ~/.nivra in ${distro.name}: ${read.stderr.trim() || `exit ${String(read.code)}`}`);
+      return read.stdout.trim();
+    };
+    await inDistro(["/bin/sh", "-c", STALE_TEST_HOMES]);
+    const releaseBefore = await releaseState();
+    console.log(`    this run's WSL home: ~/${wslHome}; the release's ~/.nivra holds ${releaseBefore ? releaseBefore.split("\n").length : 0} entries to compare at the end`);
     await check("wsl: probe", async () => {
       const probe = await target.probe();
       const facts = probe.facts;
@@ -349,6 +364,7 @@ async function main(): Promise<void> {
       wslInfo = info;
       if (info.platform !== "linux") throw new Error(`the engine says it runs on ${info.platform}`);
       if (info.runtimeHash !== linuxHash) throw new Error(`runtime ${String(info.runtimeHash)}, expected ${linuxHash}`);
+      if (!info.home.endsWith(`/${wslHome}`)) throw new Error(`the engine's home is ${info.home}, not this run's own ~/${wslHome}`);
       return `engine ${info.engineVersion} on ${info.platform}/${info.arch}, pid ${info.pid} (in ${distro.name}), home ${info.home}`;
     });
     if (up) {
@@ -403,6 +419,16 @@ async function main(): Promise<void> {
       });
     }
     await check("wsl: an engine dies with its parent (job object, then EOF)", () => orphanCheck("wsl", inDistro));
+    await check("wsl: the release's home, ~/.nivra, is as it was: no database migrated, no runtime added or pruned", async () => {
+      const changed = releaseHomeChange(releaseBefore, await releaseState());
+      if (changed) throw new Error(changed);
+      return releaseBefore ? `${releaseBefore.split("\n").length} entries unchanged` : "no release home in this distribution, and none was made";
+    });
+    await check("wsl: this run's own home is removed", async () => {
+      const removed = await inDistro(["/bin/sh", "-c", REMOVE_TEST_HOME, "sh", wslHome!]);
+      if (removed.code !== 0) throw new Error(`couldn't remove ~/${wslHome}: ${removed.stderr.trim() || `exit ${String(removed.code)}`}`);
+      return `~/${wslHome} removed`;
+    });
   }
 
   const failed = results.filter((r) => !r.ok);

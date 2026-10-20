@@ -1,7 +1,9 @@
 // The Windows development loop, run from WSL (B5): builds the real Windows app (`electron-builder --win --dir`, with
 // both staged runtimes), copies it to %LOCALAPPDATA%\nivra-dev\app and starts it there. Because it is a packaged
-// build, the native and WSL targets run exactly as they will for people who install Nivra. It uses its own user data
-// and native engine home, so an installed Nivra is never touched; the WSL target uses ~/.nivra in the distribution.
+// build, the native and WSL targets run exactly as they will for people who install Nivra. It is built for the
+// development channel (D27), so its engines keep to development homes, ~/.nivra-dev in a WSL distribution and
+// %LOCALAPPDATA%\nivra-dev\engine natively, however it is started, and it is started with its own user data: an
+// installed Nivra is never touched.
 //
 //   pnpm dev:win [--skip-stage] [--no-launch]
 import { spawn, spawnSync } from "node:child_process";
@@ -33,8 +35,8 @@ if (!values["skip-stage"]) {
   step("Staging both runtimes");
   run(process.execPath, [join(desktop, "scripts", "stage-runtime.ts"), "all"]);
 }
-step("Building the app");
-run(join(desktop, "node_modules", ".bin", "electron-vite"), ["build"]);
+step("Building the app, for the development channel");
+run(join(desktop, "node_modules", ".bin", "electron-vite"), ["build", "--mode", "development"]);
 step("Packaging for Windows (unpacked)");
 run(join(desktop, "node_modules", ".bin", "electron-builder"), ["--win", "--dir", "--x64"]);
 const unpacked = join(desktop, "release", "win-unpacked");

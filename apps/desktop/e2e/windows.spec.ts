@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { RELEASE_HOME_STATE, releaseHomeChange, REMOVE_TEST_HOME, STALE_TEST_HOMES, testWslHome } from "../scripts/test-homes.ts";
 
 /**
  * The packaged Windows app, run on Windows from WSL through interop (D14: no CI), as copied by `pnpm dev:win`. One
@@ -10,7 +12,8 @@ import { _electron as electron, expect, test, type ElectronApplication, type Pag
  * runs on the native engine, a run held on WSL keeps going and cancels on its own engine while the native one starts and
  * works, and quitting leaves no engine on either side. Preferences confirmed in the window reach each engine with its
  * runs (D21): every value intact, and one project's own never in the other's. Explaining asks for each project's
- * consent and, with no key, fails on both engines before any request (D22).
+ * consent and, with no key, fails on both engines before any request (D22). The WSL engine runs in a home of this run's own,
+ * and the release's ~/.nivra is left exactly as it was (D27).
  */
 test.skip(process.platform !== "linux" || !existsSync("/mnt/c/Windows/System32/cmd.exe"), "runs from WSL on a Windows machine");
 
@@ -21,6 +24,12 @@ const windows = (exe: string, args: string[]) => {
 };
 const wslpath = (flag: "-u" | "-w", path: string) => windows("/usr/bin/wslpath", [flag, path]);
 const GIT_EXE = "/mnt/c/Program Files/Git/cmd/git.exe";
+/** Runs a shell script in this distribution, where the app's WSL engine runs too. */
+const sh = (script: string, ...args: string[]) => {
+  const result = spawnSync("/bin/sh", ["-c", script, "sh", ...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`${script.split("\n")[0]}: ${result.stderr || result.stdout}`);
+  return result.stdout.trim();
+};
 
 let app: ElectronApplication;
 let page: Page;
@@ -28,6 +37,8 @@ let devWin: string;
 let nativeRepoWin: string;
 let wslRepo: string;
 let distro: string;
+let wslHome: string;
+let releaseBefore: string;
 const engines: { native: number | null; wslInstance: string | null; wslRun: string | null } = { native: null, wslInstance: null, wslRun: null };
 
 test.beforeAll(async () => {
@@ -42,17 +53,21 @@ test.beforeAll(async () => {
   windows(GIT_EXE, ["-C", nativeRepoWin, "-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "commit", "-q", "--allow-empty", "-m", "init"]);
 
   distro = process.env["WSL_DISTRO_NAME"] ?? "Ubuntu";
+  sh(STALE_TEST_HOMES);
+  wslHome = testWslHome("e2e");
+  releaseBefore = sh(RELEASE_HOME_STATE);
   const made = spawnSync("/bin/sh", ["-c", 'set -e; d="$HOME/.nivra-e2e/repo ü%#"; rm -rf "$d"; mkdir -p "$d"; cd "$d"; git init -q -b main; git -c user.name=t -c user.email=t@nivra.invalid commit -q --allow-empty -m init; pwd'], { encoding: "utf8" });
   if (made.status !== 0) throw new Error(made.stderr);
   wslRepo = made.stdout.trim();
 
   // chromiumSandbox: otherwise Playwright adds --no-sandbox, and the app (app.enableSandbox) refuses to start (exit 5).
-  app = await electron.launch({ executablePath: exe, args: [`--user-data-dir=${devWin}\\e2e\\user data`, `--nivra-engine-home=${devWin}\\e2e\\engine`], chromiumSandbox: true, timeout: 120_000 });
+  app = await electron.launch({ executablePath: exe, args: [`--user-data-dir=${devWin}\\e2e\\user data`, `--nivra-engine-home=${devWin}\\e2e\\engine`, `--nivra-wsl-home=${wslHome}`], chromiumSandbox: true, timeout: 120_000 });
   page = await app.firstWindow();
 });
 
 test.afterAll(async () => {
   await app?.close().catch(() => undefined);
+  if (wslHome) sh(REMOVE_TEST_HOME, wslHome);
 });
 
 const engineInfo = (targetId: string) =>
@@ -121,7 +136,7 @@ test("a \\\\wsl.localhost folder runs in its distribution, provisioned on first 
   await expect(page.getByTestId("project-target")).toHaveText(`${distro} · WSL`);
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online", { timeout: 120_000 });
   const info = (await engineInfo(`wsl:${distro}`))!;
-  expect(info.platform).toBe("linux");
+  expect([info.platform, info.home]).toEqual(["linux", `${homedir()}/${wslHome}`]);
   engines.wslInstance = info.instanceId;
   await confirmPreference("Prefer named exports, “quoted”, ü%#, 日本語", "Every project");
   const expected = await expectedFor(`wsl:${distro}`);
@@ -195,4 +210,11 @@ test("quitting leaves no engine on Windows or in the distribution", async () => 
   const nativeGone = () => !windows("/mnt/c/Windows/System32/tasklist.exe", ["/FI", `PID eq ${engines.native}`, "/NH"]).includes(String(engines.native));
   await expect.poll(nativeGone, { timeout: 15_000 }).toBe(true);
   await expect.poll(() => wslEngineAlive(engines.wslInstance!), { timeout: 15_000 }).toBe(false);
+});
+
+test("the release's WSL home, ~/.nivra, is as it was, and this run's own home goes", async () => {
+  expect(releaseHomeChange(releaseBefore, sh(RELEASE_HOME_STATE))).toBeNull();
+  expect(existsSync(`${homedir()}/${wslHome}/runtime`)).toBe(true);
+  sh(REMOVE_TEST_HOME, wslHome);
+  expect(existsSync(`${homedir()}/${wslHome}`)).toBe(false);
 });

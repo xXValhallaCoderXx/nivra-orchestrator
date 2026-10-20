@@ -1,6 +1,7 @@
 // Runs ON WINDOWS with the staged node.exe, started by verify-interrupt.ts from WSL (D14). It drives the packaged
 // Windows app through its UI while a dedicated test distribution is terminated from outside (`wsl --terminate`), and
-// writes what it saw to a trace on Windows. It terminates only the distribution it is given.
+// writes what it saw to a trace on Windows. It terminates only the distribution it is given. The app's WSL engine runs
+// in a home of this run's own (--wsl-home, D27).
 import { spawnSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -16,6 +17,7 @@ const { values } = parseArgs({
     "wsl-repo": { type: "string" },
     "native-repo": { type: "string" },
     "wsl-exe": { type: "string" },
+    "wsl-home": { type: "string" },
   },
 });
 const exe = values.exe!;
@@ -102,7 +104,7 @@ async function main(): Promise<number> {
   note(`Nivra ${exe}; test distribution ${distro}; trace ${trace}`);
   app = await electron.launch({
     executablePath: exe,
-    args: [`--user-data-dir=${work}\\user data`, `--nivra-engine-home=${work}\\engine`],
+    args: [`--user-data-dir=${work}\\user data`, `--nivra-engine-home=${work}\\engine`, `--nivra-wsl-home=${values["wsl-home"]!}`],
     // Otherwise Playwright adds --no-sandbox, and the app (app.enableSandbox) refuses to start.
     chromiumSandbox: true,
     timeout: 120_000,

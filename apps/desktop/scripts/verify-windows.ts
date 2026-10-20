@@ -1,7 +1,8 @@
 // Verifies the Windows host paths on this machine, from WSL, without CI (D14). It stages both runtimes, copies the
 // Windows runtime and a bundled harness to %LOCALAPPDATA%\nivra-dev\verify, and runs the harness with the staged
 // node.exe: a real Windows parent that drives the native engine and a WSL engine as Electron's main process will. With
-// --zip, it takes both runtimes from a release candidate's Windows zip instead, exactly as packaged (D25).
+// --zip, it takes both runtimes from a release candidate's Windows zip instead, exactly as packaged (D25). The WSL engine
+// runs in a home of this run's own, below ~/.nivra-test, and the release's ~/.nivra must be left as it was (D27).
 //
 //   pnpm --filter @nivra/desktop verify:windows [--distro <name>] [--skip-stage | --zip <path to Nivra-<version>-win-x64.zip>]
 import { spawn, spawnSync } from "node:child_process";
@@ -10,6 +11,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { build } from "esbuild";
+import { testWslHome } from "./test-homes.ts";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const stageRoot = join(desktop, "build", "stage");
@@ -100,6 +102,7 @@ cpSync(join(verifyDir, "harness.mjs"), join(work, "harness.mjs"));
 
 step("Running the harness on Windows");
 const node = join(runtime, "node", "node.exe");
+const wslHome = testWslHome("verify");
 const args = [
   `${workWin}\\harness.mjs`,
   "--runtime",
@@ -110,6 +113,8 @@ const args = [
   linuxHash,
   "--work",
   workWin,
+  "--wsl-home",
+  wslHome,
   ...(values.distro ? ["--distro", values.distro] : []),
 ];
 const harness = spawn(node, args, { cwd: "/mnt/c", stdio: "inherit" });
