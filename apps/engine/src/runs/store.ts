@@ -15,6 +15,7 @@ import {
   type WorkflowId,
 } from "@nivra/domain";
 import { Database, num, str, strOrNull, type Row } from "../db/database.ts";
+import { Refusal } from "../diagnostics.ts";
 
 /**
  * The engine's record of runs: status and an append-only timeline. Clients read these, never Mastra's tables.
@@ -170,7 +171,7 @@ export class RunStore {
   /** Stores a run's result, masked. A result over `MAX_ARTIFACT_BYTES` is refused: a cut one would no longer parse. */
   saveArtifact(runId: string, kind: string, content: string): void {
     const masked = this.#mask(content);
-    if (Buffer.byteLength(masked) > MAX_ARTIFACT_BYTES) throw new Error(`The run's ${kind} result is ${Buffer.byteLength(masked)} bytes, over the ${MAX_ARTIFACT_BYTES} Nivra stores.`);
+    if (Buffer.byteLength(masked) > MAX_ARTIFACT_BYTES) throw new Refusal("result-too-large", `The run's result is ${Buffer.byteLength(masked)} bytes, over the ${MAX_ARTIFACT_BYTES} Nivra stores.`);
     this.#database
       .open()
       .prepare("INSERT INTO artifacts (run_id, kind, content, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (run_id, kind) DO UPDATE SET content = excluded.content, created_at = excluded.created_at")

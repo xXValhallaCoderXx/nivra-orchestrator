@@ -1,6 +1,6 @@
 import type { AnswerDueReason, JsonObject, RunUsage } from "@nivra/domain";
 import type { ModelPolicy } from "../providers/policy.ts";
-import { failure, ModelFailure, type InternalFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
+import { ModelFailure, toModelFailure, type InternalFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
 import type { Budget } from "./budget.ts";
 import { mustAnswer, type ExplainLimits } from "./limits.ts";
 
@@ -142,7 +142,7 @@ export async function readUntilAnswered(options: ReadingOptions): Promise<{ step
       },
     });
   } catch (error) {
-    failed = error instanceof ModelFailure ? error : failure("internal", error instanceof Error ? error.name : typeof error);
+    failed = error instanceof ModelFailure ? error : toModelFailure(error, "reading");
     // The request that failed is recorded once, as its own step: its own time, no usage, and why (D22). A failure
     // inside Nivra made no request, so it is the run's failure alone.
     const request = failed.failedStep;

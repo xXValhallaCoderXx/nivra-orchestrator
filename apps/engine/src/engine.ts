@@ -18,6 +18,7 @@ import {
   type WorkflowId,
 } from "@nivra/domain";
 import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
+import { errorFacts, formatDiagnostic, internalMessage, publicFailure, type Diagnostic } from "./diagnostics.ts";
 import { Database, EngineLockedError } from "./db/database.ts";
 import { libsqlFileUrl } from "./db/libsql-url.ts";
 import { runDoctor } from "./doctor/doctor.ts";
@@ -33,6 +34,18 @@ import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/sc
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
+
+/** What the engine says when it stops because something inside it failed (NIV-27): Nivra's own words only. */
+const CRASH_MESSAGE = "The engine stopped because something inside it failed. Start it again; if it keeps happening, report it with the engine log.";
+
+/**
+ * What the launcher writes when an error reaches no handler (NIV-27): one diagnostic line, and the message for the
+ * app's `engine.fatal`. Node's own report of an uncaught error prints its message and properties, which can quote the
+ * key or the repository, so it never runs.
+ */
+export function crashReport(error: unknown): { line: string; message: string } {
+  return { line: formatDiagnostic({ code: "crashed", stage: "process", error: errorFacts(error) }), message: CRASH_MESSAGE };
+}
 
 /** A dependency of the engine could not load: the runtime is damaged or incomplete (D5, D6). */
 export class RuntimeBrokenError extends Error {
@@ -122,6 +135,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const vault = new SecretVault();
   // Known key values and credential shapes are masked in everything stored (D8, D22).
   const mask = combinedMask(vault.mask);
+  // Every failure the engine logs, as one bounded line that never holds an error's own words (NIV-27).
+  const diagnose = (diagnostic: Diagnostic) => log(mask(formatDiagnostic(diagnostic)));
   const store = new RunStore({ database, mask: (text) => mask(text) });
   // Names this home's store for the host (D26), as its path can't.
   const homeId = store.homeId();
@@ -162,6 +177,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     workflows: {
       [HELLO_WORKFLOW_ID]: createHelloWorkflow({
         backend,
+        mask,
         platform: process.platform,
         findGit: locateGit,
         engineInfo: () => info() as unknown as JsonObject,
@@ -209,6 +225,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     workflows: WORKFLOWS,
     instanceId,
     log: { info: log, warn: (m) => log(`warning: ${m}`), error: (m) => log(`error: ${m}`) },
+    diagnose,
   });
   scheduler.attach(mastra as unknown as WorkflowSource);
   // This process holds the home's lock, so no other engine can be running these runs (D7).
@@ -225,7 +242,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const server = new RpcServer({
     output,
     log,
-    mask: vault.mask,
+    diagnose,
+    mask,
     initialized: () => initialized,
     stopping: () => stopping !== null,
     handlers: {
@@ -260,16 +278,22 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         if (!key) throw new RpcFailure(ErrorCode.InvalidParams, "No Nebius key is set. Add it in Settings, then check again.");
         const { runProviderCheck } = await import("./providers/tool-call.ts");
         try {
-          const result = await runProviderCheck({ apiKey: key, endpoint, ...(model ? { model } : {}) });
+          const result = await runProviderCheck({
+            apiKey: key,
+            endpoint,
+            ...(model ? { model } : {}),
+            onDiagnostic: (facts) => diagnose({ ...facts, kind: "internal", method: "providers.check" }),
+          });
           return {
             ...result,
-            call: result.call ? { ...result.call, answer: vault.mask(result.call.answer) } : null,
-            problem: result.problem === null ? null : vault.mask(result.problem),
+            call: result.call ? { ...result.call, answer: mask(result.call.answer) } : null,
+            problem: result.problem === null ? null : mask(result.problem),
           };
         } catch (error) {
-          // Only listing the models throws: everything after it is reported in the result.
-          const kind = error instanceof Error && "kind" in error ? String(error.kind) : "internal";
-          throw new RpcFailure(ErrorCode.InternalError, vault.mask(error instanceof Error ? error.message : String(error)), { kind });
+          // Only listing the models throws: everything after it is reported in the result. Only Nivra's own words go
+          // back, and the diagnostic says what happened (NIV-27).
+          const known = publicFailure(error);
+          throw new RpcFailure(ErrorCode.InternalError, known?.message ?? internalMessage(), { kind: known?.kind ?? "internal" }, { cause: error });
         }
       },
       "runs.start": (params) => store.summary(scheduler.submit(params)) ?? notFound("just created"),

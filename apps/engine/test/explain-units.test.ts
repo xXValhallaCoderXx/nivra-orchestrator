@@ -223,6 +223,8 @@ describe("explain tools (D22)", () => {
     assert.equal(internal.failure?.kind, "internal");
     // Named by its class: an error's own words can quote the repository, and a failure's message is persisted.
     assert.deepEqual([/TypeError/.test(internal.failure?.message ?? ""), (internal.failure?.message ?? "").includes("disk vanished")], [true, false]);
+    // The diagnostic says which tool it was, by its facts only (NIV-27).
+    assert.deepEqual([internal.failure?.facts?.code, internal.failure?.facts?.stage, internal.failure?.facts?.error?.classes], ["unexpected-error", "read_file", ["TypeError"]]);
   });
 
   it("sends a refusal back to the model and records it", async () => {

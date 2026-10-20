@@ -294,7 +294,7 @@ function createReadTools(options: ExplainToolsOptions, state: ToolsState<unknown
         return { refused };
       }
       if (error instanceof RepoCancelled || options.signal?.aborted) return { refused: "Cancelled." };
-      internal.fail(error);
+      internal.fail(error, { stage: tool });
       return { refused: "Nivra hit an internal problem, so this run is stopping." };
     }
   };
@@ -437,7 +437,7 @@ function createAnswerTool<A extends { conflicts: AnswerConflict[] }>(options: Ex
         options.onTool({ message: accepted.message, data: { tool: spec.id, step: state.answerStep, ...accepted.data } });
         return { accepted: true };
       } catch (error) {
-        options.internal.fail(error);
+        options.internal.fail(error, { stage: spec.id });
         return { accepted: false, problems: ["Nivra hit an internal problem, so this run is stopping."] };
       }
     },

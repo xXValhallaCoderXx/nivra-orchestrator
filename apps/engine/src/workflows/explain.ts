@@ -17,6 +17,7 @@ import { createModelClient, failure, InternalFailure, type Endpoint, type ModelC
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoReader } from "../repo/files.ts";
 import { buildMap } from "../repo/map.ts";
+import { guard } from "./guard.ts";
 import { describePreferences } from "./preferences-record.ts";
 import { RepoError } from "../repo/paths.ts";
 
@@ -55,7 +56,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
   /** The run's consent and key, checked before anything is sent anywhere. */
   const allowed = (runId: string): { context: RunContext; key: string } => {
     const context = deps.context(runId);
-    if (!context) throw failure("internal", "this run's context is missing");
+    if (!context) throw failure("internal", "this run's context is missing").because("context-missing", "explain.context");
     if (!context.sharing.modelContext) throw failure("sharing-refused");
     const key = deps.apiKey();
     if (!key) throw failure("no-key");
@@ -64,7 +65,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
 
   const openReader = async (root: string, signal: AbortSignal | undefined) => {
     const git = deps.findGit();
-    if (!git) throw new RepoError(`Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
+    if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
     const session = await deps.backend.open({ workspace: root });
     try {
       return { reader: await RepoReader.open({ root, session, git, mask: deps.mask, signal }), session };
@@ -80,15 +81,15 @@ export function createExplainWorkflow(deps: ExplainDeps) {
     description: "Record the preferences the app sent with the run, without their text",
     inputSchema: Input,
     outputSchema: Input,
-    execute: async ({ inputData, runId }) => {
+    execute: async ({ inputData, runId }) => guard("explain.context", deps.mask, async () => {
       const given = deps.context(runId);
-      if (!given) throw failure("internal", "this run's context is missing");
+      if (!given) throw failure("internal", "this run's context is missing").because("context-missing", "explain.explain");
       const { message, data } = await describePreferences(given.preferences);
       deps.recorder.output(runId, "context", message, data);
       // Before anything is sent anywhere: a task that can't be read back never becomes the default question.
       if (!deps.task(runId)) throw new TaskUnreadable();
       return inputData;
-    },
+    }),
   });
 
   const prepare = createStep({
@@ -96,7 +97,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
     description: "Check consent and the key, resolve the repository, read HEAD, and pick the model",
     inputSchema: Input,
     outputSchema: Prepared,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("explain.prepare", deps.mask, async () => {
       const { key } = allowed(runId);
       const { reader, session } = await openReader(inputData.repoPath, abortSignal);
       let head: string | null;
@@ -119,7 +120,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         hiddenFiles: reader.hidden.size,
       });
       return { root: reader.root, head, model, contextLength: models.contextLengths.get(model) ?? null };
-    },
+    }),
   });
 
   const explain = createStep({
@@ -127,7 +128,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
     description: "Read the repository with the model and check its answer's citations",
     inputSchema: Prepared,
     outputSchema: Explained,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("explain.explain", deps.mask, async () => {
       const { context, key } = allowed(runId);
       const task = deps.task(runId);
       if (!task) throw new TaskUnreadable();
@@ -269,7 +270,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
       } finally {
         await session.close();
       }
-    },
+    }),
   });
 
   return createWorkflow({

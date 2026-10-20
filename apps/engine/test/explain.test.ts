@@ -325,6 +325,9 @@ describe("explain over stdio: failures, canaries and evidence (D22)", () => {
         `${files.join(", ")}: no key or repository text anywhere, and no question or choice in Mastra's records`,
       );
       assert.deepEqual([KEY, QUESTION_CANARY, CHOICE_CANARY, CONTENT_CANARY].map((needle) => engine.stderr().includes(needle)), [false, false, false, false]);
+      // One diagnostic for the failed run, saying what kind of failure it was (NIV-27).
+      const diagnostics = engine.stderr().split("\n").filter((line) => line.includes(" diagnostic {"));
+      assert.deepEqual([diagnostics.length, /"code":"model-failure"/.test(diagnostics[0] ?? "")], [1, true], engine.stderr());
     }
   });
 

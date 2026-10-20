@@ -10,15 +10,19 @@ import {
   type ResultOf,
 } from "@nivra/domain";
 import type { z } from "zod";
+import { errorFacts, internalMessage, publicFailure, type Diagnostic } from "../diagnostics.ts";
 import type { ProtocolOutput } from "./output.ts";
 
-/** Thrown by a handler to answer with a specific protocol error. */
+/**
+ * Thrown by a handler to answer with a specific protocol error, in Nivra's own words. `cause` is the error behind it,
+ * which only a diagnostic describes, by its facts (NIV-27).
+ */
 export class RpcFailure extends Error {
   readonly code: number;
   readonly data: unknown;
 
-  constructor(code: number, message: string, data?: unknown) {
-    super(message);
+  constructor(code: number, message: string, data?: unknown, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "RpcFailure";
     this.code = code;
     this.data = data;
@@ -38,6 +42,8 @@ export interface RpcServerOptions {
   stopping: () => boolean;
   mask: (text: string) => string;
   log: (line: string) => void;
+  /** Writes one safe diagnostic line for a request that failed inside the engine (NIV-27). */
+  diagnose: (diagnostic: Diagnostic) => void;
 }
 
 const BEFORE_INITIALIZE: readonly MethodName[] = ["initialize", "ping", "shutdown"];
@@ -102,7 +108,7 @@ export class RpcServer {
       const result = await handler(params.data);
       const checked = schema.result.safeParse(result);
       if (!checked.success) {
-        this.#options.log(`Handler for ${method} returned a result outside the protocol: ${describeIssues(checked.error)}`);
+        this.#options.diagnose({ code: "result-invalid", stage: method, method, rpc: id, counts: { issues: checked.error.issues.length } });
         throw new RpcFailure(ErrorCode.InternalError, `The engine produced an invalid result for ${method}.`);
       }
       await this.#options.output.send({ jsonrpc: "2.0", id, result: checked.data });
@@ -111,11 +117,28 @@ export class RpcServer {
         await this.#replyError(id, ErrorCode.InternalError, "The answer was too large to send.");
         return;
       }
-      const failure =
-        error instanceof RpcFailure ? error : new RpcFailure(ErrorCode.InternalError, error instanceof Error ? error.message : String(error));
-      if (!(error instanceof RpcFailure)) this.#options.log(`${method} failed: ${this.#options.mask(failure.message)}`);
-      await this.#replyError(id, failure.code, failure.message, failure.data);
+      if (error instanceof RpcFailure) {
+        if (error.cause !== undefined) this.#diagnoseFailure(error.cause, method, id);
+        await this.#replyError(id, error.code, error.message, error.data);
+        return;
+      }
+      // Anything else failed inside the engine: its words are never sent or logged, only what a diagnostic may say.
+      this.#diagnoseFailure(error, method, id);
+      await this.#replyError(id, ErrorCode.InternalError, internalMessage(), { kind: "internal" });
     }
+  }
+
+  #diagnoseFailure(error: unknown, method: string, id: RequestId): void {
+    const known = publicFailure(error);
+    this.#options.diagnose({
+      code: known?.facts?.code ?? known?.code ?? "unexpected-error",
+      stage: known?.facts?.stage ?? method,
+      reason: known?.reason ?? null,
+      kind: known?.kind ?? "internal",
+      error: known?.facts?.error ?? (known ? null : errorFacts(error)),
+      rpc: id,
+      method,
+    });
   }
 
   #replyError(id: RequestId | null, code: number, message: string, data?: unknown): Promise<void> {
