@@ -13,7 +13,7 @@ process.stdin.on("data", (chunk) => {
     buffer = buffer.slice(end + 1);
     const reply = (result) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`);
     if (request.method === "initialize") {
-      reply({ protocolVersion: 1, engineVersion: "stubborn", instanceId, pid: process.pid, home, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch });
+      reply({ protocolVersion: 1, engineVersion: "stubborn", instanceId, pid: process.pid, home, homeId: randomUUID(), runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch });
     } else if (request.method === "ping") {
       reply({ instanceId });
     }

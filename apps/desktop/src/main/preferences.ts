@@ -195,11 +195,12 @@ export function removeProjectPreferences(data: HostData, projectId: string): { d
 
 /**
  * What a run on this project receives: the confirmed personal preferences and the project's own, as they are now.
- * Another project's own preferences and unconfirmed suggestions are never included.
+ * Another project's own preferences and unconfirmed suggestions are never included. With no project (a general
+ * conversation, D26), only the personal ones.
  */
-export function snapshotFor(data: HostData, projectId: string): PreferenceSnapshot {
+export function snapshotFor(data: HostData, projectId: string | null): PreferenceSnapshot {
   const records = data.preferences
-    .filter((p) => p.status === "confirmed" && (p.scope === "personal" || p.projectId === projectId))
+    .filter((p) => p.status === "confirmed" && (p.scope === "personal" || (projectId !== null && p.projectId === projectId)))
     .map(({ id, statement, scope, intent, revision }) => ({ id, statement, scope, intent, revision }));
   if (records.length > MAX_PREFERENCES) {
     throw new Error(`This project has ${records.length} confirmed preferences, and a run can carry ${MAX_PREFERENCES}. Delete some under Preferences, then start the run again.`);

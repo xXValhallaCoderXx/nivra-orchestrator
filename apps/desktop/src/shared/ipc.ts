@@ -1,4 +1,4 @@
-import type { DoctorReport, EngineInfo, ExplainResult, PreferenceIntent, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
+import type { ChatResult, DoctorReport, EngineInfo, ExplainResult, HistoryRecord, PreferenceIntent, PreferenceScope, ProviderCheck, RunEventsPage, RunStatus, RunSummary } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -36,6 +36,8 @@ export const IPC = {
   getSettings: "settings:get",
   setNebiusKey: "settings:nebius-key",
   checkTokenFactory: "providers:check",
+  listConversations: "conversations:list",
+  createConversation: "conversations:create",
 } as const;
 
 export interface AppInfo {
@@ -164,6 +166,150 @@ export interface SettingsView {
   note: string | null;
 }
 
+/** Whether the workspace (D26) could be opened; everything else works without it. */
+export type WorkspaceView =
+  | { state: "ready"; schemaVersion: number; sqlite: string; notice: string | null }
+  | { state: "unavailable"; reason: string };
+
+/** What a new conversation is about: nothing (general, no repository reaches it), or one project, fixed for good. */
+export type ConversationScope = { kind: "general" } | { kind: "project"; projectId: string };
+
+export interface ConversationSummary {
+  id: string;
+  kind: "general" | "project";
+  projectId: string | null;
+  /** The project's label when the conversation started, kept after the project is removed. */
+  projectLabel: string | null;
+  /** Whether its project is still in the list; null for a general conversation. */
+  projectPresent: boolean | null;
+  /** The engine its turns run on: `local` for a general conversation, else the project's (D17). */
+  targetId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConversationsView {
+  workspace: WorkspaceView;
+  conversations: ConversationSummary[];
+}
+
+/**
+ * A turn's state (D26). `not-sent` is claimed only when it is established that nothing reached an engine's store;
+ * `unknown` when Nivra can't tell. Nothing is ever resent: sending again starts a new turn.
+ */
+export type TurnStatus = "submitting" | "running" | "answered" | "failed" | "cancelled" | "interrupted" | "not-sent" | "unknown";
+
+export interface TurnView {
+  id: string;
+  status: TurnStatus;
+  /** What happened, in Nivra's words, when it ended without an answer; null while it goes, and once answered. */
+  note: string | null;
+  /** Why its engine can't be reached to check it, while that lasts; it is checked again when the conversation opens. */
+  unresolved: string | null;
+  runId: string | null;
+  cancelRequested: boolean;
+  /** What the turn was given: how many preferences, and the history sent and left out (counts, never text). */
+  given: { preferences: number; history: HistoryRecord | null };
+  createdAt: string;
+  settledAt: string | null;
+}
+
+export interface MessageView {
+  id: string;
+  seq: number;
+  role: "person" | "assistant";
+  text: string;
+  /** An answer's whole reply: a general one's text, or a repository one's evidence, proposals and assumptions. */
+  reply: ChatResult | null;
+  turnId: string | null;
+  createdAt: string;
+}
+
+export interface ConversationView {
+  summary: ConversationSummary;
+  messages: MessageView[];
+  turns: TurnView[];
+  /** The engine its turns run on. */
+  engine: EngineView;
+  /** Why it can't continue (its project was removed); null when it can. */
+  closed: string | null;
+}
+
+/** A task's state (D26). `active` and `review` come only from attempts, which can't start yet. */
+export type TaskState = "draft" | "ready" | "active" | "review" | "completed";
+
+/** Where a brief came from: a version of a plan saved from a conversation's answer. */
+export interface BriefSource {
+  kind: "plan";
+  planId: string;
+  planLineage: string;
+  planVersion: number;
+  conversationId: string | null;
+  messageId: string | null;
+  /** The project of the conversation it came from; null for a general one. */
+  projectId: string | null;
+  /** For a repository answer: HEAD when its evidence was read. */
+  headAtStart: string | null;
+  /** The lines its evidence and proposals cited that were shown to the model. */
+  citations: Array<{ path: string; startLine: number; endLine: number }>;
+}
+
+/** What a task asks for, as one immutable version. A direct task and one made from a plan have the same shape. */
+export interface BriefContent {
+  goal: string;
+  acceptanceCriteria: string[];
+  scope: string;
+  exclusions: string;
+  context: string;
+  assumptions: string[];
+  checks: string[];
+  executionPolicy: { concurrency: 1; network: "off"; approval: "required" };
+  sources: BriefSource[];
+  /** Parts cleared because the task's repository changed: to write again for the new one. */
+  revalidate: Array<"context" | "assumptions">;
+}
+
+/** The parts of a brief the person writes. */
+export type BriefFields = Pick<BriefContent, "goal" | "acceptanceCriteria" | "scope" | "exclusions" | "context" | "assumptions" | "checks">;
+
+export interface PlanView {
+  id: string;
+  lineageId: string;
+  version: number;
+  text: string;
+  conversationId: string;
+  messageId: string;
+  /** The latest version in its lineage. */
+  latest: number;
+  createdAt: string;
+}
+
+export interface TaskSummary {
+  id: string;
+  title: string;
+  state: TaskState;
+  projectId: string | null;
+  projectLabel: string | null;
+  /** Whether its project is still in the list; null without one. */
+  projectPresent: boolean | null;
+  briefVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskView {
+  summary: TaskSummary;
+  revision: number;
+  brief: { id: string; version: number; sha256: string; content: BriefContent; createdAt: string };
+  versions: Array<{ id: string; version: number; createdAt: string }>;
+  /** Each plan the brief came from: the version it used, the latest there is, or that it was deleted. */
+  sourcePlans: Array<{ planLineage: string; usedVersion: number; latestVersion: number | null; conversationId: string | null }>;
+  attempts: Array<{ id: string; briefVersion: number; status: TurnStatus; createdAt: string }>;
+  /** Why the task can't run, in plain words; running tasks isn't available yet. */
+  runUnavailable: string;
+}
+
 export interface NivraApi {
   getAppInfo(): Promise<AppInfo>;
   /** One view per engine a project uses or that is running; nothing is started by asking. */
@@ -223,4 +369,8 @@ export interface NivraApi {
   setNebiusKey(key: string | null): Promise<SettingsView>;
   /** Token Factory from the project's engine: its NVIDIA models and one Nemotron tool call (B7). */
   checkTokenFactory(projectId: string): Promise<ProviderCheck>;
+  /** The workspace's state and every conversation, the most recently active first. Reading starts no engine. */
+  listConversations(): Promise<ConversationsView>;
+  /** Starts a conversation, general or about one project; its scope never changes afterwards. Starts no engine. */
+  createConversation(scope: ConversationScope): Promise<ConversationSummary>;
 }

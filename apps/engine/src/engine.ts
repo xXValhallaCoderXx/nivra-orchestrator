@@ -1,5 +1,8 @@
 import { basename, join } from "node:path";
 import {
+  ChatInput,
+  ChatResult,
+  combinedMask,
   ErrorCode,
   ExplainInput,
   ExplainResult,
@@ -8,7 +11,9 @@ import {
   PROTOCOL_VERSION,
   type EngineFatal,
   type EngineInfo,
+  type ChatContext,
   type JsonObject,
+  type RunContext,
   type SecretName,
   type WorkflowId,
 } from "@nivra/domain";
@@ -19,13 +24,13 @@ import { runDoctor } from "./doctor/doctor.ts";
 import { childEnv, insideWsl } from "./exec/child-env.ts";
 import { findGit } from "./exec/find-executable.ts";
 import { createLocalBackend } from "./exec/local.ts";
+import { ChatUnreadable, readChatTask } from "./chat/task.ts";
 import { readTask, TaskUnreadable } from "./explain/task.ts";
 import { launcherWrite, ProtocolOutput, type RawWrite } from "./rpc/output.ts";
 import { RpcFailure, RpcServer } from "./rpc/server.ts";
 import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
-import { combinedMask } from "./secrets/patterns.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
 
@@ -50,6 +55,22 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
         const task = readTask(input);
         if (!task) throw new TaskUnreadable();
         return { repoPath: task.repoPath };
+      },
+    },
+  ],
+  [
+    "chat",
+    {
+      id: "chat",
+      title: (input: unknown) => {
+        const { scope } = ChatInput.parse(input);
+        return scope.kind === "repository" ? `Chat · ${basename(scope.repoPath) || "repository"}` : "Chat";
+      },
+      // Mastra gets the repository's path, never the message (D22); a general turn gives it nothing.
+      mastraInput: (input: unknown) => {
+        const task = readChatTask(input);
+        if (!task) throw new ChatUnreadable();
+        return { repoPath: task.scope.kind === "repository" ? task.scope.repoPath : null };
       },
     },
   ],
@@ -83,19 +104,27 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const database = new Database(join(home, "nivra.db"), { exclusive: true });
   database.open();
 
-  let mastraModules: [typeof import("@mastra/core/mastra"), typeof import("@mastra/libsql"), typeof import("./workflows/hello.ts"), typeof import("./workflows/explain.ts")];
+  let mastraModules: [
+    typeof import("@mastra/core/mastra"),
+    typeof import("@mastra/libsql"),
+    typeof import("./workflows/hello.ts"),
+    typeof import("./workflows/explain.ts"),
+    typeof import("./workflows/chat.ts"),
+  ];
   try {
-    mastraModules = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts")]);
+    mastraModules = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts"), import("./workflows/chat.ts")]);
   } catch (error) {
     database.close();
     throw new RuntimeBrokenError("workflow runtime", error);
   }
-  const [{ Mastra }, { LibSQLStore }, { createHelloWorkflow, HELLO_WORKFLOW_ID }, { createExplainWorkflow, EXPLAIN_WORKFLOW_ID }] = mastraModules;
+  const [{ Mastra }, { LibSQLStore }, { createHelloWorkflow, HELLO_WORKFLOW_ID }, { createExplainWorkflow, EXPLAIN_WORKFLOW_ID }, { createChatWorkflow, CHAT_WORKFLOW_ID }] = mastraModules;
 
   const vault = new SecretVault();
   // Known key values and credential shapes are masked in everything stored (D8, D22).
   const mask = combinedMask(vault.mask);
   const store = new RunStore({ database, mask: (text) => mask(text) });
+  // Names this home's store for the host (D26), as its path can't.
+  const homeId = store.homeId();
   const backend = createLocalBackend({ baseEnv: env });
   const toolEnv = childEnv(env, {}, { stripWindowsPaths: process.platform === "linux" && insideWsl(env) });
   const locateGit = () => findGit({ env: toolEnv });
@@ -108,11 +137,26 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     instanceId,
     pid: process.pid,
     home,
+    homeId,
     runtimeHash,
     node: process.versions.node,
     platform: process.platform,
     arch: process.arch,
   });
+
+  // Each workflow reads the context its own kind of run carries (D21, D26).
+  const runContext = (runId: string): RunContext | null => {
+    const given = scheduler.contextOf(runId);
+    return given && !("history" in given) ? given : null;
+  };
+  const chatContext = (runId: string): ChatContext | null => {
+    const given = scheduler.contextOf(runId);
+    return given && "history" in given ? given : null;
+  };
+  const recorder = {
+    output: (runId: string, stepId: string, message: string, data?: JsonObject) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
+    event: (runId: string, type: "model.call" | "tool.called", stepId: string, message: string, data: JsonObject) => void store.append(runId, { type, stepId, message, data }),
+  };
 
   const mastra = new Mastra({
     workflows: {
@@ -122,7 +166,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         findGit: locateGit,
         engineInfo: () => info() as unknown as JsonObject,
         // Called while a step runs, long after the scheduler below exists.
-        context: (runId) => scheduler.contextOf(runId),
+        context: runContext,
         recorder: {
           output: (runId, stepId, message, data) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
           command: (runId, stepId, phase, message, data) =>
@@ -133,17 +177,27 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         backend,
         platform: process.platform,
         findGit: locateGit,
-        context: (runId) => scheduler.contextOf(runId),
+        context: runContext,
         task: (runId) => readTask(store.summary(runId)?.input),
         apiKey: () => vault.get("NEBIUS_API_KEY"),
         endpoint,
         mask,
         setMeta: (runId, meta) => store.setMeta(runId, meta),
         saveResult: (runId, result) => store.saveArtifact(runId, "explain", JSON.stringify(result)),
-        recorder: {
-          output: (runId, stepId, message, data) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
-          event: (runId, type, stepId, message, data) => void store.append(runId, { type, stepId, message, data }),
-        },
+        recorder,
+      }),
+      [CHAT_WORKFLOW_ID]: createChatWorkflow({
+        backend,
+        platform: process.platform,
+        findGit: locateGit,
+        context: chatContext,
+        task: (runId) => readChatTask(store.summary(runId)?.input),
+        apiKey: () => vault.get("NEBIUS_API_KEY"),
+        endpoint,
+        mask,
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        saveResult: (runId, result) => store.saveArtifact(runId, "chat", JSON.stringify(result)),
+        recorder,
       }),
     },
     storage: new LibSQLStore({ id: "nivra-engine", url: libsqlFileUrl(join(home, "mastra.db")) }),
@@ -165,7 +219,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   let resolveClosed!: () => void;
   const closed = new Promise<void>((resolve) => (resolveClosed = resolve));
   const notFound = (runId: string): never => {
-    throw new RpcFailure(ErrorCode.InvalidParams, `There is no run ${runId}.`);
+    throw new RpcFailure(ErrorCode.RunNotFound, `There is no run ${runId} in this engine's store.`);
   };
 
   const server = new RpcServer({
@@ -220,6 +274,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       },
       "runs.start": (params) => store.summary(scheduler.submit(params)) ?? notFound("just created"),
       "runs.get": ({ runId }) => store.summary(runId) ?? notFound(runId),
+      "runs.find": ({ clientRequestId }) => store.findByRequest(clientRequestId),
       "runs.list": ({ limit, cursor }) => store.list({ limit, cursor }),
       "runs.events": ({ runId, after, limit }) => store.events(runId, after, limit) ?? notFound(runId),
       "runs.cancel": ({ runId }) => scheduler.cancel(runId) ?? notFound(runId),
@@ -227,6 +282,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         if (!store.status(runId)) notFound(runId);
         const stored = store.artifact(runId, "explain");
         return stored === null ? null : ExplainResult.parse(JSON.parse(stored));
+      },
+      "runs.reply": ({ runId }) => {
+        if (!store.status(runId)) notFound(runId);
+        const stored = store.artifact(runId, "chat");
+        return stored === null ? null : ChatResult.parse(JSON.parse(stored));
       },
     },
   });
@@ -282,7 +342,7 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
   try {
     const { DatabaseSync } = await import("node:sqlite");
     new DatabaseSync(":memory:").close();
-    const [, { LibSQLStore }] = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts")]);
+    const [, { LibSQLStore }] = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts"), import("./workflows/chat.ts")]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {
     await fatal(output, log, "runtime-broken", new RuntimeBrokenError("runtime", error).message);

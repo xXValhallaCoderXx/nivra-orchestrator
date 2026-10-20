@@ -39,4 +39,11 @@ export const MIGRATIONS: readonly string[] = [
      created_at TEXT NOT NULL,
      PRIMARY KEY (run_id, kind)
    );`,
+  // v3 (D26): facts about the home's store. The engine sets `home_id` once, a random id the host records with each
+  // conversation turn, so it can tell this store from another at the same path. As a newer schema, it also makes an
+  // older engine refuse a home that holds chat runs.
+  `CREATE TABLE meta (
+     key TEXT PRIMARY KEY,
+     value TEXT NOT NULL
+   );`,
 ];

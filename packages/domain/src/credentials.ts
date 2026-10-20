@@ -1,8 +1,10 @@
 /**
- * Shapes of common credentials, masked wherever they appear: repository files before a model sees them, and what the
- * engine stores. Known key values are masked by the vault; these catch secrets Nivra has never been given. Ported from
- * Hird's `config/secrets.ts` (lines 81-168) @ 45c0057; the file-based secret store around it is not (D8). Detection is
- * by pattern, so it can't recognise every secret: the consent text says so (D22).
+ * Shapes of common credentials, masked wherever they appear: repository files before a model sees them, what the
+ * engine stores, and what the host keeps in its workspace (D26). Known key values are masked by whoever holds them (the
+ * engine's vault, the host's secret store); these catch secrets Nivra has never been given. Shared by the engine and
+ * the host, so both apply one definition. Ported from Hird's `config/secrets.ts` (lines 81-168) @ 45c0057; the
+ * file-based secret store around it is not (D8). Detection is by pattern, so it can't recognise every secret: the
+ * consent text says so (D22).
  */
 
 /** A private key block's first and last line, as pattern sources. The name between the dashes holds no dash. */
@@ -69,4 +71,16 @@ export type Mask = (text: string, options?: { keepLines?: boolean }) => string;
 /** The vault's known values, then the credential shapes. */
 export function combinedMask(knownValues: (text: string) => string): Mask {
   return (text, options) => maskSecretPatterns(knownValues(text), options);
+}
+
+/**
+ * `text` with each known secret value replaced by `[secret:<name>]`, the longest first, so a value inside another is
+ * replaced whole. The engine's vault and the host's workspace mask the same way.
+ */
+export function maskKnownValues(text: string, values: ReadonlyArray<readonly [name: string, value: string]>): string {
+  let masked = text;
+  for (const [name, value] of [...values].filter(([, value]) => value.length > 0).sort((a, b) => b[1].length - a[1].length)) {
+    if (masked.includes(value)) masked = masked.split(value).join(`[secret:${name}]`);
+  }
+  return masked;
 }

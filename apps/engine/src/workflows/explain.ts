@@ -1,24 +1,24 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { preferencesDigest, type AnswerDueReason, type ExplainResult, type JsonObject, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
+import { preferencesDigest, type ExplainResult, type JsonObject, type Mask, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
 import { Budget } from "../explain/budget.ts";
 import { checkCitation } from "../explain/citations.ts";
 import { Ledger } from "../explain/ledger.ts";
-import { EXPLAIN_LIMITS, mustAnswer } from "../explain/limits.ts";
+import { EXPLAIN_LIMITS } from "../explain/limits.ts";
 import { rankConflict } from "../explain/precedence.ts";
 import { DEFAULT_QUESTION, explainPrompt, INSTRUCTIONS } from "../explain/prompt.ts";
 import { TaskUnreadable, type ExplainTask } from "../explain/task.ts";
+import { Reading, readUntilAnswered, usageOf } from "../explain/reading.ts";
 import { createExplainTools, toolDefinitionChars } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
-import { createModelClient, failure, InternalFailure, ModelFailure, type Endpoint, type ModelClient, type StepRecord } from "../providers/model.ts";
+import { createModelClient, failure, InternalFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoReader } from "../repo/files.ts";
 import { buildMap } from "../repo/map.ts";
 import { describePreferences } from "./preferences-record.ts";
 import { RepoError } from "../repo/paths.ts";
-import type { Mask } from "../secrets/patterns.ts";
 
 export const EXPLAIN_WORKFLOW_ID = "explain";
 
@@ -48,18 +48,6 @@ export interface ExplainDeps {
 const Input = z.strictObject({ repoPath: z.string() });
 const Prepared = z.strictObject({ root: z.string(), head: z.string().nullable(), model: z.string(), contextLength: z.number().nullable() });
 const Explained = z.strictObject({ citations: z.number().int(), checked: z.number().int() });
-
-/** The usage a run's calls reported: totals stay null once one call didn't say, never 0 (D22). */
-function usageOf(steps: readonly StepRecord[]): RunUsage {
-  const reported = steps.filter((step) => step.inputTokens !== null && step.outputTokens !== null);
-  const all = reported.length === steps.length && steps.length > 0;
-  return {
-    inputTokens: all ? reported.reduce((sum, step) => sum + step.inputTokens!, 0) : null,
-    outputTokens: all ? reported.reduce((sum, step) => sum + step.outputTokens!, 0) : null,
-    calls: steps.length,
-    reportedCalls: reported.length,
-  };
-}
 
 export function createExplainWorkflow(deps: ExplainDeps) {
   const clientFor = (key: string) => (deps.modelClient ? deps.modelClient(key, deps.endpoint) : createModelClient({ apiKey: key, endpoint: deps.endpoint }));
@@ -172,99 +160,44 @@ export function createExplainWorkflow(deps: ExplainDeps) {
             `about ${beforeReading} tokens are needed before any reading, and ${Math.max(0, budget.tokens)} are available once ${ANSWER_TOKENS} are held back for the answer, which leaves no room to read`,
           );
         }
-        const policy = policyFor(inputData.model);
         const internal = new InternalFailure();
-        let finished = 0;
-        // Set before each step: whether it must give the answer, which is then accepted whatever it cites, and why.
-        let answerDue = false;
-        let dueReasons: AnswerDueReason[] = [];
-        // Answers Mastra turned down because they didn't match the schema: the tool never saw them.
-        let invalidAnswers = 0;
+        // Shared with the tools: how many steps have finished, and whether this one must give the answer (D22).
+        const reading = new Reading();
         const { tools, state } = createExplainTools({
           reader,
           ledger,
           budget,
           mask: deps.mask,
           internal,
-          step: () => finished,
-          answerDue: () => answerDue,
+          step: () => reading.finished,
+          answerDue: () => reading.answerDue,
           preferences: context.preferences,
           choices: choiceIds,
           signal: abortSignal,
           onTool: (event) => deps.recorder.event(runId, "tool.called", "explain", event.message, event.data),
         });
-        const client = clientFor(key);
-        const agent = client.agent({ id: "nivra-explain", name: "Nivra explain", modelId: inputData.model, instructions: INSTRUCTIONS, tools });
-        const started = performance.now();
-        const steps: StepRecord[] = [];
-        let failed: ModelFailure | null = null;
-        try {
-          await client.call(agent, prompt, {
-            maxSteps: EXPLAIN_LIMITS.maxSteps,
-            deadlines: { stepMs: EXPLAIN_LIMITS.stepMs, totalMs: EXPLAIN_LIMITS.totalMs },
-            maxOutputTokens: ANSWER_TOKENS,
-            toolChoice: policy.explore,
-            stopWhen: () => state.accepted !== null,
-            // An exploring step starts only with time left for it and for the answer after it (D22).
-            prepareStep: ({ stepNumber }) => {
-              dueReasons = mustAnswer({ stepNumber, elapsedMs: performance.now() - started, budgetExhausted: budget.exhausted() });
-              answerDue = dueReasons.length > 0;
-              // However the budget runs out, the run records that it did.
-              if (dueReasons.includes("budget")) state.budgetExhausted = true;
-              if (!answerDue) return { toolChoice: policy.explore };
-              return { activeTools: ["submit_answer"], toolChoice: policy.forceAnswer ? { type: "tool", toolName: "submit_answer" } : "auto" };
-            },
-            internal,
-            ...(abortSignal ? { signal: abortSignal } : {}),
-            onStep: (step) => {
-              finished++;
-              steps.push(step);
-              budget.observe(step);
-              for (const rejected of step.rejectedTools) {
-                if (rejected.tool === "submit_answer") invalidAnswers++;
-                const count = rejected.problems.length;
-                deps.recorder.event(runId, "tool.called", "explain", `${rejected.tool} refused: its input didn't match the tool's schema (${count} ${count === 1 ? "problem" : "problems"})`, {
-                  tool: rejected.tool,
-                  step: step.stepNumber,
-                  refused: "invalid input",
-                  problems: rejected.problems,
-                });
-              }
-              const tokens = step.inputTokens !== null && step.outputTokens !== null ? `${step.inputTokens} in / ${step.outputTokens} out tokens` : "tokens not reported";
-              deps.recorder.event(runId, "model.call", "explain", `Model step ${step.stepNumber + 1}: ${tokens}, ${(step.elapsedMs / 1000).toFixed(1)} s${step.toolNames.length ? ` (${step.toolNames.join(", ")})` : ""}`, {
-                step: step.stepNumber,
-                model: inputData.model,
-                elapsedMs: step.elapsedMs,
-                inputTokens: step.inputTokens,
-                outputTokens: step.outputTokens,
-                finishReason: step.finishReason,
-                tools: step.toolNames,
-                remainingTokens: step.rateLimit.remainingTokens,
-              });
-            },
-          });
-        } catch (error) {
-          failed = error instanceof ModelFailure ? error : failure("internal", error instanceof Error ? error.name : typeof error);
-          // The request that failed is recorded once, as its own step: its own time, no usage, and why (D22). A failure
-          // inside Nivra made no request, so it is the run's failure alone.
-          const request = failed.failedStep;
-          if (request) {
-            steps.push(request);
-            deps.recorder.event(runId, "model.call", "explain", `Model call failed: ${failed.message}`, {
-              step: request.stepNumber,
-              model: inputData.model,
-              elapsedMs: request.elapsedMs,
-              inputTokens: null,
-              outputTokens: null,
-              kind: failed.kind,
-              ...(failed.retryAfterSeconds !== null ? { retryAfterSeconds: failed.retryAfterSeconds } : {}),
-            });
-          }
-        }
+        const { steps, failed } = await readUntilAnswered({
+          client: clientFor(key),
+          agent: { id: "nivra-explain", name: "Nivra explain", instructions: INSTRUCTIONS },
+          model: inputData.model,
+          prompt,
+          tools,
+          answerTool: "submit_answer",
+          accepted: () => state.accepted !== null,
+          policy: policyFor(inputData.model),
+          budget,
+          reading,
+          state,
+          internal,
+          signal: abortSignal,
+          limits: EXPLAIN_LIMITS,
+          maxOutputTokens: ANSWER_TOKENS,
+          event: (type, message, data) => deps.recorder.event(runId, type, "explain", message, data),
+        });
         deps.setMeta(runId, { usage: usageOf(steps) });
         if (failed) throw failed;
         if (!state.accepted || state.answerStep === null) {
-          const turnedDown = state.rejected + invalidAnswers;
+          const turnedDown = state.rejected + reading.invalidAnswers;
           throw failure("malformed", `no answer was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDown ? `; ${turnedDown} turned down` : ""}`);
         }
         const answer = state.accepted;
@@ -288,9 +221,9 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           hidden: map.hidden,
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
           answer: {
-            dueReasons,
-            refusals: { citations: state.citationRefusals, conflicts: state.conflictRefusals, schema: invalidAnswers },
-            acceptedAfterRefusals: state.rejected + invalidAnswers,
+            dueReasons: reading.dueReasons,
+            refusals: { citations: state.citationRefusals, conflicts: state.conflictRefusals, schema: reading.invalidAnswers },
+            acceptedAfterRefusals: state.rejected + reading.invalidAnswers,
             conflictsDropped: state.conflictsDropped,
             suggestionsDropped,
           },

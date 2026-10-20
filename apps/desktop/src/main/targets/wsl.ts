@@ -11,8 +11,8 @@ export interface WslRuntime {
 }
 
 /**
- * Reports what the engine needs, one `key=value` per line. `$1` is the runtime's content hash; it arrives as an
- * argument, never spliced into the script.
+ * Reports what the engine needs, one `key=value` per line. `$1` is the runtime's content hash and `$2` the engine home
+ * below `$HOME`; they arrive as arguments, never spliced into the script.
  */
 export const PROBE_SCRIPT = [
   'printf "arch=%s\\n" "$(uname -m)"',
@@ -23,18 +23,19 @@ export const PROBE_SCRIPT = [
   'printf "shell=%s\\n" "$(getent passwd "$(id -un)" | cut -d: -f7)"',
   'printf "git=%s\\n" "$(command -v git || true)"',
   'printf "tar=%s\\n" "$(command -v tar || true)"',
-  'if [ -x "$HOME/.nivra/runtime/$1/node/bin/node" ]; then echo runtime=present; else echo runtime=absent; fi',
+  'if [ -x "$HOME/$2/runtime/$1/node/bin/node" ]; then echo runtime=present; else echo runtime=absent; fi',
 ].join("; ");
 
 /**
- * Installs the runtime streamed on stdin into `$HOME/.nivra/runtime/<hash>` (D5): extract into a temporary folder,
- * make Node executable, prove the runtime loads (`--self-check`), then rename into place. An existing runtime is kept
- * unless `$2` is "force". The newest two runtimes are kept.
+ * Installs the runtime streamed on stdin into `$HOME/<engine home>/runtime/<hash>` (D5, D27; the home is `$3`): extract
+ * into a temporary folder, make Node executable, prove the runtime loads (`--self-check`), then rename into place. An
+ * existing runtime is kept unless `$2` is "force". The newest two runtimes in that home are kept; another home's are
+ * never touched.
  */
 export const INSTALL_SCRIPT = [
   "set -eu",
-  'hash="$1"; force="$2"',
-  'root="$HOME/.nivra/runtime"',
+  'hash="$1"; force="$2"; home="$3"',
+  'root="$HOME/$home/runtime"',
   'mkdir -p "$root"',
   'if [ "$force" != force ] && [ -x "$root/$hash/node/bin/node" ]; then cat >/dev/null; echo present; exit 0; fi',
   'tmp=$(mktemp -d "$root/.incoming.XXXXXX")',
@@ -95,6 +96,8 @@ export interface WslTargetOptions {
   distro: WslDistro;
   wslExe: string;
   runtime: WslRuntime | null;
+  /** The engine's home below the distribution's `$HOME`, which holds its databases and runtimes (D7, D27). */
+  engineHome: string;
   env?: NodeJS.ProcessEnv;
   /** Runs `wsl.exe` with these arguments; tests replace it. */
   runWsl?: (args: readonly string[], options: { input?: Readable | null; timeoutMs: number }) => Promise<RunResult>;
@@ -126,7 +129,7 @@ export class WslTarget implements ExecutionTarget {
   async probe(): Promise<TargetProbe> {
     const hash = this.#options.runtime?.contentHash ?? "-";
     // A stopped distribution starts on this first call, which can take a while.
-    const result = await this.#script(PROBE_SCRIPT, [hash], { timeoutMs: 60_000 });
+    const result = await this.#script(PROBE_SCRIPT, [hash, this.#options.engineHome], { timeoutMs: 60_000 });
     if (result.code !== 0) {
       const code = wslErrorCode(`${result.stdout}\n${result.stderr}`);
       const message = result.timedOut
@@ -151,15 +154,16 @@ export class WslTarget implements ExecutionTarget {
       request.onProgress?.(`Installing the engine runtime into ${this.descriptor.label}…`);
       await this.#provision(runtime, Boolean(request.reprovision));
     }
-    const root = `${home}/.nivra/runtime/${runtime.contentHash}`;
+    const engineHome = `${home}/${this.#options.engineHome}`;
+    const root = `${engineHome}/runtime/${runtime.contentHash}`;
     const distro = this.#options.distro.name;
     return {
       command: this.#options.wslExe,
       // `--exec` runs no shell: every path is absolute, built from the probe's $HOME (D5).
-      args: ["-d", distro, "--cd", home, "--exec", `${root}/node/bin/node`, ...engineArgs(`${root}/engine/main.mjs`, `${home}/.nivra`, request)],
+      args: ["-d", distro, "--cd", home, "--exec", `${root}/node/bin/node`, ...engineArgs(`${root}/engine/main.mjs`, engineHome, request)],
       cwd: undefined,
       env: this.#env,
-      home: `${home}/.nivra`,
+      home: engineHome,
       cleanup: async () => {
         // pkill exits 1 when nothing matched, which is the expected outcome.
         await this.#run(["-d", distro, "--cd", "/", "--exec", "pkill", "-f", "--", instancePattern(request.instanceId)], { timeoutMs: 15_000 }).catch(() => undefined);
@@ -168,7 +172,7 @@ export class WslTarget implements ExecutionTarget {
   }
 
   async #provision(runtime: WslRuntime, force: boolean): Promise<void> {
-    const result = await this.#script(INSTALL_SCRIPT, [runtime.contentHash, force ? "force" : "keep"], { input: createReadStream(runtime.tarball), timeoutMs: 300_000 });
+    const result = await this.#script(INSTALL_SCRIPT, [runtime.contentHash, force ? "force" : "keep", this.#options.engineHome], { input: createReadStream(runtime.tarball), timeoutMs: 300_000 });
     if (result.code !== 0 || !/^(installed|present)$/m.test(result.stdout)) {
       const detail = result.stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400);
       throw new TargetUnavailableError(this.descriptor, [

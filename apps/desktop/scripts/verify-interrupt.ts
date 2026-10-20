@@ -1,7 +1,8 @@
 // Checks what the app does when a whole WSL distribution is terminated while it runs (NIV-5), from WSL, without CI
 // (D14). The packaged Windows app (from `pnpm dev:win --no-launch`) and its observer both run on Windows, where the
 // trace and the app's logs stay. It needs a dedicated test distribution with no work in it: that distribution is
-// terminated from outside, with everything running in it. It refuses the distribution it runs in.
+// terminated from outside, with everything running in it. It refuses the distribution it runs in. The app's WSL engine
+// runs in a home of this run's own there (D27), removed at the end.
 //
 //   pnpm --filter @nivra/desktop verify:interrupt --distro <test distribution>
 import { spawn, spawnSync } from "node:child_process";
@@ -11,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { build } from "esbuild";
+import { REMOVE_TEST_HOME, STALE_TEST_HOMES, testWslHome } from "./test-homes.ts";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { values } = parseArgs({ options: { distro: { type: "string" } } });
@@ -43,6 +45,9 @@ const inDistro = (args: string[]) => {
 step(`Checking the test distribution ${distro}`);
 const reached = inDistro(["/bin/true"]);
 if (reached.code !== 0) fail(`${distro} didn't answer: ${(reached.stderr || reached.stdout).trim() || `exit ${String(reached.code)}`}. Make it first (docs/development.md).`);
+
+inDistro(["/bin/sh", "-c", STALE_TEST_HOMES]);
+const wslHome = testWslHome("interrupt");
 
 const devWin = `${windows("/mnt/c/Windows/System32/cmd.exe", ["/d", "/c", "echo %LOCALAPPDATA%"])}\\nivra-dev`;
 const exeWin = `${devWin}\\app\\Nivra.exe`;
@@ -117,9 +122,11 @@ console.log(`  ${workWin} (Playwright ${version})`);
 step(`Running the observer on Windows: it terminates ${distro}, and only ${distro}`);
 const observer = spawn(
   node,
-  [`${workWin}\\interrupt-observer.mjs`, "--exe", exeWin, "--work", workWin, "--distro", distro, "--wsl-repo", wslRepo, "--native-repo", nativeRepoWin, "--wsl-exe", "C:\\Windows\\System32\\wsl.exe"],
+  [`${workWin}\\interrupt-observer.mjs`, "--exe", exeWin, "--work", workWin, "--distro", distro, "--wsl-repo", wslRepo, "--native-repo", nativeRepoWin, "--wsl-exe", "C:\\Windows\\System32\\wsl.exe", "--wsl-home", wslHome],
   { cwd: "/mnt/c", stdio: "inherit" },
 );
 const code = await new Promise<number | null>((done) => observer.once("exit", (exit) => done(exit)));
+const removed = inDistro(["/bin/sh", "-c", REMOVE_TEST_HOME, "sh", wslHome]);
 console.log(`\nTrace: ${workWin}\\trace.log · app logs: ${workWin}\\user data\\logs`);
+console.log(removed.code === 0 ? `This run's WSL home in ${distro}, ~/${wslHome}, is removed.` : `This run's WSL home in ${distro}, ~/${wslHome}, couldn't be removed: ${removed.stderr.trim()}`);
 process.exit(code ?? 1);

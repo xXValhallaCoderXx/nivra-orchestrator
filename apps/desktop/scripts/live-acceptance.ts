@@ -27,6 +27,7 @@ import { parseArgs } from "node:util";
 import { _electron as electron, type ElectronApplication } from "@playwright/test";
 import type { ExplainResult, RunEvent, RunSummary } from "@nivra/domain";
 import type { ProjectView } from "../src/shared/ipc.ts";
+import { WSL_HOMES } from "../src/main/targets/homes.ts";
 import { PROBE_SCRIPT } from "../src/main/targets/wsl.ts";
 import {
   CHECKS,
@@ -164,7 +165,7 @@ const homePath = join(homedir(), ".nivra");
 if (platform === "windows") {
   // The WSL engine runs as the distribution's default user, from that user's $HOME: this script must be that user.
   const probe = Object.fromEntries(
-    output("/mnt/c/Windows/System32/wsl.exe", ["-d", distro, "--exec", "sh", "-c", PROBE_SCRIPT, "sh", linuxRuntime.contentHash])
+    output("/mnt/c/Windows/System32/wsl.exe", ["-d", distro, "--exec", "sh", "-c", PROBE_SCRIPT, "sh", linuxRuntime.contentHash, WSL_HOMES.release])
       .split("\n")
       .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
   );

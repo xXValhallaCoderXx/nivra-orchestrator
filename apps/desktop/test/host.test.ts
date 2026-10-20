@@ -11,10 +11,11 @@ import { isTerminal, type RunEventsPage, type SecretName } from "@nivra/domain";
 import { Host } from "../src/main/host.ts";
 import { HostStore, NO_SHARING } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
+import { RUN_UNAVAILABLE } from "../src/main/tasks.ts";
 import type { TargetFactory } from "../src/main/targets/registry.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
 import type { WslDiscovery } from "../src/main/targets/wsl-discovery.ts";
-import { httpError, startStub, toolCall, type Reply, type StubRequest, type Stub } from "../../engine/test/stub-token-factory.ts";
+import { httpError, startStub, text, toolCall, type Reply, type StubRequest, type Stub } from "../../engine/test/stub-token-factory.ts";
 
 /**
  * The host's engine pool (D17) against real engines run from source. A "WSL" target here is a stand-in: a target that
@@ -80,7 +81,7 @@ function standInWsl(distro: string, inner: ExecutionTarget, beforePrepare?: () =
 const BROKEN: WslDiscovery = { status: "broken", code: "WSL_E_TEST", message: "WSL didn't answer (WSL_E_TEST). Run `wsl --update` in a terminal, then press Check again.", distros: [] };
 
 /** Both engines reach `tokenFactoryUrl` (a loopback stub) when it is set; `beforeWslPrepare` can hold the WSL engine's start. */
-type HostOptions = { localEntry?: string; wsl?: "ready" | "broken"; tokenFactoryUrl?: string; beforeWslPrepare?: () => Promise<void> };
+type HostOptions = { localEntry?: string; wsl?: "ready" | "broken"; tokenFactoryUrl?: string; beforeWslPrepare?: () => Promise<void>; testHooks?: { beforeProjection?(turnId: string): Promise<void> } };
 
 function makeHost(options: HostOptions & { projects?: Array<{ targetId: string; path: string }> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "nivra host ü%# "));
@@ -105,6 +106,7 @@ function hostAt(root: string, options: HostOptions = {}) {
   const host = new Host({
     targets,
     store,
+    workspacePath: join(root, "workspace.db"),
     logsDir: join(root, "logs"),
     client: { name: "host-test", version: "0" },
     credentials: async () => keys.current,
@@ -112,6 +114,7 @@ function hostAt(root: string, options: HostOptions = {}) {
     realpath: (path) => path,
     supervisor: { heartbeatMs: 0, shutdownGraceMs: 300, eofGraceMs: 300 },
     log: () => undefined,
+    ...(options.testHooks ? { testHooks: options.testHooks } : {}),
   });
   host.init();
   hosts.push(host);
@@ -768,5 +771,476 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     assert.match(messages[2]!, /at most 300 characters; one has 301\. Shorten it/);
     assert.match(messages[3]!, /^The same choice is there twice/);
     assert.deepEqual([stateOf(host, "local")?.status, stub.requests.length], ["stopped", 0]);
+  });
+});
+
+describe("Host: the workspace keeps conversations, and starting one starts no engine (D26)", () => {
+  it("keeps general and project conversations, each on its own engine, and still has them after a restart", async () => {
+    const { host, root, ids } = makeHost({ projects: [{ targetId: "local", path: "/repos/app" }] });
+    const empty = host.conversations();
+    assert.deepEqual([empty.workspace.state, empty.conversations.length], ["ready", 0]);
+    const general = host.createConversation({ kind: "general" });
+    const about = host.createConversation({ kind: "project", projectId: ids[0]! });
+    assert.deepEqual(
+      [general.kind, general.projectId, general.targetId, general.projectPresent, about.kind, about.projectId, about.projectLabel, about.targetId, about.projectPresent],
+      ["general", null, "local", null, "project", ids[0], "app", "local", true],
+    );
+    // Starting a conversation reaches no engine.
+    assert.deepEqual(host.engines().map((e) => e.state.status), ["stopped"]);
+    await host.shutdown();
+    const again = hostAt(root).host;
+    assert.deepEqual(
+      again.conversations().conversations.map((c) => c.id).sort(),
+      [general.id, about.id].sort(),
+    );
+  });
+
+  it("keeps a project conversation's scope and label after its project is removed, and starts none for a removed project", async () => {
+    const { host, ids } = makeHost({ projects: [{ targetId: "local", path: "/repos/app" }] });
+    const about = host.createConversation({ kind: "project", projectId: ids[0]! });
+    await host.removeProject(ids[0]!);
+    const kept = host.conversations().conversations.find((c) => c.id === about.id)!;
+    assert.deepEqual([kept.projectId, kept.projectLabel, kept.projectPresent], [ids[0], "app", false]);
+    assert.throws(() => host.createConversation({ kind: "project", projectId: ids[0]! }), /That project is no longer in the list/);
+  });
+
+  it("says why its workspace can't be used while another Nivra holds it, and everything else still works", () => {
+    const { host, root } = makeHost({ projects: [{ targetId: "local", path: "/repos/app" }] });
+    host.createConversation({ kind: "general" });
+    const second = hostAt(root).host;
+    const view = second.conversations();
+    assert.equal(view.workspace.state, "unavailable");
+    assert.match(view.workspace.state === "unavailable" ? view.workspace.reason : "", /^Another copy of Nivra is using your history/);
+    assert.throws(() => second.createConversation({ kind: "general" }), /^Error: Another copy of Nivra is using your history/);
+    assert.equal(second.projects().length, 1);
+  });
+});
+
+describe("Host: conversations follow each turn to its end, and never resend one (D26)", () => {
+  const KEY = "test-key-0123456789";
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function stubWith(chat: (request: StubRequest, index: number) => Reply) {
+    const stub = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat });
+    stubs.push(stub);
+    return stub;
+  }
+  const reposRoot = () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra conversation repos "));
+    dirs.push(root);
+    return root;
+  };
+  /** The conversation once its last turn has ended. */
+  const settled = (host: Host, conversationId: string) =>
+    waitFor(() => {
+      const view = host.conversation(conversationId);
+      const turn = view.turns.at(-1);
+      return turn && turn.status !== "submitting" && turn.status !== "running" ? { view, turn } : null;
+    }, "the turn to end");
+  const calls = (home: string) => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter(Boolean) : []);
+  /** A repository turn's reply: reads the README, then hands in evidence citing it. */
+  const readThenReply = (request: StubRequest): Reply =>
+    request.raw.includes('"role":"tool"')
+      ? toolCall("submit_reply", { answer: "It is a small repository.", evidence: [{ statement: "It has a README.", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }] }, { id: "r1" })
+      : toolCall("read_file", { path: "README.md" }, { id: "r0" });
+
+  it("answers a general turn with no tools, carries it into the next as history, and keeps both across a restart", async () => {
+    const stub = await stubWith((_request, index) => text(index === 0 ? "First answer." : "Second answer."));
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "How should I stage this?");
+    const first = await settled(host, conversation.id);
+    assert.equal(first.turn.status, "answered", first.turn.note ?? "");
+    assert.deepEqual(first.view.messages.map((m) => [m.role, m.text]), [["person", "How should I stage this?"], ["assistant", "First answer."]]);
+    assert.equal(first.view.summary.title, "How should I stage this?");
+    await host.sendMessage(conversation.id, "And then?");
+    const second = await settled(host, conversation.id);
+    assert.deepEqual([second.turn.status, second.turn.given.history?.exchanges], ["answered", 1]);
+    const chats = stub.chats();
+    assert.deepEqual([chats.length, chats[0]?.body?.tools, chats[1]?.body?.tools], [2, undefined, undefined]);
+    const sent = JSON.stringify(chats[1]?.body?.messages);
+    assert.ok(sent.indexOf("How should I stage this?") < sent.indexOf("First answer.") && sent.indexOf("First answer.") < sent.indexOf("And then?"), "the history, oldest first, before the message");
+    await host.shutdown();
+    const again = hostAt(root, { tokenFactoryUrl: stub.url }).host;
+    const reopened = await again.openConversation(conversation.id);
+    assert.deepEqual(reopened.messages.map((m) => m.text), ["How should I stage this?", "First answer.", "And then?", "Second answer."]);
+    assert.deepEqual([stub.chats().length, again.engines()], [2, []], "reopening sends nothing and starts no engine");
+  });
+
+  it("reads only a repository conversation's own project, and sends a general one no path and no project preference, whatever is opened meanwhile", async () => {
+    const stub = await stubWith((request) => (request.body?.tools ? readThenReply(request) : text("General advice.")));
+    const root = reposRoot();
+    const alpha = makeRepo(join(root, "alpha"), { "README.md": "# Alpha\n" });
+    const beta = makeRepo(join(root, "beta"), { "README.md": "# Beta\n" });
+    const { host, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: alpha }, { targetId: "local", path: beta }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    await host.setSharing(ids[0]!, true);
+    const personal = host.addPreference({ statement: "Write tests with Vitest", scope: "personal", projectId: null, intent: "default" });
+    const alphaOwn = host.addPreference({ statement: `Alpha builds with Vite ${randomUUID()}`, scope: "project", projectId: ids[0]!, intent: "default" });
+    const betaOwn = host.addPreference({ statement: `Beta builds with webpack ${randomUUID()}`, scope: "project", projectId: ids[1]!, intent: "default" });
+    const aboutAlpha = host.createConversation({ kind: "project", projectId: ids[0]! });
+    const general = host.createConversation({ kind: "general" });
+    await host.open(ids[1]!);
+    await host.sendMessage(aboutAlpha.id, "What is this?");
+    const repo = await settled(host, aboutAlpha.id);
+    assert.equal(repo.turn.status, "answered", repo.turn.note ?? "");
+    assert.equal(repo.view.messages.at(-1)?.reply?.kind, "repository");
+    await host.sendMessage(general.id, "Any advice?");
+    const asked = await settled(host, general.id);
+    assert.deepEqual([asked.turn.status, asked.turn.given.preferences, repo.turn.given.preferences], ["answered", 1, 2]);
+    const repoSent = JSON.stringify(stub.chats().filter((c) => c.body?.tools).map((c) => c.body?.messages));
+    assert.ok(repoSent.includes("# Alpha") && !repoSent.includes("# Beta"), "Alpha's files only");
+    assert.deepEqual([repoSent.includes(alphaOwn.statement), repoSent.includes(personal.statement), repoSent.includes(betaOwn.statement)], [true, true, false]);
+    const generalSent = JSON.stringify(stub.chats().filter((c) => !c.body?.tools).map((c) => c.body?.messages));
+    assert.deepEqual(
+      [generalSent.includes(personal.statement), generalSent.includes(alphaOwn.statement), generalSent.includes(betaOwn.statement), generalSent.includes(alpha), generalSent.includes("Repository map")],
+      [true, false, false, false, false],
+    );
+  });
+
+  it("reports a turn cut off by a graceful quit as interrupted after a restart, and sends nothing again", async () => {
+    const stub = await stubWith(() => ({ ...text("Too late."), delayMs: 15_000 }));
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Slow?");
+    await waitFor(() => stub.chats().length === 1, "the request to reach the stub");
+    await host.shutdown();
+    const again = hostAt(root, { tokenFactoryUrl: stub.url }).host;
+    await again.openConversation(conversation.id);
+    const { turn } = await settled(again, conversation.id);
+    assert.deepEqual([turn.status, turn.note], ["interrupted", "Interrupted: Nivra or its engine stopped before the answer arrived. Nothing was resent."]);
+    await pause(300);
+    assert.equal(stub.chats().length, 1, "nothing was sent again");
+  });
+
+  it("reports a turn whose engine was killed as interrupted after a restart, and sends nothing again", async () => {
+    const stub = await stubWith(() => ({ ...text("Too late."), delayMs: 15_000 }));
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Slow?");
+    await waitFor(() => stub.chats().length === 1, "the request to reach the stub");
+    const { pid } = await online(host, "local");
+    process.kill(pid, "SIGKILL");
+    await waitFor(() => !isAlive(pid), "the engine to die");
+    await host.shutdown();
+    const again = hostAt(root, { tokenFactoryUrl: stub.url }).host;
+    await again.openConversation(conversation.id);
+    const { turn } = await settled(again, conversation.id);
+    assert.equal(turn.status, "interrupted", turn.note ?? "");
+    await pause(300);
+    assert.equal(stub.chats().length, 1, "nothing was sent again");
+  });
+
+  it("finds a send whose answer was lost: adopted from the same store, not sent when that store has no record, unknown from another store", async () => {
+    async function lost(options: { accept: boolean; replaceStore?: boolean }) {
+      const { host, root, keys } = makeHost({ localEntry: GATED });
+      keys.current = { NEBIUS_API_KEY: KEY };
+      const home = join(root, "local home");
+      mkdirSync(home, { recursive: true });
+      if (options.accept) writeFileSync(join(home, "accept"), "");
+      const conversation = host.createConversation({ kind: "general" });
+      await host.sendMessage(conversation.id, "Lost?");
+      await waitFor(() => calls(home).includes("runs.start"), "the request to reach the engine");
+      // Nivra quits before runs.start answers.
+      await host.shutdown();
+      if (options.replaceStore) rmSync(join(home, "home-id"));
+      const again = hostAt(root, { localEntry: GATED }).host;
+      await again.openConversation(conversation.id);
+      const { turn, view } = await settled(again, conversation.id);
+      return { turn, view, starts: calls(home).filter((call) => call === "runs.start").length };
+    }
+    const adopted = await lost({ accept: true });
+    assert.deepEqual([adopted.turn.status, adopted.view.messages.at(-1)?.text, adopted.starts], ["answered", "A gated reply.", 1]);
+    const never = await lost({ accept: false });
+    assert.deepEqual([never.turn.status, never.turn.note, never.starts], ["not-sent", "Its engine has no record of this message, so it never ran and nothing reached the model.", 1]);
+    const elsewhere = await lost({ accept: true, replaceStore: true });
+    assert.deepEqual([elsewhere.turn.status, elsewhere.starts], ["unknown", 1]);
+    assert.match(elsewhere.turn.note ?? "", /^Nivra can't tell whether this message reached the model: it went to an engine whose records aren't here/);
+  });
+
+  it("adopts a run its engine accepted before answering with an error, and sends it only once", async () => {
+    const { host, root, keys } = makeHost({ localEntry: GATED });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const file of ["accept", "error-start", "release"]) writeFileSync(join(home, file), "");
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Accepted, then an error?");
+    const { turn, view } = await settled(host, conversation.id);
+    assert.deepEqual([turn.status, view.messages.at(-1)?.text], ["answered", "A gated reply."]);
+    assert.deepEqual([calls(home).filter((call) => call === "runs.start").length, calls(home).includes("runs.find")], [1, true]);
+  });
+
+  it("cancels a turn asked to stop while it was being sent, as soon as its engine answers", async () => {
+    const { host, root, keys } = makeHost({ localEntry: GATED });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const home = join(root, "local home");
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Stop me.");
+    await waitFor(() => calls(home).includes("runs.start"), "the request to reach the engine");
+    const asked = await host.cancelTurn(conversation.id, host.conversation(conversation.id).turns[0]!.id);
+    assert.deepEqual([asked.turns[0]?.status, asked.turns[0]?.cancelRequested], ["submitting", true]);
+    writeFileSync(join(home, "release"), "");
+    const { turn } = await settled(host, conversation.id);
+    assert.deepEqual([turn.status, turn.note], ["cancelled", "Cancelled. Nothing was resent."]);
+    assert.deepEqual([calls(home).filter((call) => call === "runs.start").length, calls(home).filter((call) => call === "runs.cancel").length], [1, 1]);
+  });
+
+  it("deletes a conversation while a turn is being sent, and stops the run when the engine answers", async () => {
+    const { host, root, keys } = makeHost({ localEntry: GATED });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const home = join(root, "local home");
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Delete me.");
+    await waitFor(() => calls(home).includes("runs.start"), "the request to reach the engine");
+    await host.deleteConversation(conversation.id);
+    assert.throws(() => host.conversation(conversation.id), /no longer in the list/);
+    writeFileSync(join(home, "release"), "");
+    await waitFor(() => calls(home).includes("runs.cancel"), "the late run to be stopped");
+    assert.equal(host.conversations().conversations.length, 0);
+  });
+
+  it("stops the run of a conversation deleted while its turn was out, when the engine made the run but answered with an error", async () => {
+    const { host, root, keys } = makeHost({ localEntry: GATED });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const file of ["accept", "error-start"]) writeFileSync(join(home, file), "");
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Delete me while you answer.");
+    await waitFor(() => calls(home).includes("runs.start"), "the request to reach the engine");
+    await host.deleteConversation(conversation.id);
+    assert.throws(() => host.conversation(conversation.id), /no longer in the list/);
+    writeFileSync(join(home, "release"), "");
+    await waitFor(() => existsSync(join(home, "cancelled.log")), "the deleted conversation's run to be stopped");
+    const made = readFileSync(join(home, "accepted.log"), "utf8").trim().split(" ")[1];
+    assert.deepEqual([calls(home).filter((call) => call === "runs.find").length, readFileSync(join(home, "cancelled.log"), "utf8").trim().split("\n")], [1, [made]]);
+    assert.deepEqual([host.conversations().conversations.length, calls(home).filter((call) => call === "runs.start").length], [0, 1]);
+  });
+
+  it("stops the run of a conversation deleted while its lost answer was still being looked for", async () => {
+    const { host, root, keys } = makeHost({ localEntry: GATED });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const file of ["accept", "error-start", "release", "hold-find"]) writeFileSync(join(home, file), "");
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "Lose my answer, then delete me.");
+    await waitFor(() => calls(home).includes("runs.find"), "the lost answer to be looked for");
+    await host.deleteConversation(conversation.id);
+    writeFileSync(join(home, "release-find"), "");
+    await waitFor(() => existsSync(join(home, "cancelled.log")), "the deleted conversation's run to be stopped");
+    const made = readFileSync(join(home, "accepted.log"), "utf8").trim().split(" ")[1];
+    assert.deepEqual(readFileSync(join(home, "cancelled.log"), "utf8").trim().split("\n"), [made]);
+    assert.equal(host.conversations().conversations.length, 0);
+  });
+
+  it("deletes a conversation while its answer is being projected, and the answer goes nowhere", async () => {
+    const stub = await stubWith(() => text("An answer nobody keeps."));
+    let host: Host | undefined;
+    let conversationId = "";
+    const deleted: string[] = [];
+    const made = makeHost({
+      tokenFactoryUrl: stub.url,
+      testHooks: {
+        beforeProjection: async (turnId) => {
+          await host!.deleteConversation(conversationId);
+          deleted.push(turnId);
+        },
+      },
+    });
+    host = made.host;
+    made.keys.current = { NEBIUS_API_KEY: KEY };
+    conversationId = host.createConversation({ kind: "general" }).id;
+    await host.sendMessage(conversationId, "Answer me.");
+    await waitFor(() => deleted.length === 1, "the deletion inside the projection");
+    await pause(200);
+    assert.equal(host.conversations().conversations.length, 0);
+    await host.shutdown();
+    const workspace = new DatabaseSync(join(made.root, "workspace.db"), { readOnly: true });
+    try {
+      const count = (table: string) => Number(workspace.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
+      assert.deepEqual([count("messages"), count("run_links"), count("conversations")], [0, 0, 0]);
+    } finally {
+      workspace.close();
+    }
+    assert.deepEqual(filesHolding(made.root, "An answer nobody keeps.").filter((file) => file.startsWith("workspace.db")), []);
+  });
+
+  it("reads without starting an engine or asking one, and leaves a turn whose engine can't be reached unresolved, never failed", async () => {
+    const stub = await stubWith(() => ({ ...toolCall("read_file", { path: "README.md" }), delayMs: 15_000 }));
+    const repo = makeRepo(join(reposRoot(), "in wsl"), { "README.md": "# In WSL\n" });
+    const { host, root, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "wsl:Test", path: repo }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    await host.setSharing(ids[0]!, true);
+    const conversation = host.createConversation({ kind: "project", projectId: ids[0]! });
+    await host.sendMessage(conversation.id, "What is it?");
+    await waitFor(() => stub.chats().length === 1, "the request to reach the stub");
+    await host.shutdown();
+    const again = hostAt(root, { tokenFactoryUrl: stub.url, wsl: "broken" }).host;
+    const requests = stub.requests.length;
+    const read = again.conversation(conversation.id);
+    again.conversations();
+    assert.deepEqual([read.turns[0]?.status, again.engines().map((e) => e.state.status), stub.requests.length], ["running", ["stopped"], requests]);
+    const opened = await again.openConversation(conversation.id);
+    assert.equal(opened.turns[0]?.status, "running");
+    assert.match(opened.turns[0]?.unresolved ?? "", /WSL didn't answer/);
+  });
+
+  it("stops a repository turn when sharing is turned off, saying so, and refuses the next", async () => {
+    const stub = await stubWith(() => ({ ...toolCall("read_file", { path: "README.md" }), delayMs: 15_000 }));
+    const repo = makeRepo(join(reposRoot(), "shared"), { "README.md": "# Shared\n" });
+    const { host, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: repo }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    await host.setSharing(ids[0]!, true);
+    const conversation = host.createConversation({ kind: "project", projectId: ids[0]! });
+    await host.sendMessage(conversation.id, "What is it?");
+    await waitFor(() => stub.chats().length === 1, "the request to reach the stub");
+    await host.setSharing(ids[0]!, false);
+    const { turn } = await settled(host, conversation.id);
+    assert.deepEqual([turn.status, turn.note], ["cancelled", "Stopped: sharing for this project was turned off. Nothing was resent."]);
+    await assert.rejects(host.sendMessage(conversation.id, "Again?"), /doesn't allow sending its content to Token Factory/);
+  });
+
+  it("refuses a message holding a credential, masks one in an answer, and leaves no key anywhere it writes", async () => {
+    const token = `ghp_${"z".repeat(36)}`;
+    const stub = await stubWith(() => text(`Here is ${KEY} and ${token}.`));
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    await assert.rejects(host.sendMessage(conversation.id, `my key is ${KEY}`), /^Error: Your message holds your saved Token Factory key, so nothing was sent/);
+    await assert.rejects(host.sendMessage(conversation.id, `token ${token}`), /^Error: Your message looks like it holds a GitHub token, so nothing was sent/);
+    assert.deepEqual([host.conversation(conversation.id).messages.length, stub.chats().length], [0, 0]);
+    await host.sendMessage(conversation.id, "Echo something?");
+    const { view } = await settled(host, conversation.id);
+    assert.equal(view.messages.at(-1)?.text, "Here is [secret:NEBIUS_API_KEY] and [redacted].");
+    await host.shutdown();
+    assert.deepEqual([filesHolding(root, KEY), filesHolding(root, token)], [[], []]);
+  });
+});
+
+describe("Host: native tasks, made directly or from a plan, with versioned briefs (D26, NIV-32)", () => {
+  const KEY = "test-key-0123456789";
+  const empty = { goal: "", acceptanceCriteria: [] as string[], scope: "", exclusions: "", context: "", assumptions: [] as string[], checks: [] as string[] };
+  async function stubWith(chat: (request: StubRequest, index: number) => Reply) {
+    const stub = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat });
+    stubs.push(stub);
+    return stub;
+  }
+  const answered = (host: Host, conversationId: string) =>
+    waitFor(() => {
+      const view = host.conversation(conversationId);
+      return view.turns.at(-1)?.status === "answered" ? view.messages.find((m) => m.role === "assistant")! : null;
+    }, "the answer");
+
+  it("gives a direct task and one from a plan the same brief, keeps a brief from v1 while the plan moves on, and keeps it when the conversation goes", async () => {
+    const stub = await stubWith(() => text("Stage it: the parser first, then the cache."));
+    const { host, keys, root } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const conversation = host.createConversation({ kind: "general" });
+    await host.sendMessage(conversation.id, "How do I stage the refactor?");
+    const answer = await answered(host, conversation.id);
+    const plan = await host.savePlan(conversation.id, answer.id);
+    assert.deepEqual([plan.version, plan.text, plan.latest], [1, "Stage it: the parser first, then the cache.", 1]);
+    const fields = { ...empty, goal: "Stage the refactor", acceptanceCriteria: ["The parser's tests pass"] };
+    const direct = await host.createTask({ title: "Refactor, written directly", fields, projectId: null, planId: null });
+    const planned = await host.createTask({ title: "Refactor, from the plan", fields: { ...fields, context: plan.text }, projectId: null, planId: plan.id });
+    assert.deepEqual(Object.keys(direct.brief.content).sort(), Object.keys(planned.brief.content).sort());
+    assert.deepEqual(
+      [direct.summary.state, direct.brief.version, direct.brief.content.sources, planned.brief.content.sources.map((source) => [source.planVersion, source.conversationId, source.projectId])],
+      ["draft", 1, [], [[1, conversation.id, null]]],
+    );
+    assert.deepEqual([direct.runUnavailable, direct.attempts], [RUN_UNAVAILABLE, []]);
+    const v2 = await host.revisePlan(plan.id, "Stage it: the cache first, then the parser.");
+    assert.deepEqual([v2.version, v2.latest, host.plans(conversation.id).map((p) => p.version)], [2, 2, [1, 2]]);
+    const marked = host.task(planned.summary.id);
+    assert.deepEqual(
+      [marked.brief.version, marked.brief.content.context, marked.sourcePlans],
+      [1, plan.text, [{ planLineage: plan.lineageId, usedVersion: 1, latestVersion: 2, conversationId: conversation.id }]],
+    );
+    const refreshed = host.refreshBriefFromPlan(planned.summary.id, marked.revision, v2.id);
+    assert.deepEqual([refreshed.brief.version, refreshed.brief.content.context, refreshed.brief.content.sources[0]?.planVersion], [2, "Stage it: the cache first, then the parser.", 2]);
+    await host.deleteConversation(conversation.id);
+    const kept = host.task(planned.summary.id);
+    assert.deepEqual([kept.brief.content.context, kept.sourcePlans[0]?.latestVersion, kept.versions.length], ["Stage it: the cache first, then the parser.", null, 2]);
+    // In the file itself: the question lived only in the conversation, so no copy is left; the brief's text stays with the task.
+    await host.shutdown();
+    const workspaceFiles = (needle: string) => filesHolding(root, needle).filter((file) => file.startsWith("workspace.db"));
+    assert.deepEqual([workspaceFiles("How do I stage the refactor?"), workspaceFiles("Stage it: the cache first, then the parser.").length > 0], [[], true]);
+  });
+
+  it("moves a task through its states only as its brief allows, and refuses a change made from an older view", async () => {
+    const { host } = makeHost({});
+    const task = await host.createTask({ title: "Tidy the README", fields: empty, projectId: null, planId: null });
+    assert.throws(() => host.setTaskState(task.summary.id, task.revision, "ready"), /has a goal and at least one acceptance criterion/);
+    const written = await host.reviseBrief(task.summary.id, task.revision, { ...empty, goal: "Tidy it", acceptanceCriteria: ["Every heading is sentence case"] });
+    assert.equal(written.brief.version, 2);
+    assert.throws(() => host.setTaskState(task.summary.id, task.revision, "ready"), /changed since you opened it/);
+    const ready = host.setTaskState(task.summary.id, written.revision, "ready");
+    assert.throws(() => host.setTaskState(task.summary.id, ready.revision, "active"), /^Error: Running tasks isn't available yet, so a task can't be active\.$/);
+    const emptied = await host.reviseBrief(task.summary.id, ready.revision, { ...empty, goal: "Tidy it" });
+    assert.equal(emptied.summary.state, "draft", "a ready task whose brief lost its criteria is a draft again");
+    const again = await host.reviseBrief(task.summary.id, emptied.revision, { ...empty, goal: "Tidy it", acceptanceCriteria: ["Every heading is sentence case"] });
+    const done = host.setTaskState(task.summary.id, host.setTaskState(task.summary.id, again.revision, "ready").revision, "completed");
+    assert.equal(done.summary.state, "completed");
+    await assert.rejects(host.reviseBrief(task.summary.id, done.revision, { ...empty, goal: "More" }), /Reopen it to change its brief/);
+    assert.equal(host.setTaskState(task.summary.id, done.revision, "draft").summary.state, "draft");
+  });
+
+  it("clears what a brief took from one project's conversation when the task is made for, or moved to, another repository", async () => {
+    const stub = await stubWith((request) =>
+      request.raw.includes('"role":"tool"')
+        ? toolCall("submit_reply", { answer: "Add the export beside the list.", evidence: [{ statement: "It has a README.", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }], assumptions: ["Alpha uses Vite"] })
+        : toolCall("read_file", { path: "README.md" }),
+    );
+    const root = mkdtempSync(join(tmpdir(), "nivra task repos "));
+    dirs.push(root);
+    const alpha = makeRepo(join(root, "alpha"), { "README.md": "# Alpha\n" });
+    const beta = makeRepo(join(root, "beta"), { "README.md": "# Beta\n" });
+    const { host, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: alpha }, { targetId: "local", path: beta }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    await host.setSharing(ids[0]!, true);
+    const conversation = host.createConversation({ kind: "project", projectId: ids[0]! });
+    await host.sendMessage(conversation.id, "Plan a CSV export");
+    const answer = await answered(host, conversation.id);
+    const plan = await host.savePlan(conversation.id, answer.id);
+    assert.match(plan.text, /^Add the export beside the list\.\n\nAssumed:\n- Alpha uses Vite$/);
+    const task = await host.createTask({ title: "CSV export", fields: { ...empty, goal: "Export the list", context: plan.text, assumptions: ["Alpha uses Vite"] }, projectId: ids[0]!, planId: plan.id });
+    assert.deepEqual([task.brief.content.sources[0]?.projectId, task.brief.content.sources[0]?.citations], [ids[0], [{ path: "README.md", startLine: 1, endLine: 1 }]]);
+    // Made from alpha's plan for beta, or for no repository yet: the same rule as moving a task.
+    for (const projectId of [ids[1]!, null]) {
+      const elsewhere = await host.createTask({ title: "CSV export elsewhere", fields: { ...empty, goal: "Export the list", context: plan.text, assumptions: ["Alpha uses Vite"] }, projectId, planId: plan.id });
+      assert.deepEqual(
+        [elsewhere.summary.projectId, elsewhere.brief.version, elsewhere.brief.content.sources, elsewhere.brief.content.context, elsewhere.brief.content.assumptions, elsewhere.brief.content.revalidate, elsewhere.brief.content.goal, elsewhere.sourcePlans],
+        [projectId, 1, [], "", [], ["context", "assumptions"], "Export the list", []],
+      );
+    }
+    const moved = host.setTaskProject(task.summary.id, task.revision, ids[1]!);
+    assert.deepEqual(
+      [moved.summary.projectId, moved.brief.version, moved.brief.content.sources, moved.brief.content.context, moved.brief.content.assumptions, moved.brief.content.revalidate, moved.brief.content.goal],
+      [ids[1], 2, [], "", [], ["context", "assumptions"], "Export the list"],
+    );
+    const rewritten = await host.reviseBrief(task.summary.id, moved.revision, { ...empty, goal: "Export the list", context: "Beta's own context." });
+    assert.deepEqual([rewritten.brief.content.revalidate, rewritten.versions.map((v) => v.version)], [["assumptions"], [1, 2, 3]]);
+  });
+
+  it("refuses a credential in any field the person types into, saying which, and saves nothing", async () => {
+    const { host, keys } = makeHost({});
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const token = `ghp_${"y".repeat(36)}`;
+    const base = { ...empty, goal: "Goal", acceptanceCriteria: ["Done"] };
+    const cases: Array<[string, typeof base, string]> = [
+      ["The title", base, `Title ${token}`],
+      ["The goal", { ...base, goal: `Goal ${KEY}` }, "T"],
+      ["An acceptance criterion", { ...base, acceptanceCriteria: [`Done ${token}`] }, "T"],
+      ["The context", { ...base, context: "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----" }, "T"],
+      ["A check", { ...base, checks: [`run it with ${KEY}`] }, "T"],
+    ];
+    for (const [field, fields, title] of cases) {
+      await assert.rejects(host.createTask({ title, fields, projectId: null, planId: null }), new RegExp(`^Error: ${field} (holds your saved Token Factory key|looks like it holds)`));
+    }
+    assert.equal(host.tasks().length, 0);
   });
 });

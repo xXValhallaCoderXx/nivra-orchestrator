@@ -4,7 +4,7 @@ import { z } from "zod";
  * The host–engine protocol (D2): JSON-RPC 2.0, one message per line, over the engine's stdin and stdout.
  * Bump `PROTOCOL_VERSION` whenever a change would break the other side; `initialize` refuses a mismatch.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /**
  * The longest line either side accepts, in characters of decoded text. A longer line is a protocol error: it is never
@@ -26,6 +26,8 @@ export const ErrorCode = {
   ShuttingDown: -32002,
   Cancelled: -32003,
   ProtocolMismatch: -32004,
+  /** The run asked about isn't in this engine's store (D26): told apart from parameters that failed their schema. */
+  RunNotFound: -32005,
 } as const;
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 

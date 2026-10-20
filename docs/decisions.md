@@ -1002,3 +1002,219 @@ The key saw 28 models, five of them NVIDIA's.
   as a pre-release on 19 October, and v0.1.0's notes now say it is superseded.
 - **The clean-machine test is still to run.** It needs a Windows PC or VM without the Redistributable, and this machine
   has neither Windows Sandbox nor Hyper-V.
+
+## D26. The planning workspace: a workspace the host owns, conversation turns that are never resent, and native tasks with versioned briefs (2026-10-20)
+
+**Decision.** This is checkpoint 1 of the stretch planned on 20 October. It covers NIV-30, and the engine and host
+parts of NIV-31 and NIV-32. Nate set the scope and reviewed the plan twice. The window comes at checkpoint 2.
+
+- **A workspace the host owns.**
+  - **Where:** `workspace.db`, beside `nivra.json` in userData.
+  - **What it holds:** conversations, with their messages and turns (run links); native tasks; and the versions of plans
+    and briefs.
+  - **How it's built:** with Node's own `node:sqlite`, so there is no addon (D6) and no new dependency.
+  - **How it's opened:** like an engine's database.
+    - WAL.
+    - SQLite's exclusive lock, taken at once, so a second Nivra is refused rather than made to wait.
+    - Foreign keys.
+    - `secure_delete`.
+  - **Opening never blocks startup.** A failure is held as state, and everything else keeps working. Failures are told
+    apart by SQLite's primary result code or the errno code, never by their text.
+    - **A damaged file** is the only thing ever moved. It is kept aside with its journal files, under one name.
+    - **The header is checked before SQLite opens the file.** SQLite removes a stray WAL when it closes a connection to
+      a file that isn't a database.
+    - **A schema a newer Nivra wrote** is refused before anything is written, the journal mode included.
+  - **This amends D7:** the host's records are no longer JSON only. `nivra.json` keeps the profile, the projects and the
+    preferences. A transcript never goes there.
+- **Conversations.**
+  - **A general conversation** runs on `local`, this computer's own engine, and reaches no repository.
+  - **A conversation about a project** keeps that project, its engine and its label, fixed when it starts. Choosing
+    another project afterwards changes nothing about it.
+  - **This amends D17:** the local engine also starts for a general conversation. There is still no target selector and
+    no fallback between targets.
+  - **What a turn is sent.** A general turn carries the confirmed personal preferences only (Nate's choice, 20 October).
+    A turn about a project carries that project's snapshot, as before (D21). The engine refuses a general turn that was
+    sent a project's own preference, before any request.
+- **Protocol 5.**
+  - **A `chat` workflow.**
+    - A general turn makes one call, with no tools and no map.
+    - A repository turn reads with explain's tools, under its consent, budget, citation checks and precedence (D22,
+      D23). It replies through `submit_reply`, which keeps three things apart: evidence (lines read in this turn),
+      proposals (never facts) and assumptions. Only the reply text is required; every list defaults to empty.
+    - An empty reply fails as `malformed`, and one cut off by the length limit is labelled so.
+  - **Each workflow has its own context.** Hello and explain keep `RunContext`. Chat carries `ChatContext`, which adds
+    the history, held in the scheduler's memory only, like the snapshot (extending D21). A run records counts and a
+    fingerprint of it, never its text.
+  - **New methods and codes:**
+    - `runs.find`, by request id;
+    - `runs.reply`;
+    - `RunNotFound`, a code of its own for a run that isn't in the store;
+    - `EngineInfo.homeId`, an id stored once in each `nivra.db` by migration v3, which names the store as a path can't.
+  - **Explain's tools are split** into shared read tools and one answer gate. Explain's behaviour is unchanged.
+- **History, chosen by the host.**
+  - **What can go:** answered exchanges only, and only those whose preferences are all unchanged. An answer given under
+    a preference since edited, replaced or deleted could repeat what it said, so it stays out. That keeps D21's promise
+    that an edit or a deletion reaches the next run.
+  - **Limits:**
+    - at most 10 exchanges and 24,000 characters;
+    - a message over 6,000 characters keeps its first 4,500 and its last 1,000, with a marker saying how much was left
+      out.
+  - **Order:** the newest that fit are chosen, then sent oldest first. What was left out is counted, by reason.
+  - **A repository answer** goes as "checked in that turn, not re-verified now", without its citations. In the prompt,
+    the history is context, never evidence: lines seen only in an earlier turn don't count.
+- **A turn is never resent.**
+  - **Stored first.** The person's message and its turn are stored before anything is sent.
+  - **The store is recorded before the request.** The engine's store (`homeId`) is recorded just before the request is
+    written, so a turn without one was never sent.
+  - **"Not sent" is claimed only when established:**
+    - by an error known to come before writing (`EngineOfflineError`, or the client's own parameter check);
+    - by the same store having no record of the request.
+  - **Anything after writing is found by its request id.** That covers a timeout, a closed connection and an error
+    answer, since the engine can start the run before its answer is validated. Whatever the search can't settle is
+    unknown.
+  - **How a turn ends:**
+    - a graceful quit, a killed engine, or an engine's own cancellation: interrupted;
+    - a cancel Nivra asked for: cancelled, keeping who asked (the person, sharing turned off, the project removed, the
+      conversation deleted).
+  - **Reading starts no engine.** Opening a conversation follows its open turns on their own engine.
+  - **This amends D23's "runs are remembered for the session only"** for conversation turns. Explain-panel and hello
+    runs stay session-only.
+- **Model text in the host's workspace.** Answers are stored as the engine masked them, and masked again by the host.
+  This amends D22's "stored only in the owning engine's `nivra.db`". They are still never stored in `mastra.db` or the
+  logs.
+- **One protection policy for everything stored (extends D8).**
+  - **What the person types** is refused, never quietly changed, if it holds the saved key or a recognised credential.
+    The message names the field and the kind of credential, never the value. The credential shapes are now shared by
+    the host and the engine, in `packages/domain`.
+  - **What engines and models produced** is masked again before it is stored.
+- **Deletion.**
+  1. Deleting a conversation stops its open turn first. When that fails, the conversation stays, and the person is told
+     why.
+  2. Then its messages, turns and plans are removed, overwritten in place, and the WAL is written back.
+  - **What stays:** text copied into a task's brief stays with the task, and each engine keeps its own record of the
+    runs.
+- **Native tasks (NIV-32).**
+  - **One structure.** A task written directly and one made from a plan version have the same brief:
+    - goal and acceptance criteria;
+    - scope and exclusions;
+    - context, assumptions and checks;
+    - a fixed execution policy: one at a time, network off, approval required;
+    - sources;
+    - what to write again.
+  - **Versions are immutable.** A trigger refuses changes to a stored version. Each change is made only from the revision
+    the person read.
+  - **A newer plan version** is shown on the task, and taken into the brief only when asked.
+  - **Moving a task to another repository** clears what came from another project's conversation, in a new version.
+  - **States:**
+    - `ready` needs a goal and an acceptance criterion;
+    - `completed` is the person's acceptance of a ready task;
+    - `active` and `review` come only from attempts, which can't start. The window says so in plain words, with no
+      ticket numbers.
+  - **Attempts.** An attempt is a run link bound to one brief version.
+
+**Why.**
+- **NIV-30's requirements.**
+  - Conversations, tasks and run links must be durable.
+  - `nivra.json` must not grow.
+  - Routing must survive a restart, and no paid call may be replayed.
+
+  A SQLite file the host owns does that with no dependency. Since only the host's own OS opens it, D7's cross-OS rule
+  holds.
+- **The plan's two reviews (20 October).**
+  - Planning needs evidence, proposals and assumptions kept apart.
+  - An error answer, a missing record or a search that finds nothing doesn't prove nothing ran.
+  - Every stored field needs one policy.
+  - A promise about deletion must match what stays.
+  - The database had to be proven in packaged builds first.
+- **General chat's target.** A general conversation has no folder to decide where it runs. The app's own OS is the only
+  rule that needs no choice and no fallback.
+
+**Consequences.**
+- **Protocol 5.**
+  - An app and its engines must match, and `initialize` refuses a mismatch.
+  - The WSL runtime is staged afresh.
+  - Older engines refuse a home that has reached schema v3.
+- **The shared WSL home.** Every Windows profile's WSL engine uses `~/.nivra`. So a Windows check of this branch
+  migrates the home the installed v0.1.1 also uses, and that version then refuses it until a release with schema v3
+  ships.
+  - This happened on 20 October. Migration v3 only adds the `meta` table, so dropping that table and setting
+    `user_version` back to 2 restores the home for v0.1.1.
+- **Evidence:** `docs/acceptance.md`, *Planning workspace, checkpoint 1*.
+- **Deferred:** NIV-30's explicit source attachments go to NIV-33.
+- **Coming at checkpoint 2:**
+  - the window: side navigation, conversations, plans and tasks;
+  - the rest of the IPC;
+  - the end-to-end tests;
+  - the live checks.
+- **The Nebius Sandboxes probe** exists offline, in `apps/engine/src/exec/nebius/` with `pnpm probe:sandbox`. It isn't
+  wired into the engine, and no backend claims anything from it. Its live run waits for approval. Its adopt-or-defer
+  decision will be D28, superseding D19's "Sandboxes isn't available yet".
+
+## D27. What the review of checkpoint 1 changed: seven corrections, and engine homes of their own for development and tests (2026-10-20)
+
+**Decision.** A review of PR 4 (checkpoint 1, D26) found seven gaps. Each was reproduced against the code, fixed, and
+given a test that fails without the fix.
+1. **Sandbox recovery forgets nothing it may have started.** Every spawn whose intent is journaled and that isn't
+   settled (by its answer, by being found, or by the service turning it down) is uncertain. Before, only an intent with
+   a later "uncertain" entry was. So a probe that died between sending a spawn and its answer left compute running
+   while cleanup reported nothing. A 4xx is journaled as refused: it created nothing.
+2. **A deleted conversation's turn still has its run stopped.** Deleting stays immediate. A turn whose run isn't known
+   yet keeps its request id in this session until its run is found and cancelled: one still being sent, or one whose
+   answer was lost. Before, if the engine made the run and then answered `runs.start` with an error, nothing looked for
+   the run any more. Memory is enough: only this session's engines can be running it, since an engine that stops ends
+   its runs, and one that starts fails them as interrupted (D4).
+3. **Each sandbox pattern is judged on its own evidence.** A pattern is adopted only if its own checks pass, and the
+   two that hold for both: reattaching, and telling a timeout apart. Its own median step must also be within the
+   threshold. Before, pattern A's checks and pattern B's timings were combined, so a quick, broken B and a slow A that
+   passed gave "adopt". The decision now names the pattern.
+4. **A damaged workspace a crashed session left is kept aside as it was found.** When a journal is beside
+   `workspace.db`, it is read first through a read-only connection, which can't fold the journal in or remove it.
+   Before, the writing connection found the damage, and closing it checkpointed the WAL into the damaged file and
+   deleted it, while the notice said the journal files were kept.
+5. **A task made from another project's plan takes none of that project's material.** Creating a task applies the
+   rule for moving one: the sources, context and assumptions from another project's conversation are cleared and
+   marked to be written again.
+6. **A repository reply of spaces is turned down**, like an empty one. Text in `submit_reply` is trimmed before it is
+   checked.
+7. **A subprocess that isn't ready yet is polled, not failed.** HTTP 425 from the subprocess endpoint is "pending",
+   and the client waits as long as `Retry-After` says, as the documentation asks. Once its own deadline is reached it
+   makes no request and takes no answer, so a result shows the child ended within the limit. A second review, at
+   `7155917`, found it still made one read at the deadline and took the answer.
+
+And the WSL home is no longer shared:
+- **A build has a channel**, set when it is built: development for `pnpm dev:win` (`electron-vite build --mode
+  development`), release otherwise. An unpackaged app is always development. `app.isPackaged` can't tell them apart,
+  since `pnpm dev:win` packages the app.
+- **Each channel has its own engine homes.**
+  - Release: `~/.nivra` in WSL and on Linux, and `%LOCALAPPDATA%\Nivra\engine` on Windows, as before.
+  - Development: `~/.nivra-dev` in WSL and on Linux, and `%LOCALAPPDATA%\nivra-dev\engine` on Windows, however the
+    build is started.
+- **The home is passed through** probing (is this home's runtime there), provisioning (`<home>/runtime/<hash>`,
+  pruned only there) and launching (`--home`).
+- **A test run gets a WSL home of its own**, `~/.nivra-test/<kind>-<UTC>-<id>`: `--nivra-wsl-home` for the app,
+  `--wsl-home` for the harness. Each run removes its own home at the end. One left by an interrupted run is removed
+  once it is a day old.
+- **The Windows checks prove it.** `verify:windows` and `test:windows` record what `~/.nivra` holds before they start:
+  each database file's size, time and hash, and each runtime folder with its time. They fail if any of it changed.
+
+**Why.**
+- **The review's findings.** Each was a way to report something other than the true state, or to leave something
+  running unseen. The acceptance suite forbids both.
+- **The shared home.** On 20 October the branch's Windows checks migrated `~/.nivra/nivra.db` to schema v3, and the
+  installed v0.1.1 refused its home (D26). Provisioning into that home could also prune the runtime the release runs
+  from. The review asked for a permanent fix, with release, development and test homes, and a test that development
+  and verification leave the release's database and runtime folder unchanged.
+
+**Consequences.**
+- **Supersedes** D26's consequence "the shared WSL home", and its restore procedure as a way of working: development
+  and tests no longer touch the release's home.
+- **Amends** D5 (a WSL runtime lives in its channel's home, `$HOME/<home>/runtime/<contentHash>/`) and D7 (development
+  engines use `~/.nivra-dev` in WSL too).
+- **Unchanged:** `accept:live` runs a release candidate, so it still uses `~/.nivra`, which it moves aside and puts
+  back (D24).
+- **Not covered:** a development build started without `--user-data-dir` still uses the release's user-data folder.
+  `pnpm dev:win` always passes one.
+- **Next:** the Nebius adopt-or-defer decision will be D28. D26, not merged yet, was corrected to say so.
+- **Follow-up:** explain's own `submit_answer` still accepts a summary of spaces. Explain's behaviour stays unchanged in
+  this stretch, so it is proposed separately.
+- **Evidence:** `docs/acceptance.md`, *Planning workspace: the review of checkpoint 1*.

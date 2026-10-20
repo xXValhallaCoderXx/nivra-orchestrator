@@ -10,6 +10,8 @@ export interface TargetSources {
   local: { runtime: RuntimeLayout; home: string; extraArgs?: readonly string[] };
   /** The Linux runtime streamed into WSL distributions (Windows hosts only). */
   wslRuntime: WslRuntime | null;
+  /** The engine home in every distribution, below its `$HOME`: the channel's, or a test run's own (D27). */
+  wslHome: string;
   discover?: () => Promise<WslDiscovery>;
 }
 
@@ -52,7 +54,7 @@ export function targetFactory(sources: TargetSources): TargetFactory {
       if (discovery.status !== "ready") return { discovery, targets: [] };
       // WSL 1 distributions get a target too: its probe refuses them with the fix, rather than hiding them.
       const { wslExe } = discovery;
-      return { discovery, targets: discovery.distros.map((distro) => new WslTarget({ distro, wslExe, runtime: sources.wslRuntime, ...env })) };
+      return { discovery, targets: discovery.distros.map((distro) => new WslTarget({ distro, wslExe, runtime: sources.wslRuntime, engineHome: sources.wslHome, ...env })) };
     },
   };
 }

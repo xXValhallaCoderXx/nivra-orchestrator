@@ -9,6 +9,7 @@ import { IPC, type AppInfo, type ExportResult, type ImportPreviewResult, type Se
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
+import { channelOf, WSL_HOMES, wslHomeFrom, type Channel } from "./targets/homes.ts";
 import { runtimeIn, type RuntimeLayout } from "./targets/local.ts";
 import { targetFactory } from "./targets/registry.ts";
 import type { EnginePlatform } from "./targets/types.ts";
@@ -19,6 +20,9 @@ import { defaultZoom, restoreBounds, stepZoom } from "./window-state.ts";
  * Electron's main process: a thin shell over `Host` (D12). It owns the window, the security guards (from Hird,
  * provenance.md), dialogs and IPC; everything about targets and engines lives in plain modules.
  */
+
+/** Which channel this app was built for (D27): set by the build, `development` for `pnpm dev:win`. */
+declare const __NIVRA_CHANNEL__: Channel;
 
 const here = dirname(fileURLToPath(import.meta.url));
 app.enableSandbox();
@@ -44,6 +48,7 @@ function start(): void {
   const host = new Host({
     targets: targetFactory({ platform, ...runtimeSources(platform) }),
     store,
+    workspacePath: join(app.getPath("userData"), "workspace.db"),
     logsDir: app.getPath("logs"),
     client: { name: "Nivra", version: app.getVersion() },
     credentials: () => secrets.all(),
@@ -190,6 +195,12 @@ function start(): void {
   handle(IPC.runResult, z.tuple([RunId]), (_event, id) => host.runResult(id));
   handle(IPC.runEvents, z.tuple([RunId, z.number().int().nonnegative()]), (_event, id, after) => host.runEvents(id, after));
   handle(IPC.cancelRun, z.tuple([RunId]), (_event, id) => host.cancelRun(id));
+  handle(IPC.listConversations, none, () => host.conversations());
+  handle(
+    IPC.createConversation,
+    z.tuple([z.discriminatedUnion("kind", [z.strictObject({ kind: z.literal("general") }), z.strictObject({ kind: z.literal("project"), projectId: z.uuid() })])]),
+    (_event, scope) => host.createConversation(scope),
+  );
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {
@@ -303,13 +314,19 @@ function withoutHash(url: string): string {
 }
 
 /**
- * Where this app's engine runtimes are (D5). Packaged: `resources/runtime/<os-arch>` for the host and, on Windows, the
- * Linux tarball streamed into WSL. Development: the engine from source on the Node that started pnpm, and a staged
- * tarball for WSL when there is one (`pnpm stage:runtime linux-x64`).
+ * Where this app's engine runtimes are (D5), and the engine homes they use (D7, D27). Packaged:
+ * `resources/runtime/<os-arch>` for the host and, on Windows, the Linux tarball streamed into WSL. Development: the
+ * engine from source on the Node that started pnpm, and a staged tarball for WSL when there is one
+ * (`pnpm stage:runtime linux-x64`). The homes follow the channel, so a development build, packaged or not, never uses
+ * the release's: `~/.nivra-dev` in WSL and on Linux, `%LOCALAPPDATA%\nivra-dev\engine` for a packaged one on Windows.
  */
-function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLayout; home: string; extraArgs?: string[] }; wslRuntime: WslRuntime | null } {
+function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLayout; home: string; extraArgs?: string[] }; wslRuntime: WslRuntime | null; wslHome: string } {
+  const channel = channelOf(app.isPackaged, __NIVRA_CHANNEL__);
   // Tests and side-by-side development give the local engine its own home; userData follows Chromium's --user-data-dir.
   const homeSwitch = app.commandLine.getSwitchValue("nivra-engine-home") || null;
+  // Tests give each run a WSL home of its own too, below the distribution's $HOME.
+  const wslSwitch = app.commandLine.getSwitchValue("nivra-wsl-home") || null;
+  const wslHome = wslSwitch ? wslHomeFrom(wslSwitch) : WSL_HOMES[channel];
   // Tests only: a loopback stub of Token Factory, honoured only when unpackaged (D22); the engine refuses non-loopback.
   const stubSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-token-factory-url") || null;
   const extraArgs = stubSwitch ? { extraArgs: ["--token-factory-url", stubSwitch] } : {};
@@ -325,8 +342,16 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
   if (app.isPackaged) {
     const root = join(process.resourcesPath, "runtime");
     const hash = platform === "win32" ? readHash(join(root, "runtime-linux-x64.json")) : null;
-    const home = platform === "win32" ? join(process.env["LOCALAPPDATA"] ?? join(homedir(), "AppData", "Local"), "Nivra", "engine") : join(homedir(), ".nivra");
-    return { local: { runtime: runtimeIn(join(root, hostTarget), platform), home: homeSwitch ?? home, ...extraArgs }, wslRuntime: hash ? { tarball: join(root, "runtime-linux-x64.tar.gz"), contentHash: hash } : null };
+    const localAppData = process.env["LOCALAPPDATA"] ?? join(homedir(), "AppData", "Local");
+    const home =
+      platform === "win32"
+        ? join(localAppData, ...(channel === "release" ? ["Nivra", "engine"] : ["nivra-dev", "engine"]))
+        : join(homedir(), channel === "release" ? ".nivra" : ".nivra-dev");
+    return {
+      local: { runtime: runtimeIn(join(root, hostTarget), platform), home: homeSwitch ?? home, ...extraArgs },
+      wslRuntime: hash ? { tarball: join(root, "runtime-linux-x64.tar.gz"), contentHash: hash } : null,
+      wslHome,
+    };
   }
   const appPath = app.getAppPath();
   const stage = join(appPath, "build", "stage");
@@ -338,6 +363,7 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
       ...extraArgs,
     },
     wslRuntime: hash ? { tarball: join(stage, "runtime-linux-x64.tar.gz"), contentHash: hash } : null,
+    wslHome,
   };
 }
 

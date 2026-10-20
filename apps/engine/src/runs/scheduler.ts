@@ -1,4 +1,4 @@
-import { isTerminal, type JsonObject, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { isTerminal, type ChatContext, type JsonObject, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
 import type { NewEvent, RunStore } from "./store.ts";
 
 /**
@@ -104,7 +104,7 @@ export class RunScheduler {
   readonly #maxConcurrent: number;
   readonly #log: SchedulerLog;
   readonly #slots = new Map<string, Slot>();
-  readonly #contexts = new Map<string, RunContext>();
+  readonly #contexts = new Map<string, RunContext | ChatContext>();
   #source: WorkflowSource | null = null;
   #recovered = false;
   #stopping: string | null = null;
@@ -149,7 +149,7 @@ export class RunScheduler {
   }
 
   /** The context the host sent with a run, while the run lasts; null once it has ended. Steps read it by run id. */
-  contextOf(runId: string): RunContext | null {
+  contextOf(runId: string): RunContext | ChatContext | null {
     return this.#contexts.get(runId) ?? null;
   }
 

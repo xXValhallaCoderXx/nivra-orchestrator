@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { open, realpath, stat } from "node:fs/promises";
 import { join, posix, relative, sep } from "node:path";
+import type { Mask } from "@nivra/domain";
 import type { ExecutionSession } from "../exec/backend.ts";
-import type { Mask } from "../secrets/patterns.ts";
 import { HIDDEN_WHY, hiddenReason, outputRoot, type HiddenReason } from "./deny.ts";
 import { runGit, type GitCall } from "./git.ts";
 import { checkRelativePath, isInside, RepoError } from "./paths.ts";

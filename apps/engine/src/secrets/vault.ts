@@ -1,4 +1,4 @@
-import type { SecretName } from "@nivra/domain";
+import { maskKnownValues, type SecretName } from "@nivra/domain";
 
 /** Provider variables the engine removes from its own environment at start (D8): Mastra would fall back to them. */
 export const PROVIDER_ENV_VARS = ["NEBIUS_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"] as const;
@@ -28,14 +28,7 @@ export class SecretVault {
   }
 
   /** Masks the longest values first, so a value inside another is replaced whole. */
-  readonly mask = (text: string): string => {
-    if (this.#values.size === 0) return text;
-    let masked = text;
-    for (const [name, value] of [...this.#values].sort((a, b) => b[1].length - a[1].length)) {
-      if (masked.includes(value)) masked = masked.split(value).join(`[secret:${name}]`);
-    }
-    return masked;
-  };
+  readonly mask = (text: string): string => (this.#values.size === 0 ? text : maskKnownValues(text, [...this.#values]));
 }
 
 /** Removes provider keys from an environment, in place. */

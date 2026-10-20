@@ -61,6 +61,23 @@ export class RunStore {
     this.#now = options.now ?? (() => new Date());
   }
 
+  /** This store's id (D26): made the first time an engine that knows it opens the home, and kept from then on. */
+  homeId(): string {
+    return this.#database.tx((db) => {
+      const row = db.prepare("SELECT value FROM meta WHERE key = 'home_id'").get();
+      if (row) return str(row["value"]);
+      const id = randomUUID();
+      db.prepare("INSERT INTO meta (key, value) VALUES ('home_id', ?)").run(id);
+      return id;
+    });
+  }
+
+  /** The run a request id created, or null when this store has none (D26). */
+  findByRequest(clientRequestId: string): RunSummary | null {
+    const row = this.#database.open().prepare("SELECT * FROM runs WHERE client_request_id = ?").get(clientRequestId);
+    return row ? toSummary(row) : null;
+  }
+
   /** Records a queued run. A repeated `clientRequestId` returns the run it already created. */
   create(run: NewRun): { id: string; created: boolean } {
     return this.#database.tx((db) => {
