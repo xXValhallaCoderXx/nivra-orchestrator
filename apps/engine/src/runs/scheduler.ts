@@ -1,4 +1,4 @@
-import { isTerminal, type ChatContext, type JsonObject, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { isTerminal, type ChatContext, type JsonObject, type ReviewContext, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
 import { errorFacts, internalMessage, publicFailure, Refusal, type Diagnostic, type DiagnosticCode, type ErrorFacts } from "../diagnostics.ts";
 import type { NewEvent, RunStore } from "./store.ts";
 
@@ -81,12 +81,22 @@ function failureOf(error: unknown): { message: string; data: JsonObject | null; 
   if (!known) {
     return { message: internalMessage(), data: { kind: "internal" }, diagnostic: { code: "unexpected-error", stage: null, reason: null, kind: "internal", error: errorFacts(error) } };
   }
-  const data = known.kind ? { kind: known.kind, ...(known.retryAfterSeconds !== null ? { retryAfterSeconds: known.retryAfterSeconds } : {}) } : null;
+  const data = known.kind
+    ? { kind: known.kind, ...(known.retryAfterSeconds !== null ? { retryAfterSeconds: known.retryAfterSeconds } : {}), ...(known.stage ? { stage: known.stage } : {}) }
+    : null;
   return {
     message: known.message,
     data,
     diagnostic: { code: known.code, stage: known.facts?.stage ?? null, reason: known.reason, kind: known.kind, error: known.facts?.error ?? null },
   };
+}
+
+/** Whether a stored review input names the same panel, plan version and fingerprints as a new one. */
+function sameReview(stored: unknown, input: unknown): boolean {
+  const keys = ["panel", "planId", "planVersion", "packetDigest", "preferencesDigest"] as const;
+  const a = (stored ?? {}) as Record<string, unknown>;
+  const b = (input ?? {}) as Record<string, unknown>;
+  return keys.every((key) => a[key] === (b[key] ?? (key === "panel" ? "council" : undefined)));
 }
 
 /**
@@ -114,7 +124,7 @@ export class RunScheduler {
   readonly #log: SchedulerLog;
   readonly #diagnose: (diagnostic: Diagnostic) => void;
   readonly #slots = new Map<string, Slot>();
-  readonly #contexts = new Map<string, RunContext | ChatContext>();
+  readonly #contexts = new Map<string, RunContext | ChatContext | ReviewContext>();
   /** Each live run's request id, for its diagnostic. */
   readonly #requests = new Map<string, string>();
   #source: WorkflowSource | null = null;
@@ -155,7 +165,14 @@ export class RunScheduler {
       clientRequestId: request.clientRequestId,
       instanceId: this.#instanceId,
     });
-    // A repeated request returns the run it already created, which keeps the context it came with.
+    // A repeated request returns the run it already created, which keeps the context it came with. The same id with
+    // other work is refused: a review is bound to its plan version and fingerprints (D30), and nothing is sent twice.
+    if (!created) {
+      const existing = this.#store.summary(id);
+      if (existing && (existing.workflowId !== request.workflowId || (request.workflowId === "review" && !sameReview(existing.input, request.input)))) {
+        throw new Refusal("request-conflict", "This request id already started another run, with other input. Send the new request with a new id.");
+      }
+    }
     if (created) {
       this.#contexts.set(id, request.context);
       this.#requests.set(id, request.clientRequestId);
@@ -165,7 +182,7 @@ export class RunScheduler {
   }
 
   /** The context the host sent with a run, while the run lasts; null once it has ended. Steps read it by run id. */
-  contextOf(runId: string): RunContext | ChatContext | null {
+  contextOf(runId: string): RunContext | ChatContext | ReviewContext | null {
     return this.#contexts.get(runId) ?? null;
   }
 

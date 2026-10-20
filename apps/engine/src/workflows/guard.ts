@@ -6,6 +6,7 @@ import { TaskUnreadable } from "../explain/task.ts";
 import { failure, ModelFailure } from "../providers/model.ts";
 import { RepoCancelled } from "../repo/git.ts";
 import { RepoError } from "../repo/paths.ts";
+import { ReviewUnreadable } from "../review/task.ts";
 
 /**
  * What a workflow step may throw (NIV-27): a failure in Nivra's own words. Mastra stores a step's error as it is, so
@@ -15,7 +16,15 @@ import { RepoError } from "../repo/paths.ts";
  * facts a diagnostic needs.
  */
 export function publicError(error: unknown, stage: string, mask: Mask): Error {
-  if (error instanceof ModelFailure || error instanceof TaskUnreadable || error instanceof ChatUnreadable || error instanceof Refusal || error instanceof RepoError || error instanceof RepoCancelled) {
+  if (
+    error instanceof ModelFailure ||
+    error instanceof TaskUnreadable ||
+    error instanceof ChatUnreadable ||
+    error instanceof ReviewUnreadable ||
+    error instanceof Refusal ||
+    error instanceof RepoError ||
+    error instanceof RepoCancelled
+  ) {
     error.message = mask(error.message);
     return error;
   }

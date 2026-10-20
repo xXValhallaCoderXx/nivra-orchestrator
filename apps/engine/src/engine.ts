@@ -8,18 +8,20 @@ import {
   ExplainInput,
   ExplainResult,
   HelloInput,
+  isTerminal,
   LineSplitter,
   PROTOCOL_VERSION,
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
   type JsonObject,
+  type ReviewContext,
   type RunContext,
   type SecretName,
   type WorkflowId,
 } from "@nivra/domain";
 import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
-import { errorFacts, formatDiagnostic, internalMessage, publicFailure, type Diagnostic } from "./diagnostics.ts";
+import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, type Diagnostic } from "./diagnostics.ts";
 import { Database, EngineLockedError } from "./db/database.ts";
 import { libsqlFileUrl } from "./db/libsql-url.ts";
 import { runDoctor } from "./doctor/doctor.ts";
@@ -28,6 +30,7 @@ import { findGit } from "./exec/find-executable.ts";
 import { createLocalBackend } from "./exec/local.ts";
 import { ChatUnreadable, readChatTask } from "./chat/task.ts";
 import { readTask, TaskUnreadable } from "./explain/task.ts";
+import { asEnded, readReviewTask, ReviewUnreadable } from "./review/task.ts";
 import { launcherWrite, ProtocolOutput, type RawWrite } from "./rpc/output.ts";
 import { RpcFailure, RpcServer } from "./rpc/server.ts";
 import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
@@ -88,6 +91,23 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
       },
     },
   ],
+  [
+    "review",
+    {
+      id: "review",
+      title: (input: unknown) => {
+        const task = readReviewTask(input);
+        return task ? `${task.panel === "single" ? "Single review" : "Council review"} · plan v${task.planVersion}` : "Review";
+      },
+      // Mastra gets the panel alone: the plan's id, version and fingerprints stay in the run store, and the packet in
+      // memory (D21, D30).
+      mastraInput: (input: unknown) => {
+        const task = readReviewTask(input);
+        if (!task) throw new ReviewUnreadable();
+        return { panel: task.panel };
+      },
+    },
+  ],
 ]);
 
 export interface EngineOptions extends EngineArgs {
@@ -124,14 +144,29 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/hello.ts"),
     typeof import("./workflows/explain.ts"),
     typeof import("./workflows/chat.ts"),
+    typeof import("./workflows/review.ts"),
   ];
   try {
-    mastraModules = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts"), import("./workflows/chat.ts")]);
+    mastraModules = await Promise.all([
+      import("@mastra/core/mastra"),
+      import("@mastra/libsql"),
+      import("./workflows/hello.ts"),
+      import("./workflows/explain.ts"),
+      import("./workflows/chat.ts"),
+      import("./workflows/review.ts"),
+    ]);
   } catch (error) {
     database.close();
     throw new RuntimeBrokenError("workflow runtime", error);
   }
-  const [{ Mastra }, { LibSQLStore }, { createHelloWorkflow, HELLO_WORKFLOW_ID }, { createExplainWorkflow, EXPLAIN_WORKFLOW_ID }, { createChatWorkflow, CHAT_WORKFLOW_ID }] = mastraModules;
+  const [
+    { Mastra },
+    { LibSQLStore },
+    { createHelloWorkflow, HELLO_WORKFLOW_ID },
+    { createExplainWorkflow, EXPLAIN_WORKFLOW_ID },
+    { createChatWorkflow, CHAT_WORKFLOW_ID },
+    { createReviewWorkflow, REVIEW_WORKFLOW_ID },
+  ] = mastraModules;
 
   const vault = new SecretVault();
   // Known key values and credential shapes are masked in everything stored (D8, D22).
@@ -163,7 +198,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // Each workflow reads the context its own kind of run carries (D21, D26).
   const runContext = (runId: string): RunContext | null => {
     const given = scheduler.contextOf(runId);
-    return given && !("history" in given) ? given : null;
+    return given && !("history" in given) && !("packet" in given) ? given : null;
+  };
+  const reviewContext = (runId: string): ReviewContext | null => {
+    const given = scheduler.contextOf(runId);
+    return given && "packet" in given ? given : null;
   };
   const chatContext = (runId: string): ChatContext | null => {
     const given = scheduler.contextOf(runId);
@@ -214,6 +253,17 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         mask,
         setMeta: (runId, meta) => store.setMeta(runId, meta),
         saveResult: (runId, result) => store.saveArtifact(runId, "chat", JSON.stringify(result)),
+        recorder,
+      }),
+      [REVIEW_WORKFLOW_ID]: createReviewWorkflow({
+        context: reviewContext,
+        task: (runId) => readReviewTask(store.summary(runId)?.input),
+        requestId: (runId) => store.requestIdOf(runId),
+        apiKey: () => vault.get("NEBIUS_API_KEY"),
+        endpoint,
+        mask,
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        saveResult: (runId, report) => store.saveArtifact(runId, "review", JSON.stringify(report)),
         recorder,
       }),
     },
@@ -297,7 +347,15 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
           throw new RpcFailure(ErrorCode.InternalError, known?.message ?? internalMessage(), { kind: known?.kind ?? "internal" }, { cause: error });
         }
       },
-      "runs.start": (params) => store.summary(scheduler.submit(params)) ?? notFound("just created"),
+      "runs.start": (params) => {
+        try {
+          return store.summary(scheduler.submit(params)) ?? notFound("just created");
+        } catch (error) {
+          // The same request id with other work: refused, in Nivra's words, and nothing is started (D30).
+          if (error instanceof Refusal && error.code === "request-conflict") throw new RpcFailure(ErrorCode.InvalidParams, error.message);
+          throw error;
+        }
+      },
       "runs.get": ({ runId }) => store.summary(runId) ?? notFound(runId),
       "runs.find": ({ clientRequestId }) => store.findByRequest(clientRequestId),
       "runs.list": ({ limit, cursor }) => store.list({ limit, cursor }),
@@ -314,9 +372,13 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         return stored === null ? null : ChatResult.parse(JSON.parse(stored));
       },
       "runs.review": ({ runId }) => {
-        if (!store.status(runId)) notFound(runId);
+        const status = store.status(runId);
+        if (!status) notFound(runId);
         const stored = store.artifact(runId, "review");
-        return stored === null ? null : ReviewReport.parse(JSON.parse(stored));
+        if (stored === null) return null;
+        // A report saved mid-review, of a run that has ended, reads as interrupted (D30).
+        const report = ReviewReport.parse(JSON.parse(stored));
+        return status && isTerminal(status) ? asEnded(report) : report;
       },
     },
   });
@@ -372,7 +434,14 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
   try {
     const { DatabaseSync } = await import("node:sqlite");
     new DatabaseSync(":memory:").close();
-    const [, { LibSQLStore }] = await Promise.all([import("@mastra/core/mastra"), import("@mastra/libsql"), import("./workflows/hello.ts"), import("./workflows/explain.ts"), import("./workflows/chat.ts")]);
+    const [, { LibSQLStore }] = await Promise.all([
+      import("@mastra/core/mastra"),
+      import("@mastra/libsql"),
+      import("./workflows/hello.ts"),
+      import("./workflows/explain.ts"),
+      import("./workflows/chat.ts"),
+      import("./workflows/review.ts"),
+    ]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {
     await fatal(output, log, "runtime-broken", new RuntimeBrokenError("runtime", error).message);

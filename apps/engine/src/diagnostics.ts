@@ -64,6 +64,7 @@ const KNOWN_CLASSES = new Set([
   "RepoCancelled",
   "TaskUnreadable",
   "ChatUnreadable",
+  "ReviewUnreadable",
   "RpcFailure",
   "LineTooLongError",
   "ArgsError",
@@ -278,6 +279,8 @@ export interface PublicFailure {
   message: string;
   kind: string | null;
   retryAfterSeconds: number | null;
+  /** Which stage of a review failed, when it was one (D30). */
+  stage: string | null;
   code: DiagnosticCode;
   reason: string | null;
   facts: FailureFacts | null;
@@ -304,26 +307,28 @@ export function publicFailure(error: unknown): PublicFailure | null {
     if (name === "ModelFailure" && text) {
       const retry = read(current, "retryAfterSeconds");
       const facts = readFailureFacts(read(current, "facts"));
+      const stage = read(current, "stage");
       return {
         message: text,
         kind: kind ?? "internal",
         retryAfterSeconds: typeof retry === "number" && Number.isFinite(retry) && retry > 0 ? Math.ceil(retry) : null,
+        stage: typeof stage === "string" && /^(architecture|risks|single|chair|review)$/.test(stage) ? stage : null,
         code: facts?.code ?? "model-failure",
         reason: null,
         facts,
       };
     }
-    if ((name === "TaskUnreadable" || name === "ChatUnreadable") && text) return { message: text, kind: "internal", retryAfterSeconds: null, code: "input-unreadable", reason: null, facts: null };
+    if ((name === "TaskUnreadable" || name === "ChatUnreadable" || name === "ReviewUnreadable") && text) return { message: text, kind: "internal", retryAfterSeconds: null, stage: null, code: "input-unreadable", reason: null, facts: null };
     if (name === "Refusal" && text) {
       const exec = ownCode === "exec-refused" || ownCode === "boundary-unavailable";
-      return { message: text, kind: null, retryAfterSeconds: null, code: exec ? "exec-refused" : "refused", reason: ownCode, facts: null };
+      return { message: text, kind: null, retryAfterSeconds: null, stage: null, code: exec ? "exec-refused" : "refused", reason: ownCode, facts: null };
     }
     if (name === "RepoError" && text) {
-      return { message: text, kind: null, retryAfterSeconds: null, code: ownCode === "git-failed" || ownCode === "git-timeout" ? "git-failed" : "repo-refused", reason: ownCode, facts: null };
+      return { message: text, kind: null, retryAfterSeconds: null, stage: null, code: ownCode === "git-failed" || ownCode === "git-timeout" ? "git-failed" : "repo-refused", reason: ownCode, facts: null };
     }
-    if (name === "RepoCancelled") return { message: "Cancelled.", kind: "cancelled", retryAfterSeconds: null, code: "refused", reason: "cancelled", facts: null };
-    if (name === "ExecRefusedError") return { message: EXEC_REFUSED_MESSAGE, kind: null, retryAfterSeconds: null, code: "exec-refused", reason: ownCode, facts: null };
-    if (name === "BoundaryUnavailableError") return { message: BOUNDARY_UNAVAILABLE_MESSAGE, kind: null, retryAfterSeconds: null, code: "exec-refused", reason: ownCode ?? "boundary-unavailable", facts: null };
+    if (name === "RepoCancelled") return { message: "Cancelled.", kind: "cancelled", retryAfterSeconds: null, stage: null, code: "refused", reason: "cancelled", facts: null };
+    if (name === "ExecRefusedError") return { message: EXEC_REFUSED_MESSAGE, kind: null, retryAfterSeconds: null, stage: null, code: "exec-refused", reason: ownCode, facts: null };
+    if (name === "BoundaryUnavailableError") return { message: BOUNDARY_UNAVAILABLE_MESSAGE, kind: null, retryAfterSeconds: null, stage: null, code: "exec-refused", reason: ownCode ?? "boundary-unavailable", facts: null };
     current = read(current, "cause");
   }
   return null;

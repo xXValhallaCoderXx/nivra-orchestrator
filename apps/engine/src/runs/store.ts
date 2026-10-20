@@ -80,6 +80,12 @@ export class RunStore {
   }
 
   /** Records a queued run. A repeated `clientRequestId` returns the run it already created. */
+  /** The request id a run was started with; null when it had none or isn't in this store. */
+  requestIdOf(runId: string): string | null {
+    const row = this.#database.open().prepare("SELECT client_request_id FROM runs WHERE id = ?").get(runId);
+    return row ? strOrNull(row["client_request_id"]) : null;
+  }
+
   create(run: NewRun): { id: string; created: boolean } {
     return this.#database.tx((db) => {
       if (run.clientRequestId) {
