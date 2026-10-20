@@ -102,8 +102,7 @@ export function stageZeroSummary(whoami: unknown, images: unknown): { lines: str
 
 export const LATENCY = { adoptSeconds: 10, concernSeconds: 30 } as const;
 
-export const RETENTION =
-  "Images are retained for 180 days; after that, untagged and unreferenced images may be deleted. That is not a deletion guarantee, and there is no API to delete uploads, operation records or logs. Cancelling, or a disposable run, deletes nothing.";
+export { RETENTION } from "./sandbox.ts";
 
 const EDIT = `set -e; mkdir -p /base /work; cp /fixture/* /base/; cp /fixture/* /work/; sed -i 's/Hello, world/Hello, Nivra/' /work/greet.sh; echo "interfaces: $(ls /sys/class/net | tr '\\n' ' ')"`;
 const NETCHECK = `grep -q Nivra /work/greet.sh && echo CONTINUED || echo NOT-CONTINUED; for target in "$DENY_1" "$DENY_2"; do [ -n "$target" ] || continue; if wget -q -T 5 -O /dev/null "$target" 2>/tmp/err; then echo "REACHED $target"; else echo "BLOCKED $target: $(head -c 200 /tmp/err)"; fi; done`;

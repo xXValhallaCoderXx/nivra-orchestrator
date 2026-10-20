@@ -33,8 +33,24 @@ export type JournalEntry =
   | { kind: "uncertain"; wall: string; correlation: string; cause: string }
   | { kind: "found"; wall: string; correlation: string; operationId: string }
   | { kind: "cancel"; wall: string; operationId: string }
+  /** How the provider answered a cancel: `accepted` isn't a stop yet; `conflict` means it had already ended. */
+  | { kind: "cancel-answer"; wall: string; operationId: string; answer: "accepted" | "conflict" }
   | { kind: "terminal"; wall: string; operationId: string; status: OperationStatus }
-  | { kind: "unresolved"; wall: string; correlation: string | null; operationId: string | null; reason: string };
+  | { kind: "unresolved"; wall: string; correlation: string | null; operationId: string | null; reason: string }
+  /** A session (D33): the base image it starts from and the snapshot it carries, by hash only. */
+  | { kind: "session"; wall: string; sessionId: string; baseImage: string; snapshotSha256: string; workspace: string }
+  /** An upload about to be sent, then the id it was given: what the provider may keep, whatever happens next. */
+  | { kind: "upload"; wall: string; sha256: string; bytes: number }
+  | { kind: "uploaded"; wall: string; uuid: string }
+  /** A result image an operation reported, adopted as the session's state or not: kept by the provider either way. */
+  | { kind: "image"; wall: string; operationId: string; image: string; adopted: boolean };
+
+/**
+ * What the provider keeps, as documented on 20 October 2026. It is a retention period, not a promise of deletion, and
+ * there is no API to delete anything.
+ */
+export const RETENTION =
+  "Images are retained for 180 days; after that, untagged and unreferenced images may be deleted. That is not a deletion guarantee, and there is no API to delete uploads, operation records or logs. Cancelling, or a disposable run, deletes nothing.";
 
 /**
  * Everything the probe did, one JSON line per entry, written and flushed before the request it describes. With a file,
@@ -126,6 +142,8 @@ export interface Outcome {
   timedOut: boolean;
   /** Only an operation that succeeded leaves a continuation point, and only when the service names one. */
   resultImage: string | null;
+  /** Any result image the service named, whatever the status: what it keeps, counted for retention. */
+  imageReported: string | null;
   stdout: string;
   stdoutTruncated: boolean;
   stderr: string;
@@ -178,6 +196,7 @@ export function classify(operation: Operation): Outcome {
     signal,
     timedOut,
     resultImage: status === "SUCCESS" ? (operation.result_image_uuid ?? operation.result?.image ?? null) : null,
+    imageReported: operation.result_image_uuid ?? operation.result?.image ?? null,
     stdout: text(result?.stdout),
     stdoutTruncated: result?.stdout?.truncated === true,
     stderr: text(result?.stderr),
@@ -198,6 +217,8 @@ export interface StepSpec {
   files?: Record<string, FileRef>;
   env?: Record<string, string>;
   cwd?: string;
+  /** Where the service cuts each stream off, at most `MAX_OUTPUT_BYTES`. */
+  maxOutputBytes?: number;
 }
 
 export interface SandboxOptions {
@@ -310,7 +331,7 @@ export class Sandbox {
       disposable: step.disposable,
       networking: { enabled: false },
       timeout: step.timeoutSeconds,
-      truncate_output_at: MAX_OUTPUT_BYTES,
+      truncate_output_at: Math.min(step.maxOutputBytes ?? MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES),
       ...(step.files ? { files: step.files } : {}),
     }, options);
   }
@@ -413,7 +434,8 @@ export class Sandbox {
       return null;
     }
     this.#journal.append({ kind: "cancel", wall: this.#wallNow().toISOString(), operationId });
-    await this.#api.cancel(operationId, { until: this.#until(Number.POSITIVE_INFINITY) });
+    const answer = await this.#api.cancel(operationId, { until: this.#until(Number.POSITIVE_INFINITY) });
+    this.#journal.append({ kind: "cancel-answer", wall: this.#wallNow().toISOString(), operationId, answer });
     const end = this.#now() + this.#cancelWaitMs;
     for (let deadline = this.#until(end); this.#now() < deadline; deadline = this.#until(end)) {
       const operation = await this.#readBy(operationId, deadline);

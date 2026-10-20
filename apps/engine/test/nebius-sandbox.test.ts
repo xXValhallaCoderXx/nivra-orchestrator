@@ -204,7 +204,7 @@ describe("Nebius Sandboxes, offline: deadlines, retries and cleanup (NIV-29)", (
     assert.ok("uncertain" in submitted);
     const settled = await sandbox.cleanup();
     assert.deepEqual([settled.cancelled.length, settled.unresolved, service.operations[0]?.cancelled], [1, [], true]);
-    assert.deepEqual(sandbox.journal.entries.map((e) => e.kind), ["intent", "uncertain", "found", "cancel", "terminal"]);
+    assert.deepEqual(sandbox.journal.entries.map((e) => e.kind), ["intent", "uncertain", "found", "cancel", "cancel-answer", "terminal"]);
   });
 
   it("journals what it couldn't settle, and --recover settles it later from the journal", async () => {
@@ -235,7 +235,7 @@ describe("Nebius Sandboxes, offline: deadlines, retries and cleanup (NIV-29)", (
     assert.deepEqual([service.operations.length, new Journal(path).entries.map((e) => e.kind)], [1, ["intent"]]);
     const recovered = await sandboxOn(service, { journal: new Journal(path) }).sandbox.cleanup();
     assert.deepEqual([recovered.cancelled.length, recovered.unresolved, service.operations[0]?.cancelled], [1, [], true]);
-    assert.deepEqual(new Journal(path).entries.map((e) => e.kind), ["intent", "found", "cancel", "terminal"]);
+    assert.deepEqual(new Journal(path).entries.map((e) => e.kind), ["intent", "found", "cancel", "cancel-answer", "terminal"]);
   });
 
   it("settles a spawn the service turned down, which created nothing, so the next one can go", async () => {

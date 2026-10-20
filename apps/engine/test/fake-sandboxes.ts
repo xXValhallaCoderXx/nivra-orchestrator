@@ -13,7 +13,12 @@ export interface Behaviour {
   statuses: string[];
   exitCode?: number | null;
   timedOut?: boolean;
+  /** The signal that ended the command; unless given, 9 on a timeout and -1 (none) otherwise. */
+  signal?: number;
   stdout?: string;
+  stderr?: string;
+  /** The service cut the output off. */
+  truncated?: boolean;
   resultImage?: string | null;
   /** Files a successful operation leaves in its result image. */
   files?: Record<string, string>;
@@ -70,6 +75,16 @@ export class FakeService {
   /** Reading a subprocess of a cancelled operation answers this status instead of the child's end. */
   childReadAfterCancel: number | null = null;
   lowercase = false;
+  /** Images the service no longer has: a spawn from one answers 410, creating nothing. */
+  expiredImages = new Set<string>();
+  /** Cancels are accepted (202) but never stop anything, as for an operation the service can't reach. */
+  ignoreCancels = false;
+  /** Uploads answer with a hash that isn't the bytes'. */
+  wrongUploadHash = false;
+  /** The next spawn's operation is hidden from listing, as if beyond the search window. */
+  hideNextSpawn = false;
+  /** Every upload's bytes, as received. */
+  readonly uploads: Uint8Array[] = [];
   readonly behave: (body: Record<string, unknown>) => Behaviour;
   constructor(behave: (body: Record<string, unknown>) => Behaviour) {
     this.behave = behave;
@@ -83,7 +98,11 @@ export class FakeService {
       this.rateLimitNextRead = null;
       return encode({ error: "slow down" }, 429, { "retry-after": String(seconds) });
     }
-    if (request.method === "POST" && path === "/v1/files") return encode({ uuid: randomUUID(), sha256: "x", size: 1 }, 201);
+    if (request.method === "POST" && path === "/v1/files") {
+      const bytes = typeof request.body === "string" ? new TextEncoder().encode(request.body) : (request.body ?? new Uint8Array(0));
+      this.uploads.push(bytes);
+      return encode({ uuid: randomUUID(), sha256: this.wrongUploadHash ? "0".repeat(64) : createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength }, 201);
+    }
     if (request.method === "POST" && path === "/v1/instances") return this.#spawn(JSON.parse(String(request.body)) as Record<string, unknown>);
     const subprocess = /^\/v1\/operations\/([^/]+)\/subprocesses(?:\/(\d+))?$/.exec(path);
     if (subprocess) return this.#subprocess(request, subprocess[1]!, subprocess[2] ? Number(subprocess[2]) : null);
@@ -120,12 +139,17 @@ export class FakeService {
       this.refuseNextSpawn = false;
       return encode({ error: "bad request" }, 400);
     }
+    if (this.expiredImages.has(String(body["image"]))) return encode({ error: "image not found" }, 410);
     const fail = this.failNextSpawn;
     this.failNextSpawn = null;
     if (fail && !fail.create) return encode({ error: "unavailable" }, 503);
     const behaviour = this.behave(body);
     const op: FakeOperation = { uuid: randomUUID(), body, env: (body["env"] as Record<string, string>) ?? {}, behaviour, reads: 0, status: "PENDING", cancelled: false, finishedBySubprocess: false, subprocesses: new Map(), events: [] };
     this.operations.push(op);
+    if (this.hideNextSpawn) {
+      this.hideNextSpawn = false;
+      this.hidden.add(op.uuid);
+    }
     if (fail) return encode({ error: "unavailable" }, 503);
     if (this.dropNextSpawnAnswer) {
       this.dropNextSpawnAnswer = false;
@@ -159,7 +183,7 @@ export class FakeService {
       metadata: {
         env: op.env,
         // As the live service reports it: signal -1 when none ended the command; exit code -1 and SIGKILL on a timeout.
-        result: ended && !op.cancelled ? { state: { exit_code: op.behaviour.timedOut ? -1 : (op.behaviour.exitCode ?? 0), signal: op.behaviour.timedOut ? 9 : -1, timed_out: op.behaviour.timedOut ?? false }, stdout: { value: op.behaviour.stdout ?? "", encoding: "ascii" }, stderr: { value: "" } } : null,
+        result: ended && !op.cancelled ? { state: { exit_code: op.behaviour.timedOut ? -1 : (op.behaviour.exitCode ?? 0), signal: op.behaviour.signal ?? (op.behaviour.timedOut ? 9 : -1), timed_out: op.behaviour.timedOut ?? false }, stdout: { value: op.behaviour.stdout ?? "", encoding: "ascii", truncated: op.behaviour.truncated ?? false }, stderr: { value: op.behaviour.stderr ?? "" } } : null,
       },
     });
   }
@@ -168,6 +192,7 @@ export class FakeService {
     const op = this.#find(uuid);
     if (!op) return encode({ error: "no such operation" }, 404);
     if (["SUCCESS", "FAILED", "CANCELLED"].includes(this.#status(op))) return encode({ error: "already finished" }, 409);
+    if (this.ignoreCancels) return encode(undefined, 202);
     op.cancelled = true;
     for (const sub of op.subprocesses.values()) sub.stopped = true;
     return encode(undefined, 202);
