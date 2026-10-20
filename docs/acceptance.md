@@ -584,6 +584,79 @@ the run's own WSL home and its removal; typecheck covers them. The second review
 which nothing in the app or the engine's RPC uses yet, so the UI, Windows and `rpc.ts` checks above weren't run again
 for it.
 
+### Planning workspace, checkpoint 2 (D26, NIV-30 to NIV-32)
+
+The window for checkpoint 1's workspace: a side navigation, conversations, plans and native tasks. Four commits on
+`feature/planning-window`, then the live checks:
+
+| Commit | What |
+|---|---|
+| `5cb164d` | The bridge: 18 calls for methods `Host` already had, a restart for a conversation's own engine, and size refusals in plain words |
+| `04c5ab9` | The navigation and the conversation window |
+| `14d1e17` | Plans saved from answers, and native tasks |
+| `2cfc60f` | The window on the packaged Linux and Windows builds |
+
+**The window, end to end** (`e2e/workspace.spec.ts`, the built app against the loopback stub, one profile through the
+file, each test building on the last):
+
+| Test | Shown |
+|---|---|
+| No key | A general turn fails before any request: "No Nebius key is set, so nothing was sent." The stub saw nothing |
+| A general chat | Two answers. The follow-up's details showed 1 earlier exchange sent, as counts and a fingerprint, and the run's model, time and tokens |
+| A repository chat | The project's consent asked first, with nothing sent; then an answer in its parts, 2 of 2 citations checked |
+| Another project chosen elsewhere | The open conversation kept its scope, and its next turn read alpha's README, never beta's |
+| Cancel | With the answer held, the turn ended "Cancelled. Nothing was resent."; Send again made a new, answered turn |
+| A killed engine | The turn waited, unresolved; Restart; "Interrupted: … Nothing was resent."; Send again was answered; one request per turn |
+| A relaunch | Every conversation kept; nothing sent on reopening; the repository chat went on with 2 earlier exchanges |
+| Deletion | Asked first, saying what stays (each engine's run records, with the messages; briefs' copies) |
+| A plan | Saved as shown first (answer, Proposed, Assumed); a task from v1; the plan's v2 shown on the task, whose brief stayed v1 until Update made v2 |
+| A direct task | The same brief fields; ready refused without criteria; a stale view refused and read again; Ready, Completed, Reopen; Run disabled with its text |
+| The plan's conversation deleted | The brief kept its text; moving the task to beta cleared what came from alpha, in v3, marked to write again |
+
+**Checks (20 October)**
+- `pnpm verify`: domain 36, engine 182, desktop 181. All passed.
+- `test:e2e` (the built app): 32 passed. 1 was skipped, because it applies only to a packaged app. The workspace file
+  passed three more times on its own.
+- `test:packaged` (electron-builder `--dir`, Linux, runtimes staged afresh): 21 passed. 12 were skipped, because they
+  need the test endpoint switch, which a packaged app ignores. The no-key turn, a relaunch, deletion and a direct
+  task's states ran.
+- `test:windows`, on the build from `pnpm dev:win --no-launch`: 10 of 10. The new check: with no key, a general turn
+  refused on the native Windows engine before any request, the only engine started; a task marked ready; both kept
+  across a relaunch. `~/.nivra` was unchanged.
+- **Not run:** `verify:windows` and `verify:interrupt`: no target, supervisor or staging code changed. `rpc.ts`: the
+  engine didn't change.
+
+**Live, in the Windows development app (20 October, 11:15–11:20 UTC).** Nate approved both checks and their budget,
+and Claude drove the app on Nate's development profile, so the key stayed in the app. Each turn had at most 16 model
+calls; a general turn's answer, at most 4,000 output tokens. Fixture A's sharing was already on, from Nate's earlier
+choice.
+
+| Turn | Engine | Calls | Time | Tokens in / out | Shown |
+|---|---|---|---|---|---|
+| General: "How should I stage a refactor that splits a large settings page into smaller components?" | Windows, native | 1 | 13.2 s | 255 / 1,679 | Answered; 1 preference received (the personal one) |
+| General: "What would you test first?" | Windows, native | 1 | 4.9 s | 1,775 / 564 | Answered; given 1 earlier exchange, 5,619 characters, the first answer (6,271) shortened to its start and end |
+| Fixture A: "Plan a CSV export of a user's workout history: what exists today, and what would change?" | WSL, `~/.nivra-dev` | 14 | 133.9 s | 219,488 / 3,481 | Answered, at HEAD `29c3a40a`: 4 statements of what the code does now, 1 proposal, 2 assumptions; 7 of 7 citations shown to the model; 2 preferences received (the personal one and one of A's own) |
+| Fixture A: "Which files would the first commit touch?" | WSL, `~/.nivra-dev` | 7 | 64.0 s | 53,862 / 2,019 | Answered; given 1 earlier exchange; 7 of 7 citations shown |
+
+- **What the answer found.** A's export button writes only the rows on screen (`SessionTotalsPanel.tsx` 96–109), and
+  recent history stops at 60 sessions (`history.ts` 341–347). The proposal was a full-history export. Its assumptions
+  were that a query can return every session, and that building the CSV in the browser is fine at that size.
+- **Then, with no model call:** a plan saved from the first answer, as answered, and a task made from it: a draft on
+  valhalla-fitness, brief v1, citing plan v1 and its 7 checked lines, with Run disabled.
+- **Never resent.** Read after the app had closed, each engine's store held exactly one run per turn, its request id
+  the turn's id. The Windows store was read through a copy, with the app's own Windows Node; the WSL store, through a
+  copy, once its engine had stopped. WSL's clock ran about a minute ahead of Windows', so runs are matched by id, not
+  by time.
+- **Against the budget.** Every turn kept to its calls (1, 1, 14 and 7), and the general answers to their output limit
+  (1,679 and 564 tokens). The first repository turn's 219,488 input tokens are 2.8 times the heaviest explain run on A
+  (77,514), which was quoted for scale: each of its 14 calls carried the reads and searches made so far. Nothing in a
+  turn's limits bounds its total input today.
+- **Corrected after the run.** The approval said the development profile had no confirmed personal preference. It has
+  one, and the general turns received it, as designed. The count before the run had read the wrong field of
+  `nivra.json`.
+- **Seen, not changed:** the model answers in Markdown, and the window shows answers as plain text, so its markers
+  show.
+
 ### Nebius Sandboxes, live (D28, NIV-29)
 
 NIV-29's live probe, run on 20 October in stages Nate approved one at a time, each with its data and budget. A synthetic

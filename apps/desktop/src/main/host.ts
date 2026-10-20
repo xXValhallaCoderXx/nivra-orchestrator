@@ -31,6 +31,7 @@ import type {
   PreferencesView,
   PreferenceView,
   ProjectView,
+  TasksView,
   TaskState,
   TaskSummary,
   TaskView,
@@ -386,10 +387,10 @@ export class Host {
     return plans.map((row) => this.#planView(getArtifact(workspace, String(row["id"]))!));
   }
 
-  /** Every task, the most recently changed first. */
-  tasks(): TaskSummary[] {
+  /** The workspace's state and every task, the most recently changed first. */
+  tasks(): TasksView {
     const workspace = this.#workspace;
-    return workspace.state === "ready" ? listTasks(workspace.db).map((task) => this.#taskSummary(task)) : [];
+    return { workspace: this.#workspaceView(), tasks: workspace.state === "ready" ? listTasks(workspace.db).map((task) => this.#taskSummary(task)) : [] };
   }
 
   task(taskId: string): TaskView {
@@ -407,7 +408,7 @@ export class Host {
       versions: versions.map(({ id, version, createdAt }) => ({ id, version, createdAt })),
       sourcePlans: content.sources.map((source) => {
         const latest = versionsOf(workspace, source.planLineage).at(-1);
-        return { planLineage: source.planLineage, usedVersion: source.planVersion, latestVersion: latest?.version ?? null, conversationId: source.conversationId };
+        return { planLineage: source.planLineage, usedVersion: source.planVersion, latestVersion: latest?.version ?? null, latestPlanId: latest?.id ?? null, conversationId: source.conversationId };
       }),
       attempts: attemptsOf(workspace, taskId).map((attempt) => ({ id: attempt.id, briefVersion: byId.get(attempt.briefId) ?? getArtifact(workspace, attempt.briefId)?.version ?? 0, status: attempt.status, createdAt: attempt.createdAt })),
       runUnavailable: RUN_UNAVAILABLE,
@@ -423,7 +424,7 @@ export class Host {
   async createTask(input: { title: string; fields: BriefFields; projectId: string | null; planId: string | null }): Promise<TaskView> {
     const workspace = this.#workspaceDb();
     const title = this.#taskTitle(input.title);
-    const fields = BriefFieldsSchema.parse(input.fields);
+    const fields = this.#briefFields(input.fields);
     this.#refuseInBrief(title, fields, await this.#knownSecrets());
     if (input.projectId !== null) this.#project(input.projectId);
     let sources: BriefContent["sources"] = [];
@@ -448,7 +449,7 @@ export class Host {
     const workspace = this.#workspaceDb();
     const task = this.#taskAt(taskId, revision);
     if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
-    const fields = BriefFieldsSchema.parse(input);
+    const fields = this.#briefFields(input);
     this.#refuseInBrief(task.title, fields, await this.#knownSecrets());
     const latest = versionsOf(workspace, taskId).at(-1)!;
     const before = BriefContentSchema.parse(latest.content);
@@ -546,7 +547,21 @@ export class Host {
 
   /** Restarts the project's engine; a failure shows in the engine's state rather than here. */
   async restart(projectId: string): Promise<void> {
-    const { targetId } = this.#project(projectId);
+    await this.#restartTarget(this.#project(projectId).targetId);
+  }
+
+  /**
+   * Restarts the engine a conversation's turns run on, then follows its open turns there (D26). A general conversation
+   * has no project to restart it from, so this is its way back after its engine stops.
+   */
+  async restartConversationEngine(conversationId: string): Promise<ConversationView> {
+    const record = getConversation(this.#workspaceDb(), conversationId);
+    if (!record) throw new Error("That conversation is no longer in the list.");
+    await this.#restartTarget(record.targetId);
+    return this.openConversation(conversationId);
+  }
+
+  async #restartTarget(targetId: string): Promise<void> {
     const engine = this.#engines.get(targetId);
     if (engine && targetId === "local") {
       await engine.supervisor.restart().catch(() => undefined);
@@ -1163,6 +1178,37 @@ export class Host {
     return trimmed;
   }
 
+  /**
+   * What the person wrote in a brief, trimmed, with empty list rows dropped, and checked for size in words they can act
+   * on before the schema sees it (the schema's own errors are JSON).
+   */
+  #briefFields(input: BriefFields): BriefFields {
+    const text = (label: string, value: string, max: number) => {
+      const trimmed = value.trim();
+      if (trimmed.length > max) throw new Error(`${label} is ${trimmed.length} characters long, and it can hold ${max}. Shorten it, then save it again.`);
+      return trimmed;
+    };
+    // A row is numbered as the person wrote the list, empty rows included.
+    const rows = (one: string, many: string, values: string[]) => {
+      values.forEach((value, index) => {
+        const length = value.trim().length;
+        if (length > TASK_LIMITS.itemChars) throw new Error(`${one} ${index + 1} is ${length} characters long, and each can hold ${TASK_LIMITS.itemChars}. Shorten it, then save it again.`);
+      });
+      const kept = values.map((value) => value.trim()).filter(Boolean);
+      if (kept.length > TASK_LIMITS.items) throw new Error(`There are ${kept.length} ${many}, and a brief can hold ${TASK_LIMITS.items}. Remove some, then save it again.`);
+      return kept;
+    };
+    return BriefFieldsSchema.parse({
+      goal: text("The goal", input.goal, TASK_LIMITS.textChars),
+      acceptanceCriteria: rows("Acceptance criterion", "acceptance criteria", input.acceptanceCriteria),
+      scope: text("The scope", input.scope, TASK_LIMITS.textChars),
+      exclusions: text("The exclusions", input.exclusions, TASK_LIMITS.textChars),
+      context: text("The context", input.context, TASK_LIMITS.contextChars),
+      assumptions: rows("Assumption", "assumptions", input.assumptions),
+      checks: rows("Check", "checks", input.checks),
+    });
+  }
+
   /** Every field of a brief the person wrote, through the protection policy (D26). */
   #refuseInBrief(title: string, fields: BriefFields, known: KnownSecrets): void {
     refuseCredentials("The title", title, known);
@@ -1202,6 +1248,8 @@ export class Host {
       text: content.text,
       conversationId: content.conversationId,
       messageId: content.messageId,
+      projectId: content.projectId,
+      assumptions: content.assumptions,
       latest: versionsOf(this.#workspaceDb(), plan.lineageId).at(-1)?.version ?? plan.version,
       createdAt: plan.createdAt,
     };

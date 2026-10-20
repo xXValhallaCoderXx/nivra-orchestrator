@@ -73,7 +73,7 @@ flowchart LR
   subgraph Host["Desktop host: Electron, native on Windows or Linux"]
     R["Renderer<br/>React + Mantine<br/>sandboxed, no Node"]
     M["Main process<br/>project registry · preferences · secret store · engines"]
-    R -- "window.nivra: 28 typed calls" --> M
+    R -- "window.nivra: 48 typed calls" --> M
   end
   subgraph W["Target: Windows (local)"]
     E1["Engine<br/>Node + Mastra<br/>own database"]
@@ -83,16 +83,16 @@ flowchart LR
   end
   M -- "JSON-RPC 2.0 over stdio" --> E1
   M -- "JSON-RPC 2.0 over stdio, through wsl.exe" --> E2
-  E1 -. "HTTPS: explain runs, a check" .-> TF["Nebius Token Factory<br/>NVIDIA Nemotron"]
-  E2 -. "HTTPS: explain runs, a check" .-> TF
+  E1 -. "HTTPS: explain and chat runs, a check" .-> TF["Nebius Token Factory<br/>NVIDIA Nemotron"]
+  E2 -. "HTTPS: explain and chat runs, a check" .-> TF
   E2 -. "planned: tool calls" .-> SB["Planned sandbox<br/>local container, or Token Factory Sandboxes"]
 ```
 
 | Layer | What it is | What it may do |
 |---|---|---|
-| **Renderer** | The window: React 19 + Mantine 9 | Call 28 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
+| **Renderer** | The window: React 19 + Mantine 9 | Call 48 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
 | **Main process** | Electron's main process, a thin shell over plain Node modules | Own the project list, each project's consent, the preferences, the secret store and the engines. Translate the window's calls into engine calls, each run carrying its project's preference snapshot and consent. |
-| **Engine** | One Node process per target in use, each with its own databases | Today: the hello and explain runs, Doctor, run records and a Token Factory check. Planned: sandboxes and coding work. It speaks only JSON-RPC on stdin and stdout. |
+| **Engine** | One Node process per target in use, each with its own databases | Today: the hello, explain and chat runs, Doctor, run records and a Token Factory check. Planned: sandboxes and coding work. It speaks only JSON-RPC on stdin and stdout. |
 
 The engine is never part of Electron. It runs on its own Node, shipped with the app (D5), which is what lets it run
 inside a WSL distribution while the window stays native on Windows.
@@ -145,7 +145,27 @@ source commit, marked ported or rewritten, in [docs/provenance.md](docs/provenan
   - Folders come from the native dialog, which runs in main.
 - **Keys.** A key typed into Settings sits in the renderer until it is saved. After that, the renderer sees only how the
   key is stored (encrypted, unencrypted, unreadable), never the key.
-- **What it shows:**
+- **Its places.** A side navigation holds three, kept as state with no router (D26):
+  - **Review & planning:** New chat (general, or about one project) and the conversations, the most recent first;
+  - **Tasks;**
+  - **Projects & settings,** described below. It is the opening view, and it stays mounted while another place is shown,
+    so its runs and what was typed there are kept.
+- **A conversation** shows the scope it started with ("General · no repository access", or the project, its target and
+  its sharing), and its own engine, with Restart when that engine stops. A project chosen elsewhere changes nothing there.
+  - Answers are plain text. A repository answer comes in parts: what the code does now, with citation chips;
+    "Proposed, not verified"; assumptions; conflicts; and what wasn't established.
+  - Each turn has a status line, with Cancel while it is open and Send again (a new turn) once it ends without an answer.
+    "What this answer was given" shows the preferences received, the history sent and what was left out, and the model,
+    time and tokens.
+  - The composer counts to 8,000 characters. The first repository turn asks for the project's consent, in the same
+    dialog as Explain.
+  - Delete says what stays: each engine's run records, and what briefs copied.
+- **Plans:** Save as plan on an answer, with the text editable first; an edit saves the next version; a task can be made
+  from a version.
+- **Tasks:** a list, one form for a task written directly or from a plan, and a task's view: its brief and versions,
+  "Its source plan changed" with Update, the parts to write again for its repository, Mark ready, Complete and Reopen,
+  and Run, disabled with its reason in plain words. Every change sends the revision it was read at.
+- **Projects & settings shows:**
   - every repository with its target label ("Ubuntu · WSL", "Windows · Local"), and Add/Remove;
   - the engine badge and notices for the chosen project;
   - WSL guidance (Windows only);
@@ -163,7 +183,7 @@ source commit, marked ported or rewritten, in [docs/provenance.md](docs/provenan
   - Settings: the Nebius key, and a Token Factory check.
 
 ### 4.2 The bridge
-`window.nivra` exposes 28 named functions, each invoking exactly one IPC channel. There is no generic "send any channel"
+`window.nivra` exposes 48 named functions, each invoking exactly one IPC channel. There is no generic "send any channel"
 helper. Every handler in main checks two things before acting:
 - the sender is the top frame of one of Nivra's windows, at the exact app URL;
 - the arguments pass zod validation.
@@ -185,6 +205,13 @@ helper. Every handler in main checks two things before acting:
 | `runDoctor(projectId)` | Environment checks on that project's engine. |
 | `getSettings`, `setNebiusKey` | How the saved key is stored; save or remove it. |
 | `checkTokenFactory(projectId)` | From that project's engine: lists the NVIDIA models, makes one Nemotron tool call, then probes required and forced tool choice and the answer schema. |
+| `listConversations`, `createConversation(scope)` | The workspace's conversations, the most recent first, and its state. A new one is general or about one project, fixed for good, and starts no engine (D26). |
+| `getConversation(id)`, `openConversation(id)` | One conversation: its messages, turns and engine. Reading starts nothing; opening follows a turn left open on its own engine, which starts if needed. Nothing is resent. |
+| `sendMessage(id, text)`, `cancelTurn(id, turnId)` | A new turn, refused at once with nothing stored when it can't go (a credential, a turn still open, no consent); and a stop, recorded as the person's. |
+| `deleteConversation(id)`, `restartConversationEngine(id)` | Deletion, after stopping its open turn; and a restart of the engine its turns run on, which a general conversation has no project to restart from. |
+| `savePlan(id, messageId, text)`, `revisePlan(planId, text)`, `listPlans(id)` | Plans saved from answers: v1 as answered or as edited first, then each edit a new version. |
+| `listTasks`, `getTask(id)`, `createTask(input)` | Native tasks: written directly or from a plan version, with the same brief. |
+| `reviseBrief`, `refreshBriefFromPlan`, `setTaskProject`, `setTaskState`, `renameTask(taskId, revision, …)`, `deleteTask(taskId)` | Each change from the revision as read; a stale one is refused. A brief edit, a newer plan taken in, a repository change, a state the rules allow, a new title. |
 | `getAppInfo` | Versions. |
 
 ### 4.3 Main process
@@ -823,7 +850,7 @@ docs changed afterwards.
 | Managing preferences, context assembly with overrides and full precedence | **Built** (D23), tested offline (the D20 sequence through the UI included) and run live on both fixtures; promotion to a personal preference is deferred | NIV-10, NIV-11 |
 | Acceptance on packaged builds | **Passed** (D24): live on the Linux deb and on the Windows zip driving WSL, from candidate `ead56e8`. It carries over to candidate 0.1.1 (D25), whose Windows checks ran again. Native Windows is reported from offline evidence and a controlled check | NIV-14 |
 | Release, clean-setup checks, video, submission | In progress. v0.1.1 (D25) is the latest release, with `SHA256SUMS`, and v0.1.0 is marked superseded. Clean-setup checks 1 and 2 passed on its files; check 3, a PC without the Visual C++ Redistributable, is still to run. The install and testing instructions are written, the synthetic demo repository is published, and the video (NIV-17) and the submission text (NIV-15) are next | NIV-15 – NIV-17 |
-| Planning workspace: durable conversations, conversation turns, native tasks | **Checkpoint 1 built** (D26): the workspace, protocol 5's `chat` workflow, the host's conversation service and the task records, tested offline and in the packaged apps. The window and the live checks are checkpoint 2 | NIV-30, NIV-31, NIV-32 |
+| Planning workspace: durable conversations, conversation turns, native tasks | **Built** (D26, D27): the workspace, protocol 5's `chat` workflow, the conversation service and the task records (checkpoint 1); then the window, with its navigation, conversations, plans and tasks, tested end to end on the built, packaged and Windows apps, and live (checkpoint 2) | NIV-30, NIV-31, NIV-32 |
 | Nebius Sandboxes feasibility | **Proved live** (D28): one operation per step is adopted for the workspace-to-patch adapter; a parent with subprocesses was inconclusive. The client isn't wired into the engine | NIV-29, then NIV-34 |
 | New-app creation, coding worker, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
