@@ -49,9 +49,9 @@ export function preflightProblem(seen: { endpoint: ModelEndpoint | null; model: 
  * The model the engine would pick now: the endpoint's listing (`GET /models`, never an inference request), read with
  * the engine's own client, and the engine's own pick. A listing that fails says so in Nivra's words.
  */
-export async function modelNow(apiKey: string, endpoint: Endpoint): Promise<{ model: string | null } | { problem: string }> {
+export async function modelNow(apiKey: string, endpoint: Endpoint, timeoutMs = 30_000): Promise<{ model: string | null } | { problem: string }> {
   try {
-    const list = await createModelClient({ apiKey, endpoint }).listModels({ timeoutMs: 30_000 });
+    const list = await createModelClient({ apiKey, endpoint }).listModels({ timeoutMs });
     return { model: pickNemotron(list.ids) };
   } catch (error) {
     const kind = error instanceof ModelFailure ? error.kind : "internal";

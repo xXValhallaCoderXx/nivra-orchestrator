@@ -21,7 +21,7 @@ import { readRecord, runBatch, type JournalEntry, Journal } from "./council-eval
 import { canonical, FixtureId, loadFrozen, readCredentials, REPOSITORY, runOrder, type Frozen } from "./council-eval/files.ts";
 import { approvalRequest, limitMismatches } from "./council-eval/plan.ts";
 import { paidBatchRefusal } from "./council-eval/preflight.ts";
-import { buildSheet, missingLabels, scoreBatch, type RunRecord, type SheetItem, type SheetKey } from "./council-eval/score.ts";
+import { buildSheet, labelProblems, missingLabels, scoreBatch, type RunRecord, type SheetItem, type SheetKey } from "./council-eval/score.ts";
 
 const { values } = parseArgs({
   options: {
@@ -161,21 +161,40 @@ function writeSheet(dir: string, kept: readonly RunRecord[], frozenInputs: Froze
   write(join(dir, "sheet.md"), `${lines.join("\n")}\n`);
 }
 
-/** Pass three: the scores from the labelled sheet, the automatic-only ones beside them, and the decision. */
+/**
+ * Pass three: the scores from the labelled sheet, the automatic-only ones beside them, and the decision. Only under the
+ * protocol the batch ran under (its approval digest, as `--resume` checks), and only from a sheet the runs made, every
+ * label complete and valid.
+ */
 function score(dir: string, frozenInputs: Frozen): number {
   const journal = new Journal(dir).read();
+  const sessions = journal.filter((entry): entry is Extract<JournalEntry, { type: "session" }> => entry.type === "session");
+  if (!sessions.length) {
+    console.error(`${dir} holds no batch to score.`);
+    return 2;
+  }
+  const other = sessions.find((session) => session.approvalDigest !== frozenInputs.approvalDigest);
+  if (other) {
+    console.error(`${dir} was run under another protocol (${other.approvalDigest}), so it can't be scored under this one (${frozenInputs.approvalDigest}). Score it with the fixtures, rubric and protocol it was approved under.`);
+    return 2;
+  }
   const kept = journal.filter((entry): entry is Extract<JournalEntry, { type: "end" }> => entry.type === "end").map((entry) => readRecord(dir, entry.fixture, entry.arm));
   const sheet = JSON.parse(readFileSync(join(dir, "sheet.json"), "utf8")) as SheetItem[];
+  // The key, worked out again from the runs and the seed; the labelled sheet must be the one these runs made.
+  const rebuilt = buildSheet(kept, frozenInputs);
+  const same = (a: SheetItem, b: SheetItem | undefined) => b !== undefined && typeof a === "object" && a !== null && canonical([a.item, a.fixture, a.kind, a.finding, a.summary]) === canonical([b.item, b.fixture, b.kind, b.finding, b.summary]);
+  if (!Array.isArray(sheet) || rebuilt.sheet.length !== sheet.length || sheet.some((line, index) => !same(line, rebuilt.sheet[index]))) {
+    console.error("The sheet isn't the one these runs made: a line was added, removed, moved or changed beyond its label. Label the sheet the batch wrote, then score again.");
+    return 2;
+  }
+  const problems = labelProblems(sheet, frozenInputs.rubric);
+  if (problems.length) {
+    console.error(`The sheet has ${problems.length} ${problems.length === 1 ? "label" : "labels"} the scores can't use:\n${problems.slice(0, 20).join("\n")}${problems.length > 20 ? `\n…and ${problems.length - 20} more.` : ""}\nCorrect them, then score again.`);
+    return 2;
+  }
   const missing = missingLabels(sheet, frozenInputs.rubric);
   if (missing.length) {
     console.error(`${missing.length} lines of the sheet still need a label: ${missing.join(", ")}. Label them, then score again.`);
-    return 2;
-  }
-  // The key, worked out again from the runs and the seed; the labelled sheet must be the one these runs made.
-  const rebuilt = buildSheet(kept, frozenInputs);
-  const same = (a: SheetItem, b: SheetItem | undefined) => b !== undefined && canonical([a.item, a.fixture, a.kind, a.finding, a.summary]) === canonical([b.item, b.fixture, b.kind, b.finding, b.summary]);
-  if (rebuilt.sheet.length !== sheet.length || sheet.some((line, index) => !same(line, rebuilt.sheet[index]))) {
-    console.error("The sheet isn't the one these runs made: a line was added, removed, moved or changed beyond its label. Label the sheet the batch wrote, then score again.");
     return 2;
   }
   const key: SheetKey = rebuilt.key;

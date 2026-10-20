@@ -10,7 +10,7 @@ import { EMPTY_PREFERENCES_DIGEST, FIXTURE_IDS, loadFrozen, planIdOf, readCreden
 import { defectMatches, matchedDefects } from "../scripts/council-eval/match.ts";
 import { limitMismatches } from "../scripts/council-eval/plan.ts";
 import { endpointFromDoctor, paidBatchRefusal, preflightProblem, samplingFor } from "../scripts/council-eval/preflight.ts";
-import { armScores, buildSheet, decide, missingLabels, type ArmScores, type RunRecord, type SheetItem } from "../scripts/council-eval/score.ts";
+import { armScores, buildSheet, decide, labelProblems, missingLabels, scoreBatch, type ArmScores, type RunRecord, type SheetItem } from "../scripts/council-eval/score.ts";
 import { isAlive, removeDir, tempDir, waitFor } from "./helpers.ts";
 import { httpError, startStub, toolCall, type Reply, type Stub, type StubRequest } from "./stub-token-factory.ts";
 
@@ -231,6 +231,32 @@ describe("the rubric's automatic pass, and scoring that doesn't trust the model 
     assert.deepEqual(missingLabels(labelled(first.sheet), frozen.rubric), []);
   });
 
+  it("refuses labels the scores can't use: a misspelled defect, another plan's defect, a wrong value, a field that doesn't apply", async () => {
+    // The review's cases: a misspelled defect id and another fixture's defect both counted as known defects found.
+    const frozen = await loadFrozen();
+    const records = [run("f1", "single", [{ title: "One" }, { title: "Two" }, { title: "Three" }]), run("f5", "single", [{ title: "A nit" }])];
+    const { sheet, key } = buildSheet(records, frozen);
+    assert.deepEqual(labelProblems(labelled(sheet), frozen.rubric), [], "the labels the automatic reading gives are valid");
+    const wrong = labelled(sheet, (line) => {
+      if (line.finding?.title === "One") return { defects: ["f1-rollbak"], novel: null };
+      if (line.finding?.title === "Two") return { defects: ["f2-idempotency"], novel: null };
+      if (line.finding?.title === "Three") return { unsupported: "U2" as never, actionable: "yes" as never };
+      return line.kind === "summary" ? { defects: [] } : {};
+    });
+    const problems = labelProblems(wrong, frozen.rubric);
+    const itemOf = (pick: (line: SheetItem) => boolean) => sheet.find(pick)!.item;
+    const expected: Array<[string, string]> = [
+      [itemOf((line) => line.finding?.title === "One"), `defects ["f1-rollbak"] must be f1's known defects, each named once: f1-mixed-versions, f1-rollback, f1-untested-mixed`],
+      [itemOf((line) => line.finding?.title === "Two"), `defects ["f2-idempotency"] must be f1's known defects`],
+      [itemOf((line) => line.finding?.title === "Three"), `unsupported "U2" must be "none", "U1", "U3" or null`],
+      [itemOf((line) => line.finding?.title === "Three"), `actionable "yes" must be true, false or null`],
+      [itemOf((line) => line.kind === "summary"), "defects is for findings: a summary's must be null"],
+    ];
+    assert.equal(problems.length, expected.length, problems.join(" | "));
+    for (const [item, needle] of expected) assert.ok(problems.some((problem) => problem.startsWith(`${item}: `) && problem.includes(needle)), `${item}: ${needle}`);
+    assert.throws(() => scoreBatch(records, wrong, key, frozen), /^Error: The sheet can't be scored: 5 labels are invalid and 0 are missing\.$/);
+  });
+
   /** Two arms' scores that clear every adopt rule, for testing one edge at a time. */
   const adoptable = (): { single: ArmScores; council: ArmScores } => {
     const base = (known: number): ArmScores => ({
@@ -305,7 +331,7 @@ describe("the batch on a real engine, against the stub (NIV-40)", () => {
       `f1 ${frozen.packetDigests.f1.slice(0, 16)}`,
       "Before each run, with no inference request",
       "gives it 30 s more to settle",
-      "the batch takes 52.5 minutes",
+      "With every run and every wait at its limit, it would need 74.0 minutes, so it would stop before its last runs.",
       "Labelling: you label the blinded sheet. Which arm and reviewer each line came from is never written down",
       "the blinded sheet; and, once it is labelled and scored, the scores and decision.md.",
     ]) {
@@ -347,10 +373,27 @@ describe("the batch on a real engine, against the stub (NIV-40)", () => {
     writeFileSync(join(out, "sheet.json"), JSON.stringify([labels[1], labels[0], ...labels.slice(2)]));
     const moved = await cli(["--score", out]).done;
     assert.deepEqual([moved.code, moved.stderr.trim()], [2, "The sheet isn't the one these runs made: a line was added, removed, moved or changed beyond its label. Label the sheet the batch wrote, then score again."]);
+    // A misspelled defect is refused, never counted.
+    const first = labels.findIndex((line) => line.kind === "finding" && line.fixture === "f1");
+    writeFileSync(join(out, "sheet.json"), JSON.stringify(labels.map((line, index) => (index === first ? { ...line, label: { ...line.label, defects: ["f1-rollbak"], novel: null } } : line))));
+    const misspelled = await cli(["--score", out]).done;
+    assert.deepEqual([misspelled.code, misspelled.stderr.split("\n")[0], existsSync(join(out, "scores.json"))], [2, "The sheet has 1 label the scores can't use:", false]);
     writeFileSync(join(out, "sheet.json"), JSON.stringify(labels));
     const scored = await cli(["--score", out]).done;
     assert.equal(scored.code, 0, scored.stderr);
     assert.equal(readFileSync(join(out, "decision.md"), "utf8").split("\n")[0], "# Council evaluation: defer", "neither arm found anything, so the council adds nothing");
+    // Only under the protocol the batch ran under: changed thresholds can't rescore it, or overwrite what it scored.
+    const changed = join(scratch(), "fixtures");
+    cpSync(FIXTURES, changed, { recursive: true });
+    const protocol = JSON.parse(readFileSync(join(changed, "protocol.json"), "utf8")) as { decision: { thresholds: Record<string, number> } };
+    protocol.decision.thresholds["deferCompleteAtMost"] = 5;
+    writeFileSync(join(changed, "protocol.json"), JSON.stringify(protocol));
+    const scores = readFileSync(join(out, "scores.json"), "utf8");
+    const rescored = await cli(["--score", out, "--fixtures", changed]).done;
+    assert.deepEqual(
+      [rescored.code, /^.+ was run under another protocol \([0-9a-f]{64}\), so it can't be scored under this one \([0-9a-f]{64}\)\./.test(rescored.stderr), readFileSync(join(out, "scores.json"), "utf8") === scores],
+      [2, true, true],
+    );
   });
 
   it("keeps a reviewer's failure as it was, with its partial report, and never retakes it", async () => {
@@ -395,13 +438,33 @@ describe("the batch on a real engine, against the stub (NIV-40)", () => {
     assert.deepEqual([starts(journal), journal.filter((entry) => entry.type === "cancel").map((entry) => (entry as { fixture: string; arm: string }).fixture + ":" + (entry as { arm: string }).arm)], [["f1:single", "f1:council"], ["f1:single"]]);
     const record = JSON.parse(readFileSync(join(out, "runs", "f1-single.json"), "utf8")) as RunRecord;
     assert.deepEqual([record.status, stub.chats().length], ["cancelled", 4]);
-    // A run that couldn't end within the batch's 60 minutes, windows included, isn't started.
+    // A run that couldn't end within the batch's 60 minutes, the waits around it included, isn't started: here its
+    // windows alone would fit, and with the checks before it, its start and reading its record they don't.
+    const quick = await stubFor();
     const capped = join(scratch(), "evidence");
-    const stopped = await cli(["--token-factory-url", stub.url, "--out", capped, "--only", "f1", "--deadline-ms", "3570001"]).done;
+    const stopped = await cli(["--token-factory-url", quick.url, "--out", capped, "--only", "f1", "--deadline-ms", "3470000"]).done;
     assert.deepEqual(
-      [stopped.code, stopped.stderr.trim(), starts(journalOf(capped)), stub.chats().length],
-      [3, "The next run, with its windows to cancel and to settle, could not end within the batch's 60 minutes, so the batch stopped.", [], 4],
+      [stopped.code, stopped.stderr.trim(), starts(journalOf(capped)), quick.chats().length],
+      [3, "The next run, with the checks before it, its start, its windows to cancel and to settle, and reading its record, could not end within the batch's 60 minutes, so the batch stopped.", [], 0],
     );
+  });
+
+  it("resumes a batch killed between a run's end and its stop: the stop is made again from the run it kept, and nothing more is sent", async () => {
+    // The review's case: an authentication failure stopped the batch, the stop was lost with it, and resuming sent more.
+    let unauthorised = true;
+    const stub = await stubFor((_fixture, role) => (unauthorised && role === "single" ? httpError(401, "unauthorised") : null));
+    const out = join(scratch(), "evidence");
+    const why = "A run failed with auth, so the batch stopped.";
+    const first = await cli(["--token-factory-url", stub.url, "--out", out]).done;
+    assert.deepEqual([first.code, first.stderr.trim(), stub.chats().length], [3, why, 1]);
+    // Killed after the run's end was written and before the stop was: the same journal, without its stop.
+    const journal = new Journal(out);
+    writeFileSync(journal.path, journal.read().filter((entry) => entry.type !== "stop").map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+    unauthorised = false;
+    const resumed = await cli(["--resume", out, "--token-factory-url", stub.url]).done;
+    assert.deepEqual([resumed.code, resumed.stderr.trim(), stub.chats().length, starts(journalOf(out))], [3, why, 1, ["f1:single"]]);
+    const stops = journalOf(out).filter((entry): entry is Extract<JournalEntry, { type: "stop" }> => entry.type === "stop");
+    assert.deepEqual(stops.map((entry) => entry.why), [why], "the stop is written again");
   });
 
   it("refuses a paid batch that isn't approved, isn't labelled, isn't committed, or whose key file is inside the repository or readable by others, before anything starts", async () => {

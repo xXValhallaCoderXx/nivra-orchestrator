@@ -1,5 +1,5 @@
 import type { ReviewReport, RunStatus, RunSummary } from "@nivra/domain";
-import { ARMS, FIXTURE_IDS, type Arm, type FixtureId, type Frozen, type Protocol, type Rubric } from "./files.ts";
+import { ARMS, canonical, FIXTURE_IDS, type Arm, type FixtureId, type Frozen, type Protocol, type Rubric } from "./files.ts";
 import { matchedDefects } from "./match.ts";
 
 /**
@@ -126,6 +126,46 @@ export function buildSheet(records: readonly RunRecord[], frozen: Frozen): { she
 }
 
 const emptyLabel = (): SheetItem["label"] => ({ defects: null, novel: null, novelKey: null, unsupported: null, actionable: null, material: null, substantive: null });
+const LABEL_FIELDS = Object.keys(emptyLabel()) as Array<keyof SheetItem["label"]>;
+
+/**
+ * What is wrong with the sheet's labels, by item; empty when every label is one the scores can use. A label has exactly
+ * its seven fields, each null or of its type and allowed values; a finding names only known defects of its own fixture,
+ * each once; and a field that doesn't apply to a line stays null. Labels not given yet are `missingLabels`' to report.
+ */
+export function labelProblems(sheet: readonly SheetItem[], rubric: Rubric): string[] {
+  const control = rubric.control.fixture;
+  const problems: string[] = [];
+  const shown = (value: unknown) => JSON.stringify(value)?.slice(0, 120) ?? String(value);
+  for (const line of sheet) {
+    const say = (problem: string) => void problems.push(`${line.item}: ${problem}`);
+    const label = line.label as unknown;
+    const fields = typeof label === "object" && label !== null && !Array.isArray(label) ? (label as Record<string, unknown>) : null;
+    if (!fields || canonical(Object.keys(fields).sort()) !== canonical([...LABEL_FIELDS].sort())) {
+      say(`its label must have exactly these fields: ${LABEL_FIELDS.join(", ")}`);
+      continue;
+    }
+    const { defects, novel, novelKey, unsupported } = fields;
+    const known = rubric.defects[line.fixture].map((defect) => defect.id);
+    if (defects !== null && (!Array.isArray(defects) || defects.some((id) => typeof id !== "string" || !known.includes(id)) || new Set(defects).size !== defects.length)) {
+      say(`defects ${shown(defects)} must be ${line.fixture}'s known defects, each named once: ${known.join(", ") || "it has none"}`);
+    }
+    if (novel !== null && novel !== "useful" && novel !== "not-useful") say(`novel ${shown(novel)} must be "useful", "not-useful" or null`);
+    if (novelKey !== null && typeof novelKey !== "string") say(`novelKey ${shown(novelKey)} must be text or null`);
+    if (unsupported !== null && unsupported !== "none" && unsupported !== "U1" && unsupported !== "U3") say(`unsupported ${shown(unsupported)} must be "none", "U1", "U3" or null`);
+    for (const name of ["actionable", "material", "substantive"] as const) if (fields[name] !== null && typeof fields[name] !== "boolean") say(`${name} ${shown(fields[name])} must be true, false or null`);
+    if (line.kind === "summary") {
+      for (const name of LABEL_FIELDS) if (name !== "substantive" && fields[name] !== null) say(`${name} is for findings: a summary's must be null`);
+      continue;
+    }
+    if (fields["substantive"] !== null) say("substantive is for the control's summaries: a finding's must be null");
+    if (line.fixture === control) continue;
+    if (fields["material"] !== null) say("material is for the control's findings: this one's must be null");
+    if (Array.isArray(defects) && defects.length > 0 && (novel !== null || novelKey !== null)) say("a finding that names a known defect isn't novel: its novel and novelKey must be null");
+    if (novel !== "useful" && novelKey !== null) say("novelKey is for a useful novel finding only");
+  }
+  return problems;
+}
 
 /** The sheet's lines still missing a label the scores need, by item; empty when it is complete. */
 export function missingLabels(sheet: readonly SheetItem[], rubric: Rubric): string[] {
@@ -283,8 +323,14 @@ export function decide(single: ArmScores, council: ArmScores, protocol: Protocol
   return { decision: adoptRules.every(([, held]) => held) ? "adopt" : "simplify", bothReported, latencyRatio, tokenRatio, checks };
 }
 
-/** Both arms' scores and the decision, from the labelled sheet, with the automatic-only scores beside them. */
+/**
+ * Both arms' scores and the decision, from the labelled sheet, with the automatic-only scores beside them. A sheet whose
+ * labels aren't complete and valid is refused, never scored.
+ */
 export function scoreBatch(records: readonly RunRecord[], sheet: readonly SheetItem[], key: SheetKey, frozen: Frozen) {
+  const problems = labelProblems(sheet, frozen.rubric);
+  const missing = problems.length ? [] : missingLabels(sheet, frozen.rubric);
+  if (problems.length || missing.length) throw new Error(`The sheet can't be scored: ${problems.length} labels are invalid and ${missing.length} are missing.`);
   const scores = (reading: Reading) => Object.fromEntries(ARMS.map((arm) => [arm, armScores(arm, records, sheet, key, frozen.rubric, reading)])) as Record<Arm, ArmScores>;
   const labelled = scores("labelled");
   return { labelled, automatic: scores("automatic"), decided: decide(labelled.single, labelled.council, frozen.protocol) };

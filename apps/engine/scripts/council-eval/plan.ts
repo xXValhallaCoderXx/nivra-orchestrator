@@ -1,6 +1,7 @@
 import { largestReport } from "../../src/review/answers.ts";
 import { CHAIR_INSTRUCTIONS, renderChairMessage, renderPacket, reviewerInstructions } from "../../src/review/prompt.ts";
 import { estimateRequest, REVIEW_LIMITS, REVIEW_REQUEST_MS } from "../../src/review/run.ts";
+import { AROUND_RUN_MS, WAITS } from "./batch.ts";
 import { ARMS, FIXTURE_IDS, requestFor, runOrder, type Arm, type FixtureId, type Frozen } from "./files.ts";
 
 /**
@@ -66,7 +67,9 @@ export function approvalRequest(frozen: Frozen, revision: { commit: string | nul
     const estimate = estimates(frozen, id);
     lines.push(`  ${id} ${frozen.packetDigests[id].slice(0, 16)}  ${fixture.title}: about ${n(estimate.reviewer)} tokens per reviewer, ${n(estimate.chair)} reserved for the chair`);
   }
-  const worstMs = runOrder().reduce((sum, { arm }) => sum + limits(arm).totalMs + protocol.runner.cancelMarginMs + protocol.runner.reconcileMs, 0);
+  // Every wait at its limit: the engine's start and its doctor, then each run's checks, start, windows and record.
+  const worstMs = WAITS.engineMs + WAITS.checkMs + runOrder().reduce((sum, { arm }) => sum + AROUND_RUN_MS + limits(arm).totalMs + protocol.runner.cancelMarginMs + protocol.runner.reconcileMs, 0);
+  const capMinutes = protocol.runner.batchMs / 60_000;
   lines.push(
     "",
     "Before each run, with no inference request (the batch stops, and nothing is sent, on a mismatch):",
@@ -81,7 +84,10 @@ export function approvalRequest(frozen: Frozen, revision: { commit: string | nul
     `  Each request is aborted at ${protocol.requestMs / 1000} s. The runner cancels a run still going at its limit plus ${protocol.runner.cancelMarginMs / 1000} s, and gives it ${protocol.runner.reconcileMs / 1000} s more to settle.`,
     "  A run still going after that is kept as unresolved, the batch stops, and it is never sent again. Every wait while following a run is bounded.",
     `Estimated input budgets (estimates that decide admission, not ceilings): single ${n(limits("single").estimatedInputTokens)} tokens, council ${n(limits("council").estimatedInputTokens)}.`,
-    `The batch: at most ${protocol.runner.batchMs / 60_000} minutes; a run that couldn't end within them, windows included, isn't started. With every run at its limit, the batch takes ${(worstMs / 60_000).toFixed(1)} minutes.`,
+    `The batch: at most ${capMinutes} minutes, every wait counted from its engine's start. A run is started only if the checks before it, its start, its windows to cancel and to settle, and reading its record could all end within them, each wait at its limit, and no wait goes past them. Stopping the engine comes after, in at most 15 s.`,
+    worstMs <= protocol.runner.batchMs
+      ? `  With every run and every wait at its limit, the batch takes ${(worstMs / 60_000).toFixed(1)} minutes.`
+      : `  With every run and every wait at its limit, it would need ${(worstMs / 60_000).toFixed(1)} minutes, so it would stop before its last runs.`,
     "",
     "Stops:",
     ...protocol.stops.map((stop) => `  - ${stop}`),
