@@ -782,13 +782,16 @@ describe("Nebius Sandboxes, offline: the probe's credentials, and what stage 0 s
     );
   });
 
-  it("starts stage 1 only on a token that outlasts it and its cleanup", () => {
+  it("starts stage 1 only on a token that outlasts it and its cleanup, or one renewed with each request", () => {
     const needed = PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS;
-    const now = Date.parse("2026-10-20T04:22:59Z");
-    // Stage 0's token expired 4 minutes 24 seconds after that check.
-    assert.deepEqual(tokenOutlasts({ token_expiration: Date.parse("2026-10-20T04:27:23Z") / 1000 }, now, needed), { ok: false, expiresAt: "2026-10-20T04:27:23.000Z" });
-    assert.deepEqual(tokenOutlasts({ token_expiration: now / 1000 + needed }, now, needed).ok, true);
-    assert.deepEqual([tokenOutlasts({ token_expiration: null }, now, needed), tokenOutlasts({}, now, needed)], [{ ok: true, expiresAt: null }, { ok: false, expiresAt: null }]);
+    const at = Date.parse("2026-10-20T04:28:22Z");
+    const reading = (expiration: number | null | undefined, offsetMs = 0) => ({ whoami: expiration === undefined ? {} : { token_expiration: expiration }, atMs: at + offsetMs });
+    // As both of stage 0's keys showed: an expiry minutes after each request, moving forward with it, is renewed.
+    assert.deepEqual(tokenOutlasts(reading(at / 1000 + 300), reading(at / 1000 + 315, 15_000), needed), { ok: true, renewed: true, expiresAt: "2026-10-20T04:33:37.000Z" });
+    // A fixed expiry must outlast stage 1 and its cleanup.
+    assert.deepEqual(tokenOutlasts(reading(at / 1000 + 300), reading(at / 1000 + 300, 15_000), needed), { ok: false, renewed: false, expiresAt: "2026-10-20T04:33:22.000Z" });
+    assert.equal(tokenOutlasts(reading(at / 1000 + 3_600), reading(at / 1000 + 3_600, 15_000), needed).ok, true);
+    assert.deepEqual([tokenOutlasts(reading(null), reading(null, 15_000), needed).ok, tokenOutlasts(reading(undefined), reading(undefined, 15_000), needed).ok], [true, false]);
     assert.equal(needed, 27 * 60);
   });
 });

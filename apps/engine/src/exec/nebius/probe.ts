@@ -30,14 +30,21 @@ export const CLEANUP_MAX_SECONDS = 2 * PROBE_LIMITS.searchSeconds + 2 * (PROBE_L
 
 /**
  * Whether the token stays valid long enough for stage 1 and its cleanup: a token that expires partway would leave the
- * probe unable to read, or cancel, its own operations. `expiresAt` is the whoami answer's `token_expiration` (Unix
- * seconds, null for none), compared with the wall clock, since that is what it is measured on.
+ * probe unable to read, or cancel, its own operations. It takes two readings of the whoami answer, some seconds apart,
+ * each with the wall-clock time it was taken (`token_expiration` is Unix seconds; null means none). An expiry that moved
+ * forward between them belongs to a token renewed with each request, so the key's own lifetime is what counts; a fixed
+ * one must outlast `seconds` from the second reading.
  */
-export function tokenOutlasts(whoami: unknown, nowMs: number, seconds: number): { ok: boolean; expiresAt: string | null } {
-  const expiration = (whoami as { token_expiration?: unknown } | null)?.token_expiration;
-  if (expiration === null) return { ok: true, expiresAt: null };
-  if (typeof expiration !== "number") return { ok: false, expiresAt: null };
-  return { ok: expiration * 1000 - nowMs >= seconds * 1000, expiresAt: new Date(expiration * 1000).toISOString() };
+export function tokenOutlasts(first: { whoami: unknown; atMs: number }, second: { whoami: unknown; atMs: number }, seconds: number): { ok: boolean; renewed: boolean; expiresAt: string | null } {
+  const read = (whoami: unknown) => (whoami as { token_expiration?: unknown } | null)?.token_expiration;
+  const before = read(first.whoami);
+  const after = read(second.whoami);
+  if (after === null) return { ok: true, renewed: false, expiresAt: null };
+  if (typeof after !== "number") return { ok: false, renewed: false, expiresAt: null };
+  const expiresAt = new Date(after * 1000).toISOString();
+  // Expiries are whole seconds: one that moved forward by at least a third of the time between readings was renewed.
+  if (typeof before === "number" && after - before >= Math.max(1, (second.atMs - first.atMs) / 3000)) return { ok: true, renewed: true, expiresAt };
+  return { ok: after * 1000 - second.atMs >= seconds * 1000, renewed: false, expiresAt };
 }
 
 /** The permissions stage 1 uses: spawning (disposable or not), listing to find a lost answer, and cancelling. */
