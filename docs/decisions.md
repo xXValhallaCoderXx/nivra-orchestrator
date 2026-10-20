@@ -1341,7 +1341,8 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
   - **"Not sent".** A write needs `minWriteMs` (2 s) left. With less, or once cancelled, nothing is handed to the
     transport, and `SandboxNotSentError` says so. That is the only case in which "not sent" is established.
   - **Late answers.** An answer that comes after the deadline or the cancellation is never taken as a result. A late
-    spawn answer is only journaled, so cleanup can stop that operation.
+    spawn answer gets an error of its own (`SandboxLateSpawnError`), whatever the signal says. It is journaled, so
+    cleanup can stop that operation, and it is never reported as "not started".
   - **Bounded answers.** Answers are bounded as they stream, and one over its cap isn't asked for again. A retry waits
     at least 250 ms.
   - **Supersedes D28's** "Stage 1 is stopped at 20 minutes, a hard limit". That held for reads and waits, but not for
@@ -1349,7 +1350,10 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
     edited.
 - **The journal.**
   - Each line is flushed before its request.
-  - A last line torn by a crash is left out, and its spawn stays uncertain.
+  - A last line torn by a crash is left out, and its spawn stays uncertain. The next entry cuts that line off first, so
+    it never turns into damage.
+  - A session that closes with nothing open moves its journal into `settled/`. It is kept, as the record of what was
+    sent.
   - It also records:
     - a spawn its client refused to send, as not sent;
     - each cancel's answer;
@@ -1385,11 +1389,17 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
     until it is closed.
   - **Cancels.** An abort stops the operation on a client of its own, and `cancelled` is claimed only once CANCELLED
     is seen.
-  - **Close** has one budget that includes stopping the command under way. It reconciles, then cancels only the
-    session's own operations, then searches again. "Stopped" means CANCELLED after an accepted cancel.
-  - **Recovery** is `scanJournals`, local only, then `reconcileJournals`, one bounded pass. A pass that runs out of time
-    or is stopped leaves the rest for the next. **Age never settles an operation:** one still queued long after its
-    timeout stays unresolved until a terminal status, or a verified expiry guarantee from the provider, settles it.
+  - **Close** has one budget that includes stopping the command under way, however that stop began, and its signal
+    stops it too. It reconciles, then cancels only the session's own operations, then searches again. "Stopped" means
+    CANCELLED after an accepted cancel.
+  - **Recovery.**
+    - `scanJournals` is local only. It reads the journals left in place, which are the few that may need something,
+      and says how many it couldn't read.
+    - `reconcileJournals` makes one bounded pass. A pass that runs out of time, or is stopped, leaves the rest for the
+      next, and a journal it can't read never stops the others.
+    - **Age never settles an operation.** One still queued long after its timeout stays unresolved until a terminal
+      status, or a verified expiry guarantee from the provider, settles it.
+  - **Retention** is counted from the journal: every image an operation reports is journaled where its end is seen.
   - **Limits** (defaults, all configurable):
     - 40 operations a session;
     - commands up to 600 s;
@@ -1408,6 +1418,15 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
   - no operation retired for its age.
 - **An approval is not a boundary (D9).** Asking the one contract for isolation keeps `Local` out of coding work, without
   a second framework.
+- **An independent review of the first draft (`fc82fa1`)** found six gaps. Each was reproduced against that commit,
+  then fixed with a regression test in `0505da3`:
+  1. a stop begun before closing ignored closing's budget and signal;
+  2. a torn journal tail became damage once the next entry was written, and one damaged journal stopped the whole
+     recovery pass;
+  3. the scan's limit came before its filter, so open work could be missed;
+  4. images first seen by cleanup weren't counted;
+  5. a command made as its run was cancelled was reported "not started";
+  6. a listener stayed on a long-lived run signal.
 
 **Consequences.**
 - **What comes next.**

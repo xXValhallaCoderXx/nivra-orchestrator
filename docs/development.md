@@ -184,8 +184,10 @@ cd apps/engine && node --test test/nebius-session.test.ts test/nebius-transport.
 - **The contract suite.** It is in `test/session-contract.ts`, and both `Local` and the session run it. A new backend
   supplies programs that behave as named, and runs it too.
 - **The journals.** A session journals into a folder its caller gives, one file per session (0700 folder, 0600 files).
-  `scanJournals` lists what an earlier engine left open without using the network, and `reconcileJournals` settles it
-  in one bounded pass.
+  - A session that closes with nothing open moves its journal into `settled/` there.
+  - `scanJournals` lists what an earlier engine left open, without using the network, and says how many journals it
+    couldn't read.
+  - `reconcileJournals` settles what the scan found in one bounded pass.
 
 ## Where things will live
 
