@@ -54,13 +54,16 @@ if (values.plan) {
   console.log(`Uploads: ${plan.uploads}. Downloads: at most ${PROBE_LIMITS.maxDownloadBytes} bytes.`);
   console.log(`Deadlines: ${PROBE_LIMITS.requestTimeoutSeconds} s per request; each operation's timeout plus ${PROBE_LIMITS.observeMarginSeconds} s to observe it; ${PROBE_LIMITS.overallMinutes} minutes in all.`);
   console.log("No model calls, no installs.");
-  console.log("\nThresholds, agreed before the run:");
-  console.log("  Critical (any failure means defer; NIV-34 stays blocked; local containers are proposed instead, never Local):");
+  console.log("\nThresholds, agreed before the run. Each pattern is judged on its own evidence, its checks and its latency together:");
+  console.log("  Critical, for each pattern (a failure defers that pattern; if neither qualifies, NIV-34 stays blocked and local containers");
+  console.log("  are proposed instead, never Local):");
   console.log("    network denial shown by behaviour, against a positive control that worked (a failed control is inconclusive);");
-  console.log("    state continues through an image or inside a parent; a cancel reaches a terminal state within 60 s;");
-  console.log("    reattaching observes the same operation with no second spawn; exit code and timeout told apart from SUCCESS;");
-  console.log("    the patch and report retrieved with matching hashes.");
-  console.log(`  Latency, the better pattern's median per step: adopt at ${LATENCY.adoptSeconds} s or less, with concern up to ${LATENCY.concernSeconds} s, defer above.`);
+  console.log("    state continues (A: through an image; B: between subprocesses in the parent);");
+  console.log("    a cancel reaches CANCELLED within 60 s (B: and its running subprocess is reported ended);");
+  console.log("    a failing command's exit code told apart; the patch and report retrieved with matching hashes.");
+  console.log("  Critical, holding for both: reattaching observes the same operation with no second spawn; a timeout told apart from SUCCESS.");
+  console.log(`  Latency, each pattern's own median per step: adopt at ${LATENCY.adoptSeconds} s or less, with concern up to ${LATENCY.concernSeconds} s, defer above.`);
+  console.log("  The decision is the better pattern that qualifies.");
   console.log("  Recorded, not blocking: reconciling a lost answer; what an idle parent costs; the retention below.");
   console.log(`\nRetention: ${RETENTION}`);
   console.log("Cost: unknown in advance; the service's own figures are reported raw, never converted to money.");
@@ -150,18 +153,27 @@ try {
 const judged = evaluate(results);
 write(join(folder, "results.json"), { ...results, steps: results.steps.map((step) => ({ ...step, outcome: step.outcome ? { ...step.outcome, stdout: step.outcome.stdout.slice(0, 2_000), stderr: step.outcome.stderr.slice(0, 2_000) } : null })) });
 write(join(folder, "verdicts.json"), judged);
+const chosen = judged.patterns.find((p) => p.pattern === judged.pattern);
 const report = [
   `# Nebius Sandboxes probe, ${new Date().toISOString()}`,
   "",
-  `Decision: **${judged.decision}**.`,
+  `Decision: **${judged.decision}**${chosen ? `, on pattern ${chosen.pattern} (${chosen.name})` : ""}.`,
+  ...judged.patterns.flatMap((p) => [
+    "",
+    `## Pattern ${p.pattern}, ${p.name}: ${p.outcome}`,
+    "",
+    ...p.verdicts.map((v) => `- ${v.criterion}: **${v.outcome}** (${v.detail})`),
+    `- Latency, the median per step: ${p.latency.median?.toFixed(1) ?? "n/a"} s: **${p.latency.outcome}**`,
+  ]),
   "",
-  ...judged.verdicts.map((v) => `- ${v.critical ? "Critical" : "Recorded"}: ${v.criterion}: **${v.outcome}** (${v.detail})`),
-  `- Latency: per operation ${judged.latency.perOperation?.toFixed(1) ?? "n/a"} s, per subprocess ${judged.latency.perSubprocess?.toFixed(1) ?? "n/a"} s: **${judged.latency.outcome}**`,
+  "## Recorded, not blocking",
+  "",
+  ...judged.recorded.map((v) => `- ${v.criterion}: **${v.outcome}** (${v.detail})`),
   "",
   `Retention: ${RETENTION}`,
   "",
   `Errors: ${results.errors.length ? results.errors.join("; ") : "none"}`,
 ];
 writeFileSync(join(folder, "report.md"), `${safe(report.join("\n"))}\n`, { mode: 0o600 });
-log(`Decision: ${judged.decision}. Evidence: ${folder}`);
+log(`Decision: ${judged.decision}${chosen ? `, on pattern ${chosen.pattern}` : ""}. Evidence: ${folder}`);
 process.exit(interrupted ? 130 : 0);

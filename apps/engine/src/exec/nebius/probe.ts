@@ -1,4 +1,4 @@
-import type { FileRef, SandboxApi } from "./api.ts";
+import type { FileRef, OperationStatus, SandboxApi } from "./api.ts";
 import { type Outcome, type Sandbox } from "./sandbox.ts";
 
 /**
@@ -86,8 +86,9 @@ export interface ProbeResults {
   downloads: Array<{ step: string; path: string; bytes: number; sha256: string; matched: boolean }>;
   reattach: { sameOperation: boolean; spawns: number } | null;
   lostAnswer: { found: boolean; spawns: number; detail: string } | null;
-  cancel: { reachedTerminal: boolean; seconds: number | null } | null;
-  parentCancel: { parent: string | null; subprocessStopped: boolean | null } | null;
+  cancel: { reachedTerminal: boolean; status: OperationStatus | "UNKNOWN" | null; seconds: number | null } | null;
+  /** The parent's end after the cancel, and whether the service reported its running child's end within 5 s. */
+  parentCancel: { parent: OperationStatus | "UNKNOWN" | null; seconds: number | null; child: "ended" | "not ended" | "unknown" } | null;
   errors: string[];
 }
 
@@ -171,7 +172,7 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
     if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
     await sandbox.waitFor(submitted.operationId, ["EXECUTING"], 30_000);
     const { value: outcome, seconds } = await timed(() => sandbox.cancel(submitted.operationId));
-    results.cancel = { reachedTerminal: outcome !== null, seconds: outcome ? seconds : null };
+    results.cancel = { reachedTerminal: outcome !== null, status: outcome?.status ?? null, seconds: outcome ? seconds : null };
     return { operationId: submitted.operationId, outcome, note: outcome ? `ended ${outcome.status} ${seconds.toFixed(1)} s after the cancel` : "no terminal state within the wait" };
   });
   await step("8", "reconnect", async () => {
@@ -223,10 +224,11 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
     if ("uncertain" in submitted) throw new Error("its spawn's answer was lost; it is left for cleanup to settle");
     await sandbox.waitFor(submitted.operationId, ["EXECUTING"], 60_000);
     const spawned = await sandbox.subprocess(submitted.operationId, { label: "sleeper", command: "/bin/sleep", args: ["60"] });
-    const outcome = await sandbox.cancel(submitted.operationId);
-    let stopped: boolean | null = null;
-    if ("spid" in spawned) stopped = await sandbox.subprocessResult(submitted.operationId, spawned.spid, 5_000).then((result) => result !== null, () => true);
-    results.parentCancel = { parent: outcome?.status ?? null, subprocessStopped: stopped };
+    const { value: outcome, seconds } = await timed(() => sandbox.cancel(submitted.operationId));
+    // The child counts as stopped only when the service reports its end: silence, or a read that fails, shows nothing.
+    let child: "ended" | "not ended" | "unknown" = "unknown";
+    if ("spid" in spawned) child = await sandbox.subprocessResult(submitted.operationId, spawned.spid, 5_000).then((result) => (result ? "ended" : "not ended"), () => "unknown");
+    results.parentCancel = { parent: outcome?.status ?? null, seconds: outcome ? seconds : null, child };
     return { operationId: submitted.operationId, outcome };
   });
   return results;
@@ -254,6 +256,18 @@ export interface Verdict {
   detail: string;
 }
 
+export type Decision = "adopt" | "adopt with concern" | "defer" | "inconclusive";
+
+/** One way of running steps, judged on its own evidence: its correctness and its latency together. */
+export interface PatternJudgement {
+  pattern: "A" | "B";
+  name: string;
+  /** Its own critical checks, then the two that hold for both patterns (reattaching, telling a timeout apart). */
+  verdicts: Verdict[];
+  latency: { median: number | null; outcome: "adopt" | "concern" | "defer" | "not-run" };
+  outcome: Decision;
+}
+
 const median = (values: readonly number[]) => {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -262,52 +276,95 @@ const median = (values: readonly number[]) => {
 };
 
 /**
- * Judges the results against the thresholds agreed before the run. A failed critical criterion means defer; an
- * inconclusive one (a positive control that didn't work, say) means no adoption can be claimed. Latency is judged on
- * the better of the two patterns, by the median per step.
+ * Judges the results against the thresholds agreed before the run, one pattern at a time: a pattern is adopted only on
+ * its own evidence, its checks and its latency together, never with another pattern's. Two checks hold for both, since
+ * both run as operations: reattaching to one, and telling its timeout apart from SUCCESS. A failed critical check, or a
+ * median step above the concern threshold, defers that pattern; an inconclusive check (a positive control that didn't
+ * work, say) means no adoption can be claimed for it. The decision is the better pattern's.
  */
-export function evaluate(results: ProbeResults): { verdicts: Verdict[]; latency: { perOperation: number | null; perSubprocess: number | null; better: number | null; outcome: "adopt" | "concern" | "defer" | "not-run" }; decision: "adopt" | "adopt with concern" | "defer" | "inconclusive" } {
-  const of = (id: string) => results.steps.find((step) => step.id === id) ?? null;
-  const out = (id: string) => of(id)?.outcome ?? null;
-  const verdicts: Verdict[] = [];
-  const add = (id: string, criterion: string, critical: boolean, outcome: Verdict["outcome"], detail: string) => verdicts.push({ id, criterion, critical, outcome, detail });
+export function evaluate(results: ProbeResults): { patterns: PatternJudgement[]; recorded: Verdict[]; decision: Decision; pattern: "A" | "B" | null } {
+  const out = (id: string) => results.steps.find((step) => step.id === id)?.outcome ?? null;
+  const inside = (label: string) => results.subprocesses.find((s) => s.label === label) ?? null;
+  const verdict = (id: string, criterion: string, outcome: Verdict["outcome"], detail: string, critical = true): Verdict => ({ id, criterion, critical, outcome, detail });
 
+  const control = out("3");
+  const NETWORK = "Network denial shown by behaviour, against a working positive control";
+  /** Denied attempts as a network check printed them: none may get through, at least one must be refused. */
+  const network = (stdout: string | null, notRun: string, otherInterface: boolean, extra = ""): Verdict => {
+    if (stdout === null) return verdict("network", NETWORK, "not-run", notRun);
+    if (/^REACHED /m.test(stdout) || otherInterface) return verdict("network", NETWORK, "fail", otherInterface ? "a network interface other than lo exists with networking off" : "a connection got through with networking off");
+    if (control?.verdict !== "passed") return verdict("network", NETWORK, "inconclusive", control ? `the positive control didn't connect (${control.verdict}), so the failed attempts prove nothing` : "the positive control didn't run");
+    const blocked = (stdout.match(/^BLOCKED /gm) ?? []).length;
+    return verdict("network", NETWORK, blocked >= 1 ? "pass" : "inconclusive", `${blocked} attempt(s) blocked${extra}; the control connected`);
+  };
+  const PATCH = "The patch and report are retrieved, with matching hashes";
+  const patch = (step: string): Verdict => {
+    const downloads = results.downloads.filter((d) => d.step === step);
+    const matched = downloads.filter((d) => d.matched);
+    const both = matched.some((d) => d.path.endsWith("patch.diff")) && matched.some((d) => d.path.endsWith("report.txt"));
+    return verdict("patch", PATCH, both ? "pass" : downloads.length ? "fail" : "not-run", `${matched.length} of ${downloads.length} download(s) matched`);
+  };
+
+  const timeout = out("6");
+  const shared = [
+    verdict("reattach", "Reattaching observes the same operation, with no second spawn", !results.reattach ? "not-run" : results.reattach.sameOperation && results.reattach.spawns === 1 ? "pass" : "fail", results.reattach ? `same operation: ${results.reattach.sameOperation}, spawns: ${results.reattach.spawns}` : "step 8 didn't run"),
+    verdict("timeout", "An operation's timeout is told apart from SUCCESS", !timeout ? "not-run" : timeout.verdict === "timed-out" ? "pass" : "fail", `step 6: ${timeout?.status ?? "?"}/${timeout?.verdict ?? "?"}`),
+  ];
+
+  // Pattern A: one operation per step, state carried by the image each one leaves.
   const edit = out("1");
   const denied = out("2");
-  const control = out("3");
   const onlyLoopback = edit ? /interfaces: lo\s*$/.test(edit.stdout.trim()) : null;
-  const reached = denied ? /^REACHED /m.test(denied.stdout) : null;
-  const blocked = denied ? (denied.stdout.match(/^BLOCKED /gm) ?? []).length : 0;
-  if (!edit || !denied) add("network", "Network denial shown by behaviour, against a working positive control", true, "not-run", "the edit or the denied check didn't run");
-  else if (reached || onlyLoopback === false) add("network", "Network denial shown by behaviour, against a working positive control", true, "fail", reached ? "a connection got through with networking off" : "a network interface other than lo exists with networking off");
-  else if (!control || control.verdict !== "passed") add("network", "Network denial shown by behaviour, against a working positive control", true, "inconclusive", control ? `the positive control didn't connect (${control.verdict}), so the failed attempts prove nothing` : "the positive control didn't run");
-  else add("network", "Network denial shown by behaviour, against a working positive control", true, blocked >= 1 ? "pass" : "inconclusive", `${blocked} attempt(s) blocked; only lo present; the control connected`);
-
-  const continued = (denied && /CONTINUED/.test(denied.stdout) && !/NOT-CONTINUED/.test(denied.stdout)) || results.subprocesses.some((s) => s.label === "inspect" && /Hello, Nivra/.test(s.stdout));
-  add("continuation", "State continues through an image, or inside a parent", true, continued ? "pass" : edit ? "fail" : "not-run", continued ? "the edit was there in a later step" : "no later step saw the edit");
-
-  add("cancel", "A cancel reaches a terminal state within 60 s", true, !results.cancel ? "not-run" : results.cancel.reachedTerminal && (results.cancel.seconds ?? Infinity) <= 60 ? "pass" : "fail", results.cancel ? `terminal: ${results.cancel.reachedTerminal}, after ${results.cancel.seconds ?? "?"} s` : "step 7 didn't run");
-
-  add("reattach", "Reattaching observes the same operation, with no second spawn", true, !results.reattach ? "not-run" : results.reattach.sameOperation && results.reattach.spawns === 1 ? "pass" : "fail", results.reattach ? `same operation: ${results.reattach.sameOperation}, spawns: ${results.reattach.spawns}` : "step 8 didn't run");
-
+  const continued = denied ? /CONTINUED/.test(denied.stdout) && !/NOT-CONTINUED/.test(denied.stdout) : null;
   const failing = out("4");
-  const timeout = out("6");
-  const exitOk = failing?.status === "SUCCESS" && failing.verdict === "command-failed";
-  const timeoutOk = timeout?.verdict === "timed-out";
-  add("exit", "The exit code and a timeout are told apart from SUCCESS", true, !failing || !timeout ? "not-run" : exitOk && timeoutOk ? "pass" : "fail", `failing test: ${failing?.status ?? "?"}/${failing?.verdict ?? "?"}; timeout: ${timeout?.status ?? "?"}/${timeout?.verdict ?? "?"}`);
+  const cancel = results.cancel;
+  const a = [
+    network(edit && denied ? denied.stdout : null, "the edit or the denied check didn't run", onlyLoopback === false, "; only lo present"),
+    verdict("continuation", "State continues through the image an operation leaves", !edit ? "not-run" : !edit.resultImage ? "fail" : continued === null ? "not-run" : continued ? "pass" : "fail", !edit ? "step 1 didn't run" : !edit.resultImage ? "step 1 left no image" : continued === null ? "step 2 didn't run" : continued ? "step 2 saw step 1's edit" : "step 2 didn't see step 1's edit"),
+    verdict("cancel", "A cancel reaches CANCELLED within 60 s", !cancel ? "not-run" : cancel.status === "CANCELLED" && (cancel.seconds ?? Infinity) <= 60 ? "pass" : "fail", cancel ? `ended ${cancel.status ?? "not at all within the wait"}${cancel.seconds !== null ? `, ${cancel.seconds.toFixed(1)} s after the cancel` : ""}` : "step 7 didn't run"),
+    verdict("exit", "A failing command's exit code is told apart from SUCCESS", !failing ? "not-run" : failing.status === "SUCCESS" && failing.verdict === "command-failed" ? "pass" : "fail", `step 4: ${failing?.status ?? "?"}/${failing?.verdict ?? "?"}`),
+    patch("5"),
+  ];
 
-  const matched = results.downloads.filter((d) => d.matched);
-  add("patch", "The patch and report are retrieved, with matching hashes", true, matched.some((d) => d.path.endsWith("patch.diff")) && matched.some((d) => d.path.endsWith("report.txt")) ? "pass" : results.downloads.length ? "fail" : "not-run", `${matched.length} of ${results.downloads.length} download(s) matched`);
+  // Pattern B: one bounded parent, each step a subprocess inside it.
+  const attempt = inside("network attempt");
+  const inspect = inside("inspect");
+  const failingInside = inside("failing test");
+  const passingInside = inside("passing test");
+  const parent = results.parentCancel;
+  const exitsInside = !failingInside || !passingInside ? "not-run" : failingInside.exitCode === null || passingInside.exitCode === null ? "inconclusive" : failingInside.exitCode === 1 && passingInside.exitCode === 0 ? "pass" : "fail";
+  const b = [
+    network(attempt?.stdout ?? null, "the network attempt didn't run", false),
+    verdict("continuation", "State continues between subprocesses inside the parent", !inspect ? "not-run" : /Hello, Nivra/.test(inspect.stdout) ? "pass" : "fail", !inspect ? "the inspection didn't run" : /Hello, Nivra/.test(inspect.stdout) ? "the inspection saw the edit" : "the inspection didn't see the edit"),
+    verdict(
+      "cancel",
+      "A cancel reaches CANCELLED within 60 s, and stops the parent's running subprocess",
+      !parent ? "not-run" : parent.parent !== "CANCELLED" || (parent.seconds ?? Infinity) > 60 ? "fail" : parent.child === "ended" ? "pass" : "inconclusive",
+      parent ? `the parent ended ${parent.parent ?? "not at all within the wait"}${parent.seconds !== null ? `, ${parent.seconds.toFixed(1)} s after the cancel` : ""}; its subprocess ${parent.child === "ended" ? "was reported ended" : parent.child === "not ended" ? "wasn't reported ended within 5 s" : "couldn't be read"}` : "step 11 didn't run",
+    ),
+    verdict("exit", "A failing command's exit code is told apart from a passing one", exitsInside, `failing test: exit ${failingInside?.exitCode ?? "?"}; passing test: exit ${passingInside?.exitCode ?? "?"}`),
+    patch("10"),
+  ];
 
-  add("lost-answer", "A spawn whose answer was lost is found by its correlation id", false, !results.lostAnswer ? "not-run" : results.lostAnswer.found && results.lostAnswer.spawns === 1 ? "pass" : "fail", results.lostAnswer?.detail ?? "step 9 didn't run");
+  const judge = (pattern: "A" | "B", name: string, own: Verdict[], seconds: number[]): PatternJudgement => {
+    const verdicts = [...own, ...shared];
+    const value = median(seconds);
+    const latency = value === null ? "not-run" : value <= LATENCY.adoptSeconds ? "adopt" : value <= LATENCY.concernSeconds ? "concern" : "defer";
+    const outcome: Decision =
+      verdicts.some((v) => v.outcome === "fail") || latency === "defer" ? "defer" : verdicts.some((v) => v.outcome !== "pass") || latency === "not-run" ? "inconclusive" : latency === "concern" ? "adopt with concern" : "adopt";
+    return { pattern, name, verdicts, latency: { median: value, outcome: latency }, outcome };
+  };
+  const patterns = [
+    judge("A", "one operation per step", a, results.steps.filter((s) => ["1", "2", "4", "5", "8", "9"].includes(s.id) && s.outcome && s.seconds !== null).map((s) => s.seconds!)),
+    judge("B", "a parent with subprocesses", b, results.subprocesses.filter((s) => s.seconds !== null).map((s) => s.seconds!)),
+  ];
 
-  const perOperation = median(results.steps.filter((s) => ["1", "2", "4", "5", "8", "9"].includes(s.id) && s.outcome && s.seconds !== null).map((s) => s.seconds!));
-  const perSubprocess = median(results.subprocesses.filter((s) => s.seconds !== null).map((s) => s.seconds!));
-  const candidates = [perOperation, perSubprocess].filter((value): value is number => value !== null);
-  const better = candidates.length ? Math.min(...candidates) : null;
-  const latency = better === null ? "not-run" : better <= LATENCY.adoptSeconds ? "adopt" : better <= LATENCY.concernSeconds ? "concern" : "defer";
+  const recorded = [
+    verdict("lost-answer", "A spawn whose answer was lost is found by its correlation id", !results.lostAnswer ? "not-run" : results.lostAnswer.found && results.lostAnswer.spawns === 1 ? "pass" : "fail", results.lostAnswer?.detail ?? "step 9 didn't run", false),
+  ];
 
-  const critical = verdicts.filter((v) => v.critical);
-  const decision = critical.some((v) => v.outcome === "fail") || latency === "defer" ? "defer" : critical.some((v) => v.outcome !== "pass") || latency === "not-run" ? "inconclusive" : latency === "concern" ? "adopt with concern" : "adopt";
-  return { verdicts, latency: { perOperation, perSubprocess, better, outcome: latency }, decision };
+  const order: Decision[] = ["adopt", "adopt with concern", "inconclusive", "defer"];
+  const best = [...patterns].sort((x, y) => order.indexOf(x.outcome) - order.indexOf(y.outcome) || (x.latency.median ?? Infinity) - (y.latency.median ?? Infinity))[0]!;
+  const adopted = best.outcome === "adopt" || best.outcome === "adopt with concern";
+  return { patterns, recorded, decision: best.outcome, pattern: adopted ? best.pattern : null };
 }

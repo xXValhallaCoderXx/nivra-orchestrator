@@ -250,9 +250,15 @@ export class SandboxApi {
     return { status: "created", spid: Subprocess.parse(this.#json(response)).spid };
   }
 
-  /** A subprocess's result, reconstructed by the service from the operation's events. */
-  async subprocess(operationId: string, spid: number): Promise<unknown> {
-    return this.#json(await this.#read("Reading a subprocess", { method: "GET", path: `/v1/operations/${encodeURIComponent(operationId)}/subprocesses/${spid}` }));
+  /**
+   * A subprocess's result, reconstructed by the service from the operation's events. While the child is still running
+   * the service answers 425 with when to ask again: that is `pending`, never a failure, for the caller to poll within
+   * its own deadline.
+   */
+  async subprocess(operationId: string, spid: number): Promise<{ status: "ready"; result: unknown } | { status: "pending"; retryAfterMs: number | null }> {
+    const response = await this.#read("Reading a subprocess", { method: "GET", path: `/v1/operations/${encodeURIComponent(operationId)}/subprocesses/${spid}` }, [425]);
+    if (response.status === 425) return { status: "pending", retryAfterMs: retryAfterMs(response) };
+    return { status: "ready", result: this.#json(response) };
   }
 
   async killSubprocess(operationId: string, spid: number, signal = "SIGKILL"): Promise<void> {
@@ -272,8 +278,11 @@ export class SandboxApi {
     return response.body;
   }
 
-  /** A read, retried after a 429 or a server error, or a lost answer, within the read deadline. */
-  async #read(what: string, request: Omit<TransportRequest, "timeoutMs">): Promise<TransportResponse> {
+  /**
+   * A read, retried after a 429 or a server error, or a lost answer, within the read deadline. A status in `answers` is
+   * an answer the endpoint documents, handed back as it is.
+   */
+  async #read(what: string, request: Omit<TransportRequest, "timeoutMs">, answers: readonly number[] = []): Promise<TransportResponse> {
     const deadline = performance.now() + this.#readDeadlineMs;
     for (let attempt = 0; ; attempt++) {
       let response: TransportResponse | null = null;
@@ -283,7 +292,7 @@ export class SandboxApi {
       } catch (error) {
         lost = error;
       }
-      if (response && response.status >= 200 && response.status <= 299) return response;
+      if (response && ((response.status >= 200 && response.status <= 299) || answers.includes(response.status))) return response;
       const retryable = !response || response.status === 429 || response.status >= 500;
       const wait = response ? retryAfterMs(response) ?? 1_000 * 2 ** Math.min(attempt, 4) : 1_000 * 2 ** Math.min(attempt, 4);
       if (!retryable || performance.now() + wait > deadline) {

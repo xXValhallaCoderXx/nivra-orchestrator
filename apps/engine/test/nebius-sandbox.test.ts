@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import { SandboxApi, SandboxNetworkError, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
-import { evaluate, probePlan, PROBE_LIMITS, runStageOne } from "../src/exec/nebius/probe.ts";
-import { classify, Journal, Sandbox, SandboxRefusal } from "../src/exec/nebius/sandbox.ts";
+import { SandboxApi, SandboxHttpError, SandboxNetworkError, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
+import { evaluate, probePlan, PROBE_LIMITS, runStageOne, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
+import { classify, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
 
 /**
  * Nebius Sandboxes, offline (NIV-29): the client and the lifecycle against a fake service that behaves as the
@@ -40,7 +40,7 @@ interface FakeOperation {
   status: string;
   cancelled: boolean;
   finishedBySubprocess: boolean;
-  subprocesses: Map<number, { args: string[]; exitCode: number; stdout: string; stopped: boolean }>;
+  subprocesses: Map<number, { args: string[]; exitCode: number; stdout: string; stopped: boolean; pending: number }>;
   events: string[];
 }
 
@@ -57,6 +57,10 @@ class FakeService {
   dropNextSpawnAnswer = false;
   /** The next spawn answers 5xx, creating the operation or not. */
   failNextSpawn: { create: boolean } | null = null;
+  /** The next spawn is turned down (400), creating nothing. */
+  refuseNextSpawn = false;
+  /** How many times each new subprocess answers "not ready yet" (425) before its result. */
+  subprocessPending = 0;
   /** The next read answers 429 with this Retry-After. */
   rateLimitNextRead: number | null = null;
   /** Operations whose list entries are hidden (as if beyond the search window). */
@@ -106,6 +110,10 @@ class FakeService {
 
   #spawn(body: Record<string, unknown>): TransportResponse {
     this.spawns++;
+    if (this.refuseNextSpawn) {
+      this.refuseNextSpawn = false;
+      return encode({ error: "bad request" }, 400);
+    }
     const fail = this.failNextSpawn;
     this.failNextSpawn = null;
     if (fail && !fail.create) return encode({ error: "unavailable" }, 503);
@@ -170,15 +178,17 @@ class FakeService {
       const args = [body.command, ...body.args].join(" ");
       const exitCode = /test\.sh Hello, world$/.test(args) ? 1 : 0;
       const stdout = /cat \/work\/greet\.sh/.test(args) ? 'echo "Hello, Nivra"\n' : /sha256sum/.test(args) ? `${sha("PASS: Hello, Nivra\n")}  /out/report.txt\n${sha("--- base/greet.sh\n")}  /out/patch.diff\n` : /wget/.test(args) ? "BLOCKED http://example.test: bad address\n" : "";
-      op.subprocesses.set(next, { args: [body.command, ...body.args], exitCode, stdout, stopped: false });
+      op.subprocesses.set(next, { args: [body.command, ...body.args], exitCode, stdout, stopped: false, pending: this.subprocessPending });
       op.events.push(`data: ${JSON.stringify({ type: "spawn", spid: next, env: body.env })}`);
       if (/touch \/tmp\/nivra-done/.test(args)) op.finishedBySubprocess = true;
       if (timeout?.started) return encode({ error: "gateway timeout" }, 504);
       return encode({ spid: next }, 201);
     }
     const sub = op.subprocesses.get(spid ?? -1);
-    if (!sub || sub.stopped) return encode({ error: "no such subprocess" }, 404);
-    if (/sleep 60/.test(sub.args.join(" "))) return encode({ state: { exit_code: null } });
+    if (!sub) return encode({ error: "no such subprocess" }, 404);
+    // As documented: a signalled child reports exit code -1 and its signal; one still running is "not ready yet".
+    if (sub.stopped) return encode({ state: { exit_code: -1, signal: 9 } });
+    if (/sleep 60/.test(sub.args.join(" ")) || sub.pending-- > 0) return encode({ error: "not ready" }, 425, { "retry-after": "3" });
     return encode({ state: { exit_code: sub.exitCode }, stdout: { value: sub.stdout } });
   }
 }
@@ -378,6 +388,32 @@ describe("Nebius Sandboxes, offline: deadlines, retries and cleanup (NIV-29)", (
     const recovered = await sandboxOn(service, { journal: new Journal(path) }).sandbox.cleanup();
     assert.deepEqual([recovered.cancelled.length, recovered.unresolved, service.operations[0]?.cancelled], [1, [], true]);
   });
+
+  it("finds and stops an operation whose probe died after sending its spawn, before the answer: the intent alone is enough", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const path = join(mkdtempSync(join(tmpdir(), "nivra probe ")), "journal.jsonl");
+    // The request reaches the service and creates the operation; the probe dies before its answer arrives.
+    const dying: Transport = async (request) => {
+      const response = await service.transport(request);
+      return request.method === "POST" && request.path === "/v1/instances" ? new Promise<TransportResponse>(() => undefined) : response;
+    };
+    const time = clock();
+    void new Sandbox(new SandboxApi(dying, { sleep: time.sleep }), { journal: new Journal(path), sleep: time.sleep, now: time.now }).submit(step("died"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual([service.operations.length, new Journal(path).entries.map((e) => e.kind)], [1, ["intent"]]);
+    const recovered = await sandboxOn(service, { journal: new Journal(path) }).sandbox.cleanup();
+    assert.deepEqual([recovered.cancelled.length, recovered.unresolved, service.operations[0]?.cancelled], [1, [], true]);
+    assert.deepEqual(new Journal(path).entries.map((e) => e.kind), ["intent", "found", "cancel", "terminal"]);
+  });
+
+  it("settles a spawn the service turned down, which created nothing, so the next one can go", async () => {
+    const service = new FakeService(() => succeed());
+    service.refuseNextSpawn = true;
+    const { sandbox } = sandboxOn(service);
+    await assert.rejects(sandbox.submit(step("refused")), (error: Error) => error instanceof SandboxHttpError && error.status === 400);
+    assert.deepEqual([sandbox.journal.open(), sandbox.journal.entries.map((e) => e.kind)], [{ operations: [], uncertain: [] }, ["intent", "refused"]]);
+    assert.ok("operationId" in (await sandbox.submit(step("next"))));
+  });
 });
 
 describe("Nebius Sandboxes, offline: subprocesses and downloads (NIV-29)", () => {
@@ -394,6 +430,27 @@ describe("Nebius Sandboxes, offline: subprocesses and downloads (NIV-29)", () =>
     service.timeoutNextSubprocess = { started: false };
     const lost = await sandbox.subprocess(parent.operationId, { label: "lost", command: "/bin/true", args: [] });
     assert.ok("uncertain" in lost && /may or may not have started/.test(lost.uncertain));
+  });
+
+  it("waits for a subprocess that isn't ready yet as long as the service says, within its deadline, and never past it", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING", "SUCCESS"], waits: true, exitCode: 0 }));
+    service.subprocessPending = 2;
+    const { sandbox, time } = sandboxOn(service);
+    const parent = (await sandbox.submit(step("parent", { disposable: false, timeoutSeconds: 180 }))) as { operationId: string };
+    const failing = await sandbox.subprocess(parent.operationId, { label: "failing", command: "/bin/sh", args: ["/work/test.sh", "Hello, world"] });
+    assert.ok("spid" in failing);
+    const before = time.waits.length;
+    const result = await sandbox.subprocessResult(parent.operationId, failing.spid, 30_000);
+    assert.deepEqual([result?.exitCode, time.waits.slice(before)], [1, [3_000, 3_000]]);
+    // A child that keeps running is given up at the deadline, never waited on past it.
+    const sleeper = await sandbox.subprocess(parent.operationId, { label: "sleeper", command: "/bin/sleep", args: ["60"] });
+    assert.ok("spid" in sleeper);
+    const start = time.now();
+    assert.equal(await sandbox.subprocessResult(parent.operationId, sleeper.spid, 10_000), null);
+    assert.equal(time.now() - start, 10_000);
+    // Once its parent is cancelled, the child reports the signal that ended it.
+    await sandbox.cancel(parent.operationId);
+    assert.deepEqual(await sandbox.subprocessResult(parent.operationId, sleeper.spid, 10_000), { exitCode: -1, signal: 9, timedOut: false, stdout: "", stderr: "" });
   });
 
   it("refuses a download over its cap, or one that doesn't match the hash the operation printed", async () => {
@@ -465,8 +522,10 @@ describe("Nebius Sandboxes, offline: the whole probe against the fake service (N
     const service = probeService({ controlWorks: true });
     const { results, settled, judged } = await stageOne(service, "http://example.test/");
     assert.deepEqual(results.errors, []);
-    assert.deepEqual(judged.verdicts.map((v) => [v.id, v.outcome]), [["network", "pass"], ["continuation", "pass"], ["cancel", "pass"], ["reattach", "pass"], ["exit", "pass"], ["patch", "pass"], ["lost-answer", "pass"]]);
-    assert.equal(judged.decision, "adopt");
+    const every = ["network", "continuation", "cancel", "exit", "patch", "reattach", "timeout"].map((id) => [id, "pass"]);
+    assert.deepEqual(judged.patterns.map((p) => [p.pattern, p.verdicts.map((v) => [v.id, v.outcome]), p.outcome]), [["A", every, "adopt"], ["B", every, "adopt"]]);
+    assert.deepEqual(judged.recorded.map((v) => [v.id, v.outcome]), [["lost-answer", "pass"]]);
+    assert.deepEqual([judged.decision, results.parentCancel?.child], ["adopt", "ended"]);
     assert.deepEqual(settled, { cancelled: [], unresolved: [] });
     const bodies = spawned(service);
     assert.ok(bodies.length <= PROBE_LIMITS.maxOperations);
@@ -476,9 +535,73 @@ describe("Nebius Sandboxes, offline: the whole probe against the fake service (N
   });
 
   it("calls the network result inconclusive, and adopts nothing, when the positive control doesn't connect or doesn't run", async () => {
+    const network = (judged: ReturnType<typeof evaluate>) => judged.patterns.map((p) => p.verdicts.find((v) => v.id === "network")?.outcome);
     const broken = await stageOne(probeService({ controlWorks: false }), "http://example.test/");
-    assert.deepEqual([broken.judged.verdicts.find((v) => v.id === "network")?.outcome, broken.judged.decision], ["inconclusive", "inconclusive"]);
+    assert.deepEqual([network(broken.judged), broken.judged.decision, broken.judged.pattern], [["inconclusive", "inconclusive"], "inconclusive", null]);
     const skipped = await stageOne(probeService({ controlWorks: true }), null);
-    assert.deepEqual([skipped.judged.verdicts.find((v) => v.id === "network")?.outcome, skipped.judged.decision], ["inconclusive", "inconclusive"]);
+    assert.deepEqual([network(skipped.judged), skipped.judged.decision, skipped.judged.pattern], [["inconclusive", "inconclusive"], "inconclusive", null]);
+  });
+});
+
+/** An operation's outcome, as `classify` reads the service's answer. */
+const outcome = (stdout: string, state: { exit_code?: number | null; timed_out?: boolean } = { exit_code: 0 }, status = "SUCCESS", image: string | null = null): Outcome =>
+  classify({ uuid: randomUUID(), status, result_image_uuid: image, metadata: { result: { state, stdout: { value: stdout } } } });
+
+/** Results in which both patterns pass every check, each at its own pace; a test then breaks what it is about. */
+function passing(seconds: { a: number; b: number }): ProbeResults {
+  const done = (id: string, label: string, result: Outcome): StepResult => ({ id, label, operationId: result.operationId, outcome: result, seconds: seconds.a, note: "" });
+  const inside = (label: string, exitCode: number, stdout = ""): SubprocessResult => ({ label, exitCode, seconds: seconds.b, stdout });
+  const denied = "CONTINUED\nBLOCKED http://example.test/: bad address\n";
+  const download = (step: string, path: string) => ({ step, path, bytes: 10, sha256: sha(path), matched: true });
+  return {
+    steps: [
+      done("1", "edit", outcome("interfaces: lo ", { exit_code: 0 }, "SUCCESS", "img-A")),
+      done("2", "network denied", outcome(denied)),
+      done("3", "network control", outcome("")),
+      done("4", "failing test", outcome("FAIL", { exit_code: 1 })),
+      done("5", "patch", outcome("hashes", { exit_code: 0 }, "SUCCESS", "img-D")),
+      done("6", "timeout", outcome("", { exit_code: null, timed_out: true })),
+      done("7", "cancel", outcome("", {}, "CANCELLED")),
+      done("8", "reconnect", outcome("done")),
+      done("9", "lost answer", outcome("lost-and-found")),
+      done("10", "parent", outcome("", { exit_code: 0 }, "SUCCESS", "img-P")),
+      done("11", "parent cancel", outcome("", {}, "CANCELLED")),
+    ],
+    subprocesses: [inside("edit", 0), inside("inspect", 0, 'echo "Hello, Nivra"\n'), inside("network attempt", 0, denied), inside("failing test", 1), inside("passing test", 0), inside("patch", 0), inside("done", 0)],
+    downloads: [download("5", "/out/patch.diff"), download("5", "/out/report.txt"), download("10", "/out/patch.diff"), download("10", "/out/report.txt")],
+    reattach: { sameOperation: true, spawns: 1 },
+    lostAnswer: { found: true, spawns: 1, detail: "adopted" },
+    cancel: { reachedTerminal: true, status: "CANCELLED", seconds: 2 },
+    parentCancel: { parent: "CANCELLED", seconds: 2, child: "ended" },
+    errors: [],
+  };
+}
+
+describe("Nebius Sandboxes, offline: each pattern judged on its own evidence (NIV-29)", () => {
+  it("never adopts a quick pattern that failed its own checks on the strength of a slower one that passed", () => {
+    const run = passing({ a: 25, b: 1 });
+    // B is quick and broken: a connection got through, the failing test passed, and its cancel never ended the parent.
+    run.subprocesses = run.subprocesses.map((s) => (s.label === "network attempt" ? { ...s, stdout: "CONTINUED\nREACHED http://example.test/\n" } : s.label === "failing test" ? { ...s, exitCode: 0 } : s));
+    run.parentCancel = { parent: null, seconds: null, child: "unknown" };
+    const judged = evaluate(run);
+    assert.deepEqual(judged.patterns.map((p) => [p.pattern, p.outcome, p.latency.outcome]), [["A", "adopt with concern", "concern"], ["B", "defer", "adopt"]]);
+    assert.deepEqual(judged.patterns[1]?.verdicts.filter((v) => v.outcome !== "pass").map((v) => v.id), ["network", "cancel", "exit"]);
+    assert.deepEqual([judged.decision, judged.pattern], ["adopt with concern", "A"]);
+  });
+
+  it("defers when the pattern that passes is too slow and the quick one fails, and adopts the quick one once it passes", () => {
+    const broken = passing({ a: 45, b: 1 });
+    broken.subprocesses = broken.subprocesses.map((s) => (s.label === "inspect" ? { ...s, stdout: "" } : s));
+    const judged = evaluate(broken);
+    assert.deepEqual([judged.patterns.map((p) => p.outcome), judged.decision, judged.pattern], [["defer", "defer"], "defer", null]);
+    const working = evaluate(passing({ a: 45, b: 1 }));
+    assert.deepEqual([working.patterns.map((p) => p.outcome), working.decision, working.pattern], [["defer", "adopt"], "adopt", "B"]);
+  });
+
+  it("holds a parent whose running subprocess was never reported stopped as inconclusive, never as passed", () => {
+    const run = passing({ a: 45, b: 1 });
+    run.parentCancel = { parent: "CANCELLED", seconds: 2, child: "not ended" };
+    const judged = evaluate(run);
+    assert.deepEqual([judged.patterns[1]?.verdicts.find((v) => v.id === "cancel")?.outcome, judged.decision, judged.pattern], ["inconclusive", "inconclusive", null]);
   });
 });

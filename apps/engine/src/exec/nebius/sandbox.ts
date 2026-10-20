@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { readStatus, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnBody } from "./api.ts";
+import { readStatus, SandboxHttpError, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
 
 /**
  * The lifecycle of Nebius Sandboxes operations, as Nivra models it (NIV-29), from the documentation of 20 October 2026:
@@ -20,6 +20,8 @@ import { readStatus, TERMINAL, type FileRef, type Operation, type OperationStatu
 export type JournalEntry =
   | { kind: "intent"; wall: string; correlation: string; label: string }
   | { kind: "submitted"; wall: string; correlation: string; operationId: string }
+  /** The service turned the spawn down (4xx): it created nothing. */
+  | { kind: "refused"; wall: string; correlation: string; status: number }
   | { kind: "uncertain"; wall: string; correlation: string; cause: string }
   | { kind: "found"; wall: string; correlation: string; operationId: string }
   | { kind: "cancel"; wall: string; operationId: string }
@@ -48,16 +50,18 @@ export class Journal {
     return existsSync(this.#path) ? readFileSync(this.#path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as JournalEntry) : [];
   }
 
-  /** Operations known and not yet seen to end, and spawns whose operation hasn't been found: what cleanup must settle. */
+  /**
+   * Operations known and not yet seen to end, and spawns whose operation hasn't been found: what cleanup must settle.
+   * A spawn is settled only by its answer, by being found, or by the service turning it down. Every other intent is
+   * uncertain, whether or not its lost answer was journaled: a probe that dies after sending a spawn, before its answer
+   * arrives, leaves only the intent, and the operation may be running.
+   */
   open(): { operations: string[]; uncertain: Array<{ correlation: string; wall: string; label: string }> } {
     const entries = this.entries;
     const ended = new Set(entries.flatMap((e) => (e.kind === "terminal" ? [e.operationId] : [])));
     const operations = [...new Set(entries.flatMap((e) => (e.kind === "submitted" || e.kind === "found" ? [e.operationId] : [])))].filter((id) => !ended.has(id));
-    const settled = new Set(entries.flatMap((e) => (e.kind === "submitted" || e.kind === "found" ? [e.correlation] : [])));
-    const intents = new Map(entries.flatMap((e) => (e.kind === "intent" ? [[e.correlation, e] as const] : [])));
-    const uncertain = [...new Set(entries.flatMap((e) => (e.kind === "uncertain" ? [e.correlation] : [])))]
-      .filter((correlation) => !settled.has(correlation))
-      .map((correlation) => ({ correlation, wall: intents.get(correlation)?.wall ?? "", label: intents.get(correlation)?.label ?? "" }));
+    const settled = new Set(entries.flatMap((e) => (e.kind === "submitted" || e.kind === "found" || e.kind === "refused" ? [e.correlation] : [])));
+    const uncertain = entries.flatMap((e) => (e.kind === "intent" && !settled.has(e.correlation) ? [{ correlation: e.correlation, wall: e.wall, label: e.label }] : []));
     return { operations, uncertain };
   }
 
@@ -247,7 +251,14 @@ export class Sandbox {
     if (open.operations.length || open.uncertain.length) throw new SandboxRefusal("One operation at a time: an earlier one hasn't ended, or a spawn whose answer was lost hasn't been settled.");
     const correlation = randomUUID();
     this.#journal.append({ kind: "intent", wall: this.#wallNow().toISOString(), correlation, label });
-    const answer = await this.#api.spawn({ ...body, env: { ...body.env, [CORRELATION]: correlation } }, options);
+    let answer: SpawnAnswer;
+    try {
+      answer = await this.#api.spawn({ ...body, env: { ...body.env, [CORRELATION]: correlation } }, options);
+    } catch (error) {
+      // Turned down, so nothing was created. Any other failure leaves the intent open, for cleanup to look for.
+      if (error instanceof SandboxHttpError && error.status >= 400 && error.status <= 499) this.#journal.append({ kind: "refused", wall: this.#wallNow().toISOString(), correlation, status: error.status });
+      throw error;
+    }
     if (answer.status === "created") {
       this.#journal.append({ kind: "submitted", wall: this.#wallNow().toISOString(), correlation, operationId: answer.id });
       return { operationId: answer.id };
@@ -386,15 +397,27 @@ export class Sandbox {
     return { uncertain: `the subprocess ${input.label} may or may not have started (${answer.cause})` };
   }
 
-  /** A subprocess's result, polled until it has an exit code, within `withinMs`. */
-  async subprocessResult(operationId: string, spid: number, withinMs: number): Promise<{ exitCode: number | null; timedOut: boolean; stdout: string; stderr: string } | null> {
+  /**
+   * A subprocess's result, polled until it has ended, within `withinMs`; null when it hadn't by then. A signalled child
+   * reports exit code -1 and its signal. While the child runs the service says when to ask again (HTTP 425): that wait
+   * is honoured, never past the deadline.
+   */
+  async subprocessResult(operationId: string, spid: number, withinMs: number): Promise<{ exitCode: number | null; signal: number | string | null; timedOut: boolean; stdout: string; stderr: string } | null> {
     const deadline = this.#now() + withinMs;
     for (;;) {
-      const raw = (await this.#api.subprocess(operationId, spid)) as { state?: { exit_code?: unknown; timed_out?: unknown } | null; stdout?: { value?: string; encoding?: string } | null; stderr?: { value?: string; encoding?: string } | null } | null;
-      const exitCode = typeof raw?.state?.exit_code === "number" ? raw.state.exit_code : null;
-      if (exitCode !== null) return { exitCode, timedOut: raw?.state?.timed_out === true, stdout: text(raw?.stdout), stderr: text(raw?.stderr) };
-      if (this.#now() > deadline) return null;
-      await this.#sleep(this.#pollMs);
+      const answer = await this.#api.subprocess(operationId, spid);
+      let wait = this.#pollMs;
+      if (answer.status === "ready") {
+        const raw = answer.result as { state?: { exit_code?: unknown; signal?: unknown; timed_out?: unknown } | null; stdout?: { value?: string; encoding?: string } | null; stderr?: { value?: string; encoding?: string } | null } | null;
+        const exitCode = typeof raw?.state?.exit_code === "number" ? raw.state.exit_code : null;
+        const signal = typeof raw?.state?.signal === "number" || typeof raw?.state?.signal === "string" ? raw.state.signal : null;
+        if (exitCode !== null || signal !== null) return { exitCode, signal, timedOut: raw?.state?.timed_out === true, stdout: text(raw?.stdout), stderr: text(raw?.stderr) };
+      } else if (answer.retryAfterMs !== null) {
+        wait = Math.max(wait, answer.retryAfterMs);
+      }
+      const left = deadline - this.#now();
+      if (left <= 0) return null;
+      await this.#sleep(Math.min(wait, left));
     }
   }
 
