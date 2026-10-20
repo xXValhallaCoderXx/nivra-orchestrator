@@ -14,9 +14,10 @@ import { NOT_ONE_VISIBLE_LINE } from "../repo/paths.ts";
 export const MAX_PATH_BYTES = 1_024;
 const MAX_COMPONENT_BYTES = 255;
 const bytesOf = (text: string) => Buffer.byteLength(text, "utf8");
-/** `.git`, with the trailing dots and spaces NTFS ignores, or its NTFS short names. */
-const GIT_NAME = /^(\.git[. ]*|git~\d+)$/i;
-const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)(\..*)?$/i;
+/** `.git` or its NTFS short names, with the trailing dots and spaces NTFS ignores, and any stream after a colon. */
+const GIT_NAME = /^(\.git|git~\d+)[. ]*(:.*)?$/i;
+/** A device name Windows reserves, as git checks one: spaces may come before an extension (`con .txt`). */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$) *(\..*)?$/i;
 const WINDOWS_FORBIDDEN = /[<>:"|?*\\]/;
 
 /** Why a commit's own path can't go into a sandbox, or null when it can. */

@@ -13,7 +13,8 @@
 
 const BLOCK = 512;
 const encoder = new TextEncoder();
-const strict = new TextDecoder("utf-8", { fatal: true });
+// A leading byte-order mark is part of a name, so it is kept.
+const strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 export type TarEntry =
   | { path: string; kind: "file"; executable: boolean; bytes: Uint8Array }
@@ -92,8 +93,14 @@ export function writeTar(entries: readonly TarEntry[]): Uint8Array {
     blocks.push(header(name, "5", 0o755, 0));
   };
   for (const entry of entries) {
-    const parts = entry.path.split("/");
-    for (let depth = 1; depth < parts.length; depth++) folder(parts.slice(0, depth).join("/"));
+    // The parents not made yet, found from the deepest up to one that was: a folder's parents are always made first.
+    const missing: string[] = [];
+    for (let slash = entry.path.lastIndexOf("/"); slash > 0; slash = entry.path.lastIndexOf("/", slash - 1)) {
+      const parent = entry.path.slice(0, slash);
+      if (folders.has(parent)) break;
+      missing.push(parent);
+    }
+    for (let index = missing.length - 1; index >= 0; index--) folder(missing[index]!);
     if (entry.kind === "dir") {
       folder(entry.path);
       continue;
@@ -182,7 +189,9 @@ export function readTar(archive: Uint8Array, limits: TarLimits): TarEntry[] {
   if (archive.byteLength > limits.maxBytes) throw new TarRefusal(`The archive is ${archive.byteLength} bytes, over the ${limits.maxBytes} Nivra takes.`);
   if (archive.byteLength % BLOCK !== 0) throw new TarRefusal("The archive isn't a whole number of 512-byte blocks: it was cut short, or isn't a tar archive.");
   const entries: TarEntry[] = [];
-  const kinds = new Map<string, TarEntry["kind"]>();
+  // One place per name, a folder's places under it: each entry is checked against its parents in time linear in its
+  // path, however deep, so a hostile archive can't hold the engine up.
+  const root: Place = { kind: "dir", children: new Map() };
   let longName: string | null = null;
   let longLink: string | null = null;
   let offset = 0;
@@ -227,27 +236,47 @@ export function readTar(archive: Uint8Array, limits: TarLimits): TarEntry[] {
       if (type !== "5") throw new TarRefusal("The archive holds a file with no name.");
       continue;
     }
-    if (kinds.has(path)) throw new TarRefusal(`The archive holds ${path} twice.`);
     const entry: TarEntry =
       type === "5"
         ? { path, kind: "dir" }
         : type === "2"
           ? { path, kind: "link", target: checkedTarget(target, limits) }
           : { path, kind: "file", executable: (octal(block, 100, 8, "mode") & 0o100) !== 0, bytes: data.slice() };
-    kinds.set(path, entry.kind);
+    placeEntry(root, entry);
     entries.push(entry);
     if (entries.length > limits.maxEntries) throw new TarRefusal(`The archive holds more than ${limits.maxEntries} entries.`);
   }
-  // Every entry's parents must be folders, or not in the archive at all: never a file, never a link.
-  for (const entry of entries) {
-    const parts = entry.path.split("/");
-    for (let depth = 1; depth < parts.length; depth++) {
-      const parent = kinds.get(parts.slice(0, depth).join("/"));
-      if (parent === "file") throw new TarRefusal(`The archive holds ${entry.path} under ${parts.slice(0, depth).join("/")}, which it also holds as a file.`);
-      if (parent === "link") throw new TarRefusal(`The archive holds ${entry.path} under ${parts.slice(0, depth).join("/")}, which is a link.`);
-    }
-  }
   return entries;
+}
+
+interface Place {
+  /** null for a folder the archive only implies. */
+  kind: TarEntry["kind"] | null;
+  children: Map<string, Place> | null;
+}
+
+/** Puts an entry in its place. Its parents must be folders, never a file or a link, and nothing may be there yet. */
+function placeEntry(root: Place, entry: TarEntry): void {
+  const { path } = entry;
+  const under = (at: string, parent: TarEntry["kind"] | null) => new TarRefusal(`The archive holds ${at} under ${at.slice(0, at.lastIndexOf("/"))}, which ${parent === "link" ? "is a link" : "it also holds as a file"}.`);
+  let place = root;
+  let start = 0;
+  for (;;) {
+    const slash = path.indexOf("/", start);
+    const part = slash < 0 ? path.slice(start) : path.slice(start, slash);
+    place.children ??= new Map();
+    let next = place.children.get(part);
+    if (!next) place.children.set(part, (next = { kind: null, children: null }));
+    place = next;
+    if (slash < 0) break;
+    if (place.kind === "file" || place.kind === "link") throw under(path, place.kind);
+    start = slash + 1;
+  }
+  if (place.kind !== null) throw new TarRefusal(`The archive holds ${path} twice.`);
+  // Something came first under what is now a file or a link.
+  const [child] = place.children?.keys() ?? [];
+  if (entry.kind !== "dir" && child !== undefined) throw under(`${path}/${child}`, entry.kind);
+  place.kind = entry.kind;
 }
 
 function checkedTarget(target: string, limits: TarLimits): string {

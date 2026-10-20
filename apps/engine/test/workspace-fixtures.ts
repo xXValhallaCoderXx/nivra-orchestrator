@@ -5,7 +5,7 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { findGit } from "../src/exec/find-executable.ts";
-import { WorkspaceRefusal } from "../src/exec/git-tool.ts";
+import { WorkspaceRefusal, type RefusalCode } from "../src/exec/git-tool.ts";
 import { createLocalBackend } from "../src/exec/local.ts";
 import { PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
 import { checkCollected, COLLECT_SCRIPT, type Collected } from "../src/exec/patch.ts";
@@ -92,9 +92,10 @@ export async function snap(folder: string, extra: Partial<SnapshotOptions> = {})
   }
 }
 
-/** A refusal whose words match `pattern`. */
-export const refusal = (pattern: RegExp) => (error: unknown) => {
+/** A refusal whose words match `pattern`, of the kind `code` when one is given. */
+export const refusal = (pattern: RegExp, code?: RefusalCode) => (error: unknown) => {
   assert.ok(error instanceof WorkspaceRefusal, `expected a refusal, got ${String(error)}`);
+  if (code !== undefined) assert.equal(error.code, code, error.message);
   assert.match(error.message, pattern);
   return true;
 };

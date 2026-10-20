@@ -4,7 +4,7 @@ import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { hiddenReason, OUTPUT_DIRS } from "../repo/deny.ts";
 import { ExecRefusedError, type ExecRequest, type ExecutionSession } from "./backend.ts";
-import { runGitBytes, WorkspaceCancelled, WorkspaceRefusal, type GitTool } from "./git-tool.ts";
+import { runGitBytes, WorkspaceCancelled, WorkspaceRefusal, type GitTool, type RefusalCode } from "./git-tool.ts";
 import { credentialKinds, isLfsPointer, type Counted, type Snapshot, type SnapshotFile } from "./snapshot.ts";
 import { readTar, TarRefusal, type TarLimits } from "./tar.ts";
 import { byBytes, caseKey, isGitControlFile, proposedPathProblem } from "./workspace-rules.ts";
@@ -20,7 +20,10 @@ import { byBytes, caseKey, isGitControlFile, proposedPathProblem } from "./works
  *   generated output are left out and listed.
  * - **Validation**, of added and changed paths only, so a repository's own `aux.c` or `README`/`readme` pair never
  *   refuses a run. Each problem is a refusal in plain words:
- *   - a new path no target could hold (`proposedPathProblem`), or one at or under a submodule or an excluded folder;
+ *   - a new path no target could hold (`proposedPathProblem`);
+ *   - a new path at or under a submodule or an excluded folder, under a file left out of the snapshot, or where
+ *     left-out files make a folder. None of those is in the sandbox, so the patch would pass its own check and still
+ *     fail in the checkout;
  *   - git's own files (`.gitmodules`, `.gitattributes`, `.lfsconfig`), added, changed or deleted;
  *   - links: never added, retargeted or retyped (a link may be deleted); hard links, devices and pipes never;
  *   - secrets: the shared deny rules on every added or changed path, so a new `.env` is refused whatever it holds, and
@@ -30,7 +33,9 @@ import { byBytes, caseKey, isGitControlFile, proposedPathProblem } from "./works
  *   - line endings, as the repository's `.gitattributes` says: with `text` (or `eol`), no CRLF; with `text=auto`, no
  *     CRLF in a text file, unless the commit's copy had them; with nothing said, an edit keeps the commit's style and a
  *     new file uses one style. Bytes are never converted;
- *   - over the limits.
+ *   - over the limits. The number of changes is checked first, so nothing else runs on more than a change may hold.
+ *
+ *   Every check is linear in the paths' lengths, however deep they go.
  * - **The patch** is built and checked in an engine-made bare object store that holds nothing of the repository and
  *   reads none of anyone's configuration, the person's or the system's. The repository is only read, with `cat-file`.
  *   - One `git fast-import` stream makes two trees: B, the snapshot's files at their paths in the repository with the
@@ -109,34 +114,44 @@ const sha256 = (data: Uint8Array | string) => createHash("sha256").update(data).
 const ordered = (a: { path: string }, b: { path: string }) => byBytes(`./${a.path}`, `./${b.path}`);
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 const listingLine = (entry: CollectedEntry) => (entry.kind === "link" ? `l ${entry.target} ./${entry.path}\n` : `f ${entry.sha256} ./${entry.path}\n`);
+// A leading byte-order mark is part of a name, so it is kept.
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+const lossyUtf8 = new TextDecoder("utf-8", { ignoreBOM: true });
+/** A listing line as the collect step writes one: a kind, its digest or target, and a path under `./`. */
+const LISTING_LINE = /^(f [0-9a-f]{64} \.\/|l .* \.\/|o \.\/)/;
 
 /**
  * The collect step's output and its two files, checked against each other: the digests it printed, then every line of
- * the listing against the archive. Anything other than files, folders and links is refused, by its path.
+ * the listing against the archive. Anything other than files, folders and links is refused, by its path, and so is a
+ * name with a line break in it, which no line-based listing can hold.
  */
 export function checkCollected(stdout: string, archive: { bytes: Uint8Array; sha256: string }, listing: { bytes: Uint8Array; sha256: string }, limits: TarLimits = COLLECT_LIMITS): Collected {
   // One line each; `wc` may pad its count.
   const said = [/^entries\s+(\d+)$/m, /^listing ([0-9a-f]{64})$/m, /^archive ([0-9a-f]{64})$/m].map((line) => line.exec(stdout)?.[1]);
-  if (said.some((value) => value === undefined)) throw new WorkspaceRefusal("The sandbox's collect step didn't print what it should have, so no change was proposed.");
+  if (said.some((value) => value === undefined)) throw new WorkspaceRefusal("The sandbox's collect step didn't print what it should have, so no change was proposed.", "collect");
   if (sha256(archive.bytes) !== archive.sha256 || sha256(listing.bytes) !== listing.sha256 || archive.sha256 !== said[2] || listing.sha256 !== said[1]) {
-    throw new WorkspaceRefusal("What was read back from the sandbox isn't what its collect step wrote (a digest differs), so no change was proposed.");
+    throw new WorkspaceRefusal("What was read back from the sandbox isn't what its collect step wrote (a digest differs), so no change was proposed.", "result");
   }
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(listing.bytes);
+    text = strictUtf8.decode(listing.bytes);
   } catch {
-    throw new WorkspaceRefusal("The workspace holds a name that isn't valid UTF-8, so no change was proposed.");
+    throw new WorkspaceRefusal("The workspace holds a name that isn't valid UTF-8, so no change was proposed.", "result");
   }
   const lines = text === "" ? [] : text.slice(0, -1).split("\n");
-  if (text !== "" && !text.endsWith("\n")) throw new WorkspaceRefusal("The sandbox's listing was cut short, so no change was proposed.");
-  if (lines.length !== Number(said[0])) throw new WorkspaceRefusal("The sandbox's listing doesn't hold the number of lines its collect step counted, so no change was proposed.");
+  if (text !== "" && !text.endsWith("\n")) throw new WorkspaceRefusal("The sandbox's listing was cut short, so no change was proposed.", "result");
+  if (lines.length !== Number(said[0])) throw new WorkspaceRefusal("The sandbox's listing doesn't hold the number of lines its collect step counted, so no change was proposed.", "result");
+  // A name with a line break splits into lines that aren't listing lines, or into a line listed twice.
+  if (lines.some((line) => !LISTING_LINE.test(line)) || new Set(lines).size !== lines.length) {
+    throw new WorkspaceRefusal("The workspace holds a name with a line break in it, which Nivra can't collect, so no change was proposed.", "result");
+  }
   const other = lines.filter((line) => line.startsWith("o ./")).map((line) => line.slice("o ./".length));
-  if (other.length) throw new WorkspaceRefusal(`The workspace holds ${JSON.stringify(other[0]).slice(0, 120)}${other.length > 1 ? ` and ${plural(other.length - 1, "more")}` : ""}, which is neither a file, a folder nor a link (a device, a pipe or a socket), so no change was proposed.`);
+  if (other.length) throw new WorkspaceRefusal(`The workspace holds ${JSON.stringify(other[0]).slice(0, 120)}${other.length > 1 ? ` and ${plural(other.length - 1, "more")}` : ""}, which is neither a file, a folder nor a link (a device, a pipe or a socket), so no change was proposed.`, "result");
   let read;
   try {
     read = readTar(archive.bytes, limits);
   } catch (error) {
-    if (error instanceof TarRefusal) throw new WorkspaceRefusal(`The sandbox's result can't be taken: ${error.message.replace(/\.$/, "")}, so no change was proposed.`);
+    if (error instanceof TarRefusal) throw new WorkspaceRefusal(`The sandbox's result can't be taken: ${error.message.replace(/\.$/, "")}, so no change was proposed.`, "result");
     throw error;
   }
   const entries: CollectedEntry[] = read
@@ -148,7 +163,7 @@ export function checkCollected(stdout: string, archive: { bytes: Uint8Array; sha
     const listed = new Set(lines.map((line) => `${line}\n`));
     const first = [...listed].find((line) => !archived.has(line)) ?? [...archived].find((line) => !listed.has(line)) ?? "";
     const path = first.slice(first.indexOf(" ./") + 3, -1);
-    throw new WorkspaceRefusal(`The sandbox's archive doesn't match its listing (${JSON.stringify(path).slice(0, 120)} differs), so a file it skipped can't be taken for a deletion. No change was proposed.`);
+    throw new WorkspaceRefusal(`The sandbox's archive doesn't match its listing (${JSON.stringify(path).slice(0, 120)} differs), so a file it skipped can't be taken for a deletion. No change was proposed.`, "result");
   }
   return { entries, archiveSha256: archive.sha256, listingSha256: listing.sha256 };
 }
@@ -156,25 +171,25 @@ export function checkCollected(stdout: string, archive: { bytes: Uint8Array; sha
 /** Runs the collect step in `session` and reads its archive and listing back, checked against each other. */
 export async function collectResult(session: ExecutionSession, options: { workspace: string; applets?: string; timeoutMs?: number; limits?: Partial<CollectLimits>; signal?: AbortSignal }): Promise<Collected> {
   const limits: CollectLimits = { ...COLLECT_LIMITS, ...options.limits };
-  if (!session.download) throw new WorkspaceRefusal("This execution session can't hand files back, so the result can't be collected.");
+  if (!session.download) throw new WorkspaceRefusal("This execution session can't hand files back, so the result can't be collected.", "collect");
   const ran = await session.exec({ ...collectRequest(options.workspace, options), ...(options.signal ? { signal: options.signal } : {}) });
   if (ran.cancelled) throw new WorkspaceCancelled();
   if (ran.timedOut || ran.exitCode !== 0 || !ran.persisted) {
-    const why = ran.timedOut ? "it ran out of time" : ran.exitCode !== 0 ? `it exited ${String(ran.exitCode)}${ran.stderr.trim() ? `: ${ran.stderr.trim().split("\n").at(-1)!.slice(0, 200)}` : ""}` : "its files weren't kept";
-    throw new WorkspaceRefusal(`The sandbox couldn't collect its result (${why}), so no change was proposed.`);
+    const why = ran.timedOut ? "it ran out of time" : ran.exitCode !== 0 ? `it exited ${String(ran.exitCode)}` : "its files weren't kept";
+    throw new WorkspaceRefusal(`The sandbox couldn't collect its result (${why}), so no change was proposed.`, "collect", ran.stderr.trim().split("\n").at(-1)?.slice(0, 300) || null);
   }
   try {
     const archive = await session.download(RESULT_ARCHIVE, limits.maxBytes);
     const listing = await session.download(RESULT_LISTING, limits.maxListingBytes);
     return checkCollected(ran.stdout, archive, listing, limits);
   } catch (error) {
-    if (error instanceof ExecRefusedError) throw new WorkspaceRefusal(`The sandbox's result couldn't be read back (${error.message.replace(/\.$/, "")}), so no change was proposed.`);
+    if (error instanceof ExecRefusedError) throw new WorkspaceRefusal("The sandbox's result couldn't be read back, so no change was proposed.", "collect", error.message);
     throw error;
   }
 }
 
 export interface PatchPolicy {
-  /** Bound into every proposal: a change to these rules is a new version. */
+  /** A change to these rules is a new version. The whole policy is bound into every proposal. */
   version: number;
   maxChangedFiles: number;
   maxFileBytes: number;
@@ -217,15 +232,121 @@ export interface ChangeSet {
 }
 
 /** Up to five problems, as one refusal. */
-function refuseFor(problems: readonly string[]): void {
+function refuseFor(problems: readonly string[], code: RefusalCode = "change"): void {
   if (!problems.length) return;
   const more = problems.length > 5 ? ` (and ${plural(problems.length - 5, "more problem")})` : "";
-  throw new WorkspaceRefusal(`Nivra won't propose this change: ${problems.slice(0, 5).join("; ")}${more}.`);
+  throw new WorkspaceRefusal(`Nivra won't propose this change: ${problems.slice(0, 5).join("; ")}${more}.`, code);
 }
 
 const quoted = (path: string) => JSON.stringify(path.length > 120 ? `${path.slice(0, 117)}...` : path);
-const isUnder = (path: string, folder: string) => caseKey(path) === caseKey(folder) || caseKey(path).startsWith(`${caseKey(folder)}/`);
-const ancestorsOf = (path: string) => path.split("/").map((_, index, parts) => parts.slice(0, index + 1).join("/"));
+
+/** One level of the folder a change lands in, by folded name: the spellings that fold to it, and the levels below. */
+interface Level {
+  spellings: Map<string, Spelling>;
+  children: Map<string, Level>;
+  /** The submodule or excluded folder that ends here. */
+  closed: string | null;
+}
+
+interface Spelling {
+  /** The first path seen with it. */
+  example: string;
+  existed: boolean;
+  /** A file left out of the snapshot ends here, or files left out of it lie below. */
+  leftOutFile: boolean;
+  leftOutFolder: boolean;
+}
+
+const newLevel = (): Level => ({ spellings: new Map(), children: new Map(), closed: null });
+
+/**
+ * Visits each level of `path` from `root`, one folded name at a time, so the cost is linear in the path's length
+ * however deep it goes. With `make`, missing levels are made. Without it, the walk stops where no level is: nothing a
+ * change adds lies there.
+ */
+function walkLevels(root: Level, path: string, make: boolean, visit: (level: Level, spelling: string, end: number, last: boolean) => void): void {
+  let level = root;
+  for (let start = 0; ; ) {
+    const slash = path.indexOf("/", start);
+    const end = slash < 0 ? path.length : slash;
+    const spelling = path.slice(start, end);
+    const key = caseKey(spelling);
+    let next = level.children.get(key);
+    if (!next) {
+      if (!make) return;
+      level.children.set(key, (next = newLevel()));
+    }
+    visit(next, spelling, end, slash < 0);
+    if (slash < 0) return;
+    level = next;
+    start = slash + 1;
+  }
+}
+
+function spell(level: Level, spelling: string, example: string, existed: boolean): Spelling {
+  let entry = level.spellings.get(spelling);
+  if (!entry) level.spellings.set(spelling, (entry = { example, existed, leftOutFile: false, leftOutFolder: false }));
+  else if (existed) entry.existed = true;
+  return entry;
+}
+
+/**
+ * Where the added paths land, against what the folder holds after the change: the files that stay, the files left out
+ * of the snapshot, and its submodules and excluded folders. Only the levels the added paths reach are made.
+ */
+function placeProblems(snapshot: Snapshot, added: readonly Change[], deleted: ReadonlySet<string>): string[] {
+  const root = newLevel();
+  const reached = added.map((change) => {
+    const levels: Array<{ level: Level; entry: Spelling; end: number; last: boolean }> = [];
+    walkLevels(root, change.path, true, (level, spelling, end, last) => levels.push({ level, entry: spell(level, spelling, change.path.slice(0, end), false), end, last }));
+    return { change, levels };
+  });
+  for (const path of snapshot.leftOutPaths) {
+    walkLevels(root, path, false, (level, spelling, end, last) => {
+      const entry = spell(level, spelling, path.slice(0, end), true);
+      if (last) entry.leftOutFile = true;
+      else entry.leftOutFolder = true;
+    });
+  }
+  for (const [folders, folder] of [...snapshot.submodules.map((path) => [false, path] as const), ...snapshot.excludedFolders.map((path) => [true, path] as const)]) {
+    walkLevels(root, folder, false, (level, spelling, end, last) => {
+      const entry = spell(level, spelling, folder.slice(0, end), true);
+      // An excluded folder may hold files no commit does; a submodule is a file-like entry, left out already.
+      if (folders || !last) entry.leftOutFolder = true;
+      if (last) level.closed ??= folder;
+    });
+  }
+  for (const file of snapshot.files) {
+    if (!deleted.has(file.path)) walkLevels(root, file.path, false, (level, spelling, end) => void spell(level, spelling, file.path.slice(0, end), true));
+  }
+
+  const problems = new Set<string>();
+  const levels = new Set<Level>();
+  for (const { change, levels: path } of reached) {
+    for (const { level, entry, end, last } of path) {
+      levels.add(level);
+      if (level.closed !== null) {
+        problems.add(`${quoted(change.path)} is at or under ${quoted(level.closed)}, which was left out of the snapshot (a submodule or Nivra's own data)`);
+        break;
+      }
+      if (!last && entry.leftOutFile) {
+        problems.add(`${quoted(change.path)} is under ${quoted(change.path.slice(0, end))}, a file that was left out of the snapshot`);
+        break;
+      }
+      if (last && entry.leftOutFolder) problems.add(`the new file ${quoted(change.path)} would stand where a folder of files left out of the snapshot is`);
+      else if (last && entry.leftOutFile) problems.add(`${quoted(change.path)} would replace a file that was left out of the snapshot`);
+    }
+  }
+  // Names a filesystem ignoring case or Unicode form would make one, folders included, when either is new.
+  for (const level of levels) {
+    if (level.spellings.size < 2) continue;
+    const spellings = [...level.spellings.values()];
+    if (spellings.every((entry) => entry.existed)) continue;
+    const [a, b] = spellings.map((entry) => entry.example).sort(byBytes);
+    problems.add(`${quoted(a!)} and ${quoted(b!)} differ only in case or Unicode form, which a filesystem that ignores either would make one`);
+  }
+  return [...problems];
+}
 
 /**
  * What the collected result changes against the snapshot, validated: every rule above except line endings, which
@@ -253,7 +374,7 @@ export function findChanges(snapshot: Snapshot, collected: Collected, options: {
     if (entry.kind === "link") {
       if (!before) problems.push(`${quoted(entry.path)} is a new link, and a change may not add links`);
       else if (before.kind !== "link") problems.push(`${quoted(entry.path)} was a file and is now a link`);
-      else if (new TextDecoder().decode(before.bytes) !== entry.target) problems.push(`${quoted(entry.path)} is a link whose target changed, and a change may not retarget links`);
+      else if (strictUtf8.decode(before.bytes) !== entry.target) problems.push(`${quoted(entry.path)} is a link whose target changed, and a change may not retarget links`);
       continue;
     }
     if (before?.kind === "link") {
@@ -266,12 +387,13 @@ export function findChanges(snapshot: Snapshot, collected: Collected, options: {
     (before ? changed : added).push(change);
     if (before && before.mode !== mode) modeChanges.push({ path: entry.path, from: before.mode, to: mode });
   }
+  // Counted first, so nothing below runs on more than a change may hold.
+  const count = added.length + changed.length + deleted.length;
+  if (count > policy.maxChangedFiles) refuseFor([`it changes ${count} files, over the ${policy.maxChangedFiles} a change may hold`], "limit");
 
   for (const change of added) {
     const problem = proposedPathProblem(change.path);
     if (problem) problems.push(`the new path ${quoted(change.path)} can't be written on every computer (${problem})`);
-    const inside = [...snapshot.submodules, ...snapshot.excludedFolders].find((folder) => isUnder(change.path, folder));
-    if (inside !== undefined) problems.push(`${quoted(change.path)} is at or under ${quoted(inside)}, which was left out of the snapshot (a submodule or Nivra's own data)`);
   }
   for (const path of [...added.map((change) => change.path), ...changed.map((change) => change.path), ...deleted]) {
     if (isGitControlFile(path)) problems.push(`${quoted(path)} is one of git's own files, which change how the repository is read, so a change may not touch it`);
@@ -287,26 +409,7 @@ export function findChanges(snapshot: Snapshot, collected: Collected, options: {
     const before = manifest.get(path)!;
     if (before.kind === "file" && isLfsPointer(before.bytes)) problems.push(`${quoted(path)} is a Git LFS pointer, which a change may not edit or delete`);
   }
-  const count = added.length + changed.length + deleted.length;
-  if (count > policy.maxChangedFiles) problems.push(`it changes ${count} files, over the ${policy.maxChangedFiles} a change may hold`);
-
-  // Names a filesystem ignoring case or Unicode form would make one, folders included, when either name is new.
-  const existed = new Set([...snapshot.files.map((file) => file.path), ...snapshot.leftOutPaths].flatMap(ancestorsOf));
-  const removed = new Set(deleted);
-  const names = new Map<string, Set<string>>();
-  for (const path of [...snapshot.files.map((file) => file.path).filter((path) => !removed.has(path)), ...snapshot.leftOutPaths, ...added.map((change) => change.path)]) {
-    for (const name of ancestorsOf(path)) {
-      const key = caseKey(name);
-      if (!names.has(key)) names.set(key, new Set());
-      names.get(key)!.add(name);
-    }
-  }
-  for (const group of names.values()) {
-    if (group.size > 1 && [...group].some((name) => !existed.has(name))) {
-      const [a, b] = [...group].sort(byBytes);
-      problems.push(`${quoted(a!)} and ${quoted(b!)} differ only in case or Unicode form, which a filesystem that ignores either would make one`);
-    }
-  }
+  problems.push(...placeProblems(snapshot, added, new Set(deleted)));
 
   refuseFor(problems);
   return { deleted: deleted.sort(byBytes), added: added.sort(ordered), changed: changed.sort(ordered), modeChanges, generated };
@@ -367,6 +470,8 @@ export interface PatchResult {
   baseTree: string;
   resultTree: string;
   changes: ChangeSet;
+  /** The rules it was made under, bound into its proposal. */
+  policy: PatchPolicy;
 }
 
 export interface PatchOptions {
@@ -425,8 +530,8 @@ async function attributesAbove(repository: GitTool, snapshot: Snapshot): Promise
   let offset = 0;
   for (const path of paths) {
     const end = bytes.indexOf(0x0a, offset);
-    const header = new TextDecoder().decode(bytes.subarray(offset, end < 0 ? undefined : end));
-    if (end < 0) throw new WorkspaceRefusal("git cat-file stopped before giving the attributes above the folder, so no patch was made.");
+    const header = lossyUtf8.decode(bytes.subarray(offset, end < 0 ? undefined : end));
+    if (end < 0) throw new WorkspaceRefusal("git cat-file stopped before giving the attributes above the folder, so no patch was made.", "git");
     offset = end + 1;
     if (header.endsWith(" missing")) continue;
     const [, type, size] = header.split(" ");
@@ -480,7 +585,7 @@ export async function buildPatch(options: PatchOptions): Promise<PatchResult> {
   const changes = findChanges(snapshot, options.collected, { ...(options.knownValues ? { knownValues: options.knownValues } : {}), policy });
   const repository: GitTool = { session: options.session, git: options.git, cwd: snapshot.folder, signal: options.signal };
   const present = await runGitBytes(repository, ["cat-file", "-e", `${snapshot.baseline}^{commit}`], { okCodes: [1, 128] });
-  if (present.exitCode !== 0) throw new WorkspaceRefusal(`The commit this run started from (${snapshot.baseline.slice(0, 12)}) is no longer in the repository, so no patch was made.`);
+  if (present.exitCode !== 0) throw new WorkspaceRefusal(`The commit this run started from (${snapshot.baseline.slice(0, 12)}) is no longer in the repository, so no patch was made.`, "patch");
   const full = (rel: string) => (snapshot.prefix ? `${snapshot.prefix}/${rel}` : rel);
   const base = [...(await attributesAbove(repository, snapshot)), ...snapshot.files.map((file) => ({ path: full(file.path), mode: file.mode, bytes: file.bytes }))];
   const store = await openStore(options);
@@ -490,18 +595,18 @@ export async function buildPatch(options: PatchOptions): Promise<PatchResult> {
     const baseTree = (await runGitBytes(tool, ["rev-parse", "--verify", "refs/nivra/base^{tree}"])).text.trim();
     const resultTree = (await runGitBytes(tool, ["rev-parse", "--verify", "refs/nivra/result^{tree}"])).text.trim();
     const touched = [...changes.added, ...changes.changed];
-    if (!touched.length && !changes.deleted.length) return { bytes: new Uint8Array(0), sha256: sha256(""), baseTree, resultTree: baseTree, changes };
+    if (!touched.length && !changes.deleted.length) return { bytes: new Uint8Array(0), sha256: sha256(""), baseTree, resultTree: baseTree, changes, policy };
 
     await runGitBytes(tool, ["read-tree", baseTree]);
     const attributes = await attributesOf(tool, touched.map((change) => full(change.path)));
     refuseFor(touched.map((change) => lineEndingProblem(change, attributes.get(full(change.path)) ?? { text: "unspecified", eol: "unspecified" })).filter((problem): problem is string => problem !== null));
-    const tooBig = `The change's patch is over the ${policy.maxPatchBytes} bytes Nivra proposes at once. Make a smaller change, then try again.`;
+    const tooBig = { message: `The change's patch is over the ${policy.maxPatchBytes} bytes Nivra proposes at once. Make a smaller change, then try again.`, code: "limit" as const };
     const patch = await runGitBytes(tool, ["diff-tree", "-r", "-p", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", baseTree, resultTree], { maxBytes: policy.maxPatchBytes, tooBig, timeoutMs: 120_000 });
-    if (!patch.bytes.byteLength) throw new WorkspaceRefusal("The change gave an empty patch, so it wasn't proposed.");
+    if (!patch.bytes.byteLength) throw new WorkspaceRefusal("The change gave an empty patch, so it wasn't proposed.", "patch");
     await runGitBytes(tool, ["apply", "--cached", "--whitespace=nowarn", "-"], { stdin: patch.bytes, timeoutMs: 120_000 });
     const written = (await runGitBytes(tool, ["write-tree"])).text.trim();
-    if (written !== resultTree) throw new WorkspaceRefusal("The patch, applied to the snapshot's files, didn't give the result it was made from, so it wasn't proposed.");
-    return { bytes: patch.bytes, sha256: sha256(patch.bytes), baseTree, resultTree, changes };
+    if (written !== resultTree) throw new WorkspaceRefusal("The patch, applied to the snapshot's files, didn't give the result it was made from, so it wasn't proposed.", "patch");
+    return { bytes: patch.bytes, sha256: sha256(patch.bytes), baseTree, resultTree, changes, policy };
   } finally {
     rmSync(store.dir, { recursive: true, force: true, maxRetries: 3 });
   }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { WorkspaceRefusal } from "./git-tool.ts";
-import type { PatchResult } from "./patch.ts";
+import { PATCH_POLICY, type PatchPolicy, type PatchResult } from "./patch.ts";
 import type { Snapshot } from "./snapshot.ts";
 
 /**
@@ -9,7 +9,7 @@ import type { Snapshot } from "./snapshot.ts";
  * - the destination: the repository's top level as it really is, and the picked folder's path in it;
  * - the object format and the baseline commit;
  * - the trees B and R the patch was checked between, and the snapshot's fingerprint;
- * - the policy version;
+ * - the policy the patch was made under, its version and its limits, taken from the patch itself;
  * - the digests of the patch and of the report made before the session closed.
  *
  * Its hash is the sha256 of the binding's canonical JSON, and that is what the person approves. Applying it (NIV-8)
@@ -29,7 +29,7 @@ export interface ProposalBinding {
   baseTree: string;
   resultTree: string;
   fingerprint: string;
-  policyVersion: number;
+  policy: PatchPolicy;
   patchSha256: string;
   reportSha256: string;
 }
@@ -63,7 +63,7 @@ export function canonicalJson(value: unknown): string {
 
 export const proposalHash = (binding: ProposalBinding) => sha256(canonicalJson(binding));
 
-export function makeProposal(input: { project: string; target: string; snapshot: Snapshot; patch: PatchResult; report: Uint8Array; policyVersion: number }): Proposal {
+export function makeProposal(input: { project: string; target: string; snapshot: Snapshot; patch: PatchResult; report: Uint8Array }): Proposal {
   const { snapshot, patch } = input;
   const binding: ProposalBinding = {
     version: PROPOSAL_VERSION,
@@ -75,7 +75,7 @@ export function makeProposal(input: { project: string; target: string; snapshot:
     baseTree: patch.baseTree,
     resultTree: patch.resultTree,
     fingerprint: snapshot.fingerprint,
-    policyVersion: input.policyVersion,
+    policy: { ...patch.policy },
     patchSha256: patch.sha256,
     reportSha256: sha256(input.report),
   };
@@ -90,21 +90,23 @@ export interface ProposalExpectation {
   head: string;
   /** The hash the person approved. */
   approvedHash: string;
+  /** The rules a proposal must have been made under: Nivra's own unless a check says otherwise. */
+  policy?: PatchPolicy;
 }
 
-/** Refuses a proposal that isn't intact, isn't the one approved, or isn't for this destination and commit. */
+/** Refuses a proposal that isn't intact, isn't the one approved, or isn't for these rules, this destination and commit. */
 export function verifyProposal(proposal: Proposal, expected: ProposalExpectation): void {
   const { binding } = proposal;
-  if (binding.version !== PROPOSAL_VERSION) throw new WorkspaceRefusal("This proposal was made under another version of Nivra's rules, so it can't be applied. Run the task again.");
+  const refuse = (message: string) => new WorkspaceRefusal(message, "proposal");
+  if (binding.version !== PROPOSAL_VERSION) throw refuse("This proposal was made under another version of Nivra's rules, so it can't be applied. Run the task again.");
   if (sha256(proposal.patch) !== binding.patchSha256 || sha256(proposal.report) !== binding.reportSha256 || proposalHash(binding) !== proposal.hash) {
-    throw new WorkspaceRefusal("This proposal isn't intact: its patch, its report or what it binds no longer matches its hash, so it can't be applied. Run the task again.");
+    throw refuse("This proposal isn't intact: its patch, its report or what it binds no longer matches its hash, so it can't be applied. Run the task again.");
   }
-  if (proposal.hash !== expected.approvedHash) throw new WorkspaceRefusal(`This isn't the proposal you approved (its hash is ${short(proposal.hash)}, not ${short(expected.approvedHash)}), so it wasn't applied.`);
-  if (binding.project !== expected.project || binding.target !== expected.target) throw new WorkspaceRefusal("This proposal was made for another project, or on another target, so it can't be applied here.");
-  if (binding.destination.root !== expected.destination.root || binding.destination.prefix !== expected.destination.prefix) {
-    throw new WorkspaceRefusal(`This proposal was made for ${JSON.stringify(binding.destination.prefix || ".")} in ${binding.destination.root}, not for this folder, so it can't be applied here.`);
-  }
-  if (binding.baseline !== expected.head) throw new WorkspaceRefusal(`Your checkout has moved to another commit (HEAD is ${short(expected.head)}, and the proposal was made from ${short(binding.baseline)}). Run the task again from the commit it is on now.`);
+  if (proposal.hash !== expected.approvedHash) throw refuse(`This isn't the proposal you approved (its hash is ${short(proposal.hash)}, not ${short(expected.approvedHash)}), so it wasn't applied.`);
+  if (canonicalJson(binding.policy) !== canonicalJson(expected.policy ?? PATCH_POLICY)) throw refuse("This proposal was checked under other rules than the ones Nivra applies now, so it can't be applied. Run the task again.");
+  if (binding.project !== expected.project || binding.target !== expected.target) throw refuse("This proposal was made for another project, or on another target, so it can't be applied here.");
+  if (binding.destination.root !== expected.destination.root || binding.destination.prefix !== expected.destination.prefix) throw refuse("This proposal was made for another folder, so it can't be applied here.");
+  if (binding.baseline !== expected.head) throw refuse(`Your checkout has moved to another commit (HEAD is ${short(expected.head)}, and the proposal was made from ${short(binding.baseline)}). Run the task again from the commit it is on now.`);
 }
 
 /** One step the run took, as its report shows it. */

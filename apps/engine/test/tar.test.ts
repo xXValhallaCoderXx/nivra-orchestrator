@@ -86,7 +86,7 @@ describe("Workspace archives: written by the engine, read back strictly (NIV-42,
     const archive = writeTar(SAMPLE);
     assert.equal(archive.byteLength % 512, 0);
     assert.deepEqual(shape(readTar(archive, LIMITS)), shape(SAMPLE));
-    assert.deepEqual(writeTar(SAMPLE), archive, "the same entries give the same bytes");
+    assert.equal(Buffer.compare(writeTar(SAMPLE), archive), 0, "the same entries give the same bytes");
   });
 
   it("is extracted by this machine's GNU tar into exactly the files, modes and links it holds", { skip: process.platform === "win32" ? "needs GNU tar and POSIX modes" : false }, () => {
@@ -174,6 +174,8 @@ describe("Workspace archives: written by the engine, read back strictly (NIV-42,
       ["a duplicate", blocks(...file("a"), ...file("a"), END), /holds a twice/],
       ["a file where a folder is needed", blocks(...file("a"), ...file("a/b"), END), /holds a\/b under a, which it also holds as a file/],
       ["a file under a link", blocks(rawHeader({ name: "l", type: "2", link: "/etc" }), ...file("l/passwd"), END), /holds l\/passwd under l, which is a link/],
+      ["a file after something under it", blocks(...file("a/b"), ...file("a"), END), /holds a\/b under a, which it also holds as a file/],
+      ["a link after something under it", blocks(...file("l/passwd"), rawHeader({ name: "l", type: "2", link: "/etc" }), END), /holds l\/passwd under l, which is a link/],
       ["a link with no target", blocks(rawHeader({ name: "l", type: "2" }), END), /a link with no target/],
       ["a name that isn't UTF-8", blocks(rawHeader({ name: "�", type: "0" }).fill(0xff, 0, 1), END), /checksum doesn't hold|isn't valid UTF-8/],
       ["too many entries", blocks(...file("a"), ...file("b"), END), /more than 1 entries/, { maxEntries: 1 }],
@@ -189,5 +191,21 @@ describe("Workspace archives: written by the engine, read back strictly (NIV-42,
     const sum = bad.reduce((total, byte) => total + byte, 0);
     bad.set(new TextEncoder().encode(`${sum.toString(8).padStart(6, "0")}\0 `), 148);
     assert.throws(() => readTar(blocks(bad, END), LIMITS), /a name that isn't valid UTF-8/);
+  });
+
+  it("checks a deep archive in time linear in its paths, and keeps a name's leading byte-order mark", () => {
+    // The review's hostile result: 7,000 files 505 folders deep, inside the collect step's limits. It took 7 s.
+    const deep = "a/".repeat(505);
+    const archive = writeTar(Array.from({ length: 7_000 }, (_, index) => ({ path: `${deep}f${index}`, kind: "file" as const, executable: false, bytes: new Uint8Array(0) })));
+    const started = performance.now();
+    const read = readTar(archive, { maxEntries: 10_000, maxBytes: 16 * 1024 * 1024, maxEntryBytes: 1 << 20, maxPathBytes: 1_024 });
+    const elapsed = performance.now() - started;
+    assert.equal(read.filter((entry) => entry.kind === "file").length, 7_000);
+    assert.ok(elapsed < 2_000, `reading took ${Math.round(elapsed)} ms`);
+    const marked = readTar(writeTar([{ path: "﻿name", kind: "file", executable: false, bytes: new Uint8Array(0) }]), LIMITS);
+    assert.deepEqual(
+      marked.map((entry) => entry.path),
+      ["﻿name"],
+    );
   });
 });

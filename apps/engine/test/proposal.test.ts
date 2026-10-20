@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { buildPatch } from "../src/exec/patch.ts";
+import { buildPatch, PATCH_POLICY } from "../src/exec/patch.ts";
 import { buildReport, canonicalJson, makeProposal, proposalHash, verifyProposal, type Proposal, type ProposalExpectation, type StepRecord } from "../src/exec/proposal.ts";
 import { cleanUp, collect, GIT, git, guestRun, localSession, put, refusal, repoWith, scratch, snap } from "./workspace-fixtures.ts";
 
@@ -30,7 +30,7 @@ async function realProposal() {
   const session = await localSession(root);
   const patch = await buildPatch({ snapshot, collected, session, git: GIT }).finally(() => session.close());
   const report = buildReport({ snapshot, patch, steps: [STEP] });
-  const proposal = makeProposal({ project: "project-1", target: "local", snapshot, patch, report, policyVersion: 1 });
+  const proposal = makeProposal({ project: "project-1", target: "local", snapshot, patch, report });
   const expected: ProposalExpectation = { project: "project-1", target: "local", destination: { root: snapshot.topLevel, prefix: "" }, head: snapshot.baseline, approvedHash: proposal.hash };
   return { root, snapshot, patch, report, proposal, expected };
 }
@@ -55,7 +55,7 @@ describe("proposals", () => {
       baseTree: patch.baseTree,
       resultTree: patch.resultTree,
       fingerprint: snapshot.fingerprint,
-      policyVersion: 1,
+      policy: { ...PATCH_POLICY },
       patchSha256: sha(patch.bytes),
       reportSha256: sha(report),
     });
@@ -72,7 +72,8 @@ describe("proposals", () => {
       { baseTree: "0".repeat(40) },
       { resultTree: "0".repeat(40) },
       { fingerprint: "0".repeat(64) },
-      { policyVersion: 2 },
+      { policy: { ...PATCH_POLICY, version: 2 } },
+      { policy: { ...PATCH_POLICY, maxChangedFiles: 501 } },
       { patchSha256: "0".repeat(64) },
       { reportSha256: "0".repeat(64) },
     ];
@@ -104,8 +105,8 @@ describe("proposals", () => {
     const { root, snapshot, proposal, expected } = await realProposal();
     verifyProposal(proposal, expected);
     assert.throws(() => verifyProposal(proposal, { ...expected, approvedHash: "0".repeat(64) }), refusal(/^This isn't the proposal you approved \(its hash is [0-9a-f]{12}, not 000000000000\), so it wasn't applied\.$/));
-    assert.throws(() => verifyProposal(proposal, { ...expected, destination: { root: snapshot.topLevel, prefix: "src" } }), refusal(/^This proposal was made for "\." in .*, not for this folder, so it can't be applied here\.$/));
-    assert.throws(() => verifyProposal(proposal, { ...expected, destination: { root: scratch("elsewhere"), prefix: "" } }), refusal(/not for this folder/));
+    assert.throws(() => verifyProposal(proposal, { ...expected, destination: { root: snapshot.topLevel, prefix: "src" } }), refusal(/^This proposal was made for another folder, so it can't be applied here\.$/));
+    assert.throws(() => verifyProposal(proposal, { ...expected, destination: { root: scratch("elsewhere"), prefix: "" } }), refusal(/made for another folder/));
     assert.throws(() => verifyProposal(proposal, { ...expected, project: "project-2" }), refusal(/made for another project, or on another target/));
     assert.throws(() => verifyProposal(proposal, { ...expected, target: "wsl:Ubuntu" }), refusal(/made for another project, or on another target/));
     // The checkout moved on: the patch was made from another commit.
@@ -113,6 +114,27 @@ describe("proposals", () => {
     git(root, ["commit", "-q", "-am", "moved on"]);
     const head = git(root, ["rev-parse", "HEAD"]).trim();
     assert.throws(() => verifyProposal(proposal, { ...expected, head }), refusal(new RegExp(`^Your checkout has moved to another commit \\(HEAD is ${head.slice(0, 12)}, and the proposal was made from ${snapshot.baseline.slice(0, 12)}\\)\\. Run the task again from the commit it is on now\\.$`)));
+  });
+
+  it("binds the rules its patch was made under, taken from the patch, and refuses one made under other rules", async () => {
+    const root = repoWith({ "a.txt": "a\n" });
+    const snapshot = await snap(root);
+    const collected = collect(guestRun(snapshot, (workspace) => writeFileSync(join(workspace, "a.txt"), "b\n")));
+    const proposalUnder = async (policy: Partial<typeof PATCH_POLICY>) => {
+      const session = await localSession(root);
+      const patch = await buildPatch({ snapshot, collected, session, git: GIT, policy }).finally(() => session.close());
+      const proposal = makeProposal({ project: "p", target: "t", snapshot, patch, report: buildReport({ snapshot, patch, steps: [] }) });
+      return { proposal, expected: { project: "p", target: "t", destination: { root: snapshot.topLevel, prefix: "" }, head: snapshot.baseline, approvedHash: proposal.hash } };
+    };
+    const relaxed = await proposalUnder({ maxChangedFiles: 10_000 });
+    assert.deepEqual(relaxed.proposal.binding.policy, { ...PATCH_POLICY, maxChangedFiles: 10_000 });
+    const RULES = /^This proposal was checked under other rules than the ones Nivra applies now, so it can't be applied\. Run the task again\.$/;
+    assert.throws(() => verifyProposal(relaxed.proposal, relaxed.expected), refusal(RULES));
+    verifyProposal(relaxed.proposal, { ...relaxed.expected, policy: relaxed.proposal.binding.policy });
+    // The review's case: a patch made under version 7 used to be bound as version 1, and passed.
+    const later = await proposalUnder({ version: 7 });
+    assert.equal(later.proposal.binding.policy.version, 7);
+    assert.throws(() => verifyProposal(later.proposal, later.expected), refusal(RULES));
   });
 
   it("refuses a proposal that isn't intact: its patch, its report or its binding changed after hashing", async () => {

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { WorkspaceRefusal } from "../src/exec/git-tool.ts";
 import { PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
+import { credentialKinds } from "../src/exec/snapshot.ts";
 import { readTar } from "../src/exec/tar.ts";
 import { tempDir } from "./helpers.ts";
 import { changedSince, cleanUp, folderState, GIT, git, put, refusal, repoWith, scratch, snap, track } from "./workspace-fixtures.ts";
@@ -345,5 +346,109 @@ describe("commit snapshots", () => {
     writeFileSync(join(root, "a.txt"), "changed\n");
     git(root, ["commit", "-q", "-am", "next"]);
     assert.notEqual((await snap(root)).fingerprint, first.fingerprint);
+  });
+});
+
+/** The independent review of the first draft (`f027403`): each case here was reproduced against that commit. */
+describe("commit snapshots, after the review", () => {
+  it("refuses a split index before git reads it, where plain git status changes .git, and checks the checkout once its index is whole", async () => {
+    const root = repoWith({ "a.txt": "a\n", "b.txt": "b\n" });
+    git(root, ["config", "core.splitIndex", "true"]);
+    git(root, ["update-index", "--split-index"]);
+    const shared = readdirSync(join(root, ".git")).filter((name) => name.startsWith("sharedindex."));
+    assert.equal(shared.length, 1);
+    // Set back, so a refresh of its time would show.
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(join(root, ".git", shared[0]!), past, past);
+    let before = folderState(root);
+    await assert.rejects(snap(root), refusal(/^This checkout uses a split index, and git changes a file in \.git whenever it reads one, so Nivra won't check it\. Run `git update-index --no-split-index` there, then try again\.$/, "repository"));
+    assert.deepEqual(changedSince(before, root), [], "the checkout changed");
+    // The control: git status, even with optional locks off, refreshes the shared file's time.
+    spawnSync(GIT, ["status", "--porcelain"], { cwd: root, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+    assert.deepEqual(changedSince(before, root), [`.git/${shared[0]}`]);
+
+    git(root, ["config", "core.splitIndex", "false"]);
+    git(root, ["update-index", "--no-split-index"]);
+    before = folderState(root);
+    assert.equal((await snap(root)).files.length, 2);
+    assert.deepEqual(changedSince(before, root), [], "the checkout changed");
+  });
+
+  it("refuses files git is told not to look at, whose edits git status can't see", async () => {
+    const root = repoWith({ "a.txt": "a\n", "b.txt": "b\n", "c.txt": "c\n" });
+    git(root, ["update-index", "--assume-unchanged", "a.txt"]);
+    writeFileSync(join(root, "a.txt"), "the person's own work\n");
+    const before = folderState(root);
+    await assert.rejects(snap(root), refusal(/^1 file in this folder is marked for git not to look at \(assume-unchanged or skip-worktree, as a sparse checkout does\), so Nivra can't tell whether it changed\. Clear the marks with `git update-index --no-assume-unchanged` or `--no-skip-worktree`, then try again\.$/, "uncommitted"));
+    git(root, ["update-index", "--skip-worktree", "b.txt"]);
+    writeFileSync(join(root, "b.txt"), "more of it\n");
+    await assert.rejects(snap(root), refusal(/^2 files in this folder are marked for git not to look at/, "uncommitted"));
+    assert.deepEqual(changedSince(before, root).filter((path) => !path.startsWith(".git/index") && path !== "b.txt" && path !== ".git"), [], "the checkout changed");
+  });
+
+  it("refuses a picked folder whose path holds a newline, rather than sending a sibling folder", async () => {
+    const root = repoWith({ "a/one.txt": "the sibling\n", "a\nb/two.txt": "the picked folder\n" });
+    await assert.rejects(snap(join(root, "a\nb")), refusal(/^The picked folder's path in the repository can't be sent \(it holds a control or invisible character\)\. Rename it, or pick a folder whose path is plain, then try again\.$/, "path"));
+    assert.deepEqual(
+      (await snap(join(root, "a"))).files.map((file) => file.path),
+      ["one.txt"],
+    );
+  });
+
+  it("refuses a committed path that isn't UTF-8, which would otherwise be renamed on its way", async () => {
+    const root = repoWith({ "readme.md": "r\n" });
+    writeFileSync(Buffer.concat([Buffer.from(`${root}/`), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2e, 0x74, 0x78, 0x74])]), "a Latin-1 name\n");
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-q", "-m", "latin-1"]);
+    await assert.rejects(snap(root), refusal(/^The commit holds a path that isn't valid UTF-8 \("caf�\.txt"\), so Nivra won't send this folder\. Rename it in a new commit, then try again\.$/, "path"));
+  });
+
+  it("refuses a filter driver whose name isn't UTF-8, which it couldn't switch off, and so never runs it", async () => {
+    const root = repoWith({ "a.txt": "a\n" });
+    const markerDir = track(mkdtempSync(join(tmpdir(), "nivra-markers-")));
+    const markers = join(markerDir, "markers");
+    writeFileSync(join(markerDir, "mark-clean"), `#!/bin/sh\necho clean >> '${markers}'\nexec cat\n`, { mode: 0o755 });
+    const name = Buffer.from([0x63, 0x61, 0x66, 0xe9]);
+    writeFileSync(join(root, ".gitattributes"), Buffer.concat([Buffer.from("*.txt filter="), name, Buffer.from("\n")]));
+    git(root, ["add", ".gitattributes"]);
+    git(root, ["commit", "-q", "-m", "attributes"]);
+    writeFileSync(join(root, ".git", "config"), Buffer.concat([readFileSync(join(root, ".git", "config")), Buffer.from('[filter "'), name, Buffer.from(`"]\n\tclean = ${join(markerDir, "mark-clean")} %f\n`)]));
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(join(root, ".git", "index"), past, past);
+    await assert.rejects(snap(root), refusal(/^A filter driver in this repository's git configuration has a name that isn't valid UTF-8, so Nivra can't switch it off safely and won't check the checkout\. Rename it, then try again\.$/, "repository"));
+    assert.equal(existsSync(markers), false, "the repository's filter ran");
+    // The control: plain git status runs it.
+    spawnSync(GIT, ["status", "--porcelain"], { cwd: root });
+    assert.equal(existsSync(markers), true, "plain git status didn't run the filter");
+  });
+
+  it("keeps git's own words out of a refusal's message, in its detail", async () => {
+    const root = repoWith({ "a.txt": "a\n" });
+    const failing = join(scratch("failing git"), "git");
+    writeFileSync(failing, `#!/bin/sh\nfor a in "$@"; do [ "$a" = "--version" ] && { echo 'git version 2.43.0'; exit 0; }; done\necho "fatal: private-plain-text-from-stderr" >&2\nexit 128\n`, { mode: 0o755 });
+    await assert.rejects(snap(root, { git: failing }), (error: unknown) => {
+      refusal(/^git rev-parse failed \(exit 128\)\.$/, "git")(error);
+      assert.equal((error as WorkspaceRefusal).detail, "fatal: private-plain-text-from-stderr");
+      return true;
+    });
+  });
+
+  it("finds keys and tokens in UTF-16, inside base64, as PGP blocks, and from a key's first line alone, and leaves public material alone", async () => {
+    const token = `ghp_${"a".repeat(36)}`;
+    const pem = "-----BEGIN PRIVATE KEY-----\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7\n-----END PRIVATE KEY-----\n";
+    const cases: Array<[string, Uint8Array, string[]]> = [
+      ["UTF-16LE, no byte-order mark", Buffer.from(`token = ${token}\n`, "utf16le"), ["a GitHub token"]],
+      ["UTF-16LE with its mark", Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(token, "utf16le")]), ["a GitHub token"]],
+      ["UTF-16BE, no mark", Buffer.from(`token = ${token}\n`, "utf16le").swap16(), ["a GitHub token"]],
+      ["a key in a Kubernetes secret", Buffer.from(`data:\n  tls.key: ${Buffer.from(pem).toString("base64")}\n`), ["a private key"]],
+      ["a token in base64", Buffer.from(`auth: ${Buffer.from(`user:${token}`).toString("base64")}\n`), ["a GitHub token"]],
+      ["a PGP private key", Buffer.from("-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\n"), ["a private key"]],
+      ["a key's first line, its last missing", Buffer.from("const key = `-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA`;\n"), ["a private key"]],
+      ["a public certificate", Buffer.from("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"), []],
+      ["an image in base64", Buffer.from(`url(data:image/png;base64,${Buffer.from(new Uint8Array(600).map((_, i) => (i * 7) % 256)).toString("base64")})`), []],
+    ];
+    for (const [what, bytes, kinds] of cases) assert.deepEqual(credentialKinds(bytes, []), kinds, what);
+    const root = repoWith({ "k8s/secret.yaml": `data:\n  tls.key: ${Buffer.from(pem).toString("base64")}\n`, "README.md": "# r\n" });
+    await assert.rejects(snap(root), refusal(/^k8s\/secret\.yaml in this commit holds what looks like a private key, so Nivra won't upload it\./, "content"));
   });
 });

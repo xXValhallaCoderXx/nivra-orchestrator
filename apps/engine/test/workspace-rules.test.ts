@@ -8,7 +8,7 @@ import { byBytes, caseKey, isGitControlFile, proposedPathProblem, snapshotPathPr
  */
 describe("workspace path rules", () => {
   it("refuses a commit's paths that aren't safe to write anywhere, and nothing else", () => {
-    for (const path of ["", "a//b", "./a", "a/./b", "a/../b", "..", "a/", ".git/config", ".GIT/config", ".git./x", ".git /x", ".Git", "git~1/config", "GIT~2/x", "a\nb", "tab\there", "zero​width", "bidi‮exe", `${"a".repeat(256)}/b`, "a/".repeat(600) + "b"]) {
+    for (const path of ["", "a//b", "./a", "a/./b", "a/../b", "..", "a/", ".git/config", ".GIT/config", ".git./x", ".git /x", ".Git", "git~1/config", "GIT~2/x", "GIT~1.", "git~1 ", ".git::$INDEX_ALLOCATION", ".git:x", "a\nb", "tab\there", "zero​width", "bidi‮exe", "﻿marked", `${"a".repeat(256)}/b`, "a/".repeat(600) + "b"]) {
       assert.notEqual(snapshotPathProblem(path), null, JSON.stringify(path.slice(0, 40)));
     }
     for (const path of ["README.md", "docs/ü.md", "aux.c", "con.txt", "a.git", ".github/workflows/ci.yml", ".gitignore", "dir with space/x", "x.", "PROGRA~1/x", `${"a".repeat(255)}/b`]) {
@@ -24,6 +24,11 @@ describe("workspace path rules", () => {
       ["COM¹.log", /a name Windows reserves/],
       ["lpt3", /a name Windows reserves/],
       ["CONIN$", /a name Windows reserves/],
+      // Spaces before the extension still name the device, as Windows and git read it.
+      ["con .txt", /a name Windows reserves/],
+      ["NUL  .js", /a name Windows reserves/],
+      ["src/aux .h", /a name Windows reserves/],
+      ["COM1 .log", /a name Windows reserves/],
       ["a:b", /a character Windows forbids/],
       ["a\\b", /a character Windows forbids/],
       ["what?.md", /a character Windows forbids/],

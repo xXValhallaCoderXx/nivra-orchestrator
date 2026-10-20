@@ -4,7 +4,7 @@ import { chmodSync, linkSync, readFileSync, rmSync, statSync, symlinkSync, write
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { WorkspaceRefusal } from "../src/exec/git-tool.ts";
-import { buildPatch, checkCollected, lineEndingProblem, lineStyle, type Change, type Collected, type PatchOptions } from "../src/exec/patch.ts";
+import { buildPatch, checkCollected, findChanges, lineEndingProblem, lineStyle, type Change, type Collected, type PatchOptions } from "../src/exec/patch.ts";
 import type { Snapshot } from "../src/exec/snapshot.ts";
 import { readTar, writeTar } from "../src/exec/tar.ts";
 import { changedSince, cleanUp, collect, folderState, GIT, git, guestRun, localSession, put, refusal, repoWith, scratch, sha, snap, type GuestFiles } from "./workspace-fixtures.ts";
@@ -389,6 +389,82 @@ describe("patches from a sandbox's result", () => {
     const result = await patchFor(snapshot, collect(guestRun(snapshot, (workspace) => put(workspace, "b.txt", "b\n"))));
     assert.equal(result.resultTree.length, 64);
     assert.equal(applyInClone(root, result.bytes).tree, result.resultTree);
+  });
+});
+
+/** The independent review of the first draft (`f027403`): each case here was reproduced against that commit. */
+describe("patches, after the review", () => {
+  it("refuses a new path that clashes with what the snapshot left out, which would pass its own check and then fail in the checkout", async () => {
+    // At f027403 each of these was proposed; `git apply --check` passed in a fresh clone, then `git apply` failed
+    // partway, leaving an edited file deleted.
+    const library = repoWith({ "lib.ts": "export const lib = 1;\n" });
+    const root = repoWith({ ".env": "A=1\n", "dist/index.js": "built\n", "libs/README.md": "r\n", "data/kept.txt": "k\n", "src/a.ts": "a\n" });
+    git(root, ["submodule", "add", "-q", library, "libs/foo"]);
+    git(root, ["commit", "-q", "-m", "submodule"]);
+    put(root, "data/.nivra-home/nivra.db", "the engine's own data, never committed\n");
+    const snapshot = await snap(root, { exclude: [join(root, "data", ".nivra-home")] });
+    const cases: Array<[string, (workspace: string) => void, RegExp]> = [
+      ["a file under a left-out file", (workspace) => put(workspace, ".env/notes.md", "notes\n"), /^Nivra won't propose this change: "\.env\/notes\.md" is under "\.env", a file that was left out of the snapshot\.$/],
+      [
+        "a file where left-out files make a folder",
+        (workspace) => {
+          writeFileSync(join(workspace, "src/a.ts"), "a, edited\n");
+          put(workspace, "dist", "a file now\n");
+        },
+        /^Nivra won't propose this change: the new file "dist" would stand where a folder of files left out of the snapshot is\.$/,
+      ],
+      [
+        "a file where a submodule's folder is",
+        (workspace) => {
+          rmSync(join(workspace, "libs"), { recursive: true });
+          put(workspace, "libs", "now a file\n");
+        },
+        /the new file "libs" would stand where a folder of files left out of the snapshot is/,
+      ],
+      [
+        "a file where the engine home's folder is",
+        (workspace) => {
+          rmSync(join(workspace, "data"), { recursive: true });
+          put(workspace, "data", "now a file\n");
+        },
+        /the new file "data" would stand where a folder of files left out of the snapshot is/,
+      ],
+    ];
+    for (const [what, edit, words] of cases) await assert.rejects(patchFor(snapshot, collect(guestRun(snapshot, edit))), refusal(words, "change"), what);
+    // A file and a folder may still swap places when the snapshot held all of it.
+    const swapped = await patchFor(
+      snapshot,
+      collect(
+        guestRun(snapshot, (workspace) => {
+          rmSync(join(workspace, "src"), { recursive: true });
+          put(workspace, "src", "a file now\n");
+        }),
+      ),
+    );
+    assert.deepEqual([swapped.changes.deleted, swapped.changes.added.map((change) => change.path)], [["src/a.ts"], ["src"]]);
+  });
+
+  it("says that a name holds a line break, rather than blaming a hard link", async () => {
+    const root = repoWith({ "a.txt": "a\n", b: "b\n" });
+    const snapshot = await snap(root);
+    assert.throws(() => collect(guestRun(snapshot, (workspace) => put(workspace, "a.txt\nb", "x\n"))), refusal(/^The workspace holds a name with a line break in it, which Nivra can't collect, so no change was proposed\.$/, "result"));
+  });
+
+  it("checks a deep result in time linear in its paths, the number of changes first", () => {
+    const deep = "a/".repeat(505);
+    const file = (path: string) => ({ path, kind: "file" as const, executable: false, bytes: new Uint8Array(0), sha256: sha("") });
+    const shell = { folder: "/repo", topLevel: "/repo", prefix: "", baseline: "0".repeat(40), objectFormat: "sha1", files: [], leftOutPaths: [], submodules: [], excludedFolders: [] } as unknown as Snapshot;
+    // The review's case: 7,000 new files at depth 505. findChanges took 10.5 s.
+    let started = performance.now();
+    assert.throws(() => findChanges(shell, { entries: Array.from({ length: 7_000 }, (_, index) => file(`${deep}f${index}`)), archiveSha256: "", listingSha256: "" }), refusal(/it changes 7000 files, over the 500 a change may hold/, "limit"));
+    assert.ok(performance.now() - started < 2_000, `counting took ${Math.round(performance.now() - started)} ms`);
+    // Within the limit, every name is still checked at its level: 450 new files beside 4,000 left out, as deep.
+    const beside = { ...shell, leftOutPaths: Array.from({ length: 4_000 }, (_, index) => `${deep}out${index}`) } as Snapshot;
+    started = performance.now();
+    const changes = findChanges(beside, { entries: Array.from({ length: 450 }, (_, index) => file(`${deep}f${index}`)), archiveSha256: "", listingSha256: "" });
+    const elapsed = performance.now() - started;
+    assert.equal(changes.added.length, 450);
+    assert.ok(elapsed < 2_000, `checking took ${Math.round(elapsed)} ms`);
   });
 });
 
