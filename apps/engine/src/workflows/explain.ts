@@ -6,7 +6,7 @@ import type { ExecutionBackend } from "../exec/backend.ts";
 import { Budget } from "../explain/budget.ts";
 import { checkCitation } from "../explain/citations.ts";
 import { Ledger } from "../explain/ledger.ts";
-import { canAnswerAgain, EXPLAIN_LIMITS } from "../explain/limits.ts";
+import { canAnswerAgain, EXPLAIN_LIMITS, READING_INPUT_TOKENS } from "../explain/limits.ts";
 import { rankConflict } from "../explain/precedence.ts";
 import { DEFAULT_QUESTION, explainPrompt, INSTRUCTIONS } from "../explain/prompt.ts";
 import { TaskUnreadable, type ExplainTask } from "../explain/task.ts";
@@ -14,6 +14,7 @@ import { Reading, readUntilAnswered, turnedDownCost, turnedDownText, usageOf } f
 import { createExplainTools, toolDefinitionChars } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
 import { createModelClient, failure, InternalFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
+import { RunBudget } from "../providers/run-budget.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoReader } from "../repo/files.ts";
 import { buildMap } from "../repo/map.ts";
@@ -152,6 +153,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           beforeReading,
           toolDefinitionChars: definitions,
           contextLength: inputData.contextLength,
+          runInputTokens: READING_INPUT_TOKENS,
         });
         // A model whose context can't hold the instructions and the map with room to read is refused before any chat
         // request is made (D23), never sent more than it allows.
@@ -161,6 +163,11 @@ export function createExplainWorkflow(deps: ExplainDeps) {
             `about ${beforeReading} tokens are needed before any reading, and ${Math.max(0, budget.tokens)} are available once ${ANSWER_TOKENS} are held back for the answer, which leaves no room to read`,
           );
         }
+        // The run's shared limits (D30): its steps, time and output caps, and an estimated budget for all its input.
+        const runBudget = new RunBudget(
+          { requests: EXPLAIN_LIMITS.maxSteps, totalMs: EXPLAIN_LIMITS.totalMs, outputTokensPerRequest: ANSWER_TOKENS, estimatedInputTokens: READING_INPUT_TOKENS },
+          { signal: abortSignal },
+        );
         const internal = new InternalFailure();
         // Shared with the tools: how many steps have finished, and whether this one must give the answer (D22).
         const reading = new Reading();
@@ -189,6 +196,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           accepted: () => state.accepted !== null,
           policy,
           budget,
+          runBudget,
           reading,
           state,
           internal,
@@ -226,7 +234,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           preferences: { revision: context.preferences.revision, digest: await preferencesDigest(records), records: records.map(({ id, scope, intent, revision }) => ({ id, scope, intent, revision })) },
           hidden: map.hidden,
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
-          runBudget: null,
+          runBudget: runBudget.record(),
           answer: {
             dueReasons: reading.dueReasons,
             refusals,

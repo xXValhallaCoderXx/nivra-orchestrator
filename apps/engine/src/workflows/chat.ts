@@ -8,12 +8,13 @@ import type { ExecutionBackend } from "../exec/backend.ts";
 import { Budget } from "../explain/budget.ts";
 import { checkCitation } from "../explain/citations.ts";
 import { Ledger } from "../explain/ledger.ts";
-import { canAnswerAgain, EXPLAIN_LIMITS } from "../explain/limits.ts";
+import { canAnswerAgain, EXPLAIN_LIMITS, READING_INPUT_TOKENS } from "../explain/limits.ts";
 import { rankConflict } from "../explain/precedence.ts";
 import { Reading, readUntilAnswered, turnedDownCost, turnedDownText, usageOf } from "../explain/reading.ts";
 import { createReplyTools, REPLY_TOOL_SPECS, toolDefinitionChars } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
 import { createModelClient, failure, InternalFailure, ModelFailure, toModelFailure, type Endpoint, type ModelClient, type StepRecord } from "../providers/model.ts";
+import { RunBudget } from "../providers/run-budget.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoReader } from "../repo/files.ts";
 import { buildMap } from "../repo/map.ts";
@@ -266,6 +267,7 @@ export function createChatWorkflow(deps: ChatDeps) {
         beforeReading,
         toolDefinitionChars: definitions,
         contextLength: prepared.contextLength,
+        runInputTokens: READING_INPUT_TOKENS,
       });
       if (budget.exhausted()) {
         throw failure(
@@ -273,6 +275,11 @@ export function createChatWorkflow(deps: ChatDeps) {
           `about ${beforeReading} tokens are needed before any reading, and ${Math.max(0, budget.tokens)} are available once ${ANSWER_TOKENS} are held back for the reply, which leaves no room to read`,
         );
       }
+      // The turn's shared limits (D30): its steps, time and output caps, and an estimated budget for all its input.
+      const runBudget = new RunBudget(
+        { requests: EXPLAIN_LIMITS.maxSteps, totalMs: EXPLAIN_LIMITS.totalMs, outputTokensPerRequest: ANSWER_TOKENS, estimatedInputTokens: READING_INPUT_TOKENS },
+        { signal },
+      );
       const internal = new InternalFailure();
       const reading = new Reading();
       const policy = policyFor(prepared.model);
@@ -301,6 +308,7 @@ export function createChatWorkflow(deps: ChatDeps) {
         accepted: () => state.accepted !== null,
         policy,
         budget,
+        runBudget,
         reading,
         state,
         internal,
@@ -339,7 +347,7 @@ export function createChatWorkflow(deps: ChatDeps) {
           preferences: recorded.preferences,
           hidden: map.hidden,
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
-          runBudget: null,
+          runBudget: runBudget.record(),
           answer: {
             dueReasons: reading.dueReasons,
             refusals,

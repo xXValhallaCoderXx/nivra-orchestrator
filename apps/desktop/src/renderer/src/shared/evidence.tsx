@@ -157,6 +157,17 @@ const DUE: Record<AnswerDueReason, string> = {
 const KIND_LABEL = { "personal-default": "personal default", "project-default": "project default", override: "project decision" } as const;
 const NOT_RECORDED = "Not recorded for this run.";
 
+/**
+ * A run's limits and what it used (D30): the calls and time are enforced; the input budget is Nivra's estimate, never a
+ * ceiling, so what was counted, what the provider reported and any overrun are said apart.
+ */
+function runBudgetText(record: NonNullable<ExplainResult["context"]["runBudget"]>): string {
+  const { limits, used } = record;
+  const reported = used.reportedInputTokens !== null ? `${plural(used.reportedInputTokens, "token")} reported` : "not every call reported its tokens";
+  const overrun = used.overrunTokens ? `; ${plural(used.overrunTokens, "token")} more than Nivra estimated` : "";
+  return `Run budget: ${used.requests} of ${limits.requests} model calls. Input: ${plural(used.inputTokens, "token")} counted against an estimated ${plural(limits.estimatedInputTokens, "token")} (${reported}${overrun}). The input budget is an estimate, not a ceiling.`;
+}
+
 /** What the answers turned down cost (NIV-26), when there were any: tokens only as reported, never 0 for unknown. */
 function turnedDownText(cost: NonNullable<ExplainResult["context"]["answer"]>["turnedDown"]): string {
   if (!cost || cost.steps === 0) return "";
@@ -219,6 +230,9 @@ export function ContextDetails({ context, choices, prefix = "explain" }: { conte
           {budget
             ? `Request limit: ${plural(budget.tokens, "token")}; by the end of the run, about ${plural(budget.estimatedTokens, "token")} were in use (Nivra's estimate). Results given less room than usual because of the budget: ${budget.resultsLimited}; results too large to send: ${budget.resultsReplaced}. The budget ${budget.ranOut ? "ran out" : "didn't run out"}.`
             : NOT_RECORDED}
+        </Text>
+        <Text size="xs" data-testid={`${prefix}-context-run-budget`}>
+          {context.runBudget ? runBudgetText(context.runBudget) : NOT_RECORDED}
         </Text>
         <Text size="xs" data-testid={`${prefix}-context-answer`}>
           {answer

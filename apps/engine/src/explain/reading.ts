@@ -1,6 +1,7 @@
 import type { AnswerDueReason, JsonObject, RunUsage } from "@nivra/domain";
 import type { ModelPolicy } from "../providers/policy.ts";
-import { ModelFailure, toModelFailure, type InternalFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
+import { failure, ModelFailure, toModelFailure, type InternalFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
+import type { Hold, Refusal, RunBudget } from "../providers/run-budget.ts";
 import type { Budget } from "./budget.ts";
 import { mustAnswer, type ExplainLimits } from "./limits.ts";
 
@@ -34,6 +35,11 @@ export interface ReadingOptions {
   accepted: () => boolean;
   policy: ModelPolicy;
   budget: Budget;
+  /**
+   * The run's shared limits (D30): each request is held and admitted before it is sent, and the run stops, never sending
+   * it, when its estimated input can't be admitted.
+   */
+  runBudget: RunBudget;
   reading: Reading;
   state: { budgetExhausted: boolean };
   internal: InternalFailure;
@@ -86,23 +92,53 @@ export function turnedDownText(refusals: { citations: number; conflicts: number;
   return `; ${total} turned down (${parts.join(", ")})`;
 }
 
+/** Why the run's budget stopped it, in Nivra's words (D30): it used its input budget, or ran out of time or requests. */
+export function runBudgetFailure(refusal: Refusal): ModelFailure {
+  if (refusal.reason === "cancelled") return new ModelFailure("cancelled", "Cancelled.");
+  if (refusal.reason === "time" || refusal.reason === "deadline") return failure("timeout", "the run's time ran out before its next model call");
+  if (refusal.reason === "requests") return failure("budget-exhausted", "it made every model call it may");
+  return failure("budget-exhausted", `the next model call needed about ${refusal.needed.toLocaleString("en")} tokens, and about ${refusal.available.toLocaleString("en")} were left`);
+}
+
 /** Runs the loop. Returns every request made, a failed one included, and the failure that ended it, if one did. */
 export async function readUntilAnswered(options: ReadingOptions): Promise<{ steps: StepRecord[]; failed: ModelFailure | null }> {
-  const { client, reading, budget, state, policy, model } = options;
+  const { client, reading, budget, state, policy, model, runBudget } = options;
+  const steps: StepRecord[] = [];
+  // The first request is refused before it is sent if the run's budget can't admit it (D30).
+  const first = runBudget.fits(budget.used());
+  if (first) {
+    if (first.reason === "input") runBudget.stop("exhausted");
+    return { steps, failed: runBudgetFailure(first) };
+  }
   const agent = client.agent({ id: options.agent.id, name: options.agent.name, modelId: model, instructions: options.agent.instructions, tools: options.tools });
   const started = performance.now();
-  const steps: StepRecord[] = [];
   let failed: ModelFailure | null = null;
+  // The step in flight's room in the run's budget, settled when the step is reported.
+  const flight: { hold: Hold | null } = { hold: null };
   try {
     await client.call(agent, options.prompt, {
       maxSteps: options.limits.maxSteps,
       deadlines: { stepMs: options.limits.stepMs, totalMs: options.limits.totalMs },
       maxOutputTokens: options.maxOutputTokens,
       toolChoice: policy.explore,
-      stopWhen: options.accepted,
+      // A step that can't be admitted is never sent: the run stops, and ends as having used its budget (D30).
+      stopWhen: () => {
+        if (options.accepted()) return true;
+        const next = runBudget.fits(budget.used());
+        if (next?.reason === "input") runBudget.stop("exhausted");
+        return next !== null;
+      },
       // An exploring step starts only with time left for it and for the answer after it (D22).
       prepareStep: ({ stepNumber }) => {
-        reading.dueReasons = mustAnswer({ stepNumber, elapsedMs: performance.now() - started, budgetExhausted: budget.exhausted() }, options.limits);
+        const next = budget.used();
+        // Room for this request and a full-window answer after it, or the answer is due now (D30).
+        const runBudgetLow = runBudget.fits(next, Math.max(0, budget.tokens)) !== null;
+        const held = runBudget.hold({ inputTokens: next, ms: options.limits.stepMs });
+        if ("admit" in held) {
+          held.admit();
+          flight.hold = held;
+        }
+        reading.dueReasons = mustAnswer({ stepNumber, elapsedMs: performance.now() - started, budgetExhausted: budget.exhausted(), runBudgetLow }, options.limits);
         reading.answerDue = reading.dueReasons.length > 0;
         // However the budget runs out, the run records that it did.
         if (reading.dueReasons.includes("budget")) state.budgetExhausted = true;
@@ -115,6 +151,8 @@ export async function readUntilAnswered(options: ReadingOptions): Promise<{ step
         reading.finished++;
         steps.push(step);
         budget.observe(step);
+        flight.hold?.settle([step]);
+        flight.hold = null;
         for (const rejected of step.rejectedTools) {
           if (rejected.tool === options.answerTool) {
             reading.invalidAnswers++;
@@ -146,6 +184,8 @@ export async function readUntilAnswered(options: ReadingOptions): Promise<{ step
     // The request that failed is recorded once, as its own step: its own time, no usage, and why (D22). A failure
     // inside Nivra made no request, so it is the run's failure alone.
     const request = failed.failedStep;
+    flight.hold?.settle(request ? [request] : []);
+    flight.hold = null;
     if (request) {
       steps.push(request);
       options.event("model.call", `Model call failed: ${failed.message}`, {
@@ -158,6 +198,9 @@ export async function readUntilAnswered(options: ReadingOptions): Promise<{ step
         ...(failed.retryAfterSeconds !== null ? { retryAfterSeconds: failed.retryAfterSeconds } : {}),
       });
     }
+  }
+  if (!failed && !options.accepted() && runBudget.stopped === "exhausted") {
+    failed = runBudgetFailure(runBudget.fits(budget.used()) ?? { reason: "input", needed: budget.used(), available: 0 });
   }
   return { steps, failed };
 }

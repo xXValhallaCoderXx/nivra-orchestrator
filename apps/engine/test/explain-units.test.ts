@@ -133,6 +133,7 @@ describe("mustAnswer and turnsBeforeAnswer (D22, D23)", () => {
     assert.deepEqual(due(3, 180_000, false), [], "exactly room for one more call and the answer");
     assert.deepEqual(due(3, 180_001, false), ["time"]);
     assert.deepEqual(due(14, 300_000, true), ["last-steps", "time", "budget"]);
+    assert.deepEqual(mustAnswer({ stepNumber: 3, elapsedMs: 10_000, budgetExhausted: false, runBudgetLow: true }, limits), ["run-budget"], "the run's input budget (D30)");
   });
 
   it("counts the exploring turns left after the one in progress, never below none", () => {
@@ -140,13 +141,13 @@ describe("mustAnswer and turnsBeforeAnswer (D22, D23)", () => {
   });
 
   it("lets a turned-down answer be given again only with a step left, never when time or the budget made it due, and once due only for a forced answer (NIV-26)", () => {
-    const again = (stepNumber: number, dueReasons: Array<"last-steps" | "time" | "budget">, forced: boolean) => canAnswerAgain({ stepNumber, dueReasons, forced }, limits);
+    const again = (stepNumber: number, dueReasons: Array<"last-steps" | "time" | "budget" | "run-budget">, forced: boolean) => canAnswerAgain({ stepNumber, dueReasons, forced }, limits);
     assert.deepEqual(
       [again(3, [], false), again(13, ["last-steps"], true), again(14, ["last-steps"], true), again(15, ["last-steps"], true), again(13, ["last-steps"], false)],
       [true, true, true, false, false],
       "the last step has none after it, and a model that may answer in text could lose the answer",
     );
-    assert.deepEqual([again(3, ["time"], true), again(3, ["budget"], true), again(13, ["last-steps", "budget"], true)], [false, false, false]);
+    assert.deepEqual([again(3, ["time"], true), again(3, ["budget"], true), again(13, ["last-steps", "budget"], true), again(3, ["run-budget"], true)], [false, false, false, false]);
     assert.equal(canAnswerAgain({ stepNumber: 0, dueReasons: [], forced: true }, { ...limits, maxSteps: 1 }), false, "a run of one call makes no repair request");
   });
 

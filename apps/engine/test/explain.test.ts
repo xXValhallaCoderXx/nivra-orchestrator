@@ -730,3 +730,40 @@ describe("explain over stdio: answers without findings (NIV-26)", () => {
     assert.match(answerOutput(page)?.message ?? "", /^No finding cites lines the model was shown\. 0 of 1 citations point to lines the model was shown$/);
   });
 });
+
+describe("explain over stdio: the run's estimated input budget (D30)", () => {
+  const forcedAnswer = (request: StubRequest) => JSON.stringify(request.body?.tool_choice ?? "").includes("submit_answer");
+  /** Every request reports `tokens` of input, as a run whose context keeps growing would. */
+  const reporting = (tokens: number, answer: Record<string, unknown>) => (request: StubRequest, index: number): Reply => {
+    if (forcedAnswer(request)) return toolCall("submit_answer", answer, { id: `c${index}`, tokens: [tokens, 5] });
+    return index === 0 ? toolCall("read_file", { path: "README.md" }, { id: "c0", tokens: [tokens, 5] }) : toolCall("list_files", {}, { id: `c${index}`, tokens: [tokens, 5] });
+  };
+
+  it("makes the answer due once another request and a full answer after it would no longer fit, and records the run's budget", async () => {
+    const repo = makeRepo();
+    const { stub, engine } = await setup(reporting(30_000, ANSWER));
+    const run = await explain(engine, repo);
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((e) => e.message).join(" | "));
+    const chats = stub.chats();
+    // 90,000 counted after three requests: a fourth of about 30,000 and a 60,000 answer after it would pass 160,000.
+    assert.deepEqual([chats.length, chats.map((chat) => forcedAnswer(chat))], [4, [false, false, false, true]]);
+    const context = (await engine.client.call("runs.result", { runId: run.id }))?.context;
+    assert.deepEqual(context?.answer?.dueReasons, ["run-budget"]);
+    assert.deepEqual(
+      [context?.runBudget?.limits.estimatedInputTokens, context?.runBudget?.used.requests, context?.runBudget?.used.reportedInputTokens, context?.runBudget?.stopped],
+      [160_000, 4, 120_000, null],
+    );
+    assert.equal(page.events.find((e) => e.stepId === "explain" && e.type === "step.output")?.data?.["runInputTokens"], 160_000);
+  });
+
+  it("ends as budget-exhausted, sending nothing more, when the next request can't be admitted", async () => {
+    const repo = makeRepo();
+    // The forced answer breaks the schema, so another would be needed, and there is no room for it.
+    const { stub, engine } = await setup(reporting(50_000, { ...ANSWER, gaps: ["x".repeat(400)] }));
+    const run = await explain(engine, repo);
+    const page = await finished(engine, run.id);
+    assert.deepEqual([page.status, failureOf(page), stub.chats().length], ["failed", "budget-exhausted", 3]);
+    assert.match(page.events.find((e) => e.type === "run.failed")?.message ?? "", /^This run used its input budget \(the next model call needed about [\d,]+ tokens, and about [\d,]+ were left\)/);
+  });
+});

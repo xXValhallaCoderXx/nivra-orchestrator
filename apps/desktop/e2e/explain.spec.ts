@@ -91,6 +91,9 @@ test("explaining asks for the project's consent first, then shows checked and un
     "Hidden from the model: 0 files that may hold secrets, 0 dependency or build output files, and 0 files too large to read.",
   );
   await expect(page.getByTestId("explain-context-budget")).toContainText("The budget didn't run out.");
+  // The run's limits (D30): calls counted, input against an estimate that is said to be one.
+  await expect(page.getByTestId("explain-context-run-budget")).toContainText("Run budget: 5 of 16 model calls.");
+  await expect(page.getByTestId("explain-context-run-budget")).toContainText("The input budget is an estimate, not a ceiling.");
   await expect(page.getByTestId("explain-context-answer")).toContainText(
     "The model answered before it had to. Turned down before it was accepted: 2 for citations, 0 for conflicts, 0 for its shape.",
   );
