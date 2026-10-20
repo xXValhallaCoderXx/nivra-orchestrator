@@ -60,6 +60,9 @@ list.
   their `WSL_E_*` code, never by message text, and never read `wsl --list --verbose` (it is localised).
 - Spawn engines with absolute paths. `wsl.exe --exec` runs no shell: `~` is not expanded and a relative entry
   resolves against the working directory.
+- Development and test runs never use the release's engine homes (D27). A build's channel picks `~/.nivra-dev` in WSL,
+  and every Windows check runs in a WSL home of its own and fails if `~/.nivra` changed. Never point a development
+  build or a check at `~/.nivra`.
 - Children get `childEnv()` (one PATH key; `SystemRoot`, `windir`, `TEMP`/`TMP`, `USERPROFILE`, `LOCALAPPDATA`,
   `APPDATA` always present). Spawn with `windowsHide` and `detached: process.platform !== 'win32'`.
 - Stopping follows D4: `shutdown`, then `stdin.end()`, then force. On Windows, `taskkill /T /F` only while the child's

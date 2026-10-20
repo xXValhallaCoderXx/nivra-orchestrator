@@ -527,6 +527,59 @@ These are checkpoint 2.
 **A side effect to know.** The Windows checks migrated Ubuntu's shared `~/.nivra/nivra.db` to schema v3, so the
 installed v0.1.1 refuses that home until it is put back (D26).
 
+### Planning workspace: the review of checkpoint 1 (D27)
+
+A review of PR 4 found seven gaps, and asked for a WSL engine home that development and tests never share with the
+release. Six commits on `feature/chat-managment`:
+
+| Commit | What |
+|---|---|
+| `8b9a0c1` | Nebius: recovery, a subprocess not ready yet, each pattern judged on its own (findings 1, 7 and 3) |
+| `9ec15d0` | a repository reply of spaces (6) |
+| `e355720` | a deleted conversation's run (2) |
+| `22db256` | a task made from another project's plan (5) |
+| `2460259` | a crashed session's damaged workspace (4) |
+| `7ea90a4` | engine homes by channel, and a WSL home for each test run |
+
+**Each finding, reproduced and fixed.** Each has a test that fails on the code before its fix.
+
+| Finding | Before | Now |
+|---|---|---|
+| 1. A probe dies after sending a spawn, before its answer | Cleanup: 0 cancelled, nothing unresolved, the operation still running | The intent is looked for, found, cancelled and seen to end `CANCELLED` |
+| 2. A conversation is deleted while its turn is out; the engine makes the run, then answers `runs.start` with an error | No `runs.find`, no cancel: the run went on | One `runs.find`, then that run is cancelled. The same when the deletion comes while a lost answer is being looked for |
+| 3. Pattern A passes at 25 s a step; pattern B takes 1 s, but a connection gets through, its failing test passes, and its cancel never ends the parent | "adopt", on B's timings | "adopt with concern", on A; B "defer", for its own network, cancel and exit checks |
+| 4. A session dies with its last write in the WAL, and the file is damaged past its header | The 4,152-byte WAL was gone, and the file set aside had already changed | The file and its WAL kept aside byte for byte: on ext4 in the tests, and on NTFS in the packaged Windows app |
+| 5. A task for project B made from project A's plan | Brief v1 held A's source, the plan's text and "Alpha uses Vite" | Cleared and marked to be written again, as when moving a task; the same for a task with no repository yet |
+| 6. `submit_reply({answer: " \n\t "})` | The run succeeded with that answer | Turned down; a model that never fixes it ends `malformed`, with no reply stored |
+| 7. HTTP 425 while a subprocess runs | The read threw | Polled as long as `Retry-After` says, never past the deadline; a signalled child (`exit_code` -1) counts as ended |
+
+Finding 4's read-only check was tried by hand first, with `node:sqlite` on ext4 and on NTFS (the Windows `node.exe`,
+SQLite 3.53.4). It found the damage (SQLite error 11) and left the file and the WAL byte-identical. A writing
+connection, closing, had folded the WAL in and deleted it.
+
+**The engine homes (20 October, the development build from `pnpm dev:win --no-launch`)**
+
+| Check | Result |
+|---|---|
+| `verify:windows` | 22/22. The WSL engine ran in `~/.nivra-test/verify-20261020T013521Z-dcaa14f7`, and runtime `2d6e0abc44da7fdd` was installed there. `~/.nivra`'s 8 entries were unchanged, and the run's home was removed |
+| `test:windows` | 9/9. The WSL engine's home was the run's own. `~/.nivra` was unchanged, and the run's home was removed. Includes finding 4 on NTFS |
+| `~/.nivra`, compared by hand before and after both | Identical. `nivra.db` is still schema 2, with 164 runs |
+| The install script in a real shell | Three installs into `.nivra-dev` kept its newest two; the three runtime folders in `.nivra` were untouched |
+
+One thing changed afterwards, and it was the hand check itself. A read-only query of `~/.nivra/nivra.db`, made after
+both comparisons, moved the time of its `-shm` file; the file's content is the same.
+
+**Checks**
+- `pnpm verify`: domain 36, engine 181, desktop 176. All passed.
+- `test:e2e` (built): 21 passed. 1 was skipped, because it applies only to a packaged app.
+- `test:packaged` (Linux, `--dir`): 17 passed. 5 were skipped, because they need the test endpoint switch.
+- A real engine through `apps/engine/scripts/rpc.ts`, against a loopback stub: the reply of spaces was turned down, and
+  the next one succeeded, trimmed, with 1 of 1 citations checked.
+- `pnpm probe:sandbox --plan` prints the thresholds per pattern. No live call has been made.
+
+**Not run:** `verify:interrupt`. This machine has no dedicated test distribution to terminate. Its scripts only gained
+the run's own WSL home and its removal; typecheck covers them.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

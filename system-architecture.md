@@ -276,8 +276,9 @@ sequenceDiagram
 
 - **Native Windows and Linux.** The Node shipped with the app (`resources/runtime/<os>-<arch>/node`) runs
   `engine/main.mjs`.
-- **WSL.** The command is `wsl.exe -d <distro> --cd <home> --exec <home>/.nivra/runtime/<hash>/node/bin/node …/engine/main.mjs …`.
-  Every path is absolute, because `--exec` runs no shell and would not expand `~`.
+- **WSL.** The command is `wsl.exe -d <distro> --cd <home> --exec <home>/<engine home>/runtime/<hash>/node/bin/node …/engine/main.mjs …`.
+  Every path is absolute, because `--exec` runs no shell and would not expand `~`. The engine home is the build's
+  channel's (`.nivra` for a release, `.nivra-dev` for development), or a test run's own (D27).
 - **Installing the runtime in WSL (D5).** On first use, a short, fixed `/bin/sh -c` script runs inside the distribution
   (§8). The app streams a deterministic Linux tarball to it over `wsl.exe`'s standard input. The script:
   1. extracts the tarball into a temporary folder;
@@ -438,12 +439,14 @@ run progress by polling with a cursor.
 | Runs, events and results | Each engine | `<home>/nivra.db` | `node:sqlite`, exclusive lock; known key values and secret patterns masked. Holds explain questions, answers and model-written text (D22). |
 | Workflow snapshots | Each engine | `<home>/mastra.db` | libsql, through Mastra. **Not covered by the run store's masking**: Mastra stores workflow input and step results as they are. Hello stores a repository path and a hold time; explain stores the repository path, HEAD, the model id and counts. Workflows pass ids, never sensitive content. |
 | Engine logs | Host | `<logs>/<target>.log` | The engine's stderr; the previous log is kept |
-| WSL runtime | — | `~/.nivra/runtime/<hash>`, inside the distribution | The newest two are kept |
+| WSL runtime | — | `<engine home>/runtime/<hash>`, inside the distribution | The newest two are kept in each engine home; one home's runtimes are never pruned by another's (D27) |
 
-**Engine data folders:**
-- Windows: `%LOCALAPPDATA%\Nivra\engine`.
-- Linux, and inside WSL: `~/.nivra`.
-- Development: `~/.nivra-dev`.
+**Engine data folders,** by the channel the build was made for (D27):
+- Release, on Windows: `%LOCALAPPDATA%\Nivra\engine`.
+- Release, on Linux and inside WSL: `~/.nivra`.
+- Development, packaged or not: `~/.nivra-dev` on Linux and inside WSL, and `%LOCALAPPDATA%\nivra-dev\engine` on
+  Windows.
+- A Windows check's run: `~/.nivra-test/<kind>-<UTC>-<id>` inside WSL, removed when the run ends.
 
 *Planned:* the engine gains patches, approvals, apply intents and sandbox sessions, through an additive migration.
 Migration v2 (D22) added the run's duration, usage and route, and the `artifacts` table.
@@ -821,7 +824,7 @@ docs changed afterwards.
 | Acceptance on packaged builds | **Passed** (D24): live on the Linux deb and on the Windows zip driving WSL, from candidate `ead56e8`. It carries over to candidate 0.1.1 (D25), whose Windows checks ran again. Native Windows is reported from offline evidence and a controlled check | NIV-14 |
 | Release, clean-setup checks, video, submission | In progress. v0.1.1 (D25) is the latest release, with `SHA256SUMS`, and v0.1.0 is marked superseded. Clean-setup checks 1 and 2 passed on its files; check 3, a PC without the Visual C++ Redistributable, is still to run. The install and testing instructions are written, the synthetic demo repository is published, and the video (NIV-17) and the submission text (NIV-15) are next | NIV-15 – NIV-17 |
 | Planning workspace: durable conversations, conversation turns, native tasks | **Checkpoint 1 built** (D26): the workspace, protocol 5's `chat` workflow, the host's conversation service and the task records, tested offline and in the packaged apps. The window and the live checks are checkpoint 2 | NIV-30, NIV-31, NIV-32 |
-| Nebius Sandboxes feasibility | **Offline client and probe built** (D26): the live probe waits for approval; the adopt-or-defer decision will be D27 | NIV-29 |
+| Nebius Sandboxes feasibility | **Offline client and probe built** (D26, corrected by D27): the live probe waits for approval; the adopt-or-defer decision will be D28 | NIV-29 |
 | New-app creation, coding worker, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
 The estimates are not commitments. None of the planned work is a precondition for committing the foundation.
@@ -856,6 +859,7 @@ The estimates are not commitments. None of the planned work is a precondition fo
 | D24 | Packaged acceptance, release candidates, judge access and the track |
 | D25 | The Visual C++ runtime beside the addon that imports it, and candidate 0.1.1 |
 | D26 | The planning workspace: a workspace the host owns, conversation turns that are never resent, and native tasks with versioned briefs |
+| D27 | What the review of checkpoint 1 changed: seven corrections, and engine homes of their own for development and tests |
 
 The planned work in §§10–12 will be recorded in new decisions as it is built.
 

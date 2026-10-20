@@ -1148,4 +1148,72 @@ parts of NIV-31 and NIV-32. Nate set the scope and reviewed the plan twice. The 
   - the live checks.
 - **The Nebius Sandboxes probe** exists offline, in `apps/engine/src/exec/nebius/` with `pnpm probe:sandbox`. It isn't
   wired into the engine, and no backend claims anything from it. Its live run waits for approval. Its adopt-or-defer
-  decision will be D27, superseding D19's "Sandboxes isn't available yet".
+  decision will be D28, superseding D19's "Sandboxes isn't available yet".
+
+## D27. What the review of checkpoint 1 changed: seven corrections, and engine homes of their own for development and tests (2026-10-20)
+
+**Decision.** A review of PR 4 (checkpoint 1, D26) found seven gaps. Each was reproduced against the code, fixed, and
+given a test that fails without the fix.
+1. **Sandbox recovery forgets nothing it may have started.** Every spawn whose intent is journaled and that isn't
+   settled (by its answer, by being found, or by the service turning it down) is uncertain. Before, only an intent with
+   a later "uncertain" entry was. So a probe that died between sending a spawn and its answer left compute running
+   while cleanup reported nothing. A 4xx is journaled as refused: it created nothing.
+2. **A deleted conversation's turn still has its run stopped.** Deleting stays immediate. A turn whose run isn't known
+   yet keeps its request id in this session until its run is found and cancelled: one still being sent, or one whose
+   answer was lost. Before, if the engine made the run and then answered `runs.start` with an error, nothing looked for
+   the run any more. Memory is enough: only this session's engines can be running it, since an engine that stops ends
+   its runs, and one that starts fails them as interrupted (D4).
+3. **Each sandbox pattern is judged on its own evidence.** A pattern is adopted only if its own checks pass, and the
+   two that hold for both: reattaching, and telling a timeout apart. Its own median step must also be within the
+   threshold. Before, pattern A's checks and pattern B's timings were combined, so a quick, broken B and a slow A that
+   passed gave "adopt". The decision now names the pattern.
+4. **A damaged workspace a crashed session left is kept aside as it was found.** When a journal is beside
+   `workspace.db`, it is read first through a read-only connection, which can't fold the journal in or remove it.
+   Before, the writing connection found the damage, and closing it checkpointed the WAL into the damaged file and
+   deleted it, while the notice said the journal files were kept.
+5. **A task made from another project's plan takes none of that project's material.** Creating a task applies the
+   rule for moving one: the sources, context and assumptions from another project's conversation are cleared and
+   marked to be written again.
+6. **A repository reply of spaces is turned down**, like an empty one. Text in `submit_reply` is trimmed before it is
+   checked.
+7. **A subprocess that isn't ready yet is polled, not failed.** HTTP 425 from the subprocess endpoint is "pending";
+   the client waits as long as `Retry-After` says, never past its own deadline. The documentation asks for exactly
+   that.
+
+And the WSL home is no longer shared:
+- **A build has a channel**, set when it is built: development for `pnpm dev:win` (`electron-vite build --mode
+  development`), release otherwise. An unpackaged app is always development. `app.isPackaged` can't tell them apart,
+  since `pnpm dev:win` packages the app.
+- **Each channel has its own engine homes.**
+  - Release: `~/.nivra` in WSL and on Linux, and `%LOCALAPPDATA%\Nivra\engine` on Windows, as before.
+  - Development: `~/.nivra-dev` in WSL and on Linux, and `%LOCALAPPDATA%\nivra-dev\engine` on Windows, however the
+    build is started.
+- **The home is passed through** probing (is this home's runtime there), provisioning (`<home>/runtime/<hash>`,
+  pruned only there) and launching (`--home`).
+- **A test run gets a WSL home of its own**, `~/.nivra-test/<kind>-<UTC>-<id>`: `--nivra-wsl-home` for the app,
+  `--wsl-home` for the harness. Each run removes its own home at the end. One left by an interrupted run is removed
+  once it is a day old.
+- **The Windows checks prove it.** `verify:windows` and `test:windows` record what `~/.nivra` holds before they start:
+  each database file's size, time and hash, and each runtime folder with its time. They fail if any of it changed.
+
+**Why.**
+- **The review's findings.** Each was a way to report something other than the true state, or to leave something
+  running unseen. The acceptance suite forbids both.
+- **The shared home.** On 20 October the branch's Windows checks migrated `~/.nivra/nivra.db` to schema v3, and the
+  installed v0.1.1 refused its home (D26). Provisioning into that home could also prune the runtime the release runs
+  from. The review asked for a permanent fix, with release, development and test homes, and a test that development
+  and verification leave the release's database and runtime folder unchanged.
+
+**Consequences.**
+- **Supersedes** D26's consequence "the shared WSL home", and its restore procedure as a way of working: development
+  and tests no longer touch the release's home.
+- **Amends** D5 (a WSL runtime lives in its channel's home, `$HOME/<home>/runtime/<contentHash>/`) and D7 (development
+  engines use `~/.nivra-dev` in WSL too).
+- **Unchanged:** `accept:live` runs a release candidate, so it still uses `~/.nivra`, which it moves aside and puts
+  back (D24).
+- **Not covered:** a development build started without `--user-data-dir` still uses the release's user-data folder.
+  `pnpm dev:win` always passes one.
+- **Next:** the Nebius adopt-or-defer decision will be D28. D26, not merged yet, was corrected to say so.
+- **Follow-up:** explain's own `submit_answer` still accepts a summary of spaces. Explain's behaviour stays unchanged in
+  this stretch, so it is proposed separately.
+- **Evidence:** `docs/acceptance.md`, *Planning workspace: the review of checkpoint 1*.

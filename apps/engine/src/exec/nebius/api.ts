@@ -3,7 +3,7 @@ import { z } from "zod";
 /**
  * A REST client for Nebius Token Factory Sandboxes (NIV-29), over `fetch`, with the transport injectable so tests run
  * against a fake service. No SDK (the only one is Python) and no dependency. It is not wired into the engine: no
- * backend claims anything from it until the proof says it may (D9, D27).
+ * backend claims anything from it until the proof says it may (D9, D28).
  *
  * Responses are read leniently, since the API is in beta: fields Nivra needs are checked, the rest pass through.
  * Statuses are compared ignoring case. A spawn is never retried: when its answer is lost or is a server error, the

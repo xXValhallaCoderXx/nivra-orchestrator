@@ -30,7 +30,7 @@ The desktop app:
 
 ```bash
 pnpm dev                    # Linux Electron under WSLg, hot reload; the local engine runs from source on ~/.nivra-dev
-pnpm dev:win                # from WSL: build the real Windows app and start it on Windows (WSL and Windows folders)
+pnpm dev:win                # from WSL: build the real Windows app, for development, and start it on Windows (WSL and Windows folders)
 pnpm --filter @nivra/desktop test:e2e        # build, then drive the app through its UI (Playwright, needs a display or xvfb-run -a)
 pnpm --filter @nivra/desktop test:packaged   # the same against the electron-builder --dir output (package it first)
 pnpm --filter @nivra/desktop test:windows    # from WSL: drive the Windows build `pnpm dev:win --no-launch` copied
@@ -83,11 +83,14 @@ pnpm stage:runtime all      # stage linux-x64 (+ WSL tarball, smoke-tested) and 
 pnpm verify:windows         # from WSL: run the target harness as a Windows process (native + WSL engines)
 ```
 
-`verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`; the WSL
-engine uses `~/.nivra` inside the distribution, as the installed app will.
-- **That home is shared.** Every Windows profile's WSL engine uses it. When this branch's engine migrates `nivra.db`,
-  an installed app with an older engine refuses the home until a release with the same schema ships. `test:windows`
-  does the same. On 20 October, protocol 5's migration v3 did this to v0.1.1 (D26).
+`verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`.
+- **Its WSL engine runs in a home of the run's own** (D27): `~/.nivra-test/verify-<UTC>-<id>` inside the distribution,
+  removed at the end. `test:windows` does the same with `e2e-…`, and `verify:interrupt` with `interrupt-…`. A home an
+  interrupted run left is removed by a later run once it is a day old.
+- **The release's home is checked.** `~/.nivra` is what the installed app uses in every distribution. Each run records
+  its database files (size, time and hash) and its runtime folders (with their times) before it starts, and fails if
+  any of them changed. Close the installed Nivra first: its own engine writes there too. A read-only query of
+  `~/.nivra/nivra.db` during a run also changes the time of its `-shm` file, so leave it alone until the run ends.
 - **A candidate's runtimes:** `--zip <path>` takes both runtimes from a release candidate's Windows zip, exactly as
   packaged, instead of staging.
 - **The Visual C++ runtime (D25):** it checks that the native engine loads only the copy shipped beside its addon. It
@@ -100,7 +103,7 @@ Terminating a whole distribution while the app runs needs a distribution made fo
 it, with everything running in it**, and it refuses the distribution it runs in:
 
 ```bash
-pnpm stage:runtime all && pnpm dev:win --no-launch   # the Windows build it drives
+pnpm stage:runtime all && pnpm dev:win --no-launch   # the Windows build it drives (the distribution needs no ~/.nivra)
 pnpm --filter @nivra/desktop verify:interrupt --distro NivraTest
 ```
 
@@ -158,11 +161,12 @@ NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --recover <evidence 
 
 | What | Where |
 |---|---|
-| Engine home (installed app) | `~/.nivra` on Linux and inside WSL; `%LOCALAPPDATA%\Nivra\engine` on Windows |
-| Engine home (development) | `~/.nivra-dev`, or any folder passed with `--home` |
+| Engine home (installed app, release builds) | `~/.nivra` on Linux and inside WSL; `%LOCALAPPDATA%\Nivra\engine` on Windows |
+| Engine home (development builds: `pnpm dev`, `pnpm dev:win`, `pnpm rpc`) | `~/.nivra-dev` on Linux and inside WSL; `%LOCALAPPDATA%\nivra-dev\engine` on Windows; or any folder passed with `--home` or `--nivra-engine-home` |
+| Engine home (a Windows check's run) | `~/.nivra-test/<kind>-<UTC>-<id>` inside WSL (`--nivra-wsl-home`), removed when the run ends |
 | Preferences, project registry | `nivra.json` in Electron's user-data folder (`%APPDATA%\Nivra`, `~/.config/Nivra`) |
 | Engine logs | Electron's logs folder, one file per target |
-| WSL runtime | `<home>/.nivra/runtime/<contentHash>/` inside the distribution |
+| WSL runtime | `$HOME/<engine home>/runtime/<contentHash>/` inside the distribution; the newest two are kept in each home |
 
 ## Working on WSL
 
@@ -171,6 +175,10 @@ WSL (D2), so the same code works under the default NAT mode.
 
 A Node installed with nvm is invisible to `wsl.exe --exec`; that is expected, and it is why Nivra ships its own Node
 (D5).
+
+Development builds never use the installed app's engine homes (D27). One development home is shared, though: `pnpm
+dev` under WSLg, `pnpm rpc` and the WSL engine of `pnpm dev:win`'s build all use `~/.nivra-dev` in the development
+distribution. One engine holds a home at a time (D7), so the second to start is refused until the first stops.
 
 ## Not built yet
 

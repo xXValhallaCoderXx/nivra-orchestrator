@@ -1,4 +1,4 @@
-// Live check (NIV-29, D27): whether Nebius Token Factory Sandboxes can carry the first coding workflow. Never part of
+// Live check (NIV-29, D28): whether Nebius Token Factory Sandboxes can carry the first coding workflow. Never part of
 // `pnpm verify`, and never run without your approval of the stage: stage 0 only reads; stage 1 runs at most twelve small
 // operations on a synthetic fixture. No model is called and nothing is installed. Networking is off for every
 // operation but one approved control.
