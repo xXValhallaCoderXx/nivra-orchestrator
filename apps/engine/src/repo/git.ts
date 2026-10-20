@@ -38,7 +38,18 @@ export interface GitCall {
   signal?: AbortSignal | undefined;
 }
 
-export async function runGit(call: GitCall, args: readonly string[], options: { maxBytes?: number; timeoutMs?: number; okCodes?: readonly number[] } = {}): Promise<{ stdout: string; truncated: boolean }> {
+/** The git subcommands Nivra runs, which a refusal may name; any other reads as "command". */
+const SUBCOMMANDS: ReadonlySet<string> = new Set(["ls-files", "grep", "rev-parse"]);
+
+/**
+ * Runs git read-only. A failure is refused in Nivra's own words (NIV-27): git's stderr can quote paths, remotes or
+ * configuration, which masking known keys doesn't catch, so it is never kept; `hint` is fixed text that says what to try.
+ */
+export async function runGit(
+  call: GitCall,
+  args: readonly string[],
+  options: { maxBytes?: number; timeoutMs?: number; okCodes?: readonly number[]; hint?: string } = {},
+): Promise<{ stdout: string; truncated: boolean }> {
   const timeoutMs = options.timeoutMs ?? 15_000;
   const result = await call.session.exec({
     argv: [call.git, ...GIT_PINS, ...args],
@@ -49,10 +60,11 @@ export async function runGit(call: GitCall, args: readonly string[], options: { 
     ...(call.signal ? { signal: call.signal } : {}),
   });
   if (result.cancelled) throw new RepoCancelled();
-  if (result.timedOut) throw new RepoError(`git ${args[0] ?? ""} took longer than ${Math.round(timeoutMs / 1000)} s, so it was stopped.`);
+  const subcommand = SUBCOMMANDS.has(args[0] ?? "") ? args[0]! : "command";
+  if (result.timedOut) throw new RepoError("git-timeout", `git ${subcommand} took longer than ${Math.round(timeoutMs / 1000)} s, so it was stopped.`);
   if (result.exitCode !== 0 && !(options.okCodes ?? []).includes(result.exitCode ?? -1)) {
-    const said = result.stderr.trim().split("\n").at(-1)?.slice(0, 300) ?? "";
-    throw new RepoError(`git ${args[0] ?? ""} failed (exit ${String(result.exitCode)})${said ? `: ${said}` : ""}.`);
+    const exit = typeof result.exitCode === "number" ? `exit ${result.exitCode}` : "no exit code";
+    throw new RepoError("git-failed", `git ${subcommand} failed (${exit}). ${options.hint ?? "Run git status in the project's folder to see what's wrong, then try again."}`);
   }
   return { stdout: result.stdout, truncated: result.truncated };
 }

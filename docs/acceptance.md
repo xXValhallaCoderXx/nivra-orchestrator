@@ -760,6 +760,404 @@ The new tests, each failing on the code before the fix:
 - **Not run:** `rpc.ts` and the UI checks. The client isn't wired into the engine or the app, and nothing else changed.
   The fixes weren't run live: they change how an interruption is handled, not what a run does.
 
+### Answer reliability and safe diagnostics (D29, NIV-26, NIV-27)
+
+Track A's first checkpoint (A0, NIV-22): two commits on `feature/niv-26-27-reliability`, from `dc48874`.
+
+| Commit | What |
+|---|---|
+| `7ba8a07` | NIV-26: a missing `findings` costs one refusal at most, and an answer without findings is labelled, never shown as evidence; protocol 6 |
+| `f780acc` | NIV-27: one safe diagnostic per failure, and only Nivra's own words leave the engine |
+
+**NIV-26, each case through a real engine over stdio** (`apps/engine/test/explain.test.ts`, the loopback stub):
+
+| Case | Shown |
+|---|---|
+| The original regression: forced, then three answers without findings, then one with them | 15 requests. The first answer was refused once, with the template; the next was taken and labelled `no-findings`. Answers 3 and 4 were never asked for. The conflict the answer reported was kept |
+| The rehearsal's case: an answer with `findings: []`, then one with findings | `established` after one refusal, in 3 requests |
+| No step left for another answer, after two answers refused for their shape | Taken at once, labelled `no-findings` |
+| A blank summary every time | `malformed`, naming why ("3 turned down (3 for their shape)"), and no result stored. A padded summary is trimmed |
+| Findings citing only lines the model wasn't shown | Labelled `unsupported`: "0 of 1 citations" |
+
+- **The regression and the rehearsal's case both fail on the code before the fix.**
+  - The first ends `malformed` after 16 steps, its three answers refused for their shape.
+  - The second succeeds with no findings and no label.
+- **What the refusals cost is recorded with the result:** the steps that gave the turned-down answers, their tokens as
+  reported, and their time.
+
+**NIV-27, through a real engine over stdio** (`apps/engine/test/diagnostics-stdio.test.ts`).
+- **The header reproduction.** The key: about 4,000 characters, with a newline between two canaries.
+  - `providers.check` answered "Something inside Nivra failed (TypeError)." with `{kind: "internal"}`.
+  - An explain run failed as `internal`.
+  - Neither made a request.
+  - The log held exactly two diagnostic lines. Both named the stage (`models.list`); one gave the RPC id, the other
+    the run, the request, the workflow and the step.
+  - Neither half of the key was in the log, the answers, the run's records, or any file of the home.
+  - Stdout carried JSON-RPC alone.
+- **Private text that masking can't catch,** in two places:
+  - git's stderr, from a fake git that exits 128;
+  - the path of a git that can't start.
+
+  Each run failed in Nivra's words ("git ls-files failed (exit 128). Run git status …", or the fixed refusal for a
+  program that can't start). Each wrote one `git-failed` or `exec-refused` diagnostic. The private text was nowhere in
+  the home, the log or the run's records.
+- **Before the fix,** git's stderr went into the run's stored failure, and no diagnostic was written.
+- **The unit tests** (`diagnostics.test.ts`) cover:
+  - names, codes and causes that carry canaries;
+  - a cycle, throwing getters, proxies, a 5 MB message, `AggregateError`, and values that aren't errors;
+  - the line's checks and its cap;
+  - spoofed kinds;
+  - the RPC server, the scheduler, the step guard and the crash report.
+
+**Checks (20 October)**
+- `pnpm verify`: domain 38, engine 226, desktop 181. All passed.
+- `test:e2e` (the built app): 33 passed. 1 was skipped, because it applies only to a packaged app.
+  - The new check: an answer without findings is asked for them once, then shown labelled.
+  - Its status reads "no findings", and its context reads "1 for having no findings".
+- `pnpm stage:runtime all`: the new launcher's smoke test passed on linux-x64 (self-check, then initialize and shut
+  down over stdio), and win-x64 was cross-staged.
+- `test:packaged` (electron-builder `--dir`, Linux, runtimes staged afresh): 21 passed. 13 were skipped, because they
+  need the test endpoint switch, which a packaged app ignores.
+- `rpc.ts`: a real engine, on homes under `~/.nivra-dev-track-a`, against a scratch stub.
+  - **The regression:** `no-findings` after one refusal; the refused step cost 20 in / 5 out tokens.
+  - **The rehearsal's case:** `established`.
+  - **`providers.check`, then an explain run, with the newline key:** two diagnostics, and the key nowhere in the
+    output or the home.
+  - **The fake git:** one `git-failed` diagnostic, and the private text nowhere.
+- **Not run.**
+  - `verify:windows` and `test:windows`: no target, supervisor or staging code changed. `verify:windows` runs once at
+    A1, which contains A0.
+  - No live model call: none is needed.
+
+### Plan review runtime and run budgets (D30, NIV-38)
+
+Track A's second checkpoint (A1, NIV-22): commits on `feature/niv-38-council`, stacked on A0.
+
+| Commit | What |
+|---|---|
+| `b12d242` | The review contract, recorded before the runtime: packet, fingerprints, report, protocol 7 |
+| `fee717a` | The shared run budget, for explain and repository chat |
+| `046ef76` | The review workflow: two reviewers and a chair, or one reviewer |
+| `bab22b2` | Each stage's message names the stage once |
+
+**Through a real engine over stdio** (`apps/engine/test/review.test.ts`, the loopback stub playing each role):
+
+| Case | Shown |
+|---|---|
+| A council review | 3 requests. Both reviewers read the same message, byte for byte, and neither saw the other's report; the chair saw both. The report is bound to the plan's id and version and both fingerprints. Findings got their ids, and each basis was read from its references: an unknown reference was dropped, and a finding resting only on an address was relabelled as an assumption. Agreements and dissent name their findings and reviewers. Usage and the budget record are kept |
+| The single panel | 1 request, on the same message as the council's reviewers; no chair |
+| No material issues | A review with a summary and no findings is complete |
+| Unusable answers | A reply in text, an empty review, or a form refusal: the stage fails `malformed`, the chair isn't asked, 2 requests are made, and the other report is kept |
+| The chair fails | Both reports kept; `run.failed` names the chair |
+| A fast failure beside a slow success | The run waits for the slow reviewer and keeps its report: 2 requests |
+| Cancel | No further request. The finished review is kept, and the report reads cancelled by the time the run ends |
+| The engine killed mid-review | After a restart: interrupted. The finished review is kept; the request that was out "may have been sent"; nothing is sent again |
+| Usage not reported | Totals null, with the estimate kept apart |
+| Refusals before any request | A window too small for the chair at its largest, a packet over its limits, no key, no consent, no model |
+| Bindings | A wrong fingerprint refused before any request; a request id reused for another version refused; the same request returns the same run |
+| Isolation and masking | A general plan's review sent a project preference is refused. An override is said to be one. A key in the plan is never sent, and is masked in the report. Mastra's records never hold the plan |
+
+- **In process** (`review-units.test.ts`, `run-budget.test.ts`):
+  - **Normalisation:** ids, the first eight findings, references, the basis, clipping, masking, and an empty review
+    told from a valid one.
+  - **Prompts:** the role on each first line; preferences by scope and intent.
+  - **Estimates:** the whole request, tool definitions included.
+  - **Sizes:**
+    - the largest realistic packet fits the request window and the council's budget, with about 31,900 tokens per
+      reviewer and 45,500 for the chair;
+    - absurd paths are refused before any request;
+    - a worst-case report, in characters of three bytes each, stays well under the store's 256 KB.
+  - **The run:** both reviewers in flight at once; the chair sent in its reserved room after reviewers reported far
+    over their estimates; a late reviewer stopped at its deadline; nothing sent when the budget can't hold every
+    request.
+  - **The budget:** reservations all or nothing; underestimation recorded; missing usage; time held back for the
+    chair; cancel and the deadline.
+- **Explain and repository chat** (`explain.test.ts`, `chat.test.ts`):
+  - with 30,000 tokens reported per request, the answer is forced at the 4th request (`run-budget`);
+  - with 50,000 and a refused answer, the run ends `budget-exhausted` after 3 requests and sends nothing more.
+
+**Checks (20 October)**
+- `pnpm verify`: domain 43, engine 259, desktop 181. All passed.
+- `test:e2e` (the built app): 33 passed. 1 was skipped, because it applies only to a packaged app. The context view
+  now shows the run's budget.
+- `pnpm stage:runtime all`: the protocol 7 runtime's smoke test passed on linux-x64, and win-x64 was cross-staged.
+- `rpc.ts`, a real engine on homes under `~/.nivra-dev-track-a`, against a scratch stub:
+
+| Run | Requests | Outcome |
+|---|---|---|
+| Council | 3 | complete; the same request id again returned the same run, with no new request |
+| Single | 1 | complete |
+| A reviewer answering in plain text | 2 | incomplete; "The risks review couldn't be used: it answered in plain text…" |
+| A project's plan without consent | 0 | `sharing-refused` |
+| A wrong fingerprint | 0 | refused before any request |
+| A fast failure beside a slow success | 2 | incomplete; the slow review kept; usage unknown; the failed request counted at its estimate |
+
+- **Not run yet:** `verify:windows`, which needs a turn on the shared Windows folders.
+
+### Plan reviews in the window (D31, NIV-39)
+
+Track A's third checkpoint (A2, NIV-22): commits on `feature/niv-39-review-ui`, stacked on A1. It is the release point
+for the shared files Track B's NIV-44 waits on.
+
+| Commit | What |
+|---|---|
+| `16da342` | Workspace v2: reviews as run links, bound and frozen |
+| `33937c8` | The host: preview, start only as previewed, and keep a report only when it is bound to its review |
+| `c90e14c` | The window: the dialog and the cards; the review e2e; seeded plans for the packaged and Windows checks |
+
+**The workspace** (`workspace-store.test.ts`):
+- **The migration.** A v1 file, made with v1's own schema and the store's functions, moves to v2 with every row and
+  every v1 schema object as they were. v1's migration text is pinned by its hash.
+- **The triggers refuse:**
+  - a review on a turn's run;
+  - a review of another conversation's plan, or of a version or fingerprint the plan isn't;
+  - any change to what a review was bound to, and a second report;
+  - a run link changing its workflow or its conversation.
+- **One open run per conversation,** turns and reviews together. Every stop path sees the review; the conversation's
+  turns, and so its history, don't.
+- **Deletion:** deleting a conversation leaves none of a report's text in the file.
+
+**The host, with real engines** (`host.test.ts`; the stub plays each role, and the gated fixture engine holds a start):
+
+| Case | Shown |
+|---|---|
+| A general plan's review | The preview lists exactly the personal preferences that apply. Another project's own preference isn't sent, and neither is the conversation. 3 requests. The kept report's binding and fingerprints equal the preview's. The host's store and the plan are unchanged, and a task made from the plan is ready without a review. After an edit, v1's report stays byte-equal and says the plan is at v2; reviewing v2 makes a second review |
+| The preview bound to the start | An edited preference, a deleted one, sharing turned off, and a fingerprint no preview gave: each refused, with nothing sent or stored, and the next preview shows the change. From a fresh preview, the review sends the project's own preferences as they are now, the README reference, and no path of the project's. Once the project is removed, preview and start are refused |
+| A reviewer fails | Incomplete: the risks report kept, the chair skipped, 2 requests, nothing resent |
+| Cancel while running | The conversation is held: a message is refused, and the preview says why. The cancelled report is kept; a message is then answered. 2 review requests in all |
+| Stopped while being sent | Cancelled by the person, or by sharing turned off, as soon as the engine answers; its run cancelled once |
+| A quit, or a killed engine | After a restart: interrupted, with what the engine saved and its stages marked; nothing sent again |
+| A lost answer | Found by its request id and kept as complete; sent once |
+| A report bound to something else | The review's end is unknown, and nothing of the report is kept |
+| Deleted while running | The run stops. The workspace keeps no review, run link or plan, and none of the plan's text |
+| Credentials | A version holding the saved key is refused before anything is stored. A key a reviewer echoed is masked, and no file under the profile or the engine home holds it |
+
+- **In process** (`reviews.test.ts`):
+  - **The packet:** the scope and commit; each reference once, in order; none for a general plan; assumptions and
+    paths masked.
+  - **Refusals:** too long, the saved key, a token, over a limit, each in words that say what to do.
+  - **The preview's fingerprint** moves with each part it binds, and only with them.
+  - **The report check** refuses each field of the binding that differs.
+  - **The notes** say how a review ended, and that nothing was resent.
+- **The window** (`e2e/review.spec.ts`, the built app against the stub, 10 tests):
+  - **No key:** a seeded plan's preview (the version, the scope, the counts, what isn't sent, the cost), then
+    "Failed" before any request, saying what to do;
+  - **A general plan:** "Complete" with three stages, findings "From the plan", the synthesis's "Agreement isn't proof",
+    the line saying a review approves nothing, and usage with the run budget. The plan and the preference were sent,
+    and the conversation wasn't;
+  - **A stale preview:** refused, the new preference shown, nothing sent;
+  - **A failed reviewer:** "Incomplete", with its stages; Review again ends "Complete";
+  - **Cancel:** the composer and Review… held, then "Cancelled"; the next message is answered, with no further review
+    request;
+  - **A killed engine:** unresolved, then "Interrupted" after Restart; nothing resent;
+  - **A project's plan:** consent asked in the dialog; the reference shown as "E1 · README.md:1 · historical", its
+    finding an assumption; no path of the project's sent;
+  - **An edit to v2:** every card says the plan moved on, and the dialog offers v1 and v2;
+  - **A relaunch:** every review read back equal; nothing sent;
+  - **Deletion:** the dialog says the reviews go and what each engine keeps; they go.
+
+**Checks (21 October)**
+- `pnpm verify`: domain 43, engine 259, desktop 199. All passed.
+- `test:e2e` (the built app): 43 passed. 1 was skipped, because it applies only to a packaged app.
+- `test:packaged`: 24 passed. The 20 skipped need the test endpoint switch, which a packaged app ignores. The review
+  checks that apply there ran: a seeded plan's review with no key, a relaunch and a deletion.
+- `rpc.ts`: not run again, because the engine didn't change.
+- **Not run yet:** `test:windows`, with its new check of a plan seeded by the staged `node.exe`. It needs a turn on the
+  shared Windows folders, after `pnpm dev:win --no-launch`.
+
+### Council evaluation (D32, NIV-40)
+
+Track A's fourth checkpoint (A3, NIV-22): commits on `feature/niv-40-council-eval`, stacked on A2. It is evidence from
+five short synthetic plans, one run per arm, not a general claim about councils.
+
+| Commit | What |
+|---|---|
+| `66a85ed` | The evaluator, offline: five frozen plans, the rubric, the protocol, scoring and the batch |
+| `1210c54` | How to run it |
+| `6fe7fe4` | From Nate's review: model, route and sampling checked before any inference request; every wait bounded |
+| `be14fc8` | Nate labels the sheet, as chosen at the freeze |
+| `f8d440e`, `196cad1` | The docs and the request for approval's wording |
+
+**Offline** (`apps/engine/test/council-eval.test.ts`, 16 tests, a real engine against the stub):
+- **The frozen inputs:**
+  - the five plans pass the packet's own schema;
+  - both arms get the same packet, with no preferences, no path and no repository;
+  - the protocol's limits are the engine's;
+  - the approval digest is pinned.
+- **The rubric:** every known defect matches its positive examples and none of its negatives, and nothing matches
+  the control's.
+- **The scoring:**
+  - each known defect counts once per fixture and arm, however many findings name it;
+  - novelty is judged only where no known defect is named;
+  - the control's correct outcome is a substantive "no material issues", told apart from an incomplete review;
+  - every edge of the decision rule is tested.
+- **The batch:**
+  - exactly 20 requests in the protocol's order;
+  - a reviewer's 500 kept and never retaken;
+  - a batch killed mid-review resumed by request id, with nothing sent again;
+  - the deadline and the 60-minute cap held.
+- **Before any inference request:** another model, another sampling or another endpoint each stops the batch with
+  not one inference request.
+- **A run that keeps running after it is cancelled:** kept as unresolved within its bound, the batch stopped, and it
+  is never sent again on resume.
+
+**The paid batch** (approved on 21 October: digest `c3b9225a9c41e4c9cde2a90c029682796886817f463e7e5286eab23082fc6683`,
+revision `196cad1`, a committed tree).
+- **When and where:** 20:28:37 to 20:30:25 UTC, in
+  `~/nivra-acceptance/council-eval-20261020T202836Z-196cad1/` (0700). The key came from a file outside the repository
+  (0600).
+- **The outcome:** every check before an inference request passed. No stop rule fired, and nothing was retried or
+  retaken.
+
+| Fixture | Arm | Run | End | Requests | Time | Tokens in / out |
+|---|---|---|---|---|---|---|
+| F1 | single | `16a748c5-4f9f-4146-b650-70d85fab316f` | succeeded, complete | 1 | 6.0 s | 1,405 / 647 |
+| F1 | council | `df1a6af7-063c-416a-b012-ef96ccaffba0` | succeeded, complete | 3 | 16.1 s | 5,160 / 1,979 |
+| F2 | council | `d8635dc5-e495-4aca-adbe-2c19b3df0c86` | succeeded, complete | 3 | 16.3 s | 5,360 / 2,268 |
+| F2 | single | `2ad6eb27-8022-4ceb-acee-49c5e5274405` | succeeded, complete | 1 | 8.6 s | 1,504 / 772 |
+| F3 | single | `fe7b2f8b-5132-465e-a49b-813d4bd7575a` | succeeded, complete | 1 | 6.5 s | 1,369 / 749 |
+| F3 | council | `2686320e-ea94-4fa5-ae42-afe89e9887ba` | succeeded, complete | 3 | 12.1 s | 4,954 / 1,946 |
+| F4 | council | `617184bd-9a4d-46dc-99c9-5fa210980ad7` | succeeded, complete | 3 | 12.6 s | 4,903 / 2,039 |
+| F4 | single | `52a48f69-70cd-499b-aa83-1201ab759d85` | succeeded, complete | 1 | 9.0 s | 1,383 / 673 |
+| F5 | single | `333b24c9-df75-4325-bc43-24a425f41440` | succeeded, complete | 1 | 2.0 s | 1,427 / 188 |
+| F5 | council | `52244ab8-0927-42ef-94dc-6450ed3a55b7` | succeeded, complete | 3 | 4.6 s | 4,306 / 489 |
+
+**The labels, v1.**
+- **Who:** proposed with AI assistance, then reviewed and approved by Nate as v1.
+- **What was copied:** each of the 55 rows was checked against the sheet the batch wrote (item, order, finding and
+  every other field outside the label). Only the seven label fields were copied.
+- **When:** v1 was frozen, read-only, and its hash recorded (`labels.v1.json`) before scoring rebuilt the arm mapping,
+  which was never written down. The script that checked and froze it is kept beside it, as `freeze-labels.ts`.
+- **Hashes:**
+  - the sheet the batch wrote (`sheet.original.json`): `479d7f3f57e60731095c55c72eca6711f5968327193404852c788bea2aeaeb8a`;
+  - v1 (`sheet.v1.json`, the same bytes as the approved file): `a899ab9a8a4b6387b6c2de2bc87ba1f40d8d318be128ebca4434b633ee025c95`;
+  - the scores (`scores.v1.json`): `f945c5e2d040c6e26f884a8496a1a9b1df73b2cec90c21a0b7564894954062d9`;
+  - the decision (`decision.v1.md`): `c72c3bbe6a3fe1e6650dd8a077a4cb5f3d680cd028fc4cf51553925be2cdb5f1`.
+- **A later correction** keeps v1 and makes a v2 the same way, with its own hashes and whether the decision changed.
+
+**Scores** (`pnpm council:eval --score`, offline, from v1):
+
+| | Single reviewer | Council |
+|---|---|---|
+| Known defects found, of 12 on F1–F4 | 9 (F1 1, F2 2, F3 3, F4 3) | 11 (F1 3, F2 2, F3 3, F4 3) |
+| Useful novel findings, distinct | 8 | 9 |
+| Unsupported findings | 0 | 1 (U1, the architecture reviewer on F3) |
+| False alarms on the control | 0 | 0 |
+| The control reviewed as sound, substantively | yes | yes |
+| Complete runs | 5 of 5 | 5 of 5 |
+| Findings raised | 17, each a distinct known defect or useful point | 35 (architecture 14, risks 21), of which 15 repeat another |
+| Actionable findings | 17 of 17 | 35 of 35 |
+| Median latency ratio | | 1.90 |
+| Median token ratio | | 3.35 |
+
+- **The decision, by the frozen rule: adopt.** Every adopt rule held, and no defer rule did.
+- **Three adopt rules held exactly at their edge:**
+  - known defects, 2 above (adopt needs 2);
+  - known defects plus useful novel findings, 3 above (needs 3);
+  - unsupported findings, 1 above (allows 1).
+
+  The whole known-defect margin comes from F1.
+- **The automatic pass alone** credits the single reviewer with F2's provider-timeout defect: 10 against the
+  council's 11.
+- **The limitations** are D32's: one run per arm, the labels' provenance, actionability that didn't discriminate,
+  authoring by the council's builder, and an unscored chair.
+
+### The review of PR 10: five fixes and two follow-ups (Track A)
+
+Nate's review of PR 10 (21 October) held the merge on five P2 findings and two smaller follow-ups. Each fix has a
+regression test, and each test failed with its fix taken out. The reproductions use offline stubs; no paid call ran. The review didn't establish that the v1 result is wrong, and scoring v1 again under
+the fixed scorer gives the same bytes (below).
+
+| Finding | The fix | Its regression test: with the fix, and without it |
+|---|---|---|
+| 1. A refused budget reservation didn't stop the next model request (`explain/reading.ts`) | The next request's room is held where the loop decides to go on, and admitted just before the request is sent. A refusal at either point sends nothing. A request is held for its step's time or what is left, whichever is less, so D22's deadlines still decide time. A refused admission ends the call through Mastra's tripwire, before the request, and prints nothing | `run-budget.test.ts`. The review's case, 60 s and 50,000 tokens a request in a 200 s run: 4 sent, and the budget records 4 requests and 200,000 tokens (without the fix: 1 and 50,000). An admission refused after its hold: 1 sent and 1 recorded (without: 16 sent) |
+| 2. Trimming the chair's answer could hide unaddressed findings (`review/answers.ts`) | `unaddressed` is worked out from what is kept | `review-units.test.ts`: findings named only in a ninth agreement, a fourth position or a seventh dissent entry are listed (without: only the one named nowhere) |
+| 3. A restarted evaluator could pass a stop condition (`council-eval/batch.ts`) | A resumed batch checks the protocol's stops again on every run its journal kept | `council-eval.test.ts`: an authentication failure whose stop was lost. Resumed, the batch sends nothing more and writes the stop again (without: it went on) |
+| 4. Invalid labels inflated the scores (`council-eval/score.ts`) | A label must have its seven fields, each null or an allowed value. A finding names only its own plan's known defects, each once, and a field that doesn't apply stays null. `--score` names each problem and scores nothing, and `scoreBatch` refuses such a sheet | A misspelled defect, another plan's defect, two wrong values and a summary's defects: 5 problems. The command refuses a misspelled defect (without: no problem was found, and the command scored the sheet) |
+| 5. Scoring didn't enforce the frozen approval digest (`council-eval.ts`) | `--score` refuses a batch run under another digest, as `--resume` does | A protocol with one threshold changed: refused, and `scores.json` unchanged (without: rescored) |
+| Follow-up: the 60-minute cap left some waits out | The cap counts every wait from the engine's start: the engine's start, its doctor, and for each run the model listing, its start, its windows and reading its record. A run is started only if all of these, each at its limit, could end within the 60 minutes, and every wait is cut to the time left. Only stopping the engine comes after, in at most 15 s | A run whose windows alone would fit, but not with the waits around it, isn't started (without: it started, and sent 4 requests) |
+| Follow-up: this record named four PRs | One PR, 10, carries A0 to A3 | (docs) |
+
+- **What changes beside the fixes:**
+  - **A run whose time is gone** between two requests now ends as a timeout. It used to end as one without an answer.
+  - **The input-budget failure** gives the real figures. It used to say "needed about 0 tokens, and about 0 were left".
+  - **The request for approval's worst case:** with every run and every wait at its limit, a batch would need 74.0
+    minutes, so it would stop before its last runs. It used to say 52.5 minutes, windows only. The paid batch's runs
+    took 1.6 minutes.
+  - **The evaluator stops an engine that fails to initialize,** rather than leaving it running.
+- **v1 stands.** The fixed `--score` ran on a copy of the evidence (the journal, the runs and the v1 sheet). Its
+  `scores.json` (`f945c5e2…62d9`) and `decision.md` (`c72c3bbe…b5f1`) are the same bytes as `scores.v1.json` and
+  `decision.v1.md`. v1's labels pass the new checks with no problem: they are the checks `freeze-labels.ts` made
+  before v1 was frozen. Nothing in the evidence folder was written.
+- **Not covered by a test:** that no wait goes past the cap. The pre-run reserve is tested; the cut to the time left
+  is checked by reading the code, because testing it would need a slow engine and an hour-long clock.
+
+**Checks (21 October)**
+- `pnpm verify`: domain 43, engine 282, desktop 199. All passed.
+- `rpc.ts`, a real engine on homes under `~/.nivra-dev-track-a`, against a scratch stub:
+
+| Run | Requests | Outcome |
+|---|---|---|
+| Explain | 3 | succeeded; the run's budget records 3 requests and 3,000 tokens, as reported |
+| Explain, 50,000 tokens reported a request, with a refused answer | 3 | `budget-exhausted`: "the next model call needed about 50,052 tokens, and about 9,868 were left" |
+| Council review, the chair naming one finding only in a ninth agreement | 3 | complete; 8 agreements kept, 1 dropped; that finding and one named nowhere are unaddressed |
+
+- `pnpm stage:runtime all`: the linux-x64 runtime's smoke test passed (self-check, then `initialize` and shutdown
+  over stdio), and win-x64 was cross-staged.
+- **The Windows turn.** First, a read-only look found no Nivra process on Windows and nothing of Track B's running.
+  - `pnpm verify:windows` (A1's check, on the runtimes just staged): 22 of 22 passed on Windows. That covers the native
+    and WSL engines, the Visual C++ runtime shipped beside the addon, cancel, stop, a kill and Restart, and an engine
+    dying with its parent. `~/.nivra` was unchanged, and the run's own WSL home was removed.
+  - `pnpm dev:win --no-launch`, then `test:windows` (A2's check): 11 of 11 passed. Among them, a seeded plan's review
+    on Windows shows what it would send, is refused on the native engine before any request with no key, and is kept
+    across a relaunch.
+- `test:e2e`, the built app: 43 passed and 1 skipped, the one that applies only to a packaged app. The explain runs
+  against the stub are among those passed.
+- **Not rerun:** `test:packaged`, since no packaging, main-process or preload code changed.
+
+### Track A completion record (NIV-22)
+
+Prepared 21 October 2026, at `196cad1` with this record's docs commit, and brought up to date after the review of PR 10
+(above). **The parent stays open:** item 8 isn't met yet (below).
+
+| NIV-22 acceptance item | Evidence | Where it stands |
+|---|---|---|
+| 1. Two reviewers, the same frozen packet, neither seeing the other's report; the two roles | A1: `review.test.ts` (byte-identical messages, each blind to the other). Live: five council runs, all complete | Evidenced |
+| 2. A chair keeps finding ids, evidence, assumptions and dissent; agreement is no proof; a missing reviewer gives an incomplete review, never approval | A1: dissent, a failed chair, a fast failure beside a slow success, unusable answers. A2: the cards' "Agreement isn't proof" and "Incomplete" (`review.spec.ts`). The review of PR 10: a finding named only in a part dropped for the limits is unaddressed | Evidenced |
+| 3. ModelClient reused; scoped context; aggregate limits and cancellation; at most three calls; no hidden retries | A1: `run-budget.test.ts`, `review-units.test.ts`, `review.test.ts` (cancel, deadline, no resend); real-engine council: 3 requests. Live: 20 requests for 10 runs | Evidenced |
+| 4. A shared budget guard for explain and repository chat; estimates apart from reported usage; unknown stays null | A1: explain and chat over stdio (`run-budget`, `budget-exhausted`); the context view's run budget. The review of PR 10: a request goes only with its room held and admitted, so the budget records every request sent | Evidenced |
+| 5. A report saved in its conversation, bound to the plan version and context; a revision makes a new review; nothing replayed; evidence never overwritten | A2: workspace v2's triggers; host tests (a stale version's report byte-equal, a quit and a kill interrupted, the lost answer, a mismatched binding kept nowhere); `review.spec.ts` (relaunch) | Evidenced |
+| 6. Five synthetic plans with a sound control, against the same-input single reviewer, frozen before live calls | A3: *Council evaluation* above; D32. The review of PR 10: labels validated, scoring only under the batch's digest, and v1 scored again with the same bytes | Evidenced: adopt, at its edge |
+| 7. Reports inform a person; they never change readiness, memory, patches or external tickets | A2: a task is ready without a review; the store and the plan unchanged by a review; the cards' copy | Evidenced |
+| 8. Every child and the original requirements have reviewable evidence before the parent is ready for review | Each checkpoint's section above | Not yet: see what is missing |
+
+**Platform matrix, as run:**
+
+| Check | A0 | A1 | A2 | A3 | The review's fixes |
+|---|---|---|---|---|---|
+| `pnpm verify` | passed (domain 38, engine 226, desktop 181) | passed (43, 259, 181) | passed (43, 259, 199) | passed at `196cad1` (43, 275, 199) | passed (43, 282, 199) |
+| `test:e2e`, the built app | 33 passed, 1 skipped (packaged only) | 33 passed, 1 skipped | 43 passed, 1 skipped | not affected | 43 passed, 1 skipped |
+| `test:packaged`, Linux | 21 passed, 13 skipped (the test endpoint) | not required | 24 passed, 20 skipped (the test endpoint) | not affected | not affected |
+| Real engine | `rpc.ts`: the regression, the key and plain-text canaries | `rpc.ts`: council, single, refusals, a fast failure | the engine didn't change | the paid batch | `rpc.ts`: explain, an input budget used up, the chair's ninth agreement |
+| `pnpm stage:runtime all` | passed | passed (protocol 7) | not rerun: the engine didn't change | not affected | passed |
+| `verify:windows` | not required | run later, with the fixes | n/a | n/a | 22 of 22 passed |
+| `test:windows` | n/a | n/a | run later, with the fixes | n/a | 11 of 11 passed |
+
+**What is missing before the parent is ready for review:**
+- **PR 10's merge.** One PR carries all four checkpoints, A0 to A3. It was pushed and reviewed, and the review's findings
+  are fixed (above). Nate merges it, and NIV-26, NIV-27, NIV-38, NIV-39 and NIV-40 are accepted with it.
+- **Track B's handoff:** after NIV-39 merges, the shared-file handoff for NIV-44.
+
+**Limitations the parent carries:**
+- **D29:** the engine's text before `initialize` (startup `engine.fatal`, the supervisor's log tail), and Mastra's own
+  validation errors about id-only step data.
+- **D30:** input budgets are estimates, never ceilings. Two concurrent requests on a low-tier key can draw a 429,
+  which leaves the review incomplete.
+- **D31:** older builds refuse a v2 profile.
+- **D32:** its limitations, above.
+- **A follow-up, NIV-46:** the engine creates Mastra's database files readable by others (0644). `nivra.db` is 0600.
+  The development home is 0755, so other local users can read `~/.nivra-dev/mastra.db*`.
+
 ### Nebius execution session, B1 (D33, NIV-41)
 
 Track B's first checkpoint, offline: D28's pattern A behind the execution contract, with every request inside its

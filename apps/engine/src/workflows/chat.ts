@@ -8,17 +8,19 @@ import type { ExecutionBackend } from "../exec/backend.ts";
 import { Budget } from "../explain/budget.ts";
 import { checkCitation } from "../explain/citations.ts";
 import { Ledger } from "../explain/ledger.ts";
-import { EXPLAIN_LIMITS } from "../explain/limits.ts";
+import { canAnswerAgain, EXPLAIN_LIMITS, READING_INPUT_TOKENS } from "../explain/limits.ts";
 import { rankConflict } from "../explain/precedence.ts";
-import { Reading, readUntilAnswered, usageOf } from "../explain/reading.ts";
+import { Reading, readUntilAnswered, turnedDownCost, turnedDownText, usageOf } from "../explain/reading.ts";
 import { createReplyTools, REPLY_TOOL_SPECS, toolDefinitionChars } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
-import { createModelClient, failure, InternalFailure, ModelFailure, type Endpoint, type ModelClient, type StepRecord } from "../providers/model.ts";
+import { createModelClient, failure, InternalFailure, ModelFailure, toModelFailure, type Endpoint, type ModelClient, type StepRecord } from "../providers/model.ts";
+import { RunBudget } from "../providers/run-budget.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoReader } from "../repo/files.ts";
 import { buildMap } from "../repo/map.ts";
 import { RepoError } from "../repo/paths.ts";
 import type { ExplainRecorder } from "./explain.ts";
+import { guard } from "./guard.ts";
 import { describePreferences } from "./preferences-record.ts";
 
 export const CHAT_WORKFLOW_ID = "chat";
@@ -64,7 +66,7 @@ export function createChatWorkflow(deps: ChatDeps) {
 
   const given = (runId: string): ChatContext => {
     const context = deps.context(runId);
-    if (!context) throw failure("internal", "this run's context is missing");
+    if (!context) throw failure("internal", "this run's context is missing").because("context-missing", "chat.context");
     return context;
   };
 
@@ -85,7 +87,7 @@ export function createChatWorkflow(deps: ChatDeps) {
 
   const openReader = async (root: string, signal: AbortSignal | undefined) => {
     const git = deps.findGit();
-    if (!git) throw new RepoError(`Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
+    if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
     const session = await deps.backend.open({ workspace: root });
     try {
       return { reader: await RepoReader.open({ root, session, git, mask: deps.mask, signal }), session };
@@ -101,7 +103,7 @@ export function createChatWorkflow(deps: ChatDeps) {
     description: "Record the preferences and history the app sent with the turn, without their text",
     inputSchema: Input,
     outputSchema: Input,
-    execute: async ({ inputData, runId }) => {
+    execute: async ({ inputData, runId }) => guard("chat.context", deps.mask, async () => {
       const turn = given(runId);
       const preferences = await describePreferences(turn.preferences);
       deps.recorder.output(runId, "context", preferences.message, preferences.data);
@@ -110,10 +112,10 @@ export function createChatWorkflow(deps: ChatDeps) {
       const task = taskOf(runId);
       // A general conversation belongs to no project, so a project's own preference never reaches it (D21, D26).
       if (task.scope.kind === "general" && turn.preferences.records.some((record) => record.scope !== "personal")) {
-        throw failure("internal", "a general conversation was sent a project's own preference");
+        throw failure("internal", "a general conversation was sent a project's own preference").because("input-refused", "chat.context");
       }
       return inputData;
-    },
+    }),
   });
 
   const prepare = createStep({
@@ -121,7 +123,7 @@ export function createChatWorkflow(deps: ChatDeps) {
     description: "Check the key and consent, read HEAD for a repository, and pick the model",
     inputSchema: Input,
     outputSchema: Prepared,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("chat.prepare", deps.mask, async () => {
       const task = taskOf(runId);
       const { key } = allowed(runId, task);
       let root: string | null = null;
@@ -145,7 +147,7 @@ export function createChatWorkflow(deps: ChatDeps) {
       const where = task.scope.kind === "repository" ? `Repository at ${head ? head.slice(0, 12) : "no commits yet"} (HEAD at run start); ` : "No repository: a general conversation; ";
       deps.recorder.output(runId, "prepare", `${where}model ${model}`, { root, head, model, contextLength: models.contextLengths.get(model) ?? null, ...(files ?? {}) });
       return { root, head, model, contextLength: models.contextLengths.get(model) ?? null };
-    },
+    }),
   });
 
   const reply = createStep({
@@ -153,14 +155,14 @@ export function createChatWorkflow(deps: ChatDeps) {
     description: "Reply to the person's message, reading the repository for a repository conversation",
     inputSchema: Prepared,
     outputSchema: Replied,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("chat.reply", deps.mask, async () => {
       const task = taskOf(runId);
       const { context: turn, key } = allowed(runId, task);
       const preferences = await preferencesReceived(turn.preferences);
       const history = (await describeHistory(turn.history)).record;
       if (task.scope.kind === "general" || inputData.root === null) return general(runId, task, turn, key, inputData, abortSignal, { preferences, history });
       return repository(runId, task, turn, key, { ...inputData, root: inputData.root }, abortSignal, { preferences, history });
-    },
+    }),
   });
 
   /** One call, no tools: nothing from a repository can reach it. An empty reply is never a useful answer. */
@@ -211,7 +213,7 @@ export function createChatWorkflow(deps: ChatDeps) {
       text = result.text;
       finishReason = result.finishReason;
     } catch (error) {
-      const failed = error instanceof ModelFailure ? error : failure("internal", error instanceof Error ? error.name : typeof error);
+      const failed = error instanceof ModelFailure ? error : toModelFailure(error, "chat.reply");
       // The request that failed is recorded once, as its own step (D22).
       const request = failed.failedStep;
       if (request) {
@@ -265,6 +267,7 @@ export function createChatWorkflow(deps: ChatDeps) {
         beforeReading,
         toolDefinitionChars: definitions,
         contextLength: prepared.contextLength,
+        runInputTokens: READING_INPUT_TOKENS,
       });
       if (budget.exhausted()) {
         throw failure(
@@ -272,8 +275,14 @@ export function createChatWorkflow(deps: ChatDeps) {
           `about ${beforeReading} tokens are needed before any reading, and ${Math.max(0, budget.tokens)} are available once ${ANSWER_TOKENS} are held back for the reply, which leaves no room to read`,
         );
       }
+      // The turn's shared limits (D30): its steps, time and output caps, and an estimated budget for all its input.
+      const runBudget = new RunBudget(
+        { requests: EXPLAIN_LIMITS.maxSteps, totalMs: EXPLAIN_LIMITS.totalMs, outputTokensPerRequest: ANSWER_TOKENS, estimatedInputTokens: READING_INPUT_TOKENS },
+        { signal },
+      );
       const internal = new InternalFailure();
       const reading = new Reading();
+      const policy = policyFor(prepared.model);
       const { tools, state } = createReplyTools({
         reader,
         ledger,
@@ -282,6 +291,8 @@ export function createChatWorkflow(deps: ChatDeps) {
         internal,
         step: () => reading.finished,
         answerDue: () => reading.answerDue,
+        // A reply has no findings check of its own, so this is asked of nothing yet; it is the same rule as explain's.
+        answerAgain: () => canAnswerAgain({ stepNumber: reading.finished, dueReasons: reading.dueReasons, forced: policy.forceAnswer }, EXPLAIN_LIMITS),
         preferences: turn.preferences,
         choices: new Set(),
         signal,
@@ -295,8 +306,9 @@ export function createChatWorkflow(deps: ChatDeps) {
         tools,
         answerTool: "submit_reply",
         accepted: () => state.accepted !== null,
-        policy: policyFor(prepared.model),
+        policy,
         budget,
+        runBudget,
         reading,
         state,
         internal,
@@ -307,9 +319,9 @@ export function createChatWorkflow(deps: ChatDeps) {
       });
       deps.setMeta(runId, { usage: usageOf(steps) });
       if (failed) throw failed;
+      const refusals = { citations: state.citationRefusals, conflicts: state.conflictRefusals, findings: state.findingsRefusals, schema: reading.invalidAnswers };
       if (!state.accepted || state.answerStep === null) {
-        const turnedDown = state.rejected + reading.invalidAnswers;
-        throw failure("malformed", `no reply was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDown ? `; ${turnedDown} turned down` : ""}`);
+        throw failure("malformed", `no reply was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDownText(refusals)}`);
       }
       const accepted = state.accepted;
       const answerStep = state.answerStep;
@@ -335,12 +347,14 @@ export function createChatWorkflow(deps: ChatDeps) {
           preferences: recorded.preferences,
           hidden: map.hidden,
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
+          runBudget: runBudget.record(),
           answer: {
             dueReasons: reading.dueReasons,
-            refusals: { citations: state.citationRefusals, conflicts: state.conflictRefusals, schema: reading.invalidAnswers },
+            refusals,
             acceptedAfterRefusals: state.rejected + reading.invalidAnswers,
             conflictsDropped: state.conflictsDropped,
             suggestionsDropped: 0,
+            turnedDown: turnedDownCost(steps, [...state.refusedSteps, ...reading.invalidAnswerSteps]),
           },
           history: recorded.history,
         },

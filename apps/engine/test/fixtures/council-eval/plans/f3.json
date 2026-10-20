@@ -1,0 +1,11 @@
+{
+  "id": "f3",
+  "title": "Switch search to a new service for everyone at once",
+  "control": false,
+  "packet": {
+    "scope": { "kind": "general" },
+    "text": "Move product search from our Elasticsearch cluster to the new SearchLite service.\n\n1. Change SEARCH_BACKEND from elasticsearch to searchlite in the production config.\n2. Deploy the change to every region at 09:00 on Monday.\n3. Call it a success if the search API's error rate stays under 1% for the first hour.\n4. On Tuesday, delete the Elasticsearch cluster to stop paying for it.",
+    "assumptions": ["SearchLite holds the same index as Elasticsearch.", "The search API's response format doesn't change."],
+    "references": []
+  }
+}

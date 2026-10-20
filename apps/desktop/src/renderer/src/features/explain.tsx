@@ -2,7 +2,7 @@ import { Accordion, Alert, Badge, Button, Group, List, Stack, Table, Text, Texta
 import type { ExplainResult, RunSummary } from "@nivra/domain";
 import { useEffect, useState } from "react";
 import type { PreferencesView, ProjectView } from "../../../shared/ipc";
-import { CitationChip, ConflictItem, ConsentModal, ContextDetails, linesByFile, preferenceText, runLine, STATUS_COLOR } from "../shared/evidence";
+import { CitationChip, ConflictItem, CONSENT_COVERS, ConsentModal, ContextDetails, linesByFile, preferenceText, runLine, STATUS_COLOR } from "../shared/evidence";
 import { TERMINAL, useRunEvents } from "../shared/runs";
 import { errorMessage, Section } from "../shared/ui";
 import type { RunRef } from "./hello";
@@ -94,6 +94,26 @@ function SuggestionItem({
   );
 }
 
+/**
+ * What an answer without established findings is labelled (NIV-26): it isn't an explanation with evidence, so it is
+ * never shown as one. Null for one that is, and for a result stored before this was recorded.
+ */
+function standingNote(standing: ExplainResult["standing"] | undefined): { badge: string; text: string } | null {
+  if (standing === "no-findings") {
+    return {
+      badge: "no findings",
+      text: "No findings established. The model answered without citing anything it read in this repository, so this isn't an explanation with evidence; its summary is below as it wrote it. Explain again, or ask a narrower question.",
+    };
+  }
+  if (standing === "unsupported") {
+    return {
+      badge: "not supported",
+      text: "None of these findings is established: each cites only lines the model wasn't shown before it answered. Explain again, or ask a narrower question.",
+    };
+  }
+  return null;
+}
+
 function Result({
   result,
   summary,
@@ -128,6 +148,11 @@ function Result({
       {result.context.changedFiles.length > 0 && (
         <Alert color="yellow" variant="light">
           <Text size="sm">These files changed while the run read them, so citations into them aren't checked: {result.context.changedFiles.join(", ")}.</Text>
+        </Alert>
+      )}
+      {standingNote(result.standing) && (
+        <Alert color="yellow" variant="light" data-testid="explain-standing" data-standing={result.standing ?? undefined}>
+          <Text size="sm">{standingNote(result.standing)?.text}</Text>
         </Alert>
       )}
       <Text size="sm" style={{ whiteSpace: "pre-wrap" }} data-testid="explain-summary">
@@ -384,8 +409,13 @@ export function Explain({
           </Button>
         )}
         {status && (
-          <Badge color={STATUS_COLOR[status]} variant="light" data-testid="explain-status" data-run-id={runId ?? undefined}>
-            {status.replaceAll("_", " ")}
+          <Badge
+            color={status === "succeeded" && standingNote(outcome?.result?.standing) ? "yellow" : STATUS_COLOR[status]}
+            variant="light"
+            data-testid="explain-status"
+            data-run-id={runId ?? undefined}
+          >
+            {(status === "succeeded" && standingNote(outcome?.result?.standing)?.badge) || status.replaceAll("_", " ")}
           </Badge>
         )}
         {project?.sharing.modelContext && (
@@ -443,7 +473,7 @@ export function Explain({
         onAllow={() => void allowAndStart()}
         intro={`To explain ${project?.label ?? "this repository"}, Nivra sends Nebius Token Factory:`}
         sends={["excerpts and paths from the project's tracked files;", "your question, and any choices you added for this task;", "your confirmed preferences that apply to this project."]}
-        after="You can turn this off at any time; doing so stops this project's explanations."
+        after={CONSENT_COVERS}
         testId="explain-consent"
       />
     </Section>

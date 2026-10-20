@@ -1,22 +1,24 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { preferencesDigest, type ExplainResult, type JsonObject, type Mask, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
+import { answerStanding, preferencesDigest, type ExplainResult, type JsonObject, type Mask, type RunContext, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
 import { Budget } from "../explain/budget.ts";
 import { checkCitation } from "../explain/citations.ts";
 import { Ledger } from "../explain/ledger.ts";
-import { EXPLAIN_LIMITS } from "../explain/limits.ts";
+import { canAnswerAgain, EXPLAIN_LIMITS, READING_INPUT_TOKENS } from "../explain/limits.ts";
 import { rankConflict } from "../explain/precedence.ts";
 import { DEFAULT_QUESTION, explainPrompt, INSTRUCTIONS } from "../explain/prompt.ts";
 import { TaskUnreadable, type ExplainTask } from "../explain/task.ts";
-import { Reading, readUntilAnswered, usageOf } from "../explain/reading.ts";
+import { Reading, readUntilAnswered, turnedDownCost, turnedDownText, usageOf } from "../explain/reading.ts";
 import { createExplainTools, toolDefinitionChars } from "../explain/tools.ts";
 import { ANSWER_TOKENS, policyFor, requestBudget } from "../providers/policy.ts";
 import { createModelClient, failure, InternalFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
+import { RunBudget } from "../providers/run-budget.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoReader } from "../repo/files.ts";
 import { buildMap } from "../repo/map.ts";
+import { guard } from "./guard.ts";
 import { describePreferences } from "./preferences-record.ts";
 import { RepoError } from "../repo/paths.ts";
 
@@ -55,7 +57,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
   /** The run's consent and key, checked before anything is sent anywhere. */
   const allowed = (runId: string): { context: RunContext; key: string } => {
     const context = deps.context(runId);
-    if (!context) throw failure("internal", "this run's context is missing");
+    if (!context) throw failure("internal", "this run's context is missing").because("context-missing", "explain.context");
     if (!context.sharing.modelContext) throw failure("sharing-refused");
     const key = deps.apiKey();
     if (!key) throw failure("no-key");
@@ -64,7 +66,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
 
   const openReader = async (root: string, signal: AbortSignal | undefined) => {
     const git = deps.findGit();
-    if (!git) throw new RepoError(`Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
+    if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
     const session = await deps.backend.open({ workspace: root });
     try {
       return { reader: await RepoReader.open({ root, session, git, mask: deps.mask, signal }), session };
@@ -80,15 +82,15 @@ export function createExplainWorkflow(deps: ExplainDeps) {
     description: "Record the preferences the app sent with the run, without their text",
     inputSchema: Input,
     outputSchema: Input,
-    execute: async ({ inputData, runId }) => {
+    execute: async ({ inputData, runId }) => guard("explain.context", deps.mask, async () => {
       const given = deps.context(runId);
-      if (!given) throw failure("internal", "this run's context is missing");
+      if (!given) throw failure("internal", "this run's context is missing").because("context-missing", "explain.explain");
       const { message, data } = await describePreferences(given.preferences);
       deps.recorder.output(runId, "context", message, data);
       // Before anything is sent anywhere: a task that can't be read back never becomes the default question.
       if (!deps.task(runId)) throw new TaskUnreadable();
       return inputData;
-    },
+    }),
   });
 
   const prepare = createStep({
@@ -96,7 +98,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
     description: "Check consent and the key, resolve the repository, read HEAD, and pick the model",
     inputSchema: Input,
     outputSchema: Prepared,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("explain.prepare", deps.mask, async () => {
       const { key } = allowed(runId);
       const { reader, session } = await openReader(inputData.repoPath, abortSignal);
       let head: string | null;
@@ -119,7 +121,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         hiddenFiles: reader.hidden.size,
       });
       return { root: reader.root, head, model, contextLength: models.contextLengths.get(model) ?? null };
-    },
+    }),
   });
 
   const explain = createStep({
@@ -127,7 +129,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
     description: "Read the repository with the model and check its answer's citations",
     inputSchema: Prepared,
     outputSchema: Explained,
-    execute: async ({ inputData, runId, abortSignal }) => {
+    execute: async ({ inputData, runId, abortSignal }) => guard("explain.explain", deps.mask, async () => {
       const { context, key } = allowed(runId);
       const task = deps.task(runId);
       if (!task) throw new TaskUnreadable();
@@ -151,6 +153,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           beforeReading,
           toolDefinitionChars: definitions,
           contextLength: inputData.contextLength,
+          runInputTokens: READING_INPUT_TOKENS,
         });
         // A model whose context can't hold the instructions and the map with room to read is refused before any chat
         // request is made (D23), never sent more than it allows.
@@ -160,9 +163,15 @@ export function createExplainWorkflow(deps: ExplainDeps) {
             `about ${beforeReading} tokens are needed before any reading, and ${Math.max(0, budget.tokens)} are available once ${ANSWER_TOKENS} are held back for the answer, which leaves no room to read`,
           );
         }
+        // The run's shared limits (D30): its steps, time and output caps, and an estimated budget for all its input.
+        const runBudget = new RunBudget(
+          { requests: EXPLAIN_LIMITS.maxSteps, totalMs: EXPLAIN_LIMITS.totalMs, outputTokensPerRequest: ANSWER_TOKENS, estimatedInputTokens: READING_INPUT_TOKENS },
+          { signal: abortSignal },
+        );
         const internal = new InternalFailure();
         // Shared with the tools: how many steps have finished, and whether this one must give the answer (D22).
         const reading = new Reading();
+        const policy = policyFor(inputData.model);
         const { tools, state } = createExplainTools({
           reader,
           ledger,
@@ -171,6 +180,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           internal,
           step: () => reading.finished,
           answerDue: () => reading.answerDue,
+          answerAgain: () => canAnswerAgain({ stepNumber: reading.finished, dueReasons: reading.dueReasons, forced: policy.forceAnswer }, EXPLAIN_LIMITS),
           preferences: context.preferences,
           choices: choiceIds,
           signal: abortSignal,
@@ -184,8 +194,9 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           tools,
           answerTool: "submit_answer",
           accepted: () => state.accepted !== null,
-          policy: policyFor(inputData.model),
+          policy,
           budget,
+          runBudget,
           reading,
           state,
           internal,
@@ -196,9 +207,9 @@ export function createExplainWorkflow(deps: ExplainDeps) {
         });
         deps.setMeta(runId, { usage: usageOf(steps) });
         if (failed) throw failed;
+        const refusals = { citations: state.citationRefusals, conflicts: state.conflictRefusals, findings: state.findingsRefusals, schema: reading.invalidAnswers };
         if (!state.accepted || state.answerStep === null) {
-          const turnedDown = state.rejected + reading.invalidAnswers;
-          throw failure("malformed", `no answer was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDown ? `; ${turnedDown} turned down` : ""}`);
+          throw failure("malformed", `no answer was accepted within ${steps.length} model ${steps.length === 1 ? "step" : "steps"}${turnedDownText(refusals)}`);
         }
         const answer = state.accepted;
         const answerStep = state.answerStep;
@@ -212,6 +223,9 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           return shown.length ? [{ statement: suggestion.statement, citations: shown }] : [];
         });
         const suggestionsDropped = answer.suggestions.length - suggestions.length;
+        // Only findings citing lines the model was shown make an explanation with evidence (NIV-26): an answer with none,
+        // or none of them shown, is labelled for what it is, never presented as one.
+        const standing = answerStanding(findings);
         const all = [...findings, ...conflicts].flatMap((item) => item.citations);
         const checked = all.filter((citation) => citation.checked).length;
         const records = context.preferences.records;
@@ -220,12 +234,14 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           preferences: { revision: context.preferences.revision, digest: await preferencesDigest(records), records: records.map(({ id, scope, intent, revision }) => ({ id, scope, intent, revision })) },
           hidden: map.hidden,
           budget: { tokens: budget.tokens, estimatedTokens: budget.used(), resultsLimited: state.resultsLimited, resultsReplaced: state.resultsReplaced, ranOut: state.budgetExhausted },
+          runBudget: runBudget.record(),
           answer: {
             dueReasons: reading.dueReasons,
-            refusals: { citations: state.citationRefusals, conflicts: state.conflictRefusals, schema: reading.invalidAnswers },
+            refusals,
             acceptedAfterRefusals: state.rejected + reading.invalidAnswers,
             conflictsDropped: state.conflictsDropped,
             suggestionsDropped,
+            turnedDown: turnedDownCost(steps, [...state.refusedSteps, ...reading.invalidAnswerSteps]),
           },
         };
         const result: ExplainResult = {
@@ -241,11 +257,14 @@ export function createExplainWorkflow(deps: ExplainDeps) {
           gaps: answer.gaps,
           context: { ...ledger.context(), ...details },
           checks: { citations: all.length, checked },
+          standing,
           answeredAtStep: answerStep,
           finishedAt: new Date().toISOString(),
         };
         deps.saveResult(runId, result);
-        deps.recorder.output(runId, "explain", `${checked} of ${all.length} citations point to lines the model was shown`, {
+        const standingNote = standing === "no-findings" ? "No findings established. " : standing === "unsupported" ? "No finding cites lines the model was shown. " : "";
+        deps.recorder.output(runId, "explain", `${standingNote}${checked} of ${all.length} citations point to lines the model was shown`, {
+          standing,
           citations: all.length,
           checked,
           changedFiles: result.context.changedFiles,
@@ -260,7 +279,7 @@ export function createExplainWorkflow(deps: ExplainDeps) {
       } finally {
         await session.close();
       }
-    },
+    }),
   });
 
   return createWorkflow({

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PreferenceIntent, PreferenceScope } from "./context.ts";
+import { RunBudgetRecord } from "./models.ts";
 
 /**
  * What an explain run produced (NIV-6, NIV-9, D22), as stored in the owning engine's `nivra.db`. Every citation says
@@ -51,9 +52,25 @@ export const ExplainConflict = z.strictObject({
 });
 export type ExplainConflict = z.infer<typeof ExplainConflict>;
 
-/** Why the answer was due when it was given (D22, D23): the last steps were reached, time ran short, or the budget ran out. */
-export const AnswerDueReason = z.enum(["last-steps", "time", "budget"]);
+/**
+ * Why the answer was due when it was given (D22, D23): the last steps were reached, time ran short, the request budget
+ * ran out, or the run's estimated input budget could no longer admit another request and the answer after it (D30).
+ */
+export const AnswerDueReason = z.enum(["last-steps", "time", "budget", "run-budget"]);
 export type AnswerDueReason = z.infer<typeof AnswerDueReason>;
+
+/**
+ * How far an answer's findings are established (NIV-26, D29): at least one finding cites lines the model was shown;
+ * there are findings, but none cites such lines; or there are none at all. Only `established` is an explanation with
+ * evidence. The other two are labelled for what they are, never shown as one, and nothing is made up to fill them.
+ */
+export const AnswerStanding = z.enum(["established", "unsupported", "no-findings"]);
+export type AnswerStanding = z.infer<typeof AnswerStanding>;
+
+export function answerStanding(findings: ReadonlyArray<{ citations: ReadonlyArray<{ checked: boolean }> }>): AnswerStanding {
+  if (findings.length === 0) return "no-findings";
+  return findings.some((finding) => finding.citations.some((citation) => citation.checked)) ? "established" : "unsupported";
+}
 
 const count = z.number().int().nonnegative();
 
@@ -87,14 +104,25 @@ const ContextDetails = {
     .strictObject({ tokens: z.number().int(), estimatedTokens: count, resultsLimited: count, resultsReplaced: count, ranOut: z.boolean() })
     .nullable()
     .default(null),
-  /** How the answer came to be accepted: why it was due (none when the model answered before it had to), what was turned down first, and what was dropped. */
+  /** The run's limits and what it used (D30); null for a result stored before it was recorded. */
+  runBudget: RunBudgetRecord.nullable().default(null),
+  /**
+   * How the answer came to be accepted: why it was due (none when the model answered before it had to), what was turned
+   * down first, and what was dropped. An engine before NIV-26 never turned an answer down for having no findings, so
+   * that count is 0 for its results, a fact rather than a guess.
+   */
   answer: z
     .strictObject({
       dueReasons: z.array(AnswerDueReason),
-      refusals: z.strictObject({ citations: count, conflicts: count, schema: count }),
+      refusals: z.strictObject({ citations: count, conflicts: count, schema: count, findings: count.default(0) }),
       acceptedAfterRefusals: count,
       conflictsDropped: count,
       suggestionsDropped: count,
+      /**
+       * What the answers turned down cost (NIV-26): the model steps that gave them, those steps' tokens as reported
+       * (null once one didn't say) and their time. Null for a result stored before it was recorded.
+       */
+      turnedDown: z.strictObject({ steps: count, inputTokens: count.nullable(), outputTokens: count.nullable(), elapsedMs: count }).nullable().default(null),
     })
     .nullable()
     .default(null),
@@ -130,6 +158,8 @@ export const ExplainResult = z.strictObject({
     ...ContextDetails,
   }),
   checks: z.strictObject({ citations: z.number().int().nonnegative(), checked: z.number().int().nonnegative() }),
+  /** How far the findings are established (NIV-26); null for a result stored before it was recorded: unknown, never guessed. */
+  standing: AnswerStanding.nullable().default(null),
   answeredAtStep: z.number().int().nonnegative(),
   finishedAt: z.iso.datetime(),
 });
