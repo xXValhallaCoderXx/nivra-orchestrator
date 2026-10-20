@@ -1,276 +1,32 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import { fetchTransport, SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, type SandboxApiOptions, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
+import { fetchTransport, SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, SandboxNotSentError, SandboxTooLargeError, type SpawnBody, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
 import { CLEANUP_MAX_SECONDS, evaluate, insideRepository, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, tokenOutlasts, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
 import { classify, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
+import { ANY_SIZE, clock, encode, FakeService, holding, PATCH, REPORT, sandboxOn, settles, sha, spawned, step, succeed } from "./fake-sandboxes.ts";
 
 /**
- * Nebius Sandboxes, offline (NIV-29): the client and the lifecycle against a fake service that behaves as the
- * documentation of 20 October 2026 describes. Nothing here reaches the network.
+ * Nebius Sandboxes, offline (NIV-29, NIV-41): the client and the lifecycle against the fake service in
+ * `fake-sandboxes.ts`. Nothing here reaches the network but loopback.
  */
 const dirs: string[] = [];
 after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
-
-interface Behaviour {
-  /** Statuses the operation reports on successive reads, the last repeated. */
-  statuses: string[];
-  exitCode?: number | null;
-  timedOut?: boolean;
-  stdout?: string;
-  resultImage?: string | null;
-  /** Files a successful operation leaves in its result image. */
-  files?: Record<string, string>;
-  /** Stays executing until something else ends it (a cancel, a subprocess). */
-  waits?: boolean;
+/** A journal file in a folder of its own, removed after the tests. */
+function journalPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "nivra probe "));
+  dirs.push(dir);
+  return join(dir, "journal.jsonl");
 }
-
-interface FakeOperation {
-  uuid: string;
-  body: Record<string, unknown>;
-  env: Record<string, string>;
-  behaviour: Behaviour;
-  reads: number;
-  status: string;
-  cancelled: boolean;
-  finishedBySubprocess: boolean;
-  subprocesses: Map<number, { args: string[]; exitCode: number; stdout: string; stopped: boolean; pending: number; ends?: { state: Record<string, unknown>; stderr: string } }>;
-  events: string[];
-}
-
-const encode = (value: unknown, status = 200, headers: Record<string, string> = {}): TransportResponse => ({ status, headers, body: new TextEncoder().encode(value === undefined ? "" : JSON.stringify(value)) });
-const sha = (text: string) => createHash("sha256").update(text).digest("hex");
-/** What a working edit and test leave behind: the patch holding the edit, and the report holding the passing test. */
-const REPORT = "PASS: Hello, Nivra\n";
-const PATCH = '--- base/greet.sh\n+++ work/greet.sh\n-echo "Hello, world"\n+echo "Hello, Nivra"\n';
-
-/** The service: operations as state machines, with faults a test can switch on. */
-class FakeService {
-  readonly operations: FakeOperation[] = [];
-  readonly images = new Map<string, Record<string, string>>();
-  readonly requests: TransportRequest[] = [];
-  spawns = 0;
-  /** The next spawn creates its operation, then its answer is lost. */
-  dropNextSpawnAnswer = false;
-  /** The next spawn answers 5xx, creating the operation or not. */
-  failNextSpawn: { create: boolean } | null = null;
-  /** The next spawn is turned down (400), creating nothing. */
-  refuseNextSpawn = false;
-  /** How many reads of an operation answer 503 (with Retry-After: 4) before it is read again. */
-  unavailableReads = 0;
-  /** How many times each new subprocess answers "not ready yet" (425) before its result, and the wait it asks for. */
-  subprocessPending = 0;
-  subprocessRetryAfter = 3;
-  /** The next read answers 429 with this Retry-After. */
-  rateLimitNextRead: number | null = null;
-  /** Operations whose list entries are hidden (as if beyond the search window). */
-  hidden = new Set<string>();
-  /** The next subprocess spawn answers 504, having started it or not. */
-  timeoutNextSubprocess: { started: boolean } | null = null;
-  /** Subprocesses whose command matches end this way instead, with this output. */
-  endSubprocess: { match: RegExp; state: Record<string, unknown>; stdout: string; stderr: string } | null = null;
-  /** Reading a subprocess of a cancelled operation answers this status instead of the child's end. */
-  childReadAfterCancel: number | null = null;
-  lowercase = false;
-  readonly behave: (body: Record<string, unknown>) => Behaviour;
-  constructor(behave: (body: Record<string, unknown>) => Behaviour) {
-    this.behave = behave;
-  }
-
-  readonly transport: Transport = async (request) => {
-    this.requests.push(request);
-    const path = request.path;
-    if (request.method === "GET" && this.rateLimitNextRead !== null) {
-      const seconds = this.rateLimitNextRead;
-      this.rateLimitNextRead = null;
-      return encode({ error: "slow down" }, 429, { "retry-after": String(seconds) });
-    }
-    if (request.method === "POST" && path === "/v1/files") return encode({ uuid: randomUUID(), sha256: "x", size: 1 }, 201);
-    if (request.method === "POST" && path === "/v1/instances") return this.#spawn(JSON.parse(String(request.body)) as Record<string, unknown>);
-    const subprocess = /^\/v1\/operations\/([^/]+)\/subprocesses(?:\/(\d+))?$/.exec(path);
-    if (subprocess) return this.#subprocess(request, subprocess[1]!, subprocess[2] ? Number(subprocess[2]) : null);
-    const events = /^\/v1\/operations\/([^/]+)\/events$/.exec(path);
-    if (events) return { status: 200, headers: {}, body: new TextEncoder().encode(this.#find(events[1]!)?.events.join("\n") ?? "") };
-    const one = /^\/v1\/operations\/([^/]+)$/.exec(path);
-    if (one && request.method === "GET" && this.unavailableReads > 0) {
-      this.unavailableReads--;
-      return encode({ error: "unavailable" }, 503, { "retry-after": "4" });
-    }
-    if (one && request.method === "GET") return this.#read(one[1]!);
-    if (one && request.method === "DELETE") return this.#cancel(one[1]!);
-    if (request.method === "GET" && path === "/v1/operations") {
-      const limit = Number(request.query?.["limit"] ?? 100);
-      const offset = Number(request.query?.["offset"] ?? 0);
-      const listed = [...this.operations].reverse().filter((op) => !this.hidden.has(op.uuid));
-      return encode(listed.slice(offset, offset + limit).map((op) => ({ uuid: op.uuid, kind: "instance", status: op.status })));
-    }
-    const download = /^\/v1\/inspect\/([^/]+)\/download$/.exec(path);
-    if (download) {
-      const content = this.images.get(download[1]!)?.[request.query?.["path"] ?? ""];
-      return content === undefined ? encode({ error: "no such file" }, 404) : { status: 200, headers: {}, body: new TextEncoder().encode(content) };
-    }
-    return encode({ error: "unknown" }, 404);
-  };
-
-  #find(uuid: string): FakeOperation | undefined {
-    return this.operations.find((op) => op.uuid === uuid);
-  }
-
-  #spawn(body: Record<string, unknown>): TransportResponse {
-    this.spawns++;
-    if (this.refuseNextSpawn) {
-      this.refuseNextSpawn = false;
-      return encode({ error: "bad request" }, 400);
-    }
-    const fail = this.failNextSpawn;
-    this.failNextSpawn = null;
-    if (fail && !fail.create) return encode({ error: "unavailable" }, 503);
-    const behaviour = this.behave(body);
-    const op: FakeOperation = { uuid: randomUUID(), body, env: (body["env"] as Record<string, string>) ?? {}, behaviour, reads: 0, status: "PENDING", cancelled: false, finishedBySubprocess: false, subprocesses: new Map(), events: [] };
-    this.operations.push(op);
-    if (fail) return encode({ error: "unavailable" }, 503);
-    if (this.dropNextSpawnAnswer) {
-      this.dropNextSpawnAnswer = false;
-      throw new Error("the connection dropped");
-    }
-    return encode({ uuid: op.uuid, ...body }, 201);
-  }
-
-  #status(op: FakeOperation): string {
-    if (op.cancelled) return "CANCELLED";
-    if (op.behaviour.waits && !op.finishedBySubprocess) return op.reads > 0 ? "EXECUTING" : "PENDING";
-    return op.behaviour.statuses[Math.min(op.reads, op.behaviour.statuses.length - 1)]!;
-  }
-
-  #read(uuid: string): TransportResponse {
-    const op = this.#find(uuid);
-    if (!op) return encode({ error: "no such operation" }, 404);
-    op.status = this.#status(op);
-    op.reads++;
-    const ended = ["SUCCESS", "FAILED", "CANCELLED"].includes(op.status);
-    const succeeded = op.status === "SUCCESS";
-    const image = succeeded && op.behaviour.resultImage !== null && op.body["disposable"] === false ? (op.behaviour.resultImage ?? `img-${op.uuid.slice(0, 8)}`) : null;
-    if (image && op.behaviour.files) this.images.set(image, op.behaviour.files);
-    return encode({
-      uuid: op.uuid,
-      kind: "instance",
-      status: this.lowercase ? op.status.toLowerCase() : op.status,
-      duration: ended ? 1.5 : null,
-      consumed_cpu: ended ? 0.4 : null,
-      result_image_uuid: image,
-      metadata: {
-        env: op.env,
-        // As the live service reports it: signal -1 when none ended the command; exit code -1 and SIGKILL on a timeout.
-        result: ended && !op.cancelled ? { state: { exit_code: op.behaviour.timedOut ? -1 : (op.behaviour.exitCode ?? 0), signal: op.behaviour.timedOut ? 9 : -1, timed_out: op.behaviour.timedOut ?? false }, stdout: { value: op.behaviour.stdout ?? "", encoding: "ascii" }, stderr: { value: "" } } : null,
-      },
-    });
-  }
-
-  #cancel(uuid: string): TransportResponse {
-    const op = this.#find(uuid);
-    if (!op) return encode({ error: "no such operation" }, 404);
-    if (["SUCCESS", "FAILED", "CANCELLED"].includes(this.#status(op))) return encode({ error: "already finished" }, 409);
-    op.cancelled = true;
-    for (const sub of op.subprocesses.values()) sub.stopped = true;
-    return encode(undefined, 202);
-  }
-
-  #subprocess(request: TransportRequest, uuid: string, spid: number | null): TransportResponse {
-    const op = this.#find(uuid);
-    if (!op) return encode({ error: "no such operation" }, 404);
-    if (request.method === "POST") {
-      const body = JSON.parse(String(request.body)) as { command: string; args: string[]; env: Record<string, string> };
-      const timeout = this.timeoutNextSubprocess;
-      this.timeoutNextSubprocess = null;
-      if (timeout && !timeout.started) return encode({ error: "gateway timeout" }, 504);
-      const next = op.subprocesses.size + 2;
-      const args = [body.command, ...body.args].join(" ");
-      const exitCode = /test\.sh Hello, world$/.test(args) ? 1 : 0;
-      const custom = this.endSubprocess?.match.test(args) ? this.endSubprocess : null;
-      const stdout = custom ? custom.stdout : /cat \/work\/greet\.sh/.test(args) ? 'echo "Hello, Nivra"\n' : /sha256sum/.test(args) ? `${sha(REPORT)}  /out/report.txt\n${sha(PATCH)}  /out/patch.diff\n` : /wget/.test(args) ? "BLOCKED http://example.test: bad address\n" : "";
-      op.subprocesses.set(next, { args: [body.command, ...body.args], exitCode, stdout, stopped: false, pending: this.subprocessPending, ...(custom ? { ends: { state: custom.state, stderr: custom.stderr } } : {}) });
-      op.events.push(`data: ${JSON.stringify({ type: "spawn", spid: next, env: body.env })}`);
-      if (/touch \/tmp\/nivra-done/.test(args)) op.finishedBySubprocess = true;
-      if (timeout?.started) return encode({ error: "gateway timeout" }, 504);
-      return encode({ spid: next }, 201);
-    }
-    const sub = op.subprocesses.get(spid ?? -1);
-    if (!sub) return encode({ error: "no such subprocess" }, 404);
-    // As documented: a signalled child reports exit code -1 and its signal; one still running is "not ready yet".
-    if (sub.stopped && op.cancelled && this.childReadAfterCancel !== null) return encode({ error: "the operation isn't running" }, this.childReadAfterCancel);
-    if (sub.stopped) return encode({ state: { exit_code: -1, signal: 9 } });
-    if (/sleep 60/.test(sub.args.join(" ")) || sub.pending-- > 0) return encode({ error: "not ready" }, 425, { "retry-after": String(this.subprocessRetryAfter) });
-    if (sub.ends) return encode({ state: sub.ends.state, stdout: { value: sub.stdout }, stderr: { value: sub.ends.stderr } });
-    return encode({ state: { exit_code: sub.exitCode }, stdout: { value: sub.stdout } });
-  }
-}
-
-/** A clock the tests move: sleeping advances it, so deadlines are reached without waiting. */
-function clock() {
-  let now = 0;
-  const waits: number[] = [];
-  return { now: () => now, sleep: async (ms: number) => void (waits.push(ms), (now += ms)), waits };
-}
-
-function sandboxOn(
-  service: FakeService,
-  options: {
-    journal?: Journal;
-    search?: { sinceMarginMs: number; pageSize: number; maxPages: number; maxCandidates: number; withinMs?: number };
-    time?: ReturnType<typeof clock>;
-    transport?: Transport;
-    api?: SandboxApiOptions;
-    cap?: () => number;
-    signal?: AbortSignal;
-  } = {},
-) {
-  const time = options.time ?? clock();
-  const signal = options.signal ? { signal: options.signal } : {};
-  const api = new SandboxApi(options.transport ?? service.transport, { sleep: time.sleep, now: time.now, readDeadlineMs: 60_000, ...options.api, ...signal });
-  const journal = options.journal ?? new Journal();
-  const sandbox = new Sandbox(api, { journal, sleep: time.sleep, now: time.now, pollMs: 1_000, ...(options.search ? { search: options.search } : {}), ...(options.cap ? { cap: options.cap } : {}), ...signal });
-  return { sandbox, api, journal, time };
-}
-
-/**
- * A transport that holds the requests `hold` picks until their signal aborts, as a connection still waiting would; the
- * rest go straight to the service. With `answerFirst`, the service acts on a held request before its answer is held.
- */
-function holding(service: FakeService, hold: (request: TransportRequest) => boolean, options: { answerFirst?: boolean } = {}) {
-  const seen: TransportRequest[] = [];
-  const held: TransportRequest[] = [];
-  const transport: Transport = async (request) => {
-    seen.push(request);
-    if (!hold(request)) return service.transport(request);
-    if (options.answerFirst) await service.transport(request);
-    held.push(request);
-    return new Promise<TransportResponse>((_resolve, reject) => {
-      const stop = () => reject(new DOMException("This operation was aborted", "AbortError"));
-      if (request.signal?.aborted) stop();
-      else request.signal?.addEventListener("abort", stop, { once: true });
-    });
-  };
-  return { transport, seen, held };
-}
-
-/** Lets pending work run until `check` holds; the fake clock means nothing here waits in real time. */
-async function settles(check: () => boolean): Promise<void> {
-  for (let turn = 0; turn < 1_000 && !check(); turn++) await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(check(), "the work under test never reached the point it was waited for");
-}
-
-const succeed = (extra: Partial<Behaviour> = {}): Behaviour => ({ statuses: ["PENDING", "EXECUTING", "SUCCESS"], exitCode: 0, ...extra });
-const step = (label: string, extra: Partial<Parameters<Sandbox["submit"]>[0]> = {}) => ({ label, command: "/bin/sh", args: ["-c", "true"], image: "base", disposable: true, timeoutSeconds: 30, ...extra });
-const spawned = (service: FakeService) => service.requests.filter((r) => r.method === "POST" && r.path === "/v1/instances").map((r) => JSON.parse(String(r.body)) as { networking: { enabled: boolean }; disposable: unknown; env: Record<string, string> });
 
 describe("Nebius Sandboxes, offline: the operation's status apart from its command (NIV-29)", () => {
   it("tells a command that failed, timed out or was signalled apart from SUCCESS, reads any case, and keeps no image from a failure", () => {
@@ -377,7 +133,7 @@ describe("Nebius Sandboxes, offline: lost answers, reconnects and cancels (NIV-2
     const submitted = await sandbox.submit(step("buried"));
     assert.ok("uncertain" in submitted);
     // Five newer operations push it past two pages of two.
-    for (let i = 0; i < 5; i++) await service.transport({ method: "POST", path: "/v1/instances", body: JSON.stringify({ env: {} }), timeoutMs: 1 });
+    for (let i = 0; i < 5; i++) await service.transport({ method: "POST", path: "/v1/instances", body: JSON.stringify({ env: {} }), timeoutMs: 1, maxBytes: ANY_SIZE });
     const found = await sandbox.reconcile(submitted.uncertain);
     assert.ok("unknown" in found);
     assert.match(found.unknown, /2 page\(s\) of 2, 4 operation\(s\) read, since .*; the search stopped at its bounds$/);
@@ -385,7 +141,7 @@ describe("Nebius Sandboxes, offline: lost answers, reconnects and cancels (NIV-2
 
   it("reattaches a fresh client to the same operation from the journal, with one spawn", async () => {
     const service = new FakeService(() => ({ statuses: ["PENDING", "EXECUTING", "EXECUTING", "SUCCESS"], exitCode: 0, stdout: "done" }));
-    const path = join(mkdtempSync(join(tmpdir(), "nivra probe ")), "journal.jsonl");
+    const path = journalPath();
     const first = sandboxOn(service, { journal: new Journal(path) });
     const submitted = await first.sandbox.submit(step("reconnect"));
     // The first client goes away; a new one knows only the journal's file.
@@ -423,7 +179,7 @@ describe("Nebius Sandboxes, offline: deadlines, retries and cleanup (NIV-29)", (
     const { sandbox, api, time } = sandboxOn(service);
     const submitted = (await sandbox.submit(step("slow down"))) as { operationId: string };
     service.rateLimitNextRead = 7;
-    await api.operation(submitted.operationId);
+    await api.operation(submitted.operationId, { until: Number.POSITIVE_INFINITY });
     assert.equal(time.waits[0], 7_000);
     let calls = 0;
     const hanging: Transport = async () => {
@@ -432,11 +188,11 @@ describe("Nebius Sandboxes, offline: deadlines, retries and cleanup (NIV-29)", (
     };
     const waits: number[] = [];
     const impatient = new SandboxApi(hanging, { readDeadlineMs: 10_000, sleep: async (ms) => void waits.push(ms) });
-    await assert.rejects(impatient.operation("x"), (error: Error) => error instanceof SandboxNetworkError && /got no answer/.test(error.message));
+    await assert.rejects(impatient.operation("x", { until: Number.POSITIVE_INFINITY }), (error: Error) => error instanceof SandboxNetworkError && /got no answer/.test(error.message));
     assert.ok(calls >= 2, "a lost read is retried");
     const posts: TransportRequest[] = [];
     const failing = new SandboxApi(async (request) => (posts.push(request), encode({}, 500)), { sleep: async () => undefined });
-    assert.equal((await failing.spawn({ command: "x", args: [], image: "i", shell: false, env: {}, disposable: true, networking: { enabled: false }, timeout: 5 })).status, "uncertain");
+    assert.equal((await failing.spawn({ command: "x", args: [], image: "i", shell: false, env: {}, disposable: true, networking: { enabled: false }, timeout: 5 }, { until: Number.POSITIVE_INFINITY })).status, "uncertain");
     assert.equal(posts.length, 1, "a spawn is never retried");
   });
 
@@ -454,7 +210,7 @@ describe("Nebius Sandboxes, offline: deadlines, retries and cleanup (NIV-29)", (
   it("journals what it couldn't settle, and --recover settles it later from the journal", async () => {
     const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
     service.dropNextSpawnAnswer = true;
-    const path = join(mkdtempSync(join(tmpdir(), "nivra probe ")), "journal.jsonl");
+    const path = journalPath();
     const { sandbox } = sandboxOn(service, { journal: new Journal(path) });
     await sandbox.submit(step("hidden"));
     service.hidden.add(service.operations[0]!.uuid);
@@ -467,7 +223,7 @@ describe("Nebius Sandboxes, offline: deadlines, retries and cleanup (NIV-29)", (
 
   it("finds and stops an operation whose probe died after sending its spawn, before the answer: the intent alone is enough", async () => {
     const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
-    const path = join(mkdtempSync(join(tmpdir(), "nivra probe ")), "journal.jsonl");
+    const path = journalPath();
     // The request reaches the service and creates the operation; the probe dies before its answer arrives.
     const dying: Transport = async (request) => {
       const response = await service.transport(request);
@@ -569,7 +325,7 @@ describe("Nebius Sandboxes, offline: every wait ends at its deadline (NIV-29)", 
     const submitted = await sandbox.submit(step("buried"));
     assert.ok("uncertain" in submitted);
     // Five newer operations come before it in the listing.
-    for (let i = 0; i < 5; i++) await service.transport({ method: "POST", path: "/v1/instances", body: JSON.stringify({ env: {} }), timeoutMs: 1 });
+    for (let i = 0; i < 5; i++) await service.transport({ method: "POST", path: "/v1/instances", body: JSON.stringify({ env: {} }), timeoutMs: 1, maxBytes: ANY_SIZE });
     const start = time.now();
     const found = await sandbox.reconcile(submitted.uncertain);
     assert.ok("unknown" in found);
@@ -580,16 +336,125 @@ describe("Nebius Sandboxes, offline: every wait ends at its deadline (NIV-29)", 
   it("stops a stage-1 step at the probe's cap and starts nothing after it, then cleanup without the cap settles the operation", async () => {
     const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
     const time = clock();
-    const path = join(mkdtempSync(join(tmpdir(), "nivra probe ")), "journal.jsonl");
+    const path = journalPath();
     const capped = sandboxOn(service, { time, journal: new Journal(path), cap: () => 10_000 });
     const running = (await capped.sandbox.submit(step("long", { timeoutSeconds: 60 }))) as { operationId: string };
     await assert.rejects(capped.sandbox.observe(running.operationId, 60), /wasn't seen to end within 10 s/);
     assert.equal(time.now(), 10_000);
     const entries = new Journal(path).entries.length;
-    await assert.rejects(capped.sandbox.submit(step("late")), /^SandboxRefusal: The probe's time ran out, so the late operation wasn't started\.$/);
+    await assert.rejects(capped.sandbox.submit(step("late")), /^SandboxRefusal: The time for this work ran out, so the late operation wasn't started\.$/);
     assert.deepEqual([new Journal(path).entries.length, service.spawns], [entries, 1]);
     const settled = await sandboxOn(service, { time, journal: new Journal(path) }).sandbox.cleanup();
     assert.deepEqual([settled.cancelled.length, settled.unresolved, service.operations[0]?.cancelled], [1, [], true]);
+  });
+});
+
+describe("Nebius Sandboxes, offline: every request, writes included, ends by its deadline (NIV-41, D33)", () => {
+  const body: SpawnBody = { command: "/bin/true", args: [], image: "base", shell: false, env: {}, disposable: true, networking: { enabled: false }, timeout: 5 };
+
+  it("sends no POST or DELETE with less than its minimum left, and says nothing was sent (the P3 reproduction)", async () => {
+    const service = new FakeService(() => succeed());
+    const time = clock();
+    const api = new SandboxApi(service.transport, { sleep: time.sleep, now: time.now });
+    const writes: Array<[string, (until: number) => Promise<unknown>]> = [
+      ["Starting an operation", (until) => api.spawn(body, { until })],
+      ["Uploading a file", (until) => api.upload(new Uint8Array(3), { until })],
+      ["Cancelling an operation", (until) => api.cancel("op", { until })],
+      ["Starting a subprocess", (until) => api.spawnSubprocess("op", { command: "/bin/true", args: [], shell: false, env: {} }, { until })],
+      ["Stopping a subprocess", (until) => api.killSubprocess("op", 2, { until })],
+    ];
+    for (const left of [1, api.minWriteMs - 1]) {
+      for (const [what, write] of writes) {
+        await assert.rejects(write(time.now() + left), (error: Error) => error instanceof SandboxNotSentError && error.reason === "no-time" && error.message === `${what} wasn't sent: too little time was left.`);
+      }
+    }
+    assert.deepEqual([service.requests.length, api.posts], [0, []]);
+  });
+
+  it("gives every POST and DELETE the time left, never its full 30 s", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = clock();
+    const api = new SandboxApi(service.transport, { sleep: time.sleep, now: time.now });
+    const until = time.now() + 5_000;
+    const created = await api.spawn(body, { until });
+    assert.equal(created.status, "created");
+    const id = (created as { id: string }).id;
+    await api.upload(new Uint8Array(3), { until });
+    await api.cancel(id, { until });
+    await api.killSubprocess(id, 2, { until });
+    assert.deepEqual(service.requests.map((r) => [r.method, r.timeoutMs]), [["POST", 5_000], ["POST", 5_000], ["DELETE", 5_000], ["DELETE", 5_000]]);
+    // Through the lifecycle: with the cap 1 ms away, nothing starts and no cancel is sent; with 5 s left, the spawn gets 5 s.
+    const capped = sandboxOn(service, { time, cap: () => time.now() + 1 });
+    await assert.rejects(capped.sandbox.submit(step("late")), /^SandboxRefusal: The time for this work ran out, so the late operation wasn't started\.$/);
+    assert.equal(await capped.sandbox.cancel(id), null);
+    assert.deepEqual([service.requests.length, capped.journal.entries.map((e) => e.kind)], [4, ["unresolved"]]);
+    await sandboxOn(service, { time, cap: () => time.now() + 5_000 }).sandbox.submit(step("on time"));
+    assert.equal(service.requests.at(-1)?.timeoutMs, 5_000);
+  });
+
+  it("takes no answer that comes after its deadline: a read gives up, and a late spawn is kept only for cleanup to stop", async () => {
+    const service = new FakeService(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = clock();
+    // Every answer takes 3 s to come back.
+    const slow: Transport = async (request) => {
+      const response = await service.transport(request);
+      await time.sleep(3_000);
+      return response;
+    };
+    const api = new SandboxApi(slow, { sleep: time.sleep, now: time.now });
+    await assert.rejects(api.operation("missing", { until: time.now() + 2_500 }), (error: Error) => error instanceof SandboxDeadlineError);
+    const journal = new Journal();
+    const cap = time.now() + 2_500;
+    const late = sandboxOn(service, { time, journal, transport: slow, cap: () => cap });
+    await assert.rejects(late.sandbox.submit(step("slow")), /^SandboxRefusal: The slow operation was answered only after its deadline, so it isn't used; cleanup stops it\.$/);
+    assert.deepEqual([journal.entries.map((e) => e.kind), journal.open().operations, service.spawns], [["intent", "submitted"], [service.operations[0]?.uuid], 1]);
+    const settled = await sandboxOn(service, { time, journal }).sandbox.cleanup();
+    assert.deepEqual([settled.cancelled.length, settled.unresolved, service.operations[0]?.cancelled, service.spawns], [1, [], true, 1]);
+  });
+
+  it("never asks again for an answer over its cap, and waits at least a quarter of a second between retries", async () => {
+    let calls = 0;
+    const huge: Transport = async () => (calls++, encode({ uuid: "x", status: "SUCCESS", padding: "y".repeat(2_000) }));
+    const api = new SandboxApi(huge, { maxAnswerBytes: 1_000, sleep: async () => undefined });
+    await assert.rejects(api.operation("x", { until: Number.POSITIVE_INFINITY }), (error: Error) => error instanceof SandboxTooLargeError && error.message === "Reading an operation was longer than the 1000 bytes Nivra takes.");
+    assert.equal(calls, 1);
+    const service = new FakeService(() => succeed());
+    service.rateLimitNextRead = 0;
+    const time = clock();
+    const patient = new SandboxApi(service.transport, { sleep: time.sleep, now: time.now });
+    await assert.rejects(patient.operation("missing", { until: Number.POSITIVE_INFINITY }), SandboxHttpError);
+    assert.deepEqual(time.waits, [250]);
+  });
+
+  it("journals a spawn its client refused to send as not sent, so cleanup looks for nothing and counts no spawn", async () => {
+    const service = new FakeService(() => succeed());
+    const time = clock();
+    const stopped = new AbortController();
+    stopped.abort();
+    // The lifecycle has no signal of its own, so the refusal comes from the client, after the intent is written.
+    const api = new SandboxApi(service.transport, { sleep: time.sleep, now: time.now, signal: stopped.signal });
+    const journal = new Journal();
+    const sandbox = new Sandbox(api, { journal, sleep: time.sleep, now: time.now });
+    await assert.rejects(sandbox.submit(step("unsent")), (error: Error) => error instanceof SandboxNotSentError && error.reason === "cancelled");
+    assert.deepEqual([journal.entries.map((e) => e.kind), journal.open(), journal.spawnsOf("unsent"), service.requests.length], [["intent", "not-sent"], { operations: [], uncertain: [] }, 0, 0]);
+  });
+
+  it("ends the probe's uploads by its deadline: with no time left none is sent and nothing runs", async () => {
+    const service = probeService({ controlWorks: true });
+    const { sandbox, api, time } = sandboxOn(service);
+    const results = await runStageOne({ sandbox, api, reconnect: () => sandbox, baseImage: "base", fixture, deny: [], networkControl: null, now: time.now, deadline: time.now() + 1, log: () => undefined });
+    assert.deepEqual([results.errors, service.requests.length, results.steps.length], [[`uploads: Uploading a file wasn't sent: too little time was left. (0 of ${fixture.length} sent)`], 0, 0]);
+  });
+
+  it("reads a journal whose last line a crash cut short, keeping its spawn uncertain, and refuses one damaged elsewhere", () => {
+    const path = journalPath();
+    new Journal(path).append({ kind: "intent", wall: "2026-10-20T00:00:00.000Z", correlation: "c1", label: "one" });
+    // The crash came while its answer was being recorded: the spawn may have reached the service.
+    appendFileSync(path, '{"kind":"submitted","wall":"2026-10-20T00:00:01.000Z","corr');
+    const journal = new Journal(path);
+    assert.deepEqual([journal.entries.map((e) => e.kind), journal.open().uncertain.map((u) => u.correlation)], [["intent"], ["c1"]]);
+    writeFileSync(path, '{"kind":"intent","wall":"w","correlation":"c1","label":"one"}\nnot a line\n{"kind":"refused","wall":"w","correlation":"c1","status":400}\n');
+    assert.throws(() => new Journal(path).entries, /^SandboxRefusal: The journal at .* is damaged at line 2, so what it records can't be trusted\./);
   });
 });
 
@@ -608,7 +473,7 @@ describe("Nebius Sandboxes, offline: an interruption stops what is under way (NI
       for (const path of ["/waiting", "/arriving"]) {
         const stage = new AbortController();
         const started = performance.now();
-        const request = transport({ method: "GET", path, timeoutMs: 30_000, signal: stage.signal });
+        const request = transport({ method: "GET", path, timeoutMs: 30_000, maxBytes: ANY_SIZE, signal: stage.signal });
         setTimeout(() => stage.abort(), 50);
         await assert.rejects(request, { name: "AbortError" });
         assert.ok(performance.now() - started < 5_000, `${path} was cut off at once`);
@@ -682,7 +547,7 @@ describe("Nebius Sandboxes, offline: an interruption stops what is under way (NI
       await time.sleep(ms);
     };
     const api = new SandboxApi(service.transport, { sleep, now: time.now, signal: stage.signal });
-    await assert.rejects(api.operation("op"), /^SandboxCancelledError: Reading an operation was cancelled\.$/);
+    await assert.rejects(api.operation("op", { until: Number.POSITIVE_INFINITY }), /^SandboxCancelledError: Reading an operation was cancelled\.$/);
     assert.equal(service.requests.length, 1);
   });
 
@@ -767,7 +632,7 @@ describe("Nebius Sandboxes, offline: subprocesses and downloads (NIV-29)", () =>
     service.images.set("img-D", { "/out/patch.diff": "--- base/greet.sh\n", "/out/report.txt": "x".repeat(100) });
     const { sandbox } = sandboxOn(service);
     assert.equal((await sandbox.download("img-D", "/out/patch.diff", 1_000, sha("--- base/greet.sh\n"))).sha256, sha("--- base/greet.sh\n"));
-    await assert.rejects(sandbox.download("img-D", "/out/report.txt", 50, null), /is 100 bytes, over the 50 Nivra takes/);
+    await assert.rejects(sandbox.download("img-D", "/out/report.txt", 50, null), /^SandboxTooLargeError: The file \/out\/report\.txt was longer than the 50 bytes Nivra takes\.$/);
     await assert.rejects(sandbox.download("img-D", "/out/patch.diff", 1_000, sha("something else")), /doesn't match the hash the operation printed/);
   });
 });
@@ -792,7 +657,7 @@ const FIXTURE = fileURLToPath(new URL("./fixtures/sandbox-probe/", import.meta.u
 const fixture = readdirSync(FIXTURE).sort().map((name) => ({ name, bytes: new Uint8Array(readFileSync(join(FIXTURE, name))) }));
 
 async function stageOne(service: FakeService, networkControl: string | null) {
-  const journal = new Journal(join(mkdtempSync(join(tmpdir(), "nivra probe ")), "journal.jsonl"));
+  const journal = new Journal(journalPath());
   const { sandbox, api, time } = sandboxOn(service, { journal });
   const results = await runStageOne({
     sandbox,

@@ -13,7 +13,8 @@
 // NEBIUS_PROJECT_ID=… lines (or from those variables, set in your own terminal). Never paste them into a chat. They are
 // read once, removed from the environment, and never printed or written: evidence replaces them with placeholders.
 // Evidence goes to ~/nivra-acceptance/sandbox-probe-<UTC>/ (0700): the journal, each step's outcome (outputs cut to
-// 2 KB), the verdicts and a summary. Stage 1 stops at its overall deadline, a hard limit; cleanup then has its own. The
+// 2 KB), the verdicts and a summary. Stage 1 stops at its overall deadline, a hard limit that every request, POST and
+// DELETE included, ends by (D33); cleanup then has its own. The
 // first Ctrl+C stops at once whatever is under way (requests, waits, uploads), then settles every operation the probe
 // started (reconcile, cancel, confirm), with cleanup's own budget; a second stops cleanup too, and --recover finishes
 // it later from the journal.
@@ -58,7 +59,7 @@ if (values.plan) {
   console.log(`\nOperations: ${plan.operations} (at most ${PROBE_LIMITS.maxOperations}, plus one image import only if no public image fits), one at a time.`);
   console.log(`Uploads: ${plan.uploads}. Downloads: at most ${PROBE_LIMITS.maxDownloadBytes} bytes.`);
   console.log(`Deadlines: ${PROBE_LIMITS.requestTimeoutSeconds} s per request; each operation's timeout plus ${PROBE_LIMITS.observeMarginSeconds} s to observe it.`);
-  console.log(`  Stage 1 stops at ${PROBE_LIMITS.overallMinutes} minutes, a hard limit: no wait goes past it, no read is made after it, and nothing starts after it.`);
+  console.log(`  Stage 1 stops at ${PROBE_LIMITS.overallMinutes} minutes, a hard limit: no wait goes past it, every request (POST and DELETE too) ends by it, and nothing starts after it.`);
   console.log(`  Cleanup then takes at most ${Math.ceil(CLEANUP_MAX_SECONDS / 60)} minutes: two searches for a lost answer (${PROBE_LIMITS.searchSeconds} s each) and two cancels (a request, then ${PROBE_LIMITS.cancelWaitSeconds} s each).`);
   console.log(`  Before anything starts, stage 1 reads the account twice, 15 s apart (GET /v1/whoami). It starts only if the token is renewed with each request, or stays valid for ${Math.ceil((PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS) / 60)} minutes.`);
   console.log("  Ctrl+C stops every request, wait and upload at once; cleanup then settles what was started, on its own budget. A second Ctrl+C stops cleanup, for --recover.");
@@ -122,6 +123,8 @@ const log = (line: string) => console.log(`${String(Math.round(performance.now()
 const transport = fetchTransport({ key, project });
 /** A client whose requests stop when `signal` aborts. */
 const api = (signal?: AbortSignal) => new SandboxApi(transport, { requestTimeoutMs: PROBE_LIMITS.requestTimeoutSeconds * 1000, ...(signal ? { signal } : {}) });
+/** The deadline for one of the account reads: the time a read may spend retrying. */
+const soon = () => ({ until: performance.now() + 4 * PROBE_LIMITS.requestTimeoutSeconds * 1000 });
 /**
  * A sandbox over the probe's file-backed journal, with its client's signal and a cap: stage 1's are the interruption and
  * the overall deadline; cleanup's are its own, so interrupting stage 1 never interrupts cleanup.
@@ -158,7 +161,7 @@ if (values.recover) {
 
 if (values.stage === "0") {
   const client = api();
-  const [whoami, images] = await Promise.all([client.whoami(), client.images()]);
+  const [whoami, images] = await Promise.all([client.whoami(soon()), client.images(soon())]);
   // The full answers go to the private evidence file; the terminal gets only what the proof needs.
   write(join(folder, "stage0.json"), { whoami, images });
   const summary = stageZeroSummary(whoami, images);
@@ -179,9 +182,9 @@ const client = api(stage.signal);
 // A token that expires partway would leave the probe unable to read or cancel its own operations: check it first, with
 // two readings 15 s apart, since a token renewed with each request reports an expiry minutes after that request.
 const needed = PROBE_LIMITS.overallMinutes * 60 + CLEANUP_MAX_SECONDS;
-const first = { whoami: await client.whoami(), atMs: Date.now() };
+const first = { whoami: await client.whoami(soon()), atMs: Date.now() };
 await new Promise((resolve) => setTimeout(resolve, 15_000));
-const token = tokenOutlasts(first, { whoami: await client.whoami(), atMs: Date.now() }, needed);
+const token = tokenOutlasts(first, { whoami: await client.whoami(soon()), atMs: Date.now() }, needed);
 if (token.renewed) log(`The token is renewed with each request (it now expires at ${token.expiresAt}), so your key's own lifetime is what counts.`);
 if (!token.ok) {
   console.error(`Your token ${token.expiresAt ? `expires at ${token.expiresAt}` : "didn't say when it expires"}, and stage 1 with its cleanup can take ${Math.ceil(needed / 60)} minutes. Create a key that stays valid for at least an hour, put it in the credentials file, then try again. Nothing was started.`);

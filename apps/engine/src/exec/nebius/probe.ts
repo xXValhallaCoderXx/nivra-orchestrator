@@ -26,7 +26,8 @@ export const PROBE_LIMITS = {
 
 /**
  * The longest cleanup can take once stage 1 has stopped. One operation runs at a time, so at most one spawn is uncertain
- * and one operation open: two searches for a lost answer, and two cancels, each a request and then its wait.
+ * and one operation open: two searches for a lost answer, and two cancels, each a request and then its wait. Cleanup's
+ * cap bounds every request it makes, the cancels' DELETEs included (D33), so this is a hard limit.
  */
 export const CLEANUP_MAX_SECONDS = 2 * PROBE_LIMITS.searchSeconds + 2 * (PROBE_LIMITS.requestTimeoutSeconds + PROBE_LIMITS.cancelWaitSeconds);
 
@@ -250,11 +251,12 @@ export async function runStageOne(ctx: StageOneContext): Promise<ProbeResults> {
     return { operationId: submitted.operationId, outcome: await sandbox.observe(submitted.operationId, spec.timeoutSeconds) };
   };
 
-  // An upload is never retried; once one fails, or the probe is interrupted, the rest aren't sent and nothing runs.
+  // An upload is never retried; once one fails, or the probe is interrupted, the rest aren't sent and nothing runs. Each
+  // ends by the overall deadline.
   const files: Record<string, FileRef> = {};
   for (const file of ctx.fixture) {
     try {
-      files[`/fixture/${file.name}`] = { uuid: (await ctx.api.upload(file.bytes)).uuid };
+      files[`/fixture/${file.name}`] = { uuid: (await ctx.api.upload(file.bytes, { until: ctx.deadline })).uuid };
     } catch (error) {
       results.errors.push(`uploads: ${error instanceof Error ? error.message : String(error)} (${Object.keys(files).length} of ${ctx.fixture.length} sent)`);
       return results;

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, sleepFor, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
+import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, sleepFor, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
 
 /**
  * The lifecycle of Nebius Sandboxes operations, as Nivra models it (NIV-29), from the documentation of 20 October 2026:
@@ -13,8 +13,9 @@ import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpErr
  *   a spawn whose answer was lost can be looked for. A bounded search that finds nothing leaves it unknown, never "not
  *   started", and nothing is ever resubmitted.
  * - A lost connection is not a cancellation; a cancel's 202 is not a stop. Cancelling polls to a terminal state.
- * - Every wait has a deadline, and no read is made, or answer taken, once it has passed. An optional cap (the probe's
- *   overall deadline) bounds them all, read afresh on every pass, and no operation or subprocess is started after it.
+ * - Every request and every wait has a deadline, writes included (D33): no request is sent, and no answer taken, once
+ *   it has passed, and a write needs the client's `minWriteMs` left. An optional cap (the probe's overall deadline, or
+ *   cleanup's) bounds them all, read afresh on every pass.
  * - An optional signal cancels the work: the request under way is cut off, a wait ends at once, and nothing more is
  *   started. Cleanup runs on a sandbox with a signal and a cap of its own, so cancelling the work never cancels it.
  * - Cancelling, or a disposable run, deletes nothing: images are retained for 180 days, after which untagged and
@@ -23,9 +24,12 @@ import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpErr
 
 export type JournalEntry =
   | { kind: "intent"; wall: string; correlation: string; label: string }
-  | { kind: "submitted"; wall: string; correlation: string; operationId: string }
+  /** `late`: the answer came after the deadline or the cancellation, so the operation is known only for cleanup. */
+  | { kind: "submitted"; wall: string; correlation: string; operationId: string; late?: true }
   /** The service turned the spawn down (4xx): it created nothing. */
   | { kind: "refused"; wall: string; correlation: string; status: number }
+  /** The spawn was never handed to the transport (cancelled, or out of time): nothing reached the service. */
+  | { kind: "not-sent"; wall: string; correlation: string; reason: "cancelled" | "no-time" }
   | { kind: "uncertain"; wall: string; correlation: string; cause: string }
   | { kind: "found"; wall: string; correlation: string; operationId: string }
   | { kind: "cancel"; wall: string; operationId: string }
@@ -33,8 +37,9 @@ export type JournalEntry =
   | { kind: "unresolved"; wall: string; correlation: string | null; operationId: string | null; reason: string };
 
 /**
- * Everything the probe did, one JSON line per entry, written before the request it describes. With a file, the file is
- * the record: every read takes it afresh, so a fresh client (a reconnect, `--recover`) and the one before it agree.
+ * Everything the probe did, one JSON line per entry, written and flushed before the request it describes. With a file,
+ * the file is the record: every read takes it afresh, so a fresh client (a reconnect, `--recover`) and the one before it
+ * agree.
  */
 export class Journal {
   readonly #path: string | null;
@@ -44,34 +49,64 @@ export class Journal {
     this.#path = path;
   }
 
+  /** Written and flushed before anything is sent, so a crash right after the request can't lose its record. */
   append(entry: JournalEntry): void {
-    if (this.#path) appendFileSync(this.#path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-    else this.#memory.push(entry);
+    if (!this.#path) {
+      this.#memory.push(entry);
+      return;
+    }
+    const fd = openSync(this.#path, "a", 0o600);
+    try {
+      writeSync(fd, `${JSON.stringify(entry)}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   }
 
+  /**
+   * The entries as written. A crash in the middle of a write leaves a last line with no newline, and it is left out.
+   * That loses nothing that was sent unrecorded: an intent is flushed before its request, so a torn intent was never
+   * sent, and a torn record of an answer leaves its intent unsettled, so the spawn stays uncertain and is looked for. A
+   * damaged line anywhere else means the record can't be trusted, and is said so.
+   */
   get entries(): readonly JournalEntry[] {
     if (!this.#path) return this.#memory;
-    return existsSync(this.#path) ? readFileSync(this.#path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as JournalEntry) : [];
+    if (!existsSync(this.#path)) return [];
+    const text = readFileSync(this.#path, "utf8");
+    const complete = text.endsWith("\n") ? text : text.slice(0, text.lastIndexOf("\n") + 1);
+    return complete
+      .split("\n")
+      .filter(Boolean)
+      .map((line, index) => {
+        try {
+          return JSON.parse(line) as JournalEntry;
+        } catch {
+          throw new SandboxRefusal(`The journal at ${this.#path} is damaged at line ${index + 1}, so what it records can't be trusted. Check the operations it names before starting more.`);
+        }
+      });
   }
 
   /**
    * Operations known and not yet seen to end, and spawns whose operation hasn't been found: what cleanup must settle.
-   * A spawn is settled only by its answer, by being found, or by the service turning it down. Every other intent is
-   * uncertain, whether or not its lost answer was journaled: a probe that dies after sending a spawn, before its answer
-   * arrives, leaves only the intent, and the operation may be running.
+   * A spawn is settled only by its answer, by being found, by the service turning it down, or by never having been
+   * sent. Every other intent is uncertain, whether or not its lost answer was journaled: a probe that dies after sending
+   * a spawn, before its answer arrives, leaves only the intent, and the operation may be running.
    */
   open(): { operations: string[]; uncertain: Array<{ correlation: string; wall: string; label: string }> } {
     const entries = this.entries;
     const ended = new Set(entries.flatMap((e) => (e.kind === "terminal" ? [e.operationId] : [])));
     const operations = [...new Set(entries.flatMap((e) => (e.kind === "submitted" || e.kind === "found" ? [e.operationId] : [])))].filter((id) => !ended.has(id));
-    const settled = new Set(entries.flatMap((e) => (e.kind === "submitted" || e.kind === "found" || e.kind === "refused" ? [e.correlation] : [])));
+    const settled = new Set(entries.flatMap((e) => (e.kind === "submitted" || e.kind === "found" || e.kind === "refused" || e.kind === "not-sent" ? [e.correlation] : [])));
     const uncertain = entries.flatMap((e) => (e.kind === "intent" && !settled.has(e.correlation) ? [{ correlation: e.correlation, wall: e.wall, label: e.label }] : []));
     return { operations, uncertain };
   }
 
-  /** How many spawns were sent for a label: the evidence that nothing was sent twice. */
+  /** How many spawns were sent for a label: the evidence that nothing was sent twice. One never sent doesn't count. */
   spawnsOf(label: string): number {
-    return this.entries.filter((e) => e.kind === "intent" && e.label === label).length;
+    const entries = this.entries;
+    const unsent = new Set(entries.flatMap((e) => (e.kind === "not-sent" ? [e.correlation] : [])));
+    return entries.filter((e) => e.kind === "intent" && e.label === label && !unsent.has(e.correlation)).length;
   }
 }
 
@@ -228,10 +263,18 @@ export class Sandbox {
     return Math.min(deadline, this.#cap ? this.#cap() : Number.POSITIVE_INFINITY);
   }
 
-  /** Refuses to start anything once the work is cancelled or the cap has passed: nothing is sent, and nothing journaled. */
+  /** Whether a write still fits under the cap: it needs the client's `minWriteMs` left to be sent at all. */
+  #writeFits(): boolean {
+    return this.#until(Number.POSITIVE_INFINITY) - this.#now() >= this.#api.minWriteMs;
+  }
+
+  /**
+   * Refuses to start anything once the work is cancelled, or with too little time left under the cap for its request:
+   * nothing is sent, and nothing journaled.
+   */
   #refuseAfterCap(what: string): void {
     if (this.#signal?.aborted) throw new SandboxCancelledError(`Starting ${what}`);
-    if (this.#now() >= this.#until(Number.POSITIVE_INFINITY)) throw new SandboxRefusal(`The probe's time ran out, so ${what} wasn't started.`);
+    if (!this.#writeFits()) throw new SandboxRefusal(`The time for this work ran out, so ${what} wasn't started.`);
   }
 
   /** A poll's wait, ended at once by the signal, which then stops the loop. */
@@ -305,14 +348,18 @@ export class Sandbox {
     this.#journal.append({ kind: "intent", wall: this.#wallNow().toISOString(), correlation, label });
     let answer: SpawnAnswer;
     try {
-      answer = await this.#api.spawn({ ...body, env: { ...body.env, [CORRELATION]: correlation } }, options);
+      answer = await this.#api.spawn({ ...body, env: { ...body.env, [CORRELATION]: correlation } }, { ...options, until: this.#until(Number.POSITIVE_INFINITY) });
     } catch (error) {
-      // Turned down, so nothing was created. Any other failure leaves the intent open, for cleanup to look for.
+      // Turned down, or never sent, so nothing was created. Any other failure leaves the intent open, for cleanup to
+      // look for.
       if (error instanceof SandboxHttpError && error.status >= 400 && error.status <= 499) this.#journal.append({ kind: "refused", wall: this.#wallNow().toISOString(), correlation, status: error.status });
+      else if (error instanceof SandboxNotSentError) this.#journal.append({ kind: "not-sent", wall: this.#wallNow().toISOString(), correlation, reason: error.reason });
       throw error;
     }
     if (answer.status === "created") {
-      this.#journal.append({ kind: "submitted", wall: this.#wallNow().toISOString(), correlation, operationId: answer.id });
+      this.#journal.append({ kind: "submitted", wall: this.#wallNow().toISOString(), correlation, operationId: answer.id, ...(answer.late ? { late: true as const } : {}) });
+      // Known only so that cleanup can stop it: an answer after the deadline, or the cancellation, starts nothing more.
+      if (answer.late) throw this.#signal?.aborted ? new SandboxCancelledError(`Starting the ${label} operation`) : new SandboxRefusal(`The ${label} operation was answered only after its deadline, so it isn't used; cleanup stops it.`);
       return { operationId: answer.id };
     }
     this.#journal.append({ kind: "uncertain", wall: this.#wallNow().toISOString(), correlation, cause: answer.cause });
@@ -355,17 +402,18 @@ export class Sandbox {
   }
 
   /**
-   * Asks an operation to stop, then polls until it has ended; null when it hadn't within the wait (or the cap). With no
-   * time left under the cap, no cancel is sent: the operation is journaled unresolved, for `--recover`.
+   * Asks an operation to stop, then polls until it has ended; null when it hadn't within the wait (or the cap). With too
+   * little time left under the cap for the request, no cancel is sent: the operation is journaled unresolved, for
+   * `--recover`.
    */
   async cancel(operationId: string): Promise<Outcome | null> {
     if (this.#signal?.aborted) throw new SandboxCancelledError("Cancelling an operation");
-    if (this.#now() >= this.#until(Number.POSITIVE_INFINITY)) {
+    if (!this.#writeFits()) {
       this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "no time was left to cancel it" });
       return null;
     }
     this.#journal.append({ kind: "cancel", wall: this.#wallNow().toISOString(), operationId });
-    await this.#api.cancel(operationId);
+    await this.#api.cancel(operationId, { until: this.#until(Number.POSITIVE_INFINITY) });
     const end = this.#now() + this.#cancelWaitMs;
     for (let deadline = this.#until(end); this.#now() < deadline; deadline = this.#until(end)) {
       const operation = await this.#readBy(operationId, deadline);
@@ -468,7 +516,7 @@ export class Sandbox {
   async subprocess(operationId: string, input: { label: string; command: string; args: string[]; env?: Record<string, string> }): Promise<{ spid: number } | { uncertain: string }> {
     this.#refuseAfterCap(`the subprocess ${input.label}`);
     const correlation = randomUUID();
-    const answer = await this.#api.spawnSubprocess(operationId, { command: input.command, args: input.args, shell: false, env: { ...input.env, [CORRELATION]: correlation } });
+    const answer = await this.#api.spawnSubprocess(operationId, { command: input.command, args: input.args, shell: false, env: { ...input.env, [CORRELATION]: correlation } }, { until: this.#until(Number.POSITIVE_INFINITY) });
     if (answer.status === "created") return { spid: answer.spid };
     const events = await this.#api.events(operationId, { until: this.#until(Number.POSITIVE_INFINITY) }).catch(() => "");
     for (const line of events.split("\n")) {
