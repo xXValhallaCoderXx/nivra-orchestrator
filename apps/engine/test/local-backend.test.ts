@@ -113,6 +113,36 @@ describe("Local: processes on the target", () => {
     },
   );
 
+  it(
+    "keeps its close to a budget, killing what ignores SIGTERM sooner",
+    { skip: process.platform === "win32" ? "POSIX signals only; Windows stops a tree with taskkill at once" : false },
+    async () => {
+      const session = await open();
+      const ready = join(workspace, "stubborn.ready");
+      let pid: number | null = null;
+      const running = session.exec({
+        argv: node("process.on('SIGTERM', () => {}); require('node:fs').writeFileSync(process.argv[1], 'ready'); setInterval(() => {}, 1000)", ready),
+        cwd: workspace,
+        timeoutMs: 60_000,
+        maxOutputBytes: 100,
+        onStart: (info) => (pid = info.pid),
+      });
+      await waitFor(() => {
+        try {
+          return readFileSync(ready, "utf8") === "ready";
+        } catch {
+          return false;
+        }
+      }, { what: "the stubborn process to ignore SIGTERM" });
+      pids.push(pid!);
+      const started = performance.now();
+      await session.close({ budgetMs: 400 });
+      assert.ok(performance.now() - started < 1_500, `closing took ${Math.round(performance.now() - started)} ms of its 400`);
+      await running;
+      assert.equal(isAlive(pid!), false);
+    },
+  );
+
   it("refuses a program that does not exist as never started", async () => {
     const session = await open();
     try {

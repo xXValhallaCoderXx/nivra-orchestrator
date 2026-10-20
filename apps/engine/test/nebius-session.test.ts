@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { getEventListeners } from "node:events";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { BoundaryUnavailableError, ExecRefusedError, ExecUncertainError, SessionOpenError, type ExecRequest, type ExecutionSession, type SessionSpec } from "../src/exec/backend.ts";
 import type { Transport, TransportResponse } from "../src/exec/nebius/api.ts";
 import { RETENTION } from "../src/exec/nebius/sandbox.ts";
-import { createNebiusBackend, listingDigest, NEBIUS_CAPABILITIES, PREPARE_SCRIPT, reconcileJournals, SandboxOperationError, scanJournals, type ListingEntry, type NebiusBackendOptions } from "../src/exec/nebius/session.ts";
+import { createNebiusBackend, listingDigest, NEBIUS_CAPABILITIES, PREPARE_SCRIPT, reconcileJournals, SandboxOperationError, scanJournals, signalName, type ListingEntry, type NebiusBackendOptions } from "../src/exec/nebius/session.ts";
 import { clock, FakeService, holding, settles, sha, succeed, type Behaviour } from "./fake-sandboxes.ts";
 import { sessionContract } from "./session-contract.ts";
 
@@ -287,7 +288,7 @@ describe("Nebius session: lost answers, late answers and deadlines (D33)", () =>
     };
     const session = await backendOn(service, { time, via }).backend.open(spec({ budgetMs: 200_000 }));
     late = true;
-    await assert.rejects(session.exec(command(["/bin/sleep", "60"])), (error: Error) => error instanceof ExecUncertainError && /was started, but its answer came only after the run's deadline, so Nivra didn't follow it; closing the session stops it\.$/.test(error.message));
+    await assert.rejects(session.exec(command(["/bin/sleep", "60"])), (error: Error) => error instanceof ExecUncertainError && /was started, but its answer came only after the run's deadline or its cancellation, so Nivra didn't follow it; closing the session stops it\.$/.test(error.message));
     const report = await session.close();
     assert.deepEqual([report.stopped.length, report.unresolved, service.operations.at(-1)?.cancelled], [1, [], true]);
   });
@@ -417,7 +418,7 @@ describe("Nebius session: recovery, a local scan and then one bounded pass (D33)
     await abandoned(service, journalDir, time);
     await abandoned(service, journalDir, time);
     const before = service.requests.length;
-    const scans = scanJournals(journalDir);
+    const scans = scanJournals(journalDir).open;
     assert.deepEqual([scans.length, scans.every((s) => s.operations.length === 1 && s.damaged === null), service.requests.length - before], [2, true, 0]);
     // The first pass has room for one journal: its cancel is never seen to end, and the budget is gone.
     service.ignoreCancels = true;
@@ -426,9 +427,9 @@ describe("Nebius session: recovery, a local scan and then one bounded pass (D33)
     assert.deepEqual(first.map((r) => [r.stopped.length, r.unresolved.length]), [[0, 1], [0, 1]]);
     assert.match(first[1]?.unresolved[0] ?? "", /^Not looked at in this pass: it ran out of time\. It stays for the next\.$/);
     service.ignoreCancels = false;
-    const second = await reconcileJournals(scanJournals(journalDir), { ...options, budgetMs: 120_000 });
+    const second = await reconcileJournals(scanJournals(journalDir).open, { ...options, budgetMs: 120_000 });
     assert.deepEqual(second.map((r) => [r.stopped.length, r.unresolved]), [[1, []], [1, []]]);
-    assert.deepEqual(scanJournals(journalDir), []);
+    assert.deepEqual(scanJournals(journalDir).open, []);
   });
 
   it("stops a pass when the engine shuts down partway, keeping what it didn't settle for the next", async () => {
@@ -444,10 +445,10 @@ describe("Nebius session: recovery, a local scan and then one bounded pass (D33)
       shutdown.abort();
       await time.sleep(ms);
     };
-    const pass = await reconcileJournals(scanJournals(journalDir), { credentials: { key: KEY, project: PROJECT }, transport: () => service.transport, now: time.now, sleep, budgetMs: 600_000, signal: shutdown.signal });
+    const pass = await reconcileJournals(scanJournals(journalDir).open, { credentials: { key: KEY, project: PROJECT }, transport: () => service.transport, now: time.now, sleep, budgetMs: 600_000, signal: shutdown.signal });
     assert.deepEqual(pass.map((r) => [r.stopped.length, r.unresolved.length]), [[0, 1], [0, 1]]);
     assert.match(pass[1]?.unresolved[0] ?? "", /^Not looked at in this pass: it was stopped\. It stays for the next\.$/);
-    assert.equal(scanJournals(journalDir).length, 2, "both stay open for the next pass");
+    assert.equal(scanJournals(journalDir).open.length, 2, "both stay open for the next pass");
   });
 
   it("never settles an operation by its age: one queued past its timeout and margins stays unresolved, and is found and stopped later", async () => {
@@ -461,12 +462,12 @@ describe("Nebius session: recovery, a local scan and then one bounded pass (D33)
     const options = { credentials: { key: KEY, project: PROJECT }, transport: () => service.transport, now: time.now, sleep: time.sleep, budgetMs: 600_000 };
     // Ten hours later, far past its 60 s timeout and every margin, it is still unresolved, not retired.
     await time.sleep(10 * 60 * 60 * 1000);
-    const late = await reconcileJournals(scanJournals(journalDir), options);
+    const late = await reconcileJournals(scanJournals(journalDir).open, options);
     assert.deepEqual(late.map((r) => [r.stopped.length, r.unresolved.length]), [[0, 1]]);
     assert.match(late[0]?.unresolved[0] ?? "", /^It isn't known whether "queued" started/);
     // Once the service lists it again, the next pass finds it and stops it.
     service.hidden.clear();
-    const found = await reconcileJournals(scanJournals(journalDir), options);
+    const found = await reconcileJournals(scanJournals(journalDir).open, options);
     assert.deepEqual(found.map((r) => [r.stopped.length, r.unresolved]), [[1, []]]);
     assert.equal(service.operations.at(-1)?.cancelled, true);
   });
@@ -474,8 +475,134 @@ describe("Nebius session: recovery, a local scan and then one bounded pass (D33)
   it("reports a journal it can't read, rather than guessing what it held", () => {
     const journalDir = tempDir("damaged");
     writeFileSync(join(journalDir, "broken.jsonl"), "not a journal line\n");
-    const [scan] = scanJournals(journalDir);
+    const [scan] = scanJournals(journalDir).open;
     assert.match(scan?.damaged ?? "", /is damaged at line 1/);
+  });
+});
+
+describe("Nebius session: what the independent review of B1 found, each failing on the code before its fix", () => {
+  /** A clock whose sleeps also give way to other work, so a close can begin while a stop is still waiting. */
+  function yieldingClock() {
+    const base = clock();
+    return { now: base.now, waits: base.waits, sleep: async (ms: number) => (await new Promise((resolve) => setImmediate(resolve)), await base.sleep(ms)) };
+  }
+
+  it("keeps a close to its budget and signal when the person's cancel began the stop before it", async () => {
+    const service = serviceFor(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = yieldingClock();
+    const session = await backendOn(service, { time }).backend.open(spec());
+    // The cancel is accepted, but the operation never stops: the stop would wait its 60 s.
+    service.ignoreCancels = true;
+    const person = new AbortController();
+    const running = session.exec(command(["/bin/sleep", "60"], { timeoutMs: 60_000, signal: person.signal, onStart: () => person.abort() }));
+    await settles(() => service.requests.some((r) => r.method === "DELETE"));
+    const engine = new AbortController();
+    const started = time.now();
+    const closing = session.close({ budgetMs: 5_000, signal: engine.signal });
+    engine.abort();
+    const report = await closing;
+    await assert.rejects(running, ExecUncertainError);
+    assert.ok(time.now() - started <= 5_000, `closing took ${time.now() - started} ms of its 5,000`);
+    assert.equal(report.unresolved.length, 1);
+  });
+
+  it("cuts a torn last line off before the next entry, so a crash leaves no damage and the next pass settles it", async () => {
+    const service = serviceFor(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = clock();
+    const journalDir = join(tempDir("torn"), "sandbox");
+    const session = await backendOn(service, { journalDir, time }).backend.open(spec());
+    await assert.rejects(session.exec(command(["/bin/sleep", "60"], { onStart: () => (service.rateLimitNextRead = 100_000) })), ExecUncertainError);
+    // The engine died in the middle of a write.
+    const [name] = readdirSync(journalDir).filter((file) => file.endsWith(".jsonl"));
+    appendFileSync(join(journalDir, name!), '{"kind":"cancel","wall":"2026-10-20T12:00:00.000Z","operat');
+    const { open } = scanJournals(journalDir);
+    assert.deepEqual(open.map((s) => [s.damaged, s.operations.length]), [[null, 1]]);
+    const [result] = await reconcileJournals(open, { credentials: { key: KEY, project: PROJECT }, transport: () => service.transport, now: time.now, sleep: time.sleep, budgetMs: 120_000 });
+    assert.deepEqual([result?.stopped.length, result?.unresolved], [1, []]);
+    assert.ok(existsSync(join(journalDir, "settled", name!)), "settled, and moved aside");
+  });
+
+  it("keeps passing over the rest when one journal can't be read", async () => {
+    const service = serviceFor(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const time = clock();
+    const journalDir = join(tempDir("one damaged"), "sandbox");
+    mkdirSync(journalDir, { recursive: true });
+    writeFileSync(join(journalDir, "0-damaged.jsonl"), "not a journal line\n");
+    const session = await backendOn(service, { journalDir, time }).backend.open(spec());
+    await assert.rejects(session.exec(command(["/bin/sleep", "60"], { onStart: () => (service.rateLimitNextRead = 100_000) })), ExecUncertainError);
+    const results = await reconcileJournals(scanJournals(journalDir).open, { credentials: { key: KEY, project: PROJECT }, transport: () => service.transport, now: time.now, sleep: time.sleep, budgetMs: 120_000 });
+    assert.deepEqual(results.map((r) => [r.stopped.length, r.unresolved.length]), [[0, 1], [1, 0]]);
+  });
+
+  it("finds open work however many settled journals sort before it, and moves a clean session's journal aside", async () => {
+    const journalDir = join(tempDir("many"), "sandbox");
+    mkdirSync(journalDir, { recursive: true });
+    for (let i = 0; i < 600; i++) writeFileSync(join(journalDir, `${String(i).padStart(4, "0")}.jsonl`), `${JSON.stringify({ kind: "intent", wall: "w", correlation: `c${i}`, label: "x" })}\n${JSON.stringify({ kind: "refused", wall: "w", correlation: `c${i}`, status: 400 })}\n`);
+    writeFileSync(join(journalDir, "zzzz.jsonl"), `${JSON.stringify({ kind: "intent", wall: "w", correlation: "open", label: "x" })}\n`);
+    const scan = scanJournals(journalDir);
+    assert.deepEqual([scan.open.map((s) => s.uncertain.map((u) => u.correlation)), scan.unread], [[["open"]], 0]);
+    const service = serviceFor();
+    const cleanDir = join(tempDir("clean"), "sandbox");
+    const session = await backendOn(service, { journalDir: cleanDir }).backend.open(spec());
+    await session.exec(command(["/bin/true"]));
+    assert.deepEqual((await session.close()).unresolved, []);
+    assert.deepEqual([readdirSync(cleanDir).filter((file) => file.endsWith(".jsonl")).length, readdirSync(join(cleanDir, "settled")).length], [0, 1]);
+  });
+
+  it("counts every image the service keeps, one first seen when closing included", async () => {
+    // It had ended, with an image, before closing asked it to stop.
+    const service = serviceFor(() => ({ statuses: ["SUCCESS"], exitCode: 0, resultImage: "img-late" }));
+    const session = await backendOn(service).backend.open(spec());
+    await assert.rejects(session.exec(command(["/bin/true"], { onStart: () => (service.rateLimitNextRead = 100_000) })), ExecUncertainError);
+    const report = await session.close();
+    assert.deepEqual([report.alreadyEnded.length, report.retained?.images], [1, 2]);
+  });
+
+  it("never reports as not started a command the service made, when its answer came as the run was cancelled", async () => {
+    const service = serviceFor(() => ({ statuses: ["EXECUTING"], waits: true }));
+    const person = new AbortController();
+    let armed = false;
+    // The service makes the operation; the person's cancel lands as its answer arrives.
+    const via: Transport = async (request) => {
+      const response = await service.transport(request);
+      if (armed && request.method === "POST" && request.path === "/v1/instances") person.abort();
+      return response;
+    };
+    const session = await backendOn(service, { via }).backend.open(spec());
+    armed = true;
+    await assert.rejects(session.exec(command(["/bin/sleep", "60"], { signal: person.signal })), (error: Error) => error instanceof ExecUncertainError && /was started, but its answer came only after the run's deadline or its cancellation/.test(error.message));
+    await assert.rejects(session.exec(command(["/bin/true"])), /^ExecRefusedError: An earlier command in this session wasn't settled/);
+    const report = await session.close();
+    assert.deepEqual([report.stopped.length, service.operations.at(-1)?.cancelled, report.retained?.operations], [1, true, 2]);
+  });
+
+  it("leaves no listener on a long-lived run signal once each session is closed", async () => {
+    const longLived = new AbortController();
+    const { backend } = backendOn(serviceFor());
+    for (let i = 0; i < 3; i++) await (await backend.open(spec({ signal: longLived.signal }))).close();
+    assert.equal(getEventListeners(longLived.signal, "abort").length, 0);
+  });
+
+  it("follows a command to its end when the caller's onStart throws, then gives that error back, with the session still sound", async () => {
+    const service = serviceFor();
+    const session = await backendOn(service).backend.open(spec());
+    await assert.rejects(
+      session.exec(command(["/bin/true"], {
+        onStart: () => {
+          throw new Error("the caller's own bug");
+        },
+      })),
+      /^Error: the caller's own bug$/,
+    );
+    assert.equal((await session.exec(command(["/bin/true"]))).exitCode, 0);
+    await session.close();
+  });
+
+  it("names a Linux signal by Linux's numbers, whatever the engine's platform", () => {
+    assert.deepEqual(
+      [signalName(-1), signalName(0), signalName(9), signalName(15), signalName(21), signalName(22), signalName(64), signalName("SIGTERM"), signalName("-1"), signalName(null)],
+      [null, null, "SIGKILL", "SIGTERM", "SIGTTIN", "SIGTTOU", "signal 64", "SIGTERM", null, null],
+    );
   });
 });
 
@@ -491,6 +618,10 @@ describe("Nebius session: the prepare step's listing, checked with this machine'
     writeFileSync(join(source, "dir with space", "ü.txt"), "unicode\n");
     writeFileSync(join(source, "empty"), "");
     symlinkSync("a.txt", join(source, "link"));
+    // Names whose order under LC_ALL=C (by byte) differs from a locale's (which ignores case and punctuation first).
+    writeFileSync(join(source, "B.txt"), "upper\n");
+    writeFileSync(join(source, "a-b"), "dash\n");
+    writeFileSync(join(source, "a_b"), "underscore\n");
     const archive = join(root, "snapshot.tar");
     const tar = spawnSync("tar", ["-c", "-f", archive, "-C", source, "."], { encoding: "utf8" });
     assert.equal(tar.status, 0, tar.stderr);
@@ -504,6 +635,9 @@ describe("Nebius session: the prepare step's listing, checked with this machine'
       { path: "dir with space/ü.txt", kind: "file", executable: false, sha256: sha("unicode\n") },
       { path: "empty", kind: "file", executable: false, sha256: sha("") },
       { path: "link", kind: "link", target: "a.txt" },
+      { path: "B.txt", kind: "file", executable: false, sha256: sha("upper\n") },
+      { path: "a-b", kind: "file", executable: false, sha256: sha("dash\n") },
+      { path: "a_b", kind: "file", executable: false, sha256: sha("underscore\n") },
     ];
     const { digest, entries } = listingDigest(expected);
     assert.deepEqual([/^entries\s+(\d+)$/m.exec(ran.stdout)?.[1], /^digest ([0-9a-f]{64})$/m.exec(ran.stdout)?.[1]], [String(entries), digest], readFileSync(listing, "utf8"));

@@ -406,7 +406,7 @@ describe("Nebius Sandboxes, offline: every request, writes included, ends by its
     const journal = new Journal();
     const cap = time.now() + 2_500;
     const late = sandboxOn(service, { time, journal, transport: slow, cap: () => cap });
-    await assert.rejects(late.sandbox.submit(step("slow")), /^SandboxRefusal: The slow operation was answered only after its deadline, so it isn't used; cleanup stops it\.$/);
+    await assert.rejects(late.sandbox.submit(step("slow")), /^SandboxLateSpawnError: The slow operation was answered only after its deadline, or once the work was cancelled, so it isn't used; cleanup stops it\.$/);
     assert.deepEqual([journal.entries.map((e) => e.kind), journal.open().operations, service.spawns], [["intent", "submitted"], [service.operations[0]?.uuid], 1]);
     const settled = await sandboxOn(service, { time, journal }).sandbox.cleanup();
     assert.deepEqual([settled.cancelled.length, settled.unresolved, service.operations[0]?.cancelled, service.spawns], [1, [], true, 1]);
@@ -453,8 +453,16 @@ describe("Nebius Sandboxes, offline: every request, writes included, ends by its
     appendFileSync(path, '{"kind":"submitted","wall":"2026-10-20T00:00:01.000Z","corr');
     const journal = new Journal(path);
     assert.deepEqual([journal.entries.map((e) => e.kind), journal.open().uncertain.map((u) => u.correlation)], [["intent"], ["c1"]]);
+    // The next entry cuts the torn line off first, so the journal stays readable rather than damaged in the middle.
+    journal.append({ kind: "refused", wall: "2026-10-20T00:00:02.000Z", correlation: "c1", status: 400 });
+    assert.deepEqual([new Journal(path).entries.map((e) => e.kind), readFileSync(path, "utf8").includes('"corr\n')], [["intent", "refused"], false]);
     writeFileSync(path, '{"kind":"intent","wall":"w","correlation":"c1","label":"one"}\nnot a line\n{"kind":"refused","wall":"w","correlation":"c1","status":400}\n');
     assert.throws(() => new Journal(path).entries, /^SandboxRefusal: The journal at .* is damaged at line 2, so what it records can't be trusted\./);
+  });
+
+  it("leaves a spawn answered with a redirect uncertain, never followed and never taken as refused", async () => {
+    const api = new SandboxApi(async () => encode({}, 302, { location: "https://elsewhere.test/" }), { sleep: async () => undefined });
+    assert.deepEqual(await api.spawn(body, { until: Number.POSITIVE_INFINITY }), { status: "uncertain", cause: "the service answered HTTP 302" });
   });
 });
 

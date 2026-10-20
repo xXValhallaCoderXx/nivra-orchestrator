@@ -1,10 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
-import { constants } from "node:os";
-import { join, posix } from "node:path";
+import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
+import { basename, dirname, join, posix } from "node:path";
 import { BoundaryUnavailableError, checkRequirements, ExecRefusedError, ExecUncertainError, SessionOpenError, type CloseReport, type ExecRequest, type ExecResult, type ExecutionBackend, type ExecutionCapabilities, type ExecutionSession, type SessionSnapshot, type SessionSpec, type SessionStep } from "../backend.ts";
 import { fetchTransport, SandboxApi, SandboxCancelledError, SandboxHttpError, SandboxNotSentError, SandboxTooLargeError, sleepFor, type Transport } from "./api.ts";
-import { Journal, RETENTION, Sandbox, SandboxRefusal, type JournalEntry, type Outcome, type SandboxOptions, type StepSpec } from "./sandbox.ts";
+import { Journal, RETENTION, Sandbox, SandboxLateSpawnError, SandboxRefusal, type JournalEntry, type Outcome, type SandboxOptions, type StepSpec } from "./sandbox.ts";
 
 /**
  * Nebius Token Factory Sandboxes as an execution session (NIV-41, D33), on the pattern D28 adopted: each command is one
@@ -165,11 +164,12 @@ const sha256 = (data: string | Uint8Array) => createHash("sha256").update(data).
 const IMAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const CORRELATION = "NIVRA_CORRELATION";
-const SIGNALS = new Map(Object.entries(constants.signals).map(([name, number]) => [number, name]));
+/** Linux's signal numbers, as the sandbox's machine reports them, whatever the engine's own platform. */
+const LINUX_SIGNALS = ["", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD", "SIGCONT", "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGIO", "SIGPWR", "SIGSYS"];
 
 /** A signal as a name, or null when none ended the command (the service reports -1 then). */
-function signalName(raw: number | string | null): string | null {
-  if (typeof raw === "number") return raw > 0 ? (SIGNALS.get(raw) ?? `signal ${raw}`) : null;
+export function signalName(raw: number | string | null): string | null {
+  if (typeof raw === "number") return raw > 0 ? LINUX_SIGNALS[raw] || `signal ${raw}` : null;
   if (typeof raw === "string") {
     const trimmed = raw.trim();
     return trimmed === "" || trimmed === "-1" || trimmed === "0" ? null : trimmed;
@@ -225,6 +225,17 @@ function retainedIn(entries: readonly JournalEntry[]): CloseReport["retained"] {
   return { uploads, images, operations: known.size + maybe, note: RETENTION };
 }
 
+/**
+ * Moves a journal whose session left nothing open into `settled/` beside it, so that scanning at engine start reads
+ * only the journals that may still need something, however many sessions came before. It is kept, not deleted: it is
+ * the record of what was sent.
+ */
+function settleJournal(path: string): void {
+  const folder = join(dirname(path), "settled");
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  renameSync(path, join(folder, basename(path)));
+}
+
 /** Cleanup's unresolved items, in words a person can check. */
 function describeUnresolved(item: string): string {
   const spawn = /^spawn (.*) \(([^)]+)\)$/.exec(item);
@@ -236,6 +247,14 @@ const CARRIES_CREDENTIAL = "The command holds the sandbox's key or project id, s
 
 /** A command that was never sent because the work was cancelled first: Local's "not started" result. */
 class NotStarted extends Error {}
+
+/** One step's operation, seen to its end, and anything the caller's `onStart` threw, to give back once it settled. */
+interface Ran {
+  operationId: string;
+  outcome: Outcome;
+  durationMs: number;
+  callbackError: unknown;
+}
 
 export function createNebiusBackend(options: NebiusBackendOptions): ExecutionBackend {
   const limits: NebiusLimits = { ...NEBIUS_LIMITS, ...options.limits };
@@ -270,12 +289,17 @@ class NebiusSession implements ExecutionSession {
   readonly #transport: Transport;
   readonly #workspace: string;
   readonly #sessionId = randomUUID();
+  readonly #journalPath: string;
   readonly #journal: Journal;
   readonly #now: () => number;
   readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly #wallNow: () => Date;
   /** Stops the session's work: the spec's signal, or closing. */
   readonly #work = new AbortController();
+  /** Stops cleanup itself, stopping a cancelled command included: closing's own signal. Never the work's. */
+  readonly #cleanup = new AbortController();
+  readonly #specSignal: AbortSignal | null;
+  readonly #onSpecAbort = () => this.#work.abort(this.#specSignal?.reason);
   readonly #deadline: number;
   readonly #steps: SessionStep[] = [];
   #image: string;
@@ -298,9 +322,11 @@ class NebiusSession implements ExecutionSession {
     this.#wallNow = options.wallNow ?? (() => new Date());
     this.#deadline = this.#now() + (spec.budgetMs ?? limits.sessionBudgetMs);
     this.#image = options.baseImage;
-    if (spec.signal) spec.signal.addEventListener("abort", () => this.#work.abort(spec.signal?.reason), { once: true });
+    this.#specSignal = spec.signal ?? null;
+    this.#specSignal?.addEventListener("abort", this.#onSpecAbort, { once: true });
     mkdirSync(options.journalDir, { recursive: true, mode: 0o700 });
-    this.#journal = new Journal(join(options.journalDir, `${this.#sessionId}.jsonl`));
+    this.#journalPath = join(options.journalDir, `${this.#sessionId}.jsonl`);
+    this.#journal = new Journal(this.#journalPath);
   }
 
   /** A client whose requests stop when `signal` aborts. */
@@ -359,11 +385,12 @@ class NebiusSession implements ExecutionSession {
       files: { [ARCHIVE]: { uuid: uploaded.uuid } },
       maxOutputBytes: 4_096,
     };
-    let ran: { operationId: string; outcome: Outcome; durationMs: number };
+    let ran: Ran;
     try {
       ran = await this.#runStep(step, this.#work.signal);
     } catch (error) {
-      throw await this.#failOpen(`Preparing the workspace in the sandbox failed: ${error instanceof Error ? error.message : String(error)}`);
+      const why = error instanceof NotStarted ? "the run was cancelled before it began." : error instanceof Error ? error.message : String(error);
+      throw await this.#failOpen(`Preparing the workspace in the sandbox failed: ${why}`);
     }
     const { outcome } = ran;
     const image = this.#keep(ran, true, "prepare");
@@ -433,7 +460,7 @@ class NebiusSession implements ExecutionSession {
       cwd: request.cwd,
       maxOutputBytes: Math.min(request.maxOutputBytes, this.#limits.maxOutputBytes),
     };
-    let ran: { operationId: string; outcome: Outcome; durationMs: number };
+    let ran: Ran;
     try {
       ran = await this.#runStep(step, signal, request.onStart);
     } catch (error) {
@@ -447,6 +474,8 @@ class NebiusSession implements ExecutionSession {
       this.#state = { kind: "stale", why: `${label}: ${why}` };
     }
     if (image) this.#image = image;
+    // The caller's own callback failed: its error is given back now that the command has settled.
+    if (ran.callbackError !== null) throw ran.callbackError;
     if (outcome.verdict === "operation-failed") throw new SandboxOperationError(`The sandbox couldn't run ${command}: its operation failed, so nothing is known about what the command did.`);
     if (outcome.verdict === "unknown") throw new SandboxOperationError(`${command} ended, but the sandbox didn't say how (status ${outcome.status}), so its outcome is unknown.`);
     const stdout = capText(outcome.stdout, request.maxOutputBytes);
@@ -465,14 +494,15 @@ class NebiusSession implements ExecutionSession {
   }
 
   /**
-   * Records a step and every image its operation reported, and gives the one to continue from: only when the step
-   * was persisted and ended on its own, with SUCCESS and an image Nivra can use.
+   * Records a step, and gives the image to continue from: only when the step was persisted and ended on its own, with
+   * SUCCESS and an image Nivra can use. Every image an operation reports is journaled where its end was seen; the one
+   * adopted is journaled again here, as the session's state.
    */
-  #keep(ran: { operationId: string; outcome: Outcome; durationMs: number }, persist: boolean, label: string): string | null {
+  #keep(ran: Ran, persist: boolean, label: string): string | null {
     const { outcome } = ran;
     const endedOnItsOwn = outcome.status === "SUCCESS" && !outcome.timedOut && signalName(outcome.signal) === null && outcome.verdict !== "unknown";
     const image = persist && endedOnItsOwn && outcome.resultImage !== null && IMAGE_ID.test(outcome.resultImage) ? outcome.resultImage : null;
-    if (outcome.imageReported !== null) this.#journal.append({ kind: "image", wall: this.#wallNow().toISOString(), operationId: ran.operationId, image: outcome.imageReported, adopted: image !== null });
+    if (image !== null) this.#journal.append({ kind: "image", wall: this.#wallNow().toISOString(), operationId: ran.operationId, image, adopted: true });
     this.#steps.push({ label, operationId: ran.operationId, status: outcome.status, verdict: outcome.verdict, durationMs: Math.round(ran.durationMs), persisted: image !== null, usage: usageOf(outcome) });
     return image;
   }
@@ -482,7 +512,7 @@ class NebiusSession implements ExecutionSession {
    * stops the operation on a client of its own, within the stop budget (or closing's), so the cancel isn't cut off with
    * the work. What can't be settled leaves the session unsettled, and is never sent again.
    */
-  async #runStep(step: StepSpec, signal: AbortSignal, onStart?: ExecRequest["onStart"]): Promise<{ operationId: string; outcome: Outcome; durationMs: number }> {
+  async #runStep(step: StepSpec, signal: AbortSignal, onStart?: ExecRequest["onStart"]): Promise<Ran> {
     const sandbox = this.#sandbox(this.#client(signal), () => this.#deadline, signal);
     const started = this.#now();
     let submitted: { operationId: string } | { uncertain: string };
@@ -503,21 +533,31 @@ class NebiusSession implements ExecutionSession {
     } else {
       operationId = submitted.operationId;
     }
-    onStart?.({ pid: null });
+    // A callback that throws is the caller's own error: the command runs on, is followed to its end, and the error is
+    // given back once the session's state is settled.
+    let callbackError: unknown = null;
     try {
-      return { operationId, outcome: await sandbox.observe(operationId, step.timeoutSeconds), durationMs: this.#now() - started };
+      onStart?.({ pid: null });
     } catch (error) {
-      if (signal.aborted) return this.#stopped(operationId, step, started);
+      callbackError = error ?? new Error("onStart failed");
+    }
+    try {
+      return { operationId, outcome: await sandbox.observe(operationId, step.timeoutSeconds), durationMs: this.#now() - started, callbackError };
+    } catch (error) {
+      if (signal.aborted) return { ...(await this.#stopped(operationId, step, started)), callbackError };
       this.#state = { kind: "unsettled", why: `${step.label} wasn't seen to end` };
       throw new ExecUncertainError(`${step.command} wasn't seen to end before the run's time ran out (${error instanceof Error ? error.message : String(error)}). Closing the session stops it.`);
     }
   }
 
-  /** Stops an operation whose work was cancelled, on a client of its own, within the stop budget and closing's. */
-  async #stopped(operationId: string, step: StepSpec, started: number): Promise<{ operationId: string; outcome: Outcome; durationMs: number }> {
-    const bounds = this.#closeBounds;
-    const until = Math.min(this.#now() + this.#limits.minWriteMs + this.#limits.requestTimeoutMs + this.#limits.cancelWaitMs, bounds?.deadline ?? Number.POSITIVE_INFINITY);
-    const stop = this.#sandbox(this.#client(bounds?.signal ?? null), () => until, bounds?.signal ?? null);
+  /**
+   * Stops an operation whose work was cancelled, on a client of its own. It keeps to the stop budget and, once closing
+   * has begun, to closing's deadline, read afresh, and its signal stops it too, however the stop began.
+   */
+  async #stopped(operationId: string, step: StepSpec, started: number): Promise<Omit<Ran, "callbackError">> {
+    const stopUntil = this.#now() + this.#limits.minWriteMs + this.#limits.requestTimeoutMs + this.#limits.cancelWaitMs;
+    const cap = () => Math.min(stopUntil, this.#closeBounds?.deadline ?? Number.POSITIVE_INFINITY);
+    const stop = this.#sandbox(this.#client(this.#cleanup.signal), cap, this.#cleanup.signal);
     const outcome = await stop.cancel(operationId).catch(() => null);
     if (!outcome) {
       this.#state = { kind: "unsettled", why: `${step.label} wasn't seen to stop` };
@@ -528,6 +568,12 @@ class NebiusSession implements ExecutionSession {
 
   /** What a spawn that wasn't made, or whose making isn't known, means for the session. */
   #spawnFailure(step: StepSpec, error: unknown): Error {
+    // Made, journaled, and never followed: an answer after the deadline or the cancellation, whatever the signal says.
+    if (error instanceof SandboxLateSpawnError) {
+      this.#operations++;
+      this.#state = { kind: "unsettled", why: `${step.label}'s answer came after the deadline or the cancellation` };
+      return new ExecUncertainError(`${step.command} was started, but its answer came only after the run's deadline or its cancellation, so Nivra didn't follow it; closing the session stops it.`);
+    }
     if (error instanceof SandboxCancelledError || (error instanceof SandboxNotSentError && error.reason === "cancelled")) return new NotStarted();
     if (error instanceof SandboxNotSentError) return new ExecRefusedError(`There isn't enough time left in this run to start ${step.command}, so it wasn't sent.`);
     if (error instanceof SandboxHttpError) {
@@ -540,11 +586,9 @@ class NebiusSession implements ExecutionSession {
       return new ExecRefusedError(`Nebius refused to start ${step.command} (HTTP ${error.status}).`);
     }
     if (error instanceof SandboxRefusal && /^The time for this work ran out/.test(error.message)) return new ExecRefusedError(`There isn't enough time left in this run to start ${step.command}, so it wasn't sent.`);
-    if (error instanceof SandboxRefusal && /answered only after its deadline/.test(error.message)) {
-      this.#operations++;
-      this.#state = { kind: "unsettled", why: `${step.label}'s answer came after the deadline` };
-      return new ExecUncertainError(`${step.command} was started, but its answer came only after the run's deadline, so Nivra didn't follow it; closing the session stops it.`);
-    }
+    // Every other refusal comes before the intent is written (one at a time, a damaged journal): nothing was sent.
+    if (error instanceof SandboxRefusal) return new ExecRefusedError(`${step.command} wasn't sent: ${error.message}`);
+    // Anything else may have come after the intent was written, so the spawn may have reached the service.
     this.#state = { kind: "unsettled", why: `starting ${step.label} failed` };
     return new ExecUncertainError(`Starting ${step.command} failed (${error instanceof Error ? error.message : String(error)}); it may have reached the sandbox, so it won't be sent again. Closing the session looks for it.`);
   }
@@ -572,13 +616,32 @@ class NebiusSession implements ExecutionSession {
 
   async #close(options: { signal?: AbortSignal; budgetMs?: number }): Promise<CloseReport> {
     const deadline = this.#now() + (options.budgetMs ?? this.#limits.cleanupBudgetMs);
-    const signal = options.signal ?? null;
-    this.#closeBounds = { deadline, signal };
-    this.#work.abort(new Error("The session is closing."));
-    // The command under way stops within closing's own deadline and signal (see #stopped).
-    await this.#active;
-    const settled = await this.#sandbox(this.#client(signal), () => deadline, signal).cleanup();
-    return this.#report(settled.unresolved.map(describeUnresolved));
+    this.#closeBounds = { deadline, signal: options.signal ?? null };
+    // Closing's signal stops cleanup, and a stop already under way, however that stop began. Its listener goes once
+    // closing ends, so a long-lived signal holds nothing of the session.
+    const listening = new AbortController();
+    if (options.signal?.aborted) this.#cleanup.abort(options.signal.reason);
+    else options.signal?.addEventListener("abort", () => this.#cleanup.abort(options.signal?.reason), { once: true, signal: listening.signal });
+    this.#specSignal?.removeEventListener("abort", this.#onSpecAbort);
+    let settled: { unresolved: string[] };
+    try {
+      this.#work.abort(new Error("The session is closing."));
+      // The command under way stops within closing's own deadline and signal (see #stopped).
+      await this.#active;
+      settled = await this.#sandbox(this.#client(this.#cleanup.signal), () => deadline, this.#cleanup.signal).cleanup();
+    } finally {
+      listening.abort();
+    }
+    const report = this.#report(settled.unresolved.map(describeUnresolved));
+    // Nothing left open: the journal moves aside, so a scan at the next start reads only what may still need it.
+    if (report.unresolved.length === 0) {
+      try {
+        settleJournal(this.#journalPath);
+      } catch {
+        // Left where it is, it is scanned again and found settled: nothing is lost.
+      }
+    }
+    return report;
   }
 
   #report(unresolved: string[]): CloseReport {
@@ -602,25 +665,28 @@ export interface JournalScan {
   damaged: string | null;
 }
 
+/** The most journals one scan reads; any beyond are counted in `unread`, never passed over in silence. */
+const SCAN_LIMIT = 5_000;
+
 /**
  * The journals in `dir` with work open: operations not seen to end, spawns not settled, or a journal that can't be
- * read. Local only, with no network, so an engine can run it at start without waiting on anything.
+ * read. Local only, with no network, so an engine can run it at start without waiting on anything. A session that
+ * closed with nothing open moved its journal into `settled/`, so the journals here are the few that may need something.
+ * Should there be more than one scan reads, `unread` says how many weren't looked at.
  */
-export function scanJournals(dir: string, limit = 500): JournalScan[] {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".jsonl"))
-    .sort()
-    .slice(0, limit)
-    .flatMap((name): JournalScan[] => {
-      const path = join(dir, name);
-      try {
-        const open = new Journal(path).open();
-        return open.operations.length || open.uncertain.length ? [{ path, operations: open.operations, uncertain: open.uncertain, damaged: null }] : [];
-      } catch (error) {
-        return [{ path, operations: [], uncertain: [], damaged: error instanceof Error ? error.message : String(error) }];
-      }
-    });
+export function scanJournals(dir: string): { open: JournalScan[]; unread: number } {
+  if (!existsSync(dir)) return { open: [], unread: 0 };
+  const names = readdirSync(dir).filter((name) => name.endsWith(".jsonl")).sort();
+  const open = names.slice(0, SCAN_LIMIT).flatMap((name): JournalScan[] => {
+    const path = join(dir, name);
+    try {
+      const state = new Journal(path).open();
+      return state.operations.length || state.uncertain.length ? [{ path, operations: state.operations, uncertain: state.uncertain, damaged: null }] : [];
+    } catch (error) {
+      return [{ path, operations: [], uncertain: [], damaged: error instanceof Error ? error.message : String(error) }];
+    }
+  });
+  return { open, unread: Math.max(0, names.length - SCAN_LIMIT) };
 }
 
 export interface RecoveryResult {
@@ -633,7 +699,8 @@ export interface RecoveryResult {
 /**
  * One bounded pass over what `scanJournals` found, on one overall budget: reconcile, cancel only each journal's own
  * operations, search again, and journal what stays open. Nothing is replayed. A journal the pass didn't reach, because
- * it ran out of time or was stopped, stays as it was, for the next pass.
+ * it ran out of time or was stopped, stays as it was, for the next pass, and so does one the pass couldn't settle; a
+ * failure with one journal never stops the others. A journal left with nothing open moves into `settled/`.
  */
 export async function reconcileJournals(
   scans: readonly JournalScan[],
@@ -654,22 +721,28 @@ export async function reconcileJournals(
       results.push({ path: scan.path, stopped: [], alreadyEnded: [], unresolved: [`Not looked at in this pass: it ${signal?.aborted ? "was stopped" : "ran out of time"}. It stays for the next.`] });
       continue;
     }
-    const journal = new Journal(scan.path);
-    const api = new SandboxApi(transport, { requestTimeoutMs: limits.requestTimeoutMs, minWriteMs: limits.minWriteMs, readDeadlineMs: limits.searchMs, now, ...(options.sleep ? { sleep: options.sleep } : {}), ...(signal ? { signal } : {}) });
-    const sandbox = new Sandbox(api, {
-      journal,
-      observeMarginMs: limits.observeMarginMs,
-      pollMs: limits.pollMs,
-      cancelWaitMs: limits.cancelWaitMs,
-      search: { sinceMarginMs: 24 * 60 * 60 * 1000, pageSize: 25, maxPages: 10, maxCandidates: 50, withinMs: limits.searchMs },
-      now,
-      ...(options.sleep ? { sleep: options.sleep } : {}),
-      ...(options.wallNow ? { wallNow: options.wallNow } : {}),
-      cap: () => deadline,
-      ...(signal ? { signal } : {}),
-    });
-    const settled = await sandbox.cleanup().catch((error: unknown) => ({ cancelled: [], unresolved: [`the pass failed: ${error instanceof Error ? error.message : String(error)}`] }));
-    results.push({ path: scan.path, ...cancelsIn(journal.entries), unresolved: settled.unresolved.map((item) => (item.startsWith("the pass failed") ? item : describeUnresolved(item))) });
+    try {
+      const journal = new Journal(scan.path);
+      const api = new SandboxApi(transport, { requestTimeoutMs: limits.requestTimeoutMs, minWriteMs: limits.minWriteMs, readDeadlineMs: limits.searchMs, now, ...(options.sleep ? { sleep: options.sleep } : {}), ...(signal ? { signal } : {}) });
+      const sandbox = new Sandbox(api, {
+        journal,
+        observeMarginMs: limits.observeMarginMs,
+        pollMs: limits.pollMs,
+        cancelWaitMs: limits.cancelWaitMs,
+        search: { sinceMarginMs: 24 * 60 * 60 * 1000, pageSize: 25, maxPages: 10, maxCandidates: 50, withinMs: limits.searchMs },
+        now,
+        ...(options.sleep ? { sleep: options.sleep } : {}),
+        ...(options.wallNow ? { wallNow: options.wallNow } : {}),
+        cap: () => deadline,
+        ...(signal ? { signal } : {}),
+      });
+      const settled = await sandbox.cleanup();
+      const result = { path: scan.path, ...cancelsIn(journal.entries), unresolved: settled.unresolved.map(describeUnresolved) };
+      if (result.unresolved.length === 0) settleJournal(scan.path);
+      results.push(result);
+    } catch (error) {
+      results.push({ path: scan.path, stopped: [], alreadyEnded: [], unresolved: [`This pass couldn't settle it (${error instanceof Error ? error.message : String(error)}). It stays for the next.`] });
+    }
   }
   return results;
 }

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, sleepFor, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
 
 /**
@@ -65,14 +65,21 @@ export class Journal {
     this.#path = path;
   }
 
-  /** Written and flushed before anything is sent, so a crash right after the request can't lose its record. */
+  /**
+   * Written and flushed before anything is sent, so a crash right after the request can't lose its record. A last line
+   * that an earlier crash cut short is cut off first, so the new entry starts a line of its own instead of turning the
+   * torn one into damage.
+   */
   append(entry: JournalEntry): void {
     if (!this.#path) {
       this.#memory.push(entry);
       return;
     }
-    const fd = openSync(this.#path, "a", 0o600);
+    const fd = openSync(this.#path, "a+", 0o600);
     try {
+      const size = fstatSync(fd).size;
+      const last = Buffer.alloc(1);
+      if (size > 0 && readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a) ftruncateSync(fd, readFileSync(this.#path).lastIndexOf(0x0a) + 1);
       writeSync(fd, `${JSON.stringify(entry)}\n`);
       fsyncSync(fd);
     } finally {
@@ -126,11 +133,24 @@ export class Journal {
   }
 }
 
-/** Something Nivra won't send, said in its own words. */
+/** Something Nivra won't send, said in its own words. Thrown before anything is sent. */
 export class SandboxRefusal extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SandboxRefusal";
+  }
+}
+
+/**
+ * The service created the operation, but its answer came after the deadline or once the work was cancelled. It is
+ * journaled, so cleanup stops it, and it is never followed.
+ */
+export class SandboxLateSpawnError extends Error {
+  readonly operationId: string;
+  constructor(label: string, operationId: string) {
+    super(`The ${label} operation was answered only after its deadline, or once the work was cancelled, so it isn't used; cleanup stops it.`);
+    this.name = "SandboxLateSpawnError";
+    this.operationId = operationId;
   }
 }
 
@@ -380,11 +400,22 @@ export class Sandbox {
     if (answer.status === "created") {
       this.#journal.append({ kind: "submitted", wall: this.#wallNow().toISOString(), correlation, operationId: answer.id, ...(answer.late ? { late: true as const } : {}) });
       // Known only so that cleanup can stop it: an answer after the deadline, or the cancellation, starts nothing more.
-      if (answer.late) throw this.#signal?.aborted ? new SandboxCancelledError(`Starting the ${label} operation`) : new SandboxRefusal(`The ${label} operation was answered only after its deadline, so it isn't used; cleanup stops it.`);
+      if (answer.late) throw new SandboxLateSpawnError(label, answer.id);
       return { operationId: answer.id };
     }
     this.#journal.append({ kind: "uncertain", wall: this.#wallNow().toISOString(), correlation, cause: answer.cause });
     return { uncertain: correlation };
+  }
+
+  /**
+   * Journals an operation seen to end, and any image it reported, adopted or not: the service keeps it either way, so
+   * what is retained can be counted from the journal alone.
+   */
+  #ended(operationId: string, operation: Operation, status: OperationStatus): Outcome {
+    this.#journal.append({ kind: "terminal", wall: this.#wallNow().toISOString(), operationId, status });
+    const outcome = classify(operation);
+    if (outcome.imageReported !== null) this.#journal.append({ kind: "image", wall: this.#wallNow().toISOString(), operationId, image: outcome.imageReported, adopted: false });
+    return outcome;
   }
 
   /**
@@ -398,10 +429,7 @@ export class Sandbox {
       const operation = await this.#readBy(operationId, deadline);
       if (!operation) break;
       const status = readStatus(operation.status);
-      if (status !== "UNKNOWN" && TERMINAL.has(status)) {
-        this.#journal.append({ kind: "terminal", wall: this.#wallNow().toISOString(), operationId, status });
-        return classify(operation);
-      }
+      if (status !== "UNKNOWN" && TERMINAL.has(status)) return this.#ended(operationId, operation, status);
       await this.#pause(Math.min(this.#pollMs, deadline - this.#now()), "Observing an operation");
     }
     this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "it wasn't seen to end before observing it ran out of time" });
@@ -441,10 +469,7 @@ export class Sandbox {
       const operation = await this.#readBy(operationId, deadline);
       if (!operation) break;
       const status = readStatus(operation.status);
-      if (status !== "UNKNOWN" && TERMINAL.has(status)) {
-        this.#journal.append({ kind: "terminal", wall: this.#wallNow().toISOString(), operationId, status });
-        return classify(operation);
-      }
+      if (status !== "UNKNOWN" && TERMINAL.has(status)) return this.#ended(operationId, operation, status);
       await this.#pause(Math.min(this.#pollMs, deadline - this.#now()), "Cancelling an operation");
     }
     this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation: null, operationId, reason: "a cancel didn't reach a terminal state in time" });

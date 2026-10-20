@@ -347,9 +347,9 @@ export class SandboxApi {
 
   /**
    * Starts an operation. Never retried. Refused before sending (`SandboxNotSentError`) when cancelled or out of time:
-   * then nothing was created. Once sent, a lost, late or unreadable answer, or a server error, may still have created
-   * it: `uncertain`, for the caller to reconcile by its correlation id. A client error (4xx) created nothing and is
-   * thrown.
+   * then nothing was created. Once sent, a lost, late or unreadable answer, a server error or a redirect may still have
+   * created it: `uncertain`, for the caller to reconcile by its correlation id. A client error (4xx) created nothing and
+   * is thrown.
    */
   async spawn(body: SpawnBody, options: Until & { discardAnswer?: boolean }): Promise<SpawnAnswer> {
     const what = "Starting an operation";
@@ -361,7 +361,8 @@ export class SandboxApi {
       return { status: "uncertain", cause: error instanceof Error ? error.message : "the request failed" };
     }
     const { response, late } = sent;
-    if (response.status >= 500) return { status: "uncertain", cause: `the service answered HTTP ${response.status}` };
+    // A server error, or a redirect (never followed), says nothing about whether the operation was made.
+    if (response.status >= 500 || (response.status >= 300 && response.status < 400)) return { status: "uncertain", cause: `the service answered HTTP ${response.status}` };
     if (response.status < 200 || response.status > 299) throw this.#httpError(what, response);
     // The probe's lost-answer case throws the answer away on purpose, as a dropped connection would.
     if (options.discardAnswer) return { status: "uncertain", cause: "the answer was discarded on purpose" };
@@ -417,7 +418,7 @@ export class SandboxApi {
     }
     const { response, late } = sent;
     if (late) return { status: "uncertain", cause: "its answer came only after its deadline" };
-    if (response.status === 504 || response.status >= 500) return { status: "uncertain", cause: `the service answered HTTP ${response.status}` };
+    if (response.status >= 500 || (response.status >= 300 && response.status < 400)) return { status: "uncertain", cause: `the service answered HTTP ${response.status}` };
     if (response.status < 200 || response.status > 299) throw this.#httpError(what, response);
     const created = Subprocess.safeParse(this.#jsonOrNull(response));
     return created.success ? { status: "created", spid: created.data.spid } : { status: "uncertain", cause: "its answer couldn't be read" };

@@ -198,19 +198,21 @@ class LocalSession implements ExecutionSession {
    * leader already exited (SIGTERM, then SIGKILL after the grace period). On Windows a finished command's background
    * descendants cannot be found from its process id once it has exited; they sit in libuv's kill-on-close job object
    * and die with the engine (D4). That is why general coding commands do not run unconfined on native Windows (D15).
-   * Nothing left the target, so the report is empty. A second call gives the first one's.
+   * Nothing left the target, so the report is empty. A second call gives the first one's. A budget shortens the grace
+   * before SIGKILL to fit it, and an aborted signal leaves none.
    */
-  close(): Promise<CloseReport> {
-    this.#closing ??= this.#stopAll().then(
+  close(options: { signal?: AbortSignal; budgetMs?: number } = {}): Promise<CloseReport> {
+    const grace = options.signal?.aborted ? 0 : Math.min(this.#options.graceMs ?? 2_000, (options.budgetMs ?? Number.POSITIVE_INFINITY) / 2);
+    this.#closing ??= this.#stopAll(grace).then(
       () => EMPTY_CLOSE_REPORT,
       () => EMPTY_CLOSE_REPORT,
     );
     return this.#closing;
   }
 
-  async #stopAll(): Promise<void> {
+  async #stopAll(graceMs: number): Promise<void> {
     const platform = this.#options.platform ?? process.platform;
-    await Promise.all([...this.#running].map((child) => killTree(child, { platform })));
+    await Promise.all([...this.#running].map((child) => killTree(child, { platform, graceMs })));
     if (platform === "win32") return;
     const signal = (signalName: NodeJS.Signals) =>
       [...this.#groups].filter((group) => {
@@ -223,7 +225,7 @@ class LocalSession implements ExecutionSession {
       });
     const remaining = signal("SIGTERM");
     if (remaining.length > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.#options.graceMs ?? 2_000));
+      if (graceMs > 0) await new Promise((resolve) => setTimeout(resolve, graceMs));
       signal("SIGKILL");
     }
     this.#groups.clear();
