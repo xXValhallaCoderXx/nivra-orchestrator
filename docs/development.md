@@ -15,10 +15,12 @@ pnpm verify                 # typecheck + all tests (what CI runs)
 pnpm typecheck
 pnpm test
 pnpm probe:tokenfactory     # live: list Token Factory models, one Nemotron tool call, then the tool-choice probes
+pnpm probe:sandbox --plan   # the Nebius Sandboxes probe (NIV-29): its plan, limits and thresholds; no network
 pnpm rpc doctor             # start a real engine on ~/.nivra-dev, send one request, print the answer
 pnpm rpc runs.start '{"workflowId":"hello","input":{"repoPath":"/path/to/repo","holdMs":0}}' --follow
 pnpm rpc runs.start '{"workflowId":"explain","input":{"repoPath":"/path/to/repo","question":""},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true}}}' --follow
 pnpm rpc runs.result '{"runId":"<id>"}'
+pnpm rpc runs.start '{"workflowId":"chat","input":{"message":"How should I stage this?","scope":{"kind":"general"}}}' --follow
 ```
 
 The explain example sends the repository's excerpts to Token Factory when `NEBIUS_API_KEY` is set, and uses tokens.
@@ -83,6 +85,9 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 
 `verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`; the WSL
 engine uses `~/.nivra` inside the distribution, as the installed app will.
+- **That home is shared.** Every Windows profile's WSL engine uses it. When this branch's engine migrates `nivra.db`,
+  an installed app with an older engine refuses the home until a release with the same schema ships. `test:windows`
+  does the same. On 20 October, protocol 5's migration v3 did this to v0.1.1 (D26).
 - **A candidate's runtimes:** `--zip <path>` takes both runtimes from a release candidate's Windows zip, exactly as
   packaged, instead of staging.
 - **The Visual C++ runtime (D25):** it checks that the native engine loads only the copy shipped beside its addon. It
@@ -122,8 +127,32 @@ wsl.exe --unregister NivraTest   # deletes the distribution and its disk
 - A `runs.start` without a `context` gets an empty preference snapshot, with sharing off. An explain run sent that way
   is refused before any request; pass `"sharing":{"modelContext":true}` to allow it. The app always sends its own
   context (D21, D22).
+- A chat turn without a `context` also gets an empty history (D26). After `--follow`, its stored reply is printed. A
+  repository turn needs consent, like explain:
+  `{"workflowId":"chat","input":{"message":"…","scope":{"kind":"repository","repoPath":"/path/to/repo"}},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":true},"history":{"exchanges":[],"omitted":{"overLimit":0,"unanswered":0,"preferencesChanged":0}}}}`.
 
 `probe:tokenfactory` takes `--model <id>`, passed after `--`, to pick the Nemotron model.
+
+The Nebius Sandboxes probe (NIV-29) is an explicit live check, never part of `verify`. Each stage runs only after Nate
+approves it, with its data and budget:
+
+```bash
+pnpm probe:sandbox --plan                 # every step, the data it carries, the limits and the thresholds; no network
+NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --stage 0       # read-only: the account and the public images
+NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --stage 1 --image <uuid|tag:name> --deny <url> [--deny <url>] [--network-control <url>]
+NEBIUS_API_KEY=… NEBIUS_PROJECT_ID=… pnpm probe:sandbox --recover <evidence folder>
+```
+
+- **Credentials.** Set the variables in your own terminal, never in a chat. The script removes them when it reads them,
+  and never prints or writes them.
+- **What stage 1 runs:**
+  - at most twelve operations, one at a time, on the synthetic fixture in `apps/engine/test/fixtures/sandbox-probe/`;
+  - networking off, except the one approved control;
+  - no model calls and no installs.
+- **Evidence** goes to `~/nivra-acceptance/sandbox-probe-<UTC>/` (0700): the journal, each step's outcome, the
+  verdicts and a summary.
+- **Interruption.** The first Ctrl+C settles every operation the probe started. `--recover` finishes that later from the
+  journal.
 
 ## Where things will live
 

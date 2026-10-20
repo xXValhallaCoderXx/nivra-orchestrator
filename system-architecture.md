@@ -434,6 +434,7 @@ run progress by polling with a cursor.
 |---|---|---|---|
 | Projects, sharing flags, preferences, window state | Host | `<userData>/nivra.json` | Atomic writes. The only copy of the preferences (D21). Each project's `modelContext` and `cloudExecution` flags, both off at first (D22). |
 | Nebius key | Host | `<userData>/secrets.json` | Encrypted where a keychain is available, otherwise unencrypted with a warning; engines hold a copy in memory only |
+| Conversations, their messages and turns, native tasks, plan and brief versions | Host | `<userData>/workspace.db` | `node:sqlite` (D26): WAL, exclusive lock, foreign keys, `secure_delete`. Turns are routed durably and never resent; versions are immutable. What the person types is refused when it holds a credential, and what engines produced is masked again. |
 | Runs, events and results | Each engine | `<home>/nivra.db` | `node:sqlite`, exclusive lock; known key values and secret patterns masked. Holds explain questions, answers and model-written text (D22). |
 | Workflow snapshots | Each engine | `<home>/mastra.db` | libsql, through Mastra. **Not covered by the run store's masking**: Mastra stores workflow input and step results as they are. Hello stores a repository path and a hold time; explain stores the repository path, HEAD, the model id and counts. Workflows pass ids, never sensitive content. |
 | Engine logs | Host | `<logs>/<target>.log` | The engine's stderr; the previous log is kept |
@@ -819,7 +820,9 @@ docs changed afterwards.
 | Managing preferences, context assembly with overrides and full precedence | **Built** (D23), tested offline (the D20 sequence through the UI included) and run live on both fixtures; promotion to a personal preference is deferred | NIV-10, NIV-11 |
 | Acceptance on packaged builds | **Passed** (D24): live on the Linux deb and on the Windows zip driving WSL, from candidate `ead56e8`. It carries over to candidate 0.1.1 (D25), whose Windows checks ran again. Native Windows is reported from offline evidence and a controlled check | NIV-14 |
 | Release, clean-setup checks, video, submission | In progress. v0.1.1 (D25) is the latest release, with `SHA256SUMS`, and v0.1.0 is marked superseded. Clean-setup checks 1 and 2 passed on its files; check 3, a PC without the Visual C++ Redistributable, is still to run. The install and testing instructions are written, the synthetic demo repository is published, and the video (NIV-17) and the submission text (NIV-15) are next | NIV-15 – NIV-17 |
-| New-app creation, coding worker, sandboxes, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
+| Planning workspace: durable conversations, conversation turns, native tasks | **Checkpoint 1 built** (D26): the workspace, protocol 5's `chat` workflow, the host's conversation service and the task records, tested offline and in the packaged apps. The window and the live checks are checkpoint 2 | NIV-30, NIV-31, NIV-32 |
+| Nebius Sandboxes feasibility | **Offline client and probe built** (D26): the live probe waits for approval; the adopt-or-defer decision will be D27 | NIV-29 |
+| New-app creation, coding worker, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
 The estimates are not commitments. None of the planned work is a precondition for committing the foundation.
 
@@ -849,6 +852,10 @@ The estimates are not commitments. None of the planned work is a precondition fo
 | D20 | The immediate milestone: explain with evidence and confirmed preferences; new-app creation deferred |
 | D21 | Preferences: one store owned by the host, and a snapshot with every run |
 | D22 | Explain with evidence: the model client, repository reading, consent and checked citations |
+| D23 | Context assembly: task choices, five-rank precedence, a context view, and the preference lifecycle |
+| D24 | Packaged acceptance, release candidates, judge access and the track |
+| D25 | The Visual C++ runtime beside the addon that imports it, and candidate 0.1.1 |
+| D26 | The planning workspace: a workspace the host owns, conversation turns that are never resent, and native tasks with versioned briefs |
 
 The planned work in §§10–12 will be recorded in new decisions as it is built.
 

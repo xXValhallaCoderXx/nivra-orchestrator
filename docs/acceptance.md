@@ -424,6 +424,109 @@ again.
 - `pnpm --filter @nivra/desktop test:windows`, after extracting the zip into `%LOCALAPPDATA%\nivra-dev\app`
 - `xvfb-run -a pnpm --filter @nivra/desktop test:packaged`
 
+### Planning workspace, checkpoint 1 (D26, NIV-29 to NIV-32)
+
+The workspace, conversation turns and native tasks, built without the window yet, and the Nebius Sandboxes probe
+offline. Five commits on `feature/chat-managment`:
+
+| Commit | What |
+|---|---|
+| `10f648f` | `workspace.db` |
+| `97800df` | protocol 5 |
+| `b87f8fc` | the conversation service |
+| `4cc06b6` | native tasks |
+| `2abe849` | Nebius offline |
+
+**Checks (20 October)**
+- `pnpm verify`: domain 36, desktop 168, engine 173. All passed.
+- `test:e2e` (the built app): 21 passed. 1 was skipped, because it applies only to a packaged app.
+- `test:packaged` (electron-builder `--dir`, Linux): 17 passed. 5 were skipped, because they need the test endpoint
+  switch, which a packaged app ignores.
+- `test:windows`, on the Windows build from `pnpm dev:win --no-launch`: 7 of 7. That is the 6 earlier checks, and the
+  workspace check.
+- `verify:windows`: 20/20, the native and WSL engines on runtime `35a433f1c58ac2d9` (protocol 5).
+- A real engine through `apps/engine/scripts/rpc.ts`, against a loopback stub:
+  - a general turn succeeded with no tools;
+  - a repository turn read `README.md`, then replied with 1 of 1 citations shown to the model.
+
+**The database, proven in the packaged apps first**
+
+`workspace-store.spec.ts`, with `workspace-windows.spec.ts` for Windows, ran on the built app, the packaged Linux app and
+the packaged Windows app. In each:
+1. `node:sqlite` opened in Electron's main process.
+2. A conversation survived a relaunch, and starting it started no engine.
+3. A file that isn't a database was kept aside with its `-wal`, and the app started with a new one.
+
+The store's own tests cover the rest:
+- **Opening:**
+  - each failure class by its SQLite code: locked, access and disk errors leave everything alone;
+  - a newer schema is refused with its bytes unchanged;
+  - journal files with no database are kept aside;
+  - damage SQLite finds past a good header is kept aside.
+- **Restarts:** reopening adds no duplicates, and projecting the same answer twice gives one message.
+- **Versions:** brief versions are immutable, and an attempt keeps its brief version.
+- **Deletion:** no text of a deleted conversation is left in the file's bytes.
+
+**Recovery: how a turn ends** (`host.test.ts`, real engines, the stub and the gated fixture engine)
+
+| Case | Result |
+|---|---|
+| Graceful quit with a turn in flight | Interrupted. The stub saw one request, and reopening sent none |
+| The engine killed with a turn in flight | Interrupted. One request, no replay |
+| Lost answer, the run recorded in the same store | Adopted, then answered. One `runs.start` |
+| Lost answer, no record in the same store | Not sent |
+| Lost answer, a replaced store (new `homeId`) | Unknown |
+| The run accepted, then an error answer | Adopted through `runs.find`. Sent once |
+| Cancelled while being sent | Cancelled as soon as the engine answered. One start, one cancel |
+| Deleted while being sent | The late run was cancelled, and no row came back |
+| Deleted while its answer was being projected | The answer went nowhere, and no text of it is in the file |
+| Reading a conversation | No engine started, and no request was made |
+| An engine that can't be reached | Unresolved, never failed |
+| Sharing turned off | "Stopped: sharing for this project was turned off", and the next turn was refused |
+
+Isolation and history:
+- **A repository turn** reads only its own project's files and preferences, even with another project open.
+- **A general turn** sends no path, no map and no project preference.
+- **History** is sent oldest first, as question-and-answer pairs.
+- **The canaries,** a saved key and a credential shape, are refused in a message, masked in an answer, and absent from
+  every file under the profile.
+
+**Native tasks.**
+- A direct task and one from a plan have the same brief.
+- Plan v2 leaves a brief from v1 alone until it is refreshed.
+- Deleting the conversation keeps the brief. Its question is gone from the file's bytes, and the brief's text stays with
+  the task.
+- The state rules hold, and a stale revision is refused.
+- Moving a task to another repository clears and marks what came from the old project.
+- Every field refuses a credential.
+
+**Nebius Sandboxes, offline (NIV-29).** 17 tests run against a fake service that behaves as the documentation of 20
+October describes:
+
+| What | Covered |
+|---|---|
+| Outcomes | the verdicts, kept apart from the operation's status |
+| Every spawn | networking off and disposability stated; one operation at a time |
+| The network control | each refusal |
+| Lost and unsettled spawns | a lost answer is found; a 5xx is uncertain and never retried; beyond the search's bounds stays unknown |
+| Connections | reattaching to the same operation; cancels, and cancelling an operation that has already ended; the observation deadline; `Retry-After` and the read deadline |
+| Cleanup | after an interruption, a discovered operation is cancelled; `--recover` finishes the rest |
+| Subprocesses and downloads | a 504 on a subprocess; download caps and hashes |
+| The whole of stage 1 | judged as adopt; inconclusive without a working positive control |
+
+No live call has been made. The plan is printed by `pnpm probe:sandbox --plan`.
+
+**Not run yet:**
+- the window: navigation, conversations, plans and tasks;
+- the end-to-end tests for it;
+- the live chat check;
+- the live probe stages.
+
+These are checkpoint 2.
+
+**A side effect to know.** The Windows checks migrated Ubuntu's shared `~/.nivra/nivra.db` to schema v3, so the
+installed v0.1.1 refuses that home until it is put back (D26).
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
