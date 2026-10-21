@@ -2025,11 +2025,13 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
     after consent was withdrawn, it is stopped; found but not stoppable, it stays known, and the window says so.
     Absent from that store, nothing was sent, and an error answer's own words say why.
   - Turning uploads off, or removing the project, cancels the project's check. A check whose state can't be read is
-    taken as going, so it is stopped too. The project's notice says the check is being stopped, and what Nebius
-    keeps of anything it uploaded.
+    taken as going, so it is stopped too. Once the stop is accepted, the project's notice says the check is being
+    stopped, and what Nebius keeps of anything it uploaded. A stop that fails says so, in the notice and the check's
+    note, and a removal it fails leaves the project in the list.
   - **One check of a project at a time.** The host claims the project before its first wait, so a second start, a
-    double press say, is refused. The engine refuses a second `sandbox` run of a project while one is queued or
-    running, recording nothing; a repeated request still gets its own run.
+    double press say, is refused; so is one while the last check can't be read, saying so. The engine refuses a new
+    `sandbox` request for a project while a run of it is queued or running, recording nothing; a repeated request
+    still gets its own run, ended or not.
 - **Protocol 8.**
   - `runs.start` gains a `sandbox` branch: input `{ repoPath, project, target, preview }`, context
     `{ sharing: { cloudExecution } }`, held in memory (D21).
@@ -2044,7 +2046,9 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
   names the account uploads go to, so a commit naming it, as infrastructure code does, tells Nebius nothing new. Like
   every vault value, it is masked in what the engine stores.
 - **What leaves the engine (D29).**
-  - A stopped check's failure, its events and its log lines carry Nivra's own words, chosen by its stop code.
+  - A stopped check's failure, its events and its log lines carry Nivra's own words, chosen by its stop code and
+    where it stopped. Only a stop before the upload says nothing was sent. After it, git and the size limit, which
+    check what comes back too, have words of their own, and any other code general words.
   - Of cleanup's record, only its own templates leave, filled with step labels and ids. Anything else, which can carry
     an error's words or a journal's path, becomes fixed words.
   - **A preview names the file a refusal is about,** so the person can fix it: it is a result shown to the person,
@@ -2056,7 +2060,8 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
     check's cleanup too; what they leave stays journaled for the next start.
   - **The pass's list.** It is read again only while no check is going, so it never holds the journal of a session
     this engine has open, and a pass may run beside a check. A journal the pass settles leaves the list at once, and
-    one moved aside since it was read counts as settled: no later pass looks at either again.
+    one moved aside since it was read (by hand, or by a pass that then failed) has nothing left to settle: no later
+    pass looks at either again. With nothing left open, nothing waits for the credentials.
   - Nothing is replayed, and age never settles an operation. What stays open is shown, for a person to follow up.
 - **Test endpoints.** `--sandboxes-url` points the adapter at a stub on this machine (loopback only), as
   `--token-factory-url` does, and an unpackaged app passes `--nivra-sandboxes-url` through.
@@ -2089,6 +2094,13 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
      interrupted;
   5. the project id reached children's environments, and refused any commit naming it;
   6. a comment saying consent could change between the steps, and a test that couldn't fail.
+- **An independent check of those fixes (21 October)** found five more, each reproduced, then fixed (`7a70fab`):
+  1. git failing in the patch step, after the upload, still said nothing was sent;
+  2. a stop that failed still read as being stopped, in the notice and the check's note, and a refused removal's
+     note said the project had been removed;
+  3. a last check that couldn't be read refused a new start as "still going";
+  4. the engine refused a repeated request while another check of the project went, though its run existed;
+  5. one of the pass list's filters had no test.
 
 **Consequences.**
 - **Track A's proposal on NIV-41,** safe codes on the boundary errors, isn't needed by a check, which reports by its
