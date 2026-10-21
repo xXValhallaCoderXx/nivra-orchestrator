@@ -51,7 +51,7 @@ describe("decoding what Windows tools print", () => {
   });
 
   it("gives engines and wsl.exe an environment without keys, NODE_OPTIONS or Electron's variables, with one PATH key", () => {
-    const env = engineEnv({ Path: "C:\\Windows", PATH: "C:\\other", NEBIUS_API_KEY: "k", NODE_OPTIONS: "--x", ELECTRON_RUN_AS_NODE: "1", SystemRoot: "C:\\Windows" }, "win32", { WSL_UTF8: "1" });
+    const env = engineEnv({ Path: "C:\\Windows", PATH: "C:\\other", NEBIUS_API_KEY: "k", NEBIUS_PROJECT_ID: "p", NODE_OPTIONS: "--x", ELECTRON_RUN_AS_NODE: "1", SystemRoot: "C:\\Windows" }, "win32", { WSL_UTF8: "1" });
     assert.deepEqual(Object.keys(env).sort(), ["Path", "SystemRoot", "WSL_UTF8"]);
   });
 });

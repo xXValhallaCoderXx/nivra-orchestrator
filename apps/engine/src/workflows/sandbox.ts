@@ -91,43 +91,53 @@ export function createSandboxWorkflow(deps: SandboxDeps) {
     inputSchema: Checked,
     outputSchema: Done,
     execute: async ({ runId, abortSignal }) => guard("sandbox.run", deps.mask, async () => {
-      // Checked again here: consent can be withdrawn, and the credentials removed, between the steps.
+      // Checked again here: the key and project id can be removed between the steps. Consent can't change, since the
+      // run's context is fixed when it is accepted: withdrawing it cancels the run.
       const { task } = allowed(runId);
-      const git = deps.findGit();
-      if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
-      const local = await deps.local.open({ workspace: task.repoPath });
-      let result: PrescribedResult;
+      // A failure before the report is saved still leaves one that says how the check ended.
+      let reported = false;
       try {
-        result = await runPrescribed({
-          project: task.project,
-          target: task.target,
-          folder: task.repoPath,
-          expectedFingerprint: task.preview,
-          steps: checkRecipe(),
-          backend: deps.sandbox(),
-          local,
-          git,
-          exclude: deps.exclude,
-          knownValues: deps.knownValues(),
-          budgetMs: CHECK_LIMITS.budgetMs,
-          closeBudgetMs: CHECK_LIMITS.closeBudgetMs,
-          collectTimeoutMs: CHECK_LIMITS.stepTimeoutMs,
-          signal: abortSignal,
-          closeSignal: deps.shutdown,
-          onStep: (step) => deps.recorder.output(runId, "run", `${step.label}: ${step.cancelled ? "cancelled" : step.timedOut ? "timed out" : `exit ${String(step.exitCode)}`}${step.status ? `, ${step.status}` : ""}`, { step: step.label, status: step.status, exitCode: step.exitCode }),
-        });
+        const git = deps.findGit();
+        if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
+        const local = await deps.local.open({ workspace: task.repoPath });
+        let result: PrescribedResult;
+        try {
+          result = await runPrescribed({
+            project: task.project,
+            target: task.target,
+            folder: task.repoPath,
+            expectedFingerprint: task.preview,
+            steps: checkRecipe(),
+            backend: deps.sandbox(),
+            local,
+            git,
+            exclude: deps.exclude,
+            knownValues: deps.knownValues(),
+            budgetMs: CHECK_LIMITS.budgetMs,
+            closeBudgetMs: CHECK_LIMITS.closeBudgetMs,
+            collectTimeoutMs: CHECK_LIMITS.stepTimeoutMs,
+            signal: abortSignal,
+            closeSignal: deps.shutdown,
+            onStep: (step) => deps.recorder.output(runId, "run", `${step.label}: ${step.cancelled ? "cancelled" : step.timedOut ? "timed out" : `exit ${String(step.exitCode)}`}${step.status ? `, ${step.status}` : ""}`, { step: step.label, status: step.status, exitCode: step.exitCode }),
+          });
+        } finally {
+          await local.close();
+        }
+        deps.saveResult(runId, checkReport({ result, request: requestOf(runId), now: now() }));
+        reported = true;
+        const unresolved = result.cleanup?.unresolved.length ?? 0;
+        deps.recorder.output(runId, "run", `Check ${result.outcome}${unresolved ? `; ${unresolved} left open` : ""}.`, { outcome: result.outcome, unresolved });
+        if (result.outcome === "unchanged" || result.outcome === "proposed") return { outcome: result.outcome };
+        throw stop(result.stopped?.code ?? (result.outcome === "cancelled" ? "cancelled" : "fault"));
       } catch (error) {
-        // Only something before any session can throw: nothing was sent.
-        early(runId, "failed", "fault", "snapshot", true);
+        // Until runPrescribed returns, nothing was sent: once a session opens, its failures are outcomes. A report that
+        // can't be saved after it leaves the fault's words, which claim nothing about what was sent.
+        if (!reported) {
+          const cancelled = abortSignal.aborted;
+          early(runId, cancelled ? "cancelled" : "failed", cancelled ? "cancelled" : error instanceof RepoError ? "git" : "fault", "run", true);
+        }
         throw error;
-      } finally {
-        await local.close();
       }
-      deps.saveResult(runId, checkReport({ result, request: requestOf(runId), now: now() }));
-      const unresolved = result.cleanup?.unresolved.length ?? 0;
-      deps.recorder.output(runId, "run", `Check ${result.outcome}${unresolved ? `; ${unresolved} left open` : ""}.`, { outcome: result.outcome, unresolved });
-      if (result.outcome === "unchanged" || result.outcome === "proposed") return { outcome: result.outcome };
-      throw stop(result.stopped?.code ?? (result.outcome === "cancelled" ? "cancelled" : "fault"));
     }),
   });
 

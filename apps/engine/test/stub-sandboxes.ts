@@ -26,6 +26,8 @@ export interface SandboxStub {
   url: string;
   guest: FakeGuest;
   requests: StubbedRequest[];
+  /** Called with each request once it is recorded, before the service answers it: a promise holds it until it settles. */
+  before: (request: StubbedRequest) => Promise<void> | undefined;
   close(): Promise<void>;
 }
 
@@ -46,11 +48,13 @@ export async function startSandboxStub(options: { quick?: boolean } = {}): Promi
       const bytes = await read(request);
       const method = (request.method ?? "GET") as TransportRequest["method"];
       const header = (name: string) => (typeof request.headers[name] === "string" ? (request.headers[name] as string) : null);
-      requests.push({ method, path: url.pathname, query: Object.fromEntries(url.searchParams), authorization: header("authorization"), project: header("project"), body: bytes.toString("latin1") });
+      const recorded = { method, path: url.pathname, query: Object.fromEntries(url.searchParams), authorization: header("authorization"), project: header("project"), body: bytes.toString("latin1") };
+      requests.push(recorded);
       // A connection the engine gives up on ends what it was waiting for, as a real one would.
       const gone = new AbortController();
       response.on("close", () => gone.abort());
       try {
+        await stub.before(recorded);
         const answer = await guest.service.transport({
           method,
           path: url.pathname,
@@ -69,16 +73,18 @@ export async function startSandboxStub(options: { quick?: boolean } = {}): Promi
       }
     })();
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
-  return {
-    url: `http://127.0.0.1:${port}`,
+  const stub: SandboxStub = {
+    url: "",
     guest,
     requests,
+    before: () => undefined,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
         server.close(() => resolve());
       }),
   };
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  stub.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return stub;
 }

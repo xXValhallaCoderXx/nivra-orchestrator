@@ -150,7 +150,7 @@ const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 /** Why a sandbox check can't start, and what stopped one (D36), in the person's terms. */
 const UPLOADS_OFF = "This project doesn't allow uploading its commit to Nebius Sandboxes. Allow uploads for it, then check again.";
 const UPLOADS_STOPPED =
-  "Uploads for this project were turned off, so its sandbox check was stopped. What it uploaded stays with Nebius: images are kept for 180 days, and no API deletes uploads, operation records or logs.";
+  "Uploads for this project were turned off, so its sandbox check is being stopped. Anything it uploaded stays with Nebius: images are kept for 180 days, and no API deletes uploads, operation records or logs.";
 const UPLOADS_STOPPED_STARTING = "Uploads for this project were turned off while its sandbox check was starting, so the check was stopped.";
 /** A preview snapshots the whole commit on the project's engine, which takes a while for a large repository. */
 const SANDBOX_PREVIEW_MS = 180_000;
@@ -166,7 +166,7 @@ interface SandboxCheck {
   homeId: string;
   /** Sent with its answer lost, and not found yet. */
   looking: boolean;
-  /** It never reached the engine: nothing was sent. */
+  /** Its engine has no record of it: nothing was sent. */
   notSent: boolean;
   /** Not found in time: if it started, it ends at its own limit, or when its engine restarts. */
   lost: boolean;
@@ -219,6 +219,8 @@ export class Host {
   readonly #cloudEpochs = new Map<string, number>();
   /** Each project's sandbox check this session (D36). */
   readonly #sandboxChecks = new Map<string, SandboxCheck>();
+  /** Projects whose check is being started: one at a time, from before its first wait. */
+  readonly #sandboxStarting = new Set<string>();
   /** This host session, recorded with each turn: only this session's own submissions can still be in flight. */
   readonly #sessionId = randomUUID();
   /** Turns whose `runs.start` this session hasn't finished with, and who asked them to stop meanwhile. */
@@ -800,9 +802,10 @@ export class Host {
     if (!cloudExecution) {
       this.#cloudEpochs.set(projectId, this.#cloudEpochOf(projectId) + 1);
       const check = this.#sandboxChecks.get(projectId);
-      if (check && !(await this.#sandboxEnded(check))) {
-        await this.#cancelSandboxRun(check, UPLOADS_STOPPED);
+      // A check whose state can't be read is treated as going: stopping one that had ended does no harm.
+      if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
         this.#notices.set(projectId, UPLOADS_STOPPED);
+        await this.#cancelSandboxRun(check, UPLOADS_STOPPED);
       }
     }
     return this.#view(this.#project(projectId));
@@ -829,8 +832,19 @@ export class Host {
     const project = this.#project(projectId);
     if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be checked.");
     if (!project.sharing.cloudExecution) throw new Error(UPLOADS_OFF);
+    // One check of a project at a time: claimed before the first wait, so a second start can't slip in behind it.
+    if (this.#sandboxStarting.has(projectId)) throw new Error("A sandbox check of this project is already being started.");
+    this.#sandboxStarting.add(projectId);
+    try {
+      return await this.#startSandbox(projectId, project, expected);
+    } finally {
+      this.#sandboxStarting.delete(projectId);
+    }
+  }
+
+  async #startSandbox(projectId: string, project: ProjectRecord, expected: string): Promise<SandboxCheckView> {
     const going = this.#sandboxChecks.get(projectId);
-    if (going && !(await this.#sandboxEnded(going))) throw new Error("A sandbox check of this project is still going. Wait for it to end, or cancel it, then check again.");
+    if (going && !(await this.#sandboxEnded(going).catch(() => false))) throw new Error("A sandbox check of this project is still going. Wait for it to end, or cancel it, then check again.");
     const epoch = this.#cloudEpochOf(projectId);
     const label = this.#labelOf(project.targetId);
     const engine = await this.#started(project.targetId);
@@ -860,7 +874,8 @@ export class Host {
       this.#options.log(`A sandbox check's start got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
       check.looking = true;
       check.note = "Nivra didn't hear back whether the check started, so it is looking for it by its request id. Nothing is sent again.";
-      void this.#findSandboxRun(projectId, check, engine, epoch);
+      // An error answer is the engine's own words: shown if the search then finds the check was never recorded.
+      void this.#findSandboxRun(projectId, check, engine, epoch, error instanceof RpcCallError ? errorText(error) : null);
       return this.#sandboxView(projectId);
     }
     check.runId = run.id;
@@ -941,7 +956,7 @@ export class Host {
     try {
       await this.#stopExplainRuns(projectId, (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
       const check = this.#sandboxChecks.get(projectId);
-      if (check && !(await this.#sandboxEnded(check))) await this.#cancelSandboxRun(check, "The project was removed, so its sandbox check was stopped.");
+      if (check && !(await this.#sandboxEnded(check).catch(() => false))) await this.#cancelSandboxRun(check, "The project was removed, so its sandbox check is being stopped.");
     } catch (error) {
       withdraw();
       this.#removing.delete(projectId);
@@ -1160,30 +1175,37 @@ export class Host {
   /**
    * Looks for a check whose start got no usable answer, by its request id, on the engine store it was sent to (D26).
    * Found, it becomes the project's check, and stops at once if it was asked to or uploads were turned off meanwhile.
-   * Absent from that same store, it never arrived, so nothing was sent. Never sent again either way.
+   * Absent from that same store, nothing was sent; an error answer's own words say why. Never sent again either way.
    */
-  async #findSandboxRun(projectId: string, check: SandboxCheck, engine: Engine, epoch: number): Promise<void> {
+  async #findSandboxRun(projectId: string, check: SandboxCheck, engine: Engine, epoch: number, answered: string | null): Promise<void> {
     let delay = 400;
     for (let attempt = 0; attempt < 12; attempt++) {
       if (this.#closing || this.#engines.get(check.targetId) !== engine) break;
       const state = engine.supervisor.state;
       if (state.status === "online" && state.info.homeId === check.homeId) {
+        let found: RunSummary | null;
         try {
-          const found = await engine.supervisor.call("runs.find", { clientRequestId: check.requestId });
-          check.looking = false;
-          if (!found) {
-            check.notSent = true;
-            check.note = "The check never reached the engine, so nothing was sent.";
-            return;
-          }
-          check.runId = found.id;
-          this.#runs.set(found.id, check.targetId);
-          check.note = null;
-          if (check.cancelRequested || !this.#uploadsAllowed(projectId, epoch)) await this.#cancelSandboxRun(check, check.cancelRequested ? null : UPLOADS_STOPPED_STARTING);
-          return;
+          found = await engine.supervisor.call("runs.find", { clientRequestId: check.requestId });
         } catch (error) {
           this.#options.log(`A sandbox check's start couldn't be looked up yet (${errorText(error)}); Nivra tries again.`);
+          await pause(delay);
+          delay = Math.min(delay * 2, 5_000);
+          continue;
         }
+        check.looking = false;
+        if (!found) {
+          check.notSent = true;
+          check.note = answered ? `The engine didn't start the check, so nothing was sent. ${answered}` : "The engine has no record of the check, so nothing was sent.";
+          return;
+        }
+        check.runId = found.id;
+        this.#runs.set(found.id, check.targetId);
+        check.note = null;
+        // Found, it is known: a cancel that fails now is reported as such, never taken for not knowing whether it started.
+        if (check.cancelRequested || !this.#uploadsAllowed(projectId, epoch)) {
+          await this.#cancelSandboxRun(check, check.cancelRequested ? null : UPLOADS_STOPPED_STARTING).catch((error: unknown) => (check.note = errorText(error)));
+        }
+        return;
       }
       await pause(delay);
       delay = Math.min(delay * 2, 5_000);
@@ -1202,8 +1224,13 @@ export class Host {
     if (!engine || engine.supervisor.state.status !== "online") {
       return { runId: check.runId, status: "unknown", report: null, note: check.note ?? `The engine on ${this.#labelOf(check.targetId)} isn't running, so the check can't be read now.` };
     }
-    const [summary, report] = await Promise.all([engine.supervisor.call("runs.get", { runId: check.runId }), engine.supervisor.call("runs.sandbox", { runId: check.runId })]);
-    return { runId: check.runId, status: summary.status, report, note: check.note };
+    try {
+      const [summary, report] = await Promise.all([engine.supervisor.call("runs.get", { runId: check.runId }), engine.supervisor.call("runs.sandbox", { runId: check.runId })]);
+      return { runId: check.runId, status: summary.status, report, note: check.note };
+    } catch (error) {
+      // A check that can't be read now is a state to show, never an error: it may well have started.
+      return { runId: check.runId, status: "unknown", report: null, note: check.note ?? `Nivra can't read the check from its engine now (${errorText(error)}).` };
+    }
   }
 
   /** Cancels the project's queued and running explain and conversation runs; when one can't be stopped, says so through `refusal`. */

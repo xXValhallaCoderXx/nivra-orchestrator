@@ -65,8 +65,10 @@ test("previews what a check would upload, asks for upload consent of its own, th
   await expect(page.getByText("Upload this project's commit to Nebius Sandboxes?")).toBeVisible();
   await expect(page.getByText("This is separate from sending content to Token Factory")).toBeVisible();
   expect(stub.requests.length).toBe(0);
-  await page.getByTestId("sandbox-consent-allow").click();
+  // A double press starts one check: the dialog stays on screen while it fades, and its button takes the first only.
+  await page.getByTestId("sandbox-consent-allow").dblclick();
   await expect(page.getByTestId("sandbox-status")).toHaveText("succeeded");
+  await expect(page.getByTestId("sandbox-error")).toHaveCount(0);
   await expect(page.getByTestId("sandbox-report")).toHaveAttribute("data-outcome", "unchanged");
   await expect(page.getByTestId("sandbox-report")).toContainText("The sandbox held exactly this commit, and the check changed nothing.");
   await expect(page.getByTestId("sandbox-report")).toContainText("busybox: BusyBox v1.36.1 (the fake guest)");

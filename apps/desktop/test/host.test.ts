@@ -153,6 +153,16 @@ function filesHolding(dir: string, text: string): string[] {
     .map((entry) => join(entry.parentPath, entry.name).slice(dir.length + 1));
 }
 
+/** Runs in an engine's store, read once the engine has stopped and released it (D7). */
+const storedRuns = (home: string) => {
+  const db = new DatabaseSync(join(home, "nivra.db"), { readOnly: true });
+  try {
+    return (db.prepare("SELECT workflow_id FROM runs").all() as Array<{ workflow_id: string }>).map((row) => row.workflow_id);
+  } finally {
+    db.close();
+  }
+};
+
 const stateOf = (host: Host, targetId: string) => host.engines().find((e) => e.targetId === targetId)?.state;
 const online = (host: Host, targetId: string) => waitFor(() => {
   const state = stateOf(host, targetId);
@@ -459,15 +469,6 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
       const page = await host.runEvents(runId, 0);
       return isTerminal(page.status) ? page : null;
     }, "the run to end");
-  /** Runs in an engine's store, read once the engine has stopped and released it (D7). */
-  const storedRuns = (home: string) => {
-    const db = new DatabaseSync(join(home, "nivra.db"), { readOnly: true });
-    try {
-      return (db.prepare("SELECT workflow_id FROM runs").all() as Array<{ workflow_id: string }>).map((row) => row.workflow_id);
-    } finally {
-      db.close();
-    }
-  };
 
   it("starts every project with sharing off, and refuses to explain before starting any engine", async () => {
     const stub = await stubWith(() => httpError(500, "unused"));
@@ -1628,7 +1629,7 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
   const PROJECT_ID = "project-e00hostcheck01";
   const SECRETS = { NEBIUS_API_KEY: KEY, NEBIUS_PROJECT_ID: PROJECT_ID };
   const UPLOADS_OFF = /doesn't allow uploading its commit to Nebius Sandboxes/;
-  const STOPPED = /^Uploads for this project were turned off, so its sandbox check was stopped\. What it uploaded stays with Nebius/;
+  const STOPPED = /^Uploads for this project were turned off, so its sandbox check is being stopped\. Anything it uploaded stays with Nebius/;
   const FINISHED = ["succeeded", "failed", "cancelled"];
   const reposRoot = () => {
     const root = mkdtempSync(join(tmpdir(), "nivra repos "));
@@ -1711,7 +1712,30 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     await online(host, "wsl:Test");
     assert.equal(sandboxes.requests.length, 0, "nothing reached Nebius");
     await host.shutdown();
+    // The engine's own store, read once it has stopped: the check never reached it, so it never ran at all.
+    assert.deepEqual(storedRuns(join(root, "wsl home")), []);
     assert.equal(existsSync(join(root, "wsl home", "sandbox")), false, "no session was ever opened");
+  });
+
+  it("starts one check of a project at a time: a second start is refused, and turning uploads off stops the one that went", async () => {
+    const sandboxes = await sandboxStub();
+    sandboxes.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
+    const { host, ids, keys } = makeHost({ sandboxesUrl: sandboxes.url, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    keys.current = SECRETS;
+    await host.setCloudExecution(ids[0]!, true);
+    const fingerprint = await fingerprintOf(host, ids[0]!);
+    // Two presses at once, as a double click gives: the second is refused before the first has waited for anything.
+    const [first, second] = await Promise.allSettled([host.startSandboxCheck(ids[0]!, fingerprint), host.startSandboxCheck(ids[0]!, fingerprint)]);
+    assert.deepEqual([first.status, second.status === "rejected" ? String(second.reason) : second.status], ["fulfilled", "Error: A sandbox check of this project is already being started."]);
+    const probes = () => sandboxes.guest.service.operations.filter((operation) => (operation.body["args"] as string[] | undefined)?.[1] === PROBE_SCRIPT);
+    await waitFor(() => probes().length === 1, "the probe to start");
+    await assert.rejects(host.startSandboxCheck(ids[0]!, fingerprint), /is still going/);
+    assert.match((await host.setCloudExecution(ids[0]!, false)).notice ?? "", STOPPED);
+    const view = await checkEnded(host, ids[0]!);
+    assert.deepEqual(
+      [view.status, uploads(sandboxes), probes().map((operation) => operation.cancelled), sandboxes.requests.filter((request) => request.method === "DELETE").length],
+      ["cancelled", 1, [true], 1],
+    );
   });
 
   it("stops a check whose consent is withdrawn while its start is out, as soon as its engine answers", async () => {
@@ -1747,6 +1771,59 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     await waitFor(() => logged(home, "cancelled.log").includes(runId!), "the found check to be stopped");
     const found = await host.sandboxCheck(ids[0]!);
     assert.deepEqual([found?.runId === runId, found?.status, calls(home).filter((call) => call === "runs.start").length], [true, "cancelled", 1]);
+  });
+
+  it("says a check its engine answered with an error and has no record of was never sent, in the engine's own words", async () => {
+    const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+    keys.current = SECRETS;
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["error-start", "release"]) writeFileSync(join(home, flag), "");
+    await host.setCloudExecution(ids[0]!, true);
+    await host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    const view = await waitFor(async () => {
+      const check = await host.sandboxCheck(ids[0]!);
+      return check?.status === "not-sent" ? check : null;
+    }, "the search to find no record");
+    assert.deepEqual([view.runId, view.note, calls(home).filter((call) => call === "runs.start").length], [null, "The engine didn't start the check, so nothing was sent. The engine refused the run.", 1]);
+  });
+
+  it("keeps a found check known when stopping it fails: it says so, never takes the check for lost, and a later cancel reaches it", async () => {
+    const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+    keys.current = SECRETS;
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "error-start", "hold-find", "release", "fail-cancel"]) writeFileSync(join(home, flag), "");
+    await host.setCloudExecution(ids[0]!, true);
+    const lost = await host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    assert.deepEqual([lost.status, lost.runId], ["looking", null]);
+    await waitFor(() => calls(home).includes("runs.find"), "the search by request id");
+    await host.setCloudExecution(ids[0]!, false);
+    writeFileSync(join(home, "release-find"), "");
+    const runId = logged(home, "accepted.log")[0]?.split(" ")[1];
+    const view = await waitFor(async () => {
+      const check = await host.sandboxCheck(ids[0]!);
+      return /^Nivra couldn't stop the sandbox check/.test(check?.note ?? "") ? check : null;
+    }, "the failed stop to be reported");
+    assert.deepEqual([view.runId === runId, ["runs.find", "runs.cancel"].map((method) => calls(home).filter((call) => call === method).length)], [true, [1, 1]]);
+    rmSync(join(home, "fail-cancel"));
+    await host.cancelSandboxCheck(ids[0]!);
+    assert.deepEqual(logged(home, "cancelled.log"), [runId]);
+  });
+
+  it("treats a check it can't read as going: the window reads it as unknown, and turning uploads off still stops it", async () => {
+    const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+    keys.current = SECRETS;
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "release"]) writeFileSync(join(home, flag), "");
+    await host.setCloudExecution(ids[0]!, true);
+    const started = await host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    writeFileSync(join(home, "fail-get"), "");
+    const unread = await host.sandboxCheck(ids[0]!);
+    assert.deepEqual([unread?.runId === started.runId, unread?.status, unread?.note], [true, "unknown", "Nivra can't read the check from its engine now (the run couldn't be read)."]);
+    assert.match((await host.setCloudExecution(ids[0]!, false)).notice ?? "", STOPPED);
+    assert.deepEqual(logged(home, "cancelled.log"), [started.runId]);
   });
 
   it("stops a running check when uploads are turned off, says what stays with Nebius, and the engine stops its operation", async () => {

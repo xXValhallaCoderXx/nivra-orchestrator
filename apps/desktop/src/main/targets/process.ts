@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 
 /** Provider variables that must not reach an engine through its environment (D8): keys travel in `initialize`. */
-const PROVIDER_ENV_VARS = new Set(["NEBIUS_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"]);
+const PROVIDER_ENV_VARS = new Set(["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"]);
 
 /**
  * The environment an engine (or `wsl.exe`) starts with: the host's own, without Electron's variables, NODE_OPTIONS or

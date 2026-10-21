@@ -5,13 +5,15 @@
 // answer for a finished run whose result holds one suggestion; runs.result is held while a `hold-result` file exists,
 // until a `release-result` file appears. Its store's id (D26) is kept in its home, so the same home keeps one id.
 // For conversation turns (D26): with an `accept` file, runs.start records the run (`accepted.log`) before it holds its
-// answer, as an engine that created the run would; with an `error-start` file, that answer is then an internal error.
+// answer, as an engine that created the run would; with an `error-start` file, that answer is then an internal error
+// (a refusal, without `accept`).
 // runs.find answers for a recorded request id with the run still running (held while a `hold-find` file exists, until a
 // `release-find` file appears); runs.get says "succeeded", or "cancelled" for a run it was asked to cancel; each run it
 // cancels is written to `cancelled.log`; runs.reply gives a general reply; runs.events has no events.
 // For reviews (D31): runs.start records each review's request id and input (`reviews.log`), and runs.review answers
 // with a report that repeats what it was asked for, or names the next plan version while a `wrong-report` file exists.
-// For sandbox checks (D36): runs.sandbox answers that there is no report yet.
+// For sandbox checks (D36): runs.sandbox answers that there is no report yet, and runs.get is turned down while a
+// `fail-get` file exists, as an engine that can't read a run would.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -85,7 +87,7 @@ process.stdin.on("data", (chunk) => {
       const held = setInterval(() => {
         if (!existsSync(join(home, "release"))) return;
         clearInterval(held);
-        if (existsSync(join(home, "error-start"))) send({ id: request.id, error: { code: -32603, message: "the engine failed after accepting the run" } });
+        if (existsSync(join(home, "error-start"))) send({ id: request.id, error: { code: -32603, message: existsSync(join(home, "accept")) ? "the engine failed after accepting the run" : "The engine refused the run." } });
         else send({ id: request.id, result: summary("running", runId, request.params.workflowId) });
       }, 25);
     } else if (request.method === "runs.find") {
@@ -103,7 +105,8 @@ process.stdin.on("data", (chunk) => {
       }
     } else if (request.method === "runs.get") {
       const status = cancelled.has(request.params.runId) ? "cancelled" : "succeeded";
-      send({ id: request.id, result: { ...summary(status), id: request.params.runId, finishedAt: new Date().toISOString() } });
+      if (existsSync(join(home, "fail-get"))) send({ id: request.id, error: { code: -32603, message: "the run couldn't be read" } });
+      else send({ id: request.id, result: { ...summary(status), id: request.params.runId, finishedAt: new Date().toISOString() } });
     } else if (request.method === "runs.reply") {
       const record = { exchanges: 0, chars: 0, shortened: 0, omitted: { overLimit: 0, unanswered: 0, preferencesChanged: 0 }, digest: "gated" };
       send({ id: request.id, result: { kind: "general", text: "A gated reply.", cutOff: false, context: { preferences: { revision: 0, digest: "gated", records: [] }, history: record }, finishedAt: new Date().toISOString() } });

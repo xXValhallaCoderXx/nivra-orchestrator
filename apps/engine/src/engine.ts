@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   ChatInput,
@@ -252,7 +253,9 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     const project = vault.get("NEBIUS_PROJECT_ID");
     return key && project ? { key, project } : null;
   };
-  const knownValues = () => (["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID"] as const).flatMap((name) => vault.get(name) ?? []);
+  // The key refuses a commit, or a change, that holds it (D34). The project id doesn't: it names the account the
+  // upload goes to, so a commit naming it, as infrastructure code does, sends Nebius nothing it doesn't know.
+  const knownValues = () => (["NEBIUS_API_KEY"] as const).flatMap((name) => vault.get(name) ?? []);
   const sandboxLimits = {
     ...NEBIUS_LIMITS,
     maxOperations: CHECK_LIMITS.maxOperations,
@@ -267,14 +270,23 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const engineStop = new AbortController();
 
   // What an earlier engine left open (D33): read at start with no network, then settled by one bounded pass once the
-  // credentials arrive. Nothing is replayed, and a pass never reads a journal while this engine has a check going.
+  // credentials arrive. Nothing is replayed. The list is read again only while no check is going, so it never holds
+  // the journal of a session this engine has open; a journal a pass settles leaves it at once.
   let scanned = scanJournals(journals);
   const pass: SandboxStatus["pass"] = { state: scanned.open.length ? "waiting-for-credentials" : "idle", startedAt: null, finishedAt: null, stopped: 0, alreadyEnded: 0, unresolved: [] };
   const checksActive = () => store.active().some((runId) => store.summary(runId)?.workflowId === "sandbox");
+  /** Whether a check of this project is going here, besides the one this request started (D36). */
+  const checkGoing = (project: string, clientRequestId: string) =>
+    store.active().some((runId) => {
+      const summary = store.summary(runId);
+      return summary?.workflowId === "sandbox" && readSandboxTask(summary.input)?.project === project && store.requestIdOf(runId) !== clientRequestId;
+    });
   const rescan = () => {
     if (!checksActive()) scanned = scanJournals(journals);
   };
   const recover = (): void => {
+    // A journal moved aside since the list was read was settled by then.
+    scanned = { ...scanned, open: scanned.open.filter((scan) => existsSync(scan.path)) };
     if (pass.state === "running" || engineStop.signal.aborted || scanned.open.length === 0) return;
     const credentials = sandboxCredentials();
     if (!credentials) {
@@ -287,6 +299,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         pass.stopped = results.reduce((sum, result) => sum + result.stopped.length, 0);
         pass.alreadyEnded = results.reduce((sum, result) => sum + result.alreadyEnded.length, 0);
         pass.unresolved = results.flatMap((result) => result.unresolved).slice(0, 200).map(safeUnresolved);
+        const settled = new Set(results.filter((result) => result.unresolved.length === 0).map((result) => result.path));
+        scanned = { ...scanned, open: scanned.open.filter((scan) => !settled.has(scan.path)) };
       })
       .catch((error: unknown) => {
         diagnose({ code: "unexpected-error", stage: "sandbox.recover", error: errorFacts(error) });
@@ -472,6 +486,10 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         }
       },
       "runs.start": (params) => {
+        // One check of a project at a time (D36). The host refuses a second as well; a repeated request still gets its run.
+        if (params.workflowId === "sandbox" && checkGoing(params.input.project, params.clientRequestId)) {
+          throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check of this project is already going on its engine. Wait for it to end, or cancel it, then check again.");
+        }
         try {
           return store.summary(scheduler.submit(params)) ?? notFound("just created");
         } catch (error) {

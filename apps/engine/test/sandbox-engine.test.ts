@@ -28,19 +28,19 @@ after(async () => {
   cleanUp();
 });
 
-function engineOn(stub: SandboxStub, home: string): EngineProcess {
-  const engine = startEngine(home, { args: ["--stdio", "--home", home, "--instance", randomUUID(), "--heartbeat-ms", "0", "--sandboxes-url", stub.url] });
+function engineOn(stub: SandboxStub, home: string, env?: NodeJS.ProcessEnv): EngineProcess {
+  const engine = startEngine(home, { args: ["--stdio", "--home", home, "--instance", randomUUID(), "--heartbeat-ms", "0", "--sandboxes-url", stub.url], ...(env ? { env } : {}) });
   engines.push(engine);
   return engine;
 }
 
-async function setup(options: { credentials?: boolean } = {}) {
+async function setup(options: { credentials?: boolean; env?: (root: string) => NodeJS.ProcessEnv } = {}) {
   const stub = await startSandboxStub();
   stubs.push(stub);
   const root = tempDir("nivra sandbox engine");
   dirs.push(root);
   const home = join(root, "home");
-  const engine = engineOn(stub, home);
+  const engine = engineOn(stub, home, options.env?.(root));
   await engine.initialize(options.credentials === false ? {} : CREDENTIALS);
   const repo = repoWith({ "README.md": "# A project\n", "src/app.ts": "export const app = 1;\n" });
   return { stub, engine, home, repo };
@@ -69,6 +69,9 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     const leaky = repoWith({ "README.md": "# r\n", "deploy/secret.yaml": `data:\n  token: ${Buffer.from(KEY).toString("base64")}\n` });
     const refused = await preview(engine, leaky);
     assert.deepEqual(refused.status === "refused" ? [refused.code, /^deploy\/secret\.yaml in this commit holds what looks like a value Nivra keeps as a secret/.test(refused.message), refused.message.includes(KEY)] : null, ["content", true, false]);
+    // The project id only names where uploads go, so a commit naming it, as infrastructure code does, isn't refused.
+    const named = repoWith({ "README.md": "# r\n", "infra/main.tf": `resource "nebius_compute_v1_instance" "vm" {\n  parent_id = "${PROJECT_ID}"\n}\n` });
+    assert.equal((await preview(engine, named)).status, "ready");
     assert.equal(stub.requests.length, 0, "a preview sends nothing");
   });
 
@@ -123,6 +126,80 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     assert.equal((await ended(engine, moved.id)).status, "failed");
     assert.deepEqual([(await report(engine, moved.id)).stopped?.code, stub.requests.length], ["preview", 0]);
     await assert.rejects(start(engine, repo, "e".repeat(64), { requestId }), /already started another run/);
+  });
+
+  it("runs one check of a project at a time: a second is refused and never recorded, and a repeated request still gets its run", async () => {
+    const { stub, engine, repo } = await setup();
+    stub.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
+    const fingerprint = ready(await preview(engine, repo)).fingerprint;
+    const requestId = randomUUID();
+    const first = await start(engine, repo, fingerprint, { requestId });
+    const second = randomUUID();
+    await assert.rejects(start(engine, repo, fingerprint, { requestId: second }), /A sandbox check of this project is already going on its engine\. Wait for it to end, or cancel it/);
+    assert.equal(await engine.client.call("runs.find", { clientRequestId: second }), null);
+    assert.equal((await start(engine, repo, fingerprint, { requestId })).id, first.id, "a repeated request gets the run it started");
+    await waitFor(() => probeSpawned(stub), { timeoutMs: 20_000, what: "the probe's spawn" });
+    await engine.client.call("runs.cancel", { runId: first.id });
+    assert.equal((await ended(engine, first.id)).status, "cancelled");
+    // Once it has ended, the project can be checked again.
+    stub.guest.override = () => undefined;
+    const next = await start(engine, repo, fingerprint);
+    assert.deepEqual([(await ended(engine, next.id)).status, stub.requests.filter((request) => request.path === "/v1/files").length], ["succeeded", 2]);
+  });
+
+  it("ends a check that fails before its session with a report saying so, never one that reads as interrupted", async () => {
+    // No git on this engine's PATH: the check is accepted, and its run step stops before anything is sent.
+    const { stub, engine, repo } = await setup({ env: (root) => ({ ...process.env, PATH: join(root, "no tools") }) });
+    const run = await start(engine, repo, "a".repeat(64));
+    assert.equal((await ended(engine, run.id)).status, "failed");
+    const checked = await report(engine, run.id);
+    assert.deepEqual([checked.outcome, checked.stopped, checked.finishedAt !== null, stub.requests.length], ["failed", { code: "git", step: "run", message: STOP_MESSAGES.git }, true, 0]);
+  });
+
+  it("never looks again at a journal its pass settled while a check was going, and reports nothing it didn't see", async () => {
+    const { stub, engine, home, repo } = await setup();
+    const { service } = stub.guest;
+    let armed = false;
+    // An uncertain probe leaves a journal open, as in the test above.
+    stub.guest.override = ({ args }) => {
+      if (args[1] !== PROBE_SCRIPT || armed) return undefined;
+      armed = true;
+      service.dropNextSpawnAnswer = true;
+      service.hideNextSpawn = true;
+      return { waits: true };
+    };
+    const lost = await start(engine, repo, ready(await preview(engine, repo)).fingerprint);
+    assert.equal((await ended(engine, lost.id)).status, "failed");
+    assert.equal((await report(engine, lost.id)).outcome, "uncertain");
+    await engine.client.call("shutdown", {});
+    await engine.exited;
+    const later = engineOn(stub, home);
+    await later.initialize({});
+    service.hidden.clear();
+    // The pass's stop is held while a check starts, so the pass ends with the check going.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    stub.before = (request) => (request.method === "DELETE" ? held : undefined);
+    await later.client.call("secrets.update", { set: CREDENTIALS, remove: [] });
+    await waitFor(() => stub.requests.some((request) => request.method === "DELETE"), { timeoutMs: 20_000, what: "the pass's stop" });
+    stub.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
+    const going = await later.client.call("runs.start", { clientRequestId: randomUUID(), workflowId: "sandbox", input: { repoPath: repo, project: randomUUID(), target: "local", preview: ready(await preview(later, repo)).fingerprint }, context: { sharing: { cloudExecution: true } } });
+    await waitFor(() => spawns(stub).filter((request) => request.body.includes("nivra-probe")).length === 2, { timeoutMs: 20_000, what: "the second probe's spawn" });
+    stub.before = () => undefined;
+    release();
+    const status = (): Promise<SandboxStatus> => later.client.call("sandbox.status", {});
+    const done = await waitFor(async () => {
+      const now = await status();
+      return now.pass.state === "done" ? now : null;
+    }, { timeoutMs: 30_000, what: "the recovery pass" });
+    assert.deepEqual([done.pass.stopped, done.pass.unresolved, done.open.length], [1, [], 0]);
+    // The key saved again while the check goes: nothing is left to look at, so no pass runs on what was settled.
+    await later.client.call("secrets.update", { set: CREDENTIALS, remove: [] });
+    const again = await status();
+    assert.deepEqual([again.pass.startedAt, again.pass.unresolved, again.open.length], [done.pass.startedAt, [], 0]);
+    await later.client.call("runs.cancel", { runId: going.id });
+    assert.equal((await ended(later, going.id)).status, "cancelled");
+    assert.deepEqual([(await status()).pass.unresolved, (await status()).open.length], [[], 0]);
   });
 
   it("cancels a check under way: the operation is stopped, the run ends cancelled, and cleanup's record says so", async () => {

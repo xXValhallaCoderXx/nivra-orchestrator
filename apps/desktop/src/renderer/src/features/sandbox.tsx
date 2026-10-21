@@ -1,6 +1,6 @@
 import { Alert, Badge, Button, Code, Group, List, Modal, Stack, Table, Text } from "@mantine/core";
 import type { SandboxPreview, SandboxReport, SandboxStatus } from "@nivra/domain";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ProjectView, SandboxCheckView } from "../../../shared/ipc";
 import { STATUS_COLOR } from "../shared/evidence";
 import { TERMINAL, useRunEvents } from "../shared/runs";
@@ -55,6 +55,8 @@ export function SandboxCheck({ project, online, onProjectChanged }: { project: P
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The consent dialog stays on screen while it fades out, so a second press must not start a second check.
+  const allowing = useRef(false);
   const runId = check?.runId ?? null;
   const { events, status: runStatus } = useRunEvents(runId, online, null);
   const starting = check !== null && (check.status === "sending" || check.status === "looking");
@@ -75,6 +77,18 @@ export function SandboxCheck({ project, online, onProjectChanged }: { project: P
       active = false;
     };
   }, [projectId, online]);
+
+  // A recovery pass under way is read again until it ends, so the window never keeps saying it is going.
+  const passRunning = leftOpen?.pass.state === "running";
+  useEffect(() => {
+    if (!projectId || !online || !passRunning) return;
+    let active = true;
+    const timer = setInterval(() => window.nivra.getSandboxStatus(projectId).then((value) => active && setLeftOpen(value), () => undefined), 2_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [projectId, online, passRunning]);
 
   // A start whose answer was lost is being found: ask again until it is, or until it is known never to have arrived.
   useEffect(() => {
@@ -115,14 +129,21 @@ export function SandboxCheck({ project, online, onProjectChanged }: { project: P
     setCheck(await window.nivra.startSandboxCheck(projectId, preview.fingerprint));
   };
 
-  const allowAndStart = () =>
-    act(async () => {
-      if (!projectId) return;
-      setConsent(false);
-      await window.nivra.setCloudExecution(projectId, true);
-      onProjectChanged();
-      await start();
-    });
+  const allowAndStart = async () => {
+    if (allowing.current) return;
+    allowing.current = true;
+    try {
+      await act(async () => {
+        if (!projectId) return;
+        setConsent(false);
+        await window.nivra.setCloudExecution(projectId, true);
+        onProjectChanged();
+        await start();
+      });
+    } finally {
+      allowing.current = false;
+    }
+  };
 
   const turnOff = () =>
     act(async () => {
@@ -242,7 +263,9 @@ export function SandboxCheck({ project, online, onProjectChanged }: { project: P
             ? "Nivra stops them once your key and project id are set."
             : leftOpen.pass.state === "running"
               ? "Nivra is stopping them now."
-              : "Nivra couldn't stop them all; they may still be running, so check your Nebius project."}
+              : leftOpen.pass.state === "done" && leftOpen.pass.unresolved.length > 0
+                ? "Nivra's last pass couldn't stop them all; they may still be running, so check your Nebius project."
+                : "They may still be running. Nivra looks at them again when its engine next starts, or when you save the key or project id."}
         </Text>
       )}
       <Modal opened={consent} onClose={() => setConsent(false)} title="Upload this project's commit to Nebius Sandboxes?" data-testid="sandbox-consent">
@@ -254,7 +277,7 @@ export function SandboxCheck({ project, online, onProjectChanged }: { project: P
                 commit {ready.baseline.slice(0, 12)}
                 {ready.prefix ? `, folder ${ready.prefix}` : ""}: {plural(ready.files, "file")}, {sizeText(ready.bytes)};
               </List.Item>
-              <List.Item>nothing left out: {leftOutLines(ready).length ? leftOutLines(ready).join("; ") : "no file is left out of this commit"};</List.Item>
+              <List.Item>left out, and never sent: {leftOutLines(ready).length ? leftOutLines(ready).join("; ") : "no file of this commit"};</List.Item>
               <List.Item>none of your uncommitted or untracked work: a check works from the commit.</List.Item>
             </List>
             <Text size="sm">
@@ -270,7 +293,7 @@ export function SandboxCheck({ project, online, onProjectChanged }: { project: P
               <Button variant="default" onClick={() => setConsent(false)}>
                 Cancel
               </Button>
-              <Button onClick={() => void allowAndStart()} data-testid="sandbox-consent-allow">
+              <Button onClick={() => void allowAndStart()} disabled={busy} data-testid="sandbox-consent-allow">
                 Allow uploads for this project
               </Button>
             </Group>

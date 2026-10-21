@@ -68,7 +68,7 @@ export function previewOf(snapshot: Snapshot): SandboxPreview {
 
 /** Each stop's words, in Nivra's own terms and with what to do: never anything the stop's error said. */
 export const STOP_MESSAGES: Readonly<Record<SandboxStopCode, string>> = {
-  git: "Git failed on this checkout, so nothing was sent. Run `git status` there to see what's wrong, then check again.",
+  git: "Git couldn't be run on this checkout, so nothing was sent. Make sure git is installed there, and run `git status` to see what's wrong, then check again.",
   "git-version": "The git on this target is too old for a sandbox check, so nothing was sent. Install git 2.18 or later, then check again.",
   repository: "Nivra can't read this repository safely, so nothing was sent. Preview the check to see why, then check again.",
   "no-commits": "This repository has no commits yet, so there is nothing to send. Commit your work, then check again.",

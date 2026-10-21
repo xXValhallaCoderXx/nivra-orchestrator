@@ -155,8 +155,8 @@ export interface ProjectView {
 
 /**
  * A project's sandbox check this session (D36). `sending` while its start is out, `looking` when the answer was lost
- * and it is being found by its request id, `not-sent` when it never reached the engine, `unknown` when its state can't
- * be read now; otherwise its run's status. The report is the engine's, whatever the status.
+ * and it is being found by its request id, `not-sent` when its engine has no record of it, `unknown` when its state
+ * can't be read now; otherwise its run's status. The report is the engine's, whatever the status.
  */
 export interface SandboxCheckView {
   runId: string | null;
