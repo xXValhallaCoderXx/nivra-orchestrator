@@ -7,11 +7,12 @@ import { Explain } from "../features/explain";
 import { HelloRun, TERMINAL, type RunRef } from "../features/hello";
 import { Preferences } from "../features/preferences";
 import { Projects } from "../features/projects";
+import { SandboxCheck } from "../features/sandbox";
 import { Settings } from "../features/settings";
 
 /**
  * Projects & settings: the repositories, each on the engine its folder belongs to (D17), the engineer's preferences
- * (D21), Explain, a hello run, Doctor and the key. There is no target to choose: adding a folder decides where its work
+ * (D21), Explain, a sandbox check (D36), a hello run, Doctor, and the key and project id. There is no target to choose: adding a folder decides where its work
  * runs, and every engine a project uses keeps running, so a run is never cut off by looking at another project. The page
  * stays mounted while another place is shown, so a run and what was typed are still there on the way back.
  */
@@ -58,6 +59,7 @@ export function ProjectsPage({
         onSharingChanged={onProjectsChanged}
         onPreferencesChanged={onPreferencesChanged}
       />
+      <SandboxCheck key={`sandbox:${selected?.id ?? "none"}`} project={selected} online={online} onProjectChanged={onProjectsChanged} />
       <Preferences key={`preferences:${selected?.id ?? "none"}`} project={selected} projects={projects} view={preferences} onChanged={onPreferencesChanged} />
       <HelloRun
         key={`hello:${selected?.id ?? "none"}`}
