@@ -1722,6 +1722,62 @@ host's stops, with 31 focused tests passing, and found what the window still got
 - **No sandbox check has run on Windows.** `verify:windows` and `test:windows` show B4's host, preload and window on
   Windows, with both engines. A check needs the test endpoint switch, which a packaged build ignores, or a live call.
 
+### Track B completion record (NIV-34)
+
+Prepared 22 October 2026, at `d4cc99b` (B4's branch, holding B1 to B3), with this record's docs commit. **The parent
+stays open:** item 10 is met for Linux only, and the four PRs wait for Nate's merges (below).
+
+| NIV-34 acceptance item | Evidence | Where it stands |
+|---|---|---|
+| 1. The operation and image lifecycle modelled explicitly; routing kept out of model prompts; intent journaled before dispatch; uncertain submissions reconciled without running anything twice | B1 (D33): one operation per step, with state carried by the images each leaves. `ExecResult` carries no operation or image id. The intent is fsynced before the send, and a lost answer is found by its correlation id. Tests: `nebius-session.test.ts` (an uncertain spawn sent exactly once), `prescribed.test.ts`, and `sandbox-engine.test.ts` (an uncertain spawn settled by a later engine). Live (B3): 8 spawns for 8 operations | Evidenced |
+| 2. Monotonic remaining deadlines for every request, body read, upload, download and wait, POST and DELETE included; no late result taken; cleanup on a finite budget of its own, honest about what stays unresolved | B1: `nebius-sandbox.test.ts`, `nebius-transport.test.ts` and `nebius-session.test.ts`. The review of PR 7: closing's deadline cuts off a cancel already under way (`5597249`, `fa6ce29`). Live (B3): within the 10 + 7 minute bounds, 1 stopped and 0 unresolved | Evidenced |
+| 3. The adapter selected through the engine that owns the files, with minimal typed and validated contracts; the renderer sends ids, never host paths or credentials | B4 (D36): protocol 8's `sandbox` branch. Tests: `packages/domain/test/sandbox.test.ts`, `ipc-wiring.test.ts` and `sandbox-engine.test.ts`. Every IPC call is named, and checked by sender and by zod | Evidenced |
+| 4. Credentials in the existing secure host storage and the engine's memory transport only; never in workflow inputs, events, logs, journals or the guest | B4: after the host shuts down, no file under its folder holds the key or the project id (`host.test.ts`). Every request carries them in headers, and no body does (`sandbox-engine.test.ts`). Neither reaches a child's environment. B3: neither credential was in either live run's evidence or log | Evidenced |
+| 5. Model-excerpt consent apart from per-project upload consent, both off at first, in all four combinations; revocation stops new transfers and tries to cancel; retained artefacts described honestly | B4: `host.test.ts`, the four combinations and eleven revocation tests: before, during and after `runs.start`, a lost answer, stops that fail, and an unreadable check. `sandbox.spec.ts` covers the window. The notice, the report and the dialog give what Nebius keeps | Evidenced |
+| 6. The workspace built from one explicit commit, with the deny rules; dirty and untracked work refused or handled, never lost; no host credentials, preferences or engine home, and no git worktree | B2 (D34): a snapshot reads commit objects only. Tracked changes are refused, untracked files are left out and listed, and the deny rules and the engine home's exclusion apply. Every blob's content is scanned, and an unsafe snapshot is refused, never redacted. The review of PR 8 added the vault's values inside base64. Tests: `snapshot.test.ts`. Live (B3): the prepare digest matched the snapshot's listing | Evidenced |
+| 7. Networking off for model-controlled commands; resource, output and time limits and cancellation enforced as far as the backend guarantees; a missing capability refuses the run, with no silent switch | B1: `networking: false` on every spawn, output caps, timeouts and cancels. `Local` refuses `isolatesFilesystem`, and `prescribed.test.ts` refuses `Local` with nothing sent. Live (B3): network denied by behaviour, a timeout told apart from success, and a stop seen to stop | Evidenced for prescribed commands. Model-controlled commands come with NIV-7. CPU and memory limits aren't claimed: the backend doesn't guarantee them |
+| 8. A complete patch extracted, new and deleted files included; downloads bounded; paths, links, modes, case collisions, line endings, secrets and generated output validated; unsupported forms refused | B2: `patch.ts`, `tar.ts`, `workspace-rules.ts`; `patch.test.ts`, `tar.test.ts`, `workspace-rules.test.ts`; the review of `f027403`'s eight gaps. Live (B3): the patch held exactly the fixed edit (an added file, a deleted one, two edits and a mode change), and the collect listing matched its archive | Evidenced |
+| 9. Patch bytes, hash, report, destination and baseline bound; untrusted paths and archives can't escape extraction; available usage told apart from unknown | B2: `proposal.ts`, with `verifyProposal` refusing a wrong baseline, destination or hash (`proposal.test.ts`), and the bounded tar reader (`tar.test.ts`). Live (B3): the proposal bound and verified. Usage is kept raw: the stopped operation's usage is null, and the `cost` figures (7 of 8 reported) are never turned into money | Evidenced |
+| 10. The real-engine deterministic path shows routing, consent, results, cancellation, restart and uncertainty reconciliation, and cleanup; Linux and Windows-to-WSL behaviour established; native Windows claimed only with evidence | B4: `sandbox-engine.test.ts` (12 tests over stdio, on the production adapter against the stand-in), and `rpc.ts` runs on `~/.nivra-dev-track-b`. All of it ran on Linux. On Windows, at `d5b225e`, `verify:windows` passed 22 of 22 and `test:windows` 11. They show B4's host, preload and window there, with the native and WSL engines, but no sandbox check | **Linux: evidenced. Windows-to-WSL: not established for the sandbox path,** below. Native Windows: nothing claimed |
+| 11. Every B1 to B4 criterion and the affected verification evidenced before the parent is ready for review; a standalone harness or probe isn't enough | Each checkpoint's section above. PRs 7, 8, 9 and 11 are ready for review | Not yet: item 10's Windows part, and the merges |
+
+**Platform matrix, as run:**
+
+| Check | B1 | B2 | B3 | B4 |
+|---|---|---|---|---|
+| `pnpm verify` | 589 passed (43, 347, 199), at `206b3fc` | 644 passed (43, 402, 199), at `30ad9f8` | 663 passed (43, 421, 199), at `a1622ed` | 699 passed (48, 440, 211), at `d4cc99b` |
+| `test:e2e`, the built app | not affected | not affected | not affected | 46 passed, 1 skipped (packaged only) |
+| `test:packaged`, Linux | not affected | not affected | not affected | 24 passed, 23 skipped (the test endpoint) |
+| Real engine | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: a whole check against the stand-in, nine requests |
+| Live | none | none | attempt 1 failed at the upload (HTTP 500); the approved rerun passed 20 of 20 | none |
+| `pnpm stage:runtime all` | not affected | not affected | not affected | passed |
+| `verify:windows` | not affected | not affected | not affected | 22 of 22 passed, at `69c47b1` and `d5b225e` |
+| `test:windows` | not affected | not affected | not affected | 11 passed, at `69c47b1` and `d5b225e` |
+
+**What is missing before the parent is ready for review:**
+- **The sandbox path from Windows (item 10).** No sandbox check has run from a Windows process, through the WSL engine or
+  the native one. The Windows build is packaged, so it ignores the test endpoint switch, and B4 makes no live call.
+  Two ways to establish it:
+  - a `verify:windows` case driving the WSL engine from Windows against a stand-in run inside the distribution: offline,
+    with no approval needed, but new harness work;
+  - an approved live check through the Windows app, on a project in WSL.
+- **The merges,** which are Nate's: PRs 7, 8, 9 and 11, in stack order. After each merge, Linear should be checked for
+  NIV-34 being closed by mistake.
+
+**Limitations the parent carries:**
+- **D33:** CPU and memory limits aren't claimed. An upload answered with a server error isn't retried, so a transient
+  500 ends a check, as the first live attempt showed.
+- **D34:** detection is by pattern; case collisions are refused on every target; a checkout smudged by Git LFS reads as
+  changed; inside base64, a shape is found one layer down only.
+- **D35:** one passing live run, on a tiny synthetic fixture, from Linux; `git apply --check` on a fresh clone only.
+- **D36:**
+  - a check proposes nothing, and nothing here applies a patch (NIV-8);
+  - one check of a project at a time;
+  - no button settles what earlier sessions left open;
+  - a lost check can't be cancelled from the window;
+  - a check's own probe recipe hasn't run live;
+  - the project id is masked in what the engine stores, like every vault value.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
