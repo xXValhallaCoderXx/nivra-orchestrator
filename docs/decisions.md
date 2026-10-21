@@ -1996,3 +1996,85 @@ is NIV-8's.
     B3's live run will show it;
   - git older than the 2.43 run here. The minimum, 2.18, is set from the flags used.
 - **Evidence:** `docs/acceptance.md`, *Commit snapshots and validated patches, B2 (D34, NIV-42)*.
+
+## D36. The sandbox check: one project's commit checked in Nebius Sandboxes behind upload consent of its own, bound to the preview the person saw, and recovered on the engine's own lifecycle (2026-10-21)
+
+**Decision.** This is B4 of Track B (NIV-44, part of NIV-34). It wires the prescribed path (D35) into the engine and
+the app as one deterministic run, a **sandbox check**, and nothing more: ordinary task execution stays unavailable
+(NIV-7), and nothing is applied (NIV-8).
+
+- **What a check runs,** on the engine that owns the checkout (D1, D17), through the production adapter (D33):
+  1. the commit's snapshot (D34);
+  2. the preview's fingerprint, which must match, or nothing is sent;
+  3. the session, on the public `alpine:3.20` image D28 used;
+  4. one probe the engine owns, with networking off: busybox's version and what the workspace holds. Its changes are
+     thrown away;
+  5. the collect step and the patch, which must be empty;
+  6. the bound report, and closing, with cleanup's own record.
+
+  The renderer sends a project id only, and never chooses a command. A check's bounds: 8 operations, 60 s a command,
+  10 minutes of work, then 7 for closing.
+- **Upload consent of its own.** `cloudExecution`, per project and off until the person turns it on, governs a check
+  and nothing else. Model-context consent (`modelContext`, D20) never stands in for it, nor it for model context: the
+  protocol refuses a check whose context carries model-context consent.
+  - Before any upload, the window shows the preview: the commit, the files and bytes, what is left out and why, and
+    what Nebius keeps.
+  - Consent and an epoch of its own are checked immediately before `runs.start`, and again on its answer: a check
+    started while uploads were being turned off is cancelled at once.
+  - A start whose answer was lost is found by its request id on the same engine store (D26), never sent again. Found
+    after consent was withdrawn, it is stopped. Absent from that store, it never arrived.
+  - Turning uploads off, or removing the project, cancels the project's check. The project's notice says what stays
+    with Nebius.
+- **Protocol 8.**
+  - `runs.start` gains a `sandbox` branch: input `{ repoPath, project, target, preview }`, context
+    `{ sharing: { cloudExecution } }`, held in memory (D21).
+  - `sandbox.preview` gives what a check would send, with no network.
+  - `runs.sandbox` gives a check's report, whatever its status; one saved before its engine stopped reads as
+    interrupted.
+  - `sandbox.status` and `sandbox.recover` give what an earlier engine left open, and its recovery pass.
+  - `SecretName` gains `NEBIUS_PROJECT_ID`.
+- **Credentials (D8).** The host keeps the key and the project id in secure storage and hands them to every engine in
+  `initialize` and `secrets.update` only. The adapter sends them in headers only. The vault's values refuse a commit
+  that holds one, and a change that adds one (D34).
+- **What leaves the engine (D29).**
+  - A stopped check's failure, its events and its log lines carry Nivra's own words, chosen by its stop code.
+  - Of cleanup's record, only its own templates leave, filled with step labels and ids. Anything else, which can carry
+    an error's words or a journal's path, becomes fixed words.
+  - **A preview names the file a refusal is about,** so the person can fix it: it is a result shown to the person,
+    never stored.
+  - The report carries the end of each step's output, masked, as data: text from the sandbox, never instructions.
+- **Recovery on the engine's lifecycle (D33).**
+  - At start, a local scan of the journals under `<home>/sandbox/`, with no network, so start never waits on Nebius.
+  - Once the key and project id arrive, one background pass on closing's budget. A D4 shutdown aborts it, and a
+    check's cleanup too; what they leave stays journaled for the next start.
+  - Nothing is replayed, and age never settles an operation. What stays open is shown, for a person to follow up.
+- **Test endpoints.** `--sandboxes-url` points the adapter at a stub on this machine (loopback only), as
+  `--token-factory-url` does, and an unpackaged app passes `--nivra-sandboxes-url` through.
+- **No migration.** A check's report is a run artefact (masked, at most 256 KB), and B4 keeps no patch: a check
+  proposes nothing. A store for patches comes with NIV-7 and NIV-8. The workspace stays at schema v2: a check is
+  neither a conversation's nor a task's run link.
+
+**Why.**
+- **NIV-44** asks for:
+  - the production adapter behind typed contracts;
+  - consent of its own, tested in all four combinations;
+  - revocation that blocks transfers and cancels owned work;
+  - real-engine evidence of routing, consent, bounded results, cancellation, uncertain submission, restart
+    reconciliation and unresolved cleanup.
+- **A check is the smallest real path.** It sends the person's own commit through every part B1 to B3 built, recovery
+  included, while changing nothing and running nothing chosen outside the engine. A model choosing commands is NIV-7's.
+- **The preview binds what is sent.** Consent given while looking at a commit covers that commit. One that changed
+  since is refused before the upload, as D31's previews are for reviews.
+- **Nothing is guessed.** A lost answer is looked up by its request id, as D26's turns are; a start that can't be
+  settled is reported, never retried.
+
+**Consequences.**
+- **Track A's proposal on NIV-41,** safe codes on the boundary errors, isn't needed by a check, which reports by its
+  own stop codes. It stays a refinement for Track A's own runs.
+- **Limits:**
+  - one check of a project at a time; the host keeps a project's last check for the session only;
+  - a check proposes nothing, so nothing here reads or keeps a patch;
+  - the window shows what earlier sessions left open, but has no button to settle it. A pass runs whenever the
+    credentials are handed to the engine: at its start, or when the key or project id is saved. `sandbox.recover` is
+    for `rpc.ts`.
+- **Evidence:** `docs/acceptance.md`, *Sandbox check, B4 (D36, NIV-44)*.

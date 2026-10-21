@@ -299,6 +299,26 @@ cd apps/engine && node --test test/tar.test.ts test/workspace-rules.test.ts test
 - **The tests compare each checkout before and after** by every name's kind, mode, size, time and bytes, `.git`
   included (`changedSince` in `test/workspace-fixtures.ts`).
 
+A sandbox check (NIV-44, D36) is the prescribed path wired into the engine and the app: a project's commit uploaded to
+Nebius Sandboxes, one fixed probe run there with networking off, and a report. It needs the key and the Nebius project
+id (Settings, or `NEBIUS_API_KEY` and `NEBIUS_PROJECT_ID` for `rpc.ts`) and the project's own upload consent. Without a
+real sandbox, point the engine at the stand-in in `apps/engine/test/stub-sandboxes.ts` with `--sandboxes-url` (loopback
+only); the window's tests pass `--nivra-sandboxes-url` to an unpackaged app:
+
+```bash
+pnpm rpc sandbox.preview '{"repoPath":"/path/to/repo"}' --home ~/.nivra-dev-track-b
+pnpm rpc runs.start '{"workflowId":"sandbox","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"cloudExecution":true}}}' --follow --sandboxes-url http://127.0.0.1:<port> --home ~/.nivra-dev-track-b
+pnpm rpc sandbox.status --home ~/.nivra-dev-track-b
+cd apps/engine && node --test test/sandbox-engine.test.ts test/check.test.ts
+```
+
+- **`rpc.ts` fills in the preview's fingerprint** from `sandbox.preview`, a project id and the local target when the
+  request leaves them out, and prints the report after `--follow`.
+- **The engine's journals** are under `<home>/sandbox/`. One that closed with nothing open is in `sandbox/settled/`;
+  what an earlier engine left open is listed by `sandbox.status`, and settled by a pass once the credentials arrive.
+- **The real engine tests** (`sandbox-engine.test.ts`) run the production adapter against the stand-in: a preview, a
+  whole check, refusals, a cancel, an uncertain spawn settled by a later engine, and an engine killed mid-check.
+
 ## Where things will live
 
 | What | Where |
@@ -328,4 +348,5 @@ distribution. One engine holds a home at a time (D7), so the second to start is 
   PATH, with WSL's leaked Windows folders removed. **Required before agents run builds (D15)**: nvm and similar are
   invisible to `wsl.exe --exec`.
 - Approved apply for agent writes (D15, NIV-8). Commit snapshots, patch checks and proposals bound by one hash are
-  built (D34), and so is the Nebius execution session they run with (D33), but none of them is wired into the engine.
+  built (D34), and so is the Nebius execution session they run with (D33). The engine runs them only as a sandbox
+  check (D36), which proposes nothing; a model choosing commands is NIV-7's.

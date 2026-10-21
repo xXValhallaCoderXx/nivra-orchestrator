@@ -569,7 +569,7 @@ anything runs, so `Local` can never be used for coding work (D33). This replaces
 | Backend | Role | What it would enforce | Availability |
 |---|---|---|---|
 | **Docker or Podman container** | Intended local default | Only a copy of the workspace is mounted, never the person's checkout. No network. A non-root user with all capabilities dropped, no new privileges, and process and memory limits. | Needs Docker Desktop's WSL integration, Docker Engine or Podman. Not built. |
-| **Token Factory Sandboxes** | Cloud option | A remote VM for each step, with networking off. State moves between steps through the image each one leaves (D28). | **Beta.** Access is active. A bounded live probe on 20 October passed every critical check for one operation per step, on a synthetic fixture (D28). The execution session is built and tested offline (D33), with every request inside its deadline. It isn't wired into the engine yet (NIV-44). |
+| **Token Factory Sandboxes** | Cloud option | A remote VM for each step, with networking off. State moves between steps through the image each one leaves (D28). | **Beta.** Access is active. A bounded live probe on 20 October passed every critical check for one operation per step, on a synthetic fixture (D28). The execution session is built and tested offline (D33), with every request inside its deadline. The engine runs it as a sandbox check of a project's commit only, behind upload consent of its own (D36). |
 | **NVIDIA OpenShell** | Optional, stricter local sandbox | Landlock filesystem rules, a per-host network allow-list, credential placeholders | Linux and WSL with Docker or Podman. Not built; first to cut if time runs short. |
 
 **Network**
@@ -648,9 +648,12 @@ flowchart LR
     - The host asks for it the first time, and checks it again immediately before submitting a run.
     - Turning it off cancels the project's explain runs.
     - The engine refuses a run whose context doesn't allow it.
-  - **`cloudExecution`** governs uploading a workspace.
-    - It stays off and unused while cloud execution isn't built.
-    - Turning on `modelContext` never turns it on.
+  - **`cloudExecution`** governs uploading a project's commit to Nebius Sandboxes for a check (D36).
+    - The host asks for it with the check's preview in front of the person: the commit, what is sent and left out,
+      and what Nebius keeps.
+    - It and an epoch of its own are checked immediately before submitting a check, and again on the answer. Turning
+      it off cancels the project's check.
+    - Neither opt-in ever turns the other on, and the engine refuses a check whose context carries `modelContext`.
   - **Always excluded:** secret files and dependency and build output. Text that looks like a key or token is masked.
     The detection is pattern-based, so it can't recognise every secret.
   - Reads stay inside the repository and are bounded, and output is capped.
@@ -855,8 +858,9 @@ docs changed afterwards.
 | Release, clean-setup checks, video, submission | In progress. v0.1.1 (D25) is the latest release, with `SHA256SUMS`, and v0.1.0 is marked superseded. Clean-setup checks 1 and 2 passed on its files; check 3, a PC without the Visual C++ Redistributable, is still to run. The install and testing instructions are written, the synthetic demo repository is published, and the video (NIV-17) and the submission text (NIV-15) are next | NIV-15 – NIV-17 |
 | Planning workspace: durable conversations, conversation turns, native tasks | **Built** (D26, D27): the workspace, protocol 5's `chat` workflow, the conversation service and the task records (checkpoint 1); then the window, with its navigation, conversations, plans and tasks, tested end to end on the built, packaged and Windows apps, and live (checkpoint 2) | NIV-30, NIV-31, NIV-32 |
 | Nebius Sandboxes feasibility | **Proved live** (D28): one operation per step is adopted for the workspace-to-patch adapter; a parent with subprocesses was inconclusive. The client isn't wired into the engine | NIV-29, then NIV-34 |
-| Nebius execution session (Track B, B1) | **Built** (D33), tested offline. The execution contract is extended for remote sessions, and every request ends by its deadline. The state moves only on what was kept, and closing and recovery are bounded and honest. Not wired into the engine yet | NIV-41, part of NIV-34 |
-| Commit snapshots and validated patches (Track B, B2) | **Built** (D34), tested offline against real repositories, with the sandbox's machine simulated. A snapshot is one commit's own bytes, scanned first and refused rather than redacted. A result's patch is checked in a store that holds nothing of the repository, and a proposal binds it to its destination by one hash. Not wired into the engine yet | NIV-42, part of NIV-34 |
+| Nebius execution session (Track B, B1) | **Built** (D33), tested offline. The execution contract is extended for remote sessions, and every request ends by its deadline. The state moves only on what was kept, and closing and recovery are bounded and honest. Wired into the engine as a sandbox check (D36) | NIV-41, part of NIV-34 |
+| Commit snapshots and validated patches (Track B, B2) | **Built** (D34), tested offline against real repositories, with the sandbox's machine simulated. A snapshot is one commit's own bytes, scanned first and refused rather than redacted. A result's patch is checked in a store that holds nothing of the repository, and a proposal binds it to its destination by one hash. Wired into the engine as a sandbox check (D36), which proposes nothing | NIV-42, part of NIV-34 |
+| Sandbox check (Track B, B4) | **Built** (D36), tested offline: a real engine on the production adapter against a stand-in for Nebius, the host's consent races, and the window. A project's commit is uploaded only with its own upload consent, bound to the preview the person saw, and checked by one fixed probe with networking off. The engine settles what an earlier engine left open once the credentials arrive. Not run live | NIV-44, part of NIV-34 |
 | New-app creation, coding worker, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
 The estimates are not commitments. None of the planned work is a precondition for committing the foundation.
@@ -895,6 +899,7 @@ The estimates are not commitments. None of the planned work is a precondition fo
 | D28 | Nebius Sandboxes: one operation per step proved live and adopted for the adapter; a parent with subprocesses not yet |
 | D33 | The Nebius execution session: one operation per step behind the execution contract, every request inside its deadline, the state moving only on what was kept |
 | D34 | Commit snapshots and validated patches: one commit's own bytes in, a checked patch out, bound to where it may go by one hash |
+| D36 | The sandbox check: one project's commit checked in Nebius Sandboxes behind upload consent of its own, bound to the preview the person saw, and recovered on the engine's own lifecycle |
 
 The planned work in §§10–12 will be recorded in new decisions as it is built.
 

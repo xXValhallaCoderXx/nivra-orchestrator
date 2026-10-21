@@ -1480,6 +1480,64 @@ these in turn fails its own test case. On 4 MiB files the scan takes 39 ms (rand
 - **"Exactly as it is"** means every name, kind, mode, size, modification time and byte, `.git` included. Access times
   aren't compared.
 
+### Sandbox check, B4 (D36, NIV-44)
+
+Track B's fourth checkpoint, offline: the prescribed path (D35) wired into the engine and the app as a sandbox check,
+behind upload consent of its own. On `feature/niv-44`, stacked on B3 (`a1622ed`), after NIV-39's handoff:
+
+| Commit | What |
+|---|---|
+| `d4245bd` | The engine and the domain: protocol 8, the `sandbox` workflow, the preview, the report, recovery on the engine's lifecycle |
+| `aa44fa6` | The host: upload consent of its own, the consent races around `runs.start`, the project id kept like the key, the IPC |
+| `9e974b5` | The window: the project id in Settings, and the sandbox check's preview, consent, progress and report |
+
+**NIV-44's criteria, shown:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| The adapter through the owning engine, with typed contracts; the renderer sends project ids only | `packages/domain/test/sandbox.test.ts`, `sandbox-engine.test.ts`, `ipc-wiring.test.ts` | `runs.start`'s `sandbox` branch takes a checkout, the project and target it is bound to, and a preview's fingerprint. It takes no command and no key, and refuses another workflow's context. Every call is a named preload function, checked by sender and by zod |
+| Secrets through `initialize` and `secrets.update` only; never in inputs, events, journals or the guest | `sandbox-engine.test.ts`, "runs a check on the production adapter…"; `host.test.ts`, "keeps the two opt-ins apart…" | Every request carries the key and project id in headers, and no body carries either, or the engine's home. The run's events hold neither. After the host shuts down, no file under its folder holds either |
+| Upload consent of its own, off at first, in all four combinations, with the scope and retention shown first | `host.test.ts`, "keeps the two opt-ins apart in all four combinations…"; `sandbox.spec.ts` | Both start off. A check uploads once only with `cloudExecution`, and an explanation starts only with `modelContext`, in every combination. The window's dialog shows the commit, the files and bytes, what's left out and what Nebius keeps, and says it is separate from Token Factory |
+| Revocation blocks transfers and cancels owned work; races checked again before dispatch; what stays reported | `host.test.ts`, five tests | Refused before any engine starts; never sent when withdrawn while the engine starts; cancelled as soon as an in-flight `runs.start` answers; a lost answer found by its request id and stopped, with `runs.start` sent once; a running check's operation asked to stop, its report saying what Nebius keeps; a removed project's check stopped |
+| The deterministic path through a real engine: routing, consent, bounded results, cancellation, uncertain submission, restart reconciliation, unresolved cleanup | `sandbox-engine.test.ts`, 7 tests | Below |
+| Named IPC, a narrow UI, existing run reporting; no task execution | `sandbox.spec.ts`; the Run button's existing test | The check's progress is the run's own events. Run stays unavailable |
+
+**The real engine tests,** a stdio engine with the production adapter against the stand-in in
+`test/stub-sandboxes.ts`:
+- **A preview** sends nothing, and refuses a commit holding the vault's own key in base64, naming the file.
+- **A whole check:**
+  - one upload, and three operations (prepare, probe, collect), each with networking off;
+  - the report is bound to the preview's fingerprint: outcome `unchanged`, the probe's busybox line, nothing unresolved, one upload kept;
+  - the session's journal moves to `settled/`.
+- **Refusals with nothing sent:** no upload consent; no key and project id; a commit changed since its preview; the same request id with another preview.
+- **A cancel:** the probe's operation is asked to stop, the run ends cancelled, and cleanup's record counts one stopped.
+- **An uncertain spawn:**
+  - the probe's answer is lost and the operation is hidden;
+  - it is never sent again, and the report lists it as unresolved, in cleanup's own words;
+  - a later engine on the same home, with no credentials yet, lists the journal with no network and waits;
+  - given the credentials, its pass finds the operation and stops it, replaying nothing.
+- **An engine killed mid-check:** the next engine reads the check as interrupted, and its pass stops the operation it left running.
+
+**Through `rpc.ts`,** on `~/.nivra-dev-track-b`, against the stand-in on 127.0.0.1:
+- `doctor` answered;
+- `sandbox.preview` of a throwaway repository gave 2 files, 3,584 bytes from its commit;
+- a whole check succeeded with outcome `unchanged`. The stand-in saw nine requests, each with the credentials in headers: one upload, three operations with networking off, three reads, and two downloads.
+
+**Checks**
+- `pnpm verify`: 687 passed (domain 48, engine 434, desktop 205), none skipped. B3 ended at 663.
+- `test:e2e`: 45 passed, 1 skipped (explain's packaged-only test). The two new window tests are in `e2e/sandbox.spec.ts`.
+- `test:packaged`: 24 passed, 22 skipped, after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`. The skips are the two new window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores.
+- **Not run:**
+  - `verify:windows` and `test:windows`: they wait for a Windows turn agreed with Track A;
+  - any live call: B4 makes none. B3's approved run is still to come, and its evidence is reused here only where the bytes and path match.
+
+**Limits**
+- **Not run live.** The stand-in follows the documentation and D28's live runs; B3's approved run is the live evidence.
+- **One check of a project at a time,** and the host keeps a project's last check for the session only.
+- **A check proposes nothing,** so nothing here reads or keeps a patch: that comes with NIV-7 and NIV-8.
+- **No button settles what earlier sessions left open.** A pass runs when the credentials are handed to the engine: at its start, or when the key or project id is saved.
+- **Native Windows** is claimed only once `test:windows` has run.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
