@@ -2,15 +2,20 @@
 // Windows runtime and a bundled harness to %LOCALAPPDATA%\nivra-dev\verify, and runs the harness with the staged
 // node.exe: a real Windows parent that drives the native engine and a WSL engine as Electron's main process will. With
 // --zip, it takes both runtimes from a release candidate's Windows zip instead, exactly as packaged (D25). The WSL engine
-// runs in a home of this run's own, below ~/.nivra-test, and the release's ~/.nivra must be left as it was (D27).
+// runs in a home of this run's own, below ~/.nivra-test, and the release's ~/.nivra must be left as it was (D27). A
+// stand-in for Nebius Sandboxes runs here, on loopback in this distribution, for the harness's sandbox checks through
+// the WSL engine (D36); the harness changes and reads it through `@stub` lines on its stdout, answered on its stdin.
 //
 //   pnpm --filter @nivra/desktop verify:windows [--distro <name>] [--skip-stage | --zip <path to Nivra-<version>-win-x64.zip>]
 import { spawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { build } from "esbuild";
+import { startSandboxStub } from "../../engine/test/stub-sandboxes.ts";
+import { answerStandIn } from "./stand-in.ts";
 import { testWslHome } from "./test-homes.ts";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -100,6 +105,11 @@ if (zip) {
 }
 cpSync(join(verifyDir, "harness.mjs"), join(work, "harness.mjs"));
 
+step("Starting the stand-in for Nebius Sandboxes");
+const sandboxes = await startSandboxStub();
+const here = process.env["WSL_DISTRO_NAME"] ?? "";
+console.log(`  ${sandboxes.url}, in ${here || "this distribution"}`);
+
 step("Running the harness on Windows");
 const node = join(runtime, "node", "node.exe");
 const wslHome = testWslHome("verify");
@@ -115,8 +125,19 @@ const args = [
   workWin,
   "--wsl-home",
   wslHome,
+  "--sandboxes-url",
+  sandboxes.url,
+  "--sandboxes-distro",
+  here,
   ...(values.distro ? ["--distro", values.distro] : []),
 ];
-const harness = spawn(node, args, { cwd: "/mnt/c", stdio: "inherit" });
-const code = await new Promise<number | null>((done) => harness.once("exit", (exit) => done(exit)));
+const harness = spawn(node, args, { cwd: "/mnt/c", stdio: ["pipe", "pipe", "inherit"] });
+harness.stdin.on("error", () => undefined);
+createInterface({ input: harness.stdout }).on("line", (line) => {
+  if (line.startsWith("@stub ")) harness.stdin.write(`${answerStandIn(sandboxes, line.slice("@stub ".length))}\n`);
+  else console.log(line);
+});
+// "close", not "exit": every line the harness printed has been read by then.
+const code = await new Promise<number | null>((done) => harness.once("close", (exit) => done(exit)));
+await sandboxes.close();
 process.exit(code ?? 1);

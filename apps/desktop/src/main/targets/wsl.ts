@@ -101,6 +101,8 @@ export interface WslTargetOptions {
   env?: NodeJS.ProcessEnv;
   /** Runs `wsl.exe` with these arguments; tests replace it. */
   runWsl?: (args: readonly string[], options: { input?: Readable | null; timeoutMs: number }) => Promise<RunResult>;
+  /** Tests only: more engine arguments, such as a stand-in for Nebius Sandboxes inside the distribution (D36). */
+  extraArgs?: readonly string[];
 }
 
 /** A WSL2 distribution as a target: the engine runs inside it, on the runtime streamed in from the app (D1, D5). */
@@ -160,7 +162,7 @@ export class WslTarget implements ExecutionTarget {
     return {
       command: this.#options.wslExe,
       // `--exec` runs no shell: every path is absolute, built from the probe's $HOME (D5).
-      args: ["-d", distro, "--cd", home, "--exec", `${root}/node/bin/node`, ...engineArgs(`${root}/engine/main.mjs`, engineHome, request)],
+      args: ["-d", distro, "--cd", home, "--exec", `${root}/node/bin/node`, ...engineArgs(`${root}/engine/main.mjs`, engineHome, request), ...(this.#options.extraArgs ?? [])],
       cwd: undefined,
       env: this.#env,
       home: engineHome,

@@ -225,13 +225,14 @@ describe("WSL probe rules", () => {
 });
 
 describe("WslTarget", () => {
-  function target(responses: { probe: Record<string, string> | RunResult; install?: RunResult }, engineHome = WSL_HOMES.release) {
+  function target(responses: { probe: Record<string, string> | RunResult; install?: RunResult }, engineHome = WSL_HOMES.release, extraArgs?: readonly string[]) {
     const calls: Array<{ args: readonly string[]; input: boolean }> = [];
     const wsl = new WslTarget({
       distro: UBUNTU,
       wslExe: "C:\\Program Files\\WSL\\wsl.exe",
       runtime: { tarball: process.execPath, contentHash: "abc123" },
       engineHome,
+      ...(extraArgs ? { extraArgs } : {}),
       runWsl: async (args, options) => {
         calls.push({ args, input: Boolean(options.input) });
         options.input?.destroy();
@@ -275,6 +276,12 @@ describe("WslTarget", () => {
     assert.deepEqual([probe.args.slice(-2), install.args.slice(-2)], [["abc123", ".nivra-test/run-1"], ["keep", ".nivra-test/run-1"]]);
     assert.deepEqual([launch.home, launch.args[5], launch.args[launch.args.indexOf("--home") + 1]], ["/home/odin/.nivra-test/run-1", "/home/odin/.nivra-test/run-1/runtime/abc123/node/bin/node", "/home/odin/.nivra-test/run-1"]);
     assert.equal(launch.args.some((arg) => arg.includes("/.nivra/")), false);
+  });
+
+  it("passes a test's extra engine arguments after its own, and none unless given", async () => {
+    const plain = await target({ probe: { ...HEALTHY, runtime: "present" } }).wsl.prepare({ instanceId: "11111111-1111-4111-8111-111111111111", heartbeatMs: 0 });
+    const extra = await target({ probe: { ...HEALTHY, runtime: "present" } }, WSL_HOMES.release, ["--sandboxes-url", "http://127.0.0.1:4100"]).wsl.prepare({ instanceId: "11111111-1111-4111-8111-111111111111", heartbeatMs: 0 });
+    assert.deepEqual([plain.args.at(-1), extra.args], ["--nivra-engine", [...plain.args, "--sandboxes-url", "http://127.0.0.1:4100"]]);
   });
 
   it("refuses to start on a blocking problem or a failed install, saying what to do", async () => {
