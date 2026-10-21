@@ -2226,11 +2226,27 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
   sessions left open still stale: saving the key and project id could start and end a pass while it went on saying it
   waited for them. It reads them again now on each save (`d5b225e`). A stop that worked after one that failed also
   left the failure's words, which it now takes back.
+- **Nate's choice for NIV-34 item 10 (22 October): the offline route from Windows.** It can be repeated without
+  another paid run, and it goes through the actual sandbox path, consent, cancellation and recovery, not just the
+  engine starting.
 
 **Consequences.**
 - **Track A's proposal on NIV-41,** safe codes on the boundary errors, isn't needed by a check, which reports by its
   own stop codes. It stays a refinement for Track A's own runs.
+- **The sandbox path from Windows.** `verify:windows` ends its WSL part with ten sandbox checks (`6094155`):
+  - **The host:** as Electron's main process makes it, running on Windows.
+  - **The engine:** the WSL engine that host starts, given `--sandboxes-url`. `WslTarget` takes extra engine arguments
+    for this, for tests only, as `LocalTarget` does.
+  - **The stand-in:** one for Nebius Sandboxes, on loopback in the distribution. `verify-windows.ts` runs it, and the
+    harness asks it one thing at a time over its own stdio. Nothing reaches the network.
+  - **What they cover:** a folder picked as Windows names it, both consents, a whole check, a cancel, uploads turned
+    off during a check, an uncertain submission, and recovery after a restart, without the credentials and then with
+    them.
+  - **Rehearsed first.** `test/sandbox-checks.test.ts` runs them on Linux, all but the first (where the stand-in
+    runs), through the same host and channel, so a mistake in them shows before a Windows turn.
 - **Limits:**
+  - from Windows, the sandbox path is shown through the WSL engine, against the stand-in. The native Windows engine's
+    isn't, and nothing is claimed for it;
   - one check of a project at a time, kept by the host and the engine; the host keeps a project's last check for the
     session only;
   - a check proposes nothing, so nothing here reads or keeps a patch;

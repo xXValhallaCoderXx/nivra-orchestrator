@@ -101,6 +101,11 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 - **The Visual C++ runtime (D25):** it checks that the native engine loads only the copy shipped beside its addon. It
   also runs a controlled check in a copy of the runtime. There, the addon's import is renamed so that no installed
   runtime can stand in, and the engine must still start and run hello. Without the renamed DLL, it must refuse.
+- **Sandbox checks (D36):** it runs a stand-in for Nebius Sandboxes on loopback in the distribution it is started from.
+  The harness drives the host and the WSL engine against it, with no network: consent, a whole check, a cancel,
+  uploads turned off, an uncertain submission, and recovery after a restart. Run it from the distribution the engine
+  uses: the check says so when they differ, and `--distro` picks the engine's. `test/sandbox-checks.test.ts` rehearses
+  the same checks on Linux.
 - **`test:windows` on a candidate:** extract its zip into `%LOCALAPPDATA%\nivra-dev\app` with Windows' `tar.exe`, in
   place of `pnpm dev:win --no-launch`.
 

@@ -1641,6 +1641,8 @@ behind upload consent of its own. On `feature/niv-44`, stacked on B3 (`a1622ed`)
 | `7a70fab` | The independent check of those fixes: five more, below |
 | `60285b3` | The check in D36 and this evidence |
 | `d5b225e` | Nate's review of `60285b3`: the window's recovery line, and a stop that works taking back one that didn't, below |
+| `3478e9b` | PR 9's branch merged in: main after PR 7 merged, the second review of PR 8's fix and the review of PR 9's |
+| `6094155` | NIV-34 item 10: `verify:windows` runs sandbox checks from Windows through the WSL engine, and a Linux test rehearses them, below |
 
 **NIV-44's criteria, shown:**
 
@@ -1730,15 +1732,57 @@ host's stops, with 31 focused tests passing, and found what the window still got
 | The window's line about what earlier sessions left open | Read when the window opened, and again only while a pass already ran: saving the key and project id could start and end a pass while it still said "Nivra stops them once your key and project id are set" | The projects page counts saves of either credential, Settings counts each once the engines have it, and the sandbox check reads the status again on each, then follows a running pass to its end | `sandbox.spec.ts`, "saving the key and project id settles what an earlier session left open…": a first session leaves a probe open; a second, on the same engine home, shows it waiting; saving both through Settings sees the line go and the operation stopped. With the refresh undone, the line stays |
 | A stop that works after one that failed (minor) | The "couldn't stop" words stayed in the check's note and the project's notice | A stop accepted later replaces the note. The notice says the check is being stopped while uploads are off, and goes once they are on. The window's Cancel reads the projects again | `host.test.ts`, "says a check couldn't be stopped when its stop fails…" and "keeps a found check known…". With the clearing undone, both fail |
 
+**The sandbox path from Windows (NIV-34 item 10),** by the offline route Nate chose on 22 October. `verify:windows` now
+ends its WSL part with ten sandbox checks (`6094155`):
+- **The host:** `Host`, the class Electron's main process wraps, runs in the harness on Windows.
+- **The engine:** the WSL engine that host starts, given `--sandboxes-url`.
+- **The stand-in:** one for Nebius Sandboxes, on loopback in the distribution. `verify-windows.ts` runs it, and the
+  harness asks it one thing at a time over its own stdio (`scripts/stand-in.ts`). Nothing reaches the network.
+
+On Windows at `6094155`, all ten passed, on Ubuntu:
+1. The stand-in runs in the distribution the engine runs in, and answers.
+2. A folder inside Ubuntu, picked as Windows names it (`\\wsl.localhost\Ubuntu\home\odin\.nivra-verify\sandbox ü%#`),
+   is added for Ubuntu's engine.
+3. With uploads off, the host refuses a check, and nothing reaches the stand-in.
+4. A whole check:
+   - outcome `unchanged`, bound to the preview of the repository's HEAD, with the probe's busybox line;
+   - one upload and three operations, each with networking off;
+   - every request carried the test key and project id in its headers, and no body held either, or the engine's home.
+5. A cancel: the probe's operation stopped, and cleanup counted 1 stopped and none unresolved.
+6. Uploads turned off during a check: it was cancelled, the notice said what stays with Nebius, and the next check
+   was refused with nothing more sent.
+7. A submission whose answer was lost: the check ended `uncertain`, the probe was sent once, and its journal stayed
+   open.
+8. A second host on the same records, without the credentials: the engine listed the journal with no network, and its
+   pass waited.
+9. The credentials saved: one pass stopped the operation, leaving nothing unresolved or open, and sent no operation or
+   upload again.
+10. The engine's own refusal of a check whose context doesn't allow uploads, with nothing sent.
+
+**Rehearsed on Linux first.** `test/sandbox-checks.test.ts` runs checks 2 to 10 through the same host and channel,
+against an engine that stands in for a distribution's, so a mistake in them shows before a Windows turn. Each of six
+mutations fails it:
+- the host's consent check;
+- the engine's consent check;
+- the host's stop when uploads are turned off;
+- the stand-in holding the probe;
+- the stand-in losing its answer;
+- recovery when the credentials are saved.
+
 **Checks**
 - `pnpm verify`: 699 passed (domain 48, engine 440, desktop 211), none skipped, at `d5b225e`, as at `7a70fab`: the new host checks extend tests already counted. It was 694 after the review's fixes and 687 before them, and B3 ended at 663.
+- `pnpm verify` at `6094155`: 704 passed (domain 48, engine 443, desktop 213), none skipped. It was 702 at `3478e9b`, after PR 9's branch merged in; the rehearsal and the WSL target's extra arguments add two.
 - `test:e2e`: 46 passed, 1 skipped (explain's packaged-only test), at `d5b225e`; 45 passed before it, after each round of fixes. The window's tests are in `e2e/sandbox.spec.ts`. The first presses Allow twice and sees one upload, and the third is the saving sequence above.
-- `test:packaged`: 24 passed, 23 skipped, at `d5b225e`, after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`; 22 skipped before it. The skips are the three sandbox window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores.
-- **On Windows,** each time after `stage:runtime all`. The first turn was at `69c47b1`. The second was at `d5b225e`, the final code, coordinated just before with Track A's session, which had no Windows check running and held off until it was told the turn was over. Each time:
+- `test:packaged`: 24 passed, 23 skipped, at `d5b225e`, after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`; 22 skipped before it. The skips are the three sandbox window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores. The same at `6094155`, with the runtime staged again for the merged scan.
+- **On Windows,** each time after `stage:runtime all`. The first turn was at `69c47b1`, and the second at `d5b225e`, coordinated just before with Track A's session, which had no Windows check running and held off until it was told the turn was over. Each time:
   - `verify:windows --skip-stage`: 22 of 22 checks passed, on the native engine and on the WSL engine driven by a real Windows process. The release's `~/.nivra` was as it was, and the run's own WSL home was removed;
   - `test:windows`: 11 passed, against the build `dev:win --skip-stage --no-launch` copied;
   - no tracked file under `apps/` or `packages/` was written while they ran, checked by each file's size and time before and after.
-- **`rpc.ts`** wasn't run again after `d5b225e`: the engine hasn't changed since `7a70fab`.
+- **The third turn, at `6094155`,** for item 10: Nate approved it, and it was coordinated with Track A's session the same way:
+  - `verify:windows --skip-stage`: 32 of 32 passed, the 22 earlier checks and the ten sandbox checks above. `~/.nivra`'s 8 entries were unchanged, and the run's own WSL home was removed;
+  - `test:windows`: 11 passed;
+  - nothing tracked was written while they ran.
+- **`rpc.ts`** at `3478e9b`, after the merged scan: a whole check against the stand-in, with the same nine requests and networking off. `6094155` changes no engine code.
 - **Not run:** any live call: B4 makes none. B3's approved rerun passed through the same adapter and `runPrescribed` (D35, above), and its evidence is reused here only where the bytes and path match: a check's own probe recipe hasn't run live.
 
 **Limits**
@@ -1746,13 +1790,15 @@ host's stops, with 31 focused tests passing, and found what the window still got
 - **One check of a project at a time,** kept by the host and the engine, and the host keeps a project's last check for the session only.
 - **A check proposes nothing,** so nothing here reads or keeps a patch: that comes with NIV-7 and NIV-8.
 - **No button settles what earlier sessions left open.** A pass runs when the credentials are handed to the engine: at its start, or when the key or project id is saved.
-- **No sandbox check has run on Windows.** `verify:windows` and `test:windows` show B4's host, preload and window on
-  Windows, with both engines. A check needs the test endpoint switch, which a packaged build ignores, or a live call.
+- **From Windows, through the WSL engine, against the stand-in only.** The native Windows engine's sandbox path isn't
+  covered, and nothing is claimed for it. The Windows app's window isn't driven through a check: a packaged build
+  ignores the test endpoint switch. No check has run live from Windows.
 
 ### Track B completion record (NIV-34)
 
-Prepared 22 October 2026, at `d4cc99b` (B4's branch, holding B1 to B3), with this record's docs commit. **The parent
-stays open:** item 10 is met for Linux only, and the four PRs wait for Nate's merges (below).
+Prepared 22 October 2026, at `d4cc99b` (B4's branch, holding B1 to B3), with this record's docs commit. Brought up to
+date at `6094155`, after PR 7 merged, the reviews of PRs 8 and 9, and item 10's Windows checks. **Every item is now
+evidenced,** item 7 for the prescribed commands Track B runs. PRs 8, 9 and 11 wait for Nate's merges (below).
 
 | NIV-34 acceptance item | Evidence | Where it stands |
 |---|---|---|
@@ -1765,31 +1811,24 @@ stays open:** item 10 is met for Linux only, and the four PRs wait for Nate's me
 | 7. Networking off for model-controlled commands; resource, output and time limits and cancellation enforced as far as the backend guarantees; a missing capability refuses the run, with no silent switch | B1: `networking: false` on every spawn, output caps, timeouts and cancels. `Local` refuses `isolatesFilesystem`, and `prescribed.test.ts` refuses `Local` with nothing sent. Live (B3): network denied by behaviour, a timeout told apart from success, and a stop seen to stop | Evidenced for prescribed commands. Model-controlled commands come with NIV-7. CPU and memory limits aren't claimed: the backend doesn't guarantee them |
 | 8. A complete patch extracted, new and deleted files included; downloads bounded; paths, links, modes, case collisions, line endings, secrets and generated output validated; unsupported forms refused | B2: `patch.ts`, `tar.ts`, `workspace-rules.ts`; `patch.test.ts`, `tar.test.ts`, `workspace-rules.test.ts`; the review of `f027403`'s eight gaps. Live (B3): the patch held exactly the fixed edit (an added file, a deleted one, two edits and a mode change), and the collect listing matched its archive | Evidenced |
 | 9. Patch bytes, hash, report, destination and baseline bound; untrusted paths and archives can't escape extraction; available usage told apart from unknown | B2: `proposal.ts`, with `verifyProposal` refusing a wrong baseline, destination or hash (`proposal.test.ts`), and the bounded tar reader (`tar.test.ts`). Live (B3): the proposal bound and verified. Usage is kept raw: the stopped operation's usage is null, and the `cost` figures (7 of 8 reported) are never turned into money | Evidenced |
-| 10. The real-engine deterministic path shows routing, consent, results, cancellation, restart and uncertainty reconciliation, and cleanup; Linux and Windows-to-WSL behaviour established; native Windows claimed only with evidence | B4: `sandbox-engine.test.ts` (12 tests over stdio, on the production adapter against the stand-in), and `rpc.ts` runs on `~/.nivra-dev-track-b`. All of it ran on Linux. On Windows, at `d5b225e`, `verify:windows` passed 22 of 22 and `test:windows` 11. They show B4's host, preload and window there, with the native and WSL engines, but no sandbox check | **Linux: evidenced. Windows-to-WSL: not established for the sandbox path,** below. Native Windows: nothing claimed |
-| 11. Every B1 to B4 criterion and the affected verification evidenced before the parent is ready for review; a standalone harness or probe isn't enough | Each checkpoint's section above. PRs 7, 8, 9 and 11 are ready for review | Not yet: item 10's Windows part, and the merges |
+| 10. The real-engine deterministic path shows routing, consent, results, cancellation, restart and uncertainty reconciliation, and cleanup; Linux and Windows-to-WSL behaviour established; native Windows claimed only with evidence | B4, on Linux: `sandbox-engine.test.ts` (12 tests over stdio, on the production adapter against the stand-in), and `rpc.ts` runs on `~/.nivra-dev-track-b`. From Windows, at `6094155`: `verify:windows`'s ten sandbox checks drive the host on Windows and the WSL engine against the stand-in in the distribution. They cover routing, both consents, a whole check, a cancel, uploads turned off, an uncertain submission, and restart and recovery. All ten passed: 32 of 32 checks in all. `test/sandbox-checks.test.ts` rehearses them on Linux | **Linux and Windows-to-WSL: evidenced,** offline, against the stand-in. Native Windows: nothing claimed |
+| 11. Every B1 to B4 criterion and the affected verification evidenced before the parent is ready for review; a standalone harness or probe isn't enough | Each checkpoint's section above. PR 7 merged (`091cf4c`); PRs 8, 9 and 11 are ready for review | Evidenced. The merges are Nate's |
 
 **Platform matrix, as run:**
 
 | Check | B1 | B2 | B3 | B4 |
 |---|---|---|---|---|
-| `pnpm verify` | 589 passed (43, 347, 199), at `206b3fc` | 644 passed (43, 402, 199), at `30ad9f8` | 663 passed (43, 421, 199), at `a1622ed` | 699 passed (48, 440, 211), at `d4cc99b` |
+| `pnpm verify` | 589 passed (43, 347, 199), at `206b3fc` | 646 passed (43, 404, 199), at `9f26b5e` | 666 passed (43, 424, 199), at `60b7081` | 704 passed (48, 443, 213), at `6094155` |
 | `test:e2e`, the built app | not affected | not affected | not affected | 46 passed, 1 skipped (packaged only) |
 | `test:packaged`, Linux | not affected | not affected | not affected | 24 passed, 23 skipped (the test endpoint) |
 | Real engine | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: a whole check against the stand-in, nine requests |
 | Live | none | none | attempt 1 failed at the upload (HTTP 500); the approved rerun passed 20 of 20 | none |
 | `pnpm stage:runtime all` | not affected | not affected | not affected | passed |
-| `verify:windows` | not affected | not affected | not affected | 22 of 22 passed, at `69c47b1` and `d5b225e` |
-| `test:windows` | not affected | not affected | not affected | 11 passed, at `69c47b1` and `d5b225e` |
+| `verify:windows` | not affected | not affected | not affected | 22 of 22 passed, at `69c47b1` and `d5b225e`; 32 of 32, with the sandbox checks, at `6094155` |
+| `test:windows` | not affected | not affected | not affected | 11 passed, at `69c47b1`, `d5b225e` and `6094155` |
 
-**What is missing before the parent is ready for review:**
-- **The sandbox path from Windows (item 10).** No sandbox check has run from a Windows process, through the WSL engine or
-  the native one. The Windows build is packaged, so it ignores the test endpoint switch, and B4 makes no live call.
-  Two ways to establish it:
-  - a `verify:windows` case driving the WSL engine from Windows against a stand-in run inside the distribution: offline,
-    with no approval needed, but new harness work;
-  - an approved live check through the Windows app, on a project in WSL.
-- **The merges,** which are Nate's: PRs 7, 8, 9 and 11, in stack order. After each merge, Linear should be checked for
-  NIV-34 being closed by mistake.
+**What remains:** the merges, which are Nate's. PR 7 merged as `091cf4c`; PRs 8, 9 and 11 follow, in stack order.
+After each merge, Linear should be checked for NIV-34 being closed by mistake.
 
 **Limitations the parent carries:**
 - **D33:** CPU and memory limits aren't claimed. An upload answered with a server error isn't retried, so a transient
@@ -1803,6 +1842,8 @@ stays open:** item 10 is met for Linux only, and the four PRs wait for Nate's me
   - no button settles what earlier sessions left open;
   - a lost check can't be cancelled from the window;
   - a check's own probe recipe hasn't run live;
+  - from Windows, the sandbox path is shown through the WSL engine against the stand-in, not through the native engine,
+    the window, or a live call;
   - the project id is masked in what the engine stores, like every vault value.
 
 ### Deferred to a later milestone (kept, not dropped)
