@@ -1996,3 +1996,111 @@ is NIV-8's.
     B3's live run will show it;
   - git older than the 2.43 run here. The minimum, 2.18, is set from the flags used.
 - **Evidence:** `docs/acceptance.md`, *Commit snapshots and validated patches, B2 (D34, NIV-42)*.
+
+## D35. The prescribed path: one composition from snapshot to proposal, shown offline on a byte-exact fixture, then live in one approved run (2026-10-22)
+
+**Decision.** This is B3 of Track B (NIV-43, part of NIV-34). It composes B1's session (D33) and B2's snapshot and patch
+(D34) into one prescribed path, and shows it live once on Nebius, through the real adapter.
+
+- **`runPrescribed`** (`exec/prescribed.ts`) is the one composition the tests, the live check and the engine (B4) all
+  run:
+  1. the snapshot;
+  2. a session that isolates files (`Local` is refused);
+  3. the steps, one operation each;
+  4. collect;
+  5. the patch;
+  6. the report, made before close;
+  7. the proposal;
+  8. close, with cleanup's own record.
+- **Rules that hold throughout:**
+  - **Edits and checks.** An edit keeps its changes, and a check throws them away. An edit that failed, or whose
+    changes weren't kept, stops the run and is never proposed.
+  - **Stops and cancels.** A prescribed stop ends one step, counted from when its command is seen running, and the run
+    goes on. The person's cancel ends the run.
+  - **Outcomes, not throws.** Once a session is open, every failure ends as an outcome carrying cleanup's record. Only
+    a fault before any session is thrown, and then nothing was sent.
+  - **The bound report** holds every operation the session ran, prepare first, with each step's status and usage from
+    the session's own records, read before close (`ExecutionSession.steps()`).
+- **The fixture** (`scripts/sandbox-fixture.ts`) is described byte for byte and built at run time with a fixed author
+  and time, so its baseline is always `b04b10a`: 14 entries, 487 bytes. They are:
+  - a path over 100 bytes, a UTF-8 name, a symlink, an executable, an empty file and one without a final newline;
+  - a `-text` CRLF file and a binary with NUL bytes;
+  - a passing check and a failing one.
+
+  Its fixed edit adds a file under a long path, deletes one, edits a script and the binary, and changes a mode.
+- **Offline,** a fake guest does the recipe in JavaScript on the fake service (D33). It covers:
+  - the whole recipe, proposing exactly the fixed edit, bound to the fixture, and applying on a fresh clone;
+  - truthful, different reports for a passing and a failing check;
+  - a lost answer found by its correlation id, and an expired image;
+  - the person's cancel;
+  - an unknown start, never sent again, left visible, then settled from the journal by the next engine;
+  - an operation the sandbox never stops, left unresolved;
+  - refusals with nothing sent.
+
+  The real edit and check scripts also run on this machine's `sh`, and must do what the fake guest does.
+- **The live check** (`scripts/sandbox-check.ts`):
+  - `--plan` prints the recipe with no network, for approval;
+  - `--run` runs it once and checks what it left;
+  - `--recover` settles leftovers.
+
+  The key and project id come from a file of mode 600 outside the repository, and are never printed or written. The
+  adapter itself enforces the recipe's bounds: 8 operations, 60 s a command, 10 minutes of work, then 7 for closing.
+- **One approval covers one bounded run:** its operations, upload, downloads, reads and polling, and its cleanup,
+  including one `--recover` pass if cleanup is cut short. A rerun, more operations or a fresh network control need a
+  new approval.
+
+**Why.**
+- **NIV-43** asks for deterministic acceptance first, then one approved live run. That run shows what no fake can:
+  - busybox's tar and listing;
+  - the service keeping state between operations;
+  - timeouts and stops;
+  - network denial by behaviour.
+- **One composition for all three users** makes the live evidence evidence for the engine's own path too.
+- **The network verdict judges behaviour.** `networking: false` alone proves nothing. The step passes only with
+  loopback as the one interface, and each attempt failing for want of a network ("bad address", "Network
+  unreachable"). D28's positive control, the same name reached with networking on through the probe on 20 October, is
+  reused, not repeated.
+- **The independent review of the first draft (`a074951`)** found eight gaps and three concerns, each reproduced, then
+  fixed in `87a6f93`. The worst four:
+  1. the network verdict passed with a network: an HTTP 403 from a host it had reached, or no `wget` at all;
+  2. a download fault after the paid operations escaped as a throw, losing the result and cleanup's record;
+  3. a failed open always read "failed", whether it was cancelled or its start was unknown;
+  4. a prescribed stop could count a command still pending.
+- **The live run, at `a1622ed`, as Nate approved:**
+  - **The first attempt** (21 October, 11:38:53 UTC) failed at the upload. `POST /sandboxes/v1/files` was answered HTTP
+    500, so the session never opened, and no operation ran. The request matched the documented contract.
+  - **Nate approved one rerun.** It ran on 21 October at 18:20:05 UTC (22 October locally), and passed 20 of 20
+    checks, outcome `proposed`.
+  - So the first attempt's 500 was transient, as far as one rerun can show.
+
+**Consequences.**
+- **Shown live now,** where D34 couldn't:
+  - busybox v1.36.1 running the collect step (its `find -prune`, `tar -T` and padded `wc`), with its listing matching
+    its archive;
+  - the prepare step's digest matching the snapshot's listing;
+  - the service honouring the step's folder, `/workspace`.
+- **Shown live by behaviour:**
+  - networking off for all 8 operations: loopback alone, "bad address" by name, and "Network unreachable" by IP;
+  - an edit's changes kept for what follows;
+  - a passing and a failing check told apart from the operation's own status;
+  - a timeout (exit -1, SIGKILL, with the operation's SUCCESS) told apart from success;
+  - a stop, once seen running, ending CANCELLED;
+  - each operation sent once.
+- **The patch** holds exactly the fixed edit. `git apply --check` passes on a fresh clone of the fixture, and the
+  patch applied to the snapshot gives the bound result tree. The proposal is bound to the fixture's folder and commit.
+- **The service's own figures** are kept raw. Each step's usage includes a `cost` whose unit the service doesn't
+  document. 7 of the 8 operations reported one, summing to 0.000759. The stopped one reported none, which stays
+  unknown. It is never converted to money.
+- **What stays with Nebius:**
+  - from the first attempt, at most one upload;
+  - from the rerun, 1 upload, 3 images and 8 operation records.
+
+  Images are kept for 180 days, and no API deletes uploads, operation records or logs.
+- **Limits:**
+  - **one passing run:** timings and the upload's reliability weren't measured more than once;
+  - **an upload answered with a server error isn't retried,** as no write is (D33), so a transient 500 ends a check.
+    Retrying an upload, whose worst case is a duplicate file, is left for a later decision;
+  - **the fixture is synthetic and tiny:** a real repository's upload wasn't measured live;
+  - **`git apply --check` ran on a fresh clone,** never on a person's checkout: applying is NIV-8's;
+  - **the live run was from Linux (WSL) only.**
+- **Evidence:** `docs/acceptance.md`, *Nebius sandbox check, B3 (D35, NIV-43)*.
