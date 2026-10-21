@@ -1158,6 +1158,141 @@ Prepared 21 October 2026, at `196cad1` with this record's docs commit, and broug
 - **A follow-up, NIV-46:** the engine creates Mastra's database files readable by others (0644). `nivra.db` is 0600.
   The development home is 0755, so other local users can read `~/.nivra-dev/mastra.db*`.
 
+### Nebius execution session, B1 (D33, NIV-41)
+
+Track B's first checkpoint, offline: D28's pattern A behind the execution contract, with every request inside its
+deadline. On `feature/niv-41`, from `dc48874`:
+
+| Commit | What |
+|---|---|
+| `c9c6755` | Every request, POST and DELETE included, ends by its caller's deadline, and no late answer is taken |
+| `1e065e3` | The execution contract, extended for sessions that run elsewhere; `Local` refuses what coding work needs |
+| `fc82fa1` | The Nebius execution session: one operation per step, with the state moving only on what was kept |
+| `0505da3` | The review of the first draft: closing's budget, torn journal tails, the scan's limit, image counts, a late answer, a listener |
+| `5597249` | The review of PR 7: closing's deadline cuts off a cancel already under way |
+| `fa6ce29` | An independent check of that fix: a stop closing cut off promises no retry, and closing's timer keeps the process alive until it fires |
+
+**The P3, before and after.** These three cases were run against the code at `dc48874`, in a throwaway script that was
+then deleted:
+
+| Case | At `dc48874` | Now |
+|---|---|---|
+| The cap 1 ms away | The spawn's POST and the cancel's DELETE were sent with `timeoutMs` 30000 | Nothing is sent, and `SandboxNotSentError` says so; the cancel is journaled unresolved |
+| An answer 3 s after a 2.5 s deadline | Taken: `SUCCESS` | A deadline error; a late spawn answer is only stopped |
+| A journal whose last line a crash cut short | Unreadable (`SyntaxError`), so cleanup couldn't run | The torn line is left out, and its spawn stays uncertain |
+
+**What the tests show**, all offline, with the fake service or a loopback server:
+
+| Area | Tests | What they cover |
+|---|---|---|
+| Deadlines (`nebius-sandbox.test.ts`) | 8 new, besides the 44 the probe had | A POST or DELETE with 1 ms or 1,999 ms left isn't sent; writes get the time left, not 30 s; late answers; an over-cap answer isn't asked for again; a 250 ms minimum between retries; a spawn refused before sending is journaled as not sent; the probe's uploads keep to its deadline; a torn journal (cut off before the next entry) and a damaged one; a redirect answering a spawn is uncertain |
+| The real transport (`nebius-transport.test.ts`) | 6 | A GET and a POST with no headers, and a body that stops partway, end at their 300 ms deadline; an answer over its cap is refused by its declared length, or cut off as it streams; nothing is sent with under 1 ms left; a spawn whose POST reached the server but got no answer is uncertain, never "not sent" |
+| The contract (`session-contract.ts`) | 6 for each backend | Output and exit code without a shell; a time limit; a cancel; the output cap; a missing program never a success; a second close gives the same report |
+| `Local` | 11 of its own | Process trees and background groups; input and byte output; its budget and signal; a close kept to its budget; it refuses isolation, a snapshot and a command thrown away |
+| The session (`nebius-session.test.ts`) | 37, besides the contract | See below, and the reviews' findings after it |
+
+The session's tests:
+- **What it claims and sends.** Every operation has networking off. Only the prepare step carries the snapshot.
+  Environments hold only the command's own variables and the correlation id. Nothing sent holds the key, the project
+  id or a host path, and the upload is the snapshot's bytes exactly.
+- **Refusals, with nothing sent.**
+  - Sessions: the network not denied; no snapshot, an oversized one, or one with the wrong hash; a bad workspace; a
+    cancelled run; no credentials.
+  - Commands: a relative program; a folder outside the workspace; Nivra's own variable or a bad name in the
+    environment; the key or project id; input or byte output; an over-long timeout; one that doesn't fit the time left;
+    a second command while one runs; more operations than a session may start.
+- **The state.**
+  - Each persisted command's image carries on, and a disposable one leaves the state alone.
+  - A failing exit code is a result, not an error.
+  - A persisted command with no usable image, with an image id that isn't one, that timed out, or that a signal ended
+    leaves the session stale. The next command and any download are then refused, and nothing ran on the older image.
+  - An expired image means the state is lost, with no second upload and no restart from the base image.
+  - Output cut by the service, or by the command's cap, is reported.
+  - A download is bounded, and a missing file is "not found".
+- **Lost and late answers.**
+  - A lost spawn answer is found and followed, with one spawn.
+  - One that can't be found is never sent again; nothing more runs, and closing looks once more.
+  - A spawn answered after the deadline is only stopped.
+  - A `Retry-After` past the deadline gives the command up for closing to stop.
+- **Closing.**
+  - One budget includes stopping the command under way.
+  - Its deadline cuts off a request still under way, a cancel sent before closing began included, with no signal
+    needed. The operation stays journaled, and the next pass stops it.
+  - A second close gives the same report and sends nothing.
+  - "Stopped" is told from "had already ended".
+  - An operation that never stops is reported unresolved, within the budget.
+  - Retention is counted from the journal.
+  - Closing never rejects, even when every request fails.
+- **An open that fails after something was sent closes itself.** That covers a hash that doesn't match, a listing that
+  differs, a failed prepare, and an upload cut off (counted as possibly stored).
+- **Recovery.**
+  - The scan uses no network.
+  - One pass settles what an earlier engine left. A pass that runs out of budget, or that a shutdown stops partway,
+    leaves the rest for the next.
+  - An operation still queued ten hours after its 60 s timeout stays unresolved, and is stopped once the service lists
+    it again.
+  - A damaged journal is reported.
+- **The prepare script,** run with this machine's `sh` and GNU `tar`, prints the digest `listingDigest` computes for the
+  same files. They include:
+  - a link and an executable;
+  - a UTF-8 name, a space and an empty file;
+  - names whose `LC_ALL=C` order differs from a locale's (`B.txt`, `a-b`, `a_b`).
+
+**The independent review of the first draft (`fc82fa1`)** found six gaps. Each was reproduced against that commit
+with the reviewer's scripts, and fixed in `0505da3` with a regression test. The same scripts were run again after the
+fix:
+
+| Finding | At `fc82fa1` | Now |
+|---|---|---|
+| 1. A stop the person's cancel began before closing | `close({budgetMs: 5000})`, its signal aborted at once, took 60,000 ms | The stop reads closing's deadline afresh and closing's signal stops it: 0 ms |
+| 2. A journal whose last line a crash cut short | The next entry was written straight after the fragment, so the journal scanned as damaged for good, and the recovery pass rejected, leaving the other journal untouched | The next entry cuts the fragment off first; each journal's pass is caught on its own |
+| 3. 500 settled journals sorting before one with open work | The scan found none | The scan filters first, and a session that closes with nothing open moves its journal into `settled/` |
+| 4. An image first seen by closing | 2 images kept, 1 counted | 2 counted |
+| 5. A command whose answer came as its run was cancelled | Reported "not started" while it ran; the next command was refused as "may have reached the sandbox" | `ExecUncertainError`, the session unsettled, and closing stops it |
+| 6. A long-lived run signal | 12 listeners left after 12 sessions | 0 |
+
+The review also led to these changes:
+- a redirect answering a spawn is uncertain;
+- a throwing `onStart` is given back only once its command has settled;
+- signal numbers are read as Linux's on every platform;
+- `Local`'s close keeps to a budget;
+- a cancellation before the prepare step says why.
+
+It found no defect in the prepare script or in `listingDigest`'s order.
+
+**The review of PR 7 (21 October)** found one more gap in closing. It was reproduced offline, and fixed in `5597249`
+with a regression test, which fails on the code before the fix:
+
+| Finding | At `b423e90` | Now |
+|---|---|---|
+| A stop's cancel request sent before closing began, its connection still waiting | It kept the time it was given when sent, up to 30 s. In the review's reproduction, `close({budgetMs: 50})` took 424 ms; with the connection held open, closing was still waiting after 5 s | Closing's deadline cuts it off, as its signal does. The operation is reported unresolved and stays journaled, and the next pass stops it |
+
+An independent check of the fix found no defect in it. With no signal and a 50 ms budget, closing ended in 53–56 ms with a cancel, an operation read or a cleanup search held, and with a poll wait under way; budgets of 0 and −10 ended at once. It found two smaller things, fixed in `fa6ce29`:
+- once closing had cut a stop off, the command's error still said closing would try again, which it then can't. It now says the operation stays journaled for the next recovery pass;
+- the timer was unref'd, so with nothing else waiting the process could end with closing pending. It now keeps the process alive until it fires.
+
+**Checks**
+- `pnpm verify`: 483 passed (domain 36, engine 266, desktop 181), none skipped. The baseline at `dc48874` was 419.
+- After main was merged in (`b423e90`) and the review of PR 7's fix (`5597249`, then `fa6ce29`): `pnpm verify` 589 passed (domain 43, engine 347, desktop 199), none
+  skipped. A real engine answered `doctor` and ran `hello` again.
+- `pnpm probe:sandbox --plan` prints the same steps and limits. Its deadline line now says that every request, POST and
+  DELETE too, ends by the 20 minutes.
+- A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`, before the review's fixes and again after
+  them:
+  - `doctor` answered;
+  - a `hello` run succeeded, every step through `Local`'s session included.
+- **Not run:**
+  - the Windows and packaged checks: no target, supervisor, staging, main or preload code changed;
+  - any live Nebius call: B1 needs none. B3's approved recipe is the first.
+
+**Limits**
+- **Not wired into the engine or the app.** No run uses the session yet (B4).
+- **Not shown live yet** (B3's run will show them):
+  - that busybox runs the prepare script as this machine's tools do;
+  - the service's answer for an expired image (404 or 410 is assumed);
+  - the upload API's size limit (the cap is 8 MiB).
+- **Usage** is kept raw, and null when absent. No cost is turned into money.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

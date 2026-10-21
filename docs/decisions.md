@@ -1640,3 +1640,149 @@ evidence (D27), against thresholds agreed before it ran.
   - the decision: `c72c3bbe…b5f1`.
 - **Evidence:** `docs/acceptance.md`, *Council evaluation (D32, NIV-40)*, and
   `~/nivra-acceptance/council-eval-20261020T202836Z-196cad1/`.
+
+## D33. The Nebius execution session: one operation per step behind the execution contract, every request inside its deadline, and the state moving only on what was kept (2026-10-20)
+
+**Decision.** This is B1 of Track B (NIV-41, part of NIV-34). It promotes D28's pattern A into the engine's execution
+contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
+
+- **The contract (D9), extended as little as B2 to B4 need.**
+  - **Sessions.** `SessionSpec` gains four optional fields:
+    - `requires.isolatesFilesystem`;
+    - a `snapshot`: one tar, its sha256, and the digest of what it gives once extracted;
+    - `budgetMs`;
+    - a `signal`.
+
+    `checkRequirements` refuses a boundary the backend doesn't claim before anything is sent. `Local` refuses
+    isolation, a snapshot and a command thrown away, so coding work can never fall back to it. This replaces the
+    separate `SandboxBackend` type that `system-architecture.md` §11.2 planned.
+  - **Commands.** `ExecRequest` gains `persist`, an engine-chosen `label`, `stdin` and byte output. Only `Local` offers
+    the last two, for the engine's own git, which AGENTS.md routes through a session.
+  - **Results.** `ExecResult` gains `persisted`. It still carries no provider id, so routing can't reach a model prompt.
+  - **Download and close.** `ExecutionSession` gains a bounded `download`. `close` takes an optional signal and budget,
+    and resolves to a `CloseReport`:
+    - each step's record;
+    - what was stopped, and what had already ended;
+    - what stays unresolved;
+    - what the provider keeps.
+
+    It never rejects, and a second call gives the same report.
+  - **New errors:**
+    - `ExecUncertainError`: it isn't known whether a command started, and it is never sent again;
+    - `SessionOpenError`: an open that failed after something was sent; it carries its cleanup's report.
+  - D9's `runMain` isn't added: the worker runs in the engine (§11.1).
+- **Every request ends by its caller's deadline, writes included.** This answers the P3 the final review of PR 5
+  accepted. At `dc48874`, with 1 ms left under the probe's cap, the spawn's POST and the cancel's DELETE were sent with
+  30,000 ms each.
+  - **The deadline.** Every public `SandboxApi` method requires `until`. A request's timeout is the smaller of its
+    limit and the whole milliseconds left.
+  - **"Not sent".** A write needs `minWriteMs` (2 s) left. With less, or once cancelled, nothing is handed to the
+    transport, and `SandboxNotSentError` says so. That is the only case in which "not sent" is established.
+  - **Late answers.** An answer that comes after the deadline or the cancellation is never taken as a result. A late
+    spawn answer gets an error of its own (`SandboxLateSpawnError`), whatever the signal says. It is journaled, so
+    cleanup can stop that operation, and it is never reported as "not started".
+  - **Bounded answers.** Answers are bounded as they stream, and one over its cap isn't asked for again. A retry waits
+    at least 250 ms.
+  - **Supersedes D28's** "Stage 1 is stopped at 20 minutes, a hard limit". That held for reads and waits, but not for
+    an upload, spawn or cancel begun just before the cap, which kept its own 30 s. It holds for them now. D28 isn't
+    edited.
+- **The journal.**
+  - Each line is flushed before its request.
+  - A last line torn by a crash is left out, and its spawn stays uncertain. The next entry cuts that line off first, so
+    it never turns into damage.
+  - A session that closes with nothing open moves its journal into `settled/`. It is kept, as the record of what was
+    sent.
+  - It also records:
+    - a spawn its client refused to send, as not sent;
+    - each cancel's answer;
+    - every image an operation reports;
+    - each upload.
+- **The session** (`exec/nebius/session.ts`, `createNebiusBackend`).
+  - **What it claims:**
+    - `isolatesFilesystem`;
+    - an on/off network;
+    - no injected credentials;
+    - files kept between persisted commands.
+
+    CPU and memory limits aren't claimed. Every operation runs with networking off. A session that asks for network
+    access is refused, never run with it.
+  - **Open.**
+    1. It journals the session, then uploads the snapshot once.
+    2. It runs one prepare operation: a fixed script, given everything as arguments. The script extracts the archive
+       outside the workspace and prints a digest of a canonical listing of what it holds (`listingDigest`).
+    3. That digest must match the snapshot's.
+
+    Once anything was sent, a failure closes the session.
+  - **Commands.** One owned operation at a time, from the current image. Its environment is the command's own, plus a
+    correlation id. Refused before dispatch:
+    - a relative program, or a folder outside the workspace;
+    - the key or project id anywhere in the request;
+    - input or byte output;
+    - a timeout over the cap or past the deadline;
+    - more operations than a session may start.
+  - **The state moves on only when a persisted command ended on its own,** with SUCCESS and an image Nivra can use.
+    Otherwise the session is stale, and the next command and any download are refused. A 404 or 410 from a state image
+    means the state is lost. Nothing is recreated from the snapshot.
+  - **Lost answers.** A lost spawn answer is looked for by its correlation id. Not found, the session is unsettled
+    until it is closed.
+  - **Cancels.** An abort stops the operation on a client of its own, and `cancelled` is claimed only once CANCELLED
+    is seen.
+  - **Close** has one budget that includes stopping the command under way, however that stop began.
+    - Its deadline and its signal each cut off a request still under way, a cancel sent before closing began
+      included. What that leaves open stays journaled.
+    - It reconciles, then cancels only the session's own operations, then searches again.
+    - "Stopped" means CANCELLED after an accepted cancel.
+  - **Recovery.**
+    - `scanJournals` is local only. It reads the journals left in place, which are the few that may need something,
+      and says how many it couldn't read.
+    - `reconcileJournals` makes one bounded pass. A pass that runs out of time, or is stopped, leaves the rest for the
+      next, and a journal it can't read never stops the others.
+    - **Age never settles an operation.** One still queued long after its timeout stays unresolved until a terminal
+      status, or a verified expiry guarantee from the provider, settles it.
+  - **Retention** is counted from the journal: every image an operation reports is journaled where its end is seen.
+  - **Limits** (defaults, all configurable):
+    - 40 operations a session;
+    - commands up to 600 s;
+    - an 8 MiB upload, and 16 MiB downloads;
+    - 64 KiB of output a stream;
+    - a 30-minute session;
+    - a 7-minute close.
+
+**Why.**
+- **NIV-41 and the review.** NIV-41 asks for these behaviours. The P3 showed the hard limit was weaker than its wording.
+- **SUCCESS isn't enough.** Live, a timeout came back as SUCCESS, with exit -1 and signal 9 (D28). So SUCCESS alone
+  doesn't say a command's changes are what it meant to leave.
+- **Nate's review of the plan (20 October)** asked for:
+  - a test of a persisted command with no usable image;
+  - recovery that fits the engine's lifecycle;
+  - no operation retired for its age.
+- **An approval is not a boundary (D9).** Asking the one contract for isolation keeps `Local` out of coding work, without
+  a second framework.
+- **An independent review of the first draft (`fc82fa1`)** found six gaps. Each was reproduced against that commit,
+  then fixed with a regression test in `0505da3`:
+  1. a stop begun before closing ignored closing's budget and signal;
+  2. a torn journal tail became damage once the next entry was written, and one damaged journal stopped the whole
+     recovery pass;
+  3. the scan's limit came before its filter, so open work could be missed;
+  4. images first seen by cleanup weren't counted;
+  5. a command made as its run was cancelled was reported "not started";
+  6. a listener stayed on a long-lived run signal.
+- **The review of PR 7 (21 October)** found one more. A stop's cancel request, sent before closing began, kept the time
+  it was given then, up to 30 s: in its reproduction, a close given 50 ms took 424 ms. Closing's deadline now cuts that
+  request off, as its signal did (`5597249`).
+
+**Consequences.**
+- **What comes next.**
+  - **B2** builds the snapshot (the tar, its manifest and `listingDigest`), the collect step and the patch.
+  - **B3** runs the prescribed path offline, then one approved live recipe.
+  - **B4** wires it in:
+    - journals under `<home>/sandbox/`;
+    - `scanJournals` at engine start;
+    - one background pass once credentials arrive;
+    - the project id, as a secret.
+- **Unverified until B3's live run:**
+  - that busybox runs the prepare script as this machine's `sh` and GNU tools do;
+  - the service's answer for an expired image (404 or 410 assumed);
+  - the upload API's size limit.
+- **Unchanged:** the probe's evidence and D28's measurements. The probe keeps its own steps and gains the same deadlines.
+- **Evidence:** `docs/acceptance.md`, *Nebius execution session, B1 (D33, NIV-41)*.

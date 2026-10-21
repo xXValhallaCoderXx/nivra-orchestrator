@@ -188,9 +188,11 @@ pnpm probe:sandbox --credentials <file> --recover <evidence folder>
   - no model calls and no installs.
 - **The token.** Stage 1 first reads the account twice, 15 s apart. It starts only if the token is renewed with each
   request (as it was on 20 October), or stays valid long enough for stage 1 and its cleanup.
-- **Deadlines.** Stage 1 stops at 20 minutes, a hard limit: no wait goes past it, no read is made after it, and nothing
-  starts after it. Cleanup then takes at most 7 minutes. Every request's timeout is capped by the time its caller has
-  left.
+- **Deadlines.** Stage 1 stops at 20 minutes, a hard limit: no wait goes past it, every request ends by it, POST and
+  DELETE included (D33), and nothing starts after it. Cleanup then takes at most 7 minutes, on the same terms.
+  - A request's timeout is the smaller of its own limit and the time its caller has left.
+  - A write needs 2 s left to be sent at all.
+  - No answer is taken after its deadline.
 - **Evidence** goes to `~/nivra-acceptance/sandbox-probe-<UTC>/` (0700): the journal, each step's outcome, how each of
   pattern B's subprocesses ended, the verdicts and a summary.
 - **Interruption.**
@@ -265,6 +267,22 @@ pnpm council:eval --score <dir>                                    # once the sh
 - **Evidence** goes to `~/nivra-acceptance/council-eval-<UTC>-<revision>/` (0700): the journal, every run's summary,
   events and report, the engine's home and log, the sheet, the scores and `decision.md`.
 
+The Nebius execution session (NIV-41, D33) is the sandbox probe's client and journal behind the execution contract, in
+`apps/engine/src/exec/nebius/session.ts`. Nothing runs on it yet: it isn't wired into the engine or the app (B4,
+NIV-44). Its tests run offline, against the fake service in `apps/engine/test/fake-sandboxes.ts` and a loopback server:
+
+```bash
+cd apps/engine && node --test test/nebius-session.test.ts test/nebius-transport.test.ts test/nebius-sandbox.test.ts test/local-backend.test.ts
+```
+
+- **The contract suite.** It is in `test/session-contract.ts`, and both `Local` and the session run it. A new backend
+  supplies programs that behave as named, and runs it too.
+- **The journals.** A session journals into a folder its caller gives, one file per session (0700 folder, 0600 files).
+  - A session that closes with nothing open moves its journal into `settled/` there.
+  - `scanJournals` lists what an earlier engine left open, without using the network, and says how many journals it
+    couldn't read.
+  - `reconcileJournals` settles what the scan found in one bounded pass.
+
 ## Where things will live
 
 | What | Where |
@@ -293,4 +311,5 @@ distribution. One engine holds a home at a time (D7), so the second to start is 
 - Capturing the login shell's PATH for tools the engine starts. Until then, tools are looked up in the engine's own
   PATH, with WSL's leaked Windows folders removed. **Required before agents run builds (D15)**: nvm and similar are
   invisible to `wsl.exe --exec`.
-- Workspaces, patch checks and approved apply for agent writes (D15).
+- Workspaces, patch checks and approved apply for agent writes (D15). The Nebius execution session they will run in is
+  built (D33), but not wired into the engine.
