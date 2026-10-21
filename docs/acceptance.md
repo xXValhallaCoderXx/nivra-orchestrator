@@ -1490,6 +1490,8 @@ behind upload consent of its own. On `feature/niv-44`, stacked on B3 (`a1622ed`)
 | `d4245bd` | The engine and the domain: protocol 8, the `sandbox` workflow, the preview, the report, recovery on the engine's lifecycle |
 | `aa44fa6` | The host: upload consent of its own, the consent races around `runs.start`, the project id kept like the key, the IPC |
 | `9e974b5` | The window: the project id in Settings, and the sandbox check's preview, consent, progress and report |
+| `e9ad7fa` | The docs: D36, this evidence, the check's notes and the architecture rows |
+| `a04af11` | The independent review's six findings, below |
 
 **NIV-44's criteria, shown:**
 
@@ -1498,42 +1500,71 @@ behind upload consent of its own. On `feature/niv-44`, stacked on B3 (`a1622ed`)
 | The adapter through the owning engine, with typed contracts; the renderer sends project ids only | `packages/domain/test/sandbox.test.ts`, `sandbox-engine.test.ts`, `ipc-wiring.test.ts` | `runs.start`'s `sandbox` branch takes a checkout, the project and target it is bound to, and a preview's fingerprint. It takes no command and no key, and refuses another workflow's context. Every call is a named preload function, checked by sender and by zod |
 | Secrets through `initialize` and `secrets.update` only; never in inputs, events, journals or the guest | `sandbox-engine.test.ts`, "runs a check on the production adapter…"; `host.test.ts`, "keeps the two opt-ins apart…" | Every request carries the key and project id in headers, and no body carries either, or the engine's home. The run's events hold neither. After the host shuts down, no file under its folder holds either |
 | Upload consent of its own, off at first, in all four combinations, with the scope and retention shown first | `host.test.ts`, "keeps the two opt-ins apart in all four combinations…"; `sandbox.spec.ts` | Both start off. A check uploads once only with `cloudExecution`, and an explanation starts only with `modelContext`, in every combination. The window's dialog shows the commit, the files and bytes, what's left out and what Nebius keeps, and says it is separate from Token Factory |
-| Revocation blocks transfers and cancels owned work; races checked again before dispatch; what stays reported | `host.test.ts`, five tests | Refused before any engine starts; never sent when withdrawn while the engine starts; cancelled as soon as an in-flight `runs.start` answers; a lost answer found by its request id and stopped, with `runs.start` sent once; a running check's operation asked to stop, its report saying what Nebius keeps; a removed project's check stopped |
-| The deterministic path through a real engine: routing, consent, bounded results, cancellation, uncertain submission, restart reconciliation, unresolved cleanup | `sandbox-engine.test.ts`, 7 tests | Below |
+| Revocation blocks transfers and cancels owned work; races checked again before dispatch; what stays reported | `host.test.ts`, nine tests | Refused before any engine starts; never sent when withdrawn while the engine starts, the engine's store holding no run; one check of a project at a time; cancelled as soon as an in-flight `runs.start` answers; a lost answer found by its request id and stopped, with `runs.start` sent once; an error answer with no record said to have sent nothing, in the engine's words; a found check whose stop fails kept known; a check that can't be read still stopped; a running check's operation asked to stop, its report saying what Nebius keeps; a removed project's check stopped |
+| The deterministic path through a real engine: routing, consent, bounded results, cancellation, uncertain submission, restart reconciliation, unresolved cleanup | `sandbox-engine.test.ts`, 10 tests | Below |
 | Named IPC, a narrow UI, existing run reporting; no task execution | `sandbox.spec.ts`; the Run button's existing test | The check's progress is the run's own events. Run stays unavailable |
 
 **The real engine tests,** a stdio engine with the production adapter against the stand-in in
 `test/stub-sandboxes.ts`:
-- **A preview** sends nothing, and refuses a commit holding the vault's own key in base64, naming the file.
+- **A preview** sends nothing, and refuses a commit holding the vault's own key in base64, naming the file. A commit
+  that only names the project id isn't refused.
 - **A whole check:**
   - one upload, and three operations (prepare, probe, collect), each with networking off;
   - the report is bound to the preview's fingerprint: outcome `unchanged`, the probe's busybox line, nothing unresolved, one upload kept;
   - the session's journal moves to `settled/`.
 - **Refusals with nothing sent:** no upload consent; no key and project id; a commit changed since its preview; the same request id with another preview.
+- **One check of a project at a time:** a second start is refused and never recorded, a repeated request gets its run, and once the first has ended the project is checked again.
+- **A failure before the session** (no git on the engine's PATH) ends with a final report in the git stop's words, and nothing sent.
 - **A cancel:** the probe's operation is asked to stop, the run ends cancelled, and cleanup's record counts one stopped.
 - **An uncertain spawn:**
   - the probe's answer is lost and the operation is hidden;
   - it is never sent again, and the report lists it as unresolved, in cleanup's own words;
   - a later engine on the same home, with no credentials yet, lists the journal with no network and waits;
   - given the credentials, its pass finds the operation and stops it, replaying nothing.
+- **A pass that ends while a check goes,** its stop held by the stand-in until the check's probe is out: the journal it settled leaves the list, saving the key again starts no pass on it, and nothing is reported left open.
 - **An engine killed mid-check:** the next engine reads the check as interrupted, and its pass stops the operation it left running.
 
 **Through `rpc.ts`,** on `~/.nivra-dev-track-b`, against the stand-in on 127.0.0.1:
 - `doctor` answered;
 - `sandbox.preview` of a throwaway repository gave 2 files, 3,584 bytes from its commit;
 - a whole check succeeded with outcome `unchanged`. The stand-in saw nine requests, each with the credentials in headers: one upload, three operations with networking off, three reads, and two downloads.
+- After the review's fixes, the same again, with the same nine requests; `sandbox.status` then listed nothing open.
+
+**The independent review of the first draft,** by an agent that took no part in writing it, on 21 October. It left the
+worktree untouched and reproduced each gap with its own script before reporting it:
+
+| Finding | At `e9ad7fa` | After `a04af11` | Shown by |
+|---|---|---|---|
+| 1. Two starts of one project at once | Both uploaded and probed. Turning uploads off stopped one; the other stayed `EXECUTING` | The second is refused before the first waits: one upload, one probe, stopped by one DELETE. The engine refuses a second run of the project too | `host.test.ts`, "starts one check of a project at a time…"; `sandbox-engine.test.ts`, "runs one check of a project at a time…"; `sandbox.spec.ts` presses Allow twice |
+| 2. A pass that ends while a check goes | The journal it settled stayed listed. Saving the key again started a pass on it, which reported "couldn't be settled, and may still be running" | The pass's list drops what it settled, and what was moved aside: no second pass, nothing reported | `sandbox-engine.test.ts`, "never looks again at a journal…" |
+| 3. Host paths that should be states | Turning uploads off threw before any cancel when the run couldn't be read, and so did the view. A found check whose stop failed was searched for again, and could end up lost | An unreadable check is taken as going and stopped, and reads as `unknown`. A found check stays known, with the failure in its note | `host.test.ts`, "treats a check it can't read…", "keeps a found check known…" |
+| 4. Words beyond what was shown | "nothing left out: 1 file…"; "was stopped. What it uploaded stays" for a check still being sent; "couldn't stop them all" with no pass run; a check with no git read as interrupted | "left out, and never sent"; "is being stopped. Anything it uploaded stays"; the line follows the pass, read again while one runs; a failure before the session saves its own report | `sandbox-engine.test.ts`, "ends a check that fails before its session…"; the rest by reading |
+| 5. The project id | Reached children's environments. A Terraform file naming it was refused as holding a secret | Stripped with the provider variables. Only the key refuses a commit | `units.test.ts`, `wsl.test.ts`, and the preview test |
+| 6. A claim and a test | A comment said consent could change between the steps. "Never sends one withdrawn while its engine starts" would have passed had `runs.start` been sent | The comment says what holds. The test reads the engine's store, which holds no run | `host.test.ts`, "refuses a check while uploads are off…" |
+
+- **Each fix undone alone fails its test:**
+  - without the host's claim, both starts were fulfilled;
+  - without the engine's refusal, the second start went through;
+  - with a failed stop sent round the search again, as before, no note came;
+  - with an unreadable check not taken as going, or the view not catching, the calls rejected;
+  - without the run step's report, it read `interrupted`;
+  - without the pass's list fixes, `open` stayed 1;
+  - without the engine's words, the note said only that there was no record.
+- **Also found sound** by the review: D29's words, the secrets' paths, the strict context, the preview's binding, the
+  finder's store check and stdin order, recovery's exclusion of a live session's journal, shutdown, early cancels, the
+  scan's cost and the IPC checks.
 
 **Checks**
-- `pnpm verify`: 687 passed (domain 48, engine 434, desktop 205), none skipped. B3 ended at 663.
-- `test:e2e`: 45 passed, 1 skipped (explain's packaged-only test). The two new window tests are in `e2e/sandbox.spec.ts`.
-- `test:packaged`: 24 passed, 22 skipped, after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`. The skips are the two new window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores.
+- `pnpm verify`: 694 passed (domain 48, engine 437, desktop 209), none skipped. It was 687 before the review's fixes, and B3 ended at 663.
+- `test:e2e`: 45 passed, 1 skipped (explain's packaged-only test), before and after the fixes. The two new window tests are in `e2e/sandbox.spec.ts`; the first now presses Allow twice and sees one upload.
+- `test:packaged`: 24 passed, 22 skipped, before and after the fixes, each time after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`. The skips are the two new window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores.
 - **Not run:**
   - `verify:windows` and `test:windows`: they wait for a Windows turn agreed with Track A;
   - any live call: B4 makes none. B3's approved run is still to come, and its evidence is reused here only where the bytes and path match.
 
 **Limits**
 - **Not run live.** The stand-in follows the documentation and D28's live runs; B3's approved run is the live evidence.
-- **One check of a project at a time,** and the host keeps a project's last check for the session only.
+- **One check of a project at a time,** kept by the host and the engine, and the host keeps a project's last check for the session only.
 - **A check proposes nothing,** so nothing here reads or keeps a patch: that comes with NIV-7 and NIV-8.
 - **No button settles what earlier sessions left open.** A pass runs when the credentials are handed to the engine: at its start, or when the key or project id is saved.
 - **Native Windows** is claimed only once `test:windows` has run.

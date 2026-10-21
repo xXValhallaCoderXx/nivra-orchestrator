@@ -2022,20 +2022,27 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
   - Consent and an epoch of its own are checked immediately before `runs.start`, and again on its answer: a check
     started while uploads were being turned off is cancelled at once.
   - A start whose answer was lost is found by its request id on the same engine store (D26), never sent again. Found
-    after consent was withdrawn, it is stopped. Absent from that store, it never arrived.
-  - Turning uploads off, or removing the project, cancels the project's check. The project's notice says what stays
-    with Nebius.
+    after consent was withdrawn, it is stopped; found but not stoppable, it stays known, and the window says so.
+    Absent from that store, nothing was sent, and an error answer's own words say why.
+  - Turning uploads off, or removing the project, cancels the project's check. A check whose state can't be read is
+    taken as going, so it is stopped too. The project's notice says the check is being stopped, and what Nebius
+    keeps of anything it uploaded.
+  - **One check of a project at a time.** The host claims the project before its first wait, so a second start, a
+    double press say, is refused. The engine refuses a second `sandbox` run of a project while one is queued or
+    running, recording nothing; a repeated request still gets its own run.
 - **Protocol 8.**
   - `runs.start` gains a `sandbox` branch: input `{ repoPath, project, target, preview }`, context
     `{ sharing: { cloudExecution } }`, held in memory (D21).
   - `sandbox.preview` gives what a check would send, with no network.
   - `runs.sandbox` gives a check's report, whatever its status; one saved before its engine stopped reads as
-    interrupted.
+    interrupted. A check that fails before its session (no git, say) saves a final report saying so.
   - `sandbox.status` and `sandbox.recover` give what an earlier engine left open, and its recovery pass.
   - `SecretName` gains `NEBIUS_PROJECT_ID`.
 - **Credentials (D8).** The host keeps the key and the project id in secure storage and hands them to every engine in
-  `initialize` and `secrets.update` only. The adapter sends them in headers only. The vault's values refuse a commit
-  that holds one, and a change that adds one (D34).
+  `initialize` and `secrets.update` only. The adapter sends them in headers only, and neither reaches a child's
+  environment. The key refuses a commit that holds it, and a change that adds it (D34). The project id doesn't: it
+  names the account uploads go to, so a commit naming it, as infrastructure code does, tells Nebius nothing new. Like
+  every vault value, it is masked in what the engine stores.
 - **What leaves the engine (D29).**
   - A stopped check's failure, its events and its log lines carry Nivra's own words, chosen by its stop code.
   - Of cleanup's record, only its own templates leave, filled with step labels and ids. Anything else, which can carry
@@ -2047,6 +2054,9 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
   - At start, a local scan of the journals under `<home>/sandbox/`, with no network, so start never waits on Nebius.
   - Once the key and project id arrive, one background pass on closing's budget. A D4 shutdown aborts it, and a
     check's cleanup too; what they leave stays journaled for the next start.
+  - **The pass's list.** It is read again only while no check is going, so it never holds the journal of a session
+    this engine has open, and a pass may run beside a check. A journal the pass settles leaves the list at once, and
+    one moved aside since it was read counts as settled: no later pass looks at either again.
   - Nothing is replayed, and age never settles an operation. What stays open is shown, for a person to follow up.
 - **Test endpoints.** `--sandboxes-url` points the adapter at a stub on this machine (loopback only), as
   `--token-factory-url` does, and an unpackaged app passes `--nivra-sandboxes-url` through.
@@ -2067,12 +2077,25 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
   since is refused before the upload, as D31's previews are for reviews.
 - **Nothing is guessed.** A lost answer is looked up by its request id, as D26's turns are; a start that can't be
   settled is reported, never retried.
+- **The independent review of the first draft (21 October)** found six gaps. Each was reproduced, then fixed
+  (`a04af11`):
+  1. two starts of one project at once both uploaded, and turning uploads off stopped only one;
+  2. a pass that ended while a check went left the journals it settled listed, so the next pass reported them as
+     possibly still running;
+  3. a check whose state couldn't be read kept uploads being turned off from stopping it, and read as an error rather
+     than a state; a found check whose stop failed was later taken for lost;
+  4. words that claimed more than was shown: the consent list's "nothing left out", the stopped notice for a check that
+     had uploaded nothing, "couldn't stop them all" when no pass had run, and a failure before the session read as
+     interrupted;
+  5. the project id reached children's environments, and refused any commit naming it;
+  6. a comment saying consent could change between the steps, and a test that couldn't fail.
 
 **Consequences.**
 - **Track A's proposal on NIV-41,** safe codes on the boundary errors, isn't needed by a check, which reports by its
   own stop codes. It stays a refinement for Track A's own runs.
 - **Limits:**
-  - one check of a project at a time; the host keeps a project's last check for the session only;
+  - one check of a project at a time, kept by the host and the engine; the host keeps a project's last check for the
+    session only;
   - a check proposes nothing, so nothing here reads or keeps a patch;
   - the window shows what earlier sessions left open, but has no button to settle it. A pass runs whenever the
     credentials are handed to the engine: at its start, or when the key or project id is saved. `sandbox.recover` is

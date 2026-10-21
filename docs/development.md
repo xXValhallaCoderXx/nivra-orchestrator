@@ -317,7 +317,9 @@ cd apps/engine && node --test test/sandbox-engine.test.ts test/check.test.ts
 - **The engine's journals** are under `<home>/sandbox/`. One that closed with nothing open is in `sandbox/settled/`;
   what an earlier engine left open is listed by `sandbox.status`, and settled by a pass once the credentials arrive.
 - **The real engine tests** (`sandbox-engine.test.ts`) run the production adapter against the stand-in: a preview, a
-  whole check, refusals, a cancel, an uncertain spawn settled by a later engine, and an engine killed mid-check.
+  whole check, refusals, one check of a project at a time, a failure before the session, a cancel, an uncertain spawn
+  settled by a later engine, a pass that ends while a check goes, and an engine killed mid-check. The stand-in's
+  `before` hook holds chosen requests, so a test can act while one is out.
 
 ## Where things will live
 
