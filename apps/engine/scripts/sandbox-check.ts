@@ -28,6 +28,7 @@ import { createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals } f
 import { runPrescribed, type PrescribedResult } from "../src/exec/prescribed.ts";
 import { canonicalJson, verifyProposal } from "../src/exec/proposal.ts";
 import { takeSnapshot } from "../src/exec/snapshot.ts";
+import { saveBoundEvidence } from "./sandbox-evidence.ts";
 import { APPROVED, buildFixture, DENY, EXPECTED_CHANGE, FIXTURE, fixtureRecipe, IMAGE, networkVerdict } from "./sandbox-fixture.ts";
 
 const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
@@ -323,9 +324,10 @@ if (result.proposal) {
   const applied = applyCheck.status === 0 ? run(["apply", join(parent, "change.patch")], clone) : applyCheck;
   const tree = applied.status === 0 && run(["add", "-A"], clone).status === 0 ? run(["write-tree"], clone).stdout.trim() : "";
   check("the applied patch gives the bound result tree", tree === proposal.binding.resultTree, `${tree || "not applied"} against ${proposal.binding.resultTree}`);
-  write(join(folder, "change.patch"), new TextDecoder().decode(proposal.patch));
+  // The patch and the report exactly as bound, so the evidence checks out against the proposal on its own.
+  const evidence = saveBoundEvidence(folder, proposal, [keys.key, keys.project]);
+  if (evidence.held.length) recorded.push(`not saved, as they held a credential: ${evidence.held.join(", ")}`);
   write(join(folder, "proposal.json"), { hash: proposal.hash, binding: proposal.binding });
-  write(join(folder, "report.json"), report);
 }
 check("the fixture's checkout is unchanged", changed(checkoutBefore, folderState(fixture.root)).length === 0, changed(checkoutBefore, folderState(fixture.root)).join(", ") || "every name, mode, size, time and byte");
 check("the release engine home (~/.nivra) is unchanged", changed(homeBefore, folderState(home, true)).length === 0, changed(homeBefore, folderState(home, true)).slice(0, 5).join(", ") || "every name, mode, size and time");

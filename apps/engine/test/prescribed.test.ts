@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -10,6 +10,7 @@ import { createLocalBackend } from "../src/exec/local.ts";
 import { createNebiusBackend, PREPARE_SCRIPT, reconcileJournals, scanJournals } from "../src/exec/nebius/session.ts";
 import { runPrescribed, type PrescribedRun } from "../src/exec/prescribed.ts";
 import { proposalHash, verifyProposal } from "../src/exec/proposal.ts";
+import { saveBoundEvidence } from "../scripts/sandbox-evidence.ts";
 import { APPROVED, applyFixedEdit, buildFixture, CHECK_SCRIPT, DENY, EDIT_SCRIPT, EXPECTED_CHANGE, FAIL_SCRIPT, fixtureRecipe, LONG_ADDED, NETWORK_SCRIPT, networkVerdict, type GuestNode } from "../scripts/sandbox-fixture.ts";
 import { FakeGuest } from "./fake-guest.ts";
 import { clock, holding, spawned } from "./fake-sandboxes.ts";
@@ -116,6 +117,11 @@ describe("the prescribed path", () => {
     assert.deepEqual(report.modeChanges, EXPECTED_CHANGE.modeChanges);
     assert.equal(sha(proposal.report), proposal.binding.reportSha256);
     assert.equal(treeAfterApplying(h.root, proposal.patch), proposal.binding.resultTree);
+    // The live check saves the patch and the report as they were bound, so its evidence checks out on its own.
+    const evidence = scratch("evidence");
+    assert.deepEqual(saveBoundEvidence(evidence, proposal, [KEY, PROJECT]), { saved: ["change.patch", "report.json", "report.readable.json"], held: [] });
+    assert.deepEqual([sha(readFileSync(join(evidence, "change.patch"))), sha(readFileSync(join(evidence, "report.json")))], [proposal.binding.patchSha256, proposal.binding.reportSha256]);
+    assert.deepEqual(JSON.parse(readFileSync(join(evidence, "report.readable.json"), "utf8")), JSON.parse(decode(proposal.report)));
     // The report the person approves holds what happened: every step as recorded, and every operation the session
     // ran, its own prepare step first, each with its status and usage.
     const bound = JSON.parse(decode(proposal.report)) as { steps: unknown; operations: Array<{ label: string; status: string; usage: unknown }> };
@@ -434,6 +440,19 @@ describe("the fixture's scripts on this machine's tools", () => {
       { baseline: h.baseline, archiveSha256: snapshot.archive.sha256, listingDigest: snapshot.archive.listingDigest, archiveBytes: snapshot.archive.archive.byteLength },
       { ...APPROVED },
     );
+  });
+
+  it("saves evidence as the bytes that were bound, never decoded, masked or given a newline, and never bytes holding a credential", () => {
+    // A latin-1 byte, which isn't UTF-8 on its own: decoding it as text would change it.
+    const patch = new Uint8Array([...new TextEncoder().encode("diff --git a/x b/x\n+caf"), 0xe9, 0x0a]);
+    const report = new TextEncoder().encode(JSON.stringify({ b: 1, a: [2] }));
+    const folder = scratch("evidence");
+    assert.deepEqual(saveBoundEvidence(folder, { patch, report }, [KEY, PROJECT, ""]), { saved: ["change.patch", "report.json", "report.readable.json"], held: [] });
+    assert.deepEqual([sha(readFileSync(join(folder, "change.patch"))), sha(readFileSync(join(folder, "report.json")))], [sha(patch), sha(report)]);
+    // Bytes holding the key are never saved: masking them would change what was bound.
+    const leaky = scratch("evidence");
+    assert.deepEqual(saveBoundEvidence(leaky, { patch: new TextEncoder().encode(`+${KEY}\n`), report }, [KEY, PROJECT]), { saved: ["report.json", "report.readable.json"], held: ["change.patch"] });
+    assert.deepEqual(readdirSync(leaky).sort(), ["report.json", "report.readable.json"]);
   });
 
   it("passes the network step only with loopback alone and both attempts failing for want of a network", () => {
