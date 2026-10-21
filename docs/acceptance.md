@@ -1558,16 +1558,19 @@ worktree untouched and reproduced each gap with its own script before reporting 
 - `pnpm verify`: 694 passed (domain 48, engine 437, desktop 209), none skipped. It was 687 before the review's fixes, and B3 ended at 663.
 - `test:e2e`: 45 passed, 1 skipped (explain's packaged-only test), before and after the fixes. The two new window tests are in `e2e/sandbox.spec.ts`; the first now presses Allow twice and sees one upload.
 - `test:packaged`: 24 passed, 22 skipped, before and after the fixes, each time after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`. The skips are the two new window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores.
-- **Not run:**
-  - `verify:windows` and `test:windows`: they wait for a Windows turn agreed with Track A;
-  - any live call: B4 makes none. B3's approved run is still to come, and its evidence is reused here only where the bytes and path match.
+- **On Windows,** in a turn Nate agreed on 21 October, at `69c47b1`, after `stage:runtime all`:
+  - `verify:windows --skip-stage`: 22 of 22 checks passed, on the native engine and on the WSL engine driven by a real Windows process. The release's `~/.nivra` was as it was, and the run's own WSL home was removed;
+  - `test:windows`: 11 passed, against the build `dev:win --skip-stage --no-launch` copied;
+  - no tracked file under `apps/` or `packages/` was written while they ran, checked by each file's size and time before and after.
+- **Not run:** any live call: B4 makes none. B3's approved run is still to come, and its evidence is reused here only where the bytes and path match.
 
 **Limits**
 - **Not run live.** The stand-in follows the documentation and D28's live runs; B3's approved run is the live evidence.
 - **One check of a project at a time,** kept by the host and the engine, and the host keeps a project's last check for the session only.
 - **A check proposes nothing,** so nothing here reads or keeps a patch: that comes with NIV-7 and NIV-8.
 - **No button settles what earlier sessions left open.** A pass runs when the credentials are handed to the engine: at its start, or when the key or project id is saved.
-- **Native Windows** is claimed only once `test:windows` has run.
+- **No sandbox check has run on Windows.** `verify:windows` and `test:windows` show B4's host, preload and window on
+  Windows, with both engines. A check needs the test endpoint switch, which a packaged build ignores, or a live call.
 
 ### Deferred to a later milestone (kept, not dropped)
 
