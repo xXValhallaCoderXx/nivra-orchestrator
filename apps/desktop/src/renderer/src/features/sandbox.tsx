@@ -45,9 +45,10 @@ const leftOutLines = (preview: Ready): string[] =>
 /**
  * A sandbox check of the chosen project (D36): what would be uploaded, previewed on its own engine with no network;
  * upload consent of its own, asked with that preview in front of the person; then the check's progress and report. The
- * check runs Nivra's own fixed steps with networking off, and nothing comes back to the checkout.
+ * check runs Nivra's own fixed steps with networking off, and nothing comes back to the checkout. `credentialsSaved`
+ * changes each time the key or project id is saved.
  */
-export function SandboxCheck({ project, online, onProjectChanged }: { project: ProjectView | null; online: boolean; onProjectChanged(): void }) {
+export function SandboxCheck({ project, online, credentialsSaved, onProjectChanged }: { project: ProjectView | null; online: boolean; credentialsSaved: number; onProjectChanged(): void }) {
   const projectId = project?.id ?? null;
   const [preview, setPreview] = useState<SandboxPreview | null>(null);
   const [check, setCheck] = useState<SandboxCheckView | null>(null);
@@ -67,16 +68,26 @@ export function SandboxCheck({ project, online, onProjectChanged }: { project: P
     setCheck(await window.nivra.getSandboxCheck(projectId));
   };
 
-  // What this session knows of the project's check, and what earlier sessions left open in Nebius.
+  // What this session knows of the project's check.
   useEffect(() => {
     if (!projectId || !online) return;
     let active = true;
     window.nivra.getSandboxCheck(projectId).then((view) => active && setCheck(view), (reason: unknown) => active && setError(errorMessage(reason)));
-    window.nivra.getSandboxStatus(projectId).then((value) => active && setLeftOpen(value), () => undefined);
     return () => {
       active = false;
     };
   }, [projectId, online]);
+
+  // What earlier sessions left open in Nebius, read again whenever the key or project id is saved: saving them can start
+  // a recovery pass, and see it end.
+  useEffect(() => {
+    if (!projectId || !online) return;
+    let active = true;
+    window.nivra.getSandboxStatus(projectId).then((value) => active && setLeftOpen(value), () => undefined);
+    return () => {
+      active = false;
+    };
+  }, [projectId, online, credentialsSaved]);
 
   // A recovery pass under way is read again until it ends, so the window never keeps saying it is going.
   const passRunning = leftOpen?.pass.state === "running";
@@ -173,7 +184,18 @@ export function SandboxCheck({ project, online, onProjectChanged }: { project: P
           Upload and check
         </Button>
         {running && projectId && (
-          <Button variant="default" onClick={() => void act(async () => setCheck(await window.nivra.cancelSandboxCheck(projectId)))} disabled={!online} data-testid="sandbox-cancel">
+          <Button
+            variant="default"
+            onClick={() =>
+              void act(async () => {
+                setCheck(await window.nivra.cancelSandboxCheck(projectId));
+                // A stop that works takes back the project's notice of one that didn't.
+                onProjectChanged();
+              })
+            }
+            disabled={!online}
+            data-testid="sandbox-cancel"
+          >
             Cancel
           </Button>
         )}

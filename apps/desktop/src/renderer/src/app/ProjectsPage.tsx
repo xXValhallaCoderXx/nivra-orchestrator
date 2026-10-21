@@ -40,6 +40,8 @@ export function ProjectsPage({
 }) {
   const [runs, setRuns] = useState<Record<string, RunRef>>({});
   const [explainRuns, setExplainRuns] = useState<Record<string, RunRef>>({});
+  // Counts the saves of the key and project id: the sandbox check reads its engine's recovery again on each.
+  const [credentialsSaved, setCredentialsSaved] = useState(0);
   const online = engine?.state.status === "online";
   const busyIds = [...Object.entries(runs), ...Object.entries(explainRuns)]
     .filter(([, ref]) => ref.status !== null && !TERMINAL.includes(ref.status))
@@ -59,7 +61,7 @@ export function ProjectsPage({
         onSharingChanged={onProjectsChanged}
         onPreferencesChanged={onPreferencesChanged}
       />
-      <SandboxCheck key={`sandbox:${selected?.id ?? "none"}`} project={selected} online={online} onProjectChanged={onProjectsChanged} />
+      <SandboxCheck key={`sandbox:${selected?.id ?? "none"}`} project={selected} online={online} credentialsSaved={credentialsSaved} onProjectChanged={onProjectsChanged} />
       <Preferences key={`preferences:${selected?.id ?? "none"}`} project={selected} projects={projects} view={preferences} onChanged={onPreferencesChanged} />
       <HelloRun
         key={`hello:${selected?.id ?? "none"}`}
@@ -70,7 +72,13 @@ export function ProjectsPage({
       />
       {/* Doctor reports and provider checks belong to one engine: they start fresh when the engine changes. */}
       <Doctor key={`doctor:${selected?.targetId ?? "none"}`} projectId={selected?.id ?? null} online={online} targetLabel={selected?.targetLabel ?? null} />
-      <Settings key={`settings:${selected?.targetId ?? "none"}`} projectId={selected?.id ?? null} online={online} targetLabel={selected?.targetLabel ?? null} />
+      <Settings
+        key={`settings:${selected?.targetId ?? "none"}`}
+        projectId={selected?.id ?? null}
+        online={online}
+        targetLabel={selected?.targetLabel ?? null}
+        onCredentialsSaved={() => setCredentialsSaved((count) => count + 1)}
+      />
     </Stack>
   );
 }

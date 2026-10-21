@@ -13,9 +13,10 @@ const KEY_LOOK = {
 
 /**
  * The Nebius key, and the project id Nebius Sandboxes needs with it (D36), kept by the app (D8): encrypted by the OS
- * where it can be, and handed to the engine in memory only.
+ * where it can be, and handed to the engine in memory only. `onCredentialsSaved` follows each save, once the engines
+ * have them.
  */
-export function Settings({ projectId, online, targetLabel }: { projectId: string | null; online: boolean; targetLabel: string | null }) {
+export function Settings({ projectId, online, targetLabel, onCredentialsSaved }: { projectId: string | null; online: boolean; targetLabel: string | null; onCredentialsSaved(): void }) {
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [check, setCheck] = useState<ProviderCheck | null>(null);
   const [checking, setChecking] = useState(false);
@@ -48,6 +49,7 @@ export function Settings({ projectId, online, targetLabel }: { projectId: string
     try {
       setSettings(await window.nivra.setNebiusKey(value));
       setKey("");
+      onCredentialsSaved();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -61,6 +63,7 @@ export function Settings({ projectId, online, targetLabel }: { projectId: string
     try {
       setSettings(await window.nivra.setNebiusProjectId(value));
       setNebiusProject("");
+      onCredentialsSaved();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -79,7 +82,7 @@ export function Settings({ projectId, online, targetLabel }: { projectId: string
           w={380}
           data-testid="nebius-key"
         />
-        <Button onClick={() => void save(key.trim())} loading={busy} disabled={key.trim().length < 8}>
+        <Button onClick={() => void save(key.trim())} loading={busy} disabled={key.trim().length < 8} data-testid="nebius-key-save">
           Save
         </Button>
         {settings && settings.nebiusKey !== "none" && (

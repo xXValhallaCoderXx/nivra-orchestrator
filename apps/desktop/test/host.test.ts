@@ -1826,8 +1826,8 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     assert.deepEqual([view.runId === runId, ["runs.find", "runs.cancel"].map((method) => calls(home).filter((call) => call === method).length)], [true, [1, 1]]);
     assert.equal(host.projects()[0]?.notice, `Uploads for this project were turned off. ${view.note}`);
     rmSync(join(home, "fail-cancel"));
-    await host.cancelSandboxCheck(ids[0]!);
-    assert.deepEqual(logged(home, "cancelled.log"), [runId]);
+    const stopped = await host.cancelSandboxCheck(ids[0]!);
+    assert.deepEqual([logged(home, "cancelled.log"), stopped.note, STOPPED.test(host.projects()[0]?.notice ?? "")], [[runId], null, true]);
   });
 
   it("treats a check it can't read as going: the window reads it as unknown, and turning uploads off still stops it", async () => {
@@ -1862,8 +1862,10 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     assert.deepEqual([host.projects()[0]?.notice, view?.status, view?.note], [`Uploads for this project were turned off. ${failed}`, "running", failed]);
     await assert.rejects(host.removeProject(ids[0]!), /^Error: Nivra couldn't stop the project's sandbox check \(the run couldn't be stopped\), so the project is still in the list\. Restart its engine, then remove it again\./);
     assert.deepEqual([host.projects().length, (await host.sandboxCheck(ids[0]!))?.note], [1, failed]);
-    // Once a stop is accepted, the project goes.
+    // A stop accepted on the next try takes back what said it couldn't be stopped; then the project goes.
     rmSync(join(home, "fail-cancel"));
+    const stopped = await host.cancelSandboxCheck(ids[0]!);
+    assert.deepEqual([stopped.status, stopped.note, STOPPED.test(host.projects()[0]?.notice ?? "")], ["cancelled", null, true]);
     await host.removeProject(ids[0]!);
     assert.deepEqual([host.projects().length, logged(home, "cancelled.log")], [0, [started.runId]]);
   });

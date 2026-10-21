@@ -173,6 +173,9 @@ interface SandboxCheck {
   /** The person, or a withdrawn consent, asked it to stop before its run was known. */
   cancelRequested: boolean;
   note: string | null;
+  /** Its last stop failed, and its note says so; `failedNotice` when the project's notice says so too. */
+  stopFailed: boolean;
+  failedNotice: boolean;
 }
 
 interface Engine {
@@ -859,7 +862,7 @@ export class Host {
     // Checked again immediately before sending: uploads can be turned off, and the project removed, while the engine starts.
     if (!this.#uploadsAllowed(projectId, epoch)) throw new Error("Uploads for this project were turned off, so the check wasn't started.");
     const current = this.#project(projectId);
-    const check: SandboxCheck = { requestId: randomUUID(), runId: null, targetId: current.targetId, homeId: state.info.homeId, looking: false, notSent: false, lost: false, cancelRequested: false, note: null };
+    const check: SandboxCheck = { requestId: randomUUID(), runId: null, targetId: current.targetId, homeId: state.info.homeId, looking: false, notSent: false, lost: false, cancelRequested: false, note: null, stopFailed: false, failedNotice: false };
     this.#sandboxChecks.set(projectId, check);
     let run: RunSummary;
     try {
@@ -896,7 +899,7 @@ export class Host {
     this.#project(projectId);
     const check = this.#sandboxChecks.get(projectId);
     if (!check) throw new Error("No sandbox check of this project was started this session.");
-    await this.#cancelSandboxRun(check, null);
+    await this.#cancelSandboxRun(projectId, check, null);
     return this.#sandboxView(projectId);
   }
 
@@ -963,7 +966,7 @@ export class Host {
       await this.#stopExplainRuns(projectId, (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
       const check = this.#sandboxChecks.get(projectId);
       if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
-        await this.#cancelSandboxRun(check, null, (why) => `Nivra couldn't stop the project's sandbox check (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
+        await this.#cancelSandboxRun(projectId, check, null, (why) => `Nivra couldn't stop the project's sandbox check (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
       }
     } catch (error) {
       withdraw();
@@ -1165,9 +1168,9 @@ export class Host {
   /**
    * Cancels a check's run, and gives it `note` once the stop is accepted. One whose run isn't known yet is marked, and
    * its search cancels it once it is found. An engine that isn't online isn't running it any more. One that couldn't be
-   * stopped says so in its note instead, and is reported through `refusal`.
+   * stopped says so in its note instead, and is reported through `refusal`; a stop accepted later takes that back.
    */
-  async #cancelSandboxRun(check: SandboxCheck, note: string | null, refusal = (why: string) => `Nivra couldn't stop the sandbox check (${why}). Restart the project's engine to stop it.`): Promise<void> {
+  async #cancelSandboxRun(projectId: string, check: SandboxCheck, note: string | null, refusal = (why: string) => `Nivra couldn't stop the sandbox check (${why}). Restart the project's engine to stop it.`): Promise<void> {
     check.cancelRequested = true;
     const engine = check.runId === null ? undefined : this.#engines.get(check.targetId);
     if (check.runId !== null && engine && engine.supervisor.state.status === "online") {
@@ -1175,19 +1178,33 @@ export class Host {
         await engine.supervisor.call("runs.cancel", { runId: check.runId });
       } catch (error) {
         if (!isRunNotFound(error)) {
+          check.stopFailed = true;
           check.note = `Nivra couldn't stop the sandbox check (${errorText(error)}). Restart the project's engine to stop it.`;
           throw new Error(refusal(errorText(error)));
         }
       }
     }
-    if (note) check.note = note;
+    if (!check.stopFailed) {
+      if (note) check.note = note;
+      return;
+    }
+    // Stopped after a stop that failed: nothing says any more that it couldn't be.
+    check.stopFailed = false;
+    check.note = note;
+    if (check.failedNotice) {
+      check.failedNotice = false;
+      const project = this.#options.store.data.projects.find((p) => p.id === projectId);
+      if (project?.sharing.cloudExecution) this.#notices.delete(projectId);
+      else if (project) this.#notices.set(projectId, UPLOADS_STOPPED);
+    }
   }
 
   /** Stops a check because uploads were turned off. A stop that fails says so in the project's notice too. */
   async #stopForUploads(projectId: string, check: SandboxCheck, note: string | null): Promise<void> {
     try {
-      await this.#cancelSandboxRun(check, note);
+      await this.#cancelSandboxRun(projectId, check, note);
     } catch (error) {
+      check.failedNotice = true;
       this.#notices.set(projectId, `Uploads for this project were turned off. ${errorText(error)}`);
       throw error;
     }
@@ -1196,7 +1213,7 @@ export class Host {
   /** Stops a check whose run became known after it was asked to stop, or after uploads were turned off. */
   async #stopStarted(projectId: string, check: SandboxCheck, epoch: number): Promise<void> {
     const note = check.cancelRequested ? null : UPLOADS_STOPPED_STARTING;
-    if (this.#uploadsAllowed(projectId, epoch)) await this.#cancelSandboxRun(check, note);
+    if (this.#uploadsAllowed(projectId, epoch)) await this.#cancelSandboxRun(projectId, check, note);
     else await this.#stopForUploads(projectId, check, note);
   }
 
