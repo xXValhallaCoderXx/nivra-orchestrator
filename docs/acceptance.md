@@ -1508,6 +1508,8 @@ on Nebius through the real adapter. On `feature/niv-43`, stacked on B2:
 | `a074951` | The live check, `--plan` printing its bounded recipe for approval |
 | `87a6f93` | The independent review of the first draft: eight gaps and three concerns, each reproduced against `a074951` and fixed |
 | `c962c94`, `181456e`, `a1622ed` | Main (Track A's PR 10), then the fixes from the reviews of PRs 7 and 8, merged down the stack, each cleanly |
+| `6267895` | Main after PR 7's merge, and the second review of PR 8's fix, merged down cleanly |
+| `a162108` | The review of PR 9: the live check saves the patch and the report as they were bound |
 
 **Offline** (`prescribed.test.ts`, 17 tests, with the fake guest in `test/fake-guest.ts`):
 - the whole recipe proposes exactly the fixed edit, its report telling each step truthfully, each spawn sent once, and
@@ -1582,7 +1584,7 @@ printed again and compared. Outcome `proposed`, and **20 of 20 checks passed**:
 | Cleanup left nothing unresolved | 1 stopped, 0 already ended, 0 unresolved |
 
 - **Recorded, not judged:** the service ran each step in `/workspace`, as asked.
-- **The proposal:** hash `a64cf783…5273`, a 1,335-byte patch, with its binding (project, target, destination, baseline,
+- **The proposal:** hash `a64cf783…5273`, a 1,334-byte patch, with its binding (project, target, destination, baseline,
   both trees, fingerprint, policy, and the patch's and report's digests) in `proposal.json`.
 - **The service's own figures,** kept raw: each step's usage includes a `cost` whose unit the service doesn't document.
   7 of the 8 operations reported one, summing to 0.000759. The stopped one reported none, which stays unknown. It is
@@ -1592,6 +1594,11 @@ printed again and compared. Outcome `proposed`, and **20 of 20 checks passed**:
 - **Evidence:** `~/nivra-acceptance/sandbox-check-2026-10-21T182005478Z/` (0700). It holds the result, the report, the
   patch, the proposal, cleanup's record, the checks and the journal. After each run, a check found neither credential
   in it, nor in the run's log.
+- **The saved patch and report aren't the bound bytes,** as the review of PR 9 found. The check wrote the patch through
+  its text writer, which added a newline (1,335 bytes saved for 1,334 bound). It wrote the report pretty-printed
+  (14,997 bytes for 9,759). Without the newline the saved patch hashes to `patchSha256`, and the canonical form of the
+  saved report to `reportSha256`. The review reproduced both, as did a check here, so the result stands. Since
+  `a162108` the check saves the bound bytes exactly, with the report's readable copy in `report.readable.json`.
 
 **The credentials.** Nate's were in a git-ignored `.env`, with the key under another name. For each run, a script
 wrote a mode-600 copy, under the names the check reads, into the session's private scratch folder, without printing
@@ -1601,6 +1608,9 @@ either value. Each copy was shredded after its run.
 - `pnpm verify`: 663 passed (domain 43, engine 421, desktop 199), none skipped, at `a1622ed`.
 - A real engine through `rpc.ts`, on `~/.nivra-dev-track-b`: `doctor` answered, and a `hello` run succeeded.
 - The live run, as above: attempt 1 failed at the upload, and the approved rerun passed 20 of 20 checks.
+- After PR 7's merge, the second review of PR 8's fix, and the evidence saved as bound (`6267895`, `a162108`):
+  `pnpm verify` 666 passed (domain 43, engine 424, desktop 199), none skipped. A real engine answered `doctor` and ran
+  `hello` again. `--plan` still prints exactly the approved recipe.
 - **Not run:**
   - the Windows and packaged checks: no target, supervisor, staging, main or preload code changed. B4 ran both on the
     path wired in;

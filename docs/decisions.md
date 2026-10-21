@@ -2050,6 +2050,8 @@ is NIV-8's.
 
   The key and project id come from a file of mode 600 outside the repository, and are never printed or written. The
   adapter itself enforces the recipe's bounds: 8 operations, 60 s a command, 10 minutes of work, then 7 for closing.
+  The evidence keeps the patch and the report exactly as they were bound, with a readable copy of the report beside
+  them, so it checks out against the proposal on its own.
 - **One approval covers one bounded run:** its operations, upload, downloads, reads and polling, and its cleanup,
   including one `--recover` pass if cleanup is cut short. A rerun, more operations or a fresh network control need a
   new approval.
@@ -2077,6 +2079,10 @@ is NIV-8's.
   - **Nate approved one rerun.** It ran on 21 October at 18:20:05 UTC (22 October locally), and passed 20 of 20
     checks, outcome `proposed`.
   - So the first attempt's 500 was transient, as far as one rerun can show.
+- **The review of PR 9 (22 October)** found the run's saved patch and report weren't the bound bytes. The patch had
+  gained a newline, and the report had been pretty-printed, so neither hashed to the proposal's digest. Without the
+  newline, and in canonical form, both do, so the result stands. The check now saves the bound bytes exactly
+  (`a162108`).
 
 **Consequences.**
 - **Shown live now,** where D34 couldn't:
