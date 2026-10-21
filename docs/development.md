@@ -285,7 +285,7 @@ cd apps/engine && node --test test/nebius-session.test.ts test/nebius-transport.
 
 Commit snapshots and validated patches (NIV-42, D34) are in `apps/engine/src/exec/`: `tar.ts`, `snapshot.ts`,
 `patch.ts` and `proposal.ts`, with the engine's own git in `git-tool.ts` and the path rules in `workspace-rules.ts`.
-Nothing runs them yet: B3 puts them together, and B4 wires them in. Their tests make real repositories in the temp
+B3's prescribed path runs them, below, and B4 wires it into the engine. Their tests make real repositories in the temp
 folder, and stand in for the sandbox's machine by running the real prepare and collect scripts with this machine's
 `sh` and GNU tools (busybox runs them in B3's live check):
 
@@ -298,6 +298,25 @@ cd apps/engine && node --test test/tar.test.ts test/workspace-rules.test.ts test
   the repository. Applying a patch is NIV-8's.
 - **The tests compare each checkout before and after** by every name's kind, mode, size, time and bytes, `.git`
   included (`changedSince` in `test/workspace-fixtures.ts`).
+
+The prescribed path (NIV-43, D35) is `runPrescribed` in `apps/engine/src/exec/prescribed.ts`: the snapshot, the
+session, the steps, collect, the patch, the report, the proposal and close, as one composition. Its offline scenarios
+use the fake guest in `apps/engine/test/fake-guest.ts`. The live check runs it once on Nebius, on a byte-exact fixture
+(`apps/engine/scripts/sandbox-fixture.ts`), after its recipe is approved:
+
+```bash
+cd apps/engine && node --test test/prescribed.test.ts
+node apps/engine/scripts/sandbox-check.ts --plan                                    # the recipe, what it sends, its bounds; no network
+node apps/engine/scripts/sandbox-check.ts --credentials <file> --run                # once per approval
+node apps/engine/scripts/sandbox-check.ts --credentials <file> --recover <folder>   # settles what a cut-short cleanup left
+```
+
+- **The credentials file** holds `NEBIUS_API_KEY=…` and `NEBIUS_PROJECT_ID=…` lines, with mode 600, outside the
+  repository. The check refuses anything else, and never prints or writes either value.
+- **Evidence** goes to `~/nivra-acceptance/sandbox-check-<UTC>/` (0700). Close the Nivra app first: the check fails if
+  `~/.nivra` changed.
+- **One approval covers one run,** its cleanup, and one `--recover` pass if cleanup is cut short. A rerun needs a new
+  approval.
 
 A sandbox check (NIV-44, D36) is the prescribed path wired into the engine and the app: a project's commit uploaded to
 Nebius Sandboxes, one fixed probe run there with networking off, and a report. It needs the key and the Nebius project
