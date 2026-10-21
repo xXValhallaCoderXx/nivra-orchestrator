@@ -1727,9 +1727,11 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
     until it is closed.
   - **Cancels.** An abort stops the operation on a client of its own, and `cancelled` is claimed only once CANCELLED
     is seen.
-  - **Close** has one budget that includes stopping the command under way, however that stop began, and its signal
-    stops it too. It reconciles, then cancels only the session's own operations, then searches again. "Stopped" means
-    CANCELLED after an accepted cancel.
+  - **Close** has one budget that includes stopping the command under way, however that stop began.
+    - Its deadline and its signal each cut off a request still under way, a cancel sent before closing began
+      included. What that leaves open stays journaled.
+    - It reconciles, then cancels only the session's own operations, then searches again.
+    - "Stopped" means CANCELLED after an accepted cancel.
   - **Recovery.**
     - `scanJournals` is local only. It reads the journals left in place, which are the few that may need something,
       and says how many it couldn't read.
@@ -1765,6 +1767,9 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
   4. images first seen by cleanup weren't counted;
   5. a command made as its run was cancelled was reported "not started";
   6. a listener stayed on a long-lived run signal.
+- **The review of PR 7 (21 October)** found one more. A stop's cancel request, sent before closing began, kept the time
+  it was given then, up to 30 s: in its reproduction, a close given 50 ms took 424 ms. Closing's deadline now cuts that
+  request off, as its signal did (`5597249`).
 
 **Consequences.**
 - **What comes next.**

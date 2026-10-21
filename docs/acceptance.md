@@ -1169,6 +1169,7 @@ deadline. On `feature/niv-41`, from `dc48874`:
 | `1e065e3` | The execution contract, extended for sessions that run elsewhere; `Local` refuses what coding work needs |
 | `fc82fa1` | The Nebius execution session: one operation per step, with the state moving only on what was kept |
 | `0505da3` | The review of the first draft: closing's budget, torn journal tails, the scan's limit, image counts, a late answer, a listener |
+| `5597249` | The review of PR 7: closing's deadline cuts off a cancel already under way |
 
 **The P3, before and after.** These three cases were run against the code at `dc48874`, in a throwaway script that was
 then deleted:
@@ -1187,7 +1188,7 @@ then deleted:
 | The real transport (`nebius-transport.test.ts`) | 6 | A GET and a POST with no headers, and a body that stops partway, end at their 300 ms deadline; an answer over its cap is refused by its declared length, or cut off as it streams; nothing is sent with under 1 ms left; a spawn whose POST reached the server but got no answer is uncertain, never "not sent" |
 | The contract (`session-contract.ts`) | 6 for each backend | Output and exit code without a shell; a time limit; a cancel; the output cap; a missing program never a success; a second close gives the same report |
 | `Local` | 11 of its own | Process trees and background groups; input and byte output; its budget and signal; a close kept to its budget; it refuses isolation, a snapshot and a command thrown away |
-| The session (`nebius-session.test.ts`) | 36, besides the contract | See below, and the review's findings after it |
+| The session (`nebius-session.test.ts`) | 37, besides the contract | See below, and the reviews' findings after it |
 
 The session's tests:
 - **What it claims and sends.** Every operation has networking off. Only the prepare step carries the snapshot.
@@ -1214,6 +1215,8 @@ The session's tests:
   - A `Retry-After` past the deadline gives the command up for closing to stop.
 - **Closing.**
   - One budget includes stopping the command under way.
+  - Its deadline cuts off a request still under way, a cancel sent before closing began included, with no signal
+    needed. The operation stays journaled, and the next pass stops it.
   - A second close gives the same report and sends nothing.
   - "Stopped" is told from "had already ended".
   - An operation that never stops is reported unresolved, within the budget.
@@ -1256,8 +1259,17 @@ The review also led to these changes:
 
 It found no defect in the prepare script or in `listingDigest`'s order.
 
+**The review of PR 7 (21 October)** found one more gap in closing. It was reproduced offline, and fixed in `5597249`
+with a regression test, which fails on the code before the fix:
+
+| Finding | At `b423e90` | Now |
+|---|---|---|
+| A stop's cancel request sent before closing began, its connection still waiting | It kept the time it was given when sent, up to 30 s. In the review's reproduction, `close({budgetMs: 50})` took 424 ms; with the connection held open, closing was still waiting after 5 s | Closing's deadline cuts it off, as its signal does. The operation is reported unresolved and stays journaled, and the next pass stops it |
+
 **Checks**
 - `pnpm verify`: 483 passed (domain 36, engine 266, desktop 181), none skipped. The baseline at `dc48874` was 419.
+- After main was merged in (`b423e90`) and the review of PR 7's fix (`5597249`): `pnpm verify` 589 passed (domain 43, engine 347, desktop 199), none
+  skipped. A real engine answered `doctor` and ran `hello` again.
 - `pnpm probe:sandbox --plan` prints the same steps and limits. Its deadline line now says that every request, POST and
   DELETE too, ends by the 20 minutes.
 - A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`, before the review's fixes and again after
