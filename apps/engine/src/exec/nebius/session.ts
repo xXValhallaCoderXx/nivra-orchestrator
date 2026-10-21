@@ -242,6 +242,9 @@ function describeUnresolved(item: string): string {
   return spawn ? `It isn't known whether "${spawn[1]}" started (correlation ${spawn[2]}); it may still be running.` : `Operation ${item} wasn't seen to end; it may still be running.`;
 }
 
+/** The longest a timer can wait: Node fires a longer one after 1 ms. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 /** The refusal for a command whose request carries a credential. */
 const CARRIES_CREDENTIAL = "The command holds the sandbox's key or project id, so it wasn't sent.";
 
@@ -552,7 +555,8 @@ class NebiusSession implements ExecutionSession {
 
   /**
    * Stops an operation whose work was cancelled, on a client of its own. It keeps to the stop budget and, once closing
-   * has begun, to closing's deadline, read afresh, and its signal stops it too, however the stop began.
+   * has begun, to closing's deadline: each request and wait reads it afresh, and closing cuts off the one under way when
+   * its time runs out or its signal aborts, however the stop began.
    */
   async #stopped(operationId: string, step: StepSpec, started: number): Promise<Omit<Ran, "callbackError">> {
     const stopUntil = this.#now() + this.#limits.minWriteMs + this.#limits.requestTimeoutMs + this.#limits.cancelWaitMs;
@@ -615,13 +619,19 @@ class NebiusSession implements ExecutionSession {
   }
 
   async #close(options: { signal?: AbortSignal; budgetMs?: number }): Promise<CloseReport> {
-    const deadline = this.#now() + (options.budgetMs ?? this.#limits.cleanupBudgetMs);
+    const budgetMs = options.budgetMs ?? this.#limits.cleanupBudgetMs;
+    const deadline = this.#now() + budgetMs;
     this.#closeBounds = { deadline, signal: options.signal ?? null };
     // Closing's signal stops cleanup, and a stop already under way, however that stop began. Its listener goes once
     // closing ends, so a long-lived signal holds nothing of the session.
     const listening = new AbortController();
     if (options.signal?.aborted) this.#cleanup.abort(options.signal.reason);
     else options.signal?.addEventListener("abort", () => this.#cleanup.abort(options.signal?.reason), { once: true, signal: listening.signal });
+    // So does closing's deadline. A request a stop sent before closing began was given the time left then, which can be
+    // longer than closing has: only this cuts it off at closing's end. Like a request's own timeout, it runs in real
+    // time. What it leaves open stays journaled, for recovery.
+    const expiry = budgetMs <= MAX_TIMER_MS ? setTimeout(() => this.#cleanup.abort(new Error("Closing's time ran out.")), Math.max(0, budgetMs)) : null;
+    expiry?.unref();
     this.#specSignal?.removeEventListener("abort", this.#onSpecAbort);
     let settled: { unresolved: string[] };
     try {
@@ -630,6 +640,7 @@ class NebiusSession implements ExecutionSession {
       await this.#active;
       settled = await this.#sandbox(this.#client(this.#cleanup.signal), () => deadline, this.#cleanup.signal).cleanup();
     } finally {
+      if (expiry) clearTimeout(expiry);
       listening.abort();
     }
     const report = this.#report(settled.unresolved.map(describeUnresolved));
