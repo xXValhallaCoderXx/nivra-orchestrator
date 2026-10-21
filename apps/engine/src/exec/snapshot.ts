@@ -166,12 +166,62 @@ const KEY_START = new RegExp(KEY_HEADER);
 const PGP_KEY = /-----BEGIN PGP PRIVATE KEY BLOCK-----/;
 /** Long runs of base64, as Kubernetes secrets and the like wrap keys and tokens. */
 const BASE64_RUN = /[A-Za-z0-9+/]{40,}={0,2}/g;
+/** Whether a character is whitespace as a regular expression's `\s` has it, by a table for the first 256. */
+const SPACES = Uint8Array.from({ length: 256 }, (_, code) => (/\s/.test(String.fromCharCode(code)) ? 1 : 0));
+const isSpace = (code: number) => (code < 256 ? SPACES[code] === 1 : /\s/.test(String.fromCharCode(code)));
+
 /**
- * What can break an encoding up without being part of it: spaces and line breaks, escaped line breaks (`\n` in JSON or
- * a notebook's output), a shell's line continuation, string literals joined by `+` or `,`, and JSON's escaped `/`.
- * Base64 holds none of them, so taking them out joins a broken encoding up and splits none.
+ * `text` without what can break an encoding up without being part of it: spaces and line breaks, escaped line breaks
+ * (`\n` in JSON or a notebook's output), a shell's line continuation, string literals joined by `+` or `,`, and the
+ * backslash of JSON's escaped `/`. Base64 holds none of them, so taking them out joins a broken encoding up and splits
+ * none.
+ *
+ * It takes out what `/\\\r?\n|\\[nrt]|\\(?=\/)|["']\s*[+,]?\s*["']|\s+/g` matches, in one pass. That expression
+ * backtracked over every split of a long run of spaces after a quote, so a file of 128 KB took seconds, and the scan
+ * blocks the engine (the review of PR 8). The quotes' join can match only one way: the most spaces, at most one `+` or
+ * `,`, the most spaces, then a quote. So it is found by reading forward once, in time linear in the text.
  */
-const BREAKS = /\\\r?\n|\\[nrt]|\\(?=\/)|["']\s*[+,]?\s*["']|\s+/g;
+export function withoutBreaks(text: string): string {
+  const length = text.length;
+  const spacesFrom = (from: number) => {
+    let at = from;
+    while (at < length && isSpace(text.charCodeAt(at))) at++;
+    return at;
+  };
+  const parts: string[] = [];
+  let copied = 0;
+  let at = 0;
+  while (at < length) {
+    const code = text.charCodeAt(at);
+    // Where the break starting here ends, or -1 when none does.
+    let end = -1;
+    if (code === 0x5c) {
+      // A backslash: a line continuation, an escaped n, r or t, or the backslash alone before a `/`.
+      const next = text.charCodeAt(at + 1);
+      if (next === 0x0a) end = at + 2;
+      else if (next === 0x0d && text.charCodeAt(at + 2) === 0x0a) end = at + 3;
+      else if (next === 0x6e || next === 0x72 || next === 0x74) end = at + 2;
+      else if (next === 0x2f) end = at + 1;
+    } else if (code === 0x22 || code === 0x27) {
+      // A quote, then spaces, at most one `+` or `,` with spaces after it, and a quote.
+      let close = spacesFrom(at + 1);
+      if (text.charCodeAt(close) === 0x2b || text.charCodeAt(close) === 0x2c) close = spacesFrom(close + 1);
+      const last = text.charCodeAt(close);
+      if (last === 0x22 || last === 0x27) end = close + 1;
+    } else if (isSpace(code)) {
+      end = spacesFrom(at);
+    }
+    if (end < 0) {
+      at++;
+      continue;
+    }
+    parts.push(text.slice(copied, at));
+    copied = end;
+    at = end;
+  }
+  parts.push(text.slice(copied));
+  return parts.join("");
+}
 /** A vault value shorter than this isn't looked for inside base64: what its encoding holds of it could match by chance. */
 const MIN_ENCODED_VALUE_BYTES = 12;
 
@@ -234,14 +284,14 @@ export function credentialKinds(bytes: Uint8Array, knownValues: readonly string[
   const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const wide = utf16Text(buffer);
   const texts = [buffer.toString("latin1"), ...(wide === null ? [] : [wide])];
-  const joined = texts.map((text) => text.replace(BREAKS, ""));
+  const joined = texts.map(withoutBreaks);
   const decoded = [...new Set([...texts, ...joined].flatMap(decodedRuns))];
   // Not in the joined text itself: joining words up can make a shape, as "ASIA" and an uppercase word do.
   const kinds = [...texts, ...decoded].flatMap(shapesIn);
   const known = knownValues.filter((value) => value.length > 0);
   if (known.length > 0) {
     // One layer down too: a registry's auth is base64 inside a dockerconfigjson secret's base64.
-    const searched = [...joined, ...decoded.map((text) => text.replace(BREAKS, ""))];
+    const searched = [...joined, ...decoded.map(withoutBreaks)];
     const holds = (value: string) => {
       const raw = Buffer.from(value, "utf8");
       const latin = raw.toString("latin1");
