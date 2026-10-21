@@ -1965,6 +1965,11 @@ is NIV-8's.
   their encodings (`4ec832f`). An independent check of that found no defect in its matching, but a value two layers
   of base64 down, and encodings broken up by something other than whitespace, still got through. Both are now found,
   and runs decoded from the joined-up text are read for shapes too (`b167766`).
+- **The second review of PR 8 (22 October)** found that joining up could freeze the engine. One regular expression
+  took the breaks out, and its join of quoted strings put a `\s*` either side of an optional `+` or `,`. After a quote
+  with a long run of spaces and no closing quote, it backtracked over every way to split the run. A valid JSON file of
+  128 KB took over three seconds, and the scan is synchronous, so it blocked the engine's answers and cancellation.
+  The breaks are now taken out in one pass, in time linear in the text, with the same result (`eb76f9c`).
 
 **Consequences.**
 - **What comes next.**
@@ -2045,6 +2050,8 @@ is NIV-8's.
 
   The key and project id come from a file of mode 600 outside the repository, and are never printed or written. The
   adapter itself enforces the recipe's bounds: 8 operations, 60 s a command, 10 minutes of work, then 7 for closing.
+  The evidence keeps the patch and the report exactly as they were bound, with a readable copy of the report beside
+  them, so it checks out against the proposal on its own.
 - **One approval covers one bounded run:** its operations, upload, downloads, reads and polling, and its cleanup,
   including one `--recover` pass if cleanup is cut short. A rerun, more operations or a fresh network control need a
   new approval.
@@ -2072,6 +2079,10 @@ is NIV-8's.
   - **Nate approved one rerun.** It ran on 21 October at 18:20:05 UTC (22 October locally), and passed 20 of 20
     checks, outcome `proposed`.
   - So the first attempt's 500 was transient, as far as one rerun can show.
+- **The review of PR 9 (22 October)** found the run's saved patch and report weren't the bound bytes. The patch had
+  gained a newline, and the report had been pretty-printed, so neither hashed to the proposal's digest. Without the
+  newline, and in canonical form, both do, so the result stands. The check now saves the bound bytes exactly
+  (`a162108`).
 
 **Consequences.**
 - **Shown live now,** where D34 couldn't:

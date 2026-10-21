@@ -1307,6 +1307,7 @@ may go by one hash. On `feature/niv-42`, stacked on B1 (`a53fd36`):
 | `b6be5b7` | The report gives each step's provider status and usage, raw and null when none |
 | `4ec832f` | The review of PR 8: a vault value inside base64 refuses the snapshot and the patch |
 | `b167766` | An independent check of that fix: broken encodings joined up, one layer down read too, and a URL-safe case that tests URL-safe |
+| `eb76f9c` | The second review of PR 8: an encoding's breaks taken out in one pass, so a file of spaces can't freeze the engine |
 
 **Nate's three asks of the plan, shown.**
 
@@ -1445,11 +1446,27 @@ from the pnpm store gave no new refusal. It found where the fix still fell short
 Runs decoded from the joined-up text are read for shapes too, so a token in wrapped base64 is found. Breaking each of
 these in turn fails its own test case. On 4 MiB files the scan takes 39 ms (random binary) to 195 ms (wrapped base64).
 
+**The second review of PR 8 (22 October)** found that joining up could freeze the engine, at `30ad9f8`. It was fixed in
+`eb76f9c`:
+
+| Finding | At `30ad9f8` | Now |
+|---|---|---|
+| A long run of spaces after a quote | The breaks were taken out by one regular expression, whose join of quoted strings put a `\s*` either side of an optional `+` or `,`. After a quote and a run of spaces with no closing quote, it backtracked over every way to split the run. A valid JSON file of 128 KB took over three seconds, against 1 ms before the join, and a 2 MiB file, within the per-file limit, would take minutes. The scan is synchronous, so it blocked the engine's answers and cancellation | `withoutBreaks` takes out the same matches by reading forward once. The quotes' join can match only one way, so nothing is tried twice |
+
+- **The same result:** 20,000 generated texts, made of the characters the expression reads, come out exactly as the
+  expression gave them, with `\s`'s own whitespace.
+- **Bounded:** the review's 128 KB file, and three 2 MiB files at the size limit, are scanned in well under a second
+  each (the four took 257 ms in all). They run in a process of their own, with a 20 s limit.
+- **With the old expression put back,** that process was stopped at 20 s, and the test failed rather than hang the run.
+
 **Checks**
 - `pnpm verify`: 536 passed (domain 36, engine 319, desktop 181), none skipped. Before the review's fixes it was 524,
   and B1 ended at 483.
 - After main was merged in, with B1's fixes from the review of PR 7 (`0de634c`, `7377b8d`, `2f1e9bd`), and the review
   of PR 8's fix and its check (`4ec832f`, `b167766`): `pnpm verify` 644 passed (domain 43, engine 402, desktop 199), none skipped. A real engine answered
+  `doctor` and ran `hello` again.
+- After PR 7 merged into main (`091cf4c`, merged here in `4396879`, which changed nothing) and the second review's fix
+  (`eb76f9c`): `pnpm verify` 646 passed (domain 43, engine 404, desktop 199), none skipped. A real engine answered
   `doctor` and ran `hello` again.
 - A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`, before the review's fixes and again after
   them:
@@ -1491,6 +1508,8 @@ on Nebius through the real adapter. On `feature/niv-43`, stacked on B2:
 | `a074951` | The live check, `--plan` printing its bounded recipe for approval |
 | `87a6f93` | The independent review of the first draft: eight gaps and three concerns, each reproduced against `a074951` and fixed |
 | `c962c94`, `181456e`, `a1622ed` | Main (Track A's PR 10), then the fixes from the reviews of PRs 7 and 8, merged down the stack, each cleanly |
+| `6267895` | Main after PR 7's merge, and the second review of PR 8's fix, merged down cleanly |
+| `a162108` | The review of PR 9: the live check saves the patch and the report as they were bound |
 
 **Offline** (`prescribed.test.ts`, 17 tests, with the fake guest in `test/fake-guest.ts`):
 - the whole recipe proposes exactly the fixed edit, its report telling each step truthfully, each spawn sent once, and
@@ -1565,7 +1584,7 @@ printed again and compared. Outcome `proposed`, and **20 of 20 checks passed**:
 | Cleanup left nothing unresolved | 1 stopped, 0 already ended, 0 unresolved |
 
 - **Recorded, not judged:** the service ran each step in `/workspace`, as asked.
-- **The proposal:** hash `a64cf783…5273`, a 1,335-byte patch, with its binding (project, target, destination, baseline,
+- **The proposal:** hash `a64cf783…5273`, a 1,334-byte patch, with its binding (project, target, destination, baseline,
   both trees, fingerprint, policy, and the patch's and report's digests) in `proposal.json`.
 - **The service's own figures,** kept raw: each step's usage includes a `cost` whose unit the service doesn't document.
   7 of the 8 operations reported one, summing to 0.000759. The stopped one reported none, which stays unknown. It is
@@ -1575,6 +1594,11 @@ printed again and compared. Outcome `proposed`, and **20 of 20 checks passed**:
 - **Evidence:** `~/nivra-acceptance/sandbox-check-2026-10-21T182005478Z/` (0700). It holds the result, the report, the
   patch, the proposal, cleanup's record, the checks and the journal. After each run, a check found neither credential
   in it, nor in the run's log.
+- **The saved patch and report aren't the bound bytes,** as the review of PR 9 found. The check wrote the patch through
+  its text writer, which added a newline (1,335 bytes saved for 1,334 bound). It wrote the report pretty-printed
+  (14,997 bytes for 9,759). Without the newline the saved patch hashes to `patchSha256`, and the canonical form of the
+  saved report to `reportSha256`. The review reproduced both, as did a check here, so the result stands. Since
+  `a162108` the check saves the bound bytes exactly, with the report's readable copy in `report.readable.json`.
 
 **The credentials.** Nate's were in a git-ignored `.env`, with the key under another name. For each run, a script
 wrote a mode-600 copy, under the names the check reads, into the session's private scratch folder, without printing
@@ -1584,6 +1608,9 @@ either value. Each copy was shredded after its run.
 - `pnpm verify`: 663 passed (domain 43, engine 421, desktop 199), none skipped, at `a1622ed`.
 - A real engine through `rpc.ts`, on `~/.nivra-dev-track-b`: `doctor` answered, and a `hello` run succeeded.
 - The live run, as above: attempt 1 failed at the upload, and the approved rerun passed 20 of 20 checks.
+- After PR 7's merge, the second review of PR 8's fix, and the evidence saved as bound (`6267895`, `a162108`):
+  `pnpm verify` 666 passed (domain 43, engine 424, desktop 199), none skipped. A real engine answered `doctor` and ran
+  `hello` again. `--plan` still prints exactly the approved recipe.
 - **Not run:**
   - the Windows and packaged checks: no target, supervisor, staging, main or preload code changed. B4 ran both on the
     path wired in;
