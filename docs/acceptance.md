@@ -1170,6 +1170,7 @@ deadline. On `feature/niv-41`, from `dc48874`:
 | `fc82fa1` | The Nebius execution session: one operation per step, with the state moving only on what was kept |
 | `0505da3` | The review of the first draft: closing's budget, torn journal tails, the scan's limit, image counts, a late answer, a listener |
 | `5597249` | The review of PR 7: closing's deadline cuts off a cancel already under way |
+| `fa6ce29` | An independent check of that fix: a stop closing cut off promises no retry, and closing's timer keeps the process alive until it fires |
 
 **The P3, before and after.** These three cases were run against the code at `dc48874`, in a throwaway script that was
 then deleted:
@@ -1266,9 +1267,13 @@ with a regression test, which fails on the code before the fix:
 |---|---|---|
 | A stop's cancel request sent before closing began, its connection still waiting | It kept the time it was given when sent, up to 30 s. In the review's reproduction, `close({budgetMs: 50})` took 424 ms; with the connection held open, closing was still waiting after 5 s | Closing's deadline cuts it off, as its signal does. The operation is reported unresolved and stays journaled, and the next pass stops it |
 
+An independent check of the fix found no defect in it. With no signal and a 50 ms budget, closing ended in 53–56 ms with a cancel, an operation read or a cleanup search held, and with a poll wait under way; budgets of 0 and −10 ended at once. It found two smaller things, fixed in `fa6ce29`:
+- once closing had cut a stop off, the command's error still said closing would try again, which it then can't. It now says the operation stays journaled for the next recovery pass;
+- the timer was unref'd, so with nothing else waiting the process could end with closing pending. It now keeps the process alive until it fires.
+
 **Checks**
 - `pnpm verify`: 483 passed (domain 36, engine 266, desktop 181), none skipped. The baseline at `dc48874` was 419.
-- After main was merged in (`b423e90`) and the review of PR 7's fix (`5597249`): `pnpm verify` 589 passed (domain 43, engine 347, desktop 199), none
+- After main was merged in (`b423e90`) and the review of PR 7's fix (`5597249`, then `fa6ce29`): `pnpm verify` 589 passed (domain 43, engine 347, desktop 199), none
   skipped. A real engine answered `doctor` and ran `hello` again.
 - `pnpm probe:sandbox --plan` prints the same steps and limits. Its deadline line now says that every request, POST and
   DELETE too, ends by the 20 minutes.
