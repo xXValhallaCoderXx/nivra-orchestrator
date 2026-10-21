@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PROBE_SCRIPT } from "../src/exec/check.ts";
 import { listingDigest, PREPARE_SCRIPT, type ListingEntry } from "../src/exec/nebius/session.ts";
 import { COLLECT_SCRIPT, RESULT_ARCHIVE, RESULT_LISTING } from "../src/exec/patch.ts";
 import { readTar, writeTar, type TarEntry } from "../src/exec/tar.ts";
@@ -26,6 +27,8 @@ export class FakeGuest {
   override: (command: { program: string; args: readonly string[]; body: Record<string, unknown> }) => Partial<Behaviour> | undefined = () => undefined;
   /** Commands whose result image is gone once made, so a spawn from it answers 410. */
   expiresAfter: (program: string, args: readonly string[]) => boolean = () => false;
+  /** Each operation that ends on its own ends at its first read, as a real engine's tests want: they wait in real time. */
+  quick = false;
   #images = 0;
 
   constructor(baseImage = "base-image") {
@@ -44,7 +47,8 @@ export class FakeGuest {
     const image = `img-guest-${++this.#images}`;
     this.workspaces.set(image, workspace);
     if (this.expiresAfter(program, args)) this.service.expiredImages.add(image);
-    return { ...outcome, ...this.override({ program, args, body }), resultImage: image };
+    const behaviour: Behaviour = { ...outcome, ...this.override({ program, args, body }), resultImage: image };
+    return this.quick && !behaviour.waits ? { ...behaviour, statuses: [behaviour.statuses.at(-1)!] } : behaviour;
   }
 
   #run(program: string, args: readonly string[], workspace: Workspace, body: Record<string, unknown>): Behaviour {
@@ -58,6 +62,7 @@ export class FakeGuest {
     if (program === "/bin/sh" && script === NETWORK_SCRIPT) return this.#network(args, body);
     if (program === "/bin/sh" && script === CHECK_SCRIPT) return succeed(checkOutcome(workspace));
     if (program === "/bin/sh" && script === FAIL_SCRIPT) return succeed({ exitCode: 1, stdout: "FAIL: this check fails on purpose\n" });
+    if (program === "/bin/sh" && script === PROBE_SCRIPT) return this.#probe(workspace);
     // A sleep longer than its timeout is ended by the service, as live (SUCCESS, exit -1, signal 9); a shorter one
     // runs until something stops it.
     if (program === "/bin/sleep") return Number(args[0]) > Number(body["timeout"]) ? succeed({ timedOut: true }) : { ...succeed(), waits: true };
@@ -89,6 +94,12 @@ export class FakeGuest {
     const listing = new TextEncoder().encode(kept.map(([path, node]) => (node.kind === "link" ? `l ${node.target} ./${path}\n` : `f ${sha(node.bytes)} ./${path}\n`)).join(""));
     const archive = writeTar(kept.map(([path, node]): TarEntry => (node.kind === "link" ? { path, kind: "link", target: node.target } : { path, kind: "file", executable: node.executable, bytes: node.bytes })));
     return succeed({ stdout: `entries ${kept.length}\nlisting ${sha(listing)}\narchive ${sha(archive)}\n`, files: { [RESULT_ARCHIVE]: archive, [RESULT_LISTING]: listing } });
+  }
+
+  /** The sandbox check's probe (D36): which busybox, and what the workspace holds. */
+  #probe(workspace: Workspace): Behaviour {
+    const nodes = [...workspace.values()];
+    return succeed({ stdout: `busybox: BusyBox v1.36.1 (the fake guest)\nfiles: ${nodes.filter((node) => node.kind === "file").length}\nlinks: ${nodes.filter((node) => node.kind === "link").length}\n` });
   }
 
   /** The network attempt: refused with networking off, as D28 saw live; reached with it on, which fails the step. */

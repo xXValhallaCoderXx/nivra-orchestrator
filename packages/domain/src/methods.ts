@@ -5,14 +5,18 @@ import { ExplainResult } from "./explain.ts";
 import { ModelEndpoint, ModelFailureKind } from "./models.ts";
 import { ReviewContext, ReviewInput, ReviewReport } from "./review.ts";
 import { ExplainInput, HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
+import { SandboxContext, SandboxInput, SandboxPreview, SandboxReport, SandboxStatus } from "./sandbox.ts";
 
 /**
  * Every request the host may send the engine, with its parameters and result as zod schemas. The engine validates
  * parameters before a handler runs and results before they are sent; main validates both again (D2).
  */
 
-/** Names of the secrets the engine may hold. Values arrive in `initialize` or `secrets.update` and live in memory only (D8). */
-export const SecretName = z.enum(["NEBIUS_API_KEY"]);
+/**
+ * Names of the secrets the engine may hold. Values arrive in `initialize` or `secrets.update` and live in memory only
+ * (D8). The project id goes with the key to Nebius Sandboxes (D36).
+ */
+export const SecretName = z.enum(["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID"]);
 export type SecretName = z.infer<typeof SecretName>;
 
 /** Real keys are long; a very short value would mask ordinary text everywhere it appears. */
@@ -77,6 +81,8 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ChatContext, workflowId: z.literal("chat"), input: ChatInput }),
   // A review of a saved plan version carries the frozen packet too (D30), held in memory like the snapshot.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ReviewContext, workflowId: z.literal("review"), input: ReviewInput }),
+  // A sandbox check carries its own upload consent, never model-context consent (D36).
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: SandboxContext, workflowId: z.literal("sandbox"), input: SandboxInput }),
 ]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
@@ -166,6 +172,17 @@ export const Methods = {
    * saved before it stopped reads as interrupted. Null until there is one.
    */
   "runs.review": { params: z.strictObject({ runId: RunId }), result: ReviewReport.nullable() },
+  /**
+   * A sandbox check's report (D36), whatever the run's status. A report the engine saved before it stopped reads as
+   * interrupted. Null until there is one.
+   */
+  "runs.sandbox": { params: z.strictObject({ runId: RunId }), result: SandboxReport.nullable() },
+  /** What a sandbox check of this checkout would send, with no network: for the person to see before any upload. */
+  "sandbox.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096) }), result: SandboxPreview },
+  /** Sandbox work an earlier engine left open, and the recovery pass's state. Reads only this engine's memory. */
+  "sandbox.status": { params: Empty, result: SandboxStatus },
+  /** Starts one bounded recovery pass when none is running and the credentials are set; the status as it is then. */
+  "sandbox.recover": { params: Empty, result: SandboxStatus },
 } as const satisfies Record<string, { params: z.ZodType; result: z.ZodType }>;
 
 export type MethodName = keyof typeof Methods;

@@ -1,4 +1,4 @@
-import { isTerminal, type ChatContext, type JsonObject, type ReviewContext, type RunContext, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { isTerminal, type ChatContext, type JsonObject, type ReviewContext, type RunContext, type RunStatus, type SandboxContext, type StartRunParams, type WorkflowId } from "@nivra/domain";
 import { errorFacts, internalMessage, publicFailure, Refusal, type Diagnostic, type DiagnosticCode, type ErrorFacts } from "../diagnostics.ts";
 import type { NewEvent, RunStore } from "./store.ts";
 
@@ -99,6 +99,14 @@ function sameReview(stored: unknown, input: unknown): boolean {
   return keys.every((key) => a[key] === (b[key] ?? (key === "panel" ? "council" : undefined)));
 }
 
+/** Whether a stored sandbox check's input names the same checkout, project, target and preview as a new one (D36). */
+function sameSandbox(stored: unknown, input: unknown): boolean {
+  const keys = ["repoPath", "project", "target", "preview"] as const;
+  const a = (stored ?? {}) as Record<string, unknown>;
+  const b = (input ?? {}) as Record<string, unknown>;
+  return keys.every((key) => a[key] === b[key]);
+}
+
 /**
  * Maps how a Mastra run ended onto Nivra's statuses. Anything but success is a failure, except a cancel that was asked
  * for: an aborted step can surface as `failed`, and it is still a cancellation. A failure keeps Nivra's own words only.
@@ -124,7 +132,7 @@ export class RunScheduler {
   readonly #log: SchedulerLog;
   readonly #diagnose: (diagnostic: Diagnostic) => void;
   readonly #slots = new Map<string, Slot>();
-  readonly #contexts = new Map<string, RunContext | ChatContext | ReviewContext>();
+  readonly #contexts = new Map<string, RunContext | ChatContext | ReviewContext | SandboxContext>();
   /** Each live run's request id, for its diagnostic. */
   readonly #requests = new Map<string, string>();
   #source: WorkflowSource | null = null;
@@ -166,10 +174,12 @@ export class RunScheduler {
       instanceId: this.#instanceId,
     });
     // A repeated request returns the run it already created, which keeps the context it came with. The same id with
-    // other work is refused: a review is bound to its plan version and fingerprints (D30), and nothing is sent twice.
+    // other work is refused: a review is bound to its plan version and fingerprints (D30), a check to its preview (D36),
+    // and nothing is sent twice.
     if (!created) {
       const existing = this.#store.summary(id);
-      if (existing && (existing.workflowId !== request.workflowId || (request.workflowId === "review" && !sameReview(existing.input, request.input)))) {
+      const other = existing && ((request.workflowId === "review" && !sameReview(existing.input, request.input)) || (request.workflowId === "sandbox" && !sameSandbox(existing.input, request.input)));
+      if (existing && (existing.workflowId !== request.workflowId || other)) {
         throw new Refusal("request-conflict", "This request id already started another run, with other input. Send the new request with a new id.");
       }
     }
@@ -182,7 +192,7 @@ export class RunScheduler {
   }
 
   /** The context the host sent with a run, while the run lasts; null once it has ended. Steps read it by run id. */
-  contextOf(runId: string): RunContext | ChatContext | ReviewContext | null {
+  contextOf(runId: string): RunContext | ChatContext | ReviewContext | SandboxContext | null {
     return this.#contexts.get(runId) ?? null;
   }
 
