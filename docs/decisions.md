@@ -2027,7 +2027,7 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
   - Turning uploads off, or removing the project, cancels the project's check. A check whose state can't be read is
     taken as going, so it is stopped too. Once the stop is accepted, the project's notice says the check is being
     stopped, and what Nebius keeps of anything it uploaded. A stop that fails says so, in the notice and the check's
-    note, and a removal it fails leaves the project in the list.
+    note, and a removal it fails leaves the project in the list. A stop accepted later takes those words back.
   - **One check of a project at a time.** The host claims the project before its first wait, so a second start, a
     double press say, is refused; so is one while the last check can't be read, saying so. The engine refuses a new
     `sandbox` request for a project while a run of it is queued or running, recording nothing; a repeated request
@@ -2062,6 +2062,8 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
     this engine has open, and a pass may run beside a check. A journal the pass settles leaves the list at once, and
     one moved aside since it was read (by hand, or by a pass that then failed) has nothing left to settle: no later
     pass looks at either again. With nothing left open, nothing waits for the credentials.
+  - **The window follows it.** It reads what is open again whenever the key or project id is saved, once the engines
+    have them, and then while a pass runs, so it never goes on saying a pass waits, or is going, after it has ended.
   - Nothing is replayed, and age never settles an operation. What stays open is shown, for a person to follow up.
 - **Test endpoints.** `--sandboxes-url` points the adapter at a stub on this machine (loopback only), as
   `--token-factory-url` does, and an unpackaged app passes `--nivra-sandboxes-url` through.
@@ -2101,6 +2103,10 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
   3. a last check that couldn't be read refused a new start as "still going";
   4. the engine refused a repeated request while another check of the project went, though its run existed;
   5. one of the pass list's filters had no test.
+- **Nate's review of `60285b3` (21 October)** confirmed those, and found the window's line about what earlier
+  sessions left open still stale: saving the key and project id could start and end a pass while it went on saying it
+  waited for them. It reads them again now on each save (`d5b225e`). A stop that worked after one that failed also
+  left the failure's words, which it now takes back.
 
 **Consequences.**
 - **Track A's proposal on NIV-41,** safe codes on the boundary errors, isn't needed by a check, which reports by its

@@ -1494,6 +1494,8 @@ behind upload consent of its own. On `feature/niv-44`, stacked on B3 (`a1622ed`)
 | `a04af11` | The independent review's six findings, below |
 | `69c47b1`, `8bc0d04` | The review in D36 and this evidence; the Windows checks |
 | `7a70fab` | The independent check of those fixes: five more, below |
+| `60285b3` | The check in D36 and this evidence |
+| `d5b225e` | Nate's review of `60285b3`: the window's recovery line, and a stop that works taking back one that didn't, below |
 
 **NIV-44's criteria, shown:**
 
@@ -1575,17 +1577,24 @@ its experiments ran on a copy. All six fixes held, and it found five more gaps:
   answer never found), the engine refuses the next start while the lost run goes, and the window can't cancel a run it
   never learnt. That run ends at its own time limit, or when its engine restarts.
 
+**Nate's review of `60285b3`,** on 21 October. It confirmed the words after the upload, the repeated request and the
+host's stops, with 31 focused tests passing, and found what the window still got wrong:
+
+| Finding | At `60285b3` | After `d5b225e` | Shown by |
+|---|---|---|---|
+| The window's line about what earlier sessions left open | Read when the window opened, and again only while a pass already ran: saving the key and project id could start and end a pass while it still said "Nivra stops them once your key and project id are set" | The projects page counts saves of either credential, Settings counts each once the engines have it, and the sandbox check reads the status again on each, then follows a running pass to its end | `sandbox.spec.ts`, "saving the key and project id settles what an earlier session left open…": a first session leaves a probe open; a second, on the same engine home, shows it waiting; saving both through Settings sees the line go and the operation stopped. With the refresh undone, the line stays |
+| A stop that works after one that failed (minor) | The "couldn't stop" words stayed in the check's note and the project's notice | A stop accepted later replaces the note. The notice says the check is being stopped while uploads are off, and goes once they are on. The window's Cancel reads the projects again | `host.test.ts`, "says a check couldn't be stopped when its stop fails…" and "keeps a found check known…". With the clearing undone, both fail |
+
 **Checks**
-- `pnpm verify`: 699 passed (domain 48, engine 440, desktop 211), none skipped, at `7a70fab`. It was 694 after the review's fixes and 687 before them, and B3 ended at 663.
-- `test:e2e`: 45 passed, 1 skipped (explain's packaged-only test), before and after each round of fixes. The two new window tests are in `e2e/sandbox.spec.ts`; the first now presses Allow twice and sees one upload.
-- `test:packaged`: 24 passed, 22 skipped, before and after each round, each time after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`. The skips are the two new window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores.
-- **On Windows,** in a turn Nate agreed on 21 October, at `69c47b1`, after `stage:runtime all`:
+- `pnpm verify`: 699 passed (domain 48, engine 440, desktop 211), none skipped, at `d5b225e`, as at `7a70fab`: the new host checks extend tests already counted. It was 694 after the review's fixes and 687 before them, and B3 ended at 663.
+- `test:e2e`: 46 passed, 1 skipped (explain's packaged-only test), at `d5b225e`; 45 passed before it, after each round of fixes. The window's tests are in `e2e/sandbox.spec.ts`. The first presses Allow twice and sees one upload, and the third is the saving sequence above.
+- `test:packaged`: 24 passed, 23 skipped, at `d5b225e`, after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`; 22 skipped before it. The skips are the three sandbox window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores.
+- **On Windows,** each time after `stage:runtime all`. The first turn was at `69c47b1`. The second was at `d5b225e`, the final code, coordinated just before with Track A's session, which had no Windows check running and held off until it was told the turn was over. Each time:
   - `verify:windows --skip-stage`: 22 of 22 checks passed, on the native engine and on the WSL engine driven by a real Windows process. The release's `~/.nivra` was as it was, and the run's own WSL home was removed;
   - `test:windows`: 11 passed, against the build `dev:win --skip-stage --no-launch` copied;
   - no tracked file under `apps/` or `packages/` was written while they ran, checked by each file's size and time before and after.
-- **Not run:**
-  - the Windows checks at `7a70fab`. Its host changes are to the sandbox check's stops and words, which no Windows test reaches, and they wait for another Windows turn;
-  - any live call: B4 makes none. B3's approved run is still to come, and its evidence is reused here only where the bytes and path match.
+- **`rpc.ts`** wasn't run again after `d5b225e`: the engine hasn't changed since `7a70fab`.
+- **Not run:** any live call: B4 makes none. B3's approved run is still to come, and its evidence is reused here only where the bytes and path match.
 
 **Limits**
 - **Not run live.** The stand-in follows the documentation and D28's live runs; B3's approved run is the live evidence.
