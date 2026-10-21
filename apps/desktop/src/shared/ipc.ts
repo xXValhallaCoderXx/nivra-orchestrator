@@ -12,6 +12,9 @@ import type {
   RunEventsPage,
   RunStatus,
   RunSummary,
+  SandboxPreview,
+  SandboxReport,
+  SandboxStatus,
 } from "@nivra/domain";
 
 /**
@@ -33,6 +36,12 @@ export const IPC = {
   addProject: "projects:add",
   removeProject: "projects:remove",
   setSharing: "projects:sharing",
+  setCloudExecution: "projects:cloud-execution",
+  previewSandboxCheck: "sandbox:preview",
+  startSandboxCheck: "sandbox:start",
+  cancelSandboxCheck: "sandbox:cancel",
+  getSandboxCheck: "sandbox:get",
+  getSandboxStatus: "sandbox:status",
   listPreferences: "preferences:list",
   addPreference: "preferences:add",
   editPreference: "preferences:edit",
@@ -49,6 +58,7 @@ export const IPC = {
   cancelRun: "runs:cancel",
   getSettings: "settings:get",
   setNebiusKey: "settings:nebius-key",
+  setNebiusProjectId: "settings:nebius-project-id",
   checkTokenFactory: "providers:check",
   listConversations: "conversations:list",
   createConversation: "conversations:create",
@@ -136,8 +146,24 @@ export interface ProjectView {
   displayPath: string;
   /** Something to tell the person about this project this session (it moved to another engine, say); null otherwise. */
   notice: string | null;
-  /** What the project allows to leave the machine (D20): off until the person agrees. */
-  sharing: { modelContext: boolean };
+  /**
+   * What the project allows to leave the machine (D20), each off until the person agrees: excerpts to Token Factory
+   * (`modelContext`), and its commit uploaded to Nebius Sandboxes (`cloudExecution`, D36). Neither stands in for the other.
+   */
+  sharing: { modelContext: boolean; cloudExecution: boolean };
+}
+
+/**
+ * A project's sandbox check this session (D36). `sending` while its start is out, `looking` when the answer was lost
+ * and it is being found by its request id, `not-sent` when it never reached the engine, `unknown` when its state can't
+ * be read now; otherwise its run's status. The report is the engine's, whatever the status.
+ */
+export interface SandboxCheckView {
+  runId: string | null;
+  status: RunStatus | "sending" | "looking" | "not-sent" | "unknown";
+  report: SandboxReport | null;
+  /** Something to tell the person about it: stopped because uploads were turned off, say; null otherwise. */
+  note: string | null;
 }
 
 /** One of the engineer's preferences, from the host's canonical store (D21). */
@@ -212,6 +238,8 @@ export interface SettingsView {
   keychain: "available" | "unavailable";
   /** What to tell the person about how their key is kept; null when there is nothing to say. */
   note: string | null;
+  /** Whether a Nebius project id is saved, which Nebius Sandboxes needs with the key (D36). It is kept like the key. */
+  nebiusProjectId: "none" | "set";
 }
 
 /** Whether the workspace (D26) could be opened; everything else works without it. */
@@ -471,6 +499,21 @@ export interface NivraApi {
   /** Allows or stops sending the project's content to Token Factory (D20); stopping cancels its explain runs. */
   setSharing(projectId: string, modelContext: boolean): Promise<ProjectView>;
   /**
+   * Allows or stops uploading the project's commit to Nebius Sandboxes (D36), on its own: model-context consent never
+   * stands in for it. Stopping cancels the project's sandbox check, and its notice says what Nebius keeps.
+   */
+  setCloudExecution(projectId: string, cloudExecution: boolean): Promise<ProjectView>;
+  /** What a sandbox check of the project would send, from its own engine with no network. Nothing is uploaded. */
+  previewSandboxCheck(projectId: string): Promise<SandboxPreview>;
+  /** Starts the check previewed; refused when uploads aren't allowed, or when what it would send changed since (`expected`). */
+  startSandboxCheck(projectId: string, expected: string): Promise<SandboxCheckView>;
+  /** Stops the project's sandbox check; what it uploaded stays with Nebius. */
+  cancelSandboxCheck(projectId: string): Promise<SandboxCheckView>;
+  /** The project's sandbox check this session, as it is now; null when none was started. */
+  getSandboxCheck(projectId: string): Promise<SandboxCheckView | null>;
+  /** What the project's engine has left open in Nebius from earlier sessions, and its recovery pass. */
+  getSandboxStatus(projectId: string): Promise<SandboxStatus>;
+  /**
    * Explains the project's repository with evidence (NIV-6); refused while sharing is off. An empty question means the
    * default. `choices` are this task's explicit decisions, up to five: they outrank everything for this run only and
    * are never saved (D23).
@@ -483,6 +526,8 @@ export interface NivraApi {
   cancelRun(runId: string): Promise<{ status: RunStatus; wasTerminal: boolean }>;
   getSettings(): Promise<SettingsView>;
   setNebiusKey(key: string | null): Promise<SettingsView>;
+  /** Saves the Nebius project id that Nebius Sandboxes needs with the key, kept like the key (D8, D36); null removes it. */
+  setNebiusProjectId(projectId: string | null): Promise<SettingsView>;
   /** Token Factory from the project's engine: its NVIDIA models and one Nemotron tool call (B7). */
   checkTokenFactory(projectId: string): Promise<ProviderCheck>;
   /** The workspace's state and every conversation, the most recently active first. Reading starts no engine. */

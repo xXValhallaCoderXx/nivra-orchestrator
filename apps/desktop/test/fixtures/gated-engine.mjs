@@ -11,6 +11,7 @@
 // cancels is written to `cancelled.log`; runs.reply gives a general reply; runs.events has no events.
 // For reviews (D31): runs.start records each review's request id and input (`reviews.log`), and runs.review answers
 // with a report that repeats what it was asked for, or names the next plan version while a `wrong-report` file exists.
+// For sandbox checks (D36): runs.sandbox answers that there is no report yet.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -108,6 +109,8 @@ process.stdin.on("data", (chunk) => {
       send({ id: request.id, result: { kind: "general", text: "A gated reply.", cutOff: false, context: { preferences: { revision: 0, digest: "gated", records: [] }, history: record }, finishedAt: new Date().toISOString() } });
     } else if (request.method === "runs.review") {
       send({ id: request.id, result: reviewReport(request.params.runId) });
+    } else if (request.method === "runs.sandbox") {
+      send({ id: request.id, result: null });
     } else if (request.method === "runs.events") {
       send({ id: request.id, result: { events: [], next: request.params.after ?? 0, status: cancelled.has(request.params.runId) ? "cancelled" : "succeeded" } });
     } else if (request.method === "runs.result") {

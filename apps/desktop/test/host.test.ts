@@ -17,6 +17,8 @@ import type { TargetFactory } from "../src/main/targets/registry.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
 import type { WslDiscovery } from "../src/main/targets/wsl-discovery.ts";
 import { httpError, startStub, text, toolCall, type Reply, type StubRequest, type Stub } from "../../engine/test/stub-token-factory.ts";
+import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandboxes.ts";
+import { PROBE_SCRIPT } from "../../engine/src/exec/check.ts";
 
 /**
  * The host's engine pool (D17) against real engines run from source. A "WSL" target here is a stand-in: a target that
@@ -29,9 +31,11 @@ const GATED = fileURLToPath(new URL("./fixtures/gated-engine.mjs", import.meta.u
 const dirs: string[] = [];
 const hosts: Host[] = [];
 const stubs: Stub[] = [];
+const sandboxStubs: SandboxStub[] = [];
 after(async () => {
   await Promise.all(hosts.map((host) => host.shutdown().catch(() => undefined)));
   await Promise.all(stubs.map((stub) => stub.close()));
+  await Promise.all(sandboxStubs.map((stub) => stub.close()));
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
 });
 
@@ -81,8 +85,11 @@ function standInWsl(distro: string, inner: ExecutionTarget, beforePrepare?: () =
 
 const BROKEN: WslDiscovery = { status: "broken", code: "WSL_E_TEST", message: "WSL didn't answer (WSL_E_TEST). Run `wsl --update` in a terminal, then press Check again.", distros: [] };
 
-/** Both engines reach `tokenFactoryUrl` (a loopback stub) when it is set; `beforeWslPrepare` can hold the WSL engine's start. */
-type HostOptions = { localEntry?: string; wsl?: "ready" | "broken"; tokenFactoryUrl?: string; beforeWslPrepare?: () => Promise<void>; testHooks?: { beforeProjection?(turnId: string): Promise<void> } };
+/**
+ * Both engines reach `tokenFactoryUrl` and `sandboxesUrl` (loopback stubs) when they are set; `beforeWslPrepare` can
+ * hold the WSL engine's start.
+ */
+type HostOptions = { localEntry?: string; wsl?: "ready" | "broken"; tokenFactoryUrl?: string; sandboxesUrl?: string; beforeWslPrepare?: () => Promise<void>; testHooks?: { beforeProjection?(turnId: string): Promise<void> } };
 
 function makeHost(options: HostOptions & { projects?: Array<{ targetId: string; path: string }> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "nivra host ü%# "));
@@ -98,7 +105,7 @@ function makeHost(options: HostOptions & { projects?: Array<{ targetId: string; 
 /** A host on the records and engine homes under `root`, as a desktop launch would make it: a second one is a restart. */
 function hostAt(root: string, options: HostOptions = {}) {
   const store = new HostStore(join(root, "nivra.json"));
-  const extraArgs = options.tokenFactoryUrl ? ["--token-factory-url", options.tokenFactoryUrl] : [];
+  const extraArgs = [...(options.tokenFactoryUrl ? ["--token-factory-url", options.tokenFactoryUrl] : []), ...(options.sandboxesUrl ? ["--sandboxes-url", options.sandboxesUrl] : [])];
   const wslTarget = standInWsl("Test", localTarget(join(root, "wsl home"), ENGINE, extraArgs), options.beforeWslPrepare);
   const discovery: WslDiscovery =
     options.wsl === "broken" ? BROKEN : { status: "ready", wslExe: "wsl.exe", distros: [{ name: "Test", version: 2, isDefault: true, defaultUid: 1000, osVersion: null }], hidden: [] };
@@ -246,12 +253,12 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     await host.open(ids[0]!);
     await online(host, "local");
     void host.open(ids[1]!);
-    keys.current = { NEBIUS_API_KEY: "test-key-0123456789" };
+    keys.current = { NEBIUS_API_KEY: "test-key-0123456789", NEBIUS_PROJECT_ID: "project-e00keystest" };
     await host.secretsChanged();
     await online(host, "wsl:Test");
     for (const id of ids) {
       const report = await host.doctor(id);
-      assert.match(report.checks.find((check) => check.id === "boundaries")!.detail, /credentials set/);
+      assert.match(report.checks.find((check) => check.id === "boundaries")!.detail, /Nebius Sandboxes: key and project id set/);
     }
   });
 
@@ -1613,5 +1620,166 @@ describe("Host: reviews of saved plan versions, bound to what their preview show
     assert.equal(review.report?.reviewers.find((r) => r.role === "architecture")?.summary, "The key [secret:NEBIUS_API_KEY] works.");
     await host.shutdown();
     assert.deepEqual(filesHolding(root, KEY), []);
+  });
+});
+
+describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
+  const KEY = "test-key-0123456789";
+  const PROJECT_ID = "project-e00hostcheck01";
+  const SECRETS = { NEBIUS_API_KEY: KEY, NEBIUS_PROJECT_ID: PROJECT_ID };
+  const UPLOADS_OFF = /doesn't allow uploading its commit to Nebius Sandboxes/;
+  const STOPPED = /^Uploads for this project were turned off, so its sandbox check was stopped\. What it uploaded stays with Nebius/;
+  const FINISHED = ["succeeded", "failed", "cancelled"];
+  const reposRoot = () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    return root;
+  };
+  const sandboxStub = async () => {
+    const stub = await startSandboxStub();
+    sandboxStubs.push(stub);
+    return stub;
+  };
+  const checkEnded = (host: Host, projectId: string) =>
+    waitFor(async () => {
+      const view = await host.sandboxCheck(projectId);
+      return view && FINISHED.includes(view.status) ? view : null;
+    }, "the check to end", 30_000);
+  const fingerprintOf = async (host: Host, projectId: string) => {
+    const preview = await host.previewSandboxCheck(projectId);
+    assert.equal(preview.status, "ready", JSON.stringify(preview).slice(0, 300));
+    return preview.status === "ready" ? preview.fingerprint : "";
+  };
+  const calls = (home: string) => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter(Boolean) : []);
+  const logged = (home: string, file: string) => (existsSync(join(home, file)) ? readFileSync(join(home, file), "utf8").split("\n").filter(Boolean) : []);
+  const uploads = (stub: SandboxStub) => stub.requests.filter((request) => request.path === "/v1/files").length;
+
+  it("keeps the two opt-ins apart in all four combinations: a check needs upload consent, an explanation model-context consent", async () => {
+    const sandboxes = await sandboxStub();
+    const models = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: () => httpError(503, "unused") });
+    stubs.push(models);
+    const { host, ids, keys, root } = makeHost({ tokenFactoryUrl: models.url, sandboxesUrl: sandboxes.url, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    keys.current = SECRETS;
+    const id = ids[0]!;
+    assert.deepEqual(host.projects()[0]?.sharing, { modelContext: false, cloudExecution: false }, "both start off");
+    const seen: unknown[] = [];
+    for (const [modelContext, cloudExecution] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+      await host.setSharing(id, modelContext);
+      await host.setCloudExecution(id, cloudExecution);
+      const before = uploads(sandboxes);
+      const fingerprint = await fingerprintOf(host, id);
+      const check = await host.startSandboxCheck(id, fingerprint).then(() => "started", (error: Error) => (UPLOADS_OFF.test(error.message) ? "refused" : error.message));
+      const explain = await host.startExplain(id, "", []).then(() => "started", (error: Error) => (/doesn't allow sending its content to Token Factory/.test(error.message) ? "refused" : error.message));
+      const outcome = check === "started" ? (await checkEnded(host, id)).report?.outcome : null;
+      seen.push([modelContext, cloudExecution, check, outcome, explain, uploads(sandboxes) - before]);
+    }
+    assert.deepEqual(seen, [
+      [false, false, "refused", null, "refused", 0],
+      [true, false, "refused", null, "started", 0],
+      [false, true, "started", "unchanged", "refused", 1],
+      [true, true, "started", "unchanged", "started", 1],
+    ]);
+    // The key and project id went to the engine in memory and to Nebius in headers: nothing on disk holds either.
+    assert.ok(sandboxes.requests.every((request) => request.authorization === `Bearer ${KEY}` && request.project === PROJECT_ID));
+    await host.shutdown();
+    assert.deepEqual([filesHolding(root, KEY), filesHolding(root, PROJECT_ID)], [[], []]);
+  });
+
+  it("refuses a check while uploads are off before starting any engine, and never sends one withdrawn while its engine starts", async () => {
+    const sandboxes = await sandboxStub();
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const preparing = new Promise<void>((resolve) => (entered = resolve));
+    const { host, ids, keys, root } = makeHost({
+      sandboxesUrl: sandboxes.url,
+      beforeWslPrepare: async () => {
+        entered();
+        await gate;
+      },
+      projects: [{ targetId: "wsl:Test", path: makeRepo(join(reposRoot(), "linux"), { "README.md": "# Linux\n" }) }],
+    });
+    keys.current = SECRETS;
+    await assert.rejects(host.startSandboxCheck(ids[0]!, "a".repeat(64)), UPLOADS_OFF);
+    assert.equal(stateOf(host, "wsl:Test")?.status, "stopped");
+    await host.setCloudExecution(ids[0]!, true);
+    const starting = host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    await preparing;
+    await host.setCloudExecution(ids[0]!, false);
+    release();
+    await assert.rejects(starting, /turned off, so the check wasn't started/);
+    await online(host, "wsl:Test");
+    assert.equal(sandboxes.requests.length, 0, "nothing reached Nebius");
+    await host.shutdown();
+    assert.equal(existsSync(join(root, "wsl home", "sandbox")), false, "no session was ever opened");
+  });
+
+  it("stops a check whose consent is withdrawn while its start is out, as soon as its engine answers", async () => {
+    const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+    keys.current = SECRETS;
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "accept"), "");
+    await host.setCloudExecution(ids[0]!, true);
+    const starting = host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    await waitFor(() => calls(home).includes("runs.start"), "the check's request to reach the engine");
+    await host.setCloudExecution(ids[0]!, false);
+    writeFileSync(join(home, "release"), "");
+    const view = await starting;
+    const runId = logged(home, "accepted.log")[0]?.split(" ")[1];
+    assert.deepEqual([view.runId === runId, view.status, STOPPED.test(view.note ?? ""), logged(home, "cancelled.log")], [true, "cancelled", true, [runId]]);
+    assert.match(host.projects()[0]?.notice ?? "", STOPPED);
+  });
+
+  it("finds a check whose start's answer was lost by its request id, never sends it again, and stops it once found when consent was withdrawn", async () => {
+    const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+    keys.current = SECRETS;
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "error-start", "hold-find", "release"]) writeFileSync(join(home, flag), "");
+    await host.setCloudExecution(ids[0]!, true);
+    const lost = await host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    assert.deepEqual([lost.status, lost.runId], ["looking", null]);
+    await waitFor(() => calls(home).includes("runs.find"), "the search by request id");
+    await host.setCloudExecution(ids[0]!, false);
+    writeFileSync(join(home, "release-find"), "");
+    const runId = logged(home, "accepted.log")[0]?.split(" ")[1];
+    await waitFor(() => logged(home, "cancelled.log").includes(runId!), "the found check to be stopped");
+    const found = await host.sandboxCheck(ids[0]!);
+    assert.deepEqual([found?.runId === runId, found?.status, calls(home).filter((call) => call === "runs.start").length], [true, "cancelled", 1]);
+  });
+
+  it("stops a running check when uploads are turned off, says what stays with Nebius, and the engine stops its operation", async () => {
+    const sandboxes = await sandboxStub();
+    sandboxes.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
+    const { host, ids, keys } = makeHost({ sandboxesUrl: sandboxes.url, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    keys.current = SECRETS;
+    await host.setCloudExecution(ids[0]!, true);
+    await host.startSandboxCheck(ids[0]!, await fingerprintOf(host, ids[0]!));
+    await waitFor(() => sandboxes.requests.some((request) => request.path === "/v1/instances" && request.body.includes("nivra-probe")), "the probe to start");
+    const project = await host.setCloudExecution(ids[0]!, false);
+    assert.match(project.notice ?? "", STOPPED);
+    const view = await checkEnded(host, ids[0]!);
+    assert.deepEqual([view.status, view.report?.outcome, view.report?.cleanup?.stopped, STOPPED.test(view.note ?? "")], ["cancelled", "cancelled", 1, true]);
+    assert.match(view.report?.cleanup?.retained?.note ?? "", /^Images are retained for 180 days/);
+    assert.ok(sandboxes.requests.some((request) => request.method === "DELETE"), "the probe's operation was asked to stop");
+  });
+
+  it("stops a project's check when the project is removed", async () => {
+    const sandboxes = await sandboxStub();
+    sandboxes.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
+    const { host, ids, keys } = makeHost({ sandboxesUrl: sandboxes.url, projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), { "README.md": "# Native\n" }) }] });
+    keys.current = SECRETS;
+    await host.setCloudExecution(ids[0]!, true);
+    const view = await host.startSandboxCheck(ids[0]!, await fingerprintOf(host, ids[0]!));
+    await waitFor(() => sandboxes.requests.some((request) => request.path === "/v1/instances" && request.body.includes("nivra-probe")), "the probe to start");
+    await host.removeProject(ids[0]!);
+    assert.equal(host.projects().length, 0);
+    // The run is still reachable by its id on the engine that ran it: it ends cancelled, its operation asked to stop.
+    const page = await waitFor(async () => {
+      const events = await host.runEvents(view.runId!, 0);
+      return isTerminal(events.status) ? events : null;
+    }, "the check to end", 30_000);
+    assert.deepEqual([page.status, sandboxes.requests.some((request) => request.method === "DELETE")], ["cancelled", true]);
   });
 });
