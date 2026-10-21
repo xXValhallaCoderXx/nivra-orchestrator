@@ -1965,6 +1965,11 @@ is NIV-8's.
   their encodings (`4ec832f`). An independent check of that found no defect in its matching, but a value two layers
   of base64 down, and encodings broken up by something other than whitespace, still got through. Both are now found,
   and runs decoded from the joined-up text are read for shapes too (`b167766`).
+- **The second review of PR 8 (22 October)** found that joining up could freeze the engine. One regular expression
+  took the breaks out, and its join of quoted strings put a `\s*` either side of an optional `+` or `,`. After a quote
+  with a long run of spaces and no closing quote, it backtracked over every way to split the run. A valid JSON file of
+  128 KB took over three seconds, and the scan is synchronous, so it blocked the engine's answers and cancellation.
+  The breaks are now taken out in one pass, in time linear in the text, with the same result (`eb76f9c`).
 
 **Consequences.**
 - **What comes next.**

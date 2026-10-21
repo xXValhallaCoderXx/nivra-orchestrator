@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { WorkspaceRefusal } from "../src/exec/git-tool.ts";
 import { PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
-import { credentialKinds } from "../src/exec/snapshot.ts";
+import { credentialKinds, withoutBreaks } from "../src/exec/snapshot.ts";
 import { readTar } from "../src/exec/tar.ts";
 import { tempDir } from "./helpers.ts";
 import { changedSince, cleanUp, folderState, GIT, git, put, refusal, repoWith, scratch, snap, track } from "./workspace-fixtures.ts";
@@ -501,5 +501,53 @@ describe("commit snapshots, after the review", () => {
     // Without the vault's values nothing recognises it, and it would go: the vault is what keeps it back.
     assert.deepEqual((await snap(root)).files.map((file) => file.path), ["README.md", "deploy/deployment.yaml"]);
     assert.deepEqual(changedSince(before, root), [], "the checkout changed");
+  });
+});
+
+describe("the scan, in time linear in what it reads (the second review of PR 8)", () => {
+  // What the scan took out before, by a regular expression that backtracked over every split of a run of spaces.
+  const BACKTRACKING = /\\\r?\n|\\[nrt]|\\(?=\/)|["']\s*[+,]?\s*["']|\s+/g;
+
+  it("takes out exactly what the regular expression did, from every short text made of the characters it reads", () => {
+    const alphabet = ["\\", "\r", "\n", '"', "'", "+", ",", " ", "\t", "\f", "\v", "/", "n", "r", "t", "a", "Z", "=", " ", " ", "　", "﻿"];
+    let seed = 0x2f6b;
+    const next = (bound: number) => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed % bound;
+    };
+    const differ: string[] = [];
+    for (let made = 0; made < 20_000 && differ.length < 5; made++) {
+      const text = Array.from({ length: next(31) }, () => alphabet[next(alphabet.length)]).join("");
+      if (withoutBreaks(text) !== text.replace(BACKTRACKING, "")) differ.push(JSON.stringify(text));
+    }
+    assert.deepEqual(differ, [], "texts read differently");
+    assert.equal(withoutBreaks(`const k = "QUJD" +\n  "REVG", 'R0g' , "SUo"; a\\/b \\\nc\\n`), `constk="QUJDREVGR0gSUo";a/bc`);
+  });
+
+  it("reads a file of spaces after a quote, at the size limit, in well under a second, where it once took minutes", () => {
+    // In a process of its own with a hard limit, so a scan that hangs fails this test rather than the whole run.
+    const script = [
+      `import { credentialKinds } from ${JSON.stringify(new URL("../src/exec/snapshot.ts", import.meta.url).href)};`,
+      "const cases = {",
+      // The review's case: valid JSON holding 128 KB of spaces after a quote.
+      `  "128 KB of spaces in JSON": '{"a": "x"' + " ".repeat(128 * 1024) + "}",`,
+      `  "2 MiB of spaces after a quote": '"' + " ".repeat(2 * 1024 * 1024 - 2) + "x",`,
+      `  "2 MiB of spaces around a plus": '"' + " ".repeat(1024 * 1024) + "+" + " ".repeat(1024 * 1024 - 3) + "x",`,
+      `  "2 MiB of quotes and spaces": "\\" ".repeat(1024 * 1024),`,
+      "};",
+      "const took = {};",
+      "for (const [what, text] of Object.entries(cases)) {",
+      "  const started = performance.now();",
+      "  const kinds = credentialKinds(Buffer.from(text, 'latin1'), ['a-vault-value-0123456789']);",
+      "  took[what] = { ms: Math.round(performance.now() - started), kinds };",
+      "}",
+      "console.log(JSON.stringify(took));",
+    ].join("\n");
+    const ran = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20_000 });
+    assert.equal(ran.signal, null, `the scan was stopped after 20 s: ${ran.stderr.slice(0, 300)}`);
+    assert.equal(ran.status, 0, ran.stderr.slice(0, 300));
+    const took = JSON.parse(ran.stdout) as Record<string, { ms: number; kinds: string[] }>;
+    assert.deepEqual(Object.values(took).map((one) => one.kinds), [[], [], [], []]);
+    assert.deepEqual(Object.entries(took).filter(([, one]) => one.ms > 1_000).map(([what, one]) => `${what}: ${one.ms} ms`), [], "a case took over a second");
   });
 });
