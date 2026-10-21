@@ -12,8 +12,9 @@
 // cancels is written to `cancelled.log`; runs.reply gives a general reply; runs.events has no events.
 // For reviews (D31): runs.start records each review's request id and input (`reviews.log`), and runs.review answers
 // with a report that repeats what it was asked for, or names the next plan version while a `wrong-report` file exists.
-// For sandbox checks (D36): runs.sandbox answers that there is no report yet, and runs.get is turned down while a
-// `fail-get` file exists, as an engine that can't read a run would.
+// For sandbox checks (D36): runs.sandbox answers that there is no report yet; runs.get says "running" for a run it
+// wasn't asked to cancel while a `running` file exists, and is turned down while a `fail-get` file exists, as an engine
+// that can't read a run would.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -104,9 +105,9 @@ process.stdin.on("data", (chunk) => {
         }, 25);
       }
     } else if (request.method === "runs.get") {
-      const status = cancelled.has(request.params.runId) ? "cancelled" : "succeeded";
+      const status = cancelled.has(request.params.runId) ? "cancelled" : existsSync(join(home, "running")) ? "running" : "succeeded";
       if (existsSync(join(home, "fail-get"))) send({ id: request.id, error: { code: -32603, message: "the run couldn't be read" } });
-      else send({ id: request.id, result: { ...summary(status), id: request.params.runId, finishedAt: new Date().toISOString() } });
+      else send({ id: request.id, result: { ...summary(status), id: request.params.runId, finishedAt: status === "running" ? null : new Date().toISOString() } });
     } else if (request.method === "runs.reply") {
       const record = { exchanges: 0, chars: 0, shortened: 0, omitted: { overLimit: 0, unanswered: 0, preferencesChanged: 0 }, digest: "gated" };
       send({ id: request.id, result: { kind: "general", text: "A gated reply.", cutOff: false, context: { preferences: { revision: 0, digest: "gated", records: [] }, history: record }, finishedAt: new Date().toISOString() } });

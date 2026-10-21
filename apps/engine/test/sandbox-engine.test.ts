@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { isTerminal, type RunSummary, type SandboxPreview, type SandboxReport, type SandboxStatus } from "@nivra/domain";
 import { PROBE_SCRIPT, STOP_MESSAGES } from "../src/exec/check.ts";
 import { removeDir, startEngine, tempDir, waitFor, type EngineProcess } from "./helpers.ts";
 import { startSandboxStub, type SandboxStub } from "./stub-sandboxes.ts";
-import { cleanUp, git, put, repoWith } from "./workspace-fixtures.ts";
+import { cleanUp, git, GIT, put, repoWith } from "./workspace-fixtures.ts";
 
 /**
  * A sandbox check through a real engine over stdio (NIV-44, D36): the production adapter against a stand-in for Nebius
@@ -58,6 +58,24 @@ const ready = (shown: SandboxPreview) => {
 };
 const spawns = (stub: SandboxStub) => stub.requests.filter((request) => request.method === "POST" && request.path === "/v1/instances");
 const probeSpawned = (stub: SandboxStub) => spawns(stub).some((request) => request.body.includes("nivra-probe"));
+const probes = (stub: SandboxStub) => spawns(stub).filter((request) => request.body.includes("nivra-probe")).length;
+
+/** A check whose probe's answer is lost, its operation hidden from the search for now: it ends with its journal open. */
+async function leaveUncertain(stub: SandboxStub, engine: EngineProcess, repo: string): Promise<RunSummary> {
+  const { service } = stub.guest;
+  let armed = false;
+  stub.guest.override = ({ args }) => {
+    if (args[1] !== PROBE_SCRIPT || armed) return undefined;
+    armed = true;
+    service.dropNextSpawnAnswer = true;
+    service.hideNextSpawn = true;
+    return { waits: true };
+  };
+  const run = await start(engine, repo, ready(await preview(engine, repo)).fingerprint);
+  assert.equal((await ended(engine, run.id)).status, "failed");
+  assert.equal((await report(engine, run.id)).outcome, "uncertain");
+  return run;
+}
 
 describe("a sandbox check through a real engine (NIV-44)", () => {
   it("previews what a check would send with no network, and refuses a commit holding the vault's own key, naming the file", async () => {
@@ -135,16 +153,37 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     const requestId = randomUUID();
     const first = await start(engine, repo, fingerprint, { requestId });
     const second = randomUUID();
-    await assert.rejects(start(engine, repo, fingerprint, { requestId: second }), /A sandbox check of this project is already going on its engine\. Wait for it to end, or cancel it/);
+    await assert.rejects(start(engine, repo, fingerprint, { requestId: second }), /A sandbox check of this project is already going on its engine, so another wasn't started\. Wait for it to end, then check again\./);
     assert.equal(await engine.client.call("runs.find", { clientRequestId: second }), null);
     assert.equal((await start(engine, repo, fingerprint, { requestId })).id, first.id, "a repeated request gets the run it started");
     await waitFor(() => probeSpawned(stub), { timeoutMs: 20_000, what: "the probe's spawn" });
     await engine.client.call("runs.cancel", { runId: first.id });
     assert.equal((await ended(engine, first.id)).status, "cancelled");
-    // Once it has ended, the project can be checked again.
-    stub.guest.override = () => undefined;
+    // Once it has ended, the project can be checked again; the first request, repeated while the next goes, still gets
+    // its own run.
     const next = await start(engine, repo, fingerprint);
-    assert.deepEqual([(await ended(engine, next.id)).status, stub.requests.filter((request) => request.path === "/v1/files").length], ["succeeded", 2]);
+    await waitFor(() => probes(stub) === 2, { timeoutMs: 20_000, what: "the next probe's spawn" });
+    assert.equal((await start(engine, repo, fingerprint, { requestId })).id, first.id);
+    await engine.client.call("runs.cancel", { runId: next.id });
+    assert.deepEqual([(await ended(engine, next.id)).status, stub.requests.filter((request) => request.path === "/v1/files").length], ["cancelled", 2]);
+  });
+
+  it("never says nothing was sent once the commit was uploaded: git failing as what came back is checked says so", async () => {
+    // git as usual, except fast-import, which only the patch step runs, after the probe and the collect step.
+    const root = tempDir("nivra git wrapper");
+    dirs.push(root);
+    mkdirSync(join(root, "bin"));
+    writeFileSync(join(root, "bin", "git"), `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "fast-import" ]; then echo "fatal: a test failure" >&2; exit 1; fi\ndone\nexec "${GIT}" "$@"\n`, { mode: 0o755 });
+    const { stub, engine, repo } = await setup({ env: () => ({ ...process.env, PATH: `${join(root, "bin")}${delimiter}${process.env["PATH"] ?? ""}` }) });
+    const run = await start(engine, repo, ready(await preview(engine, repo)).fingerprint);
+    assert.equal((await ended(engine, run.id)).status, "failed");
+    const checked = await report(engine, run.id);
+    assert.deepEqual([checked.stopped?.code, checked.stopped?.step, checked.steps.map((step) => step.label), checked.cleanup?.retained?.uploads], ["git", "patch", ["probe", "collect"], 1]);
+    // The report and the run's failure say the same, and neither says nothing was sent.
+    const words = /^Git failed while Nivra checked what came back from the sandbox, so nothing was proposed\. Your commit was uploaded, and what Nebius keeps is listed with the check\./;
+    assert.match(checked.stopped?.message ?? "", words);
+    assert.match((await engine.client.call("runs.get", { runId: run.id })).error ?? "", words);
+    assert.equal(stub.requests.filter((request) => request.path === "/v1/files").length, 1, "the commit was uploaded");
   });
 
   it("ends a check that fails before its session with a report saying so, never one that reads as interrupted", async () => {
@@ -159,18 +198,7 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
   it("never looks again at a journal its pass settled while a check was going, and reports nothing it didn't see", async () => {
     const { stub, engine, home, repo } = await setup();
     const { service } = stub.guest;
-    let armed = false;
-    // An uncertain probe leaves a journal open, as in the test above.
-    stub.guest.override = ({ args }) => {
-      if (args[1] !== PROBE_SCRIPT || armed) return undefined;
-      armed = true;
-      service.dropNextSpawnAnswer = true;
-      service.hideNextSpawn = true;
-      return { waits: true };
-    };
-    const lost = await start(engine, repo, ready(await preview(engine, repo)).fingerprint);
-    assert.equal((await ended(engine, lost.id)).status, "failed");
-    assert.equal((await report(engine, lost.id)).outcome, "uncertain");
+    await leaveUncertain(stub, engine, repo);
     await engine.client.call("shutdown", {});
     await engine.exited;
     const later = engineOn(stub, home);
@@ -184,7 +212,7 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     await waitFor(() => stub.requests.some((request) => request.method === "DELETE"), { timeoutMs: 20_000, what: "the pass's stop" });
     stub.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
     const going = await later.client.call("runs.start", { clientRequestId: randomUUID(), workflowId: "sandbox", input: { repoPath: repo, project: randomUUID(), target: "local", preview: ready(await preview(later, repo)).fingerprint }, context: { sharing: { cloudExecution: true } } });
-    await waitFor(() => spawns(stub).filter((request) => request.body.includes("nivra-probe")).length === 2, { timeoutMs: 20_000, what: "the second probe's spawn" });
+    await waitFor(() => probes(stub) === 2, { timeoutMs: 20_000, what: "the second probe's spawn" });
     stub.before = () => undefined;
     release();
     const status = (): Promise<SandboxStatus> => later.client.call("sandbox.status", {});
@@ -200,6 +228,23 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     await later.client.call("runs.cancel", { runId: going.id });
     assert.equal((await ended(later, going.id)).status, "cancelled");
     assert.deepEqual([(await status()).pass.unresolved, (await status()).open.length], [[], 0]);
+  });
+
+  it("never looks at a journal removed since its list was read, and has nothing to wait for once none is left", async () => {
+    const { stub, engine, home, repo } = await setup();
+    await leaveUncertain(stub, engine, repo);
+    await engine.client.call("shutdown", {});
+    await engine.exited;
+    const later = engineOn(stub, home);
+    await later.initialize({});
+    const status = (): Promise<SandboxStatus> => later.client.call("sandbox.status", {});
+    assert.deepEqual([(await status()).open.length, (await status()).pass.state], [1, "waiting-for-credentials"]);
+    // Removed by hand before the credentials arrive: no pass runs on it, nothing is sent, and nothing is reported.
+    for (const name of readdirSync(join(home, "sandbox")).filter((entry) => entry.endsWith(".jsonl"))) rmSync(join(home, "sandbox", name));
+    const before = stub.requests.length;
+    await later.client.call("secrets.update", { set: CREDENTIALS, remove: [] });
+    const after = await status();
+    assert.deepEqual([after.open.length, after.pass.state, after.pass.unresolved, stub.requests.length - before], [0, "idle", [], 0]);
   });
 
   it("cancels a check under way: the operation is stopped, the run ends cancelled, and cleanup's record says so", async () => {

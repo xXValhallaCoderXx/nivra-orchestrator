@@ -4,7 +4,7 @@ import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import { Refusal } from "../diagnostics.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
-import { CHECK_LIMITS, checkRecipe, checkReport, earlyReport, STOP_MESSAGES } from "../exec/check.ts";
+import { CHECK_LIMITS, checkRecipe, checkReport, earlyReport, stopWords } from "../exec/check.ts";
 import { runPrescribed, type PrescribedResult } from "../exec/prescribed.ts";
 import { RepoError } from "../repo/paths.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -46,8 +46,8 @@ const Input = z.strictObject({ repoPath: z.string() });
 const Checked = z.strictObject({ repoPath: z.string() });
 const Done = z.strictObject({ outcome: SandboxOutcome });
 
-/** Ends a check that won't go on, in its code's words; the report says the same. */
-const stop = (code: SandboxStopCode) => new Refusal(`sandbox-${code}`, STOP_MESSAGES[code]);
+/** Ends a check that won't go on, in its code's words for where it stopped; the report says the same. */
+const stop = (code: SandboxStopCode, step: string | null = null) => new Refusal(`sandbox-${code}`, stopWords(code, step));
 
 export function createSandboxWorkflow(deps: SandboxDeps) {
   const now = deps.now ?? (() => new Date());
@@ -128,7 +128,7 @@ export function createSandboxWorkflow(deps: SandboxDeps) {
         const unresolved = result.cleanup?.unresolved.length ?? 0;
         deps.recorder.output(runId, "run", `Check ${result.outcome}${unresolved ? `; ${unresolved} left open` : ""}.`, { outcome: result.outcome, unresolved });
         if (result.outcome === "unchanged" || result.outcome === "proposed") return { outcome: result.outcome };
-        throw stop(result.stopped?.code ?? (result.outcome === "cancelled" ? "cancelled" : "fault"));
+        throw stop(result.stopped?.code ?? (result.outcome === "cancelled" ? "cancelled" : "fault"), result.stopped?.step ?? null);
       } catch (error) {
         // Until runPrescribed returns, nothing was sent: once a session opens, its failures are outcomes. A report that
         // can't be saved after it leaves the fault's words, which claim nothing about what was sent.

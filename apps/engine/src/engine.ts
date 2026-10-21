@@ -275,17 +275,19 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   let scanned = scanJournals(journals);
   const pass: SandboxStatus["pass"] = { state: scanned.open.length ? "waiting-for-credentials" : "idle", startedAt: null, finishedAt: null, stopped: 0, alreadyEnded: 0, unresolved: [] };
   const checksActive = () => store.active().some((runId) => store.summary(runId)?.workflowId === "sandbox");
-  /** Whether a check of this project is going here, besides the one this request started (D36). */
-  const checkGoing = (project: string, clientRequestId: string) =>
+  /** Whether a check of this project is queued or running here (D36). */
+  const checkGoing = (project: string) =>
     store.active().some((runId) => {
       const summary = store.summary(runId);
-      return summary?.workflowId === "sandbox" && readSandboxTask(summary.input)?.project === project && store.requestIdOf(runId) !== clientRequestId;
+      return summary?.workflowId === "sandbox" && readSandboxTask(summary.input)?.project === project;
     });
   const rescan = () => {
     if (!checksActive()) scanned = scanJournals(journals);
+    // With nothing left open, there is nothing to wait for the credentials for.
+    if (scanned.open.length === 0 && pass.state === "waiting-for-credentials") pass.state = "idle";
   };
   const recover = (): void => {
-    // A journal moved aside since the list was read was settled by then.
+    // A journal moved aside since the list was read, by hand or by a pass that then failed, has nothing to settle.
     scanned = { ...scanned, open: scanned.open.filter((scan) => existsSync(scan.path)) };
     if (pass.state === "running" || engineStop.signal.aborted || scanned.open.length === 0) return;
     const credentials = sandboxCredentials();
@@ -486,9 +488,10 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         }
       },
       "runs.start": (params) => {
-        // One check of a project at a time (D36). The host refuses a second as well; a repeated request still gets its run.
-        if (params.workflowId === "sandbox" && checkGoing(params.input.project, params.clientRequestId)) {
-          throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check of this project is already going on its engine. Wait for it to end, or cancel it, then check again.");
+        // One check of a project at a time (D36), for a new request: a repeated one still gets its own run, ended or not.
+        // The host refuses a second check as well.
+        if (params.workflowId === "sandbox" && store.findByRequest(params.clientRequestId) === null && checkGoing(params.input.project)) {
+          throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check of this project is already going on its engine, so another wasn't started. Wait for it to end, then check again.");
         }
         try {
           return store.summary(scheduler.submit(params)) ?? notFound("just created");

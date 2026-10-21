@@ -1755,6 +1755,24 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     assert.match(host.projects()[0]?.notice ?? "", STOPPED);
   });
 
+  it("says a check whose late answer can't be stopped couldn't be, in its note and the project's notice", async () => {
+    const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+    keys.current = SECRETS;
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "running", "fail-cancel"]) writeFileSync(join(home, flag), "");
+    await host.setCloudExecution(ids[0]!, true);
+    const starting = host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    await waitFor(() => calls(home).includes("runs.start"), "the check's request to reach the engine");
+    // Withdrawn while the start is out: nothing is stopped yet, so the notice says it is being stopped.
+    assert.match((await host.setCloudExecution(ids[0]!, false)).notice ?? "", STOPPED);
+    writeFileSync(join(home, "release"), "");
+    const failed = "Nivra couldn't stop the sandbox check (the run couldn't be stopped). Restart the project's engine to stop it.";
+    await assert.rejects(starting, { message: failed });
+    const view = await host.sandboxCheck(ids[0]!);
+    assert.deepEqual([host.projects()[0]?.notice, view?.status, view?.note], [`Uploads for this project were turned off. ${failed}`, "running", failed]);
+  });
+
   it("finds a check whose start's answer was lost by its request id, never sends it again, and stops it once found when consent was withdrawn", async () => {
     const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
     keys.current = SECRETS;
@@ -1806,6 +1824,7 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
       return /^Nivra couldn't stop the sandbox check/.test(check?.note ?? "") ? check : null;
     }, "the failed stop to be reported");
     assert.deepEqual([view.runId === runId, ["runs.find", "runs.cancel"].map((method) => calls(home).filter((call) => call === method).length)], [true, [1, 1]]);
+    assert.equal(host.projects()[0]?.notice, `Uploads for this project were turned off. ${view.note}`);
     rmSync(join(home, "fail-cancel"));
     await host.cancelSandboxCheck(ids[0]!);
     assert.deepEqual(logged(home, "cancelled.log"), [runId]);
@@ -1822,8 +1841,31 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     writeFileSync(join(home, "fail-get"), "");
     const unread = await host.sandboxCheck(ids[0]!);
     assert.deepEqual([unread?.runId === started.runId, unread?.status, unread?.note], [true, "unknown", "Nivra can't read the check from its engine now (the run couldn't be read)."]);
+    // Another start is refused, saying the check can't be read, never that it is still going.
+    await assert.rejects(host.startSandboxCheck(ids[0]!, "a".repeat(64)), /^Error: Nivra can't read this project's last sandbox check from its engine now \(the run couldn't be read\), so it didn't start another\./);
     assert.match((await host.setCloudExecution(ids[0]!, false)).notice ?? "", STOPPED);
-    assert.deepEqual(logged(home, "cancelled.log"), [started.runId]);
+    assert.deepEqual([logged(home, "cancelled.log"), calls(home).filter((call) => call === "runs.start").length], [[started.runId], 1]);
+  });
+
+  it("says a check couldn't be stopped when its stop fails, never that it is being stopped: turning uploads off, and removing the project", async () => {
+    const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+    keys.current = SECRETS;
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "release", "running"]) writeFileSync(join(home, flag), "");
+    await host.setCloudExecution(ids[0]!, true);
+    const started = await host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    writeFileSync(join(home, "fail-cancel"), "");
+    const failed = "Nivra couldn't stop the sandbox check (the run couldn't be stopped). Restart the project's engine to stop it.";
+    await assert.rejects(host.setCloudExecution(ids[0]!, false), { message: failed });
+    const view = await host.sandboxCheck(ids[0]!);
+    assert.deepEqual([host.projects()[0]?.notice, view?.status, view?.note], [`Uploads for this project were turned off. ${failed}`, "running", failed]);
+    await assert.rejects(host.removeProject(ids[0]!), /^Error: Nivra couldn't stop the project's sandbox check \(the run couldn't be stopped\), so the project is still in the list\. Restart its engine, then remove it again\./);
+    assert.deepEqual([host.projects().length, (await host.sandboxCheck(ids[0]!))?.note], [1, failed]);
+    // Once a stop is accepted, the project goes.
+    rmSync(join(home, "fail-cancel"));
+    await host.removeProject(ids[0]!);
+    assert.deepEqual([host.projects().length, logged(home, "cancelled.log")], [0, [started.runId]]);
   });
 
   it("stops a running check when uploads are turned off, says what stays with Nebius, and the engine stops its operation", async () => {

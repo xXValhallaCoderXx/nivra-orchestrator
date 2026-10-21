@@ -97,6 +97,26 @@ export const STOP_MESSAGES: Readonly<Record<SandboxStopCode, string>> = {
   preview: "What would be sent changed since you previewed it, so nothing was sent. Preview the check again.",
 };
 
+/** Where a check stops before anything is uploaded: its own checks, the snapshot, and a session refused before sending. */
+const BEFORE_UPLOAD = new Set(["check", "run", "snapshot", "open"]);
+
+/**
+ * Words for a stop once the commit was uploaded, for codes whose own words say nothing was sent: git and the size limit
+ * check what comes back too. Any other such code gets the general words.
+ */
+const AFTER_UPLOAD: Partial<Record<SandboxStopCode, string>> = {
+  git: "Git failed while Nivra checked what came back from the sandbox, so nothing was proposed. Your commit was uploaded, and what Nebius keeps is listed with the check. Check again; if it keeps happening, report it with the engine log.",
+  limit: "What came back from the sandbox is larger than Nivra proposes at once, so nothing was proposed. Your commit was uploaded, and what Nebius keeps is listed with the check.",
+};
+const AFTER_UPLOAD_ANY = "The check stopped after your commit was uploaded, so nothing was proposed. What Nebius keeps is listed with the check.";
+
+/** A stop's words, by its code and where it happened: only a stop before the upload says nothing was sent. */
+export function stopWords(code: SandboxStopCode, step: string | null): string {
+  const words = STOP_MESSAGES[code];
+  if (step === null || BEFORE_UPLOAD.has(step) || !words.includes("nothing was sent")) return words;
+  return AFTER_UPLOAD[code] ?? AFTER_UPLOAD_ANY;
+}
+
 const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 const clip = (text: string, max: number) => (text.length > max ? text.slice(0, max) : text);
 
@@ -134,15 +154,15 @@ function stepOf(step: PrescribedResult["steps"][number]): SandboxStep {
 }
 
 /**
- * A check's report from what the prescribed path gave. The stop's words are the code's own; cleanup's record says what
- * was stopped, what stays open, and what Nebius keeps.
+ * A check's report from what the prescribed path gave. The stop's words are chosen by its code and where it happened;
+ * cleanup's record says what was stopped, what stays open, and what Nebius keeps.
  */
 export function checkReport(input: { result: PrescribedResult; request: SandboxReport["request"]; now: Date }): SandboxReport {
   const { result } = input;
   const { cleanup } = result;
   return {
     outcome: result.outcome,
-    stopped: result.stopped ? { code: result.stopped.code, step: result.stopped.step === null ? null : clip(result.stopped.step, 64), message: STOP_MESSAGES[result.stopped.code] } : null,
+    stopped: result.stopped ? { code: result.stopped.code, step: result.stopped.step === null ? null : clip(result.stopped.step, 64), message: stopWords(result.stopped.code, result.stopped.step) } : null,
     snapshot: result.snapshot,
     steps: result.steps.slice(0, 16).map(stepOf),
     reportSha256: result.report ? sha256(result.report) : null,

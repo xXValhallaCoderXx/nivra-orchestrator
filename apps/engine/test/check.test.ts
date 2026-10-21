@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { after, describe, it } from "node:test";
 import { SandboxReport, SandboxStopCode } from "@nivra/domain";
 import { BoundaryUnavailableError, type ExecutionBackend } from "../src/exec/backend.ts";
-import { CHECK_IMAGE, checkRecipe, checkReport, previewOf, PROBE_SCRIPT, safeUnresolved, STOP_MESSAGES } from "../src/exec/check.ts";
+import { CHECK_IMAGE, checkRecipe, checkReport, previewOf, PROBE_SCRIPT, safeUnresolved, STOP_MESSAGES, stopWords } from "../src/exec/check.ts";
 import { createLocalBackend } from "../src/exec/local.ts";
 import { NEBIUS_CAPABILITIES } from "../src/exec/nebius/session.ts";
 import { runPrescribed, type PrescribedResult } from "../src/exec/prescribed.ts";
@@ -40,6 +40,16 @@ describe("what a stopped check says, and what of cleanup leaves the engine (NIV-
   it("gives every stop code Nivra's own words, short enough for the report", () => {
     assert.deepEqual(Object.keys(STOP_MESSAGES).sort(), [...SandboxStopCode.options].sort());
     assert.ok(Object.values(STOP_MESSAGES).every((words) => words.length > 0 && words.length <= 400 && !/[{}<>]/.test(words)), "a message is fixed text");
+  });
+
+  it("says nothing was sent only for a stop before the upload, whatever its code", () => {
+    const codes = [...SandboxStopCode.options];
+    for (const step of [null, "check", "run", "snapshot", "open"]) assert.deepEqual(codes.filter((code) => stopWords(code, step) !== STOP_MESSAGES[code]), [], `before the upload, at ${String(step)}`);
+    for (const step of ["probe", "collect", "patch", "report"]) assert.deepEqual(codes.filter((code) => stopWords(code, step).includes("nothing was sent")), [], `after the upload, at ${step}`);
+    // Git and the size limit check what comes back too, so they have words of their own after the upload.
+    assert.match(stopWords("git", "patch"), /^Git failed while Nivra checked what came back from the sandbox, so nothing was proposed\. Your commit was uploaded/);
+    assert.match(stopWords("limit", "patch"), /^What came back from the sandbox is larger than Nivra proposes at once/);
+    assert.ok([...new Set(codes.map((code) => stopWords(code, "patch")))].every((words) => words.length <= 400 && !/[{}<>]/.test(words)), "a message is fixed text");
   });
 
   it("lets only cleanup's and recovery's own templates through, and gives fixed words for anything else", () => {
