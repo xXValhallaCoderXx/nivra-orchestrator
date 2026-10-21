@@ -1830,9 +1830,14 @@ is NIV-8's.
     A folder inside the engine home, or a home that holds the repository, is refused.
   - **Every file to be sent is scanned first,** text or binary, for credential shapes, private keys and the vault's
     own values. The scan reads each file as it is, as UTF-16 when it looks like UTF-16, and inside every long run of
-    base64, the way Kubernetes secrets wrap keys. A PGP private key counts, and so does a private key's first line
-    on its own. The vault's values are known exactly, so they are also looked for by their base64 encodings:
-    wherever one sits in what was encoded, however the lines are wrapped, in UTF-8 or UTF-16LE, standard or URL-safe.
+    base64, the way Kubernetes secrets wrap keys, on one line or joined up across lines. A PGP private key counts,
+    and so does a private key's first line on its own. The vault's values are known exactly, so they are also looked
+    for by their base64 encodings, in UTF-8 or UTF-16LE, standard or URL-safe:
+    - wherever one sits in what was encoded, however short the run;
+    - however the encoding was broken up: by line breaks and indentation, escaped line breaks, a shell's line
+      continuations, string literals joined with `+` or a comma, or JSON's escaped `/`;
+    - one layer further down, as a registry's auth sits inside a dockerconfigjson secret.
+
     **An unsafe snapshot is refused, never redacted.** The refusal names the path and the kind, never the value:
     "src/config.ts in this commit holds what looks like a private key, so Nivra won't upload it. Remove it from the
     commit (and replace the key if it's real), then try again."
@@ -1957,7 +1962,9 @@ is NIV-8's.
   UTF-16, never inside base64. A synthetic value with no recognised shape, base64-encoded in a `deployment.yaml`, was
   archived, and a returned change holding one would have been proposed. Decoding runs would still miss a value under
   30 bytes, a run that starts with other characters, and a wrapped encoding, so the values are now looked for by
-  their encodings (`4ec832f`).
+  their encodings (`4ec832f`). An independent check of that found no defect in its matching, but a value two layers
+  of base64 down, and encodings broken up by something other than whitespace, still got through. Both are now found,
+  and runs decoded from the joined-up text are read for shapes too (`b167766`).
 
 **Consequences.**
 - **What comes next.**
@@ -1978,9 +1985,10 @@ is NIV-8's.
     uncommitted changes. It refuses rather than misses.
   - **Content scanning refuses a repository that commits test keys,** by design. The refusal says what to do.
   - **Detection is by pattern** (D22), so it can't recognise every secret. A password in a URL is one it doesn't.
-  - **Inside base64, a shape is found only in a run of 40 or more characters on one line.** A wrapped encoding can
-    split a token's shape across lines. A vault value is found however it is wrapped, unless it is under 12 bytes,
-    where so little of its encoding could match by chance.
+  - **Inside base64, a shape is found one layer down only,** in a run of 40 or more characters read from where the
+    run starts: on one line, or joined up across lines. A token two layers down, or in a run that starts mid-way
+    through other letters, isn't found. A vault value is found two layers down, wherever it sits, unless it is under
+    12 bytes, where so little of its encoding could match by chance.
   - **A split index, and files marked for git not to look at, are refused** with what to run, rather than checked
     some other way.
 - **Not shown yet:**

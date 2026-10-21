@@ -635,7 +635,8 @@ describe("Nebius session: what the review of PR 7 found, failing on the code bef
     const tookMs = performance.now() - started;
     assert.equal(ended, "closed", "closing waited on the cancel past its budget");
     assert.ok(tookMs < 2_000, `closing took ${Math.round(tookMs)} ms of its 50`);
-    await assert.rejects(running, ExecUncertainError);
+    // Closing ended the stop and sends nothing more, so the command's error promises no retry from it.
+    await assert.rejects(running, (error: Error) => error instanceof ExecUncertainError && /wasn't seen to stop; it stays journaled, and the next recovery pass looks for it again\.$/.test(error.message));
     const report = await closing;
     assert.deepEqual([held.length, report.stopped, report.unresolved.length], [1, [], 1]);
     assert.match(report.unresolved[0] ?? "", /wasn't seen to end; it may still be running\.$/);

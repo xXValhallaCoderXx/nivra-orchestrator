@@ -579,7 +579,9 @@ class NebiusSession implements ExecutionSession {
     const outcome = await stop.cancel(operationId).catch(() => null);
     if (!outcome) {
       this.#state = { kind: "unsettled", why: `${step.label} wasn't seen to stop` };
-      throw new ExecUncertainError(`Nivra asked the sandbox to stop ${step.command}, but it wasn't seen to stop; closing the session tries again.`);
+      // Once closing has cut the stop off, by its time or its signal, it sends nothing more: recovery looks again.
+      const next = this.#cleanup.signal.aborted ? "it stays journaled, and the next recovery pass looks for it again" : "closing the session tries again";
+      throw new ExecUncertainError(`Nivra asked the sandbox to stop ${step.command}, but it wasn't seen to stop; ${next}.`);
     }
     return { operationId, outcome, durationMs: this.#now() - started };
   }
@@ -647,9 +649,9 @@ class NebiusSession implements ExecutionSession {
     else options.signal?.addEventListener("abort", () => this.#cleanup.abort(options.signal?.reason), { once: true, signal: listening.signal });
     // So does closing's deadline. A request a stop sent before closing began was given the time left then, which can be
     // longer than closing has: only this cuts it off at closing's end. Like a request's own timeout, it runs in real
-    // time. What it leaves open stays journaled, for recovery.
+    // time, and it keeps the process alive until then, so closing ends however little else is waiting. What it leaves
+    // open stays journaled, for recovery.
     const expiry = budgetMs <= MAX_TIMER_MS ? setTimeout(() => this.#cleanup.abort(new Error("Closing's time ran out.")), Math.max(0, budgetMs)) : null;
-    expiry?.unref();
     this.#specSignal?.removeEventListener("abort", this.#onSpecAbort);
     let settled: { unresolved: string[] };
     try {

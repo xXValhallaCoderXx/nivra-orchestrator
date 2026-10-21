@@ -442,6 +442,8 @@ describe("commit snapshots, after the review", () => {
       ["UTF-16BE, no mark", Buffer.from(`token = ${token}\n`, "utf16le").swap16(), ["a GitHub token"]],
       ["a key in a Kubernetes secret", Buffer.from(`data:\n  tls.key: ${Buffer.from(pem).toString("base64")}\n`), ["a private key"]],
       ["a token in base64", Buffer.from(`auth: ${Buffer.from(`user:${token}`).toString("base64")}\n`), ["a GitHub token"]],
+      ["a token in wrapped base64, split inside its encoding", Buffer.from(`blob: |\n${Buffer.from(`header line\nTOKEN=${token}\n`).toString("base64").replace(/.{1,20}/g, (line) => `  ${line}\n`)}`), ["a GitHub token"]],
+      ["words that, joined up, would read as a key", Buffer.from("REGION: ASIA\nPACIFICGROUPINGS.\n"), []],
       ["a PGP private key", Buffer.from("-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\n"), ["a private key"]],
       ["a key's first line, its last missing", Buffer.from("const key = `-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA`;\n"), ["a private key"]],
       ["a public certificate", Buffer.from("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"), []],
@@ -452,23 +454,35 @@ describe("commit snapshots, after the review", () => {
     await assert.rejects(snap(root), refusal(/^k8s\/secret\.yaml in this commit holds what looks like a private key, so Nivra won't upload it\./, "content"));
   });
 
-  it("finds a vault value inside base64, though it has no shape of its own, wherever it sits in what was encoded and however it is wrapped", () => {
-    // Values no pattern knows: only the vault does. The short one encodes to a run under base64's 40 characters.
+  it("finds a vault value inside base64, though it has no shape of its own, wherever it sits in what was encoded and however the encoding was broken up", () => {
+    // Values no pattern knows: only the vault does. The short one encodes to a run under base64's 40 characters, and
+    // the marked one's encoding holds `+` and `/`, which the URL-safe form writes as `-` and `_`.
     const value = "plain-words-no-known-prefix-4821";
     const short = "sixteen-bytes-ok";
+    const marked = "url-safe?>?>?>?>?>?>?>~~0451";
     const b64 = (data: string | Buffer) => Buffer.from(data).toString("base64");
-    const wrapped = (encoded: string) => encoded.replace(/.{1,20}/g, (line) => `    ${line}\n`);
+    const lines = (encoded: string, width: number) => encoded.match(new RegExp(`.{1,${width}}`, "g")) ?? [];
+    const jwtPart = Buffer.from(`{"k":"${marked}"}`).toString("base64url");
+    assert.match(jwtPart, /[-_]/, "the URL-safe case holds URL-safe characters");
+    // As PHP's json_encode writes it, every `/` escaped.
+    const escapedSlashes = JSON.stringify({ k: b64(`x${marked}`) }).replaceAll("/", "\\/");
+    assert.match(escapedSlashes, /\\\//, "the escaped case holds an escaped slash");
     const cases: Array<[string, Buffer]> = [
       ["a Kubernetes secret", Buffer.from(`data:\n  token: ${b64(value)}\n`)],
       ["one byte into what was encoded", Buffer.from(`auth: ${b64(`:${value}`)}\n`)],
       ["two bytes in", Buffer.from(`auth: ${b64(`u:${value}`)}\n`)],
-      ["mid-way through a long text, wrapped and indented", Buffer.from(`blob: |\n${wrapped(b64(`${"lorem ipsum ".repeat(9)}${value} and the rest`))}`)],
-      ["URL-safe and unpadded, as a JWT carries it", Buffer.from(`jwt: x.${Buffer.from(`{"k":"${value}"}`).toString("base64url")}.y\n`)],
+      ["mid-way through a long text, wrapped and indented", Buffer.from(`blob: |\n${lines(b64(`${"lorem ipsum ".repeat(9)}${value} and the rest`), 20).map((line) => `    ${line}\n`).join("")}`)],
+      ["wrapped by escaped line breaks in JSON", Buffer.from(JSON.stringify({ env: lines(b64(`REGION=eu-north1\nNEBIUS_API_KEY=${value}\n`), 76).join("\n") }))],
+      ["broken by a shell's line continuations", Buffer.from(`TOKEN=${lines(b64(`key=${value}`), 12).join("\\\n")}\n`)],
+      ["split across string literals joined with +", Buffer.from(`const k = ${lines(b64(`x${value}`), 16).map((part) => `"${part}"`).join(" +\n  ")};\n`)],
+      ["with JSON's escaped slashes", Buffer.from(escapedSlashes)],
+      ["inside two layers, as a dockerconfigjson secret keeps a registry's auth", Buffer.from(`data:\n  .dockerconfigjson: ${b64(JSON.stringify({ auths: { "registry.example": { auth: b64(`user:${value}`) } } }))}\n`)],
+      ["URL-safe and unpadded, as a JWT carries it", Buffer.from(`jwt: x.${jwtPart}.y\n`)],
       ["UTF-16LE, as PowerShell encodes a command", Buffer.from(`powershell -EncodedCommand ${b64(Buffer.from(`echo ${value}`, "utf16le"))}\n`)],
       ["a run too short to be decoded", Buffer.from(`k: ${b64(short)}\n`)],
     ];
     for (const [what, bytes] of cases) {
-      assert.deepEqual(credentialKinds(bytes, [value, short]), ["a value Nivra keeps as a secret"], what);
+      assert.deepEqual(credentialKinds(bytes, [value, short, marked]), ["a value Nivra keeps as a secret"], what);
       assert.deepEqual(credentialKinds(bytes, []), [], `${what}: without the vault, nothing recognises it`);
     }
     assert.deepEqual(credentialKinds(Buffer.from(`data:\n  token: ${b64(value)}\n`), ["a-different-vault-value-0451"]), [], "another value isn't found");
