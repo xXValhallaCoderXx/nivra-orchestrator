@@ -451,4 +451,41 @@ describe("commit snapshots, after the review", () => {
     const root = repoWith({ "k8s/secret.yaml": `data:\n  tls.key: ${Buffer.from(pem).toString("base64")}\n`, "README.md": "# r\n" });
     await assert.rejects(snap(root), refusal(/^k8s\/secret\.yaml in this commit holds what looks like a private key, so Nivra won't upload it\./, "content"));
   });
+
+  it("finds a vault value inside base64, though it has no shape of its own, wherever it sits in what was encoded and however it is wrapped", () => {
+    // Values no pattern knows: only the vault does. The short one encodes to a run under base64's 40 characters.
+    const value = "plain-words-no-known-prefix-4821";
+    const short = "sixteen-bytes-ok";
+    const b64 = (data: string | Buffer) => Buffer.from(data).toString("base64");
+    const wrapped = (encoded: string) => encoded.replace(/.{1,20}/g, (line) => `    ${line}\n`);
+    const cases: Array<[string, Buffer]> = [
+      ["a Kubernetes secret", Buffer.from(`data:\n  token: ${b64(value)}\n`)],
+      ["one byte into what was encoded", Buffer.from(`auth: ${b64(`:${value}`)}\n`)],
+      ["two bytes in", Buffer.from(`auth: ${b64(`u:${value}`)}\n`)],
+      ["mid-way through a long text, wrapped and indented", Buffer.from(`blob: |\n${wrapped(b64(`${"lorem ipsum ".repeat(9)}${value} and the rest`))}`)],
+      ["URL-safe and unpadded, as a JWT carries it", Buffer.from(`jwt: x.${Buffer.from(`{"k":"${value}"}`).toString("base64url")}.y\n`)],
+      ["UTF-16LE, as PowerShell encodes a command", Buffer.from(`powershell -EncodedCommand ${b64(Buffer.from(`echo ${value}`, "utf16le"))}\n`)],
+      ["a run too short to be decoded", Buffer.from(`k: ${b64(short)}\n`)],
+    ];
+    for (const [what, bytes] of cases) {
+      assert.deepEqual(credentialKinds(bytes, [value, short]), ["a value Nivra keeps as a secret"], what);
+      assert.deepEqual(credentialKinds(bytes, []), [], `${what}: without the vault, nothing recognises it`);
+    }
+    assert.deepEqual(credentialKinds(Buffer.from(`data:\n  token: ${b64(value)}\n`), ["a-different-vault-value-0451"]), [], "another value isn't found");
+  });
+
+  it("refuses a commit holding a vault value in base64, as a Kubernetes secret keeps one, naming the path but never the value or its encoding", async () => {
+    const value = "plain-words-no-known-prefix-4821";
+    const encoded = Buffer.from(value).toString("base64");
+    const root = repoWith({ "deploy/deployment.yaml": `apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\ndata:\n  token: ${encoded}\n`, "README.md": "# r\n" });
+    const before = folderState(root);
+    await assert.rejects(snap(root, { knownValues: [value] }), (error: unknown) => {
+      refusal(/^deploy\/deployment\.yaml in this commit holds what looks like a value Nivra keeps as a secret, so Nivra won't upload it\./, "content")(error);
+      assert.ok(![value, encoded].some((secret) => (error as Error).message.includes(secret)), "the refusal quoted the secret");
+      return true;
+    });
+    // Without the vault's values nothing recognises it, and it would go: the vault is what keeps it back.
+    assert.deepEqual((await snap(root)).files.map((file) => file.path), ["README.md", "deploy/deployment.yaml"]);
+    assert.deepEqual(changedSince(before, root), [], "the checkout changed");
+  });
 });
