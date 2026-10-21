@@ -1306,6 +1306,7 @@ may go by one hash. On `feature/niv-42`, stacked on B1 (`a53fd36`):
 | `3957da5` | The review of the first draft: clashes with left-out files, split indexes and hidden edits, exact names, deep paths, the bound policy, refusal codes |
 | `b6be5b7` | The report gives each step's provider status and usage, raw and null when none |
 | `4ec832f` | The review of PR 8: a vault value inside base64 refuses the snapshot and the patch |
+| `b167766` | An independent check of that fix: broken encodings joined up, one layer down read too, and a URL-safe case that tests URL-safe |
 
 **Nate's three asks of the plan, shown.**
 
@@ -1362,9 +1363,16 @@ The snapshot's tests:
   - git's own words kept out of a refusal's message;
   - keys and tokens found in UTF-16, inside base64, as PGP blocks and from a key's first line, while a public
     certificate and an image in base64 pass;
-  - after the review of PR 8: a vault value with no shape of its own, found inside base64 at each of its 3 alignments,
-    mid-way through a long text that is wrapped and indented, URL-safe and unpadded, in UTF-16LE, and in a run too
-    short to be decoded. Without the vault's values none of them is found, and a commit holding one is refused.
+  - after the review of PR 8, a vault value with no shape of its own, found inside base64:
+    - at each of its 3 alignments, and mid-way through a long text that is wrapped and indented;
+    - broken up by escaped line breaks in JSON, a shell's line continuations, string literals joined with `+`, or
+      JSON's escaped slashes;
+    - two layers down, as a dockerconfigjson secret keeps a registry's auth;
+    - URL-safe and unpadded, with URL-safe characters in it, and in UTF-16LE;
+    - in a run too short to be decoded.
+
+    Without the vault's values none of them is found, and a commit holding one is refused. A token is found in
+    wrapped base64 split inside its encoding, while words that joined up would read as a key aren't taken for one.
 
 The patch's tests. The sandbox's machine is stood in for by the real prepare and collect scripts, with this machine's
 tools, and every patch is applied in a fresh clone from its top level:
@@ -1424,11 +1432,25 @@ with regression tests, which fail on the code before the fix:
 |---|---|---|
 | A vault value inside base64 | Looked for only as it is and in UTF-16. A synthetic value with no recognised shape, base64-encoded in a `deployment.yaml`, was archived, and a returned change holding one was proposed | Looked for by its encodings too, wherever it sits and however it is wrapped. Both are refused, naming the path, never the value or its encoding |
 
+An independent check of the fix found no defect in its matching. 62,640 brute-force cases were found: lengths 12–40,
+all three alignments, wrapped at several widths with indentation and CRLF, URL-safe, and UTF-16LE. 40,001 real files
+from the pnpm store gave no new refusal. It found where the fix still fell short, all fixed in `b167766`:
+- a value two layers of base64 down, as in a dockerconfigjson secret, was missed. Decoded runs are now searched for
+  the vault's values too;
+- only whitespace joined a broken encoding up. Escaped line breaks, a shell's line continuations, string literals
+  joined with `+` or a comma, and JSON's escaped `/` now join it too;
+- the URL-safe test case held no URL-safe character. It now uses a value whose encoding does;
+- the 12-byte floor applied to each encoding. It now applies to the value.
+
+Runs decoded from the joined-up text are read for shapes too, so a token in wrapped base64 is found. Breaking each of
+these in turn fails its own test case. On 4 MiB files the scan takes 39 ms (random binary) to 195 ms (wrapped base64).
+
 **Checks**
 - `pnpm verify`: 536 passed (domain 36, engine 319, desktop 181), none skipped. Before the review's fixes it was 524,
   and B1 ended at 483.
-- After main was merged in, with B1's fix from the review of PR 7 (`0de634c`, `7377b8d`), and the review of PR 8's fix
-  (`4ec832f`): `pnpm verify` 644 passed (domain 43, engine 402, desktop 199), none skipped. A real engine answered `doctor` and ran `hello` again.
+- After main was merged in, with B1's fixes from the review of PR 7 (`0de634c`, `7377b8d`, `2f1e9bd`), and the review
+  of PR 8's fix and its check (`4ec832f`, `b167766`): `pnpm verify` 644 passed (domain 43, engine 402, desktop 199), none skipped. A real engine answered
+  `doctor` and ran `hello` again.
 - A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`, before the review's fixes and again after
   them:
   - `doctor` answered;
@@ -1450,8 +1472,9 @@ with regression tests, which fail on the code before the fix:
   - a repository that commits test keys is refused;
   - a split index, and files marked for git not to look at, are refused rather than checked another way.
 - **Detection is by pattern:** a password in a URL isn't recognised.
-- **Inside base64, a shape is found only in a run of 40 or more characters on one line,** so a wrapped encoding can
-  split a token's shape. A vault value is found however it is wrapped, unless it is under 12 bytes.
+- **Inside base64, a shape is found one layer down only,** in a run read from where it starts, on one line or joined up
+  across lines. A token two layers down, or in a run that starts mid-way through other letters, isn't found. A vault
+  value is found two layers down, wherever it sits, unless it is under 12 bytes.
 - **For NIV-8:** `git apply` isn't atomic in a working tree (finding 1). Applying must check every added path's place
   first, and leave the checkout as it was if it fails.
 - **"Exactly as it is"** means every name, kind, mode, size, modification time and byte, `.git` included. Access times
