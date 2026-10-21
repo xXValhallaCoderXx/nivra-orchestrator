@@ -1307,6 +1307,7 @@ may go by one hash. On `feature/niv-42`, stacked on B1 (`a53fd36`):
 | `b6be5b7` | The report gives each step's provider status and usage, raw and null when none |
 | `4ec832f` | The review of PR 8: a vault value inside base64 refuses the snapshot and the patch |
 | `b167766` | An independent check of that fix: broken encodings joined up, one layer down read too, and a URL-safe case that tests URL-safe |
+| `eb76f9c` | The second review of PR 8: an encoding's breaks taken out in one pass, so a file of spaces can't freeze the engine |
 
 **Nate's three asks of the plan, shown.**
 
@@ -1445,11 +1446,27 @@ from the pnpm store gave no new refusal. It found where the fix still fell short
 Runs decoded from the joined-up text are read for shapes too, so a token in wrapped base64 is found. Breaking each of
 these in turn fails its own test case. On 4 MiB files the scan takes 39 ms (random binary) to 195 ms (wrapped base64).
 
+**The second review of PR 8 (22 October)** found that joining up could freeze the engine, at `30ad9f8`. It was fixed in
+`eb76f9c`:
+
+| Finding | At `30ad9f8` | Now |
+|---|---|---|
+| A long run of spaces after a quote | The breaks were taken out by one regular expression, whose join of quoted strings put a `\s*` either side of an optional `+` or `,`. After a quote and a run of spaces with no closing quote, it backtracked over every way to split the run. A valid JSON file of 128 KB took over three seconds, against 1 ms before the join, and a 2 MiB file, within the per-file limit, would take minutes. The scan is synchronous, so it blocked the engine's answers and cancellation | `withoutBreaks` takes out the same matches by reading forward once. The quotes' join can match only one way, so nothing is tried twice |
+
+- **The same result:** 20,000 generated texts, made of the characters the expression reads, come out exactly as the
+  expression gave them, with `\s`'s own whitespace.
+- **Bounded:** the review's 128 KB file, and three 2 MiB files at the size limit, are scanned in well under a second
+  each (the four took 257 ms in all). They run in a process of their own, with a 20 s limit.
+- **With the old expression put back,** that process was stopped at 20 s, and the test failed rather than hang the run.
+
 **Checks**
 - `pnpm verify`: 536 passed (domain 36, engine 319, desktop 181), none skipped. Before the review's fixes it was 524,
   and B1 ended at 483.
 - After main was merged in, with B1's fixes from the review of PR 7 (`0de634c`, `7377b8d`, `2f1e9bd`), and the review
   of PR 8's fix and its check (`4ec832f`, `b167766`): `pnpm verify` 644 passed (domain 43, engine 402, desktop 199), none skipped. A real engine answered
+  `doctor` and ran `hello` again.
+- After PR 7 merged into main (`091cf4c`, merged here in `4396879`, which changed nothing) and the second review's fix
+  (`eb76f9c`): `pnpm verify` 646 passed (domain 43, engine 404, desktop 199), none skipped. A real engine answered
   `doctor` and ran `hello` again.
 - A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`, before the review's fixes and again after
   them:
