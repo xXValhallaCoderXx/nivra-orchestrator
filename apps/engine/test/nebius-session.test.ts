@@ -606,6 +606,48 @@ describe("Nebius session: what the independent review of B1 found, each failing 
   });
 });
 
+describe("Nebius session: what the review of PR 7 found, failing on the code before its fix", () => {
+  /** `promise`'s value, or `fallback` once `ms` of real time have passed first. */
+  async function within<T, F>(promise: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([promise, new Promise<F>((resolve) => (timer = setTimeout(resolve, ms, fallback)))]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  it("cuts off a cancel already under way when closing's budget runs out, with no signal, and keeps its operation for the next pass", async () => {
+    const service = serviceFor(() => ({ statuses: ["EXECUTING"], waits: true }));
+    // The person's cancel sends the stop's DELETE, and its connection then waits, as one to a slow service would: only
+    // its signal ends it here. A real one would end at the 30 s it was given when it was sent, long after closing's 50.
+    let slow = true;
+    const { transport, held } = holding(service, (request) => slow && request.method === "DELETE");
+    const time = clock();
+    const journalDir = join(tempDir("close expiry"), "sandbox");
+    const session = await backendOn(service, { via: transport, time, journalDir }).backend.open(spec());
+    const person = new AbortController();
+    const running = session.exec(command(["/bin/sleep", "60"], { timeoutMs: 60_000, signal: person.signal, onStart: () => person.abort() }));
+    await settles(() => held.length === 1);
+    const started = performance.now();
+    const closing = session.close({ budgetMs: 50 });
+    const ended = await within(closing.then(() => "closed"), 5_000, "still waiting");
+    const tookMs = performance.now() - started;
+    assert.equal(ended, "closed", "closing waited on the cancel past its budget");
+    assert.ok(tookMs < 2_000, `closing took ${Math.round(tookMs)} ms of its 50`);
+    await assert.rejects(running, ExecUncertainError);
+    const report = await closing;
+    assert.deepEqual([held.length, report.stopped, report.unresolved.length], [1, [], 1]);
+    assert.match(report.unresolved[0] ?? "", /wasn't seen to end; it may still be running\.$/);
+    // What closing couldn't settle stays journaled, and the next pass settles it.
+    const { open } = scanJournals(journalDir);
+    assert.deepEqual(open.map((scan) => scan.operations.length), [1]);
+    slow = false;
+    const [result] = await reconcileJournals(open, { credentials: { key: KEY, project: PROJECT }, transport: () => service.transport, now: time.now, sleep: time.sleep, budgetMs: 120_000 });
+    assert.deepEqual([result?.stopped.length, result?.unresolved], [1, []]);
+  });
+});
+
 describe("Nebius session: the prepare step's listing, checked with this machine's own tools", () => {
   it("prints the digest Nivra computes for the same files", { skip: process.platform === "win32" ? "needs a POSIX shell and tar" : false }, () => {
     const root = tempDir("listing");

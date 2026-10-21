@@ -1169,6 +1169,7 @@ deadline. On `feature/niv-41`, from `dc48874`:
 | `1e065e3` | The execution contract, extended for sessions that run elsewhere; `Local` refuses what coding work needs |
 | `fc82fa1` | The Nebius execution session: one operation per step, with the state moving only on what was kept |
 | `0505da3` | The review of the first draft: closing's budget, torn journal tails, the scan's limit, image counts, a late answer, a listener |
+| `5597249` | The review of PR 7: closing's deadline cuts off a cancel already under way |
 
 **The P3, before and after.** These three cases were run against the code at `dc48874`, in a throwaway script that was
 then deleted:
@@ -1187,7 +1188,7 @@ then deleted:
 | The real transport (`nebius-transport.test.ts`) | 6 | A GET and a POST with no headers, and a body that stops partway, end at their 300 ms deadline; an answer over its cap is refused by its declared length, or cut off as it streams; nothing is sent with under 1 ms left; a spawn whose POST reached the server but got no answer is uncertain, never "not sent" |
 | The contract (`session-contract.ts`) | 6 for each backend | Output and exit code without a shell; a time limit; a cancel; the output cap; a missing program never a success; a second close gives the same report |
 | `Local` | 11 of its own | Process trees and background groups; input and byte output; its budget and signal; a close kept to its budget; it refuses isolation, a snapshot and a command thrown away |
-| The session (`nebius-session.test.ts`) | 36, besides the contract | See below, and the review's findings after it |
+| The session (`nebius-session.test.ts`) | 37, besides the contract | See below, and the reviews' findings after it |
 
 The session's tests:
 - **What it claims and sends.** Every operation has networking off. Only the prepare step carries the snapshot.
@@ -1214,6 +1215,8 @@ The session's tests:
   - A `Retry-After` past the deadline gives the command up for closing to stop.
 - **Closing.**
   - One budget includes stopping the command under way.
+  - Its deadline cuts off a request still under way, a cancel sent before closing began included, with no signal
+    needed. The operation stays journaled, and the next pass stops it.
   - A second close gives the same report and sends nothing.
   - "Stopped" is told from "had already ended".
   - An operation that never stops is reported unresolved, within the budget.
@@ -1256,8 +1259,17 @@ The review also led to these changes:
 
 It found no defect in the prepare script or in `listingDigest`'s order.
 
+**The review of PR 7 (21 October)** found one more gap in closing. It was reproduced offline, and fixed in `5597249`
+with a regression test, which fails on the code before the fix:
+
+| Finding | At `b423e90` | Now |
+|---|---|---|
+| A stop's cancel request sent before closing began, its connection still waiting | It kept the time it was given when sent, up to 30 s. In the review's reproduction, `close({budgetMs: 50})` took 424 ms; with the connection held open, closing was still waiting after 5 s | Closing's deadline cuts it off, as its signal does. The operation is reported unresolved and stays journaled, and the next pass stops it |
+
 **Checks**
 - `pnpm verify`: 483 passed (domain 36, engine 266, desktop 181), none skipped. The baseline at `dc48874` was 419.
+- After main was merged in (`b423e90`) and the review of PR 7's fix (`5597249`): `pnpm verify` 589 passed (domain 43, engine 347, desktop 199), none
+  skipped. A real engine answered `doctor` and ran `hello` again.
 - `pnpm probe:sandbox --plan` prints the same steps and limits. Its deadline line now says that every request, POST and
   DELETE too, ends by the 20 minutes.
 - A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`, before the review's fixes and again after
@@ -1288,12 +1300,13 @@ may go by one hash. On `feature/niv-42`, stacked on B1 (`a53fd36`):
 | `f027403` | Validated patches from a sandbox's result, bound to their destination by one hash |
 | `3957da5` | The review of the first draft: clashes with left-out files, split indexes and hidden edits, exact names, deep paths, the bound policy, refusal codes |
 | `b6be5b7` | The report gives each step's provider status and usage, raw and null when none |
+| `4ec832f` | The review of PR 8: a vault value inside base64 refuses the snapshot and the patch |
 
 **Nate's three asks of the plan, shown.**
 
 | Ask | Test | What it shows |
 |---|---|---|
-| Every file's content scanned before upload; an unsafe snapshot refused, never redacted; a secret that isn't in the vault | `snapshot.test.ts`, "refuses a commit holding a private key, a token Nivra was never given, or a value from its vault…" | One refusal names three files and their kinds: `src/config.ts` (a private-key block and a GitHub-shaped token), `assets/blob.bin` (an AWS-shaped key between NUL bytes) and `notes.md` (a vault value). No archive is made, and the refusal quotes none of the values. Without the vault's values, the key and the token alone still refuse it |
+| Every file's content scanned before upload; an unsafe snapshot refused, never redacted; a secret that isn't in the vault | `snapshot.test.ts`, "refuses a commit holding a private key, a token Nivra was never given, or a value from its vault…" | One refusal names three files and their kinds: `src/config.ts` (a private-key block and a GitHub-shaped token), `assets/blob.bin` (an AWS-shaped key between NUL bytes) and `notes.md` (a vault value). No archive is made, and the refusal quotes none of the values. Without the vault's values, the key and the token alone still refuse it. Since the review of PR 8, a vault value with no shape of its own, base64-encoded in a `deployment.yaml`, refuses it too |
 | The deny rules again on returned changes | `patch.test.ts`, "refuses secrets by name and by content…" | A new `.env` holding `HELLO=world`, and a new `config/credentials.json` holding `{}`, are refused by name |
 | A subfolder of a larger repository, round trip | `patch.test.ts`, "takes only the picked folder of a larger repository…" | Only `apps/web`'s two files are archived. All three of the patch's headers are under `apps/web/`. `git apply --check` and `git apply` pass from the top level of a fresh clone, which then differs in exactly those three paths. The top level's `.gitattributes` holds for the folder's files |
 
@@ -1316,7 +1329,7 @@ repository's objects through `objects/info/alternates`:
 |---|---|---|
 | The tar format (`tar.test.ts`) | 6 | Our archives, extracted by GNU tar; GNU tar's gnu and ustar archives read back, and its posix (pax) header refused by name; an archive laid out as busybox writes one; a set of malformed headers, in either order; a deep archive read in time linear in its paths |
 | Path rules (`workspace-rules.test.ts`) | 3 | A commit's paths that can't be written anywhere; what a new path must also satisfy; git's own files; byte order; case and Unicode folding |
-| Snapshots (`snapshot.test.ts`) | 20 | See below |
+| Snapshots (`snapshot.test.ts`) | 22 | See below |
 | Patches (`patch.test.ts`) | 18 | See below |
 | Proposals (`proposal.test.ts`) | 6 | Canonical JSON; every binding field changes the hash; the policy taken from the patch, and other rules refused; deletions first in the report, with no file content and bounded output; each step's provider status and usage, null when none; the verifier |
 
@@ -1343,7 +1356,10 @@ The snapshot's tests:
   - the same fingerprint for the same commit and folder, and another when either changes;
   - git's own words kept out of a refusal's message;
   - keys and tokens found in UTF-16, inside base64, as PGP blocks and from a key's first line, while a public
-    certificate and an image in base64 pass.
+    certificate and an image in base64 pass;
+  - after the review of PR 8: a vault value with no shape of its own, found inside base64 at each of its 3 alignments,
+    mid-way through a long text that is wrapped and indented, URL-safe and unpadded, in UTF-16LE, and in a run too
+    short to be decoded. Without the vault's values none of them is found, and a commit holding one is refused.
 
 The patch's tests. The sandbox's machine is stood in for by the real prepare and collect scripts, with this machine's
 tools, and every patch is applied in a fresh clone from its top level:
@@ -1357,8 +1373,8 @@ tools, and every patch is applied in a fresh clone from its top level:
     isn't what the guest wrote;
   - reserved, short-name, forbidden-character and case-colliding new names. A repository's own `aux.c`, and its
     `README` and `readme`, can still be edited;
-  - a new `.env` or `credentials.json`, a token, a vault value, an edited `.gitattributes`, a deleted `.gitmodules`,
-    LFS pointers edited or added, and a file under a submodule. No refusal quotes a secret;
+  - a new `.env` or `credentials.json`, a token, a vault value (as it is, or in base64), an edited `.gitattributes`, a
+    deleted `.gitmodules`, LFS pointers edited or added, and a file under a submodule. No refusal quotes a secret;
   - CRLF where `.gitattributes` keeps it out, and a change of a file's own style;
   - each limit, and a baseline commit that is no longer there.
 - **Left out and listed:** new generated output.
@@ -1396,9 +1412,18 @@ It also led to two smaller changes:
 
 The newline-name refusal used to blame a hard link; it now names the line break.
 
+**The review of PR 8 (21 October)** found one more gap in the scan. It was reproduced offline, and fixed in `4ec832f`
+with regression tests, which fail on the code before the fix:
+
+| Finding | At `0de634c` | Now |
+|---|---|---|
+| A vault value inside base64 | Looked for only as it is and in UTF-16. A synthetic value with no recognised shape, base64-encoded in a `deployment.yaml`, was archived, and a returned change holding one was proposed | Looked for by its encodings too, wherever it sits and however it is wrapped. Both are refused, naming the path, never the value or its encoding |
+
 **Checks**
 - `pnpm verify`: 536 passed (domain 36, engine 319, desktop 181), none skipped. Before the review's fixes it was 524,
   and B1 ended at 483.
+- After main was merged in, with B1's fix from the review of PR 7 (`0de634c`, `7377b8d`), and the review of PR 8's fix
+  (`4ec832f`): `pnpm verify` 644 passed (domain 43, engine 402, desktop 199), none skipped. A real engine answered `doctor` and ran `hello` again.
 - A real engine through `rpc.ts`, on its own home `~/.nivra-dev-track-b`, before the review's fixes and again after
   them:
   - `doctor` answered;
@@ -1420,6 +1445,8 @@ The newline-name refusal used to blame a hard link; it now names the line break.
   - a repository that commits test keys is refused;
   - a split index, and files marked for git not to look at, are refused rather than checked another way.
 - **Detection is by pattern:** a password in a URL isn't recognised.
+- **Inside base64, a shape is found only in a run of 40 or more characters on one line,** so a wrapped encoding can
+  split a token's shape. A vault value is found however it is wrapped, unless it is under 12 bytes.
 - **For NIV-8:** `git apply` isn't atomic in a working tree (finding 1). Applying must check every added path's place
   first, and leave the checkout as it was if it fails.
 - **"Exactly as it is"** means every name, kind, mode, size, modification time and byte, `.git` included. Access times

@@ -266,6 +266,7 @@ describe("patches from a sandbox's result", () => {
       ["a new credentials.json", (workspace) => put(workspace, "config/credentials.json", "{}\n"), /"config\/credentials\.json" has a name that suggests it holds credentials/],
       ["a token in new content", (workspace) => put(workspace, "src/config.ts", `export const t = "${token}";\n`), /"src\/config\.ts" holds what looks like a GitHub token/],
       ["a value from the vault", (workspace) => writeFileSync(join(workspace, "src/a.ts"), `a ${vaultValue}\n`), /"src\/a\.ts" holds what looks like a value Nivra keeps as a secret/],
+      ["a value from the vault in base64", (workspace) => put(workspace, "deploy/secret.yaml", `data:\n  token: ${Buffer.from(vaultValue).toString("base64")}\n`), /"deploy\/secret\.yaml" holds what looks like a value Nivra keeps as a secret/],
       ["an edited .gitattributes", (workspace) => writeFileSync(join(workspace, ".gitattributes"), "*.psd -text\n"), /"\.gitattributes" is one of git's own files, which change how the repository is read/],
       ["a deleted .gitmodules", (workspace) => rmSync(join(workspace, ".gitmodules")), /"\.gitmodules" is one of git's own files/],
       ["an edited LFS pointer", (workspace) => writeFileSync(join(workspace, "art.psd"), "real pixels\n"), /"art\.psd" is a Git LFS pointer, which a change may not edit or delete/],
@@ -278,7 +279,7 @@ describe("patches from a sandbox's result", () => {
         patchFor(snapshot, collected, { knownValues: [vaultValue] }),
         (error: unknown) => {
           refusal(words)(error);
-          assert.ok(!(error as Error).message.includes(token) && !(error as Error).message.includes(vaultValue), `${what}: the refusal quoted a secret`);
+          assert.ok(![token, vaultValue, Buffer.from(vaultValue).toString("base64")].some((secret) => (error as Error).message.includes(secret)), `${what}: the refusal quoted a secret`);
           return true;
         },
         what,

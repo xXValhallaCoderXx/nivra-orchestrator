@@ -35,8 +35,8 @@ import { byBytes, caseKey, snapshotPathProblem } from "./workspace-rules.ts";
  *     against the path in the folder and in the repository), submodules, and folders the caller excludes (the engine
  *     home, if it sits inside the repository);
  *   - every included file's content is scanned, text or binary, for credential shapes, private keys and the vault's
- *     own values, in UTF-16 and inside base64 too. An unsafe snapshot is refused, never redacted. The refusal names
- *     the path and the kind of credential, never the value;
+ *     own values, in UTF-16 and inside base64 too (a vault value by its encodings, wrapped or not). An unsafe snapshot
+ *     is refused, never redacted. The refusal names the path and the kind of credential, never the value;
  *   - over the limits, a snapshot is refused, never truncated.
  * - **What it gives:**
  *   - one tar of the files and links (`tar.ts`), its sha256, and the digest of the listing the sandbox's prepare step
@@ -165,6 +165,26 @@ const KEY_START = new RegExp(KEY_HEADER);
 const PGP_KEY = /-----BEGIN PGP PRIVATE KEY BLOCK-----/;
 /** Long runs of base64, as Kubernetes secrets and the like wrap keys and tokens. */
 const BASE64_RUN = /[A-Za-z0-9+/]{40,}={0,2}/g;
+/** A vault value shorter than this isn't looked for inside base64: what its encoding holds of it could match by chance. */
+const MIN_ENCODED_VALUE_BYTES = 12;
+
+/**
+ * The parts of a value's base64 encodings that don't depend on the bytes around it. Every 4 characters encode 3 bytes,
+ * so for each of the 3 places the value can start in a group, the groups holding a byte before it or after it are left
+ * out. Each comes in UTF-8 and UTF-16LE (as PowerShell encodes a command), in base64 and its URL-safe form.
+ */
+function encodedCores(value: string): string[] {
+  const cores: string[] = [];
+  for (const bytes of [Buffer.from(value, "utf8"), Buffer.from(value, "utf16le")]) {
+    if (bytes.length < MIN_ENCODED_VALUE_BYTES) continue;
+    for (let offset = 0; offset < 3; offset++) {
+      const encoded = Buffer.concat([Buffer.alloc(offset), bytes]).toString("base64");
+      const core = encoded.slice(offset === 0 ? 0 : 4, 4 * Math.floor((offset + bytes.length) / 3));
+      cores.push(core, core.replaceAll("+", "-").replaceAll("/", "_"));
+    }
+  }
+  return cores;
+}
 
 function shapesIn(text: string): string[] {
   const kinds = secretShapes(text).map((shape) => SHAPE_WORDS[shape] ?? "a credential");
@@ -195,6 +215,9 @@ function utf16Text(buffer: Buffer): string | null {
  * The credential kinds `bytes` looks like it holds, in words, with the vault's own values; empty when none. Detection
  * is by pattern, so it can't recognise every secret (D22). It reads the bytes as they are (latin1 gives one character a
  * byte, so text and binary alike), as UTF-16 when they look like it, and inside every long run of base64.
+ *
+ * The vault's values are known exactly, so they are also looked for inside base64 by their encodings: wherever one sits
+ * in what was encoded, however short the run, and however its lines are wrapped or indented.
  */
 export function credentialKinds(bytes: Uint8Array, knownValues: readonly string[] = []): string[] {
   const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -204,7 +227,12 @@ export function credentialKinds(bytes: Uint8Array, knownValues: readonly string[
   if (wide !== null) kinds.push(...shapesIn(wide));
   for (const run of text.matchAll(BASE64_RUN)) kinds.push(...shapesIn(Buffer.from(run[0], "base64").toString("latin1")));
   const known = knownValues.filter((value) => value.length > 0);
-  if (known.some((value) => buffer.includes(Buffer.from(value, "utf8")) || (wide !== null && wide.includes(value)))) kinds.push("a value Nivra keeps as a secret");
+  if (known.length > 0) {
+    // Taking out every space and line break joins a wrapped encoding, and splits none: base64 holds neither.
+    const joined = [text, ...(wide === null ? [] : [wide])].map((each) => each.replace(/\s+/g, ""));
+    const holds = (value: string) => buffer.includes(Buffer.from(value, "utf8")) || (wide !== null && wide.includes(value)) || encodedCores(value).some((core) => joined.some((each) => each.includes(core)));
+    if (known.some(holds)) kinds.push("a value Nivra keeps as a secret");
+  }
   return [...new Set(kinds)];
 }
 

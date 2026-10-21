@@ -1727,9 +1727,11 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
     until it is closed.
   - **Cancels.** An abort stops the operation on a client of its own, and `cancelled` is claimed only once CANCELLED
     is seen.
-  - **Close** has one budget that includes stopping the command under way, however that stop began, and its signal
-    stops it too. It reconciles, then cancels only the session's own operations, then searches again. "Stopped" means
-    CANCELLED after an accepted cancel.
+  - **Close** has one budget that includes stopping the command under way, however that stop began.
+    - Its deadline and its signal each cut off a request still under way, a cancel sent before closing began
+      included. What that leaves open stays journaled.
+    - It reconciles, then cancels only the session's own operations, then searches again.
+    - "Stopped" means CANCELLED after an accepted cancel.
   - **Recovery.**
     - `scanJournals` is local only. It reads the journals left in place, which are the few that may need something,
       and says how many it couldn't read.
@@ -1765,6 +1767,9 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
   4. images first seen by cleanup weren't counted;
   5. a command made as its run was cancelled was reported "not started";
   6. a listener stayed on a long-lived run signal.
+- **The review of PR 7 (21 October)** found one more. A stop's cancel request, sent before closing began, kept the time
+  it was given then, up to 30 s: in its reproduction, a close given 50 ms took 424 ms. Closing's deadline now cuts that
+  request off, as its signal did (`5597249`).
 
 **Consequences.**
 - **What comes next.**
@@ -1826,9 +1831,11 @@ is NIV-8's.
   - **Every file to be sent is scanned first,** text or binary, for credential shapes, private keys and the vault's
     own values. The scan reads each file as it is, as UTF-16 when it looks like UTF-16, and inside every long run of
     base64, the way Kubernetes secrets wrap keys. A PGP private key counts, and so does a private key's first line
-    on its own. **An unsafe snapshot is refused, never redacted.** The refusal names the path and the kind, never the
-    value: "src/config.ts in this commit holds what looks like a private key, so Nivra won't upload it. Remove it from
-    the commit (and replace the key if it's real), then try again."
+    on its own. The vault's values are known exactly, so they are also looked for by their base64 encodings:
+    wherever one sits in what was encoded, however the lines are wrapped, in UTF-8 or UTF-16LE, standard or URL-safe.
+    **An unsafe snapshot is refused, never redacted.** The refusal names the path and the kind, never the value:
+    "src/config.ts in this commit holds what looks like a private key, so Nivra won't upload it. Remove it from the
+    commit (and replace the key if it's real), then try again."
   - **What it gives:**
     - one tar, its sha256, and the digest of the listing the prepare step prints (`listingDigest`, D33);
     - a manifest of every file, with Git LFS pointers named (they go as pointers);
@@ -1946,6 +1953,11 @@ is NIV-8's.
 
   Following the third, a filter driver whose name isn't UTF-8 turned out never to be switched off. The first draft's
   check ran it.
+- **The review of PR 8 (21 October)** found one more. The vault's values were looked for in the raw bytes and in
+  UTF-16, never inside base64. A synthetic value with no recognised shape, base64-encoded in a `deployment.yaml`, was
+  archived, and a returned change holding one would have been proposed. Decoding runs would still miss a value under
+  30 bytes, a run that starts with other characters, and a wrapped encoding, so the values are now looked for by
+  their encodings (`4ec832f`).
 
 **Consequences.**
 - **What comes next.**
@@ -1966,6 +1978,9 @@ is NIV-8's.
     uncommitted changes. It refuses rather than misses.
   - **Content scanning refuses a repository that commits test keys,** by design. The refusal says what to do.
   - **Detection is by pattern** (D22), so it can't recognise every secret. A password in a URL is one it doesn't.
+  - **Inside base64, a shape is found only in a run of 40 or more characters on one line.** A wrapped encoding can
+    split a token's shape across lines. A vault value is found however it is wrapped, unless it is under 12 bytes,
+    where so little of its encoding could match by chance.
   - **A split index, and files marked for git not to look at, are refused** with what to run, rather than checked
     some other way.
 - **Not shown yet:**
