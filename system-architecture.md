@@ -521,10 +521,12 @@ Migration v2 (D22) added the run's duration, usage and route, and the `artifacts
 
 ---
 
-## 11. Coding work *(a later milestone, deferred by D20; only the Nebius execution session is built, D33, and nothing here is wired into the engine yet)*
+## 11. Coding work *(a later milestone, deferred by D20; only the Nebius execution session, D33, and commit snapshots with checked patches, D34, are built, and nothing here is wired into the engine yet)*
 
 Today the only execution backend the engine uses is `Local`. It provides no isolation and runs nothing but the hello
-check and git. The Nebius execution session (D33) is built and tested offline, but no run uses it yet.
+check and git. The Nebius execution session (D33) is built and tested offline, but no run uses it yet. Neither does
+any run use commit snapshots and validated patches (D34): one commit's own bytes go in, and a checked patch comes out,
+bound to its destination by one hash.
 The design below follows D9 and D15, and is kept for when coding work is promoted again. The coding worker's first
 write task hasn't been chosen. Its open requirements are tracked in NIV-7 and NIV-8:
 - the patch captures new files explicitly;
@@ -854,6 +856,7 @@ docs changed afterwards.
 | Planning workspace: durable conversations, conversation turns, native tasks | **Built** (D26, D27): the workspace, protocol 5's `chat` workflow, the conversation service and the task records (checkpoint 1); then the window, with its navigation, conversations, plans and tasks, tested end to end on the built, packaged and Windows apps, and live (checkpoint 2) | NIV-30, NIV-31, NIV-32 |
 | Nebius Sandboxes feasibility | **Proved live** (D28): one operation per step is adopted for the workspace-to-patch adapter; a parent with subprocesses was inconclusive. The client isn't wired into the engine | NIV-29, then NIV-34 |
 | Nebius execution session (Track B, B1) | **Built** (D33), tested offline. The execution contract is extended for remote sessions, and every request ends by its deadline. The state moves only on what was kept, and closing and recovery are bounded and honest. Not wired into the engine yet | NIV-41, part of NIV-34 |
+| Commit snapshots and validated patches (Track B, B2) | **Built** (D34), tested offline against real repositories, with the sandbox's machine simulated. A snapshot is one commit's own bytes, scanned first and refused rather than redacted. A result's patch is checked in a store that holds nothing of the repository, and a proposal binds it to its destination by one hash. Not wired into the engine yet | NIV-42, part of NIV-34 |
 | New-app creation, coding worker, patches, approvals | **Deferred** (later milestone, D20) | NIV-7, NIV-8 (rest), NIV-12, NIV-13 |
 
 The estimates are not commitments. None of the planned work is a precondition for committing the foundation.
@@ -891,6 +894,7 @@ The estimates are not commitments. None of the planned work is a precondition fo
 | D27 | What the review of checkpoint 1 changed: seven corrections, and engine homes of their own for development and tests |
 | D28 | Nebius Sandboxes: one operation per step proved live and adopted for the adapter; a parent with subprocesses not yet |
 | D33 | The Nebius execution session: one operation per step behind the execution contract, every request inside its deadline, the state moving only on what was kept |
+| D34 | Commit snapshots and validated patches: one commit's own bytes in, a checked patch out, bound to where it may go by one hash |
 
 The planned work in §§10–12 will be recorded in new decisions as it is built.
 

@@ -1786,3 +1786,218 @@ contract. Nothing is wired into the engine or the app yet: that is B4 (NIV-44).
   - the upload API's size limit.
 - **Unchanged:** the probe's evidence and D28's measurements. The probe keeps its own steps and gains the same deadlines.
 - **Evidence:** `docs/acceptance.md`, *Nebius execution session, B1 (D33, NIV-41)*.
+
+## D34. Commit snapshots and validated patches: one commit's own bytes in, a checked patch out, bound to where it may go by one hash (2026-10-21)
+
+**Decision.** This is B2 of Track B (NIV-42, part of NIV-34). It builds what goes into a sandbox and what comes back,
+offline. Nothing is wired into the engine or the app yet (B4, NIV-44), and nothing writes a checkout: applying a patch
+is NIV-8's.
+
+- **The engine's own git** (`exec/git-tool.ts`) runs through a `Local` session on the target that owns the checkout,
+  with input and byte output, D22's pins, and remotes, lazy fetches and replace refs switched off.
+- **The snapshot** (`exec/snapshot.ts`).
+  - **From the commit, never the working tree.** `ls-tree -r -z -l` lists the picked folder's subtree at HEAD, and
+    `cat-file --batch` gives its exact bytes, with no filters and no line-ending conversion. The baseline is HEAD as a
+    full id, SHA-1 or SHA-256. A baseline the caller gives must equal it.
+  - **Refused:**
+    - a repository with no commits;
+    - a partial clone, since a missing object would be fetched;
+    - git older than 2.18;
+    - a crafted path among the files to send: `..`, `.git` in any case, short name or alias (trailing dots or spaces,
+      a stream after a colon), a control or invisible character;
+    - a path that isn't valid UTF-8, and a picked folder whose own path breaks the same rules. Paths are read as
+      bytes: decoded any other way, they would be renamed on the way, or cut at a newline;
+    - a folder with nothing to send;
+    - anything over the limits, never truncated: 4,000 files, 2 MiB a file, 6 MiB in all, an 8 MiB archive.
+  - **Uncommitted work.** Tracked changes in the picked folder, staged or not, refuse the snapshot: "Your checkout has
+    uncommitted changes in N files. Nivra works from a commit. Commit or stash them, then try again." So do files git
+    is told not to look at (assume-unchanged, skip-worktree), whose changes it can't see. Untracked files are counted
+    and named, and never sent. Nothing is staged, stashed or discarded.
+  - **The check is one `git status`,** with every filter driver the configuration names switched off (an empty
+    `clean`, `smudge` and `process`, and `required=false`), and fsmonitor and optional locks off. **This supersedes
+    D22's line "There is no `git status`, which can run filters a repository configures"** for this one check. D22
+    isn't edited, and explaining still runs no `git status`.
+    - A driver whose name isn't valid UTF-8 can't be named on git's command line, so it can't be switched off. It
+      refuses the check.
+    - **A split index is refused before git reads it.** git refreshes the shared index file's time whenever it reads a
+      split index, even with optional locks off. Whether the index is split is read from its own bytes.
+  - **Left out, and counted by reason:**
+    - secret-named paths and dependency or build output, by the shared deny rules, applied to the path in the folder
+      and in the repository;
+    - submodules;
+    - the engine home, when it sits inside the repository.
+
+    A folder inside the engine home, or a home that holds the repository, is refused.
+  - **Every file to be sent is scanned first,** text or binary, for credential shapes, private keys and the vault's
+    own values. The scan reads each file as it is, as UTF-16 when it looks like UTF-16, and inside every long run of
+    base64, the way Kubernetes secrets wrap keys, on one line or joined up across lines. A PGP private key counts,
+    and so does a private key's first line on its own. The vault's values are known exactly, so they are also looked
+    for by their base64 encodings, in UTF-8 or UTF-16LE, standard or URL-safe:
+    - wherever one sits in what was encoded, however short the run;
+    - however the encoding was broken up: by line breaks and indentation, escaped line breaks, a shell's line
+      continuations, string literals joined with `+` or a comma, or JSON's escaped `/`;
+    - one layer further down, as a registry's auth sits inside a dockerconfigjson secret.
+
+    **An unsafe snapshot is refused, never redacted.** The refusal names the path and the kind, never the value:
+    "src/config.ts in this commit holds what looks like a private key, so Nivra won't upload it. Remove it from the
+    commit (and replace the key if it's real), then try again."
+  - **What it gives:**
+    - one tar, its sha256, and the digest of the listing the prepare step prints (`listingDigest`, D33);
+    - a manifest of every file, with Git LFS pointers named (they go as pointers);
+    - a fingerprint over the baseline, the folder, every file and what was left out.
+- **One tar format, both ways** (`exec/tar.ts`): GNU headers with `L` and `K` records past 100 bytes, exact bytes,
+  links kept as links, a fixed owner and time. The reader is bounded and strict.
+  - It takes files, folders, links and long names, and refuses every other kind by name, hard links, pipes and devices
+    among them.
+  - It refuses absolute paths, `..`, duplicates, and anything under a file or a link.
+- **Collecting the result** (`exec/patch.ts`).
+  - A fixed, persisted command (`COLLECT_SCRIPT`) archives the workspace, leaving dependency and build output folders
+    out, and writes an independent listing of the same files. Both go outside the workspace, and are read back with
+    digests that must match what the command printed.
+  - **The archive must match the listing exactly,** so a file the archiver skipped can never be taken for a deletion.
+    Anything that isn't a file, a folder or a link refuses the result.
+  - Only manifest paths are ever deleted. New generated output is left out and listed: output folders in any case,
+    caches and compiled files.
+- **Validation,** of added and changed paths only, so a repository's own `aux.c`, or a `README` and `readme` pair,
+  never refuses a run. Each problem is a refusal in plain words, up to five at once:
+  - a new path that some target can't hold. Targets can't hold:
+    - Windows' reserved names (`con.txt`, `con .txt`, `COM¹`, `CONIN$`) and its forbidden characters;
+    - a trailing dot or space;
+    - a short-name shape;
+    - `.git` in any form;
+    - a component over 255 bytes;
+  - **a new path that clashes with what the snapshot left out,** which the sandbox never held, so the patch would pass
+    its own check and still fail in the checkout:
+    - a path at or under a submodule or the engine home;
+    - a path under a file that was left out;
+    - a file where left-out files, a submodule or the engine home make a folder;
+  - git's own files (`.gitmodules`, `.gitattributes`, `.lfsconfig`), added, changed or deleted;
+  - links: never added, retargeted, or turned into or from a file. A link may be deleted;
+  - **secrets, by name and by content:**
+    - the shared deny rules on every added or changed path, so a new `.env` or `credentials.json` is refused whatever
+      it holds;
+    - credential shapes or the vault's values in new content;
+  - Git LFS pointers: never edited, deleted or added;
+  - two names that a filesystem ignoring case or Unicode form would make one, folders included, when either is new;
+  - **line endings, as the repository's `.gitattributes` says, for new bytes only.** Bytes are never converted.
+    - With `text` or `eol`, no CRLF.
+    - With `text=auto`, no CRLF in a text file.
+    - With nothing said, an edit keeps the commit's style, and a new file uses one style.
+    - A file the commit already held with CRLF keeps its style, whatever its attributes say.
+  - the limits: 500 changed files, 2 MiB a file, an 8 MiB patch. The number of changes is checked first, and every
+    check is linear in the paths' lengths, however deep they go, so a hostile result can't hold the engine up.
+- **The patch** is built and checked in a bare object store the engine makes for it.
+  - **The store:**
+    - has the repository's object format and an empty template;
+    - reads no system, global or user configuration (`GIT_CONFIG_NOSYSTEM`, an empty `HOME`, `GIT_ATTR_NOSYSTEM`, an
+      empty `core.attributesFile`);
+    - has `core.protectNTFS` and `core.protectHFS` on.
+  - **It holds nothing of the repository,** which is only read, with `cat-file`. One `fast-import` stream makes two
+    trees:
+    - B: the snapshot's files at their paths in the repository, with the `.gitattributes` files above the picked
+      folder;
+    - R: B with the change.
+
+    The patch touches only changed paths, so it is also the patch against the baseline commit.
+  - `diff-tree -r -p --binary --full-index --no-renames --no-ext-diff --no-textconv` gives the patch, as bytes. B is
+    read into a temporary index and the patch applied there (`apply --cached`). The tree written must be R.
+- **The proposal** (`exec/proposal.ts`). One hash covers it: the sha256 of the canonical JSON of a binding that holds:
+  - the project and the target;
+  - the destination: the repository's top level as it really is, and the picked folder's path in it;
+  - the object format, the baseline, B and R;
+  - the snapshot's fingerprint;
+  - the policy the patch was made under, its version and its limits, taken from the patch itself;
+  - the digests of the patch and of the report made before the session closed.
+
+  `verifyProposal` refuses a proposal that isn't intact or isn't the one approved, one checked under other rules than
+  Nivra's current ones, and one for another project, target, folder or commit.
+- **The report** (`buildReport`) is made before the session closes, and its digest is bound.
+  - It lists deletions first, then additions and changes, with no file content.
+  - It gives each step's outcome: its exit, signal, timeout, cancellation, truncation, and whether its changes were
+    kept.
+  - It gives each step's provider status and its usage as reported, null when none and never turned into money, with
+    the end of its output.
+
+  Cleanup is a record of its own, B1's `CloseReport`: what was stopped, what stays unresolved and what the provider
+  keeps. It can't change what was approved.
+- **Refusals carry a code** (`RefusalCode`): `uncommitted`, `content`, `change`, `proposal` and the rest. What leaves
+  the engine is chosen by the code, from Nivra's own words, as Track A's safe-error rule asks; a refusal's message
+  can name paths in the repository. git's and the sandbox's own words go in a `detail` that never leaves the engine.
+
+**Why.**
+- **NIV-42 asks** for a filtered copy of one commit going in and a bounded, validated patch coming out, bound to its
+  baseline and destination, with the checkout never changing.
+- **Nate's review of the plan (20 October)** asked for three things:
+  - every included file's content scanned before upload, an unsafe snapshot refused rather than redacted, and a
+    regression with a secret that isn't in the vault;
+  - the deny rules applied again to returned changes, so a new `.env` is refused even when it holds no token;
+  - a round trip of a subfolder in a larger repository.
+- **`git status` is the one dependable dirty check.** Comparing the working tree with the index needs git's own stat
+  and racy-entry rules. With every filter off, it runs nothing a repository configures. A test sets marker scripts for
+  clean, smudge, process, textconv, an external diff, fsmonitor, hooks, a pager and gpg, then runs the check on a
+  touched file, a racily clean file and an edited one. None of the markers ran, and `.git` kept its names, sizes,
+  times and bytes. A plain `git status` on the same repository ran fsmonitor, clean and process.
+- **No alternates.** The first draft's store read the repository's objects through `objects/info/alternates`. A test
+  caught git refreshing the time of an object it found there, in the person's `.git`: `apply --cached` rewrote an
+  existing blob for a mode change. Building B from the snapshot's own bytes needs nothing of the repository.
+- **The archive must match the listing,** because an archiver that skips a file it can't read gives an archive without
+  it, and that would read as a deletion.
+- **An independent review of the first draft (`f027403`)** found eight gaps and two concerns. Each was reproduced
+  against that commit, then fixed with a regression test in `3957da5`:
+  1. a new path that clashed with a left-out file or folder passed every check. `git apply --check` passed in a fresh
+     clone, then `git apply` failed partway, leaving an edited file deleted;
+  2. a newline in the picked folder's path snapshotted a sibling folder;
+  3. a committed path that wasn't UTF-8 was renamed on its way;
+  4. Windows device names followed by spaces (`con .txt`) got through;
+  5. a deep, hostile result held the event loop for 17 s;
+  6. in a split-index repository, the dirty check refreshed a file's time in `.git`;
+  7. assume-unchanged and skip-worktree files hid edits;
+  8. the policy version was bound but never checked, and came from the caller;
+  9. *(concern)* the upload scan missed keys in UTF-16, inside base64, as PGP blocks, or without their last line;
+  10. *(concern)* refusals quoted git's own words and an absolute path, so none could leave the engine safely.
+
+  Following the third, a filter driver whose name isn't UTF-8 turned out never to be switched off. The first draft's
+  check ran it.
+- **The review of PR 8 (21 October)** found one more. The vault's values were looked for in the raw bytes and in
+  UTF-16, never inside base64. A synthetic value with no recognised shape, base64-encoded in a `deployment.yaml`, was
+  archived, and a returned change holding one would have been proposed. Decoding runs would still miss a value under
+  30 bytes, a run that starts with other characters, and a wrapped encoding, so the values are now looked for by
+  their encodings (`4ec832f`). An independent check of that found no defect in its matching, but a value two layers
+  of base64 down, and encodings broken up by something other than whitespace, still got through. Both are now found,
+  and runs decoded from the joined-up text are read for shapes too (`b167766`).
+- **The second review of PR 8 (22 October)** found that joining up could freeze the engine. One regular expression
+  took the breaks out, and its join of quoted strings put a `\s*` either side of an optional `+` or `,`. After a quote
+  with a long run of spaces and no closing quote, it backtracked over every way to split the run. A valid JSON file of
+  128 KB took over three seconds, and the scan is synchronous, so it blocked the engine's answers and cancellation.
+  The breaks are now taken out in one pass, in time linear in the text, with the same result (`eb76f9c`).
+
+**Consequences.**
+- **What comes next.**
+  - **B3** runs snapshot, session, steps, collect, patch, report and proposal as one prescribed path: offline with a
+    fake guest, then in one approved live recipe on busybox. Each step's status and usage come from the session's
+    own records, which B3 reads before closing.
+  - **B4** wires it in behind separate upload consent, mapping refusal codes to Nivra's own words.
+  - **NIV-8** applies an approved proposal after `verifyProposal`, recording the intent first. **`git apply` isn't
+    atomic in a working tree:** when an added file's place holds a folder, it fails after deleting or rewriting
+    earlier files (seen in the review). NIV-8 must check every added path's place in the checkout first, untracked
+    files included, and apply so that a failure leaves the checkout as it was.
+- **Recorded simplifications.**
+  - **Case and Unicode collisions are refused on every target,** not only on those that fold case, because a
+    repository can be cloned anywhere. D15 asks for the destination's rules.
+  - **Attributes come from the committed `.gitattributes` files only.** The person's `info/attributes` and
+    `core.autocrlf` aren't read.
+  - **Filters off means Git LFS files look changed.** A checkout whose files Git LFS smudged is refused as having
+    uncommitted changes. It refuses rather than misses.
+  - **Content scanning refuses a repository that commits test keys,** by design. The refusal says what to do.
+  - **Detection is by pattern** (D22), so it can't recognise every secret. A password in a URL is one it doesn't.
+  - **Inside base64, a shape is found one layer down only,** in a run of 40 or more characters read from where the
+    run starts: on one line, or joined up across lines. A token two layers down, or in a run that starts mid-way
+    through other letters, isn't found. A vault value is found two layers down, wherever it sits, unless it is under
+    12 bytes, where so little of its encoding could match by chance.
+  - **A split index, and files marked for git not to look at, are refused** with what to run, rather than checked
+    some other way.
+- **Not shown yet:**
+  - busybox running the collect step, its `find -prune`, `tar -T` and padded `wc`. This machine's GNU tools ran it.
+    B3's live run will show it;
+  - git older than the 2.43 run here. The minimum, 2.18, is set from the flags used.
+- **Evidence:** `docs/acceptance.md`, *Commit snapshots and validated patches, B2 (D34, NIV-42)*.
