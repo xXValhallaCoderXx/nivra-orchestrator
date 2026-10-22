@@ -345,6 +345,34 @@ cd apps/engine && node --test test/sandbox-engine.test.ts test/check.test.ts
   settled by a later engine, a pass that ends while a check goes, and an engine killed mid-check. The stand-in's
   `before` hook holds chosen requests, so a test can act while one is out.
 
+Research of a saved plan version's assumptions (NIV-45, D37): the person picks one to three assumptions of a plan's
+latest version and writes the query for each; the engine searches Tavily with those queries, reads passages from the
+pages it found, and asks the model once to assess each assumption from them. It needs the Tavily key and the Token
+Factory key (Settings, or `TAVILY_API_KEY` and `NEBIUS_API_KEY` for `rpc.ts`), research queries turned on in Settings,
+and, for a project's plan, the project's sharing. Without the real services, point the engine at stand-ins with
+`--tavily-url` and `--token-factory-url` (loopback only):
+
+```bash
+pnpm rpc runs.start '{"workflowId":"research","input":{"planId":"<uuid>","planVersion":1},"context":{"sharing":{"modelContext":false,"webResearch":true},"packet":{"scope":{"kind":"general"},"planText":"Plan text","assumptions":[{"id":"A1","text":"An assumption","origin":{"kind":"typed"},"query":"A query"}],"sites":null}}}' --follow --tavily-url http://127.0.0.1:<port> --token-factory-url http://127.0.0.1:<port>/v1 --home ~/.nivra-dev-track-a/<check>
+pnpm rpc runs.research '{"runId":"<id>"}' --home ~/.nivra-dev-track-a/<check>
+cd apps/engine && node --test test/research-run.test.ts test/research-engine.test.ts test/research-units.test.ts
+```
+
+- **`rpc.ts` fills in the packet's fingerprint** when the request leaves it out, adds no permission or deny list the
+  request doesn't give, and prints the report after `--follow`.
+- **Stand-ins.** `apps/engine/test/stub-tavily.ts` answers Search and Extract, and `stub-token-factory.ts` the model.
+  `apps/desktop/scripts/research-stand-ins.ts` starts both with the answers verify:windows uses.
+- **The window's tests** pass `--nivra-tavily-url` to an unpackaged app, and `--nivra-test-preview-delay-ms` to hold a
+  preview's answer so a test can edit the selection first. A packaged app ignores both.
+- **verify:windows** runs research through the WSL engine against those stand-ins, on loopback in the distribution:
+  research off, refused before anything is sent; then a whole run, checking that Tavily got exactly the approved query
+  with its key and never the plan, and that the model got one request. `test/research-checks.test.ts` rehearses the
+  same checks on Linux.
+- **The live check** (`apps/engine/scripts/research-check.ts`) runs the demonstration plan once against Tavily and
+  Token Factory, in process, and only with an approval of its printed digest. `--plan` prints the recipe with no
+  network. Each key comes from a file of its own (mode 600, outside the repository), never from the environment.
+  Evidence goes to `~/nivra-acceptance/research-check-<UTC>-<revision>/`. One approval is one run.
+
 ## Where things will live
 
 | What | Where |
