@@ -118,6 +118,10 @@ describe("queryProblems (NIV-45)", () => {
       "private repositories on GitHub",
       "home directory permissions on Linux",
       "localhost HMR not reloading",
+      "version 3.12.1 release notes",
+      "Python 3.12. distutils",
+      "w/o setuptools, 24/7 uptime",
+      "node.js/npm workspaces",
     ];
     assert.deepEqual(
       allowed.map((query) => queryProblems(query, deny)),
@@ -145,6 +149,18 @@ describe("queryProblems (NIV-45)", () => {
       ["api.internal latency", ["private-address"]],
       ["build.localhost:3000 dev server", ["private-address"]],
       ["fe80::1 link local", ["private-address"]],
+      // At the end of a sentence, or with a root's trailing dot.
+      ["connection refused to 10.0.0.5.", ["private-address"]],
+      ["timeouts from api.internal.", ["private-address"]],
+      ["resolve printer.local.", ["private-address"]],
+      // Wrapped as Markdown or prose wraps them: backticks, curly quotes, braces, after a colon or a pipe.
+      ["`/home/odin/proj/setup.py` distutils", ["path"]],
+      ["`./scripts/build.sh` fails", ["path"]],
+      ["`~/proj` layout", ["path"]],
+      ["path:/home/odin/project", ["path"]],
+      ["“/home/odin/proj” missing", ["path"]],
+      ["{/etc/hosts} entry", ["path"]],
+      ["see ../secrets/file", ["path"]],
       ["   ", ["blank"]],
       ["q".repeat(RESEARCH_LIMITS.queryChars + 1), ["too-long"]],
     ];
@@ -180,12 +196,15 @@ describe("siteProblem (NIV-45)", () => {
 });
 
 describe("a research report (NIV-45)", () => {
-  it("fits the engine's artifact limit at its largest, and refuses anything extra", () => {
+  it("fits the engine's artifact limit at its largest, its text in the widest characters it can hold, and refuses anything extra", () => {
     const L = RESEARCH_LIMITS;
     const at = new Date().toISOString();
     const ids = ["A1", "A2", "A3"] as const;
     const fill = (n: number) => "x".repeat(n);
-    const largest: Report = {
+    // Text the web or a model wrote can be any character the engine keeps: three bytes each at most, once it has been
+    // made well formed and plain (a lone surrogate or a control character would be six). Addresses, hosts, request ids
+    // and versions are ASCII by construction.
+    const report = (wide: (n: number) => string): Report => ({
       planId: randomUUID(),
       planVersion: 99,
       packetDigest: "f".repeat(64),
@@ -193,7 +212,7 @@ describe("a research report (NIV-45)", () => {
       scope: { kind: "project", headAtStart: "f".repeat(64) },
       request: { runId: randomUUID(), clientRequestId: randomUUID() },
       route: { provider: "nebius", endpoint: "token-factory", model: fill(200) },
-      queries: ids.map((assumption) => ({ assumption, text: fill(L.assumptionChars), query: fill(L.queryChars) })),
+      queries: ids.map((assumption) => ({ assumption, text: wide(L.assumptionChars), query: wide(L.queryChars) })),
       sites: { mode: "prefer", hosts: Array.from({ length: L.sites }, () => fill(L.siteChars)) },
       requests: [
         ...ids.map((assumption) => ({ id: `search-${assumption}` as const, kind: "search" as const, assumption, state: "answered" as const, failure: null, status: 200, requestId: fill(100), credits: 2, pages: 0, returned: null, elapsedMs: 30_000 })),
@@ -204,7 +223,7 @@ describe("a research report (NIV-45)", () => {
         id: `S${index + 1}`,
         address: fill(L.addressChars),
         host: fill(L.siteChars),
-        title: fill(L.titleChars),
+        title: wide(L.titleChars),
         foundBy: ids.map((assumption) => ({ assumption, rank: 5 })),
         extractedFor: [...ids],
         status: "read" as const,
@@ -214,8 +233,8 @@ describe("a research report (NIV-45)", () => {
         page: `S${(index % L.pages) + 1}`,
         assumption: ids[index % 3]!,
         chunk: (index % L.passagesPerExtraction) + 1,
-        heading: fill(L.headingChars),
-        text: fill(L.passageChars),
+        heading: wide(L.headingChars),
+        text: wide(L.passageChars),
         clipped: true,
         retrievedAt: at,
       })),
@@ -224,12 +243,12 @@ describe("a research report (NIV-45)", () => {
         model: "contradicted" as const,
         shown: "contradicted" as const,
         rule: null,
-        reasoning: fill(L.reasoningChars),
-        applicability: { plan: fill(L.applicabilityChars), source: fill(L.applicabilityChars), where: "heading" as const },
-        uncertainty: fill(L.uncertaintyChars),
-        citations: Array.from({ length: L.citationsPerAssessment }, () => ({ passage: "S15.3", stance: "contradicts" as const, quote: fill(L.quoteMaxChars), valid: true, problem: null })),
+        reasoning: wide(L.reasoningChars),
+        applicability: { plan: wide(L.applicabilityChars), source: wide(L.applicabilityChars), where: "heading" as const },
+        uncertainty: wide(L.uncertaintyChars),
+        citations: Array.from({ length: L.citationsPerAssessment }, () => ({ passage: "S15.3", stance: "contradicts" as const, quote: wide(L.quoteMaxChars), valid: true, problem: null })),
         version: fill(40),
-        amendment: { kind: "model" as const, text: fill(L.amendmentChars) },
+        amendment: { kind: "model" as const, text: wide(L.amendmentChars) },
       })),
       checks: { citations: 18, valid: 18, relabelled: 0 },
       stop: null,
@@ -238,11 +257,17 @@ describe("a research report (NIV-45)", () => {
       elapsedMs: 240_000,
       updatedAt: at,
       finishedAt: at,
-    };
+    });
+    const largest = report(fill);
     const parsed = ResearchReport.safeParse(largest);
     assert.equal(parsed.success, true, parsed.success ? "" : JSON.stringify(parsed.error.issues.slice(0, 3)).slice(0, 600));
-    const bytes = Buffer.byteLength(JSON.stringify(largest));
-    assert.ok(bytes < 256_000, `the largest report takes ${bytes} bytes`);
+    for (const [name, filled] of [
+      ["ASCII", largest],
+      ["three-byte characters", report((n) => "漢".repeat(n))],
+    ] as const) {
+      const bytes = Buffer.byteLength(JSON.stringify(filled));
+      assert.ok(bytes < 256_000, `the largest report in ${name} takes ${bytes} bytes`);
+    }
     assert.equal(ResearchReport.safeParse({ ...largest, planText: "the plan" }).success, false);
   });
 });

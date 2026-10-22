@@ -3,13 +3,13 @@ import type { ReviewScope, RunBudgetRecord, RunRoute, RunUsage } from "@nivra/do
 import { CHARS_PER_TOKEN } from "../explain/budget.ts";
 import { toolDefinitionChars } from "../explain/tools.ts";
 import { failure, InternalFailure, ModelFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
-import type { ModelPolicy } from "../providers/policy.ts";
+import { ANSWER_TOKENS, requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget } from "../providers/run-budget.ts";
 import { assess, ResearchAnswer, type Assessed } from "./assess.ts";
 import { RESEARCH_LIMITS } from "./limits.ts";
 import { chooseExtractions, collectPages, type AssumptionId, type Page } from "./pages.ts";
 import { passagesFrom, type Passage } from "./passages.ts";
-import { RESEARCH_INSTRUCTIONS, researchMessage } from "./prompt.ts";
+import { passageCode, RESEARCH_INSTRUCTIONS, researchMessage } from "./prompt.ts";
 import type { ExtractedPage, RequestFailure, Retrieval, Retrieved, SearchHit } from "./retrieval.ts";
 
 /**
@@ -26,15 +26,22 @@ import type { ExtractedPage, RequestFailure, Retrieval, Retrieved, SearchHit } f
 
 /** The tool the model hands its assessment in with. Mirrors the domain contract's `RESEARCH_TOOL`. */
 export const RESEARCH_TOOL = "submit_research";
-const TOOL_DESCRIPTION = "Hand in the assessment of every assumption, each with its citations. Call this once.";
-const TOOL_SPECS = { [RESEARCH_TOOL]: { description: TOOL_DESCRIPTION, inputSchema: ResearchAnswer } };
+export const RESEARCH_TOOL_DESCRIPTION = "Hand in the assessment of every assumption, each with its citations. Call this once.";
+const TOOL_SPECS = { [RESEARCH_TOOL]: { description: RESEARCH_TOOL_DESCRIPTION, inputSchema: ResearchAnswer } };
 /** What a request's messages add beyond their text, as a chat template wraps them: an allowance, in tokens. */
 const MESSAGE_ALLOWANCE_TOKENS = 64;
 
 export type ResearchStopCode =
   | "nothing-read"
+  | "tavily-auth"
+  | "tavily-plan-limit"
+  | "tavily-rate-limit"
+  | "tavily-rejected"
+  | "tavily-unavailable"
+  | "retrieval-time"
   | "tavily-key-missing"
   | "model-key-missing"
+  | "model-too-small"
   | "web-research-off"
   | "model-sharing-off"
   | "unsafe-query"
@@ -47,17 +54,39 @@ export type ResearchStopCode =
 /** Each stop in the person's words: what happened, and what to do. */
 export const RESEARCH_STOP_MESSAGES: Readonly<Record<ResearchStopCode, string>> = {
   "nothing-read": "No page could be read for any assumption, so nothing was assessed. Try other queries or sites, then start again.",
+  "tavily-auth": "Tavily didn't accept the API key, so nothing could be read. Check the Tavily key in Settings, then start again.",
+  "tavily-plan-limit": "Tavily said the key's plan has reached its limit, so nothing could be read. Check the plan and its credits in your Tavily account, then start again.",
+  "tavily-rate-limit": "Tavily asked Nivra to slow down, so nothing could be read. Wait a minute, then start again.",
+  "tavily-rejected": "Tavily turned the requests down, so nothing could be read. This looks like a Nivra problem; report it with the engine log.",
+  "tavily-unavailable": "Tavily couldn't be reached, or its answers couldn't be read, so nothing could be read. Check the network on this target, or try again in a few minutes.",
+  "retrieval-time": `Searching and reading stop ${RESEARCH_LIMITS.retrievalCutoffMs / 1000} seconds into the run, and nothing could be read by then. Start again; if it happens again, check the network on this target.`,
   "tavily-key-missing": "Research needs a Tavily API key. Add one in Settings, then start again.",
   "model-key-missing": "Research needs your Token Factory key. Add it in Settings, then start again.",
+  "model-too-small": "The model this key can use has too small a context for research, so nothing was sent. Check Token Factory in Settings to see which models the key can use.",
   "web-research-off": "Research queries to Tavily are turned off. Turn them on in Settings, then start again.",
   "model-sharing-off": "This project's plan can't be sent to Token Factory, because sharing is off for the project. Allow it, then start again.",
-  "unsafe-query": "A query didn't pass Nivra's checks, so nothing was sent. Edit it, then start again.",
+  "unsafe-query": "A query or a site didn't pass Nivra's checks, so nothing was sent. Edit it, then start again.",
   "packet-changed": "What this research would send changed since it was previewed, so nothing was sent. Open it again.",
   "model-failed": "The model's assessment couldn't be used. The pages and passages read are kept below.",
   cancelled: "Stopped. Requests already sent to Tavily can't be withdrawn.",
   deadline: "The research ran out of time before the model could assess the passages. The pages and passages read are kept below.",
-  internal: "Something inside Nivra failed during the research.",
+  internal: "Something inside Nivra failed during the research, and nothing more was sent. Start again; if it happens again, report it with the engine log.",
 };
+
+/** A run whose time was used up before anything was sent: its preparation took it all. */
+const OUT_OF_TIME = "The research ran out of time before anything was sent. Start again.";
+
+/** Why nothing could be read, from how the requests ended: Tavily's refusals first, then time, then nothing found at all. */
+function nothingReadStop(requests: readonly ResearchRequestEntry[]): ResearchStopCode {
+  const failures = new Set(requests.filter((request) => request.kind !== "model" && request.state === "failed").map((request) => request.failure));
+  if (failures.has("auth")) return "tavily-auth";
+  if (failures.has("plan-limit")) return "tavily-plan-limit";
+  if (failures.has("rate-limit")) return "tavily-rate-limit";
+  if (failures.has("rejected")) return "tavily-rejected";
+  if (failures.has("cutoff") || failures.has("deadline")) return "retrieval-time";
+  if ([...failures].some((kind) => kind !== null && kind !== "cancelled" && kind !== "not-sent")) return "tavily-unavailable";
+  return "nothing-read";
+}
 
 export interface ResearchRequestEntry {
   id: "search-A1" | "search-A2" | "search-A3" | "extract-A1" | "extract-A2" | "extract-A3" | "model";
@@ -110,10 +139,10 @@ export interface ResearchRunOptions {
   model: string;
   route: RunRoute | null;
   policy: ModelPolicy;
-  /** The vault's values, then the credential shapes. */
+  /** The vault's values, then the credential shapes: also what decides that an address holds a secret. */
   mask: (text: string) => string;
-  /** The vault's values, for checking addresses. */
-  knownValues: readonly string[];
+  /** The model's context window, as its listing gave it; null when it didn't say. */
+  contextLength: number | null;
   /** Saves the report, as it stands: at the start, before and after every request, and at the end. */
   save: (report: ResearchReportShape) => void | Promise<void>;
   /** Progress, as counts and ids only. */
@@ -127,8 +156,9 @@ export interface ResearchRunOptions {
    * (checks, the model's listing) use the same time. Defaults to now.
    */
   startedAt?: number;
-  /** Tests only: shorter times than the product's. */
+  /** Tests only: shorter times than the product's, and a fixed code for the passages' delimiters. */
   timing?: Partial<Record<"runMs" | "retrievalCutoffMs" | "searchMs" | "extractMs" | "modelMs", number>>;
+  passageCode?: string;
   now?: () => number;
   clock?: () => Date;
 }
@@ -260,10 +290,25 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     return report();
   };
 
+  // One to three assumptions, as the packet's contract says: anything else was never previewed, and nothing is sent.
+  if (packet.assumptions.length < 1 || packet.assumptions.length > L.assumptions) return finish("internal", "failed");
+  // A request larger than the model's window is never sent (D23): checked at its largest, before anything goes to Tavily.
+  const largest = largestInputTokens(packet);
+  const window = requestBudget(options.contextLength);
+  if (largest > window) {
+    return finish(
+      "model-too-small",
+      "failed",
+      `The model this key can use has too small a context for research: about ${largest.toLocaleString("en")} tokens are needed, and ${Math.max(0, window).toLocaleString("en")} are available once ${ANSWER_TOKENS.toLocaleString("en")} are held back for its answer. Nothing was sent. Check Token Factory in Settings to see which models the key can use.`,
+    );
+  }
   // The model's whole request is held before anything goes to Tavily, for its own limit or the time left, whichever is
   // less (the clock is read once). With no time left, or stopped already, nothing is sent; any other refusal is Nivra's.
-  const held = budget.hold({ inputTokens: largestInputTokens(packet), ms: L.modelMs }, { upTo: true });
-  if (!("admit" in held)) return finish(held.reason === "cancelled" ? "cancelled" : held.reason === "deadline" ? "deadline" : "internal", held.reason === "cancelled" ? "cancelled" : "failed");
+  const held = budget.hold({ inputTokens: largest, ms: L.modelMs }, { upTo: true });
+  if (!("admit" in held)) {
+    if (held.reason === "cancelled") return finish("cancelled", "cancelled");
+    return held.reason === "deadline" ? finish("deadline", "failed", OUT_OF_TIME) : finish("internal", "failed");
+  }
   const hold = held;
   await save();
 
@@ -280,7 +325,7 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
       return { assumption: assumption.id, hits: result.ok ? result.hits : [] };
     }),
   );
-  pages = collectPages(found, options.knownValues);
+  pages = collectPages(found, options.mask);
   options.progress?.(`Search found ${pages.length} ${pages.length === 1 ? "page" : "pages"}`, { pages: pages.length, refused: pages.filter((page) => page.status === "refused").length });
   if (signal?.aborted) {
     hold.release();
@@ -322,23 +367,27 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
   }
   if (!passages.length) {
     hold.release();
-    return finish("nothing-read", "failed");
+    return finish(nothingReadStop(requests), "failed");
   }
 
-  // The model: one request, admitted now with the smaller of its own limit and the time left.
-  const admitted = hold.admit();
-  if (!admitted.ok) {
-    hold.release();
-    return admitted.refusal.reason === "cancelled" ? finish("cancelled", "cancelled") : finish("deadline", "failed");
-  }
+  // The model: one request. The report says it may go out before it is admitted, so the time the save takes isn't the
+  // model's: admitted now, it gets the smaller of its own limit and the time left, and a guard ends it at that moment
+  // whatever the client does.
+  const message = researchMessage({ planVersion: options.binding.planVersion, planText: packet.planText, assumptions: packet.assumptions, pages, passages, code: options.passageCode ?? passageCode() });
   const target = request("model");
   target.state = "sending";
   await save();
-  const message = researchMessage({ planVersion: options.binding.planVersion, planText: packet.planText, assumptions: packet.assumptions, pages, passages });
+  const admitted = hold.admit();
+  if (!admitted.ok) {
+    hold.release();
+    const cancelled = admitted.refusal.reason === "cancelled";
+    Object.assign(target, { state: "failed", failure: cancelled ? "cancelled" : "deadline" });
+    return cancelled ? finish("cancelled", "cancelled") : finish("deadline", "failed");
+  }
   let handedIn: unknown = null;
   const tool = createTool({
     id: RESEARCH_TOOL,
-    description: TOOL_DESCRIPTION,
+    description: RESEARCH_TOOL_DESCRIPTION,
     inputSchema: ResearchAnswer,
     execute: async (input) => {
       handedIn ??= input;
@@ -346,6 +395,8 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     },
   });
   const agent = options.client.agent({ id: "nivra-research", name: "Nivra research", modelId: options.model, instructions: RESEARCH_INSTRUCTIONS, tools: { [RESEARCH_TOOL]: tool } });
+  const timeUp = new AbortController();
+  const timer = setTimeout(() => timeUp.abort(), admitted.ms);
   let failed: ModelFailure | null = null;
   try {
     await options.client.call(agent, message, {
@@ -354,12 +405,14 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
       maxOutputTokens: L.outputTokens,
       toolChoice: options.policy.forceAnswer ? { type: "tool", toolName: RESEARCH_TOOL } : "auto",
       internal: new InternalFailure(),
-      ...(signal ? { signal } : {}),
+      signal: signal ? AbortSignal.any([signal, timeUp.signal]) : timeUp.signal,
       onStep: (step) => steps.push(step),
     });
   } catch (error) {
     failed = error instanceof ModelFailure ? error : failure("internal", "");
     if (failed.failedStep) steps.push(failed.failedStep);
+  } finally {
+    clearTimeout(timer);
   }
   hold.settle(steps);
   for (const step of steps) {
@@ -376,8 +429,18 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
   }
   target.elapsedMs = steps.length ? Math.round(steps.reduce((sum, step) => sum + step.elapsedMs, 0)) : null;
   if (failed) {
-    Object.assign(target, { state: "failed", failure: failed.kind === "cancelled" ? "cancelled" : "model" });
-    return failed.kind === "cancelled" ? finish("cancelled", "cancelled") : finish("model-failed", "failed", `${RESEARCH_STOP_MESSAGES["model-failed"]} ${failed.message}`);
+    const stopped = failed.kind === "cancelled" && signal?.aborted === true;
+    const outOfTime = failed.kind === "timeout" || (failed.kind === "cancelled" && !stopped && timeUp.signal.aborted);
+    Object.assign(target, { state: "failed", failure: stopped ? "cancelled" : outOfTime ? "deadline" : "model" });
+    if (stopped) return finish("cancelled", "cancelled");
+    if (outOfTime) {
+      return finish(
+        "deadline",
+        "failed",
+        `The model didn't answer within the ${Math.round(admitted.ms / 1000)} s this research had left for it, so nothing was assessed. The pages and passages read are kept below. Start again to try once more.`,
+      );
+    }
+    return finish("model-failed", "failed", `${RESEARCH_STOP_MESSAGES["model-failed"]} ${failed.message}`);
   }
   const parsed = handedIn === null ? null : ResearchAnswer.safeParse(handedIn);
   if (!parsed?.success || parsed.data.assessments.length === 0) {
@@ -397,12 +460,13 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
 
 /**
  * A report as the engine reads it back once its run has ended. One saved mid-run, by an engine that stopped, reads as
- * interrupted: a request it was sending may have been sent, so its credits are unknown, and nothing is resent.
+ * interrupted: a request it was sending may have been sent, so it ends `interrupted` with its credits unknown, and
+ * nothing is resent.
  */
 export function asInterrupted(report: ResearchReportShape): ResearchReportShape {
   if (report.outcome !== "in-progress") return report;
   const requests = report.requests.map((request) =>
-    request.state === "sending" ? { ...request, state: "failed" as const, failure: "no-answer" as const, credits: null } : request.state === "pending" ? { ...request, state: "skipped" as const } : request,
+    request.state === "sending" ? { ...request, state: "failed" as const, failure: "interrupted" as const, credits: null } : request.state === "pending" ? { ...request, state: "skipped" as const } : request,
   );
   const sent = requests.filter((request) => request.kind !== "model" && (request.state === "answered" || (request.state === "failed" && request.failure !== "not-sent")));
   return {

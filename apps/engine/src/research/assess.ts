@@ -9,7 +9,8 @@ import type { Passage } from "./passages.ts";
  * the person judges it. Nivra adds three rules about the evidence, each shown with the model's own label and the
  * reason, never as a verdict on the truth:
  * - supported or contradicted needs a valid quotation of that stance;
- * - a version the assumption names (3.12, v15) must be named by a cited source: its title, address, heading or passage;
+ * - each version the assumption names (3.12, v15) must be named by a cited source: its title, address, heading or
+ *   passage;
  * - the model's own valid quotations on both sides leave it unresolved.
  *
  * The schema is lenient, as review's is: every field defaults, and the engine clips, masks and counts.
@@ -74,12 +75,27 @@ export function forMatching(value: string): string {
     .toLowerCase();
 }
 
-/** The version an assumption names, written with a dot (3.12, 18.18.0) or a v (v15); null when it names none. */
+/** The longest version kept: longer runs of numbers and dots (an OID) aren't versions. */
+const VERSION_CHARS = 40;
+
+/**
+ * The versions an assumption names, each once, in the order it names them: written with a dot (3.12, 18.18.0) or a v
+ * (v15), at most three. A version written as a bare number ("Postgres 16") isn't recognised.
+ */
+export function versionsIn(assumption: string): string[] {
+  const found = [
+    ...[...assumption.matchAll(/(?<![\w.])v?(\d+\.\d+(?:\.\d+)*)(?![\w.]*\d)/gi)].map((match) => ({ at: match.index, version: match[1]! })),
+    ...[...assumption.matchAll(/(?<![\w.])v(\d+)(?![\d.])/gi)].map((match) => ({ at: match.index, version: match[1]! })),
+  ]
+    .filter((match) => match.version.length <= VERSION_CHARS)
+    .sort((a, b) => a.at - b.at)
+    .map((match) => match.version);
+  return [...new Set(found)].slice(0, 3);
+}
+
+/** The first version an assumption names; null when it names none. */
 export function versionIn(assumption: string): string | null {
-  const dotted = /(?<![\w.])v?(\d+\.\d+(?:\.\d+)*)(?![\w.]*\d)/i.exec(assumption);
-  if (dotted) return dotted[1]!;
-  const prefixed = /(?<![\w.])v(\d+)(?![\d.])/i.exec(assumption);
-  return prefixed ? prefixed[1]! : null;
+  return versionsIn(assumption)[0] ?? null;
 }
 
 /** Whether `where` names `version`: as itself or a later part of it (3.12 in 3.12.1), never as part of another (3.120). */
@@ -123,7 +139,8 @@ export function assess(answer: ResearchAnswer, assumptions: ReadonlyArray<{ id: 
   let valid = 0;
   const assessments = assumptions.map(({ id, text: assumptionText }): Assessment => {
     const raw = answer.assessments.find((candidate) => candidate.assumption.trim().toUpperCase() === id);
-    const version = versionIn(assumptionText);
+    const versions = versionsIn(assumptionText);
+    let version = versions[0] ?? null;
     const unverified = { kind: "unverified" as const, text: `Unverified: "${assumptionText}". Research found no quotation that settles it.` };
     if (!raw) {
       return { assumption: id, model: null, shown: "unresolved", rule: "not-assessed", reasoning: "", applicability: { plan: "", source: "", where: "unknown" }, uncertainty: "", citations: [], version, amendment: unverified };
@@ -144,15 +161,21 @@ export function assess(answer: ResearchAnswer, assumptions: ReadonlyArray<{ id: 
       } else if (!backing.length) {
         shown = "unresolved";
         rule = "no-valid-citation";
-      } else if (version) {
-        const named = backing.some((citation) => {
-          const passage = passages.find((candidate) => candidate.id === citation.passage)!;
-          const page = pages.find((candidate) => candidate.id === passage.page);
-          return [passage.text, passage.heading ?? "", page?.title ?? "", page?.address ?? ""].some((where) => namesVersion(where, version));
-        });
-        if (!named) {
+      } else {
+        // Every version the assumption names must be named where a backing quotation came from: its passage, the
+        // passage's heading, or its page's title or address. The first one no source names is the one shown.
+        const missing = versions.find(
+          (named) =>
+            !backing.some((citation) => {
+              const passage = passages.find((candidate) => candidate.id === citation.passage)!;
+              const page = pages.find((candidate) => candidate.id === passage.page);
+              return [passage.text, passage.heading ?? "", page?.title ?? "", page?.address ?? ""].some((where) => namesVersion(where, named));
+            }),
+        );
+        if (missing) {
           shown = "unresolved";
           rule = "version-not-named";
+          version = missing;
         }
       }
     }

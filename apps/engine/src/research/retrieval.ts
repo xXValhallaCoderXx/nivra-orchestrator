@@ -24,7 +24,8 @@ export type RequestFailure =
   | "not-sent"
   | "no-answer"
   | "cancelled"
-  | "model";
+  | "model"
+  | "interrupted";
 
 /** What the service said about a request, whatever its end: null wherever it said nothing. */
 export interface RequestEnd {

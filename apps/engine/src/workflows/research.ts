@@ -7,6 +7,7 @@ import { policyFor } from "../providers/policy.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import type { AssumptionId } from "../research/pages.ts";
 import type { Retrieval } from "../research/retrieval.ts";
+import { RESEARCH_LIMITS } from "../research/limits.ts";
 import { RESEARCH_STOP_MESSAGES, runResearch, type ResearchReportShape, type ResearchStopCode } from "../research/run.ts";
 import { createTavily } from "../research/tavily.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -58,9 +59,10 @@ export interface ResearchDeps {
   knownValues: () => readonly string[];
   setMeta: (runId: string, meta: { usage?: RunUsage; route?: RunRoute }) => void;
   saveResult: (runId: string, report: ResearchReportShape) => void;
-  /** The domain contract's fingerprint and query checks, until research's integration window exports them. */
+  /** The domain contract's fingerprint, query checks and site check, until research's integration window exports them. */
   packetDigest: (packet: ResearchContextShape["packet"]) => Promise<string>;
   queryProblems: (query: string, deny: ResearchContextShape["deny"], knownValues: readonly string[]) => readonly string[];
+  siteProblem: (host: string) => string | null;
   /** Where Tavily is: its own address, or a stub on the loopback in tests. */
   tavilyUrl?: string;
   /** Tests only, in process: a client over a mock model, and another retrieval. */
@@ -74,12 +76,16 @@ export function researchRefusal(code: ResearchStopCode): Refusal {
 }
 
 /**
- * Why the run must stop before anything is sent, once the packet is read: it isn't what the run was asked for, or a
- * query doesn't pass the checks the host ran. Null when it may go on.
+ * Why the run must stop before anything is sent, once the packet is read: it isn't what the run was asked for, it holds
+ * no assumption or more than three, or a query or a site doesn't pass the checks the host ran. Null when it may go on.
  */
-export async function contextRefusal(task: ResearchTask, context: ResearchContextShape, deps: Pick<ResearchDeps, "packetDigest" | "queryProblems">, knownValues: readonly string[]): Promise<ResearchStopCode | null> {
-  if ((await deps.packetDigest(context.packet)) !== task.packetDigest) return "packet-changed";
-  if (context.packet.assumptions.some((assumption) => deps.queryProblems(assumption.query, context.deny, knownValues).length > 0)) return "unsafe-query";
+export async function contextRefusal(task: ResearchTask, context: ResearchContextShape, deps: Pick<ResearchDeps, "packetDigest" | "queryProblems" | "siteProblem">, knownValues: readonly string[]): Promise<ResearchStopCode | null> {
+  const { packet } = context;
+  if ((await deps.packetDigest(packet)) !== task.packetDigest) return "packet-changed";
+  if (packet.assumptions.length < 1 || packet.assumptions.length > RESEARCH_LIMITS.assumptions) return "internal";
+  if (packet.assumptions.some((assumption) => deps.queryProblems(assumption.query, context.deny, knownValues).length > 0)) return "unsafe-query";
+  const hosts = packet.sites?.hosts ?? [];
+  if (hosts.length > RESEARCH_LIMITS.sites || hosts.some((host) => deps.siteProblem(host) !== null)) return "unsafe-query";
   return null;
 }
 
@@ -93,7 +99,7 @@ export function permissionRefusal(context: ResearchContextShape, keys: { model: 
 }
 
 const Input = z.strictObject({});
-const Prepared = z.strictObject({ model: z.string() });
+const Prepared = z.strictObject({ model: z.string(), contextLength: z.number().nullable() });
 const Researched = z.strictObject({ outcome: z.enum(["complete"]), assessments: z.number().int().nonnegative() });
 
 export function createResearchWorkflow(deps: ResearchDeps) {
@@ -161,9 +167,10 @@ export function createResearchWorkflow(deps: ResearchDeps) {
           const models = await clientFor(modelKey).listModels({ signal: abortSignal, timeoutMs: 30_000 });
           const model = pickNemotron(models.ids);
           if (!model) throw failure("model-unavailable", "no NVIDIA model is listed for this key");
+          const contextLength = models.contextLengths.get(model) ?? null;
           deps.setMeta(runId, { route: { provider: "nebius", endpoint: deps.endpoint.kind, model } });
-          deps.recorder.output(runId, "prepare", `Model ${model}`, { model });
-          return { model };
+          deps.recorder.output(runId, "prepare", `Model ${model}`, { model, contextLength });
+          return { model, contextLength };
         } catch (error) {
           // A run stopped here never reaches research, which would forget its start.
           startedAt.delete(runId);
@@ -179,9 +186,9 @@ export function createResearchWorkflow(deps: ResearchDeps) {
     outputSchema: Researched,
     execute: async ({ inputData, runId, abortSignal }) =>
       guard("research.research", deps.mask, async () => {
-        const task = taskOf(runId);
-        const { context: sent, modelKey, tavilyKey } = allowed(runId);
         try {
+          const task = taskOf(runId);
+          const { context: sent, modelKey, tavilyKey } = allowed(runId);
           const final = await runResearch({
             binding: { planId: task.planId, planVersion: task.planVersion, packetDigest: task.packetDigest, scope: sent.packet.scope, request: { runId, clientRequestId: deps.requestId(runId) ?? runId } },
             packet: sent.packet,
@@ -191,7 +198,7 @@ export function createResearchWorkflow(deps: ResearchDeps) {
             route: { provider: "nebius", endpoint: deps.endpoint.kind, model: inputData.model },
             policy: policyFor(inputData.model),
             mask: deps.mask,
-            knownValues: deps.knownValues(),
+            contextLength: inputData.contextLength,
             save: (report) => deps.saveResult(runId, report),
             progress: (message, data) => deps.recorder.output(runId, "research", message, data),
             modelCall: (message, data) => deps.recorder.event(runId, "model.call", "research", message, data),

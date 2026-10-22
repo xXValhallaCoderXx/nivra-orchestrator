@@ -182,21 +182,29 @@ export const QUERY_PROBLEM_WORDS: Readonly<Record<QueryProblem, string>> = {
 
 /** Host names that only resolve inside a network, never on the public web. */
 const PRIVATE_SUFFIXES = ["internal", "local", "localhost", "lan", "corp", "home", "intranet", "private", "test", "example", "invalid"];
-const BEFORE = String.raw`(?:^|[\s"'(\[=,;])`;
+/**
+ * Where a path can start: anywhere but straight after a letter, digit, dot, tilde, slash, backslash or hyphen, so a
+ * path in backticks, quotes, brackets or after a colon is caught, and `@types/node`, `owner/repo` and `and/or` aren't.
+ */
+const START = String.raw`(?<![\w.~\\/-])`;
 const URL_PATTERNS = [/\b[a-z][a-z0-9+.-]*:\/\/\S/i, /\bwww\.[a-z0-9-]+\.[a-z]/i];
 const PATH_PATTERNS = [
-  new RegExp(`${BEFORE}/[\\w.-]+`),
+  new RegExp(`${START}/[\\w.-]+`),
   /\b[A-Za-z]:[\\/]/,
-  new RegExp(`${BEFORE}\\\\\\\\[\\w.-]+`),
-  new RegExp(`${BEFORE}~[\\\\/]`),
-  new RegExp(`${BEFORE}\\.{1,2}[\\\\/]`),
+  new RegExp(`${START}\\\\\\\\[\\w.-]+`),
+  new RegExp(`${START}~[\\\\/]`),
+  new RegExp(`${START}\\.{1,2}[\\\\/]`),
   /%USERPROFILE%|\$HOME\b/i,
 ];
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
-const IPV4 = /(?<![\d.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\d.])/g;
+/** Four numbers with dots, ended by anything but another digit or a dot that leads to one: a sentence's full stop ends it. */
+const IPV4 = /(?<![\d.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\d|\.\d)/g;
 const PRIVATE_IPV6 = /(?:^|[^0-9a-f:])(?:::1|fe80:[0-9a-f:]*|f[cd][0-9a-f]{2}:[0-9a-f:]*)(?![0-9a-f:])/i;
-/** A host name under a private suffix: at least one label before it, so ordinary words ("test", "local") pass. */
-const PRIVATE_HOST = new RegExp(`(?:^|[^\\w.-])(?:[\\w-]+\\.)+(?:${PRIVATE_SUFFIXES.join("|")})(?![\\w.-])`, "i");
+/**
+ * A host name under a private suffix: at least one label before it, so ordinary words ("test", "local") pass, and ended
+ * by anything but another label, so a sentence's full stop or a root's trailing dot doesn't hide it.
+ */
+const PRIVATE_HOST = new RegExp(`(?:^|[^\\w.-])(?:[\\w-]+\\.)+(?:${PRIVATE_SUFFIXES.join("|")})(?![\\w-]|\\.[\\w-])`, "i");
 
 function privateIpv4(a: number, b: number): boolean {
   return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
@@ -260,7 +268,8 @@ const PassageId = z.string().regex(/^S(?:[1-9]|1[0-5])\.[1-9]$/);
 /**
  * Why one request ended without an answer, in the engine's terms: never Tavily's or the provider's own words. `cutoff`
  * is retrieval's deadline, `no-answer` a request that was sent and whose answer never came, `not-sent` one established
- * as never sent.
+ * as never sent, and `interrupted` one that was being sent when Nivra or its engine stopped: it may have been sent, and
+ * its credits are unknown.
  */
 export const ResearchRequestFailure = z.enum([
   "auth",
@@ -278,6 +287,7 @@ export const ResearchRequestFailure = z.enum([
   "no-answer",
   "cancelled",
   "model",
+  "interrupted",
 ]);
 export type ResearchRequestFailure = z.infer<typeof ResearchRequestFailure>;
 
@@ -381,8 +391,31 @@ export const ResearchAssessment = z.strictObject({
 });
 export type ResearchAssessment = z.infer<typeof ResearchAssessment>;
 
-/** Why a run ended without assessments, in Nivra's words chosen by code. */
-export const ResearchStop = z.enum(["nothing-read", "tavily-key-missing", "model-key-missing", "web-research-off", "model-sharing-off", "unsafe-query", "packet-changed", "model-failed", "cancelled", "deadline", "internal"]);
+/**
+ * Why a run ended without assessments, in Nivra's words chosen by code. When nothing could be read, the code says why:
+ * Tavily refused the key, its plan's limit, asked to slow down, turned the request down, couldn't be reached or read,
+ * retrieval ran out of time, or the searches found nothing that could be read.
+ */
+export const ResearchStop = z.enum([
+  "nothing-read",
+  "tavily-auth",
+  "tavily-plan-limit",
+  "tavily-rate-limit",
+  "tavily-rejected",
+  "tavily-unavailable",
+  "retrieval-time",
+  "tavily-key-missing",
+  "model-key-missing",
+  "model-too-small",
+  "web-research-off",
+  "model-sharing-off",
+  "unsafe-query",
+  "packet-changed",
+  "model-failed",
+  "cancelled",
+  "deadline",
+  "internal",
+]);
 export type ResearchStop = z.infer<typeof ResearchStop>;
 
 /** How far a run got: never whether the plan is right. */

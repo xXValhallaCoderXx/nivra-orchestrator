@@ -1,4 +1,3 @@
-import { secretShapes } from "@nivra/domain";
 import { RESEARCH_LIMITS } from "./limits.ts";
 import type { SearchHit } from "./retrieval.ts";
 import { sameAddress } from "./tavily.ts";
@@ -24,23 +23,32 @@ export interface Page {
   status: "read" | "not-read" | "failed" | "refused";
 }
 
-/** Characters that change how text reads without being seen: direction marks and overrides, zero-width marks. */
-const INVISIBLE = /[​-‏‪-‮⁠-⁤⁦-⁩﻿]/g;
+/** A surrogate without its pair: it encodes nothing, and JSON writes it as six characters. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+/**
+ * Characters that change how text reads without being seen: every format character (direction marks and overrides,
+ * zero-width marks, soft hyphens, tag characters) and the variation selectors.
+ */
+const INVISIBLE = /[\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/gu;
 /** Control characters other than tab and line breaks. */
-const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+const CONTROL = /(?![\t\n\r])\p{Cc}/gu;
 
-/** Text from the web, made safe to show and to quote: no invisible marks, no control characters. */
+/**
+ * Text from the web or a model, made safe to show, to quote and to keep: well formed (a lone surrogate becomes U+FFFD),
+ * with no invisible marks and no control characters.
+ */
 export function plainText(text: string): string {
-  return text.replace(INVISIBLE, "").replace(CONTROL, "");
+  return text.replace(LONE_SURROGATE, "\uFFFD").replace(INVISIBLE, "").replace(CONTROL, "");
 }
 
 const PRIVATE_SUFFIXES = ["internal", "local", "localhost", "lan", "corp", "home", "intranet", "private", "test", "example", "invalid"];
 
 /**
  * Why an address Search returned can't be read or shown as a source; null when it can. The fragment is never sent, so it
- * isn't part of the check; `knownValues` are the vault's.
+ * isn't part of the check. `mask` is the vault's values, then the credential shapes: an address it would change holds a
+ * secret, so one that goes back to Tavily is always the same masked or not.
  */
-export function addressProblem(address: string, knownValues: readonly string[] = []): "too-long" | "not-https" | "credentials" | "address-literal" | "private-host" | "secret" | "unreadable" | null {
+export function addressProblem(address: string, mask: (text: string) => string): "too-long" | "not-https" | "credentials" | "address-literal" | "private-host" | "secret" | "unreadable" | null {
   if (address.length > RESEARCH_LIMITS.addressChars) return "too-long";
   let url: URL;
   try {
@@ -50,11 +58,13 @@ export function addressProblem(address: string, knownValues: readonly string[] =
   }
   if (url.protocol !== "https:") return "not-https";
   if (url.username || url.password) return "credentials";
-  const host = url.hostname;
+  // A name and the same name with the root's trailing dot are one host: checked without the dot.
+  const host = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
   if (host.startsWith("[") || /^[\d.]+$/.test(host)) return "address-literal";
   const labels = host.split(".");
+  if (labels.some((label) => label === "")) return "unreadable";
   if (labels.length < 2 || PRIVATE_SUFFIXES.includes(labels.at(-1)!) || labels.includes("localhost")) return "private-host";
-  if (secretShapes(address).length > 0 || knownValues.some((value) => value.length >= 8 && address.includes(value))) return "secret";
+  if (mask(address) !== address) return "secret";
   return null;
 }
 
@@ -74,17 +84,32 @@ function clip(text: string, max: number): string {
 }
 
 /**
- * The run's pages, from each assumption's hits in rank order: one page per address, each with every assumption whose
- * search found it. Refused addresses are kept as refused, so the report says what was found and not used.
+ * An address as the report keeps it. One that can go back to Tavily is kept as the URL parser wrote it, which is ASCII;
+ * a refused one is masked, since it may be refused for holding a secret, and percent-encoded when it couldn't be parsed,
+ * so it takes no more room than its length.
  */
-export function collectPages(found: ReadonlyArray<{ assumption: AssumptionId; hits: readonly SearchHit[] }>, knownValues: readonly string[] = []): Page[] {
+function keptAddress(address: string, refused: boolean, mask: (text: string) => string): string {
+  if (!refused) return address;
+  const masked = mask(plainText(address));
+  return clip(/^[\x20-\x7E]*$/.test(masked) ? masked : encodeURI(masked), RESEARCH_LIMITS.addressChars);
+}
+
+/**
+ * The run's pages, from each assumption's hits in rank order: one page per address, each with every assumption whose
+ * search found it. Refused addresses are kept as refused, masked, so the report says what was found and not used.
+ * Titles are made plain and masked, as passages are: the model reads them.
+ */
+export function collectPages(found: ReadonlyArray<{ assumption: AssumptionId; hits: readonly SearchHit[] }>, mask: (text: string) => string): Page[] {
   const pages: Page[] = [];
+  // The addresses as Search gave them (without fragments), page by page: a refused page keeps only a masked one.
+  const addresses: string[] = [];
   for (const { assumption, hits } of found) {
     hits.slice(0, RESEARCH_LIMITS.resultsPerSearch).forEach((hit, index) => {
       const address = withoutFragment(hit.address);
-      const existing = pages.find((page) => sameAddress(page.address, address));
-      if (existing) {
-        if (!existing.foundBy.some((entry) => entry.assumption === assumption)) existing.foundBy.push({ assumption, rank: index + 1 });
+      const existing = addresses.findIndex((seen) => sameAddress(seen, address));
+      if (existing >= 0) {
+        const page = pages[existing]!;
+        if (!page.foundBy.some((entry) => entry.assumption === assumption)) page.foundBy.push({ assumption, rank: index + 1 });
         return;
       }
       if (pages.length >= RESEARCH_LIMITS.pages) return;
@@ -94,12 +119,13 @@ export function collectPages(found: ReadonlyArray<{ assumption: AssumptionId; hi
       } catch {
         host = "";
       }
-      const refused = addressProblem(address, knownValues) !== null;
+      const refused = addressProblem(address, mask) !== null;
+      addresses.push(address);
       pages.push({
         id: `S${pages.length + 1}`,
-        address: clip(plainText(address), RESEARCH_LIMITS.addressChars),
+        address: keptAddress(address, refused, mask),
         host: clip(host, RESEARCH_LIMITS.siteChars),
-        title: clip(plainText(hit.title).replace(/\s+/g, " ").trim(), RESEARCH_LIMITS.titleChars),
+        title: clip(mask(plainText(hit.title)).replace(/\s+/g, " ").trim(), RESEARCH_LIMITS.titleChars),
         foundBy: [{ assumption, rank: index + 1 }],
         extractedFor: [],
         status: refused ? "refused" : "not-read",

@@ -25,9 +25,13 @@ export interface Passage {
 }
 
 const SEPARATOR = new RegExp(`\\s*${CHUNK_SEPARATOR.replace(/[.[\]]/g, "\\$&")}\\s*`);
-const DELIMITER = /\[(\s*)(passage|end of passage)/gi;
+/** A passage delimiter's opening, however it is spaced, with an ASCII or a full-width bracket. */
+const DELIMITER = /[\[\uFF3B](\s*)(passage\b|end\s+of\s+passage\b)/giu;
 
-/** Page text with any lookalike of the message's delimiters made plain, so only Nivra's delimiters frame a passage. */
+/**
+ * Page text with any lookalike of the message's delimiters made plain. Nivra's own carry the request's code as well, so
+ * a lookalike this misses still can't pass for one.
+ */
 export function neutralised(text: string): string {
   return text.replace(DELIMITER, "($1$2");
 }

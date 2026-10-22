@@ -45,6 +45,9 @@ describe("the research live check (NIV-45)", () => {
     assert.equal(digestIn(second.stdout), digest);
     for (const needle of [
       "Nothing here touches the network.",
+      "It covers the revision, the plan, its assumptions, the queries exactly as sent, the sites, Tavily's request parameters, the model, its",
+      "instructions and tool, and every limit. A change to any of them changes it. One approval is one run.",
+      "Never a key: both files are masked as the engine's store masks.",
       `A1 query "distutils is still in Python 3.12's standard library"`,
       `A2 query "Python 3.12 f-strings can reuse the enclosing quotes"`,
       `A3 query "venv still pre-installs setuptools"`,

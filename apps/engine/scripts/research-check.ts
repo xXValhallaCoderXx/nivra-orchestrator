@@ -1,8 +1,9 @@
 // The research live check (NIV-45): one research run of the demonstration plan, in process, against Tavily and Token
 // Factory. Never part of `pnpm verify`. It runs only with your approval of its digest, which binds the whole recipe: the
-// plan, its assumptions, the queries exactly as sent, the sites, Tavily's request parameters, the model and every limit.
-// It runs only from a committed revision. Nothing is retried and no request is added; a different recipe (for one,
-// search_depth "advanced" in place of Extract) is a separate choice with its own approval, never a switch made here.
+// committed revision, the plan, its assumptions, the queries exactly as sent, the sites, Tavily's request parameters,
+// the model, its instructions and tool, and every limit. One approval is one run. Nothing is retried and no request is
+// added; a different recipe (for one, search_depth "advanced" in place of Extract) is a separate choice with its own
+// approval, never a switch made here.
 //
 // Usage:
 //   node scripts/research-check.ts --plan                         # the request for approval; no network
@@ -16,15 +17,19 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { combinedMask, maskKnownValues } from "@nivra/domain";
+import { z } from "zod";
 // Until research's integration window exports it, the domain's contract is read straight from its file.
 import { queryProblems, RESEARCH_LIMITS, ResearchPacket, researchPacketDigest, ResearchReport } from "../../../packages/domain/src/research.ts";
 import { createModelClient, ModelFailure, type Endpoint } from "../src/providers/model.ts";
 import { policyFor } from "../src/providers/policy.ts";
 import { pickNemotron, TOKEN_FACTORY_BASE_URL } from "../src/providers/tokenfactory.ts";
-import { RESEARCH_TOOL, runResearch, type ResearchReportShape } from "../src/research/run.ts";
+import { ResearchAnswer } from "../src/research/assess.ts";
+import { RESEARCH_LIMITS as ENGINE_LIMITS } from "../src/research/limits.ts";
+import { RESEARCH_INSTRUCTIONS } from "../src/research/prompt.ts";
+import { RESEARCH_TOOL, RESEARCH_TOOL_DESCRIPTION, runResearch, type ResearchReportShape } from "../src/research/run.ts";
 import { createTavily, EXTRACT_PARAMETERS, SEARCH_PARAMETERS, TAVILY_BASE_URL } from "../src/research/tavily.ts";
 import { insideRepository, REPOSITORY } from "./council-eval/files.ts";
 
@@ -51,15 +56,42 @@ const packet: ResearchPacket = ResearchPacket.parse({
   assumptions: ASSUMPTIONS.map((assumption, index) => ({ id: `A${index + 1}`, text: assumption.text, origin: { kind: "typed" }, query: assumption.text })),
   sites: SITES,
 });
-const packetDigest = await researchPacketDigest(packet);
-const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-const approvalDigest = sha256(
-  JSON.stringify(["nivra.research-check.v1", PLAN_ID, packetDigest, TAVILY_BASE_URL, SEARCH_PARAMETERS, EXTRACT_PARAMETERS, TOKEN_FACTORY_BASE_URL, MODEL, RESEARCH_TOOL, MAX_CREDITS]),
-);
+const refuse = (message: string, code = 2): never => {
+  console.error(message);
+  process.exit(code);
+};
+
+// The run enforces the engine's limits; the packet's digest binds the domain's. They are one set, number for number.
+if (JSON.stringify(Object.entries(ENGINE_LIMITS)) !== JSON.stringify(Object.entries(RESEARCH_LIMITS))) {
+  refuse("The engine's research limits aren't the domain contract's, so this recipe can't say what a run would do. Make them equal, then run --plan again.");
+}
 
 const git = (args: string[]) => spawnSync("git", args, { cwd: REPOSITORY, encoding: "utf8" });
 const commit = git(["rev-parse", "HEAD"]).stdout.trim() || null;
 const dirty = git(["status", "--porcelain"]).stdout.trim().length > 0;
+
+const packetDigest = await researchPacketDigest(packet);
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const forced = policyFor(MODEL).forceAnswer;
+const approvalDigest = sha256(
+  JSON.stringify([
+    "nivra.research-check.v2",
+    commit,
+    PLAN_ID,
+    packetDigest,
+    Object.entries(ENGINE_LIMITS),
+    sha256(RESEARCH_INSTRUCTIONS),
+    RESEARCH_TOOL,
+    sha256(`${RESEARCH_TOOL_DESCRIPTION}\n${JSON.stringify(z.toJSONSchema(ResearchAnswer))}`),
+    forced,
+    TAVILY_BASE_URL,
+    SEARCH_PARAMETERS,
+    EXTRACT_PARAMETERS,
+    TOKEN_FACTORY_BASE_URL,
+    MODEL,
+    MAX_CREDITS,
+  ]),
+);
 
 const n = (value: number) => value.toLocaleString("en");
 const json = (value: unknown) => JSON.stringify(value).replace(/,/g, ", ").replace(/:/g, ": ");
@@ -69,10 +101,10 @@ function approvalRequest(): string[] {
   return [
     "Research live check (NIV-45): the request for approval. Nothing here touches the network.",
     "",
-    `Revision: ${commit ?? "unknown"}${dirty ? " (the working tree has uncommitted changes: the live check refuses to run until they are committed)" : ""}`,
+    `Revision: ${commit ?? "unknown"}${dirty ? " (the working tree has uncommitted changes: this digest can't be approved, and the live check refuses to run, until they are committed)" : ""}`,
     `Approval digest: ${approvalDigest}`,
-    "  It covers the plan, its assumptions, the queries exactly as sent, the sites, Tavily's request parameters, the model and every limit.",
-    "  A change to any of them changes it.",
+    "  It covers the revision, the plan, its assumptions, the queries exactly as sent, the sites, Tavily's request parameters, the model, its",
+    "  instructions and tool, and every limit. A change to any of them changes it. One approval is one run.",
     "",
     `The plan, a general plan as the demonstration seeds it: "${PLAN}"`,
     "Assumptions, each searched with its own words: a general plan's query starts as its assumption's words, and nothing rewrites it.",
@@ -89,7 +121,7 @@ function approvalRequest(): string[] {
     "",
     `Sent to Token Factory (${TOKEN_FACTORY_BASE_URL}), model ${MODEL}:`,
     "  - first the model listing (GET /models, no inference): if the engine wouldn't pick that model, nothing else is sent;",
-    `  - then exactly ${L.modelRequests} request, a forced ${RESEARCH_TOOL} tool call, at most ${n(L.outputTokens)} output tokens and an estimated ${n(L.inputTokens)} input tokens at most:`,
+    `  - then exactly ${L.modelRequests} request, ${forced ? "a forced" : "an offered"} ${RESEARCH_TOOL} tool call, at most ${n(L.outputTokens)} output tokens and an estimated ${n(L.inputTokens)} input tokens at most:`,
     `    the plan's text, the assumptions and the passages read (at most ${L.passages}, ${n(L.passageChars)} characters each). None if nothing could be read.`,
     "",
     "Limits:",
@@ -104,7 +136,7 @@ function approvalRequest(): string[] {
     "  - report.json: the run's report, saved before and after every request: the queries, each request's state, Tavily's request id and",
     "    credits as reported, the pages, the passages, the model's assessments and the checks of their quotations;",
     "  - check.json: the revision, the digests, the model, the outcome, credits and tokens as reported, the time, and each extract's pages.",
-    "  Never a key. The report holds the queries, the addresses and the passages, on purpose.",
+    "  Never a key: both files are masked as the engine's store masks. The report holds the queries, the addresses and the passages, on purpose.",
     "",
     "Stops: Ctrl-C cancels the run; requests already sent can't be withdrawn. Nothing that failed or was refused is sent again.",
     'Not part of this recipe: if Extract adds nothing over a search\'s own chunks, search_depth "advanced" with chunks_per_source 3 could be proposed',
@@ -115,11 +147,15 @@ function approvalRequest(): string[] {
   ];
 }
 
-const refuse = (message: string, code = 2): never => {
-  console.error(message);
-  process.exit(code);
-};
 const write = (path: string, value: unknown) => writeFileSync(path, typeof value === "string" ? value : `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+
+/** Every string in `value` masked, wherever it sits, so no mask can span two fields. */
+function maskedDeep<T>(value: T, mask: (text: string) => string): T {
+  if (typeof value === "string") return mask(value) as T;
+  if (Array.isArray(value)) return value.map((item: unknown) => maskedDeep(item, mask)) as T;
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, maskedDeep(item, mask)])) as T;
+  return value;
+}
 
 /** A key from a file holding a NAME=… line, outside the repository and readable by its owner only; never printed. */
 function keyFrom(file: string, name: string): string {
@@ -177,6 +213,18 @@ if (packet.assumptions.some((assumption) => queryProblems(assumption.query, { te
 const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 const out = resolve(values.out ?? join(homedir(), "nivra-acceptance", `research-check-${stamp}-${(commit ?? "unknown").slice(0, 7)}`));
 if (existsSync(out) && readdirSync(out).length) refuse(`${out} already holds evidence. Choose another --out. Nothing was sent.`);
+if (live) {
+  // One approval is one run: a run under this digest that got as far as saving its report used it.
+  const parent = dirname(out);
+  const used = (existsSync(parent) ? readdirSync(parent) : [])
+    .filter((name) => name.startsWith("research-check-"))
+    .find((name) => {
+      const folder = join(parent, name);
+      const recipe = join(folder, "recipe.txt");
+      return existsSync(join(folder, "report.json")) && existsSync(recipe) && readFileSync(recipe, "utf8").includes(`Approval digest: ${approvalDigest}`);
+    });
+  if (used) refuse(`This approval was used by the run in ${join(parent, used)}. Another run needs its own approval: run --plan, and approve the digest it prints. Nothing was sent.`);
+}
 mkdirSync(out, { recursive: true, mode: 0o700 });
 write(join(out, "recipe.txt"), `${approvalRequest().join("\n")}\n`);
 
@@ -193,13 +241,22 @@ const startedAt = performance.now();
 const started = new Date().toISOString();
 console.log(`Research check, ${live ? "live" : "against stubs"}: evidence in ${out}`);
 let model: string | null = null;
+let contextLength: number | null = null;
 try {
-  model = pickNemotron((await client.listModels({ signal: controller.signal, timeoutMs: 30_000 })).ids);
+  const listed = await client.listModels({ signal: controller.signal, timeoutMs: 30_000 });
+  model = pickNemotron(listed.ids);
+  contextLength = model ? (listed.contextLengths.get(model) ?? null) : null;
 } catch (error) {
   refuse(`The model listing failed (${error instanceof ModelFailure ? error.kind : "internal"}), so no search or model call was made.`, 1);
 }
 if (model !== MODEL) refuse(`The engine would pick ${model ?? "no NVIDIA model"}, not ${MODEL}, so no search or model call was made. A recipe for that model needs its own approval.`, 1);
 
+const mask = combinedMask((text) =>
+  maskKnownValues(text, [
+    ["NEBIUS_API_KEY", keys.model],
+    ["TAVILY_API_KEY", keys.tavily],
+  ]),
+);
 const report: ResearchReportShape = await runResearch({
   binding: { planId: PLAN_ID, planVersion: 1, packetDigest, scope: packet.scope, request: { runId: randomUUID(), clientRequestId: randomUUID() } },
   packet,
@@ -208,14 +265,9 @@ const report: ResearchReportShape = await runResearch({
   model: MODEL,
   route: { provider: "nebius", endpoint: endpoint.kind, model: MODEL },
   policy: policyFor(MODEL),
-  mask: combinedMask((text) =>
-    maskKnownValues(text, [
-      ["NEBIUS_API_KEY", keys.model],
-      ["TAVILY_API_KEY", keys.tavily],
-    ]),
-  ),
-  knownValues,
-  save: (snapshot) => write(join(out, "report.json"), snapshot),
+  mask,
+  contextLength,
+  save: (snapshot) => write(join(out, "report.json"), maskedDeep(snapshot, mask)),
   progress: (message) => console.log(`  ${message}`),
   modelCall: (message) => console.log(`  ${message}`),
   signal: controller.signal,
@@ -224,7 +276,7 @@ const report: ResearchReportShape = await runResearch({
 
 const parsed = ResearchReport.safeParse(report);
 const extracts = report.requests.filter((request) => request.kind === "extract" && request.state !== "skipped").map((request) => ({ assumption: request.assumption, asked: request.pages, returned: request.returned, credits: request.credits }));
-write(join(out, "check.json"), {
+write(join(out, "check.json"), maskedDeep({
   mode: live ? "live" : "stub",
   revision: commit,
   dirty,
@@ -249,7 +301,7 @@ write(join(out, "check.json"), {
   })),
   checks: report.checks,
   reportFitsContract: parsed.success,
-});
+}, mask));
 
 console.log(`Outcome: ${report.outcome}${report.stop ? ` (${report.stop.message})` : ""} in ${(report.elapsedMs / 1000).toFixed(1)} s.`);
 for (const assessment of report.assessments) {
