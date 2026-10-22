@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { getResearch, insertResearch, RESEARCH_MIGRATION, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "../src/main/research-store.ts";
+import { getResearch, insertResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "../src/main/research-store.ts";
 import { deleteConversation, getTurn, insertArtifact, insertConversation, insertTurn, openTurns, turnsOf, type ConversationRecord } from "../src/main/workspace.ts";
 import { openWorkspace, WORKSPACE_MIGRATIONS, type WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 
@@ -15,7 +15,7 @@ after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-/** The released schema with research's migration on top, as research's integration window will append it. */
+/** A workspace at the current schema, research's table among it (D37). */
 function workspace(): WorkspaceDb {
   const dir = mkdtempSync(join(tmpdir(), "nivra research ü "));
   dirs.push(dir);
@@ -24,7 +24,6 @@ function workspace(): WorkspaceDb {
   const ready = opening as Extract<WorkspaceOpening, { state: "ready" }>;
   open.push(ready.db);
   assert.equal(ready.schemaVersion, WORKSPACE_MIGRATIONS.length);
-  ready.db.tx((db) => db.exec(RESEARCH_MIGRATION));
   return ready.db;
 }
 

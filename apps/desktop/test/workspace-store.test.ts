@@ -73,7 +73,7 @@ describe("the workspace database (D26)", () => {
     assert.deepEqual([workspace.schemaVersion, workspace.notice], [WORKSPACE_MIGRATIONS.length, null]);
     assert.match(workspace.sqlite, /^3\.\d+\.\d+$/);
     const pragma = (name: string) => Object.values(workspace.db.db.prepare(`PRAGMA ${name}`).get() ?? {})[0];
-    assert.deepEqual([pragma("journal_mode"), pragma("foreign_keys"), pragma("secure_delete"), pragma("locking_mode"), pragma("user_version")], ["wal", 1, 1, "exclusive", 2]);
+    assert.deepEqual([pragma("journal_mode"), pragma("foreign_keys"), pragma("secure_delete"), pragma("locking_mode"), pragma("user_version")], ["wal", 1, 1, "exclusive", 3]);
     // The lock is held from the start: no shared-memory file is ever made.
     assert.equal(existsSync(`${path}-shm`), false);
   });
@@ -110,7 +110,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v2\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v3\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -270,7 +270,7 @@ describe("the workspace database (D26)", () => {
   it("creates its folder when it is missing", () => {
     const dir = join(folder(), "nested", "deeper");
     const workspace = ready(join(dir, "workspace.db"));
-    assert.equal(workspace.schemaVersion, 2);
+    assert.equal(workspace.schemaVersion, 3);
     mkdirSync(dir, { recursive: true });
   });
 });
@@ -389,7 +389,7 @@ describe("reviews of plan versions (D31)", () => {
     return "not refused";
   };
 
-  it("keeps the released v1 schema as it was, and moves a v1 file to v2 with every row as it was", () => {
+  it("keeps the released v1 schema as it was, and moves a v1 file to the current version with every row as it was", () => {
     // Migrations are append-only: v1's text is pinned, so a released version is never edited.
     assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[0]!).digest("hex"), "2a9a9cd0cc12393f6975907a3f954c998e9dba9e9e9d70119332c8d09cbcf9cb");
     const path = join(folder(), "workspace.db");
@@ -423,11 +423,45 @@ describe("reviews of plan versions (D31)", () => {
     v1.close();
 
     const migrated = ready(path);
-    assert.equal(migrated.schemaVersion, 2);
+    assert.equal(migrated.schemaVersion, 3);
     assert.deepEqual(dump(migrated.db.db), before);
     assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM reviews").get()?.["n"]), 0);
+    assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM research").get()?.["n"]), 0);
     assert.deepEqual(turnsOf(migrated.db, chat.id).map((turn) => [turn.id, turn.workflowId, turn.status]), [[answered.id, "chat", "answered"], [open.id, "chat", "submitting"]]);
     assert.deepEqual(openTurns(migrated.db, { conversationId: chat.id }).map((turn) => turn.id), [open.id]);
+  });
+
+  it("keeps the released v2 schema as it was, and moves a v2 file to v3 with every row as it was and no research yet", () => {
+    // v2's text is pinned too, now that v3 follows it.
+    assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[1]!).digest("hex"), "829d634378162a0bc4279bb301bf715ce2eab0c00bcc6fbcfd4aca5df4cba2d8");
+    const path = join(folder(), "workspace.db");
+    // A v2 file, written as v2 wrote one: its schema alone, then rows through the same functions.
+    const raw = new DatabaseSync(path);
+    raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+    raw.exec("BEGIN IMMEDIATE");
+    raw.exec(WORKSPACE_MIGRATIONS[0]!);
+    raw.exec(WORKSPACE_MIGRATIONS[1]!);
+    raw.exec("PRAGMA user_version = 2; COMMIT;");
+    const v2 = new WorkspaceDb(path, raw);
+    const conversation = project();
+    insertConversation(v2, conversation);
+    const plan = planIn(v2, conversation.id, "Rename the column in place.");
+    const review = reviewOf(conversation, plan);
+    assert.equal(insertReview(v2, review, LINK), true);
+    const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages", "reviews"];
+    const dump = (db: DatabaseSync) => ({
+      rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
+      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
+    });
+    const before = dump(raw);
+    assert.deepEqual(before.rows.map((rows) => rows.length), [1, 0, 1, 1, 0, 1]);
+    v2.close();
+
+    const migrated = ready(path);
+    assert.equal(migrated.schemaVersion, 3);
+    assert.deepEqual(dump(migrated.db.db), before);
+    assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM research").get()?.["n"]), 0);
+    assert.deepEqual(reviewsOf(migrated.db, conversation.id).map((row) => row.id), [review.id]);
   });
 
   it("binds a review to a review run and a plan version of its own conversation, one open run at a time, and never changes what it was bound to", () => {
