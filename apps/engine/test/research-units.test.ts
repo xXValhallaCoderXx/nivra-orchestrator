@@ -5,7 +5,8 @@ import { combinedMask, maskKnownValues } from "@nivra/domain";
 import { RESEARCH_LIMITS as DOMAIN_LIMITS, RESEARCH_TOOL as DOMAIN_TOOL, queryProblems, researchPacketDigest, ResearchRequestFailure, ResearchStop, siteProblem } from "../../../packages/domain/src/research.ts";
 import { Refusal } from "../src/diagnostics.ts";
 import { contextRefusal, permissionRefusal, researchRefusal, type ResearchContextShape } from "../src/workflows/research.ts";
-import { assess, forMatching, namesVersion, ResearchAnswer, versionIn, versionsIn } from "../src/research/assess.ts";
+import { z } from "zod";
+import { assess, forMatching, namesVersion, ResearchAnswer, versionIn, versionsIn, type Assessed } from "../src/research/assess.ts";
 import { RESEARCH_LIMITS } from "../src/research/limits.ts";
 import { addressProblem, chooseExtractions, collectPages, plainText, type Page } from "../src/research/pages.ts";
 import { chunksOf, neutralised, passagesFrom, type Passage } from "../src/research/passages.ts";
@@ -295,6 +296,114 @@ describe("assessing with checked citations (NIV-45)", () => {
       [true, true, false, false],
     );
     assert.equal(forMatching("“Quoted” — text here"), '"quoted" - text here');
+  });
+});
+
+describe("matching the model's assessments to the assumptions asked about (NIV-45)", () => {
+  const ASKED = [
+    { id: "A1" as const, text: "distutils is still in Python 3.12's standard library" },
+    { id: "A2" as const, text: "Python 3.12 f-strings can reuse the enclosing quotes" },
+    { id: "A3" as const, text: "venv still pre-installs setuptools" },
+  ];
+  const entry = (assumption: string, outcome = "unresolved") => ({ assumption, outcome, reasoning: `About ${assumption}.`, citations: [], uncertainty: "", amendment: "" });
+  const matching = (entries: unknown[], asked: ReadonlyArray<{ id: "A1" | "A2" | "A3"; text: string }> = ASKED): Assessed => assess(ResearchAnswer.parse({ assessments: entries }), asked, [], [], mask);
+  const which = (result: Assessed) => result.assessments.map((assessment) => [assessment.assumption, assessment.reasoning]);
+  const reasons = (result: Assessed) => result.attribution!.entries.map((rejected) => [rejected.label, rejected.reason]);
+
+  it("matches each assessment by its id, whatever their order, and keeps a matched unresolved assessment as the model gave it", () => {
+    const result = matching([entry("A3"), entry("A1", "contradicted"), entry("A2")]);
+    assert.deepEqual(which(result), [
+      ["A1", "About A1."],
+      ["A2", "About A2."],
+      ["A3", "About A3."],
+    ]);
+    assert.deepEqual(result.attribution, { handedIn: 3, matched: 3, rejected: 0, entries: [] });
+    assert.deepEqual([result.assessments[1]!.model, result.assessments[1]!.shown, result.assessments[1]!.rule], ["unresolved", "unresolved", null], "a matched unresolved is valid");
+  });
+
+  it("reads an id however it is written, with the assumption's own words after it or other words", () => {
+    const variants = matching([entry(" a1 "), entry("[A2]"), entry("Assumption A3")]);
+    assert.deepEqual(variants.attribution!.matched, 3);
+    const withWords = matching([entry("A1: distutils is still in Python 3.12's standard library."), entry("(A2) - the f-string question"), entry("A3.")]);
+    assert.deepEqual([withWords.attribution!.matched, which(withWords).map(([id]) => id)], [3, ["A1", "A2", "A3"]]);
+  });
+
+  it("matches an assumption's exact words, whatever their case, quotes or closing stop, and nothing less than the whole", () => {
+    const exact = matching([entry("Distutils is still in Python 3.12’s standard library."), entry("“Python 3.12 f-strings can reuse the enclosing quotes”")]);
+    assert.deepEqual(
+      [exact.attribution!.matched, exact.assessments[0]!.reasoning, exact.assessments[1]!.reasoning],
+      [2, "About Distutils is still in Python 3.12’s standard library..", "About “Python 3.12 f-strings can reuse the enclosing quotes”."],
+    );
+    assert.deepEqual(
+      exact.assessments.map((assessment) => assessment.rule),
+      [null, null, "not-assessed"],
+    );
+    // Part of the words, or something like them, is never enough: no likeness of words decides.
+    const partial = matching([entry("distutils is still in Python 3.12"), entry("f-strings can reuse quotes")]);
+    assert.deepEqual([partial.attribution!.matched, reasons(partial).map(([, reason]) => reason)], [0, ["unknown", "unknown"]]);
+  });
+
+  it("sets aside an assessment that names no assumption, or one that wasn't asked about, and never matches by order", () => {
+    // A field under another name is a field missing: the first three are in A1, A2, A3's order, and still not matched.
+    const result = matching([{ id: "A1", outcome: "supported" }, entry(""), entry("A4"), entry("the first assumption")]);
+    assert.deepEqual([result.attribution!.handedIn, result.attribution!.matched], [4, 0]);
+    assert.deepEqual(reasons(result), [
+      ["", "missing"],
+      ["", "missing"],
+      ["A4", "unknown"],
+      ["the first assumption", "unknown"],
+    ]);
+    assert.deepEqual(
+      result.assessments.map((assessment) => assessment.rule),
+      ["not-assessed", "not-assessed", "not-assessed"],
+    );
+    // An id that exists but wasn't asked about this time.
+    assert.deepEqual(reasons(matching([entry("A3")], ASKED.slice(0, 2))), [["A3", "unknown"]]);
+  });
+
+  it("sets aside every answer for an assumption answered twice, and an id with another assumption's words or another id", () => {
+    const result = matching([
+      entry("A1"),
+      entry("a1: distutils is still in Python 3.12's standard library"),
+      entry("A2: venv still pre-installs setuptools"),
+      entry("A3 and A2"),
+    ]);
+    assert.deepEqual([result.attribution!.handedIn, result.attribution!.matched], [4, 0]);
+    assert.deepEqual(
+      reasons(result).map(([, reason]) => reason),
+      ["duplicate", "duplicate", "conflicting", "ambiguous"],
+    );
+    // Words that are two assumptions' words at once.
+    const twins = [
+      { id: "A1" as const, text: "The same words" },
+      { id: "A2" as const, text: "the same words." },
+    ];
+    assert.deepEqual(reasons(matching([entry("The same words")], twins)), [["The same words", "ambiguous"]]);
+  });
+
+  it("keeps at most ten of those set aside, each made plain, masked and clipped, and counts them all", () => {
+    const result = matching(Array.from({ length: 12 }, (_, index) => entry(`${KEY}\u202E ${index} ${"x".repeat(200)}`)));
+    assert.deepEqual([result.attribution!.handedIn, result.attribution!.rejected, result.attribution!.entries.length], [12, 12, 10]);
+    for (const { label } of result.attribution!.entries) {
+      assert.ok(label.length <= 80, `${label.length} characters`);
+      assert.equal(label.includes(KEY) || label.includes("\u202E"), false);
+    }
+  });
+
+  it("tells the model to call once with every assessment, and what goes in each field it fills", () => {
+    assert.match(RESEARCH_INSTRUCTIONS, /Call submit_research exactly once, containing all assessments: one for each assumption listed, in any order\./);
+    assert.match(RESEARCH_INSTRUCTIONS, /- assumption: the assumption's id exactly as listed, such as "A1"\. Give the id, not the assumption's words;/);
+    const schema = z.toJSONSchema(ResearchAnswer) as unknown as { properties: { assessments: { description?: string; items: { properties: Record<string, { description?: string }> } } } };
+    const fields = schema.properties.assessments.items.properties;
+    assert.match(fields["assumption"]!.description ?? "", /^The assumption's id exactly as listed: A1, A2 or A3\. Not its words\.$/);
+    assert.deepEqual(
+      Object.entries(fields)
+        .filter(([, field]) => !field.description)
+        .map(([name]) => name),
+      [],
+      "every field the model fills says what goes in it",
+    );
+    assert.match(schema.properties.assessments.description ?? "", /all in this one call/);
   });
 });
 

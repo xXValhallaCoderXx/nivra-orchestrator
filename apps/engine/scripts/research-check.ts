@@ -130,11 +130,12 @@ function approvalRequest(): string[] {
     `  - ${L.extracts} extracts at most, POST /extract, one an assumption, together, over ${L.pageExtractions} pages at most in all, taken from each assumption's results in turn by rank:`,
     `    the addresses its own search returned, the same approved query, ${json(EXTRACT_PARAMETERS)}.`,
     `  - At most ${MAX_CREDITS} credits: ${L.searches} basic searches at 1 credit each, and at most 1 an extract (1 credit per 5 pages read). This check records`,
-    "    what each extract asked for, what came back and the credits Tavily reports, which settles how a request of fewer than 5 pages is billed.",
+    "    what each extract asked for, what came back and the credits Tavily reported for it: one run's charges, not Tavily's billing policy.",
     "",
     `Sent to Token Factory (${TOKEN_FACTORY_BASE_URL}), model ${MODEL}:`,
     "  - first the model listing (GET /models, no inference): if the engine wouldn't pick that model, nothing else is sent;",
-    `  - then exactly ${L.modelRequests} request, ${forced ? "a forced" : "an offered"} ${RESEARCH_TOOL} tool call, at most ${n(L.outputTokens)} output tokens and an estimated ${n(L.inputTokens)} input tokens at most:`,
+    `  - then exactly ${L.modelRequests} request, ${forced ? "a forced" : "an offered"} ${RESEARCH_TOOL} tool call holding every assessment, each naming its assumption by id, at most`,
+    `    ${n(L.outputTokens)} output tokens and an estimated ${n(L.inputTokens)} input tokens at most:`,
     `    the plan's text, the assumptions and the passages read (at most ${L.passages}, ${n(L.passageChars)} characters each). None if nothing could be read.`,
     "",
     "Limits:",
@@ -311,10 +312,15 @@ write(join(out, "check.json"), maskedDeep({
     valid: assessment.citations.filter((citation) => citation.valid).length,
   })),
   checks: report.checks,
+  attribution: report.attribution,
   reportFitsContract: parsed.success,
 }, mask));
 
 console.log(`Outcome: ${report.outcome}${report.stop ? ` (${report.stop.message})` : ""} in ${(report.elapsedMs / 1000).toFixed(1)} s.`);
+if (report.attribution) {
+  const { handedIn, matched, rejected, entries } = report.attribution;
+  console.log(`  The model handed in ${handedIn} assessments: ${matched} matched an assumption, ${rejected} set aside${rejected ? ` (${entries.map((entry) => entry.reason).join(", ")})` : ""}.`);
+}
 for (const assessment of report.assessments) {
   const valid = assessment.citations.filter((citation) => citation.valid).length;
   console.log(`  ${assessment.assumption}: shown ${assessment.shown}${assessment.model !== assessment.shown ? ` (the model said ${assessment.model ?? "nothing"}; ${assessment.rule})` : ""}, ${valid} of ${assessment.citations.length} quotations found.`);

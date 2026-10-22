@@ -392,6 +392,27 @@ export const ResearchAssessment = z.strictObject({
 export type ResearchAssessment = z.infer<typeof ResearchAssessment>;
 
 /**
+ * Why an assessment the model handed in was set aside instead of being matched to an assumption: it named none, named
+ * one that wasn't asked about, could mean more than one, named one by id and another in words, or answered an assumption
+ * another assessment answered too.
+ */
+export const ResearchRejection = z.enum(["missing", "unknown", "ambiguous", "conflicting", "duplicate"]);
+export type ResearchRejection = z.infer<typeof ResearchRejection>;
+
+/**
+ * What the model handed in, and how much of it named an assumption asked about: an assessment counts only by the
+ * assumption's id or its exact words, never by its place. At most ten of those set aside are listed, each with what it
+ * named, made plain, masked and clipped.
+ */
+export const ResearchAttribution = z.strictObject({
+  handedIn: count,
+  matched: count,
+  rejected: count,
+  entries: z.array(z.strictObject({ label: text(80), reason: ResearchRejection })).max(10),
+});
+export type ResearchAttribution = z.infer<typeof ResearchAttribution>;
+
+/**
  * Why a run ended without assessments, in Nivra's words chosen by code. When nothing could be read, the code says why:
  * Tavily refused the key, its plan's limit, asked to slow down, turned the request down, couldn't be reached or read,
  * retrieval ran out of time, or the searches found nothing that could be read.
@@ -442,6 +463,8 @@ export const ResearchReport = z.strictObject({
   assessments: z.array(ResearchAssessment).max(RESEARCH_LIMITS.assumptions),
   /** The citations the model gave, the ones Nivra found, and how many assessments are shown other than as given. */
   checks: z.strictObject({ citations: count, valid: count, relabelled: count }),
+  /** Null until the model handed in an answer that could be read. */
+  attribution: ResearchAttribution.nullable(),
   stop: z.strictObject({ code: ResearchStop, message: text(400) }).nullable(),
   /** Credits as reported, null once any request didn't say; the model's tokens as reported. */
   usage: z.strictObject({ credits: z.number().nonnegative().nullable(), model: RunUsage }),

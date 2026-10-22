@@ -255,6 +255,51 @@ describe("a research run, in process (NIV-45)", () => {
     assert.match(empty.report.stop!.message, /handed in no assessment/);
   });
 
+  it("fails as the model's output when no assessment names an assumption asked about, keeping what was read, the usage and a note of the answer", async () => {
+    const unnamed = { assessments: [{ ...ANSWER.assessments[0]!, assumption: "the first assumption" }, { ...ANSWER.assessments[1]!, assumption: "" }] };
+    const { report, model } = await research(python, async () => handIn(unnamed));
+    assert.deepEqual(
+      [report.outcome, report.stop?.code, states(report)["model"], report.assessments.length, model.doGenerateCalls.length],
+      ["failed", "model-failed", "failed:model", 0, 1],
+    );
+    assert.match(report.stop!.message, /^The model's answer named none of the assumptions it was asked about, so nothing was assessed\./);
+    assert.deepEqual([report.pages.filter((page) => page.status === "read").length, report.passages.length], [3, 5], "what was read is kept");
+    assert.deepEqual([report.usage.model.inputTokens, report.usage.model.outputTokens, report.usage.credits], [6_000, 700, 4]);
+    assert.deepEqual(report.attribution, {
+      handedIn: 2,
+      matched: 0,
+      rejected: 2,
+      entries: [
+        { label: "the first assumption", reason: "unknown" },
+        { label: "", reason: "missing" },
+      ],
+    });
+    const parsed = ResearchReport.safeParse(report);
+    assert.equal(parsed.success, true, parsed.success ? "" : JSON.stringify(parsed.error.issues.slice(0, 3)).slice(0, 500));
+  });
+
+  it("completes with every assessment named by its id and words or by its exact words, in any order", async () => {
+    const named = {
+      assessments: [
+        { ...ANSWER.assessments[1]!, assumption: "Python 3.12 f-strings can reuse the enclosing quotes." },
+        { ...ANSWER.assessments[0]!, assumption: "A1: distutils is still in Python 3.12's standard library." },
+      ],
+    };
+    const { report } = await research(python, async () => handIn(named));
+    assert.deepEqual(
+      [report.outcome, report.assessments.map((assessment) => [assessment.assumption, assessment.shown]), report.attribution?.matched, report.attribution?.rejected],
+      [
+        "complete",
+        [
+          ["A1", "contradicted"],
+          ["A2", "supported"],
+        ],
+        2,
+        0,
+      ],
+    );
+  });
+
   it("ends as cancelled when stopped during Search or Extract, sending nothing after the stop and no model request", async () => {
     const slowSearch: TavilyScript = (call, index) => (call.path === "/search" ? { delayMs: 5_000, ...python(call, index) } : python(call, index));
     const stopped = new AbortController();

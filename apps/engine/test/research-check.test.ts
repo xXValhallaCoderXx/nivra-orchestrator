@@ -66,10 +66,13 @@ describe("the research live check (NIV-45)", () => {
       `"chunks_per_source": 3`,
       `"extract_depth": "basic"`,
       `"timeout": 40`,
+      "one run's charges, not Tavily's billing policy",
+      "holding every assessment, each naming its assumption by id",
       "never the plan's text",
       "At most 6 credits",
       `model ${MODEL}`,
-      "exactly 1 request, a forced submit_research tool call, at most 4,000 output tokens",
+      "exactly 1 request, a forced submit_research tool call holding every assessment",
+      "4,000 output tokens and an estimated 60,000 input tokens at most",
       "one deadline, 240 s from the start",
       "searching and reading stop 90 s in",
       "the model gets at most 150 s, and never past the deadline",
@@ -188,6 +191,7 @@ describe("the research live check (NIV-45)", () => {
         ],
       );
       assert.deepEqual(check["tokens"], { inputTokens: 9_000, outputTokens: 700, calls: 1, reportedCalls: 1 });
+      assert.deepEqual(check["attribution"], { handedIn: 3, matched: 3, rejected: 0, entries: [] });
     } finally {
       await Promise.all([tavily.close(), factory.close()]);
     }

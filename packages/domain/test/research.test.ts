@@ -251,6 +251,7 @@ describe("a research report (NIV-45)", () => {
         amendment: { kind: "model" as const, text: wide(L.amendmentChars) },
       })),
       checks: { citations: 18, valid: 18, relabelled: 0 },
+      attribution: { handedIn: 13, matched: 3, rejected: 10, entries: Array.from({ length: 10 }, () => ({ label: wide(80), reason: "conflicting" as const })) },
       stop: null,
       usage: { credits: 9, model: { inputTokens: 60_000, outputTokens: 4_000, calls: 1, reportedCalls: 1 } },
       budget: null,

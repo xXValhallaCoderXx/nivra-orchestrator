@@ -119,6 +119,8 @@ export interface ResearchReportShape {
   passages: Passage[];
   assessments: Assessed["assessments"];
   checks: Assessed["checks"];
+  /** What the model handed in and how much of it named an assumption asked about; null until it answered. */
+  attribution: Assessed["attribution"];
   stop: { code: ResearchStopCode; message: string } | null;
   usage: { credits: number | null; model: RunUsage };
   budget: RunBudgetRecord | null;
@@ -216,7 +218,7 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
   const request = (id: ResearchRequestEntry["id"]) => requests.find((candidate) => candidate.id === id)!;
   let pages: Page[] = [];
   const passages: Passage[] = [];
-  let assessed: Assessed = { assessments: [], checks: { citations: 0, valid: 0, relabelled: 0 } };
+  let assessed: Assessed = { assessments: [], checks: { citations: 0, valid: 0, relabelled: 0 }, attribution: null };
   let outcome: ResearchReportShape["outcome"] = "in-progress";
   let stop: ResearchReportShape["stop"] = null;
   let finishedAt: string | null = null;
@@ -249,6 +251,7 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     passages: passages.map((passage) => ({ ...passage })),
     assessments: assessed.assessments,
     checks: { ...assessed.checks },
+    attribution: assessed.attribution ? { ...assessed.attribution, entries: assessed.attribution.entries.map((entry) => ({ ...entry })) } : null,
     stop,
     usage: {
       credits: credits(),
@@ -448,8 +451,20 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     Object.assign(target, { state: "failed", failure: "model" });
     return finish("model-failed", "failed", `The model's assessment couldn't be used: ${unusable(steps, problems)}. The pages and passages read are kept below.`);
   }
+  const matched = assess(parsed.data, packet.assumptions, passages, pages, options.mask);
+  if (matched.attribution!.matched === 0) {
+    // An answer that names none of the assumptions asked about assesses nothing: a failure of the model's output. What
+    // was read, what the model used and what it handed in are all kept.
+    Object.assign(target, { state: "failed", failure: "model" });
+    assessed = { assessments: [], checks: matched.checks, attribution: matched.attribution };
+    return finish(
+      "model-failed",
+      "failed",
+      "The model's answer named none of the assumptions it was asked about, so nothing was assessed. The pages and passages read are kept below, with a note of what it handed in.",
+    );
+  }
   target.state = "answered";
-  assessed = assess(parsed.data, packet.assumptions, passages, pages, options.mask);
+  assessed = matched;
   options.progress?.(`Assessed ${assessed.assessments.length} ${assessed.assessments.length === 1 ? "assumption" : "assumptions"}`, {
     citations: assessed.checks.citations,
     valid: assessed.checks.valid,

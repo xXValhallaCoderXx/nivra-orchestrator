@@ -13,24 +13,44 @@ import type { Passage } from "./passages.ts";
  *   passage;
  * - the model's own valid quotations on both sides leave it unresolved.
  *
- * The schema is lenient, as review's is: every field defaults, and the engine clips, masks and counts.
+ * The schema is lenient, as review's is: every field defaults, and the engine clips, masks and counts. Every field the
+ * model fills says what goes in it. An assessment counts only when it names an assumption that was asked about, by its
+ * id or by its exact words, and no other assessment names the same one: never by its place in the answer, and never by
+ * a likeness of words. What is set aside is counted, with a short, masked record of what it named and why.
  */
 
-const text = z.string().default("");
+const text = (description: string) => z.string().default("").describe(description);
 export const ResearchAnswer = z.object({
   assessments: z
     .array(
       z.object({
-        assumption: text,
-        outcome: text,
-        reasoning: text,
-        citations: z.array(z.object({ passage: text, stance: text, quote: text })).default([]),
-        applicability: z.object({ plan: text, source: text, where: text }).default({ plan: "", source: "", where: "" }),
-        uncertainty: text,
-        amendment: text,
+        assumption: text("The assumption's id exactly as listed: A1, A2 or A3. Not its words."),
+        outcome: text('"supported", "contradicted" or "unresolved".'),
+        reasoning: text("How the passages you cite bear on the assumption, in two to four sentences."),
+        citations: z
+          .array(
+            z.object({
+              passage: text('The id of one passage you were given, such as "S2.1".'),
+              stance: text('"supports" or "contradicts".'),
+              quote: text("Words copied exactly from that one passage."),
+            }),
+          )
+          .default([])
+          .describe("The passages that bear on the assumption, each with a quotation copied exactly from it."),
+        applicability: z
+          .object({
+            plan: text("The version or environment the plan means."),
+            source: text("The version or environment the cited source is about."),
+            where: text('Where the source says so: "title", "address", "heading" or "passage".'),
+          })
+          .default({ plan: "", source: "", where: "" })
+          .describe("Whether the cited sources are about the version or environment the plan means."),
+        uncertainty: text("What the passages leave open."),
+        amendment: text("For a contradicted assumption, one or two sentences correcting the assumption or the plan; otherwise empty."),
       }),
     )
-    .default([]),
+    .default([])
+    .describe("One assessment for each assumption listed, in any order, all in this one call."),
 });
 export type ResearchAnswer = z.infer<typeof ResearchAnswer>;
 
@@ -58,9 +78,23 @@ export interface Assessment {
   amendment: { kind: "model" | "unverified"; text: string } | null;
 }
 
+/** Why an assessment the model handed in was set aside instead of being matched to an assumption. */
+export type Rejection = "missing" | "unknown" | "ambiguous" | "conflicting" | "duplicate";
+
+/** What the model handed in, and how much of it named an assumption that was asked about. */
+export interface Attribution {
+  handedIn: number;
+  matched: number;
+  rejected: number;
+  /** At most ten of the assessments set aside: what each named, made plain, masked and clipped, and why. */
+  entries: Array<{ label: string; reason: Rejection }>;
+}
+
 export interface Assessed {
   assessments: Assessment[];
   checks: { citations: number; valid: number; relabelled: number };
+  /** Null until the model has handed in an answer that could be read. */
+  attribution: Attribution | null;
 }
 
 /** For matching a quotation: one case, single spaces, straight quotes and plain dashes, no invisible marks. */
@@ -109,6 +143,49 @@ function clip(value: string, max: number, mask: (text: string) => string): strin
   return cleaned.length <= max ? cleaned : `${cleaned.slice(0, max - 1)}…`;
 }
 
+/** How many of the assessments set aside are listed, and how much of what each named is kept. */
+const LISTED = 10;
+const LABEL_CHARS = 80;
+
+/**
+ * An assumption named by its id: "A1", in any case, optionally in brackets or after the word "assumption", and
+ * optionally followed by a separator and words. Nothing else is read as an id.
+ */
+const BY_ID = /^(?:assumption\s*)?[(\[]?\s*a(\d{1,2})\s*[)\]]?(?:$|[\s:.,;\u2013\u2014-]+(.*)$)/isu;
+/** Another id inside the words after one. */
+const ID_TOKEN = /(?<![\p{L}\p{N}])a\d{1,2}(?![\p{L}\p{N}])/iu;
+
+/** Words as matching reads them: plain, in one case, with single spaces and straight quotes, and no wrapping quotes or closing stop. */
+const wording = (value: string) =>
+  forMatching(value)
+    .replace(/^["']+|["']+$/g, "")
+    .replace(/[.!?]+$/, "")
+    .trim();
+
+/**
+ * Which assumption an assessment names, or why it names none Nivra can be sure of. By id: the id must be one asked
+ * about, and words after it must not be another assumption's exact words or name another id. By words: they must be
+ * exactly one assumption's words, as matching reads them.
+ */
+function named(value: string, assumptions: ReadonlyArray<{ id: AssumptionId; text: string }>): { ok: true; id: AssumptionId } | { ok: false; reason: Rejection } {
+  const plain = plainText(value).normalize("NFKC").trim();
+  if (!plain) return { ok: false, reason: "missing" };
+  const byId = BY_ID.exec(plain);
+  if (byId) {
+    const asked = assumptions.find((assumption) => assumption.id === `A${Number(byId[1])}`);
+    if (!asked) return { ok: false, reason: "unknown" };
+    const rest = wording(byId[2] ?? "");
+    if (!rest || rest === wording(asked.text)) return { ok: true, id: asked.id };
+    if (assumptions.some((assumption) => assumption.id !== asked.id && wording(assumption.text) === rest)) return { ok: false, reason: "conflicting" };
+    if (ID_TOKEN.test(rest)) return { ok: false, reason: "ambiguous" };
+    return { ok: true, id: asked.id };
+  }
+  const words = wording(plain);
+  const same = assumptions.filter((assumption) => wording(assumption.text) === words);
+  if (same.length === 1) return { ok: true, id: same[0]!.id };
+  return { ok: false, reason: same.length > 1 ? "ambiguous" : "unknown" };
+}
+
 const OUTCOMES = new Set<Conclusion>(["supported", "contradicted", "unresolved"]);
 const STANCE_OF: Record<"supported" | "contradicted", "supports" | "contradicts"> = { supported: "supports", contradicted: "contradicts" };
 const WHERE = new Set(["title", "address", "heading", "passage"]);
@@ -131,14 +208,26 @@ function checkCitation(raw: { passage: string; stance: string; quote: string }, 
 }
 
 /**
- * Each assumption's assessment, as the model gave it and as it is shown, with every citation checked. Assessments for
- * assumptions that weren't asked about are ignored; an assumption the model left out is shown unresolved.
+ * Each assumption's assessment, as the model gave it and as it is shown, with every citation checked. An assessment is
+ * used only when it names one assumption asked about and no other assessment names the same one; the rest are set
+ * aside and counted. An assumption with no assessment used is shown unresolved, as not assessed.
  */
 export function assess(answer: ResearchAnswer, assumptions: ReadonlyArray<{ id: AssumptionId; text: string }>, passages: readonly Passage[], pages: readonly Page[], mask: (text: string) => string): Assessed {
   let given = 0;
   let valid = 0;
+  const resolved = answer.assessments.map((entry) => ({ entry, result: named(entry.assumption, assumptions) }));
+  const answers = new Map<AssumptionId, number>();
+  for (const { result } of resolved) if (result.ok) answers.set(result.id, (answers.get(result.id) ?? 0) + 1);
+  const used = new Map<AssumptionId, ResearchAnswer["assessments"][number]>();
+  const rejected: Attribution["entries"] = [];
+  for (const { entry, result } of resolved) {
+    // Two answers for one assumption: neither is used, since nothing says which one the model meant.
+    if (result.ok && answers.get(result.id) === 1) used.set(result.id, entry);
+    else rejected.push({ label: clip(entry.assumption, LABEL_CHARS, mask), reason: result.ok ? "duplicate" : result.reason });
+  }
+  const attribution: Attribution = { handedIn: resolved.length, matched: used.size, rejected: rejected.length, entries: rejected.slice(0, LISTED) };
   const assessments = assumptions.map(({ id, text: assumptionText }): Assessment => {
-    const raw = answer.assessments.find((candidate) => candidate.assumption.trim().toUpperCase() === id);
+    const raw = used.get(id);
     const versions = versionsIn(assumptionText);
     let version = versions[0] ?? null;
     const unverified = { kind: "unverified" as const, text: `Unverified: "${assumptionText}". Research found no quotation that settles it.` };
@@ -199,5 +288,5 @@ export function assess(answer: ResearchAnswer, assumptions: ReadonlyArray<{ id: 
       amendment,
     };
   });
-  return { assessments, checks: { citations: given, valid, relabelled: assessments.filter((assessment) => assessment.rule !== null).length } };
+  return { assessments, checks: { citations: given, valid, relabelled: assessments.filter((assessment) => assessment.rule !== null).length }, attribution };
 }
