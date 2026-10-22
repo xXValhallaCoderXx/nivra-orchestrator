@@ -16,7 +16,8 @@ const Rect = z.object({ x: z.number(), y: z.number(), width: z.number().positive
 
 /**
  * What a project allows to leave the machine (D20), both off until the person agrees. `modelContext` lets repository
- * excerpts go to Token Factory; `cloudExecution` is kept but unused until cloud execution exists.
+ * excerpts go to Token Factory; `cloudExecution` lets its commit be uploaded to Nebius Sandboxes for a check (D36).
+ * Neither stands in for the other.
  */
 export const ProjectSharing = z.strictObject({ modelContext: z.boolean(), cloudExecution: z.boolean() });
 export type ProjectSharing = z.infer<typeof ProjectSharing>;

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ExecResult, SessionStep } from "./backend.ts";
 import { WorkspaceRefusal } from "./git-tool.ts";
 import { PATCH_POLICY, type PatchPolicy, type PatchResult } from "./patch.ts";
 import type { Snapshot } from "./snapshot.ts";
@@ -118,7 +119,8 @@ export interface StepRecord {
   cancelled: boolean;
   truncated: boolean;
   persisted: boolean;
-  durationMs: number;
+  /** Null for a step that stopped the run before its command gave a result. */
+  durationMs: number | null;
   /** The provider's status for the step's operation, or null where no provider ran it. */
   status: string | null;
   /** As the provider reported it, raw, null when it reported none: never turned into money. */
@@ -131,12 +133,38 @@ export interface StepRecord {
 const TAIL = 2_000;
 const tail = (text: string) => (text.length > TAIL ? text.slice(-TAIL) : text);
 
+/** A step's record from its result, and from the session's own record of it when there is one (status, usage). */
+export function stepRecord(label: string, ran: ExecResult, recorded: SessionStep | undefined): StepRecord {
+  return {
+    label,
+    exitCode: ran.exitCode,
+    signal: ran.signal,
+    timedOut: ran.timedOut,
+    cancelled: ran.cancelled,
+    truncated: ran.truncated,
+    persisted: ran.persisted,
+    durationMs: ran.durationMs,
+    status: recorded?.status ?? null,
+    usage: recorded?.usage ?? null,
+    stdoutTail: tail(ran.stdout),
+    stderrTail: tail(ran.stderr),
+  };
+}
+
+/** A step that stopped the run before its command gave a result: what the session recorded of it, if anything. */
+export function stoppedStepRecord(label: string, recorded: SessionStep | undefined): StepRecord {
+  return { label, exitCode: null, signal: null, timedOut: false, cancelled: false, truncated: false, persisted: false, durationMs: recorded?.durationMs ?? null, status: recorded?.status ?? null, usage: recorded?.usage ?? null, stdoutTail: "", stderrTail: "" };
+}
+
 /**
- * The report the person reads before approving, as canonical JSON, so its digest can be bound. It holds what the
- * snapshot sent and left out, every step's outcome, and the change: deletions first, then additions, then changes, by
- * path, mode, size and digest, with the content only in the patch.
+ * The report the person reads before approving, as canonical JSON, so its digest can be bound. It holds:
+ * - what the snapshot sent and left out;
+ * - every step's outcome;
+ * - every operation the session ran, its own prepare step included, with its status and its usage as reported;
+ * - the change: deletions first, then additions, then changes, by path, mode, size and digest, with the content only
+ *   in the patch.
  */
-export function buildReport(input: { snapshot: Snapshot; patch: PatchResult; steps: readonly StepRecord[] }): Uint8Array {
+export function buildReport(input: { snapshot: Snapshot; patch: PatchResult; steps: readonly StepRecord[]; operations?: readonly SessionStep[] }): Uint8Array {
   const { snapshot, patch } = input;
   const { changes } = patch;
   const describe = (kind: string) => (change: PatchResult["changes"]["added"][number]) => ({ change: kind, path: change.path, mode: change.mode, bytes: change.bytes.byteLength, sha256: change.sha256 });
@@ -151,6 +179,8 @@ export function buildReport(input: { snapshot: Snapshot; patch: PatchResult; ste
       lfsPointers: snapshot.lfsPointers.count,
     },
     steps: input.steps.map((step) => ({ ...step, usage: step.usage ?? null, stdoutTail: tail(step.stdoutTail), stderrTail: tail(step.stderrTail) })),
+    // The provider's own ids stay out: the report is for the person.
+    operations: (input.operations ?? []).map((operation) => ({ label: operation.label, status: operation.status, verdict: operation.verdict, durationMs: operation.durationMs, persisted: operation.persisted, usage: operation.usage ?? null })),
     changes: [...changes.deleted.map((path) => ({ change: "deleted", path })), ...changes.added.map(describe("added")), ...changes.changed.map(describe("changed"))],
     modeChanges: changes.modeChanges,
     generatedLeftOut: changes.generated,

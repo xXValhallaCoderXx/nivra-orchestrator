@@ -95,7 +95,7 @@ function start(): void {
   const project = z.tuple([z.uuid()]);
   const settings = async (): Promise<SettingsView> => {
     const state = await secrets.state("NEBIUS_API_KEY");
-    return { nebiusKey: state, keychain: secrets.keychain(), note: secrets.note(state) };
+    return { nebiusKey: state, keychain: secrets.keychain(), note: secrets.note(state), nebiusProjectId: (await secrets.get("NEBIUS_PROJECT_ID")) ? "set" : "none" };
   };
 
   handle(IPC.getAppInfo, none, (): AppInfo => ({
@@ -187,6 +187,13 @@ function start(): void {
   );
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));
   handle(IPC.setSharing, z.tuple([z.uuid(), z.boolean()]), (_event, id, modelContext) => host.setSharing(id, modelContext));
+  // Sandbox checks (D36): upload consent of its own, and a check bound to its preview's fingerprint (SHA-256 in hex).
+  handle(IPC.setCloudExecution, z.tuple([z.uuid(), z.boolean()]), (_event, id, cloudExecution) => host.setCloudExecution(id, cloudExecution));
+  handle(IPC.previewSandboxCheck, project, (_event, id) => host.previewSandboxCheck(id));
+  handle(IPC.startSandboxCheck, z.tuple([z.uuid(), z.string().regex(/^[0-9a-f]{64}$/)]), (_event, id, expected) => host.startSandboxCheck(id, expected));
+  handle(IPC.cancelSandboxCheck, project, (_event, id) => host.cancelSandboxCheck(id));
+  handle(IPC.getSandboxCheck, project, (_event, id) => host.sandboxCheck(id));
+  handle(IPC.getSandboxStatus, project, (_event, id) => host.sandboxStatus(id));
   // The choices are required, so a caller that drops them fails here rather than explaining without them. The host
   // checks them again, with messages a person can act on (D23).
   handle(IPC.startExplain, z.tuple([z.uuid(), z.string().max(2_000), z.array(z.string().max(2_000)).max(20)]), (_event, id, question, choices) =>
@@ -242,6 +249,15 @@ function start(): void {
     }
     await secrets.set("NEBIUS_API_KEY", key);
     await host.secretsChanged().catch((error: unknown) => console.error("Could not hand the engine the new key", error));
+    return settings();
+  });
+  // The project id Nebius Sandboxes needs with the key (D36): kept and handed to the engines the way the key is (D8).
+  handle(IPC.setNebiusProjectId, z.tuple([z.string().trim().min(8).max(200).nullable()]), async (_event, value) => {
+    if (value !== null && !/^[\x21-\x7E]+$/.test(value)) {
+      throw new Error("That project id holds a space, a line break or a character no Nebius project id has, often copied along with it, so it wasn't saved. Copy it again, then save it.");
+    }
+    await secrets.set("NEBIUS_PROJECT_ID", value);
+    await host.secretsChanged().catch((error: unknown) => console.error("Could not hand the engine the new project id", error));
     return settings();
   });
 
@@ -358,9 +374,12 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
   // Tests give each run a WSL home of its own too, below the distribution's $HOME.
   const wslSwitch = app.commandLine.getSwitchValue("nivra-wsl-home") || null;
   const wslHome = wslSwitch ? wslHomeFrom(wslSwitch) : WSL_HOMES[channel];
-  // Tests only: a loopback stub of Token Factory, honoured only when unpackaged (D22); the engine refuses non-loopback.
+  // Tests only: loopback stubs of Token Factory and Nebius Sandboxes, honoured only when unpackaged (D22, D36); the
+  // engine refuses any address that isn't on this machine.
   const stubSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-token-factory-url") || null;
-  const extraArgs = stubSwitch ? { extraArgs: ["--token-factory-url", stubSwitch] } : {};
+  const sandboxSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-sandboxes-url") || null;
+  const stubArgs = [...(stubSwitch ? ["--token-factory-url", stubSwitch] : []), ...(sandboxSwitch ? ["--sandboxes-url", sandboxSwitch] : [])];
+  const extraArgs = stubArgs.length ? { extraArgs: stubArgs } : {};
   const hostTarget = `${platform === "win32" ? "win" : platform === "darwin" ? "mac" : "linux"}-${process.arch}`;
   const readHash = (path: string): string | null => {
     try {

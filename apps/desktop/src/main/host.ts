@@ -20,6 +20,8 @@ import {
   type RunEventsPage,
   type RunStatus,
   type RunSummary,
+  type SandboxPreview,
+  type SandboxStatus,
   type SecretName,
 } from "@nivra/domain";
 import type {
@@ -39,6 +41,7 @@ import type {
   ProjectView,
   ReviewPreview,
   ReviewView,
+  SandboxCheckView,
   TasksView,
   TaskState,
   TaskSummary,
@@ -144,6 +147,37 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 const isRunNotFound = (error: unknown) => error instanceof RpcCallError && error.code === ErrorCode.RunNotFound;
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref?.());
 
+/** Why a sandbox check can't start, and what stopped one (D36), in the person's terms. */
+const UPLOADS_OFF = "This project doesn't allow uploading its commit to Nebius Sandboxes. Allow uploads for it, then check again.";
+const UPLOADS_STOPPED =
+  "Uploads for this project were turned off, so its sandbox check is being stopped. Anything it uploaded stays with Nebius: images are kept for 180 days, and no API deletes uploads, operation records or logs.";
+const UPLOADS_STOPPED_STARTING = "Uploads for this project were turned off while its sandbox check was starting, so the check is being stopped.";
+/** A preview snapshots the whole commit on the project's engine, which takes a while for a large repository. */
+const SANDBOX_PREVIEW_MS = 180_000;
+
+/**
+ * A project's sandbox check this session (D36): the request id it was sent with, its run once known, and the engine
+ * store it went to, where its absence means it never arrived (D26).
+ */
+interface SandboxCheck {
+  requestId: string;
+  runId: string | null;
+  targetId: string;
+  homeId: string;
+  /** Sent with its answer lost, and not found yet. */
+  looking: boolean;
+  /** Its engine has no record of it: nothing was sent. */
+  notSent: boolean;
+  /** Not found in time: if it started, it ends at its own limit, or when its engine restarts. */
+  lost: boolean;
+  /** The person, or a withdrawn consent, asked it to stop before its run was known. */
+  cancelRequested: boolean;
+  note: string | null;
+  /** Its last stop failed, and its note says so; `failedNotice` when the project's notice says so too. */
+  stopFailed: boolean;
+  failedNotice: boolean;
+}
+
 interface Engine {
   readonly target: ExecutionTarget;
   readonly supervisor: EngineSupervisor;
@@ -184,6 +218,12 @@ export class Host {
   readonly #explainRuns = new Map<string, Set<string>>();
   /** Each project's conversation runs this session, for the same reason (D26). */
   readonly #conversationRuns = new Map<string, Set<string>>();
+  /** Raised when a project's uploads are turned off, so a sandbox check started under old consent can be caught (D36). */
+  readonly #cloudEpochs = new Map<string, number>();
+  /** Each project's sandbox check this session (D36). */
+  readonly #sandboxChecks = new Map<string, SandboxCheck>();
+  /** Projects whose check is being started: one at a time, from before its first wait. */
+  readonly #sandboxStarting = new Set<string>();
   /** This host session, recorded with each turn: only this session's own submissions can still be in flight. */
   readonly #sessionId = randomUUID();
   /** Turns whose `runs.start` this session hasn't finished with, and who asked them to stop meanwhile. */
@@ -753,6 +793,128 @@ export class Host {
     return this.#view(this.#project(projectId));
   }
 
+  /**
+   * Allows or stops uploading the project's commit to Nebius Sandboxes (D36), independent of model-context consent.
+   * Stopping raises the project's upload epoch, which a check being started checks, and cancels its check under way;
+   * what that check uploaded stays with Nebius, and the project's notice says so once the stop is accepted. A check
+   * that couldn't be stopped is reported, in the notice too, never passed over.
+   */
+  async setCloudExecution(projectId: string, cloudExecution: boolean): Promise<ProjectView> {
+    this.#project(projectId);
+    this.#options.store.update((data) => ({ ...data, projects: data.projects.map((p) => (p.id === projectId ? { ...p, sharing: { ...p.sharing, cloudExecution } } : p)) }));
+    if (!cloudExecution) {
+      this.#cloudEpochs.set(projectId, this.#cloudEpochOf(projectId) + 1);
+      const check = this.#sandboxChecks.get(projectId);
+      // A check whose state can't be read is treated as going: stopping one that had ended does no harm.
+      if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
+        await this.#stopForUploads(projectId, check, UPLOADS_STOPPED);
+        this.#notices.set(projectId, UPLOADS_STOPPED);
+      }
+    }
+    return this.#view(this.#project(projectId));
+  }
+
+  /**
+   * What a sandbox check of the project would send, worked out on the project's own engine with no network, for the
+   * person to see before anything is uploaded (D36). It needs no consent: nothing leaves the machine.
+   */
+  async previewSandboxCheck(projectId: string): Promise<SandboxPreview> {
+    const project = this.#project(projectId);
+    if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be checked.");
+    const engine = await this.#started(project.targetId);
+    return engine.supervisor.call("sandbox.preview", { repoPath: project.nativePath }, { timeoutMs: SANDBOX_PREVIEW_MS });
+  }
+
+  /**
+   * Starts a sandbox check of the project's commit (D36), bound to the preview the person saw by its fingerprint: the
+   * engine refuses a commit that changed since. Refused while the project doesn't allow uploads. Consent and its epoch
+   * are checked immediately before sending, and again on the answer: a check started while uploads were being turned
+   * off is cancelled at once. A start whose answer was lost is found by its request id, never sent again.
+   */
+  async startSandboxCheck(projectId: string, expected: string): Promise<SandboxCheckView> {
+    const project = this.#project(projectId);
+    if (this.#removing.has(projectId)) throw new Error("This project is being removed, so it can't be checked.");
+    if (!project.sharing.cloudExecution) throw new Error(UPLOADS_OFF);
+    // One check of a project at a time: claimed before the first wait, so a second start can't slip in behind it.
+    if (this.#sandboxStarting.has(projectId)) throw new Error("A sandbox check of this project is already being started.");
+    this.#sandboxStarting.add(projectId);
+    try {
+      return await this.#startSandbox(projectId, project, expected);
+    } finally {
+      this.#sandboxStarting.delete(projectId);
+    }
+  }
+
+  async #startSandbox(projectId: string, project: ProjectRecord, expected: string): Promise<SandboxCheckView> {
+    const going = this.#sandboxChecks.get(projectId);
+    if (going) {
+      // A check whose state can't be read is never taken to have ended.
+      const ended = await this.#sandboxEnded(going).catch((error: unknown) => {
+        throw new Error(`Nivra can't read this project's last sandbox check from its engine now (${errorText(error)}), so it didn't start another. Try again in a moment.`);
+      });
+      if (!ended) throw new Error("A sandbox check of this project is still going. Wait for it to end, or cancel it, then check again.");
+    }
+    const epoch = this.#cloudEpochOf(projectId);
+    const label = this.#labelOf(project.targetId);
+    const engine = await this.#started(project.targetId);
+    const state = engine.supervisor.state;
+    if (state.status !== "online") throw new Error(`The engine on ${label} isn't running, so nothing was sent.`);
+    // Checked again immediately before sending: uploads can be turned off, and the project removed, while the engine starts.
+    if (!this.#uploadsAllowed(projectId, epoch)) throw new Error("Uploads for this project were turned off, so the check wasn't started.");
+    const current = this.#project(projectId);
+    const check: SandboxCheck = { requestId: randomUUID(), runId: null, targetId: current.targetId, homeId: state.info.homeId, looking: false, notSent: false, lost: false, cancelRequested: false, note: null, stopFailed: false, failedNotice: false };
+    this.#sandboxChecks.set(projectId, check);
+    let run: RunSummary;
+    try {
+      run = await engine.supervisor.call("runs.start", {
+        clientRequestId: check.requestId,
+        workflowId: "sandbox",
+        input: { repoPath: current.nativePath, project: current.id, target: current.targetId, preview: expected },
+        context: { sharing: { cloudExecution: true } },
+      });
+    } catch (error) {
+      // Nothing was written: the engine wasn't online, or the request was refused before it was sent.
+      if (error instanceof EngineOfflineError || error instanceof TypeError) {
+        check.notSent = true;
+        check.note = `The engine on ${label} didn't take the check (${errorText(error)}), so nothing was sent.`;
+        return this.#sandboxView(projectId);
+      }
+      // The engine may have started it first: it is found by its request id, and never sent again.
+      this.#options.log(`A sandbox check's start got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
+      check.looking = true;
+      check.note = "Nivra didn't hear back whether the check started, so it is looking for it by its request id. Nothing is sent again.";
+      // An error answer is the engine's own words: shown if the search then finds the check was never recorded.
+      void this.#findSandboxRun(projectId, check, engine, epoch, error instanceof RpcCallError ? errorText(error) : null);
+      return this.#sandboxView(projectId);
+    }
+    check.runId = run.id;
+    this.#runs.set(run.id, current.targetId);
+    // A late answer is accepted only while uploads stay allowed: otherwise the check stops now.
+    if (check.cancelRequested || !this.#uploadsAllowed(projectId, epoch)) await this.#stopStarted(projectId, check, epoch);
+    return this.#sandboxView(projectId);
+  }
+
+  /** Stops the project's sandbox check, or marks one being found so that it stops once it is; what it uploaded stays. */
+  async cancelSandboxCheck(projectId: string): Promise<SandboxCheckView> {
+    this.#project(projectId);
+    const check = this.#sandboxChecks.get(projectId);
+    if (!check) throw new Error("No sandbox check of this project was started this session.");
+    await this.#cancelSandboxRun(projectId, check, null);
+    return this.#sandboxView(projectId);
+  }
+
+  /** The project's sandbox check this session, as it is now; null when none was started. */
+  async sandboxCheck(projectId: string): Promise<SandboxCheckView | null> {
+    this.#project(projectId);
+    return this.#sandboxChecks.has(projectId) ? this.#sandboxView(projectId) : null;
+  }
+
+  /** What the project's engine has left open in Nebius from earlier sessions, and its recovery pass (D33, D36). */
+  async sandboxStatus(projectId: string): Promise<SandboxStatus> {
+    const engine = await this.#started(this.#project(projectId).targetId);
+    return engine.supervisor.call("sandbox.status", {});
+  }
+
   async runEvents(runId: string, after: number): Promise<RunEventsPage> {
     return this.#runEngine(runId).supervisor.call("runs.events", { runId, after, limit: 500 });
   }
@@ -788,8 +950,9 @@ export class Host {
 
   /**
    * Removes a folder from the list, with its own preferences (personal ones stay), and says how many went. Removing a
-   * project withdraws its consent first: its epoch moves (and stays moved), so an explanation being submitted stops
-   * itself, and its queued and running explanations are cancelled. When one can't be stopped, the project stays.
+   * project withdraws its consent first: its epochs move (and stay moved), so an explanation or a sandbox check being
+   * submitted stops itself, and its queued and running explanations and its check are cancelled. When one can't be
+   * stopped, the project stays.
    */
   async removeProject(projectId: string): Promise<{ preferencesRemoved: number }> {
     this.#project(projectId);
@@ -797,9 +960,14 @@ export class Host {
     // Marked before the first wait, so no explanation can start while its runs are being stopped.
     this.#removing.add(projectId);
     this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
+    this.#cloudEpochs.set(projectId, this.#cloudEpochOf(projectId) + 1);
     const withdraw = this.#markProjectTurns(projectId, "removal");
     try {
       await this.#stopExplainRuns(projectId, (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
+      const check = this.#sandboxChecks.get(projectId);
+      if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
+        await this.#cancelSandboxRun(projectId, check, null, (why) => `Nivra couldn't stop the project's sandbox check (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
+      }
     } catch (error) {
       withdraw();
       this.#removing.delete(projectId);
@@ -808,6 +976,7 @@ export class Host {
     this.#notices.delete(projectId);
     this.#explainRuns.delete(projectId);
     this.#conversationRuns.delete(projectId);
+    this.#sandboxChecks.delete(projectId);
     let preferencesRemoved = 0;
     this.#options.store.update((data) => {
       const { data: next, removed } = removeProjectPreferences(data, projectId);
@@ -937,7 +1106,7 @@ export class Host {
   /** Hands every engine the keys as they are now (D8), including one that was still starting when they changed. */
   async secretsChanged(): Promise<void> {
     const secrets = await this.#options.credentials();
-    const remove = (["NEBIUS_API_KEY"] as const).filter((name) => !secrets[name]);
+    const remove = (["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID"] as const).filter((name) => !secrets[name]);
     const results = await Promise.allSettled(
       [...this.#engines.values()].map(async (engine) => {
         if (engine.supervisor.state.status === "starting") await engine.supervisor.start().catch(() => undefined);
@@ -967,6 +1136,145 @@ export class Host {
 
   #epochOf(projectId: string): number {
     return this.#sharingEpochs.get(projectId) ?? 0;
+  }
+
+  #cloudEpochOf(projectId: string): number {
+    return this.#cloudEpochs.get(projectId) ?? 0;
+  }
+
+  /** Whether the project still allows uploads as it did at `epoch`: still listed, not being removed, never turned off since. */
+  #uploadsAllowed(projectId: string, epoch: number): boolean {
+    const project = this.#options.store.data.projects.find((p) => p.id === projectId);
+    return Boolean(project?.sharing.cloudExecution) && !this.#removing.has(projectId) && this.#cloudEpochOf(projectId) === epoch;
+  }
+
+  /**
+   * Whether a check has ended: its run seen to reach a terminal status, or it never reached the engine, or it was
+   * given up on. A run whose engine isn't online isn't running any more (D4).
+   */
+  async #sandboxEnded(check: SandboxCheck): Promise<boolean> {
+    if (check.notSent || check.lost) return true;
+    if (check.runId === null) return false;
+    const engine = this.#engines.get(check.targetId);
+    if (!engine || engine.supervisor.state.status !== "online") return true;
+    try {
+      return isTerminal((await engine.supervisor.call("runs.get", { runId: check.runId })).status);
+    } catch (error) {
+      if (isRunNotFound(error)) return true;
+      throw error;
+    }
+  }
+
+  /**
+   * Cancels a check's run, and gives it `note` once the stop is accepted. One whose run isn't known yet is marked, and
+   * its search cancels it once it is found. An engine that isn't online isn't running it any more. One that couldn't be
+   * stopped says so in its note instead, and is reported through `refusal`; a stop accepted later takes that back.
+   */
+  async #cancelSandboxRun(projectId: string, check: SandboxCheck, note: string | null, refusal = (why: string) => `Nivra couldn't stop the sandbox check (${why}). Restart the project's engine to stop it.`): Promise<void> {
+    check.cancelRequested = true;
+    const engine = check.runId === null ? undefined : this.#engines.get(check.targetId);
+    if (check.runId !== null && engine && engine.supervisor.state.status === "online") {
+      try {
+        await engine.supervisor.call("runs.cancel", { runId: check.runId });
+      } catch (error) {
+        if (!isRunNotFound(error)) {
+          check.stopFailed = true;
+          check.note = `Nivra couldn't stop the sandbox check (${errorText(error)}). Restart the project's engine to stop it.`;
+          throw new Error(refusal(errorText(error)));
+        }
+      }
+    }
+    if (!check.stopFailed) {
+      if (note) check.note = note;
+      return;
+    }
+    // Stopped after a stop that failed: nothing says any more that it couldn't be.
+    check.stopFailed = false;
+    check.note = note;
+    if (check.failedNotice) {
+      check.failedNotice = false;
+      const project = this.#options.store.data.projects.find((p) => p.id === projectId);
+      if (project?.sharing.cloudExecution) this.#notices.delete(projectId);
+      else if (project) this.#notices.set(projectId, UPLOADS_STOPPED);
+    }
+  }
+
+  /** Stops a check because uploads were turned off. A stop that fails says so in the project's notice too. */
+  async #stopForUploads(projectId: string, check: SandboxCheck, note: string | null): Promise<void> {
+    try {
+      await this.#cancelSandboxRun(projectId, check, note);
+    } catch (error) {
+      check.failedNotice = true;
+      this.#notices.set(projectId, `Uploads for this project were turned off. ${errorText(error)}`);
+      throw error;
+    }
+  }
+
+  /** Stops a check whose run became known after it was asked to stop, or after uploads were turned off. */
+  async #stopStarted(projectId: string, check: SandboxCheck, epoch: number): Promise<void> {
+    const note = check.cancelRequested ? null : UPLOADS_STOPPED_STARTING;
+    if (this.#uploadsAllowed(projectId, epoch)) await this.#cancelSandboxRun(projectId, check, note);
+    else await this.#stopForUploads(projectId, check, note);
+  }
+
+  /**
+   * Looks for a check whose start got no usable answer, by its request id, on the engine store it was sent to (D26).
+   * Found, it becomes the project's check, and stops at once if it was asked to or uploads were turned off meanwhile.
+   * Absent from that same store, nothing was sent; an error answer's own words say why. Never sent again either way.
+   */
+  async #findSandboxRun(projectId: string, check: SandboxCheck, engine: Engine, epoch: number, answered: string | null): Promise<void> {
+    let delay = 400;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      if (this.#closing || this.#engines.get(check.targetId) !== engine) break;
+      const state = engine.supervisor.state;
+      if (state.status === "online" && state.info.homeId === check.homeId) {
+        let found: RunSummary | null;
+        try {
+          found = await engine.supervisor.call("runs.find", { clientRequestId: check.requestId });
+        } catch (error) {
+          this.#options.log(`A sandbox check's start couldn't be looked up yet (${errorText(error)}); Nivra tries again.`);
+          await pause(delay);
+          delay = Math.min(delay * 2, 5_000);
+          continue;
+        }
+        check.looking = false;
+        if (!found) {
+          check.notSent = true;
+          check.note = answered ? `The engine didn't start the check, so nothing was sent. ${answered}` : "The engine has no record of the check, so nothing was sent.";
+          return;
+        }
+        check.runId = found.id;
+        this.#runs.set(found.id, check.targetId);
+        check.note = null;
+        // Found, it is known: a stop that fails now says so in its note (and the notice, if uploads were turned off),
+        // never taken for not knowing whether it started.
+        if (check.cancelRequested || !this.#uploadsAllowed(projectId, epoch)) await this.#stopStarted(projectId, check, epoch).catch(() => undefined);
+        return;
+      }
+      await pause(delay);
+      delay = Math.min(delay * 2, 5_000);
+    }
+    check.looking = false;
+    check.lost = true;
+    check.note = "Nivra couldn't find out whether the check started, and sent nothing again. If it did start, it ends at its own time limit, or when its engine restarts.";
+  }
+
+  /** A check as the window shows it: its run's status and the engine's report, or where its start stands. */
+  async #sandboxView(projectId: string): Promise<SandboxCheckView> {
+    const check = this.#sandboxChecks.get(projectId);
+    if (!check) throw new Error("No sandbox check of this project was started this session.");
+    if (check.runId === null) return { runId: null, status: check.notSent ? "not-sent" : check.lost ? "unknown" : check.looking ? "looking" : "sending", report: null, note: check.note };
+    const engine = this.#engines.get(check.targetId);
+    if (!engine || engine.supervisor.state.status !== "online") {
+      return { runId: check.runId, status: "unknown", report: null, note: check.note ?? `The engine on ${this.#labelOf(check.targetId)} isn't running, so the check can't be read now.` };
+    }
+    try {
+      const [summary, report] = await Promise.all([engine.supervisor.call("runs.get", { runId: check.runId }), engine.supervisor.call("runs.sandbox", { runId: check.runId })]);
+      return { runId: check.runId, status: summary.status, report, note: check.note };
+    } catch (error) {
+      // A check that can't be read now is a state to show, never an error: it may well have started.
+      return { runId: check.runId, status: "unknown", report: null, note: check.note ?? `Nivra can't read the check from its engine now (${errorText(error)}).` };
+    }
   }
 
   /** Cancels the project's queued and running explain and conversation runs; when one can't be stopped, says so through `refusal`. */
@@ -1534,6 +1842,13 @@ export class Host {
     return body(await this.#ensure(project.targetId));
   }
 
+  /** The target's engine, once a start in progress has ended: online, or failed with its reason. */
+  async #started(targetId: string): Promise<Engine> {
+    const engine = await this.#ensure(targetId);
+    if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
+    return engine;
+  }
+
   #runEngine(runId: string): Engine {
     // A conversation's run is routed from the workspace too, so it is reachable after a restart (D26).
     const targetId = this.#runs.get(runId) ?? (this.#workspace.state === "ready" ? turnByRun(this.#workspace.db, runId)?.targetId : undefined);
@@ -1672,7 +1987,7 @@ export class Host {
       label: record.label,
       displayPath: record.nativePath,
       notice: this.#notices.get(record.id) ?? null,
-      sharing: { modelContext: record.sharing.modelContext },
+      sharing: { modelContext: record.sharing.modelContext, cloudExecution: record.sharing.cloudExecution },
     };
   }
 

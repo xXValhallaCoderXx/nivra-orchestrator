@@ -164,7 +164,10 @@ class LocalSession implements ExecutionSession {
       // A command that stops reading early closes its end; that is the command's business, not a failure here.
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(request.stdin);
-      child.once("spawn", () => request.onStart?.({ pid: child.pid ?? null }));
+      child.once("spawn", () => {
+        request.onStart?.({ pid: child.pid ?? null });
+        request.onRunning?.();
+      });
       child.once("error", (error: NodeJS.ErrnoException) => {
         // Only a process that never started reports here (ENOENT, EACCES): nothing ran.
         if (child.pid === undefined) finish({ error: new ExecRefusedError(`Could not start ${program} (${error.code ?? error.message}).`) });

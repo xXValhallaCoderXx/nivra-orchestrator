@@ -4,7 +4,8 @@
 // parent when the parent is killed (libuv's kill-on-close job object, D4). It also checks that the native engine's
 // storage driver loads the Visual C++ runtime shipped beside it, not one installed on this machine (D25). The WSL engine
 // runs in a home of this run's own (--wsl-home, below the distribution's $HOME), which is removed at the end, and the
-// release's home, ~/.nivra, must be left exactly as it was (D27).
+// release's home, ~/.nivra, must be left exactly as it was (D27). With --sandboxes-url, it also runs sandbox checks
+// through the WSL engine against the stand-in for Nebius Sandboxes that verify-windows.ts runs in the distribution (D36).
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -18,9 +19,11 @@ import { LocalTarget, runtimeIn } from "../src/main/targets/local.ts";
 import { runTool } from "../src/main/targets/process.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
 import { wslHomeFrom } from "../src/main/targets/homes.ts";
-import { discoverWsl, type WslDistro } from "../src/main/targets/wsl-discovery.ts";
+import { discoverWsl, type WslDiscovery, type WslDistro } from "../src/main/targets/wsl-discovery.ts";
 import { instancePattern, WslTarget } from "../src/main/targets/wsl.ts";
 import { renameDllImport, VC_RUNTIME_DLL, vcRuntimeAddons } from "./runtime-files.ts";
+import { sandboxChecks } from "./sandbox-checks.ts";
+import { standInClient } from "./stand-in.ts";
 import { RELEASE_HOME_STATE, releaseHomeChange, REMOVE_TEST_HOME, STALE_TEST_HOMES } from "./test-homes.ts";
 
 const { values } = parseArgs({
@@ -31,6 +34,9 @@ const { values } = parseArgs({
     work: { type: "string" },
     distro: { type: "string" },
     "wsl-home": { type: "string" },
+    // The stand-in for Nebius Sandboxes, on loopback in the distribution named by --sandboxes-distro.
+    "sandboxes-url": { type: "string" },
+    "sandboxes-distro": { type: "string" },
     // Child mode: start one engine, print its pid and instance, then wait to be killed.
     "hold-engine": { type: "string" },
   },
@@ -65,13 +71,13 @@ function nativeTarget(home: string, runtime = runtimeDir): LocalTarget {
   return new LocalTarget({ platform: "win32", runtime: runtimeIn(runtime, "win32"), home });
 }
 
-async function wslTarget(): Promise<{ target: WslTarget; distro: WslDistro; wslExe: string }> {
+async function wslTarget(): Promise<{ target: WslTarget; distro: WslDistro; wslExe: string; discovery: WslDiscovery }> {
   const discovery = await discoverWsl();
   if (discovery.status !== "ready") throw new Error(`WSL: ${discovery.message}`);
   const distro = values.distro ? discovery.distros.find((d) => d.name === values.distro) : (discovery.distros.find((d) => d.isDefault) ?? discovery.distros[0]);
   if (!distro) throw new Error(`No usable WSL distribution${values.distro ? ` named ${values.distro}` : ""} (found: ${discovery.distros.map((d) => d.name).join(", ") || "none"})`);
   if (!wslHome) throw new Error("No --wsl-home: verify:windows gives each run a home of its own, so the release's ~/.nivra is never used.");
-  return { target: new WslTarget({ distro, wslExe: discovery.wslExe, runtime: { tarball, contentHash: linuxHash }, engineHome: wslHome }), distro, wslExe: discovery.wslExe };
+  return { target: new WslTarget({ distro, wslExe: discovery.wslExe, runtime: { tarball, contentHash: linuxHash }, engineHome: wslHome }), distro, wslExe: discovery.wslExe, discovery };
 }
 
 function supervisorFor(target: ExecutionTarget, name: string): EngineSupervisor {
@@ -341,7 +347,7 @@ async function main(): Promise<void> {
     return `using ${wsl.distro.name} (WSL ${String(wsl.distro.version)}, default user ${String(wsl.distro.defaultUid)})`;
   });
   if (wsl) {
-    const { target, distro, wslExe } = wsl as Awaited<ReturnType<typeof wslTarget>>;
+    const { target, distro, wslExe, discovery } = wsl as Awaited<ReturnType<typeof wslTarget>>;
     const inDistro = (args: string[], timeoutMs = 60_000) => runTool(wslExe, ["-d", distro.name, "--cd", "/", "--exec", ...args], { env: { ...process.env, WSL_UTF8: "1" } as Record<string, string>, timeoutMs });
     const releaseState = async () => {
       const read = await inDistro(["/bin/sh", "-c", RELEASE_HOME_STATE]);
@@ -419,6 +425,37 @@ async function main(): Promise<void> {
       });
     }
     await check("wsl: an engine dies with its parent (job object, then EOF)", () => orphanCheck("wsl", inDistro));
+
+    // ---- sandbox checks (D36) ----
+    // Through this distribution's engine, against the stand-in for Nebius Sandboxes that verify-windows.ts runs in the
+    // distribution (sandbox-checks.ts says what they cover).
+    console.log("\nSandbox checks: the host on Windows, the engine in WSL, a stand-in for Nebius Sandboxes");
+    const sandboxesUrl = values["sandboxes-url"];
+    const stub = standInClient(process.stdin, process.stdout);
+    const reachable = await check("wsl sandbox: the stand-in runs in the distribution this engine runs in, and answers", async () => {
+      if (!up) throw new Error("not run: the WSL engine didn't start");
+      if (!sandboxesUrl) throw new Error("no --sandboxes-url: verify-windows.ts runs the stand-in and passes its address");
+      const where = values["sandboxes-distro"] ?? "";
+      if (where !== distro.name) throw new Error(`the stand-in runs in ${where || "an unnamed distribution"}, but the engine runs in ${distro.name}. Run verify:windows from ${distro.name}, or pass --distro ${where || "<name>"}.`);
+      await stub("normal");
+      return `${sandboxesUrl} in ${distro.name}`;
+    });
+    if (reachable) {
+      const root = join(work, `host sandbox ${AWKWARD}`);
+      await sandboxChecks({
+        target: new WslTarget({ distro, wslExe, runtime: { tarball, contentHash: linuxHash }, engineHome: wslHome!, extraArgs: ["--sandboxes-url", sandboxesUrl!] }),
+        discovery,
+        local: nativeTarget(join(root, "native home")),
+        inDistro,
+        root: join(root, "host"),
+        logsDir: join(work, "logs", "sandbox"),
+        engineHome: wslHome!,
+        stub,
+        check,
+        log: (line) => console.log(`    ${line}`),
+      });
+    }
+
     await check("wsl: the release's home, ~/.nivra, is as it was: no database migrated, no runtime added or pruned", async () => {
       const changed = releaseHomeChange(releaseBefore, await releaseState());
       if (changed) throw new Error(changed);

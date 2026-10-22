@@ -26,7 +26,7 @@ process.stdin.on("data", (chunk) => {
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     const params = request.params ?? {};
     if (request.method === "initialize") {
-      send({ id: request.id, result: { protocolVersion: 7, engineVersion: "stuck", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 8, engineVersion: "stuck", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "doctor") {
       const tokenFactory = basename(process.argv[1] ?? "").startsWith("token-factory-engine");
       send({ id: request.id, result: { checks: [{ id: "models", status: tokenFactory ? "ok" : "warn", title: "Model endpoint", detail: tokenFactory ? "Nebius Token Factory" : "A test endpoint", fix: null }] } });

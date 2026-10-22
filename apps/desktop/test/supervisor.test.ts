@@ -83,10 +83,10 @@ describe("EngineSupervisor", () => {
   });
 
   it("hands the engine its keys in initialize, and only there (D8)", async () => {
-    const { instance } = supervisor({ overrides: { credentials: async () => ({ NEBIUS_API_KEY: "test-key-0123456789" }) } });
+    const { instance } = supervisor({ overrides: { credentials: async () => ({ NEBIUS_API_KEY: "test-key-0123456789", NEBIUS_PROJECT_ID: "project-e00keystest" }) } });
     await instance.start();
     const report = await instance.call("doctor", {});
-    assert.match(report.checks.find((check) => check.id === "boundaries")!.detail, /credentials set/);
+    assert.match(report.checks.find((check) => check.id === "boundaries")!.detail, /Nebius Sandboxes: key and project id set/);
   });
 
   it("reports a second engine on the same home as locked, by code", async () => {
