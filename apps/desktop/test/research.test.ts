@@ -25,6 +25,7 @@ import type { ArtifactRecord, ConversationRecord, TurnRecord } from "../src/main
 import {
   amendmentChoices,
   amendmentDraft,
+  attributionText,
   evidenceFor,
   initialQuery,
   requestText,
@@ -420,6 +421,28 @@ describe("the research window's words and evidence (NIV-45)", () => {
       "1 Tavily credit, as reported · tokens unknown",
     );
     assert.equal(usageText({ outcome: "interrupted", requests: [request({ state: "failed", failure: "interrupted", credits: null })], usage: { credits: null, model: none } }), "Tavily credits unknown · no model call");
+  });
+
+  it("says what became of the model's assessments when some were set aside, and nothing when all matched", () => {
+    assert.equal(attributionText(null), null);
+    assert.equal(attributionText({ handedIn: 3, matched: 3, rejected: 0, entries: [] }), null);
+    assert.equal(
+      attributionText({
+        handedIn: 4,
+        matched: 1,
+        rejected: 3,
+        entries: [
+          { label: "A1", reason: "duplicate" },
+          { label: "A1: the same", reason: "duplicate" },
+          { label: "", reason: "missing" },
+        ],
+      }),
+      "The model handed in 4 assessments. 1 matched an assumption asked about; 3 were set aside: 2 answered an assumption that another assessment answered too; 1 named no assumption.",
+    );
+    assert.equal(
+      attributionText({ handedIn: 12, matched: 0, rejected: 12, entries: Array.from({ length: 10 }, () => ({ label: "x", reason: "unknown" as const })) }),
+      "The model handed in 12 assessments. 0 matched an assumption asked about; 12 were set aside: 10 named no assumption that was asked about; 2 more not listed.",
+    );
   });
 
   it("offers the model's amendment for a contradiction with valid quotations, the fixed note for an unresolved one, and the draft names each site", () => {

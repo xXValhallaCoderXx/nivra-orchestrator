@@ -4,6 +4,7 @@ import type { PlanView, ProjectView, TurnStatus } from "../../../shared/ipc";
 import {
   amendmentChoices,
   amendmentDraft,
+  attributionText,
   CONCLUSION_LABEL,
   evidenceFor,
   initialQuery,
@@ -625,6 +626,18 @@ function Report({ report }: { report: ResearchReportView }) {
       {report.assessments.map((assessment) => (
         <Assessment key={assessment.assumption} assessment={assessment} report={report} />
       ))}
+      {report.attribution && report.attribution.rejected > 0 && (
+        <Stack gap={2} data-testid="research-attribution">
+          <Text size="xs" c="var(--nivra-text-2)">
+            {attributionText(report.attribution)}
+          </Text>
+          {report.attribution.entries.map((entry, index) => (
+            <Text key={index} size="xs" c="var(--nivra-text-3)" style={plain}>
+              {entry.label ? `“${entry.label}”` : "(no assumption named)"}
+            </Text>
+          ))}
+        </Stack>
+      )}
       {report.checks.relabelled > 0 && (
         <Text size="xs" c="var(--nivra-text-3)" data-testid="research-relabelled">
           {plural(report.checks.relabelled, "assessment")} shown as unresolved by the rules above. {plural(report.checks.valid, "quotation")} of {report.checks.citations} found in the pages read.

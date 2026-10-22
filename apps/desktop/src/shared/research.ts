@@ -130,6 +130,17 @@ export interface ResearchRequestView {
   elapsedMs: number | null;
 }
 
+/** Why an assessment the model handed in was set aside instead of being matched to an assumption. */
+export type Rejection = "missing" | "unknown" | "ambiguous" | "conflicting" | "duplicate";
+
+/** What the model handed in, and how much of it named an assumption asked about: at most ten set aside are listed. */
+export interface AttributionView {
+  handedIn: number;
+  matched: number;
+  rejected: number;
+  entries: Array<{ label: string; reason: Rejection }>;
+}
+
 /** A research run's report, as the engine saved it and the host masked it again: the parts the window reads. */
 export interface ResearchReportView {
   planId: string;
@@ -144,6 +155,8 @@ export interface ResearchReportView {
   passages: ResearchPassageView[];
   assessments: ResearchAssessmentView[];
   checks: { citations: number; valid: number; relabelled: number };
+  /** Null until the model handed in an answer that could be read. */
+  attribution: AttributionView | null;
   stop: { code: string; message: string } | null;
   usage: { credits: number | null; model: RunUsage };
   budget: RunBudgetRecord | null;
@@ -278,6 +291,28 @@ export function requestText(request: ResearchRequestView, outcome: ResearchRepor
         : " · credits not reported";
   const time = request.elapsedMs !== null ? ` · ${(request.elapsedMs / 1000).toFixed(1)} s` : "";
   return `${what}: ${state}${credits}${time}`;
+}
+
+const REJECTION: Readonly<Record<Rejection, string>> = {
+  missing: "named no assumption",
+  unknown: "named no assumption that was asked about",
+  ambiguous: "could mean more than one assumption",
+  conflicting: "named one assumption by its id and another by its words",
+  duplicate: "answered an assumption that another assessment answered too",
+};
+
+/**
+ * What became of the model's assessments when some were set aside, in plain words: how many it handed in, how many
+ * matched an assumption, and why the rest didn't. Null when every one matched, or the model handed in nothing.
+ */
+export function attributionText(attribution: AttributionView | null): string | null {
+  if (!attribution || attribution.rejected === 0) return null;
+  const counts = new Map<Rejection, number>();
+  for (const entry of attribution.entries) counts.set(entry.reason, (counts.get(entry.reason) ?? 0) + 1);
+  const unlisted = attribution.rejected - attribution.entries.length;
+  const why = [...counts].map(([reason, n]) => `${n} ${REJECTION[reason]}`);
+  if (unlisted > 0) why.push(`${unlisted} more not listed`);
+  return `The model handed in ${plural(attribution.handedIn, "assessment")}. ${attribution.matched} matched an assumption asked about; ${attribution.rejected} ${attribution.rejected === 1 ? "was" : "were"} set aside: ${why.join("; ")}.`;
 }
 
 /**
