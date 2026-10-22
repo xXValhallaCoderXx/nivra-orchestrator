@@ -101,6 +101,11 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 - **The Visual C++ runtime (D25):** it checks that the native engine loads only the copy shipped beside its addon. It
   also runs a controlled check in a copy of the runtime. There, the addon's import is renamed so that no installed
   runtime can stand in, and the engine must still start and run hello. Without the renamed DLL, it must refuse.
+- **Sandbox checks (D36):** it runs a stand-in for Nebius Sandboxes on loopback in the distribution it is started from.
+  The harness drives the host and the WSL engine against it, with no network: consent, a whole check, a cancel,
+  uploads turned off, an uncertain submission, and recovery after a restart. Run it from the distribution the engine
+  uses: the check says so when they differ, and `--distro` picks the engine's. `test/sandbox-checks.test.ts` rehearses
+  the same checks on Linux.
 - **`test:windows` on a candidate:** extract its zip into `%LOCALAPPDATA%\nivra-dev\app` with Windows' `tar.exe`, in
   place of `pnpm dev:win --no-launch`.
 
@@ -318,6 +323,28 @@ node apps/engine/scripts/sandbox-check.ts --credentials <file> --recover <folder
 - **One approval covers one run,** its cleanup, and one `--recover` pass if cleanup is cut short. A rerun needs a new
   approval.
 
+A sandbox check (NIV-44, D36) is the prescribed path wired into the engine and the app: a project's commit uploaded to
+Nebius Sandboxes, one fixed probe run there with networking off, and a report. It needs the key and the Nebius project
+id (Settings, or `NEBIUS_API_KEY` and `NEBIUS_PROJECT_ID` for `rpc.ts`) and the project's own upload consent. Without a
+real sandbox, point the engine at the stand-in in `apps/engine/test/stub-sandboxes.ts` with `--sandboxes-url` (loopback
+only); the window's tests pass `--nivra-sandboxes-url` to an unpackaged app:
+
+```bash
+pnpm rpc sandbox.preview '{"repoPath":"/path/to/repo"}' --home ~/.nivra-dev-track-b
+pnpm rpc runs.start '{"workflowId":"sandbox","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"cloudExecution":true}}}' --follow --sandboxes-url http://127.0.0.1:<port> --home ~/.nivra-dev-track-b
+pnpm rpc sandbox.status --home ~/.nivra-dev-track-b
+cd apps/engine && node --test test/sandbox-engine.test.ts test/check.test.ts
+```
+
+- **`rpc.ts` fills in the preview's fingerprint** from `sandbox.preview`, a project id and the local target when the
+  request leaves them out, and prints the report after `--follow`.
+- **The engine's journals** are under `<home>/sandbox/`. One that closed with nothing open is in `sandbox/settled/`;
+  what an earlier engine left open is listed by `sandbox.status`, and settled by a pass once the credentials arrive.
+- **The real engine tests** (`sandbox-engine.test.ts`) run the production adapter against the stand-in: a preview, a
+  whole check, refusals, one check of a project at a time, a failure before the session, a cancel, an uncertain spawn
+  settled by a later engine, a pass that ends while a check goes, and an engine killed mid-check. The stand-in's
+  `before` hook holds chosen requests, so a test can act while one is out.
+
 ## Where things will live
 
 | What | Where |
@@ -347,4 +374,5 @@ distribution. One engine holds a home at a time (D7), so the second to start is 
   PATH, with WSL's leaked Windows folders removed. **Required before agents run builds (D15)**: nvm and similar are
   invisible to `wsl.exe --exec`.
 - Approved apply for agent writes (D15, NIV-8). Commit snapshots, patch checks and proposals bound by one hash are
-  built (D34), and so is the Nebius execution session they run with (D33), but none of them is wired into the engine.
+  built (D34), and so is the Nebius execution session they run with (D33). The engine runs them only as a sandbox
+  check (D36), which proposes nothing; a model choosing commands is NIV-7's.

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   ChatInput,
@@ -11,23 +12,33 @@ import {
   isTerminal,
   LineSplitter,
   PROTOCOL_VERSION,
+  SandboxReport,
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
   type JsonObject,
   type ReviewContext,
   type RunContext,
+  type SandboxContext,
+  type SandboxPreview,
+  type SandboxStatus,
   type SecretName,
   type WorkflowId,
 } from "@nivra/domain";
+import { installGitAdvice } from "./advice.ts";
 import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
 import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, type Diagnostic } from "./diagnostics.ts";
 import { Database, EngineLockedError } from "./db/database.ts";
 import { libsqlFileUrl } from "./db/libsql-url.ts";
 import { runDoctor } from "./doctor/doctor.ts";
+import { CHECK_IMAGE, CHECK_LIMITS, previewOf, readSandboxTask, safeUnresolved } from "./exec/check.ts";
 import { childEnv, insideWsl } from "./exec/child-env.ts";
 import { findGit } from "./exec/find-executable.ts";
+import { WorkspaceRefusal } from "./exec/git-tool.ts";
 import { createLocalBackend } from "./exec/local.ts";
+import { fetchTransport, SANDBOXES_BASE_URL, type Transport } from "./exec/nebius/api.ts";
+import { createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals, type NebiusCredentials } from "./exec/nebius/session.ts";
+import { takeSnapshot } from "./exec/snapshot.ts";
 import { ChatUnreadable, readChatTask } from "./chat/task.ts";
 import { readTask, TaskUnreadable } from "./explain/task.ts";
 import { asEnded, readReviewTask, ReviewUnreadable } from "./review/task.ts";
@@ -108,6 +119,19 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
       },
     },
   ],
+  [
+    "sandbox",
+    {
+      id: "sandbox",
+      title: (input: unknown) => `Sandbox check · ${basename(readSandboxTask(input)?.repoPath ?? "") || "repository"}`,
+      // Mastra gets the checkout's path alone (D22): the project, the target and the preview stay in the run store.
+      mastraInput: (input: unknown) => {
+        const task = readSandboxTask(input);
+        if (!task) throw new Refusal("input-unreadable", "This check's request can't be read back from the engine's store, so it wasn't started. Check again.");
+        return { repoPath: task.repoPath };
+      },
+    },
+  ],
 ]);
 
 export interface EngineOptions extends EngineArgs {
@@ -145,6 +169,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/explain.ts"),
     typeof import("./workflows/chat.ts"),
     typeof import("./workflows/review.ts"),
+    typeof import("./workflows/sandbox.ts"),
   ];
   try {
     mastraModules = await Promise.all([
@@ -154,6 +179,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       import("./workflows/explain.ts"),
       import("./workflows/chat.ts"),
       import("./workflows/review.ts"),
+      import("./workflows/sandbox.ts"),
     ]);
   } catch (error) {
     database.close();
@@ -166,6 +192,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     { createExplainWorkflow, EXPLAIN_WORKFLOW_ID },
     { createChatWorkflow, CHAT_WORKFLOW_ID },
     { createReviewWorkflow, REVIEW_WORKFLOW_ID },
+    { createSandboxWorkflow, SANDBOX_WORKFLOW_ID },
   ] = mastraModules;
 
   const vault = new SecretVault();
@@ -195,10 +222,15 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     arch: process.arch,
   });
 
-  // Each workflow reads the context its own kind of run carries (D21, D26).
+  // Each workflow reads the context its own kind of run carries (D21, D26). A sandbox check's alone holds no
+  // preferences: its consent is for uploads, never for a model (D36).
   const runContext = (runId: string): RunContext | null => {
     const given = scheduler.contextOf(runId);
-    return given && !("history" in given) && !("packet" in given) ? given : null;
+    return given && "preferences" in given && !("history" in given) && !("packet" in given) ? given : null;
+  };
+  const sandboxContext = (runId: string): SandboxContext | null => {
+    const given = scheduler.contextOf(runId);
+    return given && !("preferences" in given) ? given : null;
   };
   const reviewContext = (runId: string): ReviewContext | null => {
     const given = scheduler.contextOf(runId);
@@ -211,6 +243,95 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const recorder = {
     output: (runId: string, stepId: string, message: string, data?: JsonObject) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
     event: (runId: string, type: "model.call" | "tool.called", stepId: string, message: string, data: JsonObject) => void store.append(runId, { type, stepId, message, data }),
+  };
+
+  // Nebius Sandboxes (D33–D36): the key and project id from the vault only (D8), every session journaled under the
+  // engine's home, and a stub on this machine in their place when the tests name one.
+  const journals = join(home, "sandbox");
+  const sandboxCredentials = (): NebiusCredentials | null => {
+    const key = vault.get("NEBIUS_API_KEY");
+    const project = vault.get("NEBIUS_PROJECT_ID");
+    return key && project ? { key, project } : null;
+  };
+  // The key refuses a commit, or a change, that holds it (D34). The project id doesn't: it names the account the
+  // upload goes to, so a commit naming it, as infrastructure code does, sends Nebius nothing it doesn't know.
+  const knownValues = () => (["NEBIUS_API_KEY"] as const).flatMap((name) => vault.get(name) ?? []);
+  const sandboxLimits = {
+    ...NEBIUS_LIMITS,
+    maxOperations: CHECK_LIMITS.maxOperations,
+    maxTimeoutSeconds: CHECK_LIMITS.stepTimeoutMs / 1000,
+    prepareTimeoutSeconds: CHECK_LIMITS.stepTimeoutMs / 1000,
+    sessionBudgetMs: CHECK_LIMITS.budgetMs,
+    cleanupBudgetMs: CHECK_LIMITS.closeBudgetMs,
+  };
+  const sandboxTransport = (given: NebiusCredentials): Transport => fetchTransport(given, options.sandboxesUrl ?? SANDBOXES_BASE_URL);
+  const sandboxBackend = () => createNebiusBackend({ credentials: sandboxCredentials, baseImage: CHECK_IMAGE.uuid, journalDir: journals, limits: sandboxLimits, transport: sandboxTransport });
+  // Stops the engine's background work, and a check's cleanup, when the engine shuts down (D4).
+  const engineStop = new AbortController();
+
+  // What an earlier engine left open (D33): read at start with no network, then settled by one bounded pass once the
+  // credentials arrive. Nothing is replayed. The list is read again only while no check is going, so it never holds
+  // the journal of a session this engine has open; a journal a pass settles leaves it at once.
+  let scanned = scanJournals(journals);
+  const pass: SandboxStatus["pass"] = { state: scanned.open.length ? "waiting-for-credentials" : "idle", startedAt: null, finishedAt: null, stopped: 0, alreadyEnded: 0, unresolved: [] };
+  const checksActive = () => store.active().some((runId) => store.summary(runId)?.workflowId === "sandbox");
+  /** Whether a check of this project is queued or running here (D36). */
+  const checkGoing = (project: string) =>
+    store.active().some((runId) => {
+      const summary = store.summary(runId);
+      return summary?.workflowId === "sandbox" && readSandboxTask(summary.input)?.project === project;
+    });
+  const rescan = () => {
+    if (!checksActive()) scanned = scanJournals(journals);
+    // With nothing left open, there is nothing to wait for the credentials for.
+    if (scanned.open.length === 0 && pass.state === "waiting-for-credentials") pass.state = "idle";
+  };
+  const recover = (): void => {
+    // A journal moved aside since the list was read, by hand or by a pass that then failed, has nothing to settle.
+    scanned = { ...scanned, open: scanned.open.filter((scan) => existsSync(scan.path)) };
+    if (pass.state === "running" || engineStop.signal.aborted || scanned.open.length === 0) return;
+    const credentials = sandboxCredentials();
+    if (!credentials) {
+      pass.state = "waiting-for-credentials";
+      return;
+    }
+    Object.assign(pass, { state: "running", startedAt: new Date().toISOString(), finishedAt: null, stopped: 0, alreadyEnded: 0, unresolved: [] });
+    void reconcileJournals(scanned.open, { credentials, budgetMs: CHECK_LIMITS.closeBudgetMs, signal: engineStop.signal, transport: sandboxTransport, limits: sandboxLimits })
+      .then((results) => {
+        pass.stopped = results.reduce((sum, result) => sum + result.stopped.length, 0);
+        pass.alreadyEnded = results.reduce((sum, result) => sum + result.alreadyEnded.length, 0);
+        pass.unresolved = results.flatMap((result) => result.unresolved).slice(0, 200).map(safeUnresolved);
+        const settled = new Set(results.filter((result) => result.unresolved.length === 0).map((result) => result.path));
+        scanned = { ...scanned, open: scanned.open.filter((scan) => !settled.has(scan.path)) };
+      })
+      .catch((error: unknown) => {
+        diagnose({ code: "unexpected-error", stage: "sandbox.recover", error: errorFacts(error) });
+        pass.unresolved = [safeUnresolved("")];
+      })
+      .finally(() => {
+        Object.assign(pass, { state: "done", finishedAt: new Date().toISOString() });
+        rescan();
+      });
+  };
+  const sandboxStatus = (): SandboxStatus => ({
+    open: scanned.open.slice(0, 200).map((scan) => ({ journal: basename(scan.path).slice(0, 128), operations: scan.operations.length, uncertain: scan.uncertain.length, damaged: scan.damaged !== null })),
+    unread: scanned.unread,
+    pass: { ...pass, unresolved: [...pass.unresolved] },
+  });
+  /** What a check of this checkout would send, with no network; a commit that would be refused says why. */
+  const sandboxPreview = async (repoPath: string): Promise<SandboxPreview> => {
+    const git = locateGit();
+    if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
+    const session = await backend.open({ workspace: repoPath });
+    try {
+      return previewOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: knownValues() }));
+    } catch (error) {
+      // It names the file it is about: a preview is shown to the person, and never stored (D36).
+      if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
+      throw error;
+    } finally {
+      await session.close();
+    }
   };
 
   const mastra = new Mastra({
@@ -266,6 +387,22 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         saveResult: (runId, report) => store.saveArtifact(runId, "review", JSON.stringify(report)),
         recorder,
       }),
+      [SANDBOX_WORKFLOW_ID]: createSandboxWorkflow({
+        recorder,
+        context: sandboxContext,
+        task: (runId) => readSandboxTask(store.summary(runId)?.input),
+        requestId: (runId) => store.requestIdOf(runId),
+        credentials: sandboxCredentials,
+        sandbox: sandboxBackend,
+        local: backend,
+        findGit: locateGit,
+        platform: process.platform,
+        exclude: [home],
+        knownValues,
+        shutdown: engineStop.signal,
+        mask,
+        saveResult: (runId, report) => store.saveArtifact(runId, "sandbox", JSON.stringify(report)),
+      }),
     },
     storage: new LibSQLStore({ id: "nivra-engine", url: libsqlFileUrl(join(home, "mastra.db")) }),
     logger: false,
@@ -308,6 +445,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         }
         for (const [name, value] of Object.entries(params.secrets)) if (value) vault.set(name as SecretName, value);
         initialized = true;
+        // In the background, on its own budget: the host's wait for `initialize` never covers it.
+        recover();
         // Deliberately console.log: the launcher sends it to stderr, and the stdout purity test proves it (D2).
         console.log(`Nivra engine ${ENGINE_VERSION} ready for ${params.client.name} ${params.client.version}`);
         return info();
@@ -315,6 +454,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       "secrets.update": (params) => {
         for (const [name, value] of Object.entries(params.set)) if (value) vault.set(name as SecretName, value);
         for (const name of params.remove) vault.remove(name);
+        recover();
         return { ok: true as const };
       },
       shutdown: () => {
@@ -348,6 +488,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         }
       },
       "runs.start": (params) => {
+        // One check of a project at a time (D36), for a new request: a repeated one still gets its own run, ended or not.
+        // The host refuses a second check as well.
+        if (params.workflowId === "sandbox" && store.findByRequest(params.clientRequestId) === null && checkGoing(params.input.project)) {
+          throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check of this project is already going on its engine, so another wasn't started. Wait for it to end, then check again.");
+        }
         try {
           return store.summary(scheduler.submit(params)) ?? notFound("just created");
         } catch (error) {
@@ -380,12 +525,34 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         const report = ReviewReport.parse(JSON.parse(stored));
         return status && isTerminal(status) ? asEnded(report) : report;
       },
+      "runs.sandbox": ({ runId }) => {
+        const status = store.status(runId);
+        if (!status) notFound(runId);
+        const stored = store.artifact(runId, "sandbox");
+        if (stored === null) return null;
+        // A report saved mid-check, of a run that has ended, reads as interrupted (D36).
+        const report = SandboxReport.parse(JSON.parse(stored));
+        return status && isTerminal(status) && report.outcome === "in-progress" ? { ...report, outcome: "interrupted" as const, finishedAt: report.updatedAt } : report;
+      },
+      "sandbox.preview": ({ repoPath }) => sandboxPreview(repoPath),
+      "sandbox.status": () => {
+        rescan();
+        return sandboxStatus();
+      },
+      "sandbox.recover": () => {
+        if (checksActive()) throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check is going on this engine. Let it end, then try again.");
+        rescan();
+        recover();
+        return sandboxStatus();
+      },
     },
   });
 
   const shutdown = (reason: string): Promise<void> => {
     stopping ??= (async () => {
       log(`Shutting down: ${reason}`);
+      // A recovery pass, and a check's cleanup, stop now: what they leave stays journaled for the next start.
+      engineStop.abort(new Error("The engine is shutting down."));
       try {
         await scheduler.stop(reason, 3_000);
         await server.idle();
@@ -441,6 +608,7 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
       import("./workflows/explain.ts"),
       import("./workflows/chat.ts"),
       import("./workflows/review.ts"),
+      import("./workflows/sandbox.ts"),
     ]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {

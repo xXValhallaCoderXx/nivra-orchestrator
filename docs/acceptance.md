@@ -1625,6 +1625,227 @@ either value. Each copy was shredded after its run.
 - **`git apply --check` ran on a fresh clone,** never on a person's checkout: applying is NIV-8's.
 - **The live run was from Linux (WSL) only.**
 
+### Sandbox check, B4 (D36, NIV-44)
+
+Track B's fourth checkpoint, offline: the prescribed path (D35) wired into the engine and the app as a sandbox check,
+behind upload consent of its own. On `feature/niv-44`, stacked on B3 (`a1622ed`), after NIV-39's handoff:
+
+| Commit | What |
+|---|---|
+| `d4245bd` | The engine and the domain: protocol 8, the `sandbox` workflow, the preview, the report, recovery on the engine's lifecycle |
+| `aa44fa6` | The host: upload consent of its own, the consent races around `runs.start`, the project id kept like the key, the IPC |
+| `9e974b5` | The window: the project id in Settings, and the sandbox check's preview, consent, progress and report |
+| `e9ad7fa` | The docs: D36, this evidence, the check's notes and the architecture rows |
+| `a04af11` | The independent review's six findings, below |
+| `69c47b1`, `8bc0d04` | The review in D36 and this evidence; the Windows checks |
+| `7a70fab` | The independent check of those fixes: five more, below |
+| `60285b3` | The check in D36 and this evidence |
+| `d5b225e` | Nate's review of `60285b3`: the window's recovery line, and a stop that works taking back one that didn't, below |
+| `3478e9b` | PR 9's branch merged in: main after PR 7 merged, the second review of PR 8's fix and the review of PR 9's |
+| `6094155` | NIV-34 item 10: `verify:windows` runs sandbox checks from Windows through the WSL engine, and a Linux test rehearses them, below |
+
+**NIV-44's criteria, shown:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| The adapter through the owning engine, with typed contracts; the renderer sends project ids only | `packages/domain/test/sandbox.test.ts`, `sandbox-engine.test.ts`, `ipc-wiring.test.ts` | `runs.start`'s `sandbox` branch takes a checkout, the project and target it is bound to, and a preview's fingerprint. It takes no command and no key, and refuses another workflow's context. Every call is a named preload function, checked by sender and by zod |
+| Secrets through `initialize` and `secrets.update` only; never in inputs, events, journals or the guest | `sandbox-engine.test.ts`, "runs a check on the production adapter…"; `host.test.ts`, "keeps the two opt-ins apart…" | Every request carries the key and project id in headers, and no body carries either, or the engine's home. The run's events hold neither. After the host shuts down, no file under its folder holds either |
+| Upload consent of its own, off at first, in all four combinations, with the scope and retention shown first | `host.test.ts`, "keeps the two opt-ins apart in all four combinations…"; `sandbox.spec.ts` | Both start off. A check uploads once only with `cloudExecution`, and an explanation starts only with `modelContext`, in every combination. The window's dialog shows the commit, the files and bytes, what's left out and what Nebius keeps, and says it is separate from Token Factory |
+| Revocation blocks transfers and cancels owned work; races checked again before dispatch; what stays reported | `host.test.ts`, eleven tests | Refused before any engine starts; never sent when withdrawn while the engine starts, the engine's store holding no run; one check of a project at a time; cancelled as soon as an in-flight `runs.start` answers; a lost answer found by its request id and stopped, with `runs.start` sent once; an error answer with no record said to have sent nothing, in the engine's words; a found check whose stop fails kept known; a check that can't be read still stopped; a stop that fails said to have failed, in the notice and the note; a running check's operation asked to stop, its report saying what Nebius keeps; a removed project's check stopped |
+| The deterministic path through a real engine: routing, consent, bounded results, cancellation, uncertain submission, restart reconciliation, unresolved cleanup | `sandbox-engine.test.ts`, 12 tests | Below |
+| Named IPC, a narrow UI, existing run reporting; no task execution | `sandbox.spec.ts`; the Run button's existing test | The check's progress is the run's own events. Run stays unavailable |
+
+**The real engine tests,** a stdio engine with the production adapter against the stand-in in
+`test/stub-sandboxes.ts`:
+- **A preview** sends nothing, and refuses a commit holding the vault's own key in base64, naming the file. A commit
+  that only names the project id isn't refused.
+- **A whole check:**
+  - one upload, and three operations (prepare, probe, collect), each with networking off;
+  - the report is bound to the preview's fingerprint: outcome `unchanged`, the probe's busybox line, nothing unresolved, one upload kept;
+  - the session's journal moves to `settled/`.
+- **Refusals with nothing sent:** no upload consent; no key and project id; a commit changed since its preview; the same request id with another preview.
+- **One check of a project at a time:** a second start is refused and never recorded, a repeated request gets its run, and once the first has ended the project is checked again. The first request, repeated while the next check goes, still gets its own run.
+- **A failure before the session** (no git on the engine's PATH) ends with a final report in the git stop's words, and nothing sent.
+- **Git failing after the upload** (a wrapper that fails `fast-import` alone): the report and the run's failure say the commit was uploaded and nothing was proposed, never that nothing was sent.
+- **A cancel:** the probe's operation is asked to stop, the run ends cancelled, and cleanup's record counts one stopped.
+- **An uncertain spawn:**
+  - the probe's answer is lost and the operation is hidden;
+  - it is never sent again, and the report lists it as unresolved, in cleanup's own words;
+  - a later engine on the same home, with no credentials yet, lists the journal with no network and waits;
+  - given the credentials, its pass finds the operation and stops it, replaying nothing.
+- **A pass that ends while a check goes,** its stop held by the stand-in until the check's probe is out: the journal it settled leaves the list, saving the key again starts no pass on it, and nothing is reported left open.
+- **A journal removed by hand** before the credentials arrive: no pass runs on it, nothing is sent, and with nothing open the pass reads idle.
+- **An engine killed mid-check:** the next engine reads the check as interrupted, and its pass stops the operation it left running.
+
+**Through `rpc.ts`,** on `~/.nivra-dev-track-b`, against the stand-in on 127.0.0.1:
+- `doctor` answered;
+- `sandbox.preview` of a throwaway repository gave 2 files, 3,584 bytes from its commit;
+- a whole check succeeded with outcome `unchanged`. The stand-in saw nine requests, each with the credentials in headers: one upload, three operations with networking off, three reads, and two downloads.
+- After the review's fixes, and again after the check's, the same, with the same nine requests; `sandbox.status` then listed nothing open.
+
+**The independent review of the first draft,** by an agent that took no part in writing it, on 21 October. It left the
+worktree untouched and reproduced each gap with its own script before reporting it:
+
+| Finding | At `e9ad7fa` | After `a04af11` | Shown by |
+|---|---|---|---|
+| 1. Two starts of one project at once | Both uploaded and probed. Turning uploads off stopped one; the other stayed `EXECUTING` | The second is refused before the first waits: one upload, one probe, stopped by one DELETE. The engine refuses a second run of the project too | `host.test.ts`, "starts one check of a project at a time…"; `sandbox-engine.test.ts`, "runs one check of a project at a time…"; `sandbox.spec.ts` presses Allow twice |
+| 2. A pass that ends while a check goes | The journal it settled stayed listed. Saving the key again started a pass on it, which reported "couldn't be settled, and may still be running" | The pass's list drops what it settled, and what was moved aside: no second pass, nothing reported | `sandbox-engine.test.ts`, "never looks again at a journal…" |
+| 3. Host paths that should be states | Turning uploads off threw before any cancel when the run couldn't be read, and so did the view. A found check whose stop failed was searched for again, and could end up lost | An unreadable check is taken as going and stopped, and reads as `unknown`. A found check stays known, with the failure in its note | `host.test.ts`, "treats a check it can't read…", "keeps a found check known…" |
+| 4. Words beyond what was shown | "nothing left out: 1 file…"; "was stopped. What it uploaded stays" for a check still being sent; "couldn't stop them all" with no pass run; a check with no git read as interrupted | "left out, and never sent"; "is being stopped. Anything it uploaded stays"; the line follows the pass, read again while one runs; a failure before the session saves its own report | `sandbox-engine.test.ts`, "ends a check that fails before its session…"; the rest by reading |
+| 5. The project id | Reached children's environments. A Terraform file naming it was refused as holding a secret | Stripped with the provider variables. Only the key refuses a commit | `units.test.ts`, `wsl.test.ts`, and the preview test |
+| 6. A claim and a test | A comment said consent could change between the steps. "Never sends one withdrawn while its engine starts" would have passed had `runs.start` been sent | The comment says what holds. The test reads the engine's store, which holds no run | `host.test.ts`, "refuses a check while uploads are off…" |
+
+- **Each fix undone alone fails its test:**
+  - without the host's claim, both starts were fulfilled;
+  - without the engine's refusal, the second start went through;
+  - with a failed stop sent round the search again, as before, no note came;
+  - with an unreadable check not taken as going, or the view not catching, the calls rejected;
+  - without the run step's report, it read `interrupted`;
+  - without the pass's list fixes, `open` stayed 1;
+  - without the engine's words, the note said only that there was no record.
+- **Also found sound** by the review: D29's words, the secrets' paths, the strict context, the preview's binding, the
+  finder's store check and stdin order, recovery's exclusion of a live session's journal, shutdown, early cancels, the
+  scan's cost and the IPC checks.
+
+**The independent check of those fixes,** by another agent, on 21 October at `a04af11`. It changed no worktree file:
+its experiments ran on a copy. All six fixes held, and it found five more gaps:
+
+| Finding | At `a04af11` | After `7a70fab` | Shown by |
+|---|---|---|---|
+| 1. Git failing after the upload | With `fast-import` failing, the report and the run's failure said "Git couldn't be run on this checkout, so nothing was sent", after one upload and three operations | Words chosen by where the check stopped. After the upload: "Git failed while Nivra checked what came back from the sandbox, so nothing was proposed. Your commit was uploaded…" | `check.test.ts`, "says nothing was sent only for a stop before the upload…"; `sandbox-engine.test.ts`, "never says nothing was sent once the commit was uploaded…" |
+| 2. A stop that fails | Turning uploads off was refused, yet the notice and the note said the check was being stopped. A refused removal's note said the project had been removed | The notice and the note follow an accepted stop. A failed one says so in both, and a refused removal says the project is still in the list | `host.test.ts`, "says a check couldn't be stopped when its stop fails…", "says a check whose late answer can't be stopped…", "keeps a found check known…" |
+| 3. A start beside an unreadable check | Refused as "still going" | Refused, saying the last check can't be read now | `host.test.ts`, "treats a check it can't read as going…" |
+| 4. A repeated request | Refused while another check of the project went, though its run existed | The engine looks the request id up first, so a repeated request gets its run, ended or not | `sandbox-engine.test.ts`, "runs one check of a project at a time…" |
+| 5. The filter for a journal moved aside | Removing it left every test green | A journal removed by hand is never looked at, and with nothing open the pass reads idle | `sandbox-engine.test.ts`, "never looks at a journal removed…" |
+
+- **Each of these fixes undone alone fails its test.** Without the filter, a pass ran on the removed journal and
+  reported "Something Nivra started in a sandbox couldn't be settled, and may still be running".
+- **A risk that remains,** named by the check and true before B4's fixes too: after a check is lost (its start's
+  answer never found), the engine refuses the next start while the lost run goes, and the window can't cancel a run it
+  never learnt. That run ends at its own time limit, or when its engine restarts.
+
+**Nate's review of `60285b3`,** on 21 October. It confirmed the words after the upload, the repeated request and the
+host's stops, with 31 focused tests passing, and found what the window still got wrong:
+
+| Finding | At `60285b3` | After `d5b225e` | Shown by |
+|---|---|---|---|
+| The window's line about what earlier sessions left open | Read when the window opened, and again only while a pass already ran: saving the key and project id could start and end a pass while it still said "Nivra stops them once your key and project id are set" | The projects page counts saves of either credential, Settings counts each once the engines have it, and the sandbox check reads the status again on each, then follows a running pass to its end | `sandbox.spec.ts`, "saving the key and project id settles what an earlier session left open…": a first session leaves a probe open; a second, on the same engine home, shows it waiting; saving both through Settings sees the line go and the operation stopped. With the refresh undone, the line stays |
+| A stop that works after one that failed (minor) | The "couldn't stop" words stayed in the check's note and the project's notice | A stop accepted later replaces the note. The notice says the check is being stopped while uploads are off, and goes once they are on. The window's Cancel reads the projects again | `host.test.ts`, "says a check couldn't be stopped when its stop fails…" and "keeps a found check known…". With the clearing undone, both fail |
+
+**The sandbox path from Windows (NIV-34 item 10),** by the offline route Nate chose on 22 October. `verify:windows` now
+ends its WSL part with ten sandbox checks (`6094155`):
+- **The host:** `Host`, the class Electron's main process wraps, runs in the harness on Windows.
+- **The engine:** the WSL engine that host starts, given `--sandboxes-url`.
+- **The stand-in:** one for Nebius Sandboxes, on loopback in the distribution. `verify-windows.ts` runs it, and the
+  harness asks it one thing at a time over its own stdio (`scripts/stand-in.ts`). Nothing reaches the network.
+
+On Windows at `6094155`, all ten passed, on Ubuntu:
+1. The stand-in runs in the distribution the engine runs in, and answers.
+2. A folder inside Ubuntu, picked as Windows names it (`\\wsl.localhost\Ubuntu\home\odin\.nivra-verify\sandbox ü%#`),
+   is added for Ubuntu's engine.
+3. With uploads off, the host refuses a check, and nothing reaches the stand-in.
+4. A whole check:
+   - outcome `unchanged`, bound to the preview of the repository's HEAD, with the probe's busybox line;
+   - one upload and three operations, each with networking off;
+   - every request carried the test key and project id in its headers, and no body held either, or the engine's home.
+5. A cancel: the probe's operation stopped, and cleanup counted 1 stopped and none unresolved.
+6. Uploads turned off during a check: it was cancelled, the notice said what stays with Nebius, and the next check
+   was refused with nothing more sent.
+7. A submission whose answer was lost: the check ended `uncertain`, the probe was sent once, and its journal stayed
+   open.
+8. A second host on the same records, without the credentials: the engine listed the journal with no network, and its
+   pass waited.
+9. The credentials saved: one pass stopped the operation, leaving nothing unresolved or open, and sent no operation or
+   upload again.
+10. The engine's own refusal of a check whose context doesn't allow uploads, with nothing sent.
+
+**Rehearsed on Linux first.** `test/sandbox-checks.test.ts` runs checks 2 to 10 through the same host and channel,
+against an engine that stands in for a distribution's, so a mistake in them shows before a Windows turn. Each of six
+mutations fails it:
+- the host's consent check;
+- the engine's consent check;
+- the host's stop when uploads are turned off;
+- the stand-in holding the probe;
+- the stand-in losing its answer;
+- recovery when the credentials are saved.
+
+**Checks**
+- `pnpm verify`: 699 passed (domain 48, engine 440, desktop 211), none skipped, at `d5b225e`, as at `7a70fab`: the new host checks extend tests already counted. It was 694 after the review's fixes and 687 before them, and B3 ended at 663.
+- `pnpm verify` at `6094155`: 704 passed (domain 48, engine 443, desktop 213), none skipped. It was 702 at `3478e9b`, after PR 9's branch merged in; the rehearsal and the WSL target's extra arguments add two.
+- `test:e2e`: 46 passed, 1 skipped (explain's packaged-only test), at `d5b225e`; 45 passed before it, after each round of fixes. The window's tests are in `e2e/sandbox.spec.ts`. The first presses Allow twice and sees one upload, and the third is the saving sequence above.
+- `test:packaged`: 24 passed, 23 skipped, at `d5b225e`, after the runtime was staged again (`stage:runtime linux-x64`) and `package:dir`; 22 skipped before it. The skips are the three sandbox window tests and Track A's twenty, which need the test endpoint switch a packaged app ignores. The same at `6094155`, with the runtime staged again for the merged scan.
+- **On Windows,** each time after `stage:runtime all`. The first turn was at `69c47b1`, and the second at `d5b225e`, coordinated just before with Track A's session, which had no Windows check running and held off until it was told the turn was over. Each time:
+  - `verify:windows --skip-stage`: 22 of 22 checks passed, on the native engine and on the WSL engine driven by a real Windows process. The release's `~/.nivra` was as it was, and the run's own WSL home was removed;
+  - `test:windows`: 11 passed, against the build `dev:win --skip-stage --no-launch` copied;
+  - no tracked file under `apps/` or `packages/` was written while they ran, checked by each file's size and time before and after.
+- **The third turn, at `6094155`,** for item 10: Nate approved it, and it was coordinated with Track A's session the same way:
+  - `verify:windows --skip-stage`: 32 of 32 passed, the 22 earlier checks and the ten sandbox checks above. `~/.nivra`'s 8 entries were unchanged, and the run's own WSL home was removed;
+  - `test:windows`: 11 passed;
+  - nothing tracked was written while they ran.
+- **`rpc.ts`** at `3478e9b`, after the merged scan: a whole check against the stand-in, with the same nine requests and networking off. `6094155` changes no engine code.
+- **Not run:** any live call: B4 makes none. B3's approved rerun passed through the same adapter and `runPrescribed` (D35, above), and its evidence is reused here only where the bytes and path match: a check's own probe recipe hasn't run live.
+
+**Limits**
+- **Not run live.** The stand-in follows the documentation and D28's live runs. B3's approved run (D35) is the live evidence for the adapter and the prescribed path a check runs; a check, with its own probe, hasn't run live.
+- **One check of a project at a time,** kept by the host and the engine, and the host keeps a project's last check for the session only.
+- **A check proposes nothing,** so nothing here reads or keeps a patch: that comes with NIV-7 and NIV-8.
+- **No button settles what earlier sessions left open.** A pass runs when the credentials are handed to the engine: at its start, or when the key or project id is saved.
+- **From Windows, through the WSL engine, against the stand-in only.** The native Windows engine's sandbox path isn't
+  covered, and nothing is claimed for it. The Windows app's window isn't driven through a check: a packaged build
+  ignores the test endpoint switch. No check has run live from Windows.
+
+### Track B completion record (NIV-34)
+
+Prepared 22 October 2026, at `d4cc99b` (B4's branch, holding B1 to B3), with this record's docs commit. Brought up to
+date at `6094155`, after PR 7 merged, the reviews of PRs 8 and 9, and item 10's Windows checks. **Every item is now
+evidenced,** item 7 for the prescribed commands Track B runs. PRs 8, 9 and 11 wait for Nate's merges (below).
+
+| NIV-34 acceptance item | Evidence | Where it stands |
+|---|---|---|
+| 1. The operation and image lifecycle modelled explicitly; routing kept out of model prompts; intent journaled before dispatch; uncertain submissions reconciled without running anything twice | B1 (D33): one operation per step, with state carried by the images each leaves. `ExecResult` carries no operation or image id. The intent is fsynced before the send, and a lost answer is found by its correlation id. Tests: `nebius-session.test.ts` (an uncertain spawn sent exactly once), `prescribed.test.ts`, and `sandbox-engine.test.ts` (an uncertain spawn settled by a later engine). Live (B3): 8 spawns for 8 operations | Evidenced |
+| 2. Monotonic remaining deadlines for every request, body read, upload, download and wait, POST and DELETE included; no late result taken; cleanup on a finite budget of its own, honest about what stays unresolved | B1: `nebius-sandbox.test.ts`, `nebius-transport.test.ts` and `nebius-session.test.ts`. The review of PR 7: closing's deadline cuts off a cancel already under way (`5597249`, `fa6ce29`). Live (B3): within the 10 + 7 minute bounds, 1 stopped and 0 unresolved | Evidenced |
+| 3. The adapter selected through the engine that owns the files, with minimal typed and validated contracts; the renderer sends ids, never host paths or credentials | B4 (D36): protocol 8's `sandbox` branch. Tests: `packages/domain/test/sandbox.test.ts`, `ipc-wiring.test.ts` and `sandbox-engine.test.ts`. Every IPC call is named, and checked by sender and by zod | Evidenced |
+| 4. Credentials in the existing secure host storage and the engine's memory transport only; never in workflow inputs, events, logs, journals or the guest | B4: after the host shuts down, no file under its folder holds the key or the project id (`host.test.ts`). Every request carries them in headers, and no body does (`sandbox-engine.test.ts`). Neither reaches a child's environment. B3: neither credential was in either live run's evidence or log | Evidenced |
+| 5. Model-excerpt consent apart from per-project upload consent, both off at first, in all four combinations; revocation stops new transfers and tries to cancel; retained artefacts described honestly | B4: `host.test.ts`, the four combinations and eleven revocation tests: before, during and after `runs.start`, a lost answer, stops that fail, and an unreadable check. `sandbox.spec.ts` covers the window. The notice, the report and the dialog give what Nebius keeps | Evidenced |
+| 6. The workspace built from one explicit commit, with the deny rules; dirty and untracked work refused or handled, never lost; no host credentials, preferences or engine home, and no git worktree | B2 (D34): a snapshot reads commit objects only. Tracked changes are refused, untracked files are left out and listed, and the deny rules and the engine home's exclusion apply. Every blob's content is scanned, and an unsafe snapshot is refused, never redacted. The review of PR 8 added the vault's values inside base64. Tests: `snapshot.test.ts`. Live (B3): the prepare digest matched the snapshot's listing | Evidenced |
+| 7. Networking off for model-controlled commands; resource, output and time limits and cancellation enforced as far as the backend guarantees; a missing capability refuses the run, with no silent switch | B1: `networking: false` on every spawn, output caps, timeouts and cancels. `Local` refuses `isolatesFilesystem`, and `prescribed.test.ts` refuses `Local` with nothing sent. Live (B3): network denied by behaviour, a timeout told apart from success, and a stop seen to stop | Evidenced for prescribed commands. Model-controlled commands come with NIV-7. CPU and memory limits aren't claimed: the backend doesn't guarantee them |
+| 8. A complete patch extracted, new and deleted files included; downloads bounded; paths, links, modes, case collisions, line endings, secrets and generated output validated; unsupported forms refused | B2: `patch.ts`, `tar.ts`, `workspace-rules.ts`; `patch.test.ts`, `tar.test.ts`, `workspace-rules.test.ts`; the review of `f027403`'s eight gaps. Live (B3): the patch held exactly the fixed edit (an added file, a deleted one, two edits and a mode change), and the collect listing matched its archive | Evidenced |
+| 9. Patch bytes, hash, report, destination and baseline bound; untrusted paths and archives can't escape extraction; available usage told apart from unknown | B2: `proposal.ts`, with `verifyProposal` refusing a wrong baseline, destination or hash (`proposal.test.ts`), and the bounded tar reader (`tar.test.ts`). Live (B3): the proposal bound and verified. Usage is kept raw: the stopped operation's usage is null, and the `cost` figures (7 of 8 reported) are never turned into money | Evidenced |
+| 10. The real-engine deterministic path shows routing, consent, results, cancellation, restart and uncertainty reconciliation, and cleanup; Linux and Windows-to-WSL behaviour established; native Windows claimed only with evidence | B4, on Linux: `sandbox-engine.test.ts` (12 tests over stdio, on the production adapter against the stand-in), and `rpc.ts` runs on `~/.nivra-dev-track-b`. From Windows, at `6094155`: `verify:windows`'s ten sandbox checks drive the host on Windows and the WSL engine against the stand-in in the distribution. They cover routing, both consents, a whole check, a cancel, uploads turned off, an uncertain submission, and restart and recovery. All ten passed: 32 of 32 checks in all. `test/sandbox-checks.test.ts` rehearses them on Linux | **Linux and Windows-to-WSL: evidenced,** offline, against the stand-in. Native Windows: nothing claimed |
+| 11. Every B1 to B4 criterion and the affected verification evidenced before the parent is ready for review; a standalone harness or probe isn't enough | Each checkpoint's section above. PR 7 merged (`091cf4c`); PRs 8, 9 and 11 are ready for review | Evidenced. The merges are Nate's |
+
+**Platform matrix, as run:**
+
+| Check | B1 | B2 | B3 | B4 |
+|---|---|---|---|---|
+| `pnpm verify` | 589 passed (43, 347, 199), at `206b3fc` | 646 passed (43, 404, 199), at `9f26b5e` | 666 passed (43, 424, 199), at `60b7081` | 704 passed (48, 443, 213), at `6094155` |
+| `test:e2e`, the built app | not affected | not affected | not affected | 46 passed, 1 skipped (packaged only) |
+| `test:packaged`, Linux | not affected | not affected | not affected | 24 passed, 23 skipped (the test endpoint) |
+| Real engine | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: `doctor`, `hello` | `rpc.ts`: a whole check against the stand-in, nine requests |
+| Live | none | none | attempt 1 failed at the upload (HTTP 500); the approved rerun passed 20 of 20 | none |
+| `pnpm stage:runtime all` | not affected | not affected | not affected | passed |
+| `verify:windows` | not affected | not affected | not affected | 22 of 22 passed, at `69c47b1` and `d5b225e`; 32 of 32, with the sandbox checks, at `6094155` |
+| `test:windows` | not affected | not affected | not affected | 11 passed, at `69c47b1`, `d5b225e` and `6094155` |
+
+**What remains:** the merges, which are Nate's. PR 7 merged as `091cf4c`; PRs 8, 9 and 11 follow, in stack order.
+After each merge, Linear should be checked for NIV-34 being closed by mistake.
+
+**Limitations the parent carries:**
+- **D33:** CPU and memory limits aren't claimed. An upload answered with a server error isn't retried, so a transient
+  500 ends a check, as the first live attempt showed.
+- **D34:** detection is by pattern; case collisions are refused on every target; a checkout smudged by Git LFS reads as
+  changed; inside base64, a shape is found one layer down only.
+- **D35:** one passing live run, on a tiny synthetic fixture, from Linux; `git apply --check` on a fresh clone only.
+- **D36:**
+  - a check proposes nothing, and nothing here applies a patch (NIV-8);
+  - one check of a project at a time;
+  - no button settles what earlier sessions left open;
+  - a lost check can't be cancelled from the window;
+  - a check's own probe recipe hasn't run live;
+  - from Windows, the sandbox path is shown through the WSL engine against the stand-in, not through the native engine,
+    the window, or a live call;
+  - the project id is masked in what the engine stores, like every vault value.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

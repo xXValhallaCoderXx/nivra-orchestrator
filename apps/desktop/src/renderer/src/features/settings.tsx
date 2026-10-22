@@ -1,4 +1,4 @@
-import { Alert, Badge, Button, Code, Group, PasswordInput, Stack, Text } from "@mantine/core";
+import { Alert, Badge, Button, Code, Group, PasswordInput, Stack, Text, TextInput } from "@mantine/core";
 import type { ProviderCheck } from "@nivra/domain";
 import { useEffect, useState } from "react";
 import type { SettingsView } from "../../../shared/ipc";
@@ -11,12 +11,17 @@ const KEY_LOOK = {
   unreadable: { label: "Key can't be read here", color: "red" },
 } as const;
 
-/** The Nebius key, kept by the app (D8): encrypted by the OS where it can be, and handed to the engine in memory only. */
-export function Settings({ projectId, online, targetLabel }: { projectId: string | null; online: boolean; targetLabel: string | null }) {
+/**
+ * The Nebius key, and the project id Nebius Sandboxes needs with it (D36), kept by the app (D8): encrypted by the OS
+ * where it can be, and handed to the engine in memory only. `onCredentialsSaved` follows each save, once the engines
+ * have them.
+ */
+export function Settings({ projectId, online, targetLabel, onCredentialsSaved }: { projectId: string | null; online: boolean; targetLabel: string | null; onCredentialsSaved(): void }) {
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [check, setCheck] = useState<ProviderCheck | null>(null);
   const [checking, setChecking] = useState(false);
   const [key, setKey] = useState("");
+  const [nebiusProject, setNebiusProject] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,6 +49,21 @@ export function Settings({ projectId, online, targetLabel }: { projectId: string
     try {
       setSettings(await window.nivra.setNebiusKey(value));
       setKey("");
+      onCredentialsSaved();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveProject(value: string | null) {
+    setBusy(true);
+    setError(null);
+    try {
+      setSettings(await window.nivra.setNebiusProjectId(value));
+      setNebiusProject("");
+      onCredentialsSaved();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -52,7 +72,7 @@ export function Settings({ projectId, online, targetLabel }: { projectId: string
   }
 
   return (
-    <Section title="Nebius Token Factory" description="Your API key, for Nemotron models and Token Factory Sandboxes.">
+    <Section title="Nebius Token Factory" description="Your API key, for Nemotron models and Token Factory Sandboxes, and the project id Sandboxes needs with it.">
       <Group gap="sm" align="flex-end">
         <PasswordInput
           label="API key"
@@ -62,7 +82,7 @@ export function Settings({ projectId, online, targetLabel }: { projectId: string
           w={380}
           data-testid="nebius-key"
         />
-        <Button onClick={() => void save(key.trim())} loading={busy} disabled={key.trim().length < 8}>
+        <Button onClick={() => void save(key.trim())} loading={busy} disabled={key.trim().length < 8} data-testid="nebius-key-save">
           Save
         </Button>
         {settings && settings.nebiusKey !== "none" && (
@@ -73,6 +93,29 @@ export function Settings({ projectId, online, targetLabel }: { projectId: string
         {settings && (
           <Badge variant="light" color={KEY_LOOK[settings.nebiusKey].color} data-testid="nebius-key-state">
             {KEY_LOOK[settings.nebiusKey].label}
+          </Badge>
+        )}
+      </Group>
+      <Group gap="sm" align="flex-end">
+        <TextInput
+          label="Project id, for Sandboxes"
+          placeholder={settings?.nebiusProjectId === "set" ? "A project id is saved; enter a new one to replace it" : "Paste your Nebius project id"}
+          value={nebiusProject}
+          onChange={(event) => setNebiusProject(event.currentTarget.value)}
+          w={380}
+          data-testid="nebius-project-id"
+        />
+        <Button onClick={() => void saveProject(nebiusProject.trim())} loading={busy} disabled={nebiusProject.trim().length < 8} data-testid="nebius-project-id-save">
+          Save
+        </Button>
+        {settings?.nebiusProjectId === "set" && (
+          <Button variant="subtle" color="red" onClick={() => void saveProject(null)} disabled={busy}>
+            Remove
+          </Button>
+        )}
+        {settings && (
+          <Badge variant="light" color={settings.nebiusProjectId === "set" ? "green" : "gray"} data-testid="nebius-project-id-state">
+            {settings.nebiusProjectId === "set" ? "Project id saved" : "No project id"}
           </Badge>
         )}
       </Group>

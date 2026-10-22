@@ -55,10 +55,12 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const find = (name: string) => findOnPath(name, { env: deps.toolEnv, platform: deps.platform });
   const openshell = deps.platform === "win32" ? null : find("openshell");
   const runtime = find("docker") ?? find("podman");
-  const nebius = deps.vault.has("NEBIUS_API_KEY");
+  // A sandbox needs the project id as well as the key (D36).
+  const key = deps.vault.has("NEBIUS_API_KEY");
+  const nebius = key && deps.vault.has("NEBIUS_PROJECT_ID");
   const lines = [
     "No isolation: always available, enforces nothing.",
-    nebius ? "Nebius Sandboxes: credentials set; access not checked yet." : "Nebius Sandboxes: no credentials set.",
+    nebius ? "Nebius Sandboxes: key and project id set; access not checked yet." : key ? "Nebius Sandboxes: the key is set, but not the project id." : "Nebius Sandboxes: no credentials set.",
     deps.platform === "win32"
       ? "OpenShell: not available on native Windows."
       : openshell
@@ -70,7 +72,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     status: nebius || openshell ? "ok" : "warn",
     title: "Execution boundaries",
     detail: lines.join(" "),
-    fix: nebius || openshell ? null : "Coding work that installs packages needs a sandbox: add your Nebius key in Settings, or install OpenShell (Linux and WSL).",
+    fix: nebius || openshell ? null : "Coding work that installs packages needs a sandbox: add your Nebius key and project id in Settings, or install OpenShell (Linux and WSL).",
   });
   return { checks };
 }

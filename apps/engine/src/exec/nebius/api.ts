@@ -56,7 +56,8 @@ export function fetchTransport(credentials: { key: string; project: string }, ba
     const response = await fetch(url, {
       method: request.method,
       headers: { Authorization: `Bearer ${credentials.key}`, Project: credentials.project, ...request.headers },
-      ...(request.body !== undefined ? { body: request.body } : {}),
+      // Every body Nivra sends is backed by an ordinary ArrayBuffer; the DOM's fetch types (the window's tests) ask for one.
+      ...(request.body !== undefined ? { body: request.body as string | Uint8Array<ArrayBuffer> } : {}),
       // The same signal cuts off reading the answer below.
       signal: request.signal ? AbortSignal.any([timeout, request.signal]) : timeout,
       redirect: "manual",

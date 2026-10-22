@@ -9,7 +9,8 @@ import { takeSnapshot, type Snapshot } from "./snapshot.ts";
 /**
  * The prescribed path (NIV-43, D35): one commit's snapshot, fixed steps in a sandbox, and a checked patch proposed
  * from what they changed. The tests, the live check and the engine (B4) all run this one composition, in order:
- * 1. the snapshot, made by the engine that owns the checkout, through its own `Local` session;
+ * 1. the snapshot, made by the engine that owns the checkout, through its own `Local` session. A run bound to a
+ *    preview (D36) goes no further unless the snapshot's fingerprint is the preview's;
  * 2. a session on a backend that isolates files, opened with the snapshot. `Local` is refused before anything is sent;
  * 3. the steps, one operation each. An edit keeps its changes for the next step and for the result; a check throws
  *    its changes away;
@@ -68,7 +69,9 @@ export type PrescribedStopCode =
   /** An edit exited with an error, or its changes weren't kept. */
   | "edit-failed"
   /** Anything else: a fault, reported with its words. */
-  | "fault";
+  | "fault"
+  /** The snapshot isn't the one the person was shown (D36): nothing was sent. */
+  | "preview";
 
 export interface PrescribedResult {
   outcome: PrescribedOutcome;
@@ -95,6 +98,8 @@ export interface PrescribedRun {
   folder: string;
   /** When given, the checkout's HEAD must be this commit. */
   baseline?: string;
+  /** When given, the snapshot's fingerprint must be this one: what the person was shown before any upload (D36). */
+  expectedFingerprint?: string;
   steps: readonly PrescribedStep[];
   /** A backend that isolates files (Nebius). */
   backend: ExecutionBackend;
@@ -174,6 +179,10 @@ export async function runPrescribed(run: PrescribedRun): Promise<PrescribedResul
     return ended(stop.outcome, { stopped: stoppedBy(error, stop.code, "snapshot") });
   }
   const summary = { baseline: snapshot.baseline, prefix: snapshot.prefix, fingerprint: snapshot.fingerprint, files: snapshot.files.length, archiveSha256: snapshot.archive.sha256 };
+  // A commit, or what would be sent of it, that changed since the person saw it goes nowhere.
+  if (run.expectedFingerprint !== undefined && snapshot.fingerprint !== run.expectedFingerprint) {
+    return ended("refused", { snapshot: summary, stopped: { code: "preview", message: "snapshot: what would be sent changed since it was previewed, so nothing was sent.", step: "snapshot", detail: null } });
+  }
 
   // 2. The session. A backend that can't keep commands away from this computer's files is refused here.
   let session: ExecutionSession;

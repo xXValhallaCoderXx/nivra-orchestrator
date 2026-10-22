@@ -20,7 +20,7 @@ describe("childEnv", () => {
 
   it("drops provider keys, NODE_OPTIONS and Electron's variables, and keeps Windows' essentials", () => {
     const env = childEnv(
-      { NEBIUS_API_KEY: "k", OPENAI_API_KEY: "k", NODE_OPTIONS: "--inspect", ELECTRON_RUN_AS_NODE: "1", SystemRoot: "C:\\Windows", TEMP: "C:\\t", APPDATA: "C:\\a" },
+      { NEBIUS_API_KEY: "k", NEBIUS_PROJECT_ID: "p", OPENAI_API_KEY: "k", NODE_OPTIONS: "--inspect", ELECTRON_RUN_AS_NODE: "1", SystemRoot: "C:\\Windows", TEMP: "C:\\t", APPDATA: "C:\\a" },
       {},
       { platform: "win32" },
     );
