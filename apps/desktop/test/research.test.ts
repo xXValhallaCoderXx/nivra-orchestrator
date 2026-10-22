@@ -117,6 +117,9 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.deepEqual([packet.assumptions[1]!.text, packet.scope, packet.sites], ["venv still pre-installs setuptools", { kind: "project", headAtStart: HEAD }, { mode: "prefer", hosts: ["docs.python.org", "peps.python.org", "xn--bcher-kva.de"] }]);
     // What the engine wrote is masked again before it goes anywhere.
     assert.equal(packet.assumptions[2]!.text.includes(SAVED), false);
+    // Sites written several ways count once each.
+    const variants = researchPacket(plan, conversation, { assumptions: [pick(1, "q")], sites: { mode: "restrict", hosts: ["Docs.Python.org", "docs.python.org", " DOCS.PYTHON.ORG", "peps.python.org", "Peps.Python.Org", "peps.python.org "] } }, KNOWN, CONTRACT);
+    assert.deepEqual(variants.sites, { mode: "restrict", hosts: ["docs.python.org", "peps.python.org"] });
     // With every query written, the domain's own schema takes the packet whole.
     packet.assumptions[2]!.query = "Python 3.12 distutils removed";
     assert.equal(ResearchPacket.safeParse(packet).success, true);
@@ -136,11 +139,13 @@ describe("research packets, queries and previews (NIV-45)", () => {
       ["a long assumption of the plan", () => packetOf({ assumptions: [pick(1, "q")] }), /assumption 2 is 301 characters long.*Type a shorter version of it instead/],
       ["an assumption that isn't there", () => packetOf({ assumptions: [pick(7, "q")] }), /has no assumption 8/],
       ["one picked twice", () => packetOf({ assumptions: [pick(0, "q"), pick(0, "r")] }), /assumption 1 is picked twice/],
-      ["none", () => packetOf({ assumptions: [] }), /^Pick one to 3 assumptions/],
-      ["four", () => packetOf({ assumptions: [pick(0, "q"), typed("a", "q"), typed("b", "q"), typed("c", "q")] }), /^Pick one to 3 assumptions/],
-      ["six sites", () => packetOf({ sites: { mode: "prefer", hosts: ["a.org", "b.org", "c.org", "d.org", "e.org", "f.org"] } }), /up to 5 sites, and 6 are listed\. Remove 1/],
+      ["none", () => packetOf({ assumptions: [] }), /^Pick one to three assumptions/],
+      ["four", () => packetOf({ assumptions: [pick(0, "q"), typed("a", "q"), typed("b", "q"), typed("c", "q")] }), /^Pick one to three assumptions/],
+      ["six sites", () => packetOf({ sites: { mode: "restrict", hosts: ["a.org", "b.org", "c.org", "d.org", "e.org", "f.org"] } }), /^Research can use up to five sites, and six are listed\. Remove one/],
       ["a scheme", () => packetOf({ sites: { mode: "prefer", hosts: ["https://docs.python.org"] } }), /^Site 1 isn't a host name such as docs\.python\.org/],
       ["a path", () => packetOf({ sites: { mode: "restrict", hosts: ["docs.python.org", "docs.python.org/3/"] } }), /^Site 2 isn't a host name/],
+      // Named by its place as written: blanks and repeats before it still count.
+      ["a place as written", () => packetOf({ sites: { mode: "prefer", hosts: ["docs.python.org", " ", "https://x.org"] } }), /^Site 3 isn't a host name/],
       ["a private name", () => packetOf({ sites: { mode: "prefer", hosts: ["wiki.corp"] } }), /^Site 1 is a private host name/],
       ["an address", () => packetOf({ sites: { mode: "prefer", hosts: ["10.0.0.1"] } }), /^Site 1 isn't a host name/],
       ["a key as a site", () => packetOf({ sites: { mode: "prefer", hosts: [TOKEN] } }), /^Site 1 isn't a host name/],
@@ -214,6 +219,10 @@ describe("research packets, queries and previews (NIV-45)", () => {
       await again({}, {}, { ...subject, plan: { ...subject.plan, version: 2 }, latestVersion: 2 }),
     ];
     assert.equal(new Set([preview.expected, ...others]).size, 6);
+    // A project's sharing is part of what it is bound by, on or off.
+    const projectSubject = subjectOf(project());
+    const sharing = async (on: boolean) => (await researchRequest({ ...projectSubject, project: { label: "shop", targetLabel: "Ubuntu", modelSharing: on } }, { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state(), CONTRACT)).preview.expected;
+    assert.notEqual(await sharing(true), await sharing(false));
   });
 
   it("blocks Start research with the first reason that applies, and lists each query's problems", async () => {
@@ -268,6 +277,9 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.equal(researchNoteFor(link("cancelled"), { cause: "web-research", token: "T1" }), `Stopped: research queries to Tavily were turned off. ${SENT}`);
     assert.equal(researchNoteFor(link("cancelled"), { cause: "model-sharing", token: "T1" }), `Stopped: sharing for this project was turned off. ${SENT}`);
     assert.equal(researchNoteFor(link("cancelled"), { cause: "removal", token: "T1" }), `Stopped: the project was removed. ${SENT}`);
+    // What the host established about the stop is kept.
+    assert.equal(researchNoteFor(link("cancelled", "Stopped before it was sent."), { cause: "web-research", token: "T1" }), "Stopped: research queries to Tavily were turned off. Stopped before it was sent.");
+    assert.equal(researchNoteFor(link("cancelled", "Stopped before it was sent."), null), "Cancelled. Stopped before it was sent.");
     assert.equal(researchNoteFor(link("failed", "Nothing could be read from the pages found."), null), "Nothing could be read from the pages found. Nothing was resent.");
     assert.match(researchNoteFor(link("interrupted"), null)!, /may have been sent, and its credits are unknown/);
     assert.equal(researchNoteFor(link("not-sent"), null), "Not sent: nothing reached Tavily or Token Factory.");
@@ -283,6 +295,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
       ["a key in the text", () => amendedPlanFields(`Use ${SAVED}`, [], KNOWN), /^The plan holds .*so nothing was saved/],
       ["too many", () => amendedPlanFields("Plan", Array.from({ length: 21 }, (_, i) => `a${i}`), KNOWN), /can list 20 assumptions, and this one lists 21\. Remove 1/],
       ["a long item", () => amendedPlanFields("Plan", ["a", "b".repeat(1_001)], KNOWN), /^Assumption 2 is 1,001 characters long/],
+      ["numbered as written", () => amendedPlanFields("Plan", ["a", "", "c".repeat(1_001)], KNOWN), /^Assumption 3 is 1,001 characters long/],
       ["a token in an item", () => amendedPlanFields("Plan", ["a", `uses ${TOKEN}`], KNOWN), /^Assumption 2 looks like it holds a GitHub token, so nothing was saved/],
     ];
     for (const [name, run, words] of cases) {
@@ -294,6 +307,12 @@ describe("research packets, queries and previews (NIV-45)", () => {
     const amended = amendedContent(researched, { text: "Move to 3.12 and replace distutils.", assumptions: ["setuptools provides distutils"] });
     assert.deepEqual(Object.keys(amended).sort(), Object.keys(researched).sort());
     assert.deepEqual(amended, { ...researched, text: "Move to 3.12 and replace distutils.", assumptions: ["setuptools provides distutils"] });
+  });
+
+  it("refuses a project's plan whose project is gone, rather than treating it as a general one", async () => {
+    const conversation = project();
+    const message = await refusalOf(() => researchRequest(subjectOf(conversation, { project: null }), { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state(), CONTRACT));
+    assert.equal(message, "This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.");
   });
 
   it("refuses a selection whose plan holds a credential before any query is checked or fingerprinted", async () => {
@@ -372,15 +391,35 @@ describe("the research window's words and evidence (NIV-45)", () => {
     assert.equal(requestText(request({}), "complete"), "Search for A1: answered · 1 credit · 1.3 s");
     assert.equal(requestText(request({ credits: null }), "complete"), "Search for A1: answered · credits not reported · 1.3 s");
     assert.equal(requestText(request({ state: "failed", failure: "rate-limit", credits: null, elapsedMs: null }), "complete"), "Search for A1: Tavily asked Nivra to slow down; not retried · credits not reported");
+    // What the engine reads back after a stop: a request it was sending ended `interrupted`, its credits unknown.
+    assert.equal(requestText(request({ id: "extract-A2", kind: "extract", assumption: "A2", state: "failed", failure: "interrupted", credits: null, pages: 2, elapsedMs: null }), "interrupted"), "Read 2 pages for A2: may have been sent; credits unknown");
     assert.equal(requestText(request({ id: "extract-A2", kind: "extract", assumption: "A2", state: "sending", credits: null, pages: 2, elapsedMs: null }), "interrupted"), "Read 2 pages for A2: may have been sent; credits unknown");
+    assert.equal(requestText(request({ id: "model", kind: "model", assumption: null, state: "failed", failure: "interrupted", credits: null, elapsedMs: null }), "interrupted"), "The model's assessment: may have been sent; tokens unknown");
     assert.equal(requestText(request({ state: "sending", credits: null, elapsedMs: null }), "in-progress"), "Search for A1: sending");
     assert.equal(requestText(request({ id: "model", kind: "model", assumption: null, credits: null, elapsedMs: 41_000 }), "complete"), "The model's assessment: answered · 41.0 s");
     assert.equal(requestText(request({ state: "pending", credits: null, elapsedMs: null }), "failed"), "Search for A1: not sent");
+    assert.equal(requestText(request({ state: "failed", failure: "not-sent", credits: null, elapsedMs: null }), "failed"), "Search for A1: not sent", "nothing sent, so no credits to report");
 
     const model = { inputTokens: 9_000, outputTokens: 700, calls: 1, reportedCalls: 1 };
-    assert.equal(usageText({ requests: [request({})], usage: { credits: 3, model } }), "3 Tavily credits, as reported · 9,000 in / 700 out tokens, as reported");
-    assert.equal(usageText({ requests: [request({ credits: null })], usage: { credits: null, model: { ...model, inputTokens: null, reportedCalls: 0 } } }), "Tavily credits not reported · tokens not reported");
-    assert.equal(usageText({ requests: [request({ state: "pending" })], usage: { credits: null, model: { inputTokens: null, outputTokens: null, calls: 0, reportedCalls: 0 } } }), "no Tavily requests · no model call");
+    const modelAnswered = request({ id: "model", kind: "model", assumption: null, credits: null });
+    const none = { inputTokens: null, outputTokens: null, calls: 0, reportedCalls: 0 };
+    assert.equal(usageText({ outcome: "complete", requests: [request({}), modelAnswered], usage: { credits: 3, model } }), "3 Tavily credits, as reported · 9,000 in / 700 out tokens, as reported");
+    assert.equal(
+      usageText({ outcome: "complete", requests: [request({ credits: null }), modelAnswered], usage: { credits: null, model: { ...model, inputTokens: null, reportedCalls: 0 } } }),
+      "Tavily credits not reported · tokens not reported",
+    );
+    assert.equal(usageText({ outcome: "failed", requests: [request({ state: "pending" }), request({ id: "model", kind: "model", assumption: null, state: "skipped" })], usage: { credits: 0, model: none } }), "no Tavily requests · no model call");
+    assert.equal(
+      usageText({ outcome: "failed", requests: [request({ state: "failed", failure: "not-sent", credits: null }), request({ id: "model", kind: "model", assumption: null, state: "skipped" })], usage: { credits: 0, model: none } }),
+      "no Tavily requests · no model call",
+      "a request never sent costs nothing, and says so",
+    );
+    // Cut off while the model's request was out: neither its tokens nor the credits are known, and neither reads as none.
+    assert.equal(
+      usageText({ outcome: "interrupted", requests: [request({}), request({ id: "model", kind: "model", assumption: null, state: "failed", failure: "interrupted" })], usage: { credits: 1, model: none } }),
+      "1 Tavily credit, as reported · tokens unknown",
+    );
+    assert.equal(usageText({ outcome: "interrupted", requests: [request({ state: "failed", failure: "interrupted", credits: null })], usage: { credits: null, model: none } }), "Tavily credits unknown · no model call");
   });
 
   it("offers the model's amendment for a contradiction with valid quotations, the fixed note for an unresolved one, and the draft names each site", () => {

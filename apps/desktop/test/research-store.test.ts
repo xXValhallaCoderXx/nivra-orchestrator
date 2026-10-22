@@ -45,6 +45,7 @@ const researchFor = (conversation: ConversationRecord, plan: { id: string; linea
   planSha256: plan.sha256,
   packetDigest: "a".repeat(64),
   queries: QUERIES,
+  sites: { mode: "prefer" as const, hosts: ["docs.python.org", "peps.python.org"] },
   scope: conversation.projectId ? { kind: "project" as const, projectId: conversation.projectId, projectLabel: conversation.projectLabel, headAtStart: "c".repeat(40) } : { kind: "general" as const },
   createdAt: AT,
 });
@@ -76,8 +77,8 @@ describe("research of plan versions (NIV-45)", () => {
     assert.deepEqual(openTurns(db, { projectId: conversation.projectId! }).map((turn) => turn.id), [research.id]);
     const stored = getResearch(db, research.id);
     assert.deepEqual(
-      [stored?.planVersion, stored?.planSha256, stored?.queries, stored?.scope, stored?.stop, stored?.amendedPlanId, stored?.report, stored?.link.status, stored?.link.preferences],
-      [1, v1.sha256, QUERIES, { kind: "project", projectId: conversation.projectId, projectLabel: "shop", headAtStart: "c".repeat(40) }, null, null, null, "submitting", []],
+      [stored?.planVersion, stored?.planSha256, stored?.queries, stored?.sites, stored?.scope, stored?.stop, stored?.amendedPlanId, stored?.report, stored?.link.status, stored?.link.preferences],
+      [1, v1.sha256, QUERIES, research.sites, { kind: "project", projectId: conversation.projectId, projectLabel: "shop", headAtStart: "c".repeat(40) }, null, null, null, "submitting", []],
     );
 
     // A turn open first holds the conversation too.
@@ -132,10 +133,17 @@ describe("research of plan versions (NIV-45)", () => {
     // What it was bound to never changes.
     const FROZEN = /research never changes what it was bound to/;
     for (const [column, value] of [
+      ["id", randomUUID()],
+      ["conversation_id", other.id],
+      ["plan_id", v2.id],
+      ["plan_lineage", randomUUID()],
       ["plan_version", 2],
       ["plan_sha256", v2.sha256],
       ["packet_digest", "b".repeat(64)],
       ["queries_json", "[]"],
+      ["sites_json", null],
+      ["scope_kind", "general"],
+      ["project_id", randomUUID()],
       ["project_label", "renamed"],
       ["head_at_start", "d".repeat(40)],
       ["created_at", LATER],
@@ -156,29 +164,32 @@ describe("research of plan versions (NIV-45)", () => {
       return [stored.stop, stored.link.cancelRequested, stored.link.cancelReason];
     };
 
-    assert.equal(stopResearch(db, research.id, "person", "T1"), true);
-    assert.deepEqual(state(), [{ cause: "person", token: "T1" }, true, "person"]);
+    const first = stopResearch(db, research.id, "person");
+    assert.ok(first);
+    assert.deepEqual(state(), [{ cause: "person", token: first }, true, "person"]);
     // A later stop replaces the cause and the token: the newest is the one on record and the one the card names.
-    assert.equal(stopResearch(db, research.id, "web-research", "T2"), true);
-    assert.deepEqual(state(), [{ cause: "web-research", token: "T2" }, true, "sharing"]);
+    const second = stopResearch(db, research.id, "web-research");
+    assert.ok(second && second !== first, "each stop gets a token of its own");
+    assert.deepEqual(state(), [{ cause: "web-research", token: second }, true, "sharing"]);
     // The first stop failed: its withdrawal no longer matches, and the newer stop stays whole.
-    assert.equal(withdrawStop(db, research.id, "T1"), false);
-    assert.deepEqual(state(), [{ cause: "web-research", token: "T2" }, true, "sharing"]);
+    assert.equal(withdrawStop(db, research.id, first), false);
+    assert.deepEqual(state(), [{ cause: "web-research", token: second }, true, "sharing"]);
     // The newer one failed too: withdrawn, every field together.
-    assert.equal(withdrawStop(db, research.id, "T2"), true);
+    assert.equal(withdrawStop(db, research.id, second), true);
     assert.deepEqual(state(), [null, false, null]);
-    assert.equal(withdrawStop(db, research.id, "T2"), false, "withdrawn once");
+    assert.equal(withdrawStop(db, research.id, second), false, "withdrawn once");
 
     // A cause without its token, or one the table doesn't know, is refused.
     assert.notEqual(refusal(() => db.db.prepare("UPDATE research SET stop_cause = 'person' WHERE id = ?").run(research.id)), "not refused");
     assert.notEqual(refusal(() => db.db.prepare("UPDATE research SET stop_cause = 'sharing', stop_token = 'T9' WHERE id = ?").run(research.id)), "not refused");
 
-    // Once the run has ended, a stop changes nothing, and the stop that ended it stays on record.
-    assert.equal(stopResearch(db, research.id, "model-sharing", "T3"), true);
-    assert.equal(settleResearch(db, research.id, { status: "cancelled" }, null, LATER), true);
-    assert.equal(stopResearch(db, research.id, "person", "T4"), false);
-    assert.equal(withdrawStop(db, research.id, "T3"), false);
-    assert.deepEqual(state(), [{ cause: "model-sharing", token: "T3" }, true, "sharing"]);
+    // Once the run has ended, a stop changes nothing, and the stop that ended it stays on record, even written directly.
+    const third = stopResearch(db, research.id, "model-sharing");
+    assert.equal(settleResearch(db, research.id, { status: "cancelled" }, undefined, LATER), true, "a settle with no report given");
+    assert.equal(stopResearch(db, research.id, "person"), null);
+    assert.equal(withdrawStop(db, research.id, third!), false);
+    assert.deepEqual(state(), [{ cause: "model-sharing", token: third }, true, "sharing"]);
+    assert.match(refusal(() => db.db.prepare("UPDATE research SET stop_cause = NULL, stop_token = NULL WHERE id = ?").run(research.id)), /changes its stop only while it runs/);
     assert.equal(getResearch(db, research.id)?.link.status, "cancelled");
 
     // A conversation's turn is never stopped or withdrawn through research.
@@ -186,7 +197,7 @@ describe("research of plan versions (NIV-45)", () => {
     insertConversation(db, chat);
     const turn = randomUUID();
     insertTurn(db, { id: turn, conversationId: chat.id, sessionId: "s", targetId: "local", preferences: [], history: null, createdAt: AT }, { id: randomUUID(), text: "Still there?" });
-    assert.equal(stopResearch(db, turn, "person", "T5"), false);
+    assert.equal(stopResearch(db, turn, "person"), null);
     assert.deepEqual([getTurn(db, turn)?.cancelRequested, getTurn(db, turn)?.cancelReason], [false, null]);
   });
 
@@ -199,6 +210,9 @@ describe("research of plan versions (NIV-45)", () => {
     insertResearch(db, research, LINK);
     const v2 = planIn(db, conversation.id, "Move it, and replace distutils.", v1.lineageId, v1.id, 1);
     assert.equal(recordAmendedPlan(db, research.id, v2.id), false, "no report yet");
+    // Written past the function, an amended plan still needs a report, and a version derived from the researched one.
+    const AMENDED = /keeps its first report and its amended plan/;
+    assert.match(refusal(() => db.db.prepare("UPDATE research SET amended_plan_id = ? WHERE id = ?").run(v2.id, research.id)), AMENDED);
 
     const report = { outcome: "complete", planVersion: 1, assessments: [{ assumption: "A1", shown: "contradicted" }] };
     assert.equal(settleResearch(db, research.id, { status: "answered" }, report, LATER), true);
@@ -206,6 +220,7 @@ describe("research of plan versions (NIV-45)", () => {
     const settled = getResearch(db, research.id)!;
     assert.deepEqual([settled.link.status, settled.link.settledAt, settled.report, settled.reportedAt], ["answered", LATER, report, LATER]);
     assert.match(refusal(() => db.db.prepare("UPDATE research SET report_json = '{}' WHERE id = ?").run(research.id)), /keeps its first report/);
+    assert.match(refusal(() => db.db.prepare("UPDATE research SET amended_plan_id = 'not-a-plan' WHERE id = ?").run(research.id)), AMENDED);
 
     // Only a version of the same lineage, in the same conversation, derived from the researched one.
     const unrelated = planIn(db, conversation.id, "A plan of its own lineage.", randomUUID(), v1.id);

@@ -1,5 +1,5 @@
 import { Alert, Badge, Button, Checkbox, Group, List, Modal, Paper, SegmentedControl, Stack, Text, Textarea, TextInput } from "@mantine/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PlanView, ProjectView, TurnStatus } from "../../../shared/ipc";
 import {
   amendmentChoices,
@@ -144,18 +144,23 @@ function ResearchDialog({
   const [typing, setTyping] = useState("");
   const [sites, setSites] = useState("");
   const [mode, setMode] = useState<"prefer" | "restrict">("prefer");
-  const [preview, setPreview] = useState<ResearchPreview | null>(null);
+  // The preview, with the selection it was made from: Start sends exactly that selection.
+  const [previewed, setPreviewed] = useState<{ preview: ResearchPreview; selection: ResearchSelection } | null>(null);
+  const preview = previewed?.preview ?? null;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState<"web" | "sharing" | null>(null);
+  // Counts the form's changes: a preview asked for before the latest one is dropped when it arrives.
+  const asked = useRef(0);
 
   useEffect(() => {
     if (!opened) return;
+    asked.current++;
     setRows([]);
     setTyping("");
     setSites("");
     setMode("prefer");
-    setPreview(null);
+    setPreviewed(null);
     setError(null);
   }, [opened, plan.id]);
 
@@ -163,9 +168,10 @@ function ResearchDialog({
     const hosts = sites.split(/[\s,]+/).filter(Boolean);
     return { assumptions: rows.map((row) => ({ from: row.from, query: row.query })), sites: hosts.length ? { mode, hosts } : null };
   };
-  /** Any change makes the preview stale: it is cleared, and Start waits for a new one. */
+  /** Any change makes the preview stale: it is cleared, one still on its way is dropped, and Start waits for a new one. */
   const change = (update: () => void) => {
-    setPreview(null);
+    asked.current++;
+    setPreviewed(null);
     setError(null);
     update();
   };
@@ -173,29 +179,33 @@ function ResearchDialog({
   const picked = (index: number) => rows.some((row) => row.from.kind === "plan" && row.from.index === index);
 
   async function prepare() {
+    const mine = ++asked.current;
+    const chosen = selection();
     setBusy(true);
     setError(null);
     try {
-      setPreview(await actions.prepare(plan.id, selection()));
+      const value = await actions.prepare(plan.id, chosen);
+      if (mine === asked.current) setPreviewed({ preview: value, selection: chosen });
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (mine === asked.current) setError(errorMessage(reason));
     } finally {
       setBusy(false);
     }
   }
 
   async function start() {
-    if (!preview) return;
+    if (!previewed) return;
     setBusy(true);
     setError(null);
     try {
-      await actions.start(plan.id, selection(), preview.expected);
+      await actions.start(previewed.preview.planId, previewed.selection, previewed.preview.expected);
       onStarted();
       onClose();
     } catch (reason) {
       // Whatever stopped it, nothing was sent: the preview is cleared, so a new start shows what it would send first.
+      asked.current++;
       setError(errorMessage(reason));
-      setPreview(null);
+      setPreviewed(null);
     } finally {
       setBusy(false);
     }
@@ -265,7 +275,6 @@ function ResearchDialog({
               value={typing}
               onChange={(event) => setTyping(event.currentTarget.value)}
               disabled={full}
-              maxLength={300}
               style={{ flex: 1 }}
               data-testid="research-type"
             />
@@ -305,7 +314,6 @@ function ResearchDialog({
                     const query = event.currentTarget.value;
                     change(() => setRows((current) => current.map((other, i) => (i === index ? { ...other, query } : other))));
                   }}
-                  maxLength={400}
                   data-testid="research-query"
                 />
                 {scope === "project" && row.query !== row.text && (
@@ -474,7 +482,15 @@ function PreviewBody({ preview }: { preview: ResearchPreview }) {
         <List size="sm" data-testid="research-preview-model">
           <List.Item>The plan's text: {plural(model.planChars, "character")}.</List.Item>
           <List.Item>
-            The assumptions in full: {model.assumptions.map((assumption) => `${assumption.id}${assumption.fromPlan !== null ? ` (the plan's ${assumption.fromPlan + 1})` : ""}`).join(", ")}.
+            The assumptions in full:
+            <List size="sm" withPadding>
+              {model.assumptions.map((assumption) => (
+                <List.Item key={assumption.id}>
+                  {assumption.id}
+                  {assumption.fromPlan !== null ? ` (the plan's ${assumption.fromPlan + 1})` : ""}: {assumption.text}
+                </List.Item>
+              ))}
+            </List>
           </List.Item>
           <List.Item>The passages read from those pages.</List.Item>
         </List>
@@ -538,8 +554,9 @@ function ResearchCard({ research, researching, onAgain, onAmend }: { research: R
             The plan is now at v{research.latestVersion}. This research is of v{research.planVersion}, and stays as it was.
           </Text>
         )}
-        <Text size="xs" c="var(--nivra-text-2)" data-testid="research-queries">
-          Queries sent to Tavily: {research.queries.map((query) => `${query.assumption} “${query.query}”`).join(" · ")}
+        <Text size="xs" c="var(--nivra-text-2)" style={plain} data-testid="research-queries">
+          Approved queries: {research.queries.map((query) => `${query.assumption} “${query.query}”`).join(" · ")}
+          {research.sites ? ` · ${research.sites.mode === "prefer" ? "preferring" : "only"} ${research.sites.hosts.join(", ")}` : ""}
         </Text>
         {open && research.runId && <ResearchProgress runId={research.runId} online={researching.online} />}
         {research.note && (
@@ -755,7 +772,8 @@ function AmendDialog({ research, plan, actions, onClose, onSaved }: { research: 
   const [ticked, setTicked] = useState<AssumptionId[]>([]);
   const [text, setText] = useState(plan.text);
   const [edited, setEdited] = useState(false);
-  const [assumptions, setAssumptions] = useState(plan.assumptions.join("\n"));
+  // One assumption a line: one written over several lines is joined, so the list saves as it reads.
+  const [assumptions, setAssumptions] = useState(plan.assumptions.map((assumption) => assumption.replace(/\s*\n\s*/g, " ")).join("\n"));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 

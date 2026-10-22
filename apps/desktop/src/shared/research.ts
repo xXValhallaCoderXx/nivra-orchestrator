@@ -112,7 +112,8 @@ export type ResearchFailure =
   | "not-sent"
   | "no-answer"
   | "cancelled"
-  | "model";
+  | "model"
+  | "interrupted";
 
 export interface ResearchRequestView {
   id: string;
@@ -171,8 +172,10 @@ export interface ResearchView {
   cancelRequested: boolean;
   /** The newest stop on record, by cause. */
   stopCause: StopCause | null;
-  /** The queries the person approved, as sent. */
+  /** The queries the person approved. Whether each was sent is the report's to say. */
   queries: Array<{ assumption: AssumptionId; text: string; query: string }>;
+  /** The sites the person chose; null for none. */
+  sites: ResearchSites | null;
   packetDigest: string;
   /** The version saved from this research, once; null until then. */
   amended: { planId: string; version: number } | null;
@@ -241,42 +244,66 @@ const FAILURE: Readonly<Record<ResearchFailure, string>> = {
   "no-answer": "sent, and no answer came",
   cancelled: "cancelled",
   model: "the model's request failed",
+  interrupted: "may have been sent; credits unknown",
 };
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString("en")} ${n === 1 ? one : many}`;
 
+/** Whether a request may have reached Tavily or the model: anything but one never sent. */
+const mayHaveGone = (request: ResearchRequestView) => request.state === "answered" || request.state === "sending" || (request.state === "failed" && request.failure !== "not-sent");
+/** Whether a request was cut off by a stop of Nivra or its engine: it may have been sent, and what it used is unknown. */
+const cutOff = (request: ResearchRequestView, outcome: ResearchReportView["outcome"]) => (request.state === "failed" && request.failure === "interrupted") || (request.state === "sending" && outcome !== "in-progress");
+
 /**
- * One request of a run, in plain words: what it was, how it ended and the credits Tavily reported. A request a report
- * left `sending` (the run was interrupted) may have been sent, and its credits are unknown.
+ * One request of a run, in plain words: what it was, how it ended and the credits Tavily reported. A request cut off when
+ * Nivra or its engine stopped may have been sent, and what it used is unknown; one never sent has no credits to report.
  */
 export function requestText(request: ResearchRequestView, outcome: ResearchReportView["outcome"]): string {
   const what = request.kind === "search" ? `Search for ${request.assumption}` : request.kind === "extract" ? `Read ${plural(request.pages, "page")} for ${request.assumption}` : "The model's assessment";
-  const state =
-    request.state === "sending"
-      ? outcome === "in-progress"
-        ? "sending"
-        : "may have been sent; credits unknown"
+  const unknown = request.kind === "model" ? "may have been sent; tokens unknown" : "may have been sent; credits unknown";
+  const state = cutOff(request, outcome)
+    ? unknown
+    : request.state === "sending"
+      ? "sending"
       : request.state === "failed"
         ? FAILURE[request.failure ?? "no-answer"]
         : request.state === "pending"
           ? "not sent"
           : request.state;
-  const credits = request.kind === "model" || request.state === "pending" || request.state === "skipped" ? "" : request.credits !== null ? ` · ${plural(request.credits, "credit")}` : request.state === "sending" ? "" : " · credits not reported";
+  const credits =
+    request.kind === "model" || !mayHaveGone(request) || cutOff(request, outcome) || request.state === "sending"
+      ? ""
+      : request.credits !== null
+        ? ` · ${plural(request.credits, "credit")}`
+        : " · credits not reported";
   const time = request.elapsedMs !== null ? ` · ${(request.elapsedMs / 1000).toFixed(1)} s` : "";
   return `${what}: ${state}${credits}${time}`;
 }
 
-/** Tavily's credits as reported, never 0 for unknown; the model's tokens as reported. */
-export function usageText(report: Pick<ResearchReportView, "usage" | "requests">): string {
-  const sent = report.requests.some((request) => request.kind !== "model" && request.state !== "pending" && request.state !== "skipped");
-  const credits = !sent ? "no Tavily requests" : report.usage.credits !== null ? `${plural(report.usage.credits, "Tavily credit")}, as reported` : "Tavily credits not reported";
+/**
+ * Tavily's credits as reported, never 0 for unknown, and "no Tavily requests" when none was sent; the model's tokens as
+ * reported, "no model call" only when its request was never sent, and unknown when it was cut off.
+ */
+export function usageText(report: Pick<ResearchReportView, "usage" | "requests" | "outcome">): string {
+  const tavily = report.requests.filter((request) => request.kind !== "model");
+  const interrupted = tavily.some((request) => cutOff(request, report.outcome));
+  const credits = !tavily.some(mayHaveGone)
+    ? "no Tavily requests"
+    : report.usage.credits !== null
+      ? `${plural(report.usage.credits, "Tavily credit")}, as reported`
+      : interrupted
+        ? "Tavily credits unknown"
+        : "Tavily credits not reported";
+  const modelRequest = report.requests.find((request) => request.kind === "model");
   const { model } = report.usage;
   const tokens =
-    model.calls === 0
+    !modelRequest || !mayHaveGone(modelRequest)
       ? "no model call"
-      : model.inputTokens !== null && model.outputTokens !== null
-        ? `${model.inputTokens.toLocaleString("en")} in / ${model.outputTokens.toLocaleString("en")} out tokens, as reported`
-        : "tokens not reported";
+      : cutOff(modelRequest, report.outcome)
+        ? "tokens unknown"
+        : model.inputTokens !== null && model.outputTokens !== null
+          ? `${model.inputTokens.toLocaleString("en")} in / ${model.outputTokens.toLocaleString("en")} out tokens, as reported`
+          : "tokens not reported";
   return `${credits} · ${tokens}`;
 }
 

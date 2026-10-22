@@ -1,4 +1,5 @@
-import type { StopCause } from "../shared/research.ts";
+import { randomUUID } from "node:crypto";
+import type { ResearchSites, StopCause } from "../shared/research.ts";
 import { str, strOrNull, type Row, type WorkspaceDb } from "./workspace-db.ts";
 import { getTurn, type CancelReason, type TurnRecord, type TurnStatus } from "./workspace.ts";
 
@@ -9,6 +10,12 @@ import { getTurn, type CancelReason, type TurnRecord, type TurnStatus } from "./
  *
  * The migration is a constant until research's integration window appends it to `WORKSPACE_MIGRATIONS`, at the index
  * that window takes. Until then it is tested on top of the released schema.
+ *
+ * Every stop of a research run goes through `stopResearch`, and every withdrawal through `withdrawStop`: the person's
+ * cancel, either permission turned off, a project removed and a conversation deleted. The generic `requestCancel` and
+ * `withdrawCancel` in `workspace.ts` don't know about tokens, so research's window makes them refuse research links and
+ * gives each of the host's stop paths a research branch; a path it missed then fails in tests rather than clearing a
+ * newer stop.
  */
 export const RESEARCH_MIGRATION = `
   -- Research of one saved plan version's assumptions (NIV-45): a run link with workflow 'research', and what it was
@@ -22,6 +29,7 @@ export const RESEARCH_MIGRATION = `
     plan_sha256 TEXT NOT NULL,
     packet_digest TEXT NOT NULL,
     queries_json TEXT NOT NULL,
+    sites_json TEXT,
     scope_kind TEXT NOT NULL CHECK (scope_kind IN ('general', 'project')),
     project_id TEXT,
     project_label TEXT,
@@ -48,11 +56,19 @@ export const RESEARCH_MIGRATION = `
   CREATE TRIGGER research_frozen BEFORE UPDATE ON research
   WHEN NEW.id IS NOT OLD.id OR NEW.conversation_id IS NOT OLD.conversation_id OR NEW.plan_id IS NOT OLD.plan_id OR NEW.plan_lineage IS NOT OLD.plan_lineage
     OR NEW.plan_version IS NOT OLD.plan_version OR NEW.plan_sha256 IS NOT OLD.plan_sha256 OR NEW.packet_digest IS NOT OLD.packet_digest
-    OR NEW.queries_json IS NOT OLD.queries_json OR NEW.scope_kind IS NOT OLD.scope_kind OR NEW.project_id IS NOT OLD.project_id
+    OR NEW.queries_json IS NOT OLD.queries_json OR NEW.sites_json IS NOT OLD.sites_json OR NEW.scope_kind IS NOT OLD.scope_kind OR NEW.project_id IS NOT OLD.project_id
     OR NEW.project_label IS NOT OLD.project_label OR NEW.head_at_start IS NOT OLD.head_at_start OR NEW.created_at IS NOT OLD.created_at
     OR (OLD.report_json IS NOT NULL AND (NEW.report_json IS NOT OLD.report_json OR NEW.reported_at IS NOT OLD.reported_at))
     OR (OLD.amended_plan_id IS NOT NULL AND NEW.amended_plan_id IS NOT OLD.amended_plan_id)
-  BEGIN SELECT RAISE(ABORT, 'research never changes what it was bound to, and keeps its first report and its amended plan'); END;
+    -- The amended plan comes from a report, and is a version of the researched plan derived from it.
+    OR (OLD.amended_plan_id IS NULL AND NEW.amended_plan_id IS NOT NULL AND (NEW.report_json IS NULL OR NOT EXISTS (
+      SELECT 1 FROM artifacts
+      WHERE id = NEW.amended_plan_id AND kind = 'plan' AND conversation_id = OLD.conversation_id AND lineage_id = OLD.plan_lineage AND derived_from = OLD.plan_id
+    )))
+    -- A stop is asked for, or withdrawn, only while the run is open.
+    OR ((NEW.stop_cause IS NOT OLD.stop_cause OR NEW.stop_token IS NOT OLD.stop_token)
+      AND NOT EXISTS (SELECT 1 FROM run_links WHERE id = OLD.id AND status IN ('submitting', 'running')))
+  BEGIN SELECT RAISE(ABORT, 'research never changes what it was bound to, keeps its first report and its amended plan, and changes its stop only while it runs'); END;
 `;
 
 /** The run link statuses of research still under way, as `workspace.ts` counts them. */
@@ -79,6 +95,8 @@ export interface ResearchRecord {
   planSha256: string;
   packetDigest: string;
   queries: ResearchQuery[];
+  /** The sites the person chose, as they were sent; null for none. */
+  sites: ResearchSites | null;
   scope: { kind: "general" } | { kind: "project"; projectId: string; projectLabel: string | null; headAtStart: string | null };
   /** The newest stop asked for, with its token; null when none is pending or it was withdrawn. */
   stop: { cause: StopCause; token: string } | null;
@@ -104,6 +122,7 @@ function recordOf(workspace: WorkspaceDb, row: Row): ResearchRecord | null {
     planSha256: str(row["plan_sha256"]),
     packetDigest: str(row["packet_digest"]),
     queries: JSON.parse(str(row["queries_json"])) as ResearchQuery[],
+    sites: row["sites_json"] ? (JSON.parse(str(row["sites_json"])) as ResearchSites) : null,
     scope:
       str(row["scope_kind"]) === "project"
         ? { kind: "project", projectId: str(row["project_id"]), projectLabel: strOrNull(row["project_label"]), headAtStart: strOrNull(row["head_at_start"]) }
@@ -137,7 +156,7 @@ export function insertResearch(
     );
     const project = research.scope.kind === "project" ? research.scope : null;
     db.prepare(
-      "INSERT INTO research (id, conversation_id, plan_id, plan_lineage, plan_version, plan_sha256, packet_digest, queries_json, scope_kind, project_id, project_label, head_at_start, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO research (id, conversation_id, plan_id, plan_lineage, plan_version, plan_sha256, packet_digest, queries_json, sites_json, scope_kind, project_id, project_label, head_at_start, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
       research.id,
       research.conversationId,
@@ -147,6 +166,7 @@ export function insertResearch(
       research.planSha256,
       research.packetDigest,
       JSON.stringify(research.queries),
+      research.sites ? JSON.stringify(research.sites) : null,
       research.scope.kind,
       project?.projectId ?? null,
       project?.projectLabel ?? null,
@@ -173,15 +193,16 @@ export function researchOf(workspace: WorkspaceDb, conversationId: string): Rese
 
 /**
  * Asks an open research run to stop, in one transaction: the run link's cancel flag and reason, and the research row's
- * cause with this stop's token. A later stop replaces both, so the newest stop is the one on record. False when the run
- * had already ended.
+ * cause with a new token, made here so no two stops share one. A later stop replaces both, so the newest stop is the one
+ * on record. Returns the token, for withdrawing this stop if it fails; null when the run had already ended.
  */
-export function stopResearch(workspace: WorkspaceDb, id: string, cause: StopCause, token: string): boolean {
+export function stopResearch(workspace: WorkspaceDb, id: string, cause: StopCause): string | null {
   return workspace.tx((db) => {
     const open = Number(db.prepare(`UPDATE run_links SET cancel_requested = 1, cancel_reason = ? WHERE id = ? AND workflow_id = 'research' AND status IN ${OPEN}`).run(CANCEL_REASON[cause], id).changes) === 1;
-    if (!open) return false;
+    if (!open) return null;
+    const token = randomUUID();
     db.prepare("UPDATE research SET stop_cause = ?, stop_token = ? WHERE id = ?").run(cause, token, id);
-    return true;
+    return token;
   });
 }
 
@@ -199,7 +220,7 @@ export function withdrawStop(workspace: WorkspaceDb, id: string, token: string):
           .run(id, token).changes,
       ) === 1;
     if (!cleared) return false;
-    db.prepare("UPDATE run_links SET cancel_requested = 0, cancel_reason = NULL WHERE id = ?").run(id);
+    db.prepare("UPDATE run_links SET cancel_requested = 0, cancel_reason = NULL WHERE id = ? AND workflow_id = 'research'").run(id);
     return true;
   });
 }
@@ -222,7 +243,7 @@ export function settleResearch(
         .run(outcome.status, outcome.errorKind ?? null, outcome.errorMessage ?? null, at, id).changes,
     );
     if (settled !== 1) return false;
-    if (report !== null) db.prepare("UPDATE research SET report_json = ?, reported_at = ? WHERE id = ? AND report_json IS NULL").run(JSON.stringify(report), at, id);
+    if (report !== null && report !== undefined) db.prepare("UPDATE research SET report_json = ?, reported_at = ? WHERE id = ? AND report_json IS NULL").run(JSON.stringify(report), at, id);
     return true;
   });
 }

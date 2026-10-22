@@ -40,6 +40,9 @@ export interface ResearchContract {
 }
 
 const count = (n: number) => n.toLocaleString("en");
+const WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+/** A small number in words, as copy writes one: "three", not "3". */
+const inWords = (n: number) => WORDS[n] ?? count(n);
 const segments = (path: string) => path.split(/[\\/]/).filter(Boolean);
 
 /**
@@ -51,21 +54,26 @@ function refuseSecret(field: string, text: string, known: KnownSecrets, then: st
   if (secretShapes(text).length > 0) throw new Error(`${field} looks like it holds a credential, so nothing was sent. ${then}`);
 }
 
-/** The sites as hostnames, in punycode and lower case, each once: refused, by position, unless each is a public one. */
+/**
+ * The sites as hostnames, in punycode and lower case, each once: refused unless each is a public one, named by its place
+ * in the list as the person wrote it, and counted once written the same way.
+ */
 function sitesOf(sites: ResearchSites, contract: ResearchContract): ResearchSites | null {
-  const hosts = [...new Set(sites.hosts.map((host) => host.trim()).filter(Boolean))];
-  if (hosts.length === 0) return null;
-  const max = contract.limits.sites;
-  if (hosts.length > max) throw new Error(`Research can prefer up to ${max} sites, and ${hosts.length} are listed. Remove ${hosts.length - max}, then preview again.`);
-  const ascii = hosts.map((host, index) => {
+  const hosts: string[] = [];
+  sites.hosts.forEach((written, index) => {
+    const host = written.trim();
+    if (!host) return;
     // Converted only when it is a bare name: the conversion would drop a path or a scheme's rest without a word.
     const name = /[\s/\\:@?#]/.test(host) ? "" : domainToASCII(host.toLowerCase());
     const problem = name ? contract.siteProblem(name) : "not-a-hostname";
     if (problem === "private") throw new Error(`Site ${index + 1} is a private host name, and research only searches the public web. Remove it, then preview again.`);
     if (problem) throw new Error(`Site ${index + 1} isn't a host name such as docs.python.org: no https://, path or port. Fix it, then preview again.`);
-    return name;
+    if (!hosts.includes(name)) hosts.push(name);
   });
-  return { mode: sites.mode, hosts: [...new Set(ascii)] };
+  if (hosts.length === 0) return null;
+  const max = contract.limits.sites;
+  if (hosts.length > max) throw new Error(`Research can use up to ${inWords(max)} sites, and ${inWords(hosts.length)} are listed. Remove ${inWords(hosts.length - max)}, then preview again.`);
+  return { mode: sites.mode, hosts };
 }
 
 /**
@@ -83,7 +91,7 @@ export function researchPacket(plan: ArtifactRecord, conversation: ConversationR
   }
   refuseSecret("This plan version", content.text, known, "Edit the plan to remove it, then check the new version.");
   const picks = selection.assumptions;
-  if (picks.length === 0 || picks.length > limits.assumptions) throw new Error(`Pick one to ${limits.assumptions} assumptions to check, then preview again.`);
+  if (picks.length === 0 || picks.length > limits.assumptions) throw new Error(`Pick one to ${inWords(limits.assumptions)} assumptions to check, then preview again.`);
   const picked = new Set<number>();
   const assumptions = picks.map((pick, index): ResearchPacketShape["assumptions"][number] => {
     const id = `A${index + 1}` as AssumptionId;
@@ -185,6 +193,8 @@ export async function researchRequest(
   queries: ResearchQuery[];
 }> {
   const { plan, conversation, project } = subject;
+  // A project's plan is checked only with its project's sharing, so a plan whose project is gone isn't checked at all.
+  if (conversation.kind === "project" && !project) throw new Error("This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.");
   const packet = researchPacket(plan, conversation, selection, state.known, contract);
   const deny = researchDeny(state.projects, plan.content as PlanContent);
   const checks = queryChecks(packet, deny, state.known, contract);
@@ -261,17 +271,20 @@ export function researchNoteFor(link: TurnRecord, stop: ResearchRecord["stop"]):
   switch (link.status) {
     case "failed":
       return `${link.errorMessage ?? "The research failed."} Nothing was resent.`;
-    case "cancelled":
+    case "cancelled": {
+      // What the host established about the stop (that nothing was sent, say) is kept: it says more than the default.
+      const then = link.errorMessage ?? SENT;
       switch (stop?.cause) {
         case "web-research":
-          return `Stopped: research queries to Tavily were turned off. ${SENT}`;
+          return `Stopped: research queries to Tavily were turned off. ${then}`;
         case "model-sharing":
-          return `Stopped: sharing for this project was turned off. ${SENT}`;
+          return `Stopped: sharing for this project was turned off. ${then}`;
         case "removal":
-          return `Stopped: the project was removed. ${SENT}`;
+          return `Stopped: the project was removed. ${then}`;
         default:
-          return `Cancelled. ${SENT}`;
+          return `Cancelled. ${then}`;
       }
+    }
     case "interrupted":
       return "Interrupted: Nivra or its engine stopped before the research finished. A request it was making may have been sent, and its credits are unknown. Nothing was resent.";
     case "not-sent":
@@ -289,12 +302,14 @@ export function amendedPlanFields(text: string, assumptions: readonly string[], 
   if (!trimmed) throw new Error("A plan needs some text.");
   if (trimmed.length > TASK_LIMITS.planChars) throw new Error(`That plan is ${count(trimmed.length)} characters long, and a plan can hold ${count(TASK_LIMITS.planChars)}. Shorten it, then save it again.`);
   refuseCredentials("The plan", trimmed, known);
+  // Numbered as written, blank lines included, as a brief's items are.
+  assumptions.forEach((written, index) => {
+    const item = written.trim();
+    if (item.length > TASK_LIMITS.itemChars) throw new Error(`Assumption ${index + 1} is ${count(item.length)} characters long, and an assumption can hold ${count(TASK_LIMITS.itemChars)}. Shorten it, then save it again.`);
+    if (item) refuseCredentials(`Assumption ${index + 1}`, item, known);
+  });
   const items = assumptions.map((item) => item.trim()).filter(Boolean);
   if (items.length > TASK_LIMITS.items) throw new Error(`A plan can list ${TASK_LIMITS.items} assumptions, and this one lists ${items.length}. Remove ${items.length - TASK_LIMITS.items}, then save it again.`);
-  items.forEach((item, index) => {
-    if (item.length > TASK_LIMITS.itemChars) throw new Error(`Assumption ${index + 1} is ${count(item.length)} characters long, and an assumption can hold ${count(TASK_LIMITS.itemChars)}. Shorten it, then save it again.`);
-    refuseCredentials(`Assumption ${index + 1}`, item, known);
-  });
   return { text: trimmed, assumptions: items };
 }
 
