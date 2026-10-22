@@ -312,6 +312,8 @@ export interface ConversationView {
   closed: string | null;
   /** The review still going in this conversation, which holds it as a turn does (D31); null when none is. */
   openReview: string | null;
+  /** The research still going in this conversation, which holds it as a turn does (D37); null when none is. */
+  openResearch: string | null;
 }
 
 /** A task's states (D26). `active` and `review` come only from attempts, which can't start yet. */

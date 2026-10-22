@@ -1,4 +1,4 @@
-import type { RunBudgetRecord, RunRoute, RunUsage } from "@nivra/domain";
+import type { ResearchAssumptionId, ResearchConclusion, ResearchDisplayRule, ResearchRejection, ResearchReport, ResearchRequestFailure } from "@nivra/domain";
 import type { TurnStatus } from "./ipc.ts";
 
 /**
@@ -6,13 +6,12 @@ import type { TurnStatus } from "./ipc.ts";
  * "Start research" is bound by, a research run and its report, and the words they are shown in. Main builds the views;
  * the window shows them. Pure, so both sides use it and tests read it without a window.
  *
- * The report's shape is the domain's `ResearchReport`, kept here as the parts the window reads until research's
- * integration window exports the domain contract.
+ * The report's types are the domain contract's own (D37), imported as types only, as the window's must be.
  */
 
-export type AssumptionId = "A1" | "A2" | "A3";
-export type Conclusion = "supported" | "contradicted" | "unresolved";
-export type DisplayRule = "no-valid-citation" | "version-not-named" | "both-sides" | "not-assessed";
+export type AssumptionId = ResearchAssumptionId;
+export type Conclusion = ResearchConclusion;
+export type DisplayRule = ResearchDisplayRule;
 /** Who or what stopped research: the person, a permission turned off, the project removed, the conversation deleted. */
 export type StopCause = "person" | "web-research" | "model-sharing" | "removal" | "deletion";
 
@@ -54,120 +53,21 @@ export interface ResearchPreview {
   expected: string;
 }
 
-export interface ResearchCitationView {
-  passage: string;
-  stance: "supports" | "contradicts";
-  quote: string;
-  valid: boolean;
-  problem: "unknown-passage" | "bad-stance" | "too-short" | "too-long" | "not-found" | null;
-}
-
-export interface ResearchAssessmentView {
-  assumption: AssumptionId;
-  /** What the model concluded; null when it gave nothing for this assumption. */
-  model: Conclusion | null;
-  shown: Conclusion;
-  rule: DisplayRule | null;
-  reasoning: string;
-  applicability: { plan: string; source: string; where: "title" | "address" | "heading" | "passage" | "unknown" };
-  uncertainty: string;
-  citations: ResearchCitationView[];
-  version: string | null;
-  amendment: { kind: "model" | "unverified"; text: string } | null;
-}
-
-export interface ResearchPageView {
-  id: string;
-  address: string;
-  host: string;
-  title: string;
-  foundBy: Array<{ assumption: AssumptionId; rank: number }>;
-  extractedFor: AssumptionId[];
-  status: "read" | "not-read" | "failed" | "refused";
-}
-
-export interface ResearchPassageView {
-  id: string;
-  page: string;
-  assumption: AssumptionId;
-  chunk: number;
-  heading: string | null;
-  text: string;
-  clipped: boolean;
-  retrievedAt: string;
-}
-
-export type ResearchFailure =
-  | "auth"
-  | "rate-limit"
-  | "plan-limit"
-  | "rejected"
-  | "server"
-  | "redirect"
-  | "deadline"
-  | "cutoff"
-  | "too-large"
-  | "malformed"
-  | "network"
-  | "not-sent"
-  | "no-answer"
-  | "cancelled"
-  | "model"
-  | "interrupted";
-
-export interface ResearchRequestView {
-  id: string;
-  kind: "search" | "extract" | "model";
-  assumption: AssumptionId | null;
-  state: "pending" | "sending" | "answered" | "failed" | "skipped";
-  failure: ResearchFailure | null;
-  status: number | null;
-  requestId: string | null;
-  credits: number | null;
-  pages: number;
-  /** For an Extract, how many of its pages came back with content; null otherwise, or without an answer. */
-  returned: number | null;
-  elapsedMs: number | null;
-}
-
+/** A research run's report, as the engine saved it and the host masked it again: the domain contract's own (D37). */
+export type ResearchReportView = ResearchReport;
+export type ResearchAssessmentView = ResearchReportView["assessments"][number];
+export type ResearchCitationView = ResearchAssessmentView["citations"][number];
+export type ResearchPageView = ResearchReportView["pages"][number];
+export type ResearchPassageView = ResearchReportView["passages"][number];
+export type ResearchRequestView = ResearchReportView["requests"][number];
+export type ResearchFailure = ResearchRequestFailure;
 /** Why an assessment the model handed in was set aside instead of being matched to an assumption. */
-export type Rejection = "missing" | "unknown" | "ambiguous" | "conflicting" | "duplicate";
-
+export type Rejection = ResearchRejection;
 /**
  * What the model handed in, how much of it named an assumption asked about, and how much of that gave an outcome: at
  * most ten set aside are listed, and every matched assessment without a recognised outcome.
  */
-export interface AttributionView {
-  handedIn: number;
-  matched: number;
-  usable: number;
-  rejected: number;
-  entries: Array<{ label: string; reason: Rejection }>;
-  unusable: Array<{ assumption: AssumptionId; outcome: string }>;
-}
-
-/** A research run's report, as the engine saved it and the host masked it again: the parts the window reads. */
-export interface ResearchReportView {
-  planId: string;
-  planVersion: number;
-  packetDigest: string;
-  outcome: "in-progress" | "complete" | "failed" | "cancelled" | "interrupted";
-  route: RunRoute | null;
-  queries: Array<{ assumption: AssumptionId; text: string; query: string }>;
-  sites: ResearchSites | null;
-  requests: ResearchRequestView[];
-  pages: ResearchPageView[];
-  passages: ResearchPassageView[];
-  assessments: ResearchAssessmentView[];
-  checks: { citations: number; valid: number; relabelled: number };
-  /** Null until the model handed in an answer that could be read. */
-  attribution: AttributionView | null;
-  stop: { code: string; message: string } | null;
-  usage: { credits: number | null; model: RunUsage };
-  budget: RunBudgetRecord | null;
-  elapsedMs: number;
-  finishedAt: string | null;
-}
+export type AttributionView = NonNullable<ResearchReportView["attribution"]>;
 
 /**
  * Research of a plan version (NIV-45): what it was bound to, how its run went, the report its engine saved, kept when it

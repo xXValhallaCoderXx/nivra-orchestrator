@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { domainToASCII } from "node:url";
+import { QUERY_PROBLEM_WORDS, queryProblems, RESEARCH_LIMITS, researchPacketDigest, siteProblem, type ResearchContext, type ResearchDeny, type ResearchInput, type ResearchPacket } from "@nivra/domain";
 import type { AssumptionId, ResearchPreview, ResearchSelection, ResearchSites } from "../shared/research.ts";
 import { maskForStorage, refuseCredentials, type KnownSecrets } from "./protect.ts";
 import type { ResearchQuery, ResearchRecord } from "./research-store.ts";
@@ -8,35 +9,11 @@ import type { ArtifactRecord, ConversationRecord, TurnRecord } from "./workspace
 
 /**
  * Research of a saved plan version's assumptions (NIV-45), as plain functions: the packet a selection freezes, what no
- * query may name, the preview and the fingerprint "Start research" is bound by, the check that a report is the one a run
- * asked for, what an ended run says, and the amended version's checked fields and content. No Electron (D12). What the
- * window computes itself (the amendments offered and the pre-filled text) is in `shared/research.ts`.
- *
- * The domain's research contract isn't exported until research's integration window: until then its limits, checks and
- * fingerprint are passed in (`ResearchContract`), and the window passes the domain's own.
+ * query may name, the preview and the fingerprint "Start research" is bound by, the check that a report is the one a
+ * run asked for, what an ended run says, and the amended version's checked fields and content. No Electron (D12). What
+ * the window computes itself (the amendments offered and the pre-filled text) is in `shared/research.ts`. The limits,
+ * checks and fingerprint are the domain contract's own (D37), which the engine runs again.
  */
-
-/** A packet, in the domain contract's shape. */
-export interface ResearchPacketShape {
-  scope: { kind: "general" } | { kind: "project"; headAtStart: string | null };
-  planText: string;
-  assumptions: Array<{ id: AssumptionId; text: string; origin: { kind: "plan"; index: number } | { kind: "typed" }; query: string }>;
-  sites: ResearchSites | null;
-}
-
-export interface ResearchDenyShape {
-  terms: string[];
-  paths: string[];
-}
-
-/** The domain contract's limits, checks and fingerprint, passed in until research's integration window exports them. */
-export interface ResearchContract {
-  limits: { assumptions: number; assumptionChars: number; queryChars: number; sites: number; planChars: number; searches: number; extracts: number; pageExtractions: number; modelRequests: number; runMs: number };
-  packetDigest: (packet: ResearchPacketShape) => Promise<string>;
-  queryProblems: (query: string, deny: ResearchDenyShape, knownValues: readonly string[]) => readonly string[];
-  problemWords: Readonly<Record<string, string>>;
-  siteProblem: (host: string) => string | null;
-}
 
 const count = (n: number) => n.toLocaleString("en");
 const WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
@@ -48,20 +25,20 @@ const segments = (path: string) => path.split(/[\\/]/).filter(Boolean);
  * The sites as hostnames, in punycode and lower case, each once: refused unless each is a public one, named by its place
  * in the list as the person wrote it, and counted once written the same way.
  */
-function sitesOf(sites: ResearchSites, contract: ResearchContract): ResearchSites | null {
+function sitesOf(sites: ResearchSites): ResearchSites | null {
   const hosts: string[] = [];
   sites.hosts.forEach((written, index) => {
     const host = written.trim();
     if (!host) return;
     // Converted only when it is a bare name: the conversion would drop a path or a scheme's rest without a word.
     const name = /[\s/\\:@?#]/.test(host) ? "" : domainToASCII(host.toLowerCase());
-    const problem = name ? contract.siteProblem(name) : "not-a-hostname";
+    const problem = name ? siteProblem(name) : "not-a-hostname";
     if (problem === "private") throw new Error(`Site ${index + 1} is a private host name, and research only searches the public web. Remove it, then preview again.`);
     if (problem) throw new Error(`Site ${index + 1} isn't a host name such as docs.python.org: no https://, path or port. Fix it, then preview again.`);
     if (!hosts.includes(name)) hosts.push(name);
   });
   if (hosts.length === 0) return null;
-  const max = contract.limits.sites;
+  const max = RESEARCH_LIMITS.sites;
   if (hosts.length > max) throw new Error(`Research can use up to ${inWords(max)} sites, and ${inWords(hosts.length)} are listed. Remove ${inWords(hosts.length - max)}, then preview again.`);
   return { mode: sites.mode, hosts };
 }
@@ -73,9 +50,9 @@ function sitesOf(sites: ResearchSites, contract: ResearchContract): ResearchSite
  * which the engine wrote, is masked again; the plan's text, and what the person typed, are refused when they hold a
  * credential. Anything over research's limits is refused in words that say which.
  */
-export function researchPacket(plan: ArtifactRecord, conversation: ConversationRecord, selection: ResearchSelection, known: KnownSecrets, contract: ResearchContract): ResearchPacketShape {
+export function researchPacket(plan: ArtifactRecord, conversation: ConversationRecord, selection: ResearchSelection, known: KnownSecrets): ResearchPacket {
   const content = plan.content as PlanContent;
-  const { limits } = contract;
+  const limits = RESEARCH_LIMITS;
   if (content.text.length > limits.planChars) {
     throw new Error(`This plan version is ${count(content.text.length)} characters long, and research can take ${count(limits.planChars)}. Edit the plan to shorten it, then check the new version.`);
   }
@@ -84,7 +61,7 @@ export function researchPacket(plan: ArtifactRecord, conversation: ConversationR
   const picks = selection.assumptions;
   if (picks.length === 0 || picks.length > limits.assumptions) throw new Error(`Pick one to ${inWords(limits.assumptions)} assumptions to check, then preview again.`);
   const picked = new Set<number>();
-  const assumptions = picks.map((pick, index): ResearchPacketShape["assumptions"][number] => {
+  const assumptions = picks.map((pick, index): ResearchPacket["assumptions"][number] => {
     const id = `A${index + 1}` as AssumptionId;
     const query = pick.query.trim();
     if (pick.from.kind === "typed") {
@@ -110,7 +87,7 @@ export function researchPacket(plan: ArtifactRecord, conversation: ConversationR
     scope: conversation.kind === "project" ? { kind: "project", headAtStart: content.headAtStart } : { kind: "general" },
     planText: content.text,
     assumptions,
-    sites: selection.sites ? sitesOf(selection.sites, contract) : null,
+    sites: selection.sites ? sitesOf(selection.sites) : null,
   };
 }
 
@@ -118,7 +95,7 @@ export function researchPacket(plan: ArtifactRecord, conversation: ConversationR
  * What no query may name: every project's label and folder name, and the paths the plan cites with more than one
  * segment (a bare name such as `setup.py` is a fair thing to search for), each once.
  */
-export function researchDeny(projects: ReadonlyArray<{ label: string; nativePath: string }>, content: PlanContent): ResearchDenyShape {
+export function researchDeny(projects: ReadonlyArray<{ label: string; nativePath: string }>, content: PlanContent): ResearchDeny {
   const terms = new Map<string, string>();
   for (const project of projects) {
     for (const term of [project.label, segments(project.nativePath).at(-1) ?? ""]) {
@@ -131,11 +108,11 @@ export function researchDeny(projects: ReadonlyArray<{ label: string; nativePath
 }
 
 /** Each query's problems, in the person's terms: none when it may be sent. The checks are best-effort, never a guarantee. */
-export function queryChecks(packet: ResearchPacketShape, deny: ResearchDenyShape, known: KnownSecrets, contract: ResearchContract): Array<{ assumption: AssumptionId; problems: string[] }> {
+export function queryChecks(packet: ResearchPacket, deny: ResearchDeny, known: KnownSecrets): Array<{ assumption: AssumptionId; problems: string[] }> {
   const values = known.map(([, value]) => value).filter((value) => value.length > 0);
   return packet.assumptions.map((assumption) => ({
     assumption: assumption.id,
-    problems: contract.queryProblems(assumption.query, deny, values).map((problem) => contract.problemWords[problem] ?? "can't be sent"),
+    problems: queryProblems(assumption.query, deny, values).map((problem) => QUERY_PROBLEM_WORDS[problem]),
   }));
 }
 
@@ -176,23 +153,17 @@ export async function researchRequest(
   subject: ResearchSubject,
   selection: ResearchSelection,
   state: ResearchState,
-  contract: ResearchContract,
-): Promise<{
-  preview: ResearchPreview;
-  input: { planId: string; planVersion: number; packetDigest: string };
-  context: { sharing: { modelContext: boolean; webResearch: boolean }; deny: ResearchDenyShape; packet: ResearchPacketShape };
-  queries: ResearchQuery[];
-}> {
+): Promise<{ preview: ResearchPreview; input: ResearchInput; context: ResearchContext; queries: ResearchQuery[] }> {
   const { plan, conversation, project } = subject;
   // A project's plan is checked only with its project's sharing, so a plan whose project is gone isn't checked at all.
   if (conversation.kind === "project" && !project) throw new Error("This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.");
-  const packet = researchPacket(plan, conversation, selection, state.known, contract);
+  const packet = researchPacket(plan, conversation, selection, state.known);
   const deny = researchDeny(state.projects, plan.content as PlanContent);
-  const checks = queryChecks(packet, deny, state.known, contract);
-  const packetDigest = await contract.packetDigest(packet);
+  const checks = queryChecks(packet, deny, state.known);
+  const packetDigest = await researchPacketDigest(packet);
   const modelSharing = project ? project.modelSharing : null;
   const failing = checks.find((check) => check.problems.length > 0);
-  const { limits } = contract;
+  const limits = RESEARCH_LIMITS;
   const blocked =
     state.busy ??
     (subject.latestVersion !== plan.version

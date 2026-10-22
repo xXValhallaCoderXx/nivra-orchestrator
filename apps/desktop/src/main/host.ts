@@ -13,6 +13,9 @@ import {
   type ExplainResult,
   type PreferenceIntent,
   type ProviderCheck,
+  type ResearchContext,
+  type ResearchInput,
+  type ResearchReport,
   type ReviewContext,
   type ReviewInput,
   type ReviewPanel,
@@ -50,6 +53,7 @@ import type {
   WorkspaceView,
   WslView,
 } from "../shared/ipc.ts";
+import type { ResearchPreview, ResearchSelection, ResearchView, StopCause } from "../shared/research.ts";
 import { selectHistory } from "./history.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
@@ -73,6 +77,8 @@ import {
   type PreferenceExport,
 } from "./preferences.ts";
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
+import { researchNoteFor, researchReportMatches, researchRequest, type ResearchSubject } from "./research.ts";
+import { getResearch, insertResearch, openResearch, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
 import { historicalReferences, packetFor, previewFingerprint, reportMatches, REVIEW_REQUESTS, reviewNoteFor } from "./reviews.ts";
 import { BriefContentSchema, BriefFieldsSchema, briefForRepository, briefFrom, briefIsReady, nextState, planFromAnswer, RUN_UNAVAILABLE, sourceFrom, TASK_LIMITS, type PlanContent } from "./tasks.ts";
 import { EngineOfflineError, EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
@@ -143,6 +149,8 @@ export interface HostOptions {
 const CLOSED = "This conversation's project was removed, so it can't continue. Its history stays here until you delete it.";
 /** Why a plan can't be reviewed once its project is gone. */
 const REVIEW_CLOSED = "This plan's project was removed, so it can't be reviewed. Its history stays here until you delete it.";
+/** Why a plan's assumptions can't be checked once its project is gone. */
+const RESEARCH_CLOSED = "This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.";
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const isRunNotFound = (error: unknown) => error instanceof RpcCallError && error.code === ErrorCode.RunNotFound;
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref?.());
@@ -186,8 +194,13 @@ interface Engine {
 
 type WslLookup = { target: ExecutionTarget } | { notReady: string } | { notFound: true };
 
-/** What a conversation's run link sends: a turn, or a review of a plan version (D31). */
-type LinkRequest = { workflowId: "chat"; input: ChatInput; context: ChatContext } | { workflowId: "review"; input: ReviewInput; context: ReviewContext };
+/**
+ * What a conversation's run link sends: a turn, a review of a plan version (D31), or research of its assumptions (D37).
+ */
+type LinkRequest =
+  | { workflowId: "chat"; input: ChatInput; context: ChatContext }
+  | { workflowId: "review"; input: ReviewInput; context: ReviewContext }
+  | { workflowId: "research"; input: ResearchInput; context: ResearchContext };
 
 /** A plan version to review, its conversation, and the project that conversation is about (null for a general one). */
 interface ReviewSubject {
@@ -220,6 +233,8 @@ export class Host {
   readonly #conversationRuns = new Map<string, Set<string>>();
   /** Raised when a project's uploads are turned off, so a sandbox check started under old consent can be caught (D36). */
   readonly #cloudEpochs = new Map<string, number>();
+  /** Raised each time research is turned off, so a start or a send in progress can be caught (D37). */
+  #webResearchEpoch = 0;
   /** Each project's sandbox check this session (D36). */
   readonly #sandboxChecks = new Map<string, SandboxCheck>();
   /** Projects whose check is being started: one at a time, from before its first wait. */
@@ -292,13 +307,15 @@ export class Host {
     if (!record) throw new Error("That conversation is no longer in the list.");
     const summary = this.#conversationView(record);
     const engine = this.#engineView(record.targetId);
+    const open = openTurns(workspace, { conversationId });
     return {
       summary,
       messages: messagesOf(workspace, conversationId).map(({ conversationId: _of, ...message }) => message),
       turns: turnsOf(workspace, conversationId).map((turn) => this.#turnView(turn, engine)),
       engine,
       closed: summary.projectPresent === false ? CLOSED : null,
-      openReview: openTurns(workspace, { conversationId }).find((link) => link.workflowId === "review")?.id ?? null,
+      openReview: open.find((link) => link.workflowId === "review")?.id ?? null,
+      openResearch: open.find((link) => link.workflowId === "research")?.id ?? null,
     };
   }
 
@@ -380,16 +397,27 @@ export class Host {
     const record = getConversation(workspace, conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const open = openTurns(workspace, { conversationId });
+    // Research is stopped with a stop of its own (D37), which alone is taken back if the conversation stays.
+    const researchStops: Array<{ id: string; token: string }> = [];
     for (const turn of open) {
+      if (turn.workflowId === "research") {
+        const token = stopResearch(workspace, turn.id, "deletion");
+        if (token) researchStops.push({ id: turn.id, token });
+        continue;
+      }
       requestCancel(workspace, turn.id, "deletion");
       const pending = this.#submissions.get(turn.id);
       if (pending) pending.cancel ??= "deletion";
     }
     // A run whose engine isn't online isn't running any more: its engine fails it as interrupted when it starts (D4).
     const running = open.filter((turn) => turn.runId && this.#engines.get(turn.targetId)?.supervisor.state.status === "online");
-    const failed = (await Promise.allSettled(running.map((turn) => this.cancelRun(turn.runId!)))).filter((result) => result.status === "rejected");
-    if (failed.length) {
-      throw new Error(`Nivra couldn't stop this conversation's answer on ${this.#labelOf(record.targetId)} (${errorText(failed[0]!.reason)}), so the conversation is still here. Restart that engine, then delete it again.`);
+    const results = await Promise.allSettled(running.map((turn) => this.cancelRun(turn.runId!)));
+    const failedAt = results.findIndex((result) => result.status === "rejected");
+    if (failedAt >= 0) {
+      if (this.#workspace.state === "ready") for (const { id, token } of researchStops) withdrawStop(this.#workspace.db, id, token);
+      const what = running[failedAt]!.workflowId === "research" ? "research" : "answer";
+      const why = errorText((results[failedAt] as PromiseRejectedResult).reason);
+      throw new Error(`Nivra couldn't stop this conversation's ${what} on ${this.#labelOf(record.targetId)} (${why}), so the conversation is still here. Restart that engine, then delete it again.`);
     }
     // Sent by this session to an engine still online, with no run known: its answer was lost. One still being sent is
     // stopped by its submission, when its engine answers.
@@ -516,6 +544,120 @@ export class Host {
     if (!review || review.conversationId !== conversationId) throw new Error("That review is no longer in this conversation.");
     await this.#cancelLink(review.link);
     return this.reviews(conversationId);
+  }
+
+  /**
+   * What research of one saved plan version's assumptions would send (D37), and the fingerprint that binds it: each
+   * query for Tavily exactly as the person wrote it, the sites, and what goes to the model. Reads only: nothing is
+   * stored or sent, and no engine starts. It is shown whatever keeps research from starting, and says what that is.
+   */
+  async prepareResearch(planId: string, selection: ResearchSelection): Promise<ResearchPreview> {
+    return (await this.#researchRequest(this.#researchSubject(planId), selection)).preview;
+  }
+
+  /**
+   * Starts the research the person previewed (D37). Everything is worked out again from the records as they are now,
+   * and refused when its fingerprint isn't the one previewed, so research sends exactly the queries that were shown.
+   * Both permissions are checked now, again after that wait against their epochs, and once more when its request is
+   * out. It is stored first, then sent in the background on its conversation's engine; its report is kept when it ends.
+   * Research writes no plan, task or preference: an amended version is saved only when the person saves it.
+   */
+  async startResearch(planId: string, selection: ResearchSelection, expected: string): Promise<ResearchView> {
+    const workspace = this.#workspaceDb();
+    const subject = this.#researchSubject(planId);
+    const { plan, conversation } = subject;
+    const epoch = conversation.projectId !== null ? this.#epochOf(conversation.projectId) : 0;
+    const researchEpoch = this.#webResearchEpoch;
+    const request = await this.#researchRequest(subject, selection);
+    if (request.preview.blocked) throw new Error(request.preview.blocked);
+    if (request.preview.expected !== expected) throw new Error("What this research would send has changed since you previewed it. Check the new preview, then start again.");
+    if (!this.webResearch() || this.#webResearchEpoch !== researchEpoch) throw new Error("Research queries to Tavily were turned off, so the research wasn't started.");
+    if (conversation.projectId !== null) {
+      const now = this.#options.store.data.projects.find((p) => p.id === conversation.projectId);
+      if (!now || this.#removing.has(now.id)) throw new Error(RESEARCH_CLOSED);
+      if (!now.sharing.modelContext || this.#epochOf(now.id) !== epoch) throw new Error("Sharing for this project was turned off, so the research wasn't started.");
+    }
+    if (!getConversation(workspace, conversation.id) || !getArtifact(workspace, plan.id)) throw new Error("That plan is no longer here.");
+    const id = randomUUID();
+    const { packet } = request.context;
+    const research = {
+      id,
+      conversationId: conversation.id,
+      planId: plan.id,
+      planLineage: plan.lineageId,
+      planVersion: plan.version,
+      planSha256: plan.sha256,
+      packetDigest: request.input.packetDigest,
+      queries: request.queries,
+      sites: packet.sites,
+      scope:
+        conversation.projectId !== null
+          ? { kind: "project" as const, projectId: conversation.projectId, projectLabel: subject.project?.label ?? null, headAtStart: packet.scope.kind === "project" ? packet.scope.headAtStart : null }
+          : { kind: "general" as const },
+      createdAt: new Date().toISOString(),
+    };
+    if (!insertResearch(workspace, research, { sessionId: this.#sessionId, targetId: conversation.targetId })) {
+      throw new Error(this.#busyReason(conversation.id, "start research") ?? "This conversation is busy. Wait for it, then start research.");
+    }
+    this.#submissions.set(id, { cancel: null });
+    void this.#submit(id, conversation, { workflowId: "research", input: request.input, context: request.context }, epoch, researchEpoch).catch((error: unknown) =>
+      this.#options.log(`Research couldn't be sent: ${errorText(error)}`),
+    );
+    return this.#researchView(getResearch(workspace, id)!, this.#engineView(conversation.targetId));
+  }
+
+  /** A conversation's research, oldest first, read from the workspace. Asks no engine and starts nothing. */
+  research(conversationId: string): ResearchView[] {
+    const workspace = this.#workspaceDb();
+    const record = getConversation(workspace, conversationId);
+    if (!record) throw new Error("That conversation is no longer in the list.");
+    const engine = this.#engineView(record.targetId);
+    return researchOf(workspace, conversationId).map((research) => this.#researchView(research, engine));
+  }
+
+  /** Stops research the person no longer wants (D37); its end is recorded as cancelled by the person. */
+  async cancelResearch(conversationId: string, researchId: string): Promise<ResearchView[]> {
+    const research = getResearch(this.#workspaceDb(), researchId);
+    if (!research || research.conversationId !== conversationId) throw new Error("That research is no longer in this conversation.");
+    await this.#cancelLink(research.link);
+    return this.research(conversationId);
+  }
+
+  /** Whether research may send a plan version's approved queries to Tavily (D37): off until the person turns it on. */
+  webResearch(): boolean {
+    return this.#options.store.data.webResearch === true;
+  }
+
+  /**
+   * Turns research's queries to Tavily on or off (D37). Turning it off raises research's epoch, which a start or a send
+   * in progress checks, and stops every research run under way with a stop of its own: a run is cancelled on its
+   * engine, and a stop its engine couldn't carry out is withdrawn and reported, never passed over.
+   */
+  async setWebResearch(on: boolean): Promise<void> {
+    this.#options.store.update((data) => ({ ...data, webResearch: on }));
+    if (on) return;
+    this.#webResearchEpoch++;
+    if (this.#workspace.state !== "ready") return;
+    const workspace = this.#workspace.db;
+    const stopped = openResearch(workspace).flatMap((link) => {
+      const token = stopResearch(workspace, link.id, "web-research");
+      return token ? [{ link, token }] : [];
+    });
+    // One still being sent stops at its own check, and one whose run isn't known yet once it is found. A run whose
+    // engine isn't online isn't running any more (D4).
+    const running = stopped.filter(({ link }) => link.runId && this.#engines.get(link.targetId)?.supervisor.state.status === "online");
+    const results = await Promise.allSettled(running.map(({ link }) => this.cancelRun(link.runId!)));
+    const failed = running.flatMap((stop, index) => {
+      const result = results[index]!;
+      return result.status === "rejected" ? [{ ...stop, why: errorText(result.reason) }] : [];
+    });
+    if (this.#workspace.state === "ready") for (const { link, token } of failed) withdrawStop(this.#workspace.db, link.id, token);
+    if (failed.length) {
+      const one = failed.length === 1;
+      throw new Error(
+        `Research queries to Tavily are off, but Nivra couldn't stop ${one ? "a research run" : `${failed.length} research runs`} (${failed[0]!.why}). Restart ${one ? "its engine" : "their engines"} to stop ${one ? "it" : "them"}.`,
+      );
+    }
   }
 
   /** The workspace's state and every task, the most recently changed first. */
@@ -1106,7 +1248,7 @@ export class Host {
   /** Hands every engine the keys as they are now (D8), including one that was still starting when they changed. */
   async secretsChanged(): Promise<void> {
     const secrets = await this.#options.credentials();
-    const remove = (["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID"] as const).filter((name) => !secrets[name]);
+    const remove = (["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID", "TAVILY_API_KEY"] as const).filter((name) => !secrets[name]);
     const results = await Promise.allSettled(
       [...this.#engines.values()].map(async (engine) => {
         if (engine.supervisor.state.status === "starting") await engine.supervisor.start().catch(() => undefined);
@@ -1291,18 +1433,27 @@ export class Host {
   /**
    * Records why the project's open conversation turns stop, so each ends as cancelled by that, not by the person.
    * Returns a function that takes the reason back, for when they couldn't be stopped. A turn still being sent stops
-   * through its epoch check either way.
+   * through its epoch check either way. Research is stopped with a stop of its own, by cause and token (D37), and only
+   * that stop is taken back.
    */
   #markProjectTurns(projectId: string, reason: CancelReason): () => void {
     if (this.#workspace.state !== "ready") return () => undefined;
     const workspace = this.#workspace.db;
-    const marked = openTurns(workspace, { projectId }).filter((turn) => requestCancel(workspace, turn.id, reason) && turn.cancelReason === null);
+    const open = openTurns(workspace, { projectId });
+    const marked = open.filter((turn) => requestCancel(workspace, turn.id, reason) && turn.cancelReason === null);
     for (const turn of marked) {
       const pending = this.#submissions.get(turn.id);
       if (pending) pending.cancel ??= reason;
     }
+    const cause: StopCause = reason === "sharing" ? "model-sharing" : reason;
+    const stopped = open.flatMap((link) => {
+      const token = link.workflowId === "research" ? stopResearch(workspace, link.id, cause) : null;
+      return token ? [{ id: link.id, token }] : [];
+    });
     return () => {
-      if (this.#workspace.state === "ready") for (const turn of marked) withdrawCancel(this.#workspace.db, turn.id, reason);
+      if (this.#workspace.state !== "ready") return;
+      for (const turn of marked) withdrawCancel(this.#workspace.db, turn.id, reason);
+      for (const { id, token } of stopped) withdrawStop(this.#workspace.db, id, token);
     };
   }
 
@@ -1311,10 +1462,14 @@ export class Host {
     return Object.entries(await this.#options.credentials()).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
   }
 
-  /** Why a conversation can't take another run now (D31): a turn or a review still going, in the person's terms; null when it can. */
+  /**
+   * Why a conversation can't take another run now (D31, D37): a turn, a review or research still going, in the person's
+   * terms; null when it can.
+   */
   #busyReason(conversationId: string, then: string): string | null {
     const open = openTurns(this.#workspaceDb(), { conversationId });
     if (!open.length) return null;
+    if (open.some((link) => link.workflowId === "research")) return `Research of a plan's assumptions is running in this conversation. Wait for it, or cancel it, then ${then}.`;
     return open.some((link) => link.workflowId === "review")
       ? `A review of a plan is running in this conversation. Wait for it, or cancel it, then ${then}.`
       : `This conversation is still waiting for an answer. Wait for it, or cancel it, then ${then}.`;
@@ -1326,6 +1481,20 @@ export class Host {
    */
   async #cancelLink(link: TurnRecord): Promise<void> {
     if (link.status !== "submitting" && link.status !== "running") return;
+    if (link.workflowId === "research") {
+      // A stop of its own (D37). One being sent stops at its own check, one whose run isn't known yet once it is found;
+      // a stop its engine can't carry out is taken back, and a newer stop is never cleared.
+      const workspace = this.#workspaceDb();
+      const token = stopResearch(workspace, link.id, "person");
+      if (!token) return;
+      if (link.runId) {
+        await this.cancelRun(link.runId).catch((error: unknown) => {
+          withdrawStop(workspace, link.id, token);
+          throw error;
+        });
+      } else if (!this.#submissions.has(link.id)) this.#follow(link.id);
+      return;
+    }
     requestCancel(this.#workspaceDb(), link.id, "person");
     const pending = this.#submissions.get(link.id);
     if (pending) pending.cancel ??= "person";
@@ -1385,6 +1554,61 @@ export class Host {
     };
   }
 
+  /**
+   * A plan version to research, with its conversation and project; refused in plain words when it can't be researched.
+   */
+  #researchSubject(planId: string): ResearchSubject {
+    const workspace = this.#workspaceDb();
+    const plan = getArtifact(workspace, planId);
+    const conversation = plan?.kind === "plan" && plan.conversationId ? getConversation(workspace, plan.conversationId) : null;
+    if (!plan || !conversation) throw new Error("That plan is no longer here.");
+    const latestVersion = versionsOf(workspace, plan.lineageId).at(-1)?.version ?? plan.version;
+    if (conversation.projectId === null) return { plan, latestVersion, conversation, project: null };
+    const project = this.#options.store.data.projects.find((p) => p.id === conversation.projectId);
+    if (!project) throw new Error(RESEARCH_CLOSED);
+    if (this.#removing.has(project.id)) throw new Error("This plan's project is being removed, so its assumptions can't be checked.");
+    return { plan, latestVersion, conversation, project: { label: project.label, targetLabel: this.#labelOf(project.targetId), modelSharing: project.sharing.modelContext } };
+  }
+
+  /**
+   * Everything research of `subject` with `selection` would send, worked out from the records as they are now (D37):
+   * the packet, what no query may name (every project's name, and the paths the plan cites), the permissions, and the
+   * preview that shows them, with the fingerprint that binds it.
+   */
+  async #researchRequest(subject: ResearchSubject, selection: ResearchSelection): ReturnType<typeof researchRequest> {
+    return researchRequest(subject, selection, {
+      webResearch: this.webResearch(),
+      tavilyKey: Boolean((await this.#options.credentials())["TAVILY_API_KEY"]),
+      known: await this.#knownSecrets(),
+      projects: this.#options.store.data.projects.map(({ label, nativePath }) => ({ label, nativePath })),
+      busy: this.#busyReason(subject.conversation.id, "start research"),
+    });
+  }
+
+  /**
+   * Why research must not go on (D37): the stop on record, or a permission withdrawn since it was asked for (research
+   * turned off, the project's sharing turned off, or the project removed). Null when it may.
+   */
+  #researchStop(id: string, conversation: ConversationRecord, epoch: number, researchEpoch: number): StopCause | null {
+    const recorded = this.#workspace.state === "ready" ? (getResearch(this.#workspace.db, id)?.stop?.cause ?? null) : null;
+    if (recorded) return recorded;
+    if (!this.webResearch() || this.#webResearchEpoch !== researchEpoch) return "web-research";
+    if (conversation.projectId === null) return null;
+    const project = this.#options.store.data.projects.find((p) => p.id === conversation.projectId);
+    if (!project || this.#removing.has(project.id)) return "removal";
+    if (!project.sharing.modelContext || this.#epochOf(project.id) !== epoch) return "model-sharing";
+    return null;
+  }
+
+  /**
+   * Records a research stop that a permission check found, unless one is on record already: that one says why (D37).
+   */
+  #recordResearchStop(id: string, cause: StopCause): void {
+    if (this.#workspace.state !== "ready") return;
+    const workspace = this.#workspace.db;
+    if (!getResearch(workspace, id)?.stop) stopResearch(workspace, id, cause);
+  }
+
   /** Why a turn must not be sent now (a cancel, or its project's consent gone since it was asked for); null when it may. */
   #stopReason(turnId: string, conversation: ConversationRecord, epoch: number): CancelReason | null {
     const asked = this.#submissions.get(turnId)?.cancel ?? null;
@@ -1403,15 +1627,28 @@ export class Host {
   }
 
   /**
-   * Sends a stored turn or review (D26, D31). The request is written only after the engine's store is recorded with it,
-   * so one with none was never sent. A failure known to come before writing is "not sent"; anything after it (no answer,
-   * a closed connection, an error answer: the engine may have started the run first) leaves it to be found by its
-   * request id.
+   * Sends a stored turn, review or research (D26, D31, D37). The request is written only after the engine's store is
+   * recorded with it, so one with none was never sent. A failure known to come before writing is "not sent"; anything
+   * after it (no answer, a closed connection, an error answer: the engine may have started the run first) leaves it to
+   * be found by its request id.
    */
-  async #submit(turnId: string, conversation: ConversationRecord, request: LinkRequest, epoch: number): Promise<void> {
+  async #submit(turnId: string, conversation: ConversationRecord, request: LinkRequest, epoch: number, researchEpoch = this.#webResearchEpoch): Promise<void> {
     const workspace = this.#workspaceDb();
     const label = this.#labelOf(conversation.targetId);
-    const what = request.workflowId === "review" ? "this review" : "this message";
+    const what = request.workflowId === "review" ? "this review" : request.workflowId === "research" ? "this research" : "this message";
+    // Research reaches two services; a turn and a review reach the model alone.
+    const nothing = request.workflowId === "research" ? "nothing reached Tavily or Token Factory" : "nothing reached the model";
+    // A stop asked for meanwhile, or a permission withdrawn since: recorded, and research's with its own cause (D37).
+    const stopped = (): boolean => {
+      if (request.workflowId === "research") {
+        const cause = this.#researchStop(turnId, conversation, epoch, researchEpoch);
+        if (cause) this.#recordResearchStop(turnId, cause);
+        return cause !== null;
+      }
+      const reason = this.#stopReason(turnId, conversation, epoch);
+      if (reason) requestCancel(workspace, turnId, reason);
+      return reason !== null;
+    };
     const notSent = (why: string) => {
       this.#submissions.delete(turnId);
       this.#settle(turnId, { status: "not-sent", errorMessage: why });
@@ -1421,19 +1658,17 @@ export class Host {
       engine = await this.#ensure(conversation.targetId);
       if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
     } catch (error) {
-      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so ${what} wasn't sent and nothing reached the model.`);
+      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so ${what} wasn't sent and ${nothing}.`);
       return;
     }
     const state = engine.supervisor.state;
     if (state.status !== "online") {
-      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so ${what} wasn't sent and nothing reached the model.`);
+      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so ${what} wasn't sent and ${nothing}.`);
       return;
     }
-    const before = this.#stopReason(turnId, conversation, epoch);
-    if (before) {
+    if (stopped()) {
       this.#submissions.delete(turnId);
-      requestCancel(workspace, turnId, before);
-      this.#settle(turnId, { status: "cancelled", errorMessage: "It was stopped before it was sent, so nothing reached the model." });
+      this.#settle(turnId, { status: "cancelled", errorMessage: `It was stopped before it was sent, so ${nothing}.` });
       return;
     }
     // Deleted or ended meanwhile: nothing to send.
@@ -1447,7 +1682,7 @@ export class Host {
     } catch (error) {
       // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
       if (error instanceof EngineOfflineError || error instanceof TypeError) {
-        notSent(`The engine on ${label} didn't take ${what} (${errorText(error)}), so nothing reached the model.`);
+        notSent(`The engine on ${label} didn't take ${what} (${errorText(error)}), so ${nothing}.`);
         return;
       }
       this.#options.log(`A turn's request got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
@@ -1465,14 +1700,13 @@ export class Host {
       this.#conversationRuns.set(conversation.projectId, runs);
     }
     // Stopped while the request was out (a cancel, a deletion, consent withdrawn): the run stops now.
-    const late = this.#stopReason(turnId, conversation, epoch);
+    const late = stopped();
     this.#submissions.delete(turnId);
     if (getTurn(workspace, turnId) === null) {
       this.#stopDeleted(engine, turnId, state.info.homeId, run.id);
       return;
     }
     if (late) {
-      requestCancel(workspace, turnId, late);
       await engine.supervisor.call("runs.cancel", { runId: run.id }).catch((error: unknown) => this.#options.log(`A turn stopped while it was being sent couldn't be cancelled: ${errorText(error)}`));
     }
     this.#follow(turnId);
@@ -1590,6 +1824,7 @@ export class Host {
     const workspace = this.#workspaceDb();
     const link = getTurn(workspace, turnId);
     if (link?.workflowId === "review") return this.#finishReview(link, engine, summary);
+    if (link?.workflowId === "research") return this.#finishResearch(link, engine, summary);
     const known = await this.#knownSecrets();
     if (summary.status === "succeeded") {
       const reply = await engine.supervisor.call("runs.reply", { runId: summary.id });
@@ -1643,6 +1878,39 @@ export class Host {
     }
     const { interrupted, kind } = await this.#failureOf(engine, summary.id);
     end(interrupted ? { status: "interrupted" } : { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The review failed.", known) }, kept);
+  }
+
+  /**
+   * Records how research's run ended (D37), with the report its engine saved, masked again. A report that isn't the one
+   * this research asked for (another plan version, packet, scope, queries, request or run) is kept nowhere, and its end
+   * is unknown. A report that ended short is kept with how it ended: what was read, and what the model handed in, stay
+   * as evidence.
+   */
+  async #finishResearch(link: TurnRecord, engine: Engine, summary: RunSummary): Promise<void> {
+    const research = getResearch(this.#workspaceDb(), link.id);
+    if (!research) return;
+    const known = await this.#knownSecrets();
+    const report = await engine.supervisor.call("runs.research", { runId: summary.id });
+    if (report && !researchReportMatches(report, research, summary.id)) {
+      this.#settle(link.id, { status: "unknown", errorMessage: "its engine's report is about something other than what this research sent, so none of it was kept" });
+      return;
+    }
+    const kept = report ? maskValue(report, known) : null;
+    const end = (outcome: Parameters<typeof settleResearch>[2], with_: ResearchReport | null) => {
+      if (this.#workspace.state === "ready") settleResearch(this.#workspace.db, link.id, outcome, with_, new Date().toISOString());
+    };
+    if (summary.status === "succeeded") {
+      if (kept?.outcome === "complete") end({ status: "answered" }, kept);
+      else this.#settle(link.id, { status: "unknown", errorMessage: "its run finished, but its engine has no complete report stored for it" });
+      return;
+    }
+    if (summary.status === "cancelled") {
+      // A stop Nivra asked for is on record with its cause; any other cancel means Nivra or its engine stopped first.
+      end({ status: getResearch(this.#workspaceDb(), link.id)?.stop ? "cancelled" : "interrupted" }, kept);
+      return;
+    }
+    const { interrupted, kind } = await this.#failureOf(engine, summary.id);
+    end(interrupted ? { status: "interrupted" } : { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The research failed.", known) }, kept);
   }
 
   /** How a failed run ended, from its events: interrupted by its engine stopping, or failed, with the kind it gave. */
@@ -1703,6 +1971,35 @@ export class Host {
       references: review.scope.kind === "project" && plan ? historicalReferences(plan.content as PlanContent) : [],
       report: review.report,
       createdAt: review.createdAt,
+      settledAt: link.settledAt,
+    };
+  }
+
+  #researchView(research: ResearchRecord, engine: EngineView): ResearchView {
+    const { link } = research;
+    const workspace = this.#workspaceDb();
+    const open = link.status === "submitting" || link.status === "running";
+    const away = open && !this.#submissions.has(link.id) && engine.state.status !== "online";
+    const amended = research.amendedPlanId ? getArtifact(workspace, research.amendedPlanId) : null;
+    return {
+      id: research.id,
+      conversationId: research.conversationId,
+      planId: research.planId,
+      planLineage: research.planLineage,
+      planVersion: research.planVersion,
+      latestVersion: versionsOf(workspace, research.planLineage).at(-1)?.version ?? research.planVersion,
+      status: link.status,
+      note: researchNoteFor(link, research.stop),
+      unresolved: away ? (engine.state.status === "failed" ? engine.state.reason : `The engine on ${engine.label} isn't running, so Nivra can't check this research yet. It checks again when you open the conversation.`) : null,
+      runId: link.runId,
+      cancelRequested: link.cancelRequested,
+      stopCause: research.stop?.cause ?? null,
+      queries: research.queries,
+      sites: research.sites,
+      packetDigest: research.packetDigest,
+      amended: amended ? { planId: amended.id, version: amended.version } : null,
+      report: research.report as ResearchView["report"],
+      createdAt: research.createdAt,
       settledAt: link.settledAt,
     };
   }

@@ -127,6 +127,14 @@ export function getResearch(workspace: WorkspaceDb, id: string): ResearchRecord 
   return row ? recordOf(workspace, row) : null;
 }
 
+/** Research still under way in any conversation, as run links: what turning research off stops (D37). */
+export function openResearch(workspace: WorkspaceDb): TurnRecord[] {
+  return workspace.db
+    .prepare(`SELECT id FROM run_links WHERE workflow_id = 'research' AND status IN ${OPEN} ORDER BY rowid`)
+    .all()
+    .flatMap((row) => getTurn(workspace, str(row["id"])) ?? []);
+}
+
 /** A conversation's research, oldest first. */
 export function researchOf(workspace: WorkspaceDb, conversationId: string): ResearchRecord[] {
   return workspace.db

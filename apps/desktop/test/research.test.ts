@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-// The domain's research contract isn't exported until research's integration window: its tests read it directly.
-import { QUERY_PROBLEM_WORDS, queryProblems, RESEARCH_LIMITS, ResearchContext, ResearchDeny, ResearchInput, ResearchPacket, researchPacketDigest, siteProblem } from "../../../packages/domain/src/research.ts";
+import { QUERY_PROBLEM_WORDS, queryProblems, RESEARCH_LIMITS, ResearchContext, ResearchDeny, ResearchInput, ResearchPacket, researchPacketDigest } from "@nivra/domain";
 import type { KnownSecrets } from "../src/main/protect.ts";
 import {
   amendedContent,
@@ -15,7 +14,6 @@ import {
   researchPacket,
   researchReportMatches,
   researchRequest,
-  type ResearchContract,
   type ResearchState,
   type ResearchSubject,
 } from "../src/main/research.ts";
@@ -36,7 +34,6 @@ import {
   type ResearchSelection,
 } from "../src/shared/research.ts";
 
-const CONTRACT: ResearchContract = { limits: RESEARCH_LIMITS, packetDigest: researchPacketDigest, queryProblems, problemWords: QUERY_PROBLEM_WORDS, siteProblem };
 const SAVED = "NIVRA-SAVED-KEY-CANARY-7f3a";
 const KNOWN: KnownSecrets = [["NEBIUS_API_KEY", SAVED]];
 const TOKEN = `ghp_${"a1B2".repeat(9)}`;
@@ -105,7 +102,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
       assumptions: [pick(1, "  Python 3.12 f-string quotes PEP 701  "), typed("  venv still pre-installs setuptools ", "venv setuptools Python 3.12"), pick(0, "")],
       sites: { mode: "prefer", hosts: [" Docs.Python.org ", "peps.python.org", "docs.python.org", "bücher.de"] },
     };
-    const packet = researchPacket(plan, conversation, selection, KNOWN, CONTRACT);
+    const packet = researchPacket(plan, conversation, selection, KNOWN);
     assert.deepEqual(
       packet.assumptions.map((assumption) => [assumption.id, assumption.origin, assumption.query]),
       [
@@ -119,7 +116,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     // What the engine wrote is masked again before it goes anywhere.
     assert.equal(packet.assumptions[2]!.text.includes(SAVED), false);
     // Sites written several ways count once each.
-    const variants = researchPacket(plan, conversation, { assumptions: [pick(1, "q")], sites: { mode: "restrict", hosts: ["Docs.Python.org", "docs.python.org", " DOCS.PYTHON.ORG", "peps.python.org", "Peps.Python.Org", "peps.python.org "] } }, KNOWN, CONTRACT);
+    const variants = researchPacket(plan, conversation, { assumptions: [pick(1, "q")], sites: { mode: "restrict", hosts: ["Docs.Python.org", "docs.python.org", " DOCS.PYTHON.ORG", "peps.python.org", "Peps.Python.Org", "peps.python.org "] } }, KNOWN);
     assert.deepEqual(variants.sites, { mode: "restrict", hosts: ["docs.python.org", "peps.python.org"] });
     // With every query written, the domain's own schema takes the packet whole.
     packet.assumptions[2]!.query = "Python 3.12 distutils removed";
@@ -129,7 +126,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
   it("refuses a plan, an assumption or a site research can't take, in words that say which and never the value", () => {
     const conversation = project();
     const plan = planOf(conversation, { assumptions: ["distutils is still in Python 3.12's standard library", "x".repeat(RESEARCH_LIMITS.assumptionChars + 1)] });
-    const packetOf = (selection: Partial<ResearchSelection>, of: ArtifactRecord = plan) => researchPacket(of, conversation, { assumptions: [pick(0, "q")], sites: null, ...selection }, KNOWN, CONTRACT);
+    const packetOf = (selection: Partial<ResearchSelection>, of: ArtifactRecord = plan) => researchPacket(of, conversation, { assumptions: [pick(0, "q")], sites: null, ...selection }, KNOWN);
     const cases: Array<[string, () => unknown, RegExp]> = [
       ["a long plan", () => packetOf({}, planOf(conversation, { text: "x".repeat(RESEARCH_LIMITS.planChars + 1) })), /is 20,001 characters long, and research can take 20,000\. Edit the plan to shorten it/],
       ["a token in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${TOKEN} to pull.` })), /^This plan version looks like it holds a GitHub token, so nothing was sent\. Edit the plan to remove it, then research the new version\.$/],
@@ -172,7 +169,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.deepEqual(deny, { terms: ["shop", "shop-api", "Billing"], paths: ["build/Dockerfile"] });
     assert.equal(ResearchDeny.safeParse(deny).success, true);
     const values = KNOWN.map(([, value]) => value);
-    const problems = (query: string) => queryChecks({ ...researchPacket(planOf(conversation), conversation, { assumptions: [pick(0, query)], sites: null }, KNOWN, CONTRACT) }, deny, KNOWN, CONTRACT)[0]!.problems;
+    const problems = (query: string) => queryChecks({ ...researchPacket(planOf(conversation), conversation, { assumptions: [pick(0, query)], sites: null }, KNOWN) }, deny, KNOWN)[0]!.problems;
     assert.deepEqual(problems("Python 3.12 distutils removed setup.py"), []);
     assert.deepEqual(problems("distutils in build/Dockerfile"), [QUERY_PROBLEM_WORDS["cited-path"]]);
     assert.deepEqual(problems("Billing service distutils"), [QUERY_PROBLEM_WORDS.project]);
@@ -190,7 +187,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     const conversation = general();
     const subject = subjectOf(conversation);
     const selection: ResearchSelection = { assumptions: [typed("distutils is still in Python 3.12's standard library", "Python 3.12 distutils removed")], sites: null };
-    const request = await researchRequest(subject, selection, state(), CONTRACT);
+    const request = await researchRequest(subject, selection, state());
     const { preview } = request;
     assert.deepEqual(
       [preview.blocked, preview.tavily, preview.model, preview.limits],
@@ -210,7 +207,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.deepEqual(request.context.sharing, { modelContext: false, webResearch: true });
 
     // The same records give the same fingerprint; any change to what would be sent, or to a permission, gives another.
-    const again = async (change: Partial<ResearchSelection> = {}, at: Partial<ResearchState> = {}, of: ResearchSubject = subject) => (await researchRequest(of, { ...selection, ...change }, state(at), CONTRACT)).preview.expected;
+    const again = async (change: Partial<ResearchSelection> = {}, at: Partial<ResearchState> = {}, of: ResearchSubject = subject) => (await researchRequest(of, { ...selection, ...change }, state(at))).preview.expected;
     assert.equal(await again(), preview.expected);
     const others = [
       await again({ assumptions: [typed("distutils is still in Python 3.12's standard library", "Python 3.12 distutils")] }),
@@ -222,14 +219,14 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.equal(new Set([preview.expected, ...others]).size, 6);
     // A project's sharing is part of what it is bound by, on or off.
     const projectSubject = subjectOf(project());
-    const sharing = async (on: boolean) => (await researchRequest({ ...projectSubject, project: { label: "shop", targetLabel: "Ubuntu", modelSharing: on } }, { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state(), CONTRACT)).preview.expected;
+    const sharing = async (on: boolean) => (await researchRequest({ ...projectSubject, project: { label: "shop", targetLabel: "Ubuntu", modelSharing: on } }, { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state())).preview.expected;
     assert.notEqual(await sharing(true), await sharing(false));
   });
 
   it("blocks Start research with the first reason that applies, and lists each query's problems", async () => {
     const conversation = project();
     const selection: ResearchSelection = { assumptions: [pick(0, "Python 3.12 distutils removed")], sites: null };
-    const blocked = async (subject: ResearchSubject, at: Partial<ResearchState> = {}, picks: ResearchSelection = selection) => (await researchRequest(subject, picks, state(at), CONTRACT)).preview.blocked;
+    const blocked = async (subject: ResearchSubject, at: Partial<ResearchState> = {}, picks: ResearchSelection = selection) => (await researchRequest(subject, picks, state(at))).preview.blocked;
     const ready = subjectOf(conversation);
     assert.equal(await blocked(ready), null);
     assert.equal(await blocked(ready, { busy: "A review of a plan is running in this conversation.", webResearch: false }), "A review of a plan is running in this conversation.");
@@ -240,7 +237,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     // A general plan needs no project's sharing.
     assert.equal(await blocked(subjectOf(general()), {}, { assumptions: [typed("a claim", "a claim")], sites: null }), null);
 
-    const preview = (await researchRequest(ready, { assumptions: [pick(0, ""), typed("Our shop service pins pip", "shop service pip pin"), pick(1, `quotes ${SAVED}`)], sites: null }, state(), CONTRACT)).preview;
+    const preview = (await researchRequest(ready, { assumptions: [pick(0, ""), typed("Our shop service pins pip", "shop service pip pin"), pick(1, `quotes ${SAVED}`)], sites: null }, state())).preview;
     assert.deepEqual(
       preview.tavily.queries.map((query) => [query.assumption, query.problems]),
       [
@@ -312,13 +309,13 @@ describe("research packets, queries and previews (NIV-45)", () => {
 
   it("refuses a project's plan whose project is gone, rather than treating it as a general one", async () => {
     const conversation = project();
-    const message = await refusalOf(() => researchRequest(subjectOf(conversation, { project: null }), { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state(), CONTRACT));
+    const message = await refusalOf(() => researchRequest(subjectOf(conversation, { project: null }), { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state()));
     assert.equal(message, "This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.");
   });
 
   it("refuses a selection whose plan holds a credential before any query is checked or fingerprinted", async () => {
     const conversation = general();
-    const message = await refusalOf(() => researchRequest(subjectOf(conversation, {}, { text: `Pull with ${TOKEN}.` }), { assumptions: [typed("a claim", "a claim")], sites: null }, state(), CONTRACT));
+    const message = await refusalOf(() => researchRequest(subjectOf(conversation, {}, { text: `Pull with ${TOKEN}.` }), { assumptions: [typed("a claim", "a claim")], sites: null }, state()));
     assert.match(message, /^This plan version looks like it holds a GitHub token, so nothing was sent\./);
   });
 });
