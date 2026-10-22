@@ -2280,6 +2280,59 @@ describe("Host: research of saved plan versions' assumptions, bound to what its 
     assert.equal(researchRequests(model).length, 0);
   });
 
+  it("saves one amended version from research, in one transaction: derived from the researched version, recorded, and never twice", async () => {
+    const { model, tavily } = await stubsFor();
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    await start(host, plan.id);
+    const research = await ended(host, conversation.id);
+    assert.equal(research.status, "answered", research.note ?? "");
+    const AMENDED = `${PLAN} Install setuptools in the 3.12 image first.`;
+    // Two saves at once: exactly one lands, and the other says why.
+    const [first, second] = await Promise.allSettled([host.saveAmendedPlan(research.id, AMENDED, ["setuptools still provides distutils"]), host.saveAmendedPlan(research.id, `${AMENDED} Twice.`, [])]);
+    assert.deepEqual([first.status, second.status], ["fulfilled", "rejected"]);
+    assert.match(String((second as PromiseRejectedResult).reason), /^Error: A version amended from this research was saved already, so nothing new was saved\./);
+    const amended = (first as PromiseFulfilledResult<Awaited<ReturnType<Host["saveAmendedPlan"]>>>).value;
+    assert.deepEqual([amended.version, amended.text, amended.assumptions, amended.latest], [2, AMENDED, ["setuptools still provides distutils"], 2]);
+    assert.deepEqual([host.plans(conversation.id).map((p) => p.version), host.research(conversation.id)[0]?.amended], [[1, 2], { planId: amended.id, version: 2 }]);
+    // One after the other: refused as well, and nothing new is saved.
+    await assert.rejects(host.saveAmendedPlan(research.id, AMENDED, []), /^Error: A version amended from this research was saved already/);
+    assert.equal(host.plans(conversation.id).length, 2);
+    // A later edit is a plain next version: the research still names the version it led to, and nothing more.
+    const v3 = await host.revisePlan(amended.id, `${AMENDED} And test it.`);
+    assert.deepEqual([v3.version, host.research(conversation.id)[0]?.amended?.version], [3, 2]);
+    await host.shutdown();
+    const workspace = new DatabaseSync(join(root, "workspace.db"), { readOnly: true });
+    try {
+      const rows = workspace.prepare("SELECT version, derived_from, content_json FROM artifacts ORDER BY version").all();
+      assert.deepEqual(rows.map((row) => [row["version"], row["derived_from"]]), [[1, null], [2, plan.id], [3, amended.id]], "each version derives from the one before");
+      assert.equal(rows.some((row) => /research/i.test(String(row["content_json"]))), false, "no version's content says anything of the research");
+    } finally {
+      workspace.close();
+    }
+  });
+
+  it("saves no amended version once the plan has moved on since its research, or when it holds a credential", async () => {
+    const { model, tavily } = await stubsFor();
+    const { host, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    await start(host, plan.id);
+    const research = await ended(host, conversation.id);
+    await assert.rejects(host.saveAmendedPlan(research.id, `${PLAN} Use ${KEY} to pull.`, []), /^Error: The plan holds your saved Token Factory key, so nothing was saved\./);
+    await host.revisePlan(plan.id, `${PLAN} Pin setuptools first.`);
+    await assert.rejects(
+      host.saveAmendedPlan(research.id, `${PLAN} Install setuptools first.`, []),
+      /^Error: This plan moved on since it was researched: v1 isn't its latest version any more, so nothing was saved\. Research the latest version, then save an amended one from that\.$/,
+    );
+    assert.deepEqual([host.plans(conversation.id).map((p) => p.version), host.research(conversation.id)[0]?.amended], [[1, 2], null]);
+  });
+
   it("fails research cleanly when Tavily can't be reached, asks the model nothing, and the conversation goes on", async () => {
     const { model, tavily } = await stubsFor();
     await tavily.close();

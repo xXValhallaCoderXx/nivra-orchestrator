@@ -77,8 +77,8 @@ import {
   type PreferenceExport,
 } from "./preferences.ts";
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
-import { researchNoteFor, researchReportMatches, researchRequest, type ResearchSubject } from "./research.ts";
-import { getResearch, insertResearch, openResearch, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
+import { amendedContent, amendedPlanFields, researchNoteFor, researchReportMatches, researchRequest, type ResearchSubject } from "./research.ts";
+import { getResearch, insertResearch, openResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
 import { historicalReferences, packetFor, previewFingerprint, reportMatches, REVIEW_REQUESTS, reviewNoteFor } from "./reviews.ts";
 import { BriefContentSchema, BriefFieldsSchema, briefForRepository, briefFrom, briefIsReady, nextState, planFromAnswer, RUN_UNAVAILABLE, sourceFrom, TASK_LIMITS, type PlanContent } from "./tasks.ts";
 import { EngineOfflineError, EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
@@ -151,6 +151,8 @@ const CLOSED = "This conversation's project was removed, so it can't continue. I
 const REVIEW_CLOSED = "This plan's project was removed, so it can't be reviewed. Its history stays here until you delete it.";
 /** Why a plan's assumptions can't be checked once its project is gone. */
 const RESEARCH_CLOSED = "This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.";
+/** Why research leads to one amended version at most (D37). */
+const AMENDED_ALREADY = "A version amended from this research was saved already, so nothing new was saved. Open the plan to see it.";
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const isRunNotFound = (error: unknown) => error instanceof RpcCallError && error.code === ErrorCode.RunNotFound;
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref?.());
@@ -621,6 +623,49 @@ export class Host {
     if (!research || research.conversationId !== conversationId) throw new Error("That research is no longer in this conversation.");
     await this.#cancelLink(research.link);
     return this.research(conversationId);
+  }
+
+  /**
+   * Saves the version the person amended from research (D37): their text and assumptions, checked as any plan's are,
+   * as the next version of the researched plan, derived from it. One transaction checks that the researched version is
+   * still the latest, adds the next version, and records it on the research: when any part fails, nothing is saved, so
+   * research leads to one amended version at most.
+   */
+  async saveAmendedPlan(researchId: string, text: string, assumptions: readonly string[]): Promise<PlanView> {
+    const workspace = this.#workspaceDb();
+    const research = getResearch(workspace, researchId);
+    if (!research) throw new Error("That research is no longer here.");
+    if (research.amendedPlanId) throw new Error(AMENDED_ALREADY);
+    if (research.report === null) throw new Error("This research has no report, so no version can be amended from it.");
+    const researched = getArtifact(workspace, research.planId);
+    if (!researched) throw new Error("That plan is no longer here.");
+    const fields = amendedPlanFields(text, assumptions, await this.#knownSecrets());
+    const moved = `This plan moved on since it was researched: v${research.planVersion} isn't its latest version any more, so nothing was saved. Research the latest version, then save an amended one from that.`;
+    const saved = workspace.tx(() => {
+      // Read again inside the transaction: another save may have landed while the fields were checked.
+      if (getResearch(workspace, researchId)?.amendedPlanId) throw new Error(AMENDED_ALREADY);
+      const plan = insertArtifact(
+        workspace,
+        {
+          id: randomUUID(),
+          kind: "plan",
+          lineageId: research.planLineage,
+          content: amendedContent(researched.content as PlanContent, fields),
+          conversationId: research.conversationId,
+          taskId: null,
+          messageId: researched.messageId,
+          runLinkId: researched.runLinkId,
+          derivedFrom: researched.id,
+          createdAt: new Date().toISOString(),
+        },
+        research.planVersion,
+      );
+      if (!plan) throw new Error(moved);
+      // Recorded in the same transaction, so a version that couldn't be recorded is rolled back with it.
+      if (!recordAmendedPlan(workspace, researchId, plan.id)) throw new Error(AMENDED_ALREADY);
+      return plan;
+    });
+    return this.#planView(saved);
   }
 
   /** Whether research may send a plan version's approved queries to Tavily (D37): off until the person turns it on. */
