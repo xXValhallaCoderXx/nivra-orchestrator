@@ -10,6 +10,7 @@ const SAMPLES = {
   "api-key": `sk-proj-${"c".repeat(24)}`,
   "slack-token": `xoxb-${"1234567890"}-abcdef`,
   "linear-token": `lin_api_${"d".repeat(24)}`,
+  "tavily-key": `tvly-dev-${"e".repeat(24)}`,
 } as const;
 const KEY_BLOCK = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH PRIVATE KEY-----";
 
@@ -18,6 +19,7 @@ describe("credential shapes, shared by the engine and the host (D22, D26)", () =
     for (const [id, sample] of Object.entries(SAMPLES)) assert.deepEqual(secretShapes(`before ${sample} after`), [id], id);
     assert.deepEqual(secretShapes(`${KEY_BLOCK}\n${SAMPLES["aws-access-key"]}`), ["private-key", "aws-access-key"]);
     assert.deepEqual(secretShapes("rotate AWS_SECRET_ACCESS_KEY and the GitHub token monthly"), []);
+    assert.deepEqual(secretShapes("a tvly-short value, and tvly on its own"), [], "a Tavily key is tvly- and at least 16 more characters");
   });
 
   it("masks every shape, and keeps a key block's line breaks when asked, so line numbers stay right", () => {

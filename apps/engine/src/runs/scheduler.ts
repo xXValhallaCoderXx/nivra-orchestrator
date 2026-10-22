@@ -1,4 +1,5 @@
-import { isTerminal, type ChatContext, type JsonObject, type ReviewContext, type RunContext, type RunStatus, type SandboxContext, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { isTerminal, type JsonObject, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import type { z } from "zod";
 import { errorFacts, internalMessage, publicFailure, Refusal, type Diagnostic, type DiagnosticCode, type ErrorFacts } from "../diagnostics.ts";
 import type { NewEvent, RunStore } from "./store.ts";
 
@@ -107,6 +108,20 @@ function sameSandbox(stored: unknown, input: unknown): boolean {
   return keys.every((key) => a[key] === b[key]);
 }
 
+/** Whether a stored research input names the same plan version and packet fingerprint as a new one (D37). */
+function sameResearch(stored: unknown, input: unknown): boolean {
+  const keys = ["planId", "planVersion", "packetDigest"] as const;
+  const a = (stored ?? {}) as Record<string, unknown>;
+  const b = (input ?? {}) as Record<string, unknown>;
+  return keys.every((key) => a[key] === b[key]);
+}
+
+/**
+ * The context each kind of run carries (D21), as the protocol's start parameters define it, kept with the run's
+ * workflow so each workflow reads only its own.
+ */
+export type ContextOf = { [P in z.output<typeof StartRunParams> as P["workflowId"]]: P["context"] };
+
 /**
  * Maps how a Mastra run ended onto Nivra's statuses. Anything but success is a failure, except a cancel that was asked
  * for: an aborted step can surface as `failed`, and it is still a cancellation. A failure keeps Nivra's own words only.
@@ -132,7 +147,7 @@ export class RunScheduler {
   readonly #log: SchedulerLog;
   readonly #diagnose: (diagnostic: Diagnostic) => void;
   readonly #slots = new Map<string, Slot>();
-  readonly #contexts = new Map<string, RunContext | ChatContext | ReviewContext | SandboxContext>();
+  readonly #contexts = new Map<string, { workflowId: WorkflowId; context: ContextOf[WorkflowId] }>();
   /** Each live run's request id, for its diagnostic. */
   readonly #requests = new Map<string, string>();
   #source: WorkflowSource | null = null;
@@ -175,25 +190,33 @@ export class RunScheduler {
     });
     // A repeated request returns the run it already created, which keeps the context it came with. The same id with
     // other work is refused: a review is bound to its plan version and fingerprints (D30), a check to its preview (D36),
-    // and nothing is sent twice.
+    // research to its plan version and packet (D37), and nothing is sent twice.
     if (!created) {
       const existing = this.#store.summary(id);
-      const other = existing && ((request.workflowId === "review" && !sameReview(existing.input, request.input)) || (request.workflowId === "sandbox" && !sameSandbox(existing.input, request.input)));
+      const other =
+        existing &&
+        ((request.workflowId === "review" && !sameReview(existing.input, request.input)) ||
+          (request.workflowId === "sandbox" && !sameSandbox(existing.input, request.input)) ||
+          (request.workflowId === "research" && !sameResearch(existing.input, request.input)));
       if (existing && (existing.workflowId !== request.workflowId || other)) {
         throw new Refusal("request-conflict", "This request id already started another run, with other input. Send the new request with a new id.");
       }
     }
     if (created) {
-      this.#contexts.set(id, request.context);
+      this.#contexts.set(id, { workflowId: request.workflowId, context: request.context });
       this.#requests.set(id, request.clientRequestId);
     }
     this.pump();
     return id;
   }
 
-  /** The context the host sent with a run, while the run lasts; null once it has ended. Steps read it by run id. */
-  contextOf(runId: string): RunContext | ChatContext | ReviewContext | SandboxContext | null {
-    return this.#contexts.get(runId) ?? null;
+  /**
+   * The context the host sent with a run of `workflowId`, while the run lasts: null once it has ended, and for another
+   * workflow's run. Steps read it by run id, each workflow asking for its own kind.
+   */
+  contextOf<W extends WorkflowId>(runId: string, workflowId: W): ContextOf[W] | null {
+    const held = this.#contexts.get(runId);
+    return held && held.workflowId === workflowId ? (held.context as ContextOf[W]) : null;
   }
 
   /**

@@ -8,69 +8,13 @@ import { getTurn, type CancelReason, type TurnRecord, type TurnStatus } from "./
  * row with what it was bound to. It mirrors reviews (D31). The plan is referenced, never copied; the queries the person
  * approved are kept, as the report keeps them; the engine's report, masked again, is kept once, when the research ends.
  *
- * The migration is a constant until research's integration window appends it to `WORKSPACE_MIGRATIONS`, at the index
- * that window takes. Until then it is tested on top of the released schema.
+ * Its table is the workspace's third migration (D37).
  *
  * Every stop of a research run goes through `stopResearch`, and every withdrawal through `withdrawStop`: the person's
  * cancel, either permission turned off, a project removed and a conversation deleted. The generic `requestCancel` and
- * `withdrawCancel` in `workspace.ts` don't know about tokens, so research's window makes them refuse research links and
- * gives each of the host's stop paths a research branch; a path it missed then fails in tests rather than clearing a
- * newer stop.
+ * `withdrawCancel` in `workspace.ts` don't know about tokens, so they leave research links as they are: each of the
+ * host's stop paths needs a research branch, and a path without one fails in tests rather than clearing a newer stop.
  */
-export const RESEARCH_MIGRATION = `
-  -- Research of one saved plan version's assumptions (NIV-45): a run link with workflow 'research', and what it was
-  -- bound to. A stop's cause and token, the report and the amended plan are the only things that change afterwards.
-  CREATE TABLE research (
-    id TEXT PRIMARY KEY REFERENCES run_links(id) ON DELETE CASCADE,
-    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    plan_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
-    plan_lineage TEXT NOT NULL,
-    plan_version INTEGER NOT NULL CHECK (plan_version >= 1),
-    plan_sha256 TEXT NOT NULL,
-    packet_digest TEXT NOT NULL,
-    queries_json TEXT NOT NULL,
-    sites_json TEXT,
-    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('general', 'project')),
-    project_id TEXT,
-    project_label TEXT,
-    head_at_start TEXT,
-    stop_cause TEXT CHECK (stop_cause IN ('person', 'web-research', 'model-sharing', 'removal', 'deletion')),
-    stop_token TEXT,
-    amended_plan_id TEXT,
-    report_json TEXT,
-    reported_at TEXT,
-    created_at TEXT NOT NULL,
-    CHECK ((scope_kind = 'general') = (project_id IS NULL)),
-    CHECK ((report_json IS NULL) = (reported_at IS NULL)),
-    CHECK ((stop_cause IS NULL) = (stop_token IS NULL))
-  ) STRICT;
-  CREATE INDEX research_conversation ON research(conversation_id, created_at);
-  CREATE TRIGGER research_bound BEFORE INSERT ON research
-  WHEN NOT EXISTS (SELECT 1 FROM run_links WHERE id = NEW.id AND workflow_id = 'research' AND conversation_id = NEW.conversation_id)
-    OR NOT EXISTS (
-      SELECT 1 FROM artifacts
-      WHERE id = NEW.plan_id AND kind = 'plan' AND conversation_id = NEW.conversation_id AND lineage_id = NEW.plan_lineage AND version = NEW.plan_version AND sha256 = NEW.plan_sha256
-    )
-    OR NEW.stop_cause IS NOT NULL OR NEW.amended_plan_id IS NOT NULL OR NEW.report_json IS NOT NULL
-  BEGIN SELECT RAISE(ABORT, 'research is bound to a research run and to a plan version of its own conversation'); END;
-  CREATE TRIGGER research_frozen BEFORE UPDATE ON research
-  WHEN NEW.id IS NOT OLD.id OR NEW.conversation_id IS NOT OLD.conversation_id OR NEW.plan_id IS NOT OLD.plan_id OR NEW.plan_lineage IS NOT OLD.plan_lineage
-    OR NEW.plan_version IS NOT OLD.plan_version OR NEW.plan_sha256 IS NOT OLD.plan_sha256 OR NEW.packet_digest IS NOT OLD.packet_digest
-    OR NEW.queries_json IS NOT OLD.queries_json OR NEW.sites_json IS NOT OLD.sites_json OR NEW.scope_kind IS NOT OLD.scope_kind OR NEW.project_id IS NOT OLD.project_id
-    OR NEW.project_label IS NOT OLD.project_label OR NEW.head_at_start IS NOT OLD.head_at_start OR NEW.created_at IS NOT OLD.created_at
-    OR (OLD.report_json IS NOT NULL AND (NEW.report_json IS NOT OLD.report_json OR NEW.reported_at IS NOT OLD.reported_at))
-    OR (OLD.amended_plan_id IS NOT NULL AND NEW.amended_plan_id IS NOT OLD.amended_plan_id)
-    -- The amended plan comes from a report, and is a version of the researched plan derived from it.
-    OR (OLD.amended_plan_id IS NULL AND NEW.amended_plan_id IS NOT NULL AND (NEW.report_json IS NULL OR NOT EXISTS (
-      SELECT 1 FROM artifacts
-      WHERE id = NEW.amended_plan_id AND kind = 'plan' AND conversation_id = OLD.conversation_id AND lineage_id = OLD.plan_lineage AND derived_from = OLD.plan_id
-    )))
-    -- A stop is asked for, or withdrawn, only while the run is open.
-    OR ((NEW.stop_cause IS NOT OLD.stop_cause OR NEW.stop_token IS NOT OLD.stop_token)
-      AND NOT EXISTS (SELECT 1 FROM run_links WHERE id = OLD.id AND status IN ('submitting', 'running')))
-  BEGIN SELECT RAISE(ABORT, 'research never changes what it was bound to, keeps its first report and its amended plan, and changes its stop only while it runs'); END;
-`;
-
 /** The run link statuses of research still under way, as `workspace.ts` counts them. */
 const OPEN = "('submitting', 'running')";
 
@@ -181,6 +125,14 @@ export function insertResearch(
 export function getResearch(workspace: WorkspaceDb, id: string): ResearchRecord | null {
   const row = workspace.db.prepare("SELECT * FROM research WHERE id = ?").get(id);
   return row ? recordOf(workspace, row) : null;
+}
+
+/** Research still under way in any conversation, as run links: what turning research off stops (D37). */
+export function openResearch(workspace: WorkspaceDb): TurnRecord[] {
+  return workspace.db
+    .prepare(`SELECT id FROM run_links WHERE workflow_id = 'research' AND status IN ${OPEN} ORDER BY rowid`)
+    .all()
+    .flatMap((row) => getTurn(workspace, str(row["id"])) ?? []);
 }
 
 /** A conversation's research, oldest first. */

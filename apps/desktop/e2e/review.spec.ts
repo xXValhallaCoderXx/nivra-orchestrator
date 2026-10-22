@@ -337,7 +337,7 @@ test("reviews and their reports are kept across a relaunch, and reopening sends 
 test("deleting a conversation says its reviews go with it and what each engine keeps, then takes them", async () => {
   await openConversation(SEEDED.question);
   await page.getByTestId("conversation-delete").click();
-  await expect(page.getByText("Its messages, turns, plans and reviews are deleted from Nivra.")).toBeVisible();
+  await expect(page.getByText("Its messages, turns, plans, reviews and research are deleted from Nivra.")).toBeVisible();
   await expect(page.getByText("(a report can quote the plan)")).toBeVisible();
   await page.getByTestId("conversation-delete-confirm").click();
   await expect(page.getByTestId("nav-conversation").filter({ hasText: SEEDED.question })).toHaveCount(0);

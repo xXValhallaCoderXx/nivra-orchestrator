@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-// The domain's research contract isn't exported until research's integration window: its tests read it directly.
-import { QUERY_PROBLEM_WORDS, queryProblems, RESEARCH_LIMITS, ResearchContext, ResearchDeny, ResearchInput, ResearchPacket, researchPacketDigest, siteProblem } from "../../../packages/domain/src/research.ts";
+import { QUERY_PROBLEM_WORDS, queryProblems, RESEARCH_LIMITS, ResearchContext, ResearchDeny, ResearchInput, ResearchPacket, researchPacketDigest } from "@nivra/domain";
 import type { KnownSecrets } from "../src/main/protect.ts";
 import {
   amendedContent,
@@ -15,7 +14,7 @@ import {
   researchPacket,
   researchReportMatches,
   researchRequest,
-  type ResearchContract,
+  researchStopFailedText,
   type ResearchState,
   type ResearchSubject,
 } from "../src/main/research.ts";
@@ -28,15 +27,16 @@ import {
   attributionText,
   evidenceFor,
   initialQuery,
+  rejectedQuotes,
   requestText,
   ruleText,
+  unusableAssessments,
   usageText,
   type ResearchReportView,
   type ResearchRequestView,
   type ResearchSelection,
 } from "../src/shared/research.ts";
 
-const CONTRACT: ResearchContract = { limits: RESEARCH_LIMITS, packetDigest: researchPacketDigest, queryProblems, problemWords: QUERY_PROBLEM_WORDS, siteProblem };
 const SAVED = "NIVRA-SAVED-KEY-CANARY-7f3a";
 const KNOWN: KnownSecrets = [["NEBIUS_API_KEY", SAVED]];
 const TOKEN = `ghp_${"a1B2".repeat(9)}`;
@@ -105,7 +105,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
       assumptions: [pick(1, "  Python 3.12 f-string quotes PEP 701  "), typed("  venv still pre-installs setuptools ", "venv setuptools Python 3.12"), pick(0, "")],
       sites: { mode: "prefer", hosts: [" Docs.Python.org ", "peps.python.org", "docs.python.org", "bücher.de"] },
     };
-    const packet = researchPacket(plan, conversation, selection, KNOWN, CONTRACT);
+    const packet = researchPacket(plan, conversation, selection, KNOWN);
     assert.deepEqual(
       packet.assumptions.map((assumption) => [assumption.id, assumption.origin, assumption.query]),
       [
@@ -119,7 +119,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     // What the engine wrote is masked again before it goes anywhere.
     assert.equal(packet.assumptions[2]!.text.includes(SAVED), false);
     // Sites written several ways count once each.
-    const variants = researchPacket(plan, conversation, { assumptions: [pick(1, "q")], sites: { mode: "restrict", hosts: ["Docs.Python.org", "docs.python.org", " DOCS.PYTHON.ORG", "peps.python.org", "Peps.Python.Org", "peps.python.org "] } }, KNOWN, CONTRACT);
+    const variants = researchPacket(plan, conversation, { assumptions: [pick(1, "q")], sites: { mode: "restrict", hosts: ["Docs.Python.org", "docs.python.org", " DOCS.PYTHON.ORG", "peps.python.org", "Peps.Python.Org", "peps.python.org "] } }, KNOWN);
     assert.deepEqual(variants.sites, { mode: "restrict", hosts: ["docs.python.org", "peps.python.org"] });
     // With every query written, the domain's own schema takes the packet whole.
     packet.assumptions[2]!.query = "Python 3.12 distutils removed";
@@ -129,12 +129,12 @@ describe("research packets, queries and previews (NIV-45)", () => {
   it("refuses a plan, an assumption or a site research can't take, in words that say which and never the value", () => {
     const conversation = project();
     const plan = planOf(conversation, { assumptions: ["distutils is still in Python 3.12's standard library", "x".repeat(RESEARCH_LIMITS.assumptionChars + 1)] });
-    const packetOf = (selection: Partial<ResearchSelection>, of: ArtifactRecord = plan) => researchPacket(of, conversation, { assumptions: [pick(0, "q")], sites: null, ...selection }, KNOWN, CONTRACT);
+    const packetOf = (selection: Partial<ResearchSelection>, of: ArtifactRecord = plan) => researchPacket(of, conversation, { assumptions: [pick(0, "q")], sites: null, ...selection }, KNOWN);
     const cases: Array<[string, () => unknown, RegExp]> = [
       ["a long plan", () => packetOf({}, planOf(conversation, { text: "x".repeat(RESEARCH_LIMITS.planChars + 1) })), /is 20,001 characters long, and research can take 20,000\. Edit the plan to shorten it/],
-      ["a token in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${TOKEN} to pull.` })), /^This plan version looks like it holds a credential, so nothing was sent\./],
-      ["a saved key in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${SAVED} to pull.` })), /^This plan version holds one of your saved keys, so nothing was sent\./],
-      ["a saved key typed", () => packetOf({ assumptions: [pick(0, "q"), typed(`The key ${SAVED} works`, "q")] }), /^A2 holds one of your saved keys, so nothing was sent\. Remove it/],
+      ["a token in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${TOKEN} to pull.` })), /^This plan version looks like it holds a GitHub token, so nothing was sent\. Edit the plan to remove it, then research the new version\.$/],
+      ["a saved key in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${SAVED} to pull.` })), /^This plan version holds your saved Token Factory key, so nothing was sent\. Edit the plan to remove it, then research the new version\.$/],
+      ["a saved key typed", () => packetOf({ assumptions: [pick(0, "q"), typed(`The key ${SAVED} works`, "q")] }), /^A2 holds your saved Token Factory key, so nothing was sent\. Remove it, then preview again\.$/],
       ["a blank assumption", () => packetOf({ assumptions: [typed("   ", "q")] }), /^A1 is empty\./],
       ["a long typed assumption", () => packetOf({ assumptions: [typed("y".repeat(301), "q")] }), /^A1 is 301 characters long, and research can take 300/],
       ["a long assumption of the plan", () => packetOf({ assumptions: [pick(1, "q")] }), /assumption 2 is 301 characters long.*Type a shorter version of it instead/],
@@ -172,7 +172,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.deepEqual(deny, { terms: ["shop", "shop-api", "Billing"], paths: ["build/Dockerfile"] });
     assert.equal(ResearchDeny.safeParse(deny).success, true);
     const values = KNOWN.map(([, value]) => value);
-    const problems = (query: string) => queryChecks({ ...researchPacket(planOf(conversation), conversation, { assumptions: [pick(0, query)], sites: null }, KNOWN, CONTRACT) }, deny, KNOWN, CONTRACT)[0]!.problems;
+    const problems = (query: string) => queryChecks({ ...researchPacket(planOf(conversation), conversation, { assumptions: [pick(0, query)], sites: null }, KNOWN) }, deny, KNOWN)[0]!.problems;
     assert.deepEqual(problems("Python 3.12 distutils removed setup.py"), []);
     assert.deepEqual(problems("distutils in build/Dockerfile"), [QUERY_PROBLEM_WORDS["cited-path"]]);
     assert.deepEqual(problems("Billing service distutils"), [QUERY_PROBLEM_WORDS.project]);
@@ -180,7 +180,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.deepEqual(queryProblems(`distutils ${SAVED}`, deny, values), ["saved-key"], "the same check the engine runs again");
   });
 
-  const state = (change: Partial<ResearchState> = {}): ResearchState => ({ webResearch: true, tavilyKey: true, known: KNOWN, projects: [{ label: "shop", nativePath: "/home/me/code/shop" }], busy: null, ...change });
+  const state = (change: Partial<ResearchState> = {}): ResearchState => ({ webResearch: true, tavilyKey: true, modelKey: true, known: KNOWN, projects: [{ label: "shop", nativePath: "/home/me/code/shop" }], busy: null, ...change });
   const subjectOf = (conversation: ConversationRecord, change: Partial<ResearchSubject> = {}, content: Partial<PlanContent> = {}): ResearchSubject => {
     const plan = planOf(conversation, content);
     return { plan, latestVersion: plan.version, conversation, project: conversation.kind === "project" ? { label: "shop", targetLabel: "Ubuntu", modelSharing: true } : null, ...change };
@@ -190,7 +190,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     const conversation = general();
     const subject = subjectOf(conversation);
     const selection: ResearchSelection = { assumptions: [typed("distutils is still in Python 3.12's standard library", "Python 3.12 distutils removed")], sites: null };
-    const request = await researchRequest(subject, selection, state(), CONTRACT);
+    const request = await researchRequest(subject, selection, state());
     const { preview } = request;
     assert.deepEqual(
       [preview.blocked, preview.tavily, preview.model, preview.limits],
@@ -210,7 +210,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.deepEqual(request.context.sharing, { modelContext: false, webResearch: true });
 
     // The same records give the same fingerprint; any change to what would be sent, or to a permission, gives another.
-    const again = async (change: Partial<ResearchSelection> = {}, at: Partial<ResearchState> = {}, of: ResearchSubject = subject) => (await researchRequest(of, { ...selection, ...change }, state(at), CONTRACT)).preview.expected;
+    const again = async (change: Partial<ResearchSelection> = {}, at: Partial<ResearchState> = {}, of: ResearchSubject = subject) => (await researchRequest(of, { ...selection, ...change }, state(at))).preview.expected;
     assert.equal(await again(), preview.expected);
     const others = [
       await again({ assumptions: [typed("distutils is still in Python 3.12's standard library", "Python 3.12 distutils")] }),
@@ -222,25 +222,26 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.equal(new Set([preview.expected, ...others]).size, 6);
     // A project's sharing is part of what it is bound by, on or off.
     const projectSubject = subjectOf(project());
-    const sharing = async (on: boolean) => (await researchRequest({ ...projectSubject, project: { label: "shop", targetLabel: "Ubuntu", modelSharing: on } }, { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state(), CONTRACT)).preview.expected;
+    const sharing = async (on: boolean) => (await researchRequest({ ...projectSubject, project: { label: "shop", targetLabel: "Ubuntu", modelSharing: on } }, { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state())).preview.expected;
     assert.notEqual(await sharing(true), await sharing(false));
   });
 
   it("blocks Start research with the first reason that applies, and lists each query's problems", async () => {
     const conversation = project();
     const selection: ResearchSelection = { assumptions: [pick(0, "Python 3.12 distutils removed")], sites: null };
-    const blocked = async (subject: ResearchSubject, at: Partial<ResearchState> = {}, picks: ResearchSelection = selection) => (await researchRequest(subject, picks, state(at), CONTRACT)).preview.blocked;
+    const blocked = async (subject: ResearchSubject, at: Partial<ResearchState> = {}, picks: ResearchSelection = selection) => (await researchRequest(subject, picks, state(at))).preview.blocked;
     const ready = subjectOf(conversation);
     assert.equal(await blocked(ready), null);
     assert.equal(await blocked(ready, { busy: "A review of a plan is running in this conversation.", webResearch: false }), "A review of a plan is running in this conversation.");
     assert.match((await blocked({ ...ready, latestVersion: 2 }))!, /^This is v1 of the plan, and v2 is the latest\. Check v2 instead/);
     assert.equal(await blocked(ready, { webResearch: false, tavilyKey: false }), "Research queries to Tavily are turned off. Turn them on, then start again.");
     assert.equal(await blocked(ready, { tavilyKey: false }), "Nivra has no Tavily API key. Add one in Settings, then start again.");
+    assert.equal(await blocked(ready, { modelKey: false }), "Nivra has no Token Factory API key. Add one in Settings, then start again.");
     assert.match((await blocked({ ...ready, project: { label: "shop", targetLabel: "Ubuntu", modelSharing: false } }))!, /^This project doesn't allow sending its content to Token Factory/);
     // A general plan needs no project's sharing.
     assert.equal(await blocked(subjectOf(general()), {}, { assumptions: [typed("a claim", "a claim")], sites: null }), null);
 
-    const preview = (await researchRequest(ready, { assumptions: [pick(0, ""), typed("Our shop service pins pip", "shop service pip pin"), pick(1, `quotes ${SAVED}`)], sites: null }, state(), CONTRACT)).preview;
+    const preview = (await researchRequest(ready, { assumptions: [pick(0, ""), typed("Our shop service pins pip", "shop service pip pin"), pick(1, `quotes ${SAVED}`)], sites: null }, state())).preview;
     assert.deepEqual(
       preview.tavily.queries.map((query) => [query.assumption, query.problems]),
       [
@@ -277,7 +278,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.equal(researchNoteFor(link("cancelled"), { cause: "person", token: "T1" }), `Cancelled. ${SENT}`);
     assert.equal(researchNoteFor(link("cancelled"), { cause: "web-research", token: "T1" }), `Stopped: research queries to Tavily were turned off. ${SENT}`);
     assert.equal(researchNoteFor(link("cancelled"), { cause: "model-sharing", token: "T1" }), `Stopped: sharing for this project was turned off. ${SENT}`);
-    assert.equal(researchNoteFor(link("cancelled"), { cause: "removal", token: "T1" }), `Stopped: the project was removed. ${SENT}`);
+    assert.equal(researchNoteFor(link("cancelled"), { cause: "removal", token: "T1" }), `Stopped: the project was being removed. ${SENT}`);
     // What the host established about the stop is kept.
     assert.equal(researchNoteFor(link("cancelled", "Stopped before it was sent."), { cause: "web-research", token: "T1" }), "Stopped: research queries to Tavily were turned off. Stopped before it was sent.");
     assert.equal(researchNoteFor(link("cancelled", "Stopped before it was sent."), null), "Cancelled. Stopped before it was sent.");
@@ -286,6 +287,20 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.equal(researchNoteFor(link("not-sent"), null), "Not sent: nothing reached Tavily or Token Factory.");
     assert.match(researchNoteFor(link("unknown", "its engine stopped"), null)!, /^Nivra can't tell whether this research reached Tavily or Token Factory: its engine stopped\./);
     assert.deepEqual([researchNoteFor(link("running"), null), researchNoteFor(link("answered"), null)], [null, null]);
+  });
+
+  it("says why a stop made before its run was known couldn't be carried out, by its cause, and what to do", () => {
+    const why = "the run couldn't be stopped";
+    const then = "Press Cancel to try again, or restart its engine to stop it.";
+    assert.deepEqual(
+      (["web-research", "model-sharing", "removal", "person"] as const).map((cause) => researchStopFailedText(cause, why)),
+      [
+        `Research queries to Tavily are off, but Nivra couldn't stop this research (${why}). ${then}`,
+        `Sharing for this project is off, but Nivra couldn't stop this research (${why}). ${then}`,
+        `The project was being removed, but Nivra couldn't stop this research (${why}). ${then}`,
+        `Nivra couldn't stop this research (${why}). ${then}`,
+      ],
+    );
   });
 
   it("checks an amended version's text and assumptions as a plan's and a brief's are, and adds nothing of the research to its content", () => {
@@ -312,14 +327,14 @@ describe("research packets, queries and previews (NIV-45)", () => {
 
   it("refuses a project's plan whose project is gone, rather than treating it as a general one", async () => {
     const conversation = project();
-    const message = await refusalOf(() => researchRequest(subjectOf(conversation, { project: null }), { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state(), CONTRACT));
+    const message = await refusalOf(() => researchRequest(subjectOf(conversation, { project: null }), { assumptions: [pick(0, "Python 3.12 distutils")], sites: null }, state()));
     assert.equal(message, "This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.");
   });
 
   it("refuses a selection whose plan holds a credential before any query is checked or fingerprinted", async () => {
     const conversation = general();
-    const message = await refusalOf(() => researchRequest(subjectOf(conversation, {}, { text: `Pull with ${TOKEN}.` }), { assumptions: [typed("a claim", "a claim")], sites: null }, state(), CONTRACT));
-    assert.match(message, /^This plan version looks like it holds a credential, so nothing was sent\./);
+    const message = await refusalOf(() => researchRequest(subjectOf(conversation, {}, { text: `Pull with ${TOKEN}.` }), { assumptions: [typed("a claim", "a claim")], sites: null }, state()));
+    assert.match(message, /^This plan version looks like it holds a GitHub token, so nothing was sent\./);
   });
 });
 
@@ -421,6 +436,40 @@ describe("the research window's words and evidence (NIV-45)", () => {
       "1 Tavily credit, as reported · tokens unknown",
     );
     assert.equal(usageText({ outcome: "interrupted", requests: [request({ state: "failed", failure: "interrupted", credits: null })], usage: { credits: null, model: none } }), "Tavily credits unknown · no model call");
+  });
+
+  it("keeps the quotations not found apart, each with why, and the assessments that couldn't be used, each with why", () => {
+    const citation = (quote: string, valid: boolean, problem: "unknown-passage" | "too-short" | "not-found" | null) => ({ passage: "S1.1", stance: "contradicts" as const, quote, valid, problem });
+    assert.deepEqual(
+      rejectedQuotes({
+        citations: [citation("has been removed from the standard library", true, null), citation("a sentence no page holds at all", false, "not-found"), citation("too short", false, "too-short"), citation("no problem said", false, null)],
+      }),
+      [
+        { quote: "a sentence no page holds at all", passage: "S1.1", problem: "isn't in the passage it names" },
+        { quote: "too short", passage: "S1.1", problem: "is too short to check (under 20 characters or 4 words)" },
+        { quote: "no problem said", passage: "S1.1", problem: "isn't in the passage it names" },
+      ],
+      "only the quotations Nivra didn't find, never a valid one",
+    );
+    assert.deepEqual(unusableAssessments(null), []);
+    assert.deepEqual(unusableAssessments({ handedIn: 2, matched: 2, usable: 2, rejected: 0, entries: [], unusable: [] }), []);
+    assert.deepEqual(
+      unusableAssessments({
+        handedIn: 15,
+        matched: 2,
+        usable: 1,
+        rejected: 13,
+        entries: [{ label: "A4", reason: "unknown" }, { label: "", reason: "missing" }, ...Array.from({ length: 8 }, () => ({ label: "A1", reason: "duplicate" as const }))],
+        unusable: [{ assumption: "A2", outcome: "likely" }],
+      }).filter((line, index, all) => all.indexOf(line) === index),
+      [
+        "“A4” named no assumption that was asked about, so it was set aside.",
+        "An assessment named no assumption, so it was set aside.",
+        "“A1” answered an assumption that another assessment answered too, so it was set aside.",
+        "3 more assessments were set aside, and aren't listed.",
+        "A2's assessment gave “likely”, not supported, contradicted or unresolved, so it can't be used.",
+      ],
+    );
   });
 
   it("says what became of the model's assessments when some were set aside, and nothing when all matched", () => {

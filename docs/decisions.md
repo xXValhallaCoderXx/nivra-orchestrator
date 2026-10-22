@@ -2254,3 +2254,137 @@ the app as one deterministic run, a **sandbox check**, and nothing more: ordinar
     credentials are handed to the engine: at its start, or when the key or project id is saved. `sandbox.recover` is
     for `rpc.ts`.
 - **Evidence:** `docs/acceptance.md`, *Sandbox check, B4 (D36, NIV-44)*.
+
+## D37. Research of a saved plan version's assumptions: approved queries to Tavily, one model call, quotations checked for where they came from, behind a permission of its own (2026-10-22)
+
+**Decision.** This is R2 of NIV-45, the first slice of NIV-33. It wires research, built offline in R1 (PR 13), into the
+engine, the host and the window. The person picks one to three assumptions of a saved plan's latest version, writes
+the query for each, and sees exactly what would be sent. "Start research" is bound to that preview.
+
+- **What a run does,** on the engine of the plan's conversation (D1, D17):
+  1. checks the packet against its fingerprint, and every query again (the host checked them first);
+  2. checks the permissions and the keys, then picks the model;
+  3. one Search per assumption, with its approved query;
+  4. one Extract per assumption, of the pages its Search returned: at most five pages in all, three passages each;
+  5. one model request, admitted just before it is sent, assessing each assumption from those passages only;
+  6. Nivra's own check of each quotation against the passage it names, and the evidence rules for how each assessment
+     is shown.
+
+  Its bounds: 240 s for the whole run, with retrieval stopping at 90 s and the model getting the smaller of 150 s and
+  the time left; 3 searches, 3 extracts and 1 model request; nothing retried.
+- **What goes where.**
+  - Tavily gets the approved queries exactly as written, the sites if any, and the addresses of pages its own search
+    returned. Never the plan's text, a repository, a path, a preference or a conversation.
+  - Token Factory gets the plan's text, the assumptions and the passages read.
+- **A permission of its own.** `webResearch`, for the whole app and off until the person turns it on, governs every
+  request to Tavily. A project's plan also needs the project's sharing (D20), since its text goes to the model.
+  - Both are checked when the preview is made, at the start against their epochs, before the request is written, and
+    again on its answer.
+  - Turning research off raises its epoch and stops every research run under way.
+- **Stops, by token.** A stop records its cause (the person, research turned off, sharing turned off, the project
+  removed, or the conversation deleted) with a token of its own, and the newest stop is the one on record. A stop the
+  engine can't carry out is withdrawn by its own token only, so a newer stop is never cleared. A turn's own stop leaves
+  research alone.
+- **Protocol 9.**
+  - `runs.start` gains a `research` branch: input `{ planId, planVersion, packetDigest }`, and context
+    `{ sharing: { modelContext, webResearch }, deny, packet }`, held in memory (D21).
+  - `runs.research` gives a run's report, whatever its status. One saved before its engine stopped reads as
+    interrupted, and a request it was sending as maybe sent, with its credits unknown.
+  - `SecretName` gains `TAVILY_API_KEY`, and a Tavily key's shape (`tvly-` and 16 more characters or more) is a
+    credential wherever shapes are checked.
+  - Each workflow now reads only the context its own kind of run carries, chosen by the run's workflow, never by the
+    context's shape.
+- **Four things kept apart** in the report, on the card and in the record:
+  1. the model's conclusion, with Nivra's label beside it and the rule's reason when the evidence rules show another;
+  2. the quotations found in the source, each with its page's title, host and address as text, never a link;
+  3. the quotations not found, each with its problem in words, marked as not evidence;
+  4. the assessments that couldn't be used: set aside, or matched with no outcome Nivra recognises, each with why.
+
+  A found quotation shows where the words came from, not that they support the conclusion, and the card says so under
+  every assessment.
+- **An amended version, once.** The person may save the researched version's next version from what research found.
+  One workspace transaction checks that the researched version is still the latest, adds the next version derived from
+  it, and records it on the research. A double save never makes two, and nothing about the research goes into the
+  plan's content.
+- **Workspace v3:** the `research` table, as D31's reviews have theirs. It holds what a run was bound to, its stop, its
+  report and its amended version, the last two kept once. Version 2's text is pinned.
+- **Retention.** Tavily keeps what it receives, under its own terms. The engine keeps each report, with its queries,
+  addresses and passages, and can't delete it yet. The permission, Settings and the delete dialog say so.
+
+**Why.**
+- **NIV-45** asks for:
+  - a saved plan version and one to three assumptions, frozen with the scope and limits, so a later edit can't change
+    a run under way;
+  - a small retrieval contract with Tavily behind it, and limits set before any live work: at most 3 searches and 5
+    extracted pages;
+  - a permission for queries to Tavily of its own, the exact queries shown, and unsafe queries refused rather than
+    masked;
+  - findings that point to the excerpt the model actually had, outcomes beside the proposed amendment, and a new plan
+    version only when the person saves one.
+- **The person writes the queries.** Nothing of the plan reaches Tavily but words the person approved, so the preview
+  can show all of it. A project's plan's queries start empty, since its assumptions came from repository work; "Use
+  the assumption's words" fills one in only when pressed.
+- **A quotation is checked, not trusted.** The model may quote only the passages it was given, and Nivra looks for
+  each quotation in the passage it names. Finding it shows where the words came from, never that they support the
+  conclusion, so the conclusion stays the model's, labelled as such.
+- **R1's two live runs (22 October, PR 13)** shaped the matching. In the first, none of the model's assessments
+  named A1, A2 or A3 as its assumption, and all three came out not assessed. An assessment now counts only when it
+  names one assumption asked about, by its id or its exact words, never by its place or a likeness of words. A run
+  completes only with one that matches and gives a recognised outcome. The second run matched all three.
+- **Nate's instructions for R2 (22 October):** keep four things apart (the model's conclusion, the quotations found,
+  the quotations not found and the unusable assessments), and include the consent, cancellation, restart, amendment
+  and Windows-to-WSL checks.
+- **Admitted just before the call** (D30). An earlier order admitted the model's time before its agent was built, so
+  the request could start a few milliseconds past the run's deadline (`b10f94d`).
+- **The independent reviews of R2 (22 October),** one of the engine and domain and one of the desktop, found three
+  medium gaps and a number of small ones. Each fix has a test that fails without it:
+  1. a project-wide stop (sharing turned off, the project removed) took back every research stop in the project when
+     another of its runs couldn't be stopped. Research that had stopped then read as interrupted, and research whose
+     run wasn't known yet was never cancelled once found. Only a stop whose own cancel failed is taken back now
+     (`9230fb6`);
+  2. a report cut off during the model's request said no model call had been made; it now counts the request as one
+     that may have gone, its tokens unknown. A request refused before it was sent reads as never sent (`fcf572b`);
+  3. the test for plan text in the stores read them only after closing, which folds nivra.db's log away, so a leak in
+     an intermediate save went unseen. It now reads every store file while the engine runs too (`fcf572b`);
+  4. the smaller ones: research's own words for a send that never happened, the sites in the settings' privacy claim,
+     research in the project consent, a preview that could miss an edit made while a permission was saved, a missing
+     Token Factory key caught at the preview, R1's types aliased to the domain's, and tests that couldn't fail.
+- **Nate's review of `2fd0f73` (PR 15, 22 October)** found two more, each reproduced there, then fixed (`c786d13`):
+  1. a stop recorded while research's start had lost its answer was sent once the run was found, and a failure was
+     thrown away: the run went on while the card said "Cancelling". The stop is now taken back by its own token, the
+     card says why, and Cancel works again;
+  2. credential changes could overlap: two saves lost one key, and a save racing a removal brought the removed key
+     back. Every change to the secrets file now waits for the one before it, a re-encryption replaces only what it
+     read, and the engines are handed the keys one change at a time.
+
+**Consequences.**
+- **Numbers.** Protocol 9, workspace schema v3 and D37 were checked free on merged `main` (`471b29a`) and with the
+  execution lane before they were taken.
+- **Research from Windows.** `verify:windows` ends its WSL part with five research checks:
+  - **The host:** as Electron's main process makes it, on Windows.
+  - **The engine:** the WSL engine that host starts, given `--tavily-url` and `--token-factory-url`.
+  - **The stand-ins:** for Tavily and Token Factory, on loopback in the distribution. `verify-windows.ts` runs them
+    beside the sandbox stand-in, and the harness asks what reached them over the same channel.
+  - **What they cover:** a project inside the distribution picked as Windows names it, a plan saved from its
+    conversation, research off refusing before anything is sent, and a whole run that sends Tavily exactly the
+    approved query with its key and never the plan, and the model one request.
+  - **Rehearsed first** by `test/research-checks.test.ts` on Linux. On 22 October: 37 of 37 checks passed on Windows,
+    and `test:windows` passed 12 of 12, the Windows build's research defaults among them.
+- **The execution lane.** A Tavily key's shape now refuses a snapshot that holds one. `exec/snapshot.ts`'s
+  `SHAPE_WORDS` has no words for it yet, so such a refusal says "a credential"; the execution lane adds them. This
+  repository's tests hold Tavily-shaped strings, so a sandbox upload of it is refused, by design (refuse, never
+  redact).
+- **Limits:**
+  - a found quotation proves where its words came from, not that they support the conclusion. A quotation with an
+    elision ("...") is never found, and a passage read under one assumption's query may be cited for another;
+  - a version is recognised only when written with a dot or a v (3.12, v15), never as a bare number;
+  - from Windows, research is shown through the WSL engine against stand-ins. The native Windows engine's isn't, and
+    nothing is claimed for it;
+  - one permission for the whole app, not one per project;
+  - the engine keeps each report and can't delete it yet;
+  - Tavily's credits are shown as reported. R1's two runs each reported 0, 0 and 1 for their three extracts: an
+    observation, never taken as Tavily's policy;
+  - no test covers the preview token taken before a permission is saved, or the settings and consent wording;
+  - deferred: research from chat or in council reviews, opening pages from the app, and deleting the engine's
+    research records.
+- **Evidence:** R3 adds the acceptance record to `docs/acceptance.md`, after one approved live run through the app.

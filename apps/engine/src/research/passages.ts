@@ -1,4 +1,4 @@
-import { RESEARCH_LIMITS } from "./limits.ts";
+import { RESEARCH_LIMITS } from "@nivra/domain";
 import { plainText, type AssumptionId, type Page } from "./pages.ts";
 import { CHUNK_SEPARATOR, type ExtractedPage } from "./retrieval.ts";
 

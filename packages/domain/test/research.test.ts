@@ -14,6 +14,9 @@ import {
   type ResearchPacket as Packet,
   type ResearchReport as Report,
 } from "../src/research.ts";
+import { InitializeParams, Methods, SecretName, SecretsUpdateParams, StartRunParams } from "../src/methods.ts";
+import { PROTOCOL_VERSION } from "../src/protocol.ts";
+import { WorkflowId } from "../src/runs.ts";
 
 /** The research contract (NIV-45): what a run is bound to, what a query may not carry, and how big a report can get. */
 const PACKET: Packet = {
@@ -64,6 +67,52 @@ describe("a research packet (NIV-45)", () => {
     assert.equal(ResearchContext.safeParse(context).success, true);
     assert.equal(ResearchContext.safeParse({ ...context, preferences: { revision: 0, records: [] } }).success, false);
     assert.equal(ResearchContext.safeParse({ ...context, sharing: { modelContext: true } }).success, false);
+  });
+});
+
+describe("a research run's request (NIV-45, D37)", () => {
+  const context = { sharing: { modelContext: false, webResearch: true }, deny: NO_DENY, packet: PACKET };
+  const request = async (overrides: { input?: Record<string, unknown>; context?: unknown } = {}) => ({
+    clientRequestId: randomUUID(),
+    workflowId: "research",
+    input: { planId: randomUUID(), planVersion: 2, packetDigest: await researchPacketDigest(PACKET), ...overrides.input },
+    context: overrides.context ?? context,
+  });
+
+  it("takes the plan version and the packet's fingerprint as its input, and the packet with both permissions as its context", async () => {
+    const parsed = StartRunParams.parse(await request());
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("research"), PROTOCOL_VERSION], ["research", "research", 9]);
+    assert.equal(Methods["runs.research"].result.safeParse(null).success, true, "no report yet");
+  });
+
+  it("takes no other workflow's context, nor one without both permissions, and no input beyond what it is bound to", async () => {
+    const preferences = { revision: 0, records: [] };
+    const refused = [
+      await request({ context: { preferences, sharing: { modelContext: true } } }),
+      await request({ context: { sharing: { cloudExecution: true } } }),
+      await request({ context: { preferences, sharing: { modelContext: true }, packet: { scope: { kind: "general" }, text: "A plan", assumptions: [], references: [] } } }),
+      await request({ context: { ...context, sharing: { modelContext: true } } }),
+      await request({ context: { ...context, preferences } }),
+      await request({ input: { planText: PACKET.planText } }),
+      await request({ input: { query: "Python 3.12 distutils" } }),
+      await request({ input: { packetDigest: "not a fingerprint" } }),
+      await request({ input: { planId: "not-a-uuid" } }),
+      await request({ input: { planVersion: 0 } }),
+    ];
+    assert.deepEqual(
+      refused.map((params) => StartRunParams.safeParse(params).success),
+      refused.map(() => false),
+    );
+    // Nor does a review take research's context in place of its own.
+    const review = { clientRequestId: randomUUID(), workflowId: "review", input: { planId: randomUUID(), planVersion: 2, packetDigest: "a".repeat(64), preferencesDigest: "b".repeat(64) } };
+    const own = { preferences, sharing: { modelContext: false }, packet: { scope: { kind: "general" }, text: "A plan", assumptions: [], references: [] } };
+    assert.deepEqual([StartRunParams.safeParse({ ...review, context: own }).success, StartRunParams.safeParse({ ...review, context }).success], [true, false]);
+  });
+
+  it("holds the Tavily key as a secret of its own", () => {
+    assert.equal(SecretName.parse("TAVILY_API_KEY"), "TAVILY_API_KEY");
+    assert.equal(InitializeParams.safeParse({ protocolVersion: PROTOCOL_VERSION, client: { name: "test", version: "1" }, secrets: { TAVILY_API_KEY: `tvly-${"k".repeat(24)}` } }).success, true);
+    assert.equal(SecretsUpdateParams.safeParse({ remove: ["TAVILY_API_KEY"] }).success, true);
   });
 });
 
@@ -131,7 +180,9 @@ describe("queryProblems (NIV-45)", () => {
 
   it("refuses saved keys, credential shapes, addresses, paths, cited paths, projects, email addresses and private hosts, by kind", () => {
     const cases: Array<[string, string[]]> = [
-      ["tvly-secretsecretsecret leaked here", ["saved-key"]],
+      ["tvly-secretsecretsecret leaked here", ["saved-key", "credential"]],
+      ["deploy to e00-project-saved-id first", ["saved-key"]],
+      ["key tvly-dev-abcdefghijklmnop works", ["credential"]],
       ["key sk-proj-abcdefghijklmnopqrstuvwx works", ["credential"]],
       ["see https://docs.python.org/3/whatsnew", ["url"]],
       ["see www.python.org downloads", ["url"]],
@@ -165,7 +216,7 @@ describe("queryProblems (NIV-45)", () => {
       ["q".repeat(RESEARCH_LIMITS.queryChars + 1), ["too-long"]],
     ];
     assert.deepEqual(
-      cases.map(([query]) => queryProblems(query, deny, ["tvly-secretsecretsecret"])),
+      cases.map(([query]) => queryProblems(query, deny, ["tvly-secretsecretsecret", "e00-project-saved-id"])),
       cases.map(([, problems]) => problems),
     );
     assert.equal(Object.keys(QUERY_PROBLEM_WORDS).length, 10, "every kind has its words");

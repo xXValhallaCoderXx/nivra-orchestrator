@@ -16,6 +16,7 @@ import type {
   SandboxReport,
   SandboxStatus,
 } from "@nivra/domain";
+import type { ResearchPreview, ResearchSelection, ResearchView } from "./research.ts";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -59,6 +60,8 @@ export const IPC = {
   getSettings: "settings:get",
   setNebiusKey: "settings:nebius-key",
   setNebiusProjectId: "settings:nebius-project-id",
+  setTavilyKey: "settings:tavily-key",
+  setWebResearch: "settings:web-research",
   checkTokenFactory: "providers:check",
   listConversations: "conversations:list",
   createConversation: "conversations:create",
@@ -75,6 +78,11 @@ export const IPC = {
   startReview: "reviews:start",
   listReviews: "reviews:list",
   cancelReview: "reviews:cancel",
+  prepareResearch: "research:prepare",
+  startResearch: "research:start",
+  listResearch: "research:list",
+  cancelResearch: "research:cancel",
+  saveAmendedPlan: "research:save-amended",
   listTasks: "tasks:list",
   getTask: "tasks:get",
   createTask: "tasks:create",
@@ -240,6 +248,10 @@ export interface SettingsView {
   note: string | null;
   /** Whether a Nebius project id is saved, which Nebius Sandboxes needs with the key (D36). It is kept like the key. */
   nebiusProjectId: "none" | "set";
+  /** Whether a Tavily API key is saved, which research needs (D37). It is kept like the Nebius key. */
+  tavilyKey: "none" | "set";
+  /** Whether research may send a plan version's approved queries to Tavily (D37): off until the person turns it on. */
+  webResearch: boolean;
 }
 
 /** Whether the workspace (D26) could be opened; everything else works without it. */
@@ -312,6 +324,8 @@ export interface ConversationView {
   closed: string | null;
   /** The review still going in this conversation, which holds it as a turn does (D31); null when none is. */
   openReview: string | null;
+  /** The research still going in this conversation, which holds it as a turn does (D37); null when none is. */
+  openResearch: string | null;
 }
 
 /** A task's states (D26). `active` and `review` come only from attempts, which can't start yet. */
@@ -528,6 +542,10 @@ export interface NivraApi {
   setNebiusKey(key: string | null): Promise<SettingsView>;
   /** Saves the Nebius project id that Nebius Sandboxes needs with the key, kept like the key (D8, D36); null removes it. */
   setNebiusProjectId(projectId: string | null): Promise<SettingsView>;
+  /** Saves the Tavily API key research needs, kept like the Nebius key (D8, D37); null removes it. */
+  setTavilyKey(key: string | null): Promise<SettingsView>;
+  /** Allows or stops research's queries to Tavily, for the whole app (D37); stopping stops research under way. */
+  setWebResearch(on: boolean): Promise<SettingsView>;
   /** Token Factory from the project's engine: its NVIDIA models and one Nemotron tool call (B7). */
   checkTokenFactory(projectId: string): Promise<ProviderCheck>;
   /** The workspace's state and every conversation, the most recently active first. Reading starts no engine. */
@@ -558,6 +576,16 @@ export interface NivraApi {
   startReview(planId: string, panel: ReviewPanel, expected: string): Promise<ReviewView>;
   /** A conversation's reviews, oldest first. Reading starts no engine and asks none. */
   listReviews(conversationId: string): Promise<ReviewView[]>;
+  /** What research of this plan version's assumptions would send, with its fingerprint. Reads only: nothing is stored or sent. */
+  prepareResearch(planId: string, selection: ResearchSelection): Promise<ResearchPreview>;
+  /** Starts the research previewed; refused when what it would send changed since (`expected` is the preview's fingerprint). */
+  startResearch(planId: string, selection: ResearchSelection, expected: string): Promise<ResearchView>;
+  /** A conversation's research, oldest first. Reading starts no engine and asks none. */
+  listResearch(conversationId: string): Promise<ResearchView[]>;
+  /** Stops research that is being sent or is running; its end is recorded as cancelled by the person. */
+  cancelResearch(conversationId: string, researchId: string): Promise<ResearchView[]>;
+  /** Saves the version amended from research as the plan's next version, once, while the researched version is the latest. */
+  saveAmendedPlan(researchId: string, text: string, assumptions: string[]): Promise<PlanView>;
   /** Stops a review being sent or running; its end is recorded as cancelled by the person. */
   cancelReview(conversationId: string, reviewId: string): Promise<ReviewView[]>;
   listTasks(): Promise<TasksView>;

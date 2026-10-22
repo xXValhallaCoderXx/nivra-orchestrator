@@ -1,7 +1,8 @@
 // Stands in for an engine whose answer to runs.start is held until the test releases it (a `release` file in its
 // home), so a test can act while a submission is out. It writes every method it is asked for to `calls.log`, turns
 // runs.cancel down while a `fail-cancel` file exists, as an engine that can't stop a run would, and holds its answer to
-// runs.cancel while a `hold-cancel` file exists, until a `release-cancel` file appears. runs.get and runs.result
+// runs.cancel while a `hold-cancel` file exists, until a `release-cancel` file appears, then answers the held ones in
+// the order they came. runs.get and runs.result
 // answer for a finished run whose result holds one suggestion; runs.result is held while a `hold-result` file exists,
 // until a `release-result` file appears. Its store's id (D26) is kept in its home, so the same home keeps one id.
 // For conversation turns (D26): with an `accept` file, runs.start records the run (`accepted.log`) before it holds its
@@ -15,8 +16,11 @@
 // For sandbox checks (D36): runs.sandbox answers that there is no report yet; runs.get says "running" for a run it
 // wasn't asked to cancel while a `running` file exists, and is turned down while a `fail-get` file exists, as an engine
 // that can't read a run would.
+// For research (D37): runs.start records each research request and what it was bound to (`research.log`), and
+// runs.research answers with a report that repeats it: complete, or cancelled for a run it was asked to cancel. With a
+// `fail-cancel-once` file, the next runs.cancel it answers is turned down, and the file is removed.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const home = process.argv[process.argv.indexOf("--home") + 1];
@@ -69,6 +73,42 @@ const reviewReport = (runId) => {
     finishedAt: now,
   };
 };
+/** A research report as an engine keeps one, repeating what the research was bound to. */
+const researchReport = (runId) => {
+  const line = existsSync(join(home, "research.log")) ? readFileSync(join(home, "research.log"), "utf8").split("\n").find((entry) => entry.startsWith(`${runId} `)) : undefined;
+  if (!line) return null;
+  const { clientRequestId, input, packet } = JSON.parse(line.slice(runId.length + 1));
+  const now = new Date().toISOString();
+  const stopped = cancelled.has(runId);
+  return {
+    planId: input.planId,
+    planVersion: input.planVersion,
+    packetDigest: input.packetDigest,
+    outcome: stopped ? "cancelled" : "complete",
+    scope: packet.scope,
+    request: { runId, clientRequestId },
+    route: null,
+    queries: packet.assumptions.map(({ id, text, query }) => ({ assumption: id, text, query })),
+    sites: packet.sites,
+    requests: [],
+    pages: [],
+    passages: [],
+    assessments: [],
+    checks: { citations: 0, valid: 0, relabelled: 0 },
+    attribution: null,
+    stop: stopped ? { code: "cancelled", message: "Cancelled." } : null,
+    usage: { credits: null, model: { inputTokens: null, outputTokens: null, calls: 0, reportedCalls: 0 } },
+    budget: null,
+    elapsedMs: 0,
+    updatedAt: now,
+    finishedAt: now,
+  };
+};
+/** The answers to runs.cancel held while a `hold-cancel` file exists, given in the order they came once released. */
+const heldCancels = [];
+setInterval(() => {
+  if (heldCancels.length && existsSync(join(home, "release-cancel"))) for (const answer of heldCancels.splice(0)) answer();
+}, 25).unref();
 let buffer = "";
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -78,13 +118,16 @@ process.stdin.on("data", (chunk) => {
     buffer = buffer.slice(end + 1);
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
-      send({ id: request.id, result: { protocolVersion: 8, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 9, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
       const runId = randomUUID();
       if (existsSync(join(home, "accept"))) appendFileSync(join(home, "accepted.log"), `${request.params.clientRequestId} ${runId}\n`);
       if (request.params.workflowId === "review") appendFileSync(join(home, "reviews.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
+      if (request.params.workflowId === "research") {
+        appendFileSync(join(home, "research.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input, packet: request.params.context.packet })}\n`);
+      }
       const held = setInterval(() => {
         if (!existsSync(join(home, "release"))) return;
         clearInterval(held);
@@ -113,6 +156,8 @@ process.stdin.on("data", (chunk) => {
       send({ id: request.id, result: { kind: "general", text: "A gated reply.", cutOff: false, context: { preferences: { revision: 0, digest: "gated", records: [] }, history: record }, finishedAt: new Date().toISOString() } });
     } else if (request.method === "runs.review") {
       send({ id: request.id, result: reviewReport(request.params.runId) });
+    } else if (request.method === "runs.research") {
+      send({ id: request.id, result: researchReport(request.params.runId) });
     } else if (request.method === "runs.sandbox") {
       send({ id: request.id, result: null });
     } else if (request.method === "runs.events") {
@@ -145,7 +190,9 @@ process.stdin.on("data", (chunk) => {
       }
     } else if (request.method === "runs.cancel") {
       const answer = () => {
-        if (existsSync(join(home, "fail-cancel"))) send({ id: request.id, error: { code: -32000, message: "the run couldn't be stopped" } });
+        const once = existsSync(join(home, "fail-cancel-once"));
+        if (once) rmSync(join(home, "fail-cancel-once"));
+        if (once || existsSync(join(home, "fail-cancel"))) send({ id: request.id, error: { code: -32000, message: "the run couldn't be stopped" } });
         else {
           cancelled.add(request.params.runId);
           appendFileSync(join(home, "cancelled.log"), `${request.params.runId}\n`);
@@ -153,13 +200,7 @@ process.stdin.on("data", (chunk) => {
         }
       };
       if (!existsSync(join(home, "hold-cancel"))) answer();
-      else {
-        const held = setInterval(() => {
-          if (!existsSync(join(home, "release-cancel"))) return;
-          clearInterval(held);
-          answer();
-        }, 25);
-      }
+      else heldCancels.push(answer);
     } else if (request.method === "shutdown") {
       send({ id: request.id, result: { ok: true } });
       setTimeout(() => process.exit(0), 10);

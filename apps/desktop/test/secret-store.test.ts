@@ -10,13 +10,22 @@ after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A stand-in for safeStorage: "encrypts" by reversing, and can lose its keychain or refuse to decrypt. */
-function fakeCrypto(): KeyCrypto & { keychain: boolean; broken: boolean } {
+/**
+ * A stand-in for safeStorage: "encrypts" by reversing, and can lose its keychain or refuse to decrypt. With a `gate`,
+ * the next encryption waits for it, as a slow keychain would.
+ */
+function fakeCrypto(): KeyCrypto & { keychain: boolean; broken: boolean; gate: Promise<void> | null } {
   const crypto = {
     keychain: false,
     broken: false,
+    gate: null as Promise<void> | null,
     protects: () => crypto.keychain,
-    encrypt: async (text: string) => Buffer.from(`enc:${[...text].reverse().join("")}`),
+    encrypt: async (text: string) => {
+      const gate = crypto.gate;
+      crypto.gate = null;
+      await gate;
+      return Buffer.from(`enc:${[...text].reverse().join("")}`);
+    },
     decrypt: async (data: Buffer) => {
       if (crypto.broken) throw new Error("Error while decrypting the ciphertext provided to safeStorage.decryptString.");
       return { result: [...data.toString().slice(4)].reverse().join(""), shouldReEncrypt: false };
@@ -34,6 +43,14 @@ function store() {
 }
 
 const KEY = "nebius-test-key-0123456789";
+const TAVILY = "tavily-test-key-0123456789";
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Holds the store's next encryption until the returned function is called. */
+function hold(crypto: { gate: Promise<void> | null }): () => void {
+  let release!: () => void;
+  crypto.gate = new Promise<void>((resolve) => (release = resolve));
+  return release;
+}
 
 describe("SecretStore", () => {
   it("says a key saved without a keychain is unencrypted, and where it is", async () => {
@@ -75,5 +92,47 @@ describe("SecretStore", () => {
     await secrets.set("NEBIUS_API_KEY", null);
     assert.equal(await secrets.state("NEBIUS_API_KEY"), "none");
     assert.deepEqual(await secrets.all(), {});
+  });
+
+  it("keeps both keys when two are saved at once, the first held by a slow keychain", async () => {
+    const { secrets, crypto } = store();
+    crypto.keychain = true;
+    const release = hold(crypto);
+    const first = secrets.set("NEBIUS_API_KEY", KEY);
+    const second = secrets.set("TAVILY_API_KEY", TAVILY);
+    await pause(20);
+    release();
+    await Promise.all([first, second]);
+    assert.deepEqual(await secrets.all(), { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY });
+  });
+
+  it("never brings back a key removed while another was being saved", async () => {
+    const { secrets, crypto } = store();
+    crypto.keychain = true;
+    await secrets.set("TAVILY_API_KEY", TAVILY);
+    const release = hold(crypto);
+    const saving = secrets.set("NEBIUS_API_KEY", KEY);
+    const removing = secrets.set("TAVILY_API_KEY", null);
+    await pause(20);
+    release();
+    await Promise.all([saving, removing]);
+    assert.deepEqual(await secrets.all(), { NEBIUS_API_KEY: KEY });
+  });
+
+  it("never brings back a key removed before a read's re-encryption of it ran", async () => {
+    const { secrets, crypto, file } = store();
+    await secrets.set("TAVILY_API_KEY", TAVILY);
+    crypto.keychain = true;
+    const release = hold(crypto);
+    const saving = secrets.set("NEBIUS_API_KEY", KEY);
+    const removing = secrets.set("TAVILY_API_KEY", null);
+    // Read while the removal waits its turn: the read gives the key it read, and its re-encryption comes after the
+    // removal.
+    const reading = secrets.get("TAVILY_API_KEY");
+    await pause(20);
+    release();
+    assert.equal(await reading, TAVILY);
+    await Promise.all([saving, removing]);
+    assert.deepEqual([await secrets.all(), file().includes("TAVILY_API_KEY")], [{ NEBIUS_API_KEY: KEY }, false]);
   });
 });

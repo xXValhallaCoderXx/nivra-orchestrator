@@ -2,6 +2,7 @@
 // sends one request, prints the result as JSON, then shuts it down.
 //
 // Usage: pnpm rpc <method> [params-json] [--home <dir>] [--follow] [--token-factory-url <loopback url>] [--sandboxes-url <loopback url>]
+//   [--tavily-url <loopback url>]
 //   pnpm rpc doctor
 //   pnpm rpc runs.start '{"workflowId":"hello","input":{"repoPath":"/path/to/repo"}}' --follow
 //
@@ -22,24 +23,29 @@
 // report is printed. Against a stand-in for Nebius on this machine, pass --sandboxes-url:
 //   pnpm rpc sandbox.preview '{"repoPath":"/path/to/repo"}'
 //   pnpm rpc runs.start '{"workflowId":"sandbox","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"cloudExecution":true}}}' --follow --sandboxes-url http://127.0.0.1:<port>
+// Research of a saved plan version's assumptions (D37) needs its packet. Without the rest of its context it has no
+// permission to research and no deny list; its packet's fingerprint is worked out here when it is left out; after
+// --follow, its report is printed. Against stand-ins for Tavily and Token Factory, pass --tavily-url and
+// --token-factory-url:
+//   pnpm rpc runs.start '{"workflowId":"research","input":{"planId":"<uuid>","planVersion":1},"context":{"sharing":{"modelContext":false,"webResearch":true},"packet":{"scope":{"kind":"general"},"planText":"Plan text","assumptions":[{"id":"A1","text":"An assumption","origin":{"kind":"typed"},"query":"A query"}],"sites":null}}}' --follow
 //
-// The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY and NEBIUS_PROJECT_ID, when set,
-// are passed to the engine in `initialize`, the way the app does it (D8).
+// The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, NEBIUS_PROJECT_ID and
+// TAVILY_API_KEY, when set, are passed to the engine in `initialize`, the way the app does it (D8).
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { isMethodName, isTerminal, LineSplitter, Methods, packetDigest, preferencesDigest, PROTOCOL_VERSION, RpcCallError, RpcClient, type MethodName } from "@nivra/domain";
+import { isMethodName, isTerminal, LineSplitter, Methods, packetDigest, preferencesDigest, PROTOCOL_VERSION, researchPacketDigest, RpcCallError, RpcClient, type MethodName } from "@nivra/domain";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
-  options: { home: { type: "string" }, follow: { type: "boolean", default: false }, "token-factory-url": { type: "string" }, "sandboxes-url": { type: "string" } },
+  options: { home: { type: "string" }, follow: { type: "boolean", default: false }, "token-factory-url": { type: "string" }, "sandboxes-url": { type: "string" }, "tavily-url": { type: "string" } },
 });
 const [method, rawParams] = positionals;
 if (!method || !isMethodName(method)) {
-  console.error(`Usage: pnpm rpc <method> [params-json] [--home <dir>] [--follow] [--token-factory-url <loopback url>] [--sandboxes-url <loopback url>]\nMethods: ${Object.keys(Methods).join(", ")}`);
+  console.error(`Usage: pnpm rpc <method> [params-json] [--home <dir>] [--follow] [--token-factory-url <loopback url>] [--sandboxes-url <loopback url>] [--tavily-url <loopback url>]\nMethods: ${Object.keys(Methods).join(", ")}`);
   process.exit(2);
 }
 let params: Record<string, unknown>;
@@ -58,6 +64,15 @@ if (method === "runs.start" && params["workflowId"] === "review") {
   if (context?.preferences?.records && input["preferencesDigest"] === undefined) input["preferencesDigest"] = await preferencesDigest(context.preferences.records);
   params = { ...params, input };
 }
+// Research without the rest of its context: no permission to research or share, and nothing denied (D37). Its packet's
+// fingerprint is worked out from the packet it carries when the request leaves it out.
+if (method === "runs.start" && params["workflowId"] === "research") {
+  const given = (params["context"] ?? {}) as { sharing?: unknown; deny?: unknown; packet?: Parameters<typeof researchPacketDigest>[0] };
+  const context = { sharing: { modelContext: false, webResearch: false }, deny: { terms: [], paths: [] }, ...given };
+  const input = (params["input"] ?? {}) as Record<string, unknown>;
+  if (context.packet && input["packetDigest"] === undefined) input["packetDigest"] = await researchPacketDigest(context.packet);
+  params = { ...params, input, context };
+}
 const sandbox = method === "runs.start" && params["workflowId"] === "sandbox";
 // Without a context: no preferences, no consent to send repository content to a model (D22), and for a turn no
 // history. A sandbox check gets no upload consent (D36).
@@ -67,18 +82,19 @@ if (method === "runs.start" && params["context"] === undefined) {
 }
 if (sandbox) params = { ...params, input: { project: randomUUID(), target: "local", ...(params["input"] as Record<string, unknown>) } };
 
-const secrets = Object.fromEntries((["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID"] as const).flatMap((name) => {
+const secrets = Object.fromEntries((["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID", "TAVILY_API_KEY"] as const).flatMap((name) => {
   const value = process.env[name]?.trim();
   delete process.env[name];
   return value ? [[name, value]] : [];
 }));
 const home = values.home ?? join(homedir(), ".nivra-dev");
 const entry = fileURLToPath(new URL("../src/main.mjs", import.meta.url));
-// Stubs of Token Factory and Nebius Sandboxes on this machine, for checking a workflow without a real model or
-// sandbox (the engine refuses any other address).
+// Stubs of Token Factory, Nebius Sandboxes and Tavily on this machine, for checking a workflow without a real model,
+// sandbox or search (the engine refuses any other address).
 const stub = [
   ...(values["token-factory-url"] ? ["--token-factory-url", values["token-factory-url"]] : []),
   ...(values["sandboxes-url"] ? ["--sandboxes-url", values["sandboxes-url"]] : []),
+  ...(values["tavily-url"] ? ["--tavily-url", values["tavily-url"]] : []),
 ];
 const child = spawn(process.execPath, [entry, "--stdio", "--home", home, "--heartbeat-ms", "0", "--nivra-engine", ...stub], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 
@@ -126,6 +142,7 @@ try {
         if ((result as { workflowId?: string }).workflowId === "chat") console.log(JSON.stringify(await client.call("runs.reply", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "review") console.log(JSON.stringify(await client.call("runs.review", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "sandbox") console.log(JSON.stringify(await client.call("runs.sandbox", { runId }), null, 2));
+        if ((result as { workflowId?: string }).workflowId === "research") console.log(JSON.stringify(await client.call("runs.research", { runId }), null, 2));
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 250));

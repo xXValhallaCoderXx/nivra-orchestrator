@@ -1,3 +1,5 @@
+import type { ResearchRequestFailure } from "@nivra/domain";
+
 /**
  * Retrieval for research (NIV-45): a small contract any web search service can stand behind, and Tavily does first.
  * Search finds pages for one approved query; Extract reads selected passages from chosen pages, ranked against that
@@ -8,24 +10,8 @@
  * reported about it. A failed request is never retried here or anywhere: a run makes each request at most once.
  */
 
-/** Why a request ended without an answer. The same kinds as the report's `ResearchRequestFailure`. */
-export type RequestFailure =
-  | "auth"
-  | "rate-limit"
-  | "plan-limit"
-  | "rejected"
-  | "server"
-  | "redirect"
-  | "deadline"
-  | "cutoff"
-  | "too-large"
-  | "malformed"
-  | "network"
-  | "not-sent"
-  | "no-answer"
-  | "cancelled"
-  | "model"
-  | "interrupted";
+/** Why a request ended without an answer: the report's `ResearchRequestFailure`. */
+export type RequestFailure = ResearchRequestFailure;
 
 /** What the service said about a request, whatever its end: null wherever it said nothing. */
 export interface RequestEnd {

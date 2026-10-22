@@ -1,14 +1,13 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import type { Mask, ReviewScope, RunRoute, RunUsage } from "@nivra/domain";
+import { queryProblems, RESEARCH_LIMITS, researchPacketDigest, siteProblem, type Mask, type ResearchContext, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
 import { Refusal } from "../diagnostics.ts";
 import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
 import { policyFor } from "../providers/policy.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
-import type { AssumptionId } from "../research/pages.ts";
 import type { Retrieval } from "../research/retrieval.ts";
-import { RESEARCH_LIMITS } from "../research/limits.ts";
 import { RESEARCH_STOP_MESSAGES, runResearch, type ResearchReportShape, type ResearchStopCode } from "../research/run.ts";
+import type { ResearchTask } from "../research/task.ts";
 import { createTavily } from "../research/tavily.ts";
 import type { ExplainRecorder } from "./explain.ts";
 import { guard } from "./guard.ts";
@@ -16,38 +15,16 @@ import { guard } from "./guard.ts";
 export const RESEARCH_WORKFLOW_ID = "research";
 
 /**
- * Research of a saved plan's assumptions (NIV-45). It reaches no repository and changes nothing: it has no execution
- * backend, no git and no path, only the packet the host froze, with the queries the person approved, held in memory
- * (D21). Mastra gets nothing of it; the report is saved by the engine's store. Before anything is sent, the packet is
- * checked against its fingerprint, every query is checked again, and the permissions and keys are read: a refusal then
- * sends nothing.
- *
- * Not registered yet: research's integration window wires it into the engine, and replaces the domain contract's
- * functions passed in below with the domain's own exports.
+ * Research of a saved plan's assumptions (NIV-45, D37). It reaches no repository and changes nothing: it has no
+ * execution backend, no git and no path, only the packet the host froze, with the queries the person approved, held in
+ * memory (D21). Mastra gets nothing of it; the report is saved by the engine's store. Before anything is sent, the
+ * packet is checked against its fingerprint, every query is checked again, and the permissions and keys are read: a
+ * refusal then sends nothing.
  */
-
-/** What the host sends with a research run: the shape of the domain contract's `ResearchContext`, as zod reads it. */
-export interface ResearchContextShape {
-  sharing: { modelContext: boolean; webResearch: boolean };
-  deny: { terms: string[]; paths: string[] };
-  packet: {
-    scope: ReviewScope;
-    planText: string;
-    assumptions: Array<{ id: AssumptionId; text: string; origin: { kind: "plan"; index: number } | { kind: "typed" }; query: string }>;
-    sites: { mode: "prefer" | "restrict"; hosts: string[] } | null;
-  };
-}
-
-/** What a research run reads back from its store: the plan's id and version, and the packet's fingerprint. */
-export interface ResearchTask {
-  planId: string;
-  planVersion: number;
-  packetDigest: string;
-}
 
 export interface ResearchDeps {
   recorder: ExplainRecorder;
-  context: (runId: string) => ResearchContextShape | null;
+  context: (runId: string) => ResearchContext | null;
   task: (runId: string) => ResearchTask | null;
   requestId: (runId: string) => string | null;
   /** The Token Factory key, and the Tavily key, from the vault. */
@@ -55,14 +32,10 @@ export interface ResearchDeps {
   tavilyKey: () => string | null;
   endpoint: Endpoint;
   mask: Mask;
-  /** The vault's values. */
+  /** The vault's values: a query that holds one is refused. */
   knownValues: () => readonly string[];
   setMeta: (runId: string, meta: { usage?: RunUsage; route?: RunRoute }) => void;
   saveResult: (runId: string, report: ResearchReportShape) => void;
-  /** The domain contract's fingerprint, query checks and site check, until research's integration window exports them. */
-  packetDigest: (packet: ResearchContextShape["packet"]) => Promise<string>;
-  queryProblems: (query: string, deny: ResearchContextShape["deny"], knownValues: readonly string[]) => readonly string[];
-  siteProblem: (host: string) => string | null;
   /** Where Tavily is: its own address, or a stub on the loopback in tests. */
   tavilyUrl?: string;
   /** Tests only, in process: a client over a mock model, and another retrieval. */
@@ -79,18 +52,18 @@ export function researchRefusal(code: ResearchStopCode): Refusal {
  * Why the run must stop before anything is sent, once the packet is read: it isn't what the run was asked for, it holds
  * no assumption or more than three, or a query or a site doesn't pass the checks the host ran. Null when it may go on.
  */
-export async function contextRefusal(task: ResearchTask, context: ResearchContextShape, deps: Pick<ResearchDeps, "packetDigest" | "queryProblems" | "siteProblem">, knownValues: readonly string[]): Promise<ResearchStopCode | null> {
+export async function contextRefusal(task: ResearchTask, context: ResearchContext, knownValues: readonly string[]): Promise<ResearchStopCode | null> {
   const { packet } = context;
-  if ((await deps.packetDigest(packet)) !== task.packetDigest) return "packet-changed";
+  if ((await researchPacketDigest(packet)) !== task.packetDigest) return "packet-changed";
   if (packet.assumptions.length < 1 || packet.assumptions.length > RESEARCH_LIMITS.assumptions) return "internal";
-  if (packet.assumptions.some((assumption) => deps.queryProblems(assumption.query, context.deny, knownValues).length > 0)) return "unsafe-query";
+  if (packet.assumptions.some((assumption) => queryProblems(assumption.query, context.deny, knownValues).length > 0)) return "unsafe-query";
   const hosts = packet.sites?.hosts ?? [];
-  if (hosts.length > RESEARCH_LIMITS.sites || hosts.some((host) => deps.siteProblem(host) !== null)) return "unsafe-query";
+  if (hosts.length > RESEARCH_LIMITS.sites || hosts.some((host) => siteProblem(host) !== null)) return "unsafe-query";
   return null;
 }
 
 /** Why the run can't send anything: research turned off, a project's plan without model sharing, or a key missing. */
-export function permissionRefusal(context: ResearchContextShape, keys: { model: string | null; tavily: string | null }): ResearchStopCode | null {
+export function permissionRefusal(context: ResearchContext, keys: { model: string | null; tavily: string | null }): ResearchStopCode | null {
   if (!context.sharing.webResearch) return "web-research-off";
   if (context.packet.scope.kind === "project" && !context.sharing.modelContext) return "model-sharing-off";
   if (!keys.tavily) return "tavily-key-missing";
@@ -108,7 +81,7 @@ export function createResearchWorkflow(deps: ResearchDeps) {
   /** Each run's start, on the monotonic clock: its one deadline counts from here, its checks included. */
   const startedAt = new Map<string, number>();
 
-  const given = (runId: string): ResearchContextShape => {
+  const given = (runId: string): ResearchContext => {
     const context = deps.context(runId);
     if (!context) throw failure("internal", "this run's context is missing").because("context-missing", "research.context");
     return context;
@@ -118,7 +91,7 @@ export function createResearchWorkflow(deps: ResearchDeps) {
     if (!task) throw failure("internal", "this run's plan and fingerprint can't be read back").because("input-unreadable", "research.context");
     return task;
   };
-  const allowed = (runId: string): { context: ResearchContextShape; modelKey: string; tavilyKey: string } => {
+  const allowed = (runId: string): { context: ResearchContext; modelKey: string; tavilyKey: string } => {
     const context = given(runId);
     const keys = { model: deps.modelKey(), tavily: deps.tavilyKey() };
     const refused = permissionRefusal(context, keys);
@@ -137,7 +110,7 @@ export function createResearchWorkflow(deps: ResearchDeps) {
         try {
           const task = taskOf(runId);
           const sent = given(runId);
-          const refused = await contextRefusal(task, sent, deps, deps.knownValues());
+          const refused = await contextRefusal(task, sent, deps.knownValues());
           if (refused) throw researchRefusal(refused);
           deps.recorder.output(runId, "context", `Plan v${task.planVersion}: ${sent.packet.assumptions.length} ${sent.packet.assumptions.length === 1 ? "assumption" : "assumptions"} to check`, {
             planVersion: task.planVersion,

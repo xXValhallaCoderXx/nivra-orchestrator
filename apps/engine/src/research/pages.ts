@@ -1,4 +1,4 @@
-import { RESEARCH_LIMITS } from "./limits.ts";
+import { RESEARCH_LIMITS, type ResearchAssumptionId } from "@nivra/domain";
 import type { SearchHit } from "./retrieval.ts";
 import { sameAddress } from "./tavily.ts";
 
@@ -10,7 +10,7 @@ import { sameAddress } from "./tavily.ts";
  * query, since Extract ranks a page's passages against one query only.
  */
 
-export type AssumptionId = "A1" | "A2" | "A3";
+export type AssumptionId = ResearchAssumptionId;
 
 export interface Page {
   id: string;

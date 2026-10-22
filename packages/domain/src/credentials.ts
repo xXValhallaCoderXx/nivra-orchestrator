@@ -48,6 +48,7 @@ const SECRET_PATTERNS: ReadonlyArray<{ id: string; pattern: RegExp }> = [
   { id: "api-key", pattern: /\bsk-(?:or-v1-|ant-|proj-)?[A-Za-z0-9_-]{20,}/g },
   { id: "slack-token", pattern: /\bxox[abpr]-[A-Za-z0-9-]{10,}/g },
   { id: "linear-token", pattern: /\blin_(?:api|oauth)_[A-Za-z0-9]{20,}/g },
+  { id: "tavily-key", pattern: /\btvly-[A-Za-z0-9_-]{16,}/g },
 ];
 
 /**

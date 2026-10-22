@@ -178,14 +178,20 @@ export function recordRun(workspace: WorkspaceDb, turnId: string, runId: string)
   return Number(workspace.db.prepare("UPDATE run_links SET run_id = ?, status = 'running' WHERE id = ? AND status = 'submitting'").run(runId, turnId).changes) === 1;
 }
 
-/** Asks for an open turn to stop, keeping the first reason given. */
+/**
+ * Asks for an open turn to stop, keeping the first reason given. Research is stopped only by `stopResearch`, with a
+ * token (D37), so a research link is left as it is.
+ */
 export function requestCancel(workspace: WorkspaceDb, turnId: string, reason: CancelReason): boolean {
-  return Number(workspace.db.prepare(`UPDATE run_links SET cancel_requested = 1, cancel_reason = COALESCE(cancel_reason, ?) WHERE id = ? AND status IN ${OPEN}`).run(reason, turnId).changes) === 1;
+  return Number(workspace.db.prepare(`UPDATE run_links SET cancel_requested = 1, cancel_reason = COALESCE(cancel_reason, ?) WHERE id = ? AND workflow_id <> 'research' AND status IN ${OPEN}`).run(reason, turnId).changes) === 1;
 }
 
-/** Takes back a stop Nivra asked for and couldn't carry out, so the turn's end isn't later put down to it. */
+/**
+ * Takes back a stop Nivra asked for and couldn't carry out, so the turn's end isn't later put down to it. A research
+ * stop is withdrawn only by `withdrawStop`, with its token, so a research link is left as it is.
+ */
 export function withdrawCancel(workspace: WorkspaceDb, turnId: string, reason: CancelReason): void {
-  workspace.db.prepare(`UPDATE run_links SET cancel_requested = 0, cancel_reason = NULL WHERE id = ? AND cancel_reason = ? AND status IN ${OPEN}`).run(turnId, reason);
+  workspace.db.prepare(`UPDATE run_links SET cancel_requested = 0, cancel_reason = NULL WHERE id = ? AND workflow_id <> 'research' AND cancel_reason = ? AND status IN ${OPEN}`).run(turnId, reason);
 }
 
 /** Ends an open turn without an answer. A turn that already ended keeps its first outcome. */

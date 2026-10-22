@@ -90,6 +90,11 @@ const HostData = z.object({
   preferences: z.array(PreferenceRecord).default([]),
   /** Raised by every change to any preference, so a run can say which version of them it was given. */
   preferencesRevision: z.number().int().nonnegative().default(0),
+  /**
+   * Whether research may send a plan version's approved queries to Tavily (D37). Absent means off: until the person
+   * turns it on, and again once an older version, which drops it, has rewritten the file.
+   */
+  webResearch: z.boolean().optional(),
   zoom: z.number().min(0.5).max(3).optional(),
   window: z.object({ bounds: Rect, maximized: z.boolean() }).optional(),
 });

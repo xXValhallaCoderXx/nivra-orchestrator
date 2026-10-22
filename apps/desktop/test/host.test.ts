@@ -18,6 +18,9 @@ import type { ExecutionTarget } from "../src/main/targets/types.ts";
 import type { WslDiscovery } from "../src/main/targets/wsl-discovery.ts";
 import { httpError, startStub, text, toolCall, type Reply, type StubRequest, type Stub } from "../../engine/test/stub-token-factory.ts";
 import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandboxes.ts";
+import { extractAnswer, searchAnswer, startTavilyStub, type TavilyStub } from "../../engine/test/stub-tavily.ts";
+import { researchFingerprint } from "../src/main/research.ts";
+import type { ResearchSelection, ResearchView } from "../src/shared/research.ts";
 import { PROBE_SCRIPT } from "../../engine/src/exec/check.ts";
 
 /**
@@ -32,10 +35,12 @@ const dirs: string[] = [];
 const hosts: Host[] = [];
 const stubs: Stub[] = [];
 const sandboxStubs: SandboxStub[] = [];
+const tavilyStubs: TavilyStub[] = [];
 after(async () => {
   await Promise.all(hosts.map((host) => host.shutdown().catch(() => undefined)));
   await Promise.all(stubs.map((stub) => stub.close()));
   await Promise.all(sandboxStubs.map((stub) => stub.close()));
+  await Promise.all(tavilyStubs.map((stub) => stub.close()));
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
 });
 
@@ -86,10 +91,20 @@ function standInWsl(distro: string, inner: ExecutionTarget, beforePrepare?: () =
 const BROKEN: WslDiscovery = { status: "broken", code: "WSL_E_TEST", message: "WSL didn't answer (WSL_E_TEST). Run `wsl --update` in a terminal, then press Check again.", distros: [] };
 
 /**
- * Both engines reach `tokenFactoryUrl` and `sandboxesUrl` (loopback stubs) when they are set; `beforeWslPrepare` can
- * hold the WSL engine's start.
+ * Both engines reach `tokenFactoryUrl`, `sandboxesUrl` and `tavilyUrl` (loopback stubs) when they are set;
+ * `beforeWslPrepare` can hold the WSL engine's start; `credentials` stands in for the saved keys, which are otherwise
+ * `keys.current`.
  */
-type HostOptions = { localEntry?: string; wsl?: "ready" | "broken"; tokenFactoryUrl?: string; sandboxesUrl?: string; beforeWslPrepare?: () => Promise<void>; testHooks?: { beforeProjection?(turnId: string): Promise<void> } };
+type HostOptions = {
+  localEntry?: string;
+  wsl?: "ready" | "broken";
+  tokenFactoryUrl?: string;
+  sandboxesUrl?: string;
+  tavilyUrl?: string;
+  beforeWslPrepare?: () => Promise<void>;
+  testHooks?: { beforeProjection?(turnId: string): Promise<void> };
+  credentials?: () => Promise<Partial<Record<SecretName, string>>>;
+};
 
 function makeHost(options: HostOptions & { projects?: Array<{ targetId: string; path: string }> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "nivra host ü%# "));
@@ -105,7 +120,11 @@ function makeHost(options: HostOptions & { projects?: Array<{ targetId: string; 
 /** A host on the records and engine homes under `root`, as a desktop launch would make it: a second one is a restart. */
 function hostAt(root: string, options: HostOptions = {}) {
   const store = new HostStore(join(root, "nivra.json"));
-  const extraArgs = [...(options.tokenFactoryUrl ? ["--token-factory-url", options.tokenFactoryUrl] : []), ...(options.sandboxesUrl ? ["--sandboxes-url", options.sandboxesUrl] : [])];
+  const extraArgs = [
+    ...(options.tokenFactoryUrl ? ["--token-factory-url", options.tokenFactoryUrl] : []),
+    ...(options.sandboxesUrl ? ["--sandboxes-url", options.sandboxesUrl] : []),
+    ...(options.tavilyUrl ? ["--tavily-url", options.tavilyUrl] : []),
+  ];
   const wslTarget = standInWsl("Test", localTarget(join(root, "wsl home"), ENGINE, extraArgs), options.beforeWslPrepare);
   const discovery: WslDiscovery =
     options.wsl === "broken" ? BROKEN : { status: "ready", wslExe: "wsl.exe", distros: [{ name: "Test", version: 2, isDefault: true, defaultUid: 1000, osVersion: null }], hidden: [] };
@@ -117,7 +136,7 @@ function hostAt(root: string, options: HostOptions = {}) {
     workspacePath: join(root, "workspace.db"),
     logsDir: join(root, "logs"),
     client: { name: "host-test", version: "0" },
-    credentials: async () => keys.current,
+    credentials: options.credentials ?? (async () => keys.current),
     platform: "win32",
     realpath: (path) => path,
     supervisor: { heartbeatMs: 0, shutdownGraceMs: 300, eofGraceMs: 300 },
@@ -270,6 +289,35 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
       const report = await host.doctor(id);
       assert.match(report.checks.find((check) => check.id === "boundaries")!.detail, /Nebius Sandboxes: key and project id set/);
     }
+  });
+
+  it("hands engines the latest keys when two changes overlap, never an older set after a newer one (D8)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    // The keys as they are when read, the first read held as a slow keychain would hold it.
+    const saved: { current: Partial<Record<SecretName, string>>; gate: Promise<void> | null } = { current: {}, gate: null };
+    const credentials = async () => {
+      const read = { ...saved.current };
+      const gate = saved.gate;
+      saved.gate = null;
+      await gate;
+      return read;
+    };
+    const { host, ids } = makeHost({ credentials, projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
+    await host.open(ids[0]!);
+    await online(host, "local");
+    saved.current = { NEBIUS_API_KEY: "test-key-0123456789" };
+    let release!: () => void;
+    saved.gate = new Promise<void>((resolve) => (release = resolve));
+    const older = host.secretsChanged();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    saved.current = { NEBIUS_API_KEY: "test-key-0123456789", TAVILY_API_KEY: "tavily-test-key-0123456789" };
+    const newer = host.secretsChanged();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    release();
+    await Promise.all([older, newer]);
+    const research = (await host.doctor(ids[0]!)).checks.find((check) => check.id === "research");
+    assert.equal(research?.detail, "A Tavily key is set; access not checked yet.");
   });
 
   it("stops every engine on shutdown, and starts none afterwards", async () => {
@@ -1902,5 +1950,543 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
       return isTerminal(events.status) ? events : null;
     }, "the check to end", 30_000);
     assert.deepEqual([page.status, sandboxes.requests.some((request) => request.method === "DELETE")], ["cancelled", true]);
+  });
+});
+
+describe("Host: research of saved plan versions' assumptions, bound to what its preview showed (D37)", () => {
+  const KEY = "test-key-0123456789";
+  const TAVILY = `tvly-dev-host-research-${"t".repeat(16)}`;
+  const PLAN = "Move the build image from Python 3.11 to 3.12; setup.py keeps importing distutils.";
+  const ASSUMPTION = "distutils is still in Python 3.12's standard library.";
+  const QUERY = "Python 3.12 distutils standard library";
+  const WHATSNEW = "https://docs.python.org/3/whatsnew/3.12.html";
+  const SENT = "What was already sent can't be withdrawn, and nothing was resent.";
+  const ANSWER = {
+    assessments: [
+      {
+        assumption: "A1",
+        outcome: "contradicted",
+        reasoning: "The 3.12 release notes say distutils was removed.",
+        citations: [{ passage: "S1.1", stance: "contradicts", quote: "has been removed from the standard library" }],
+        applicability: { plan: "Python 3.12", source: "Python 3.12", where: "title" },
+        uncertainty: "",
+        amendment: "Install setuptools in the 3.12 image before switching.",
+      },
+    ],
+  };
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const selection = (query = QUERY): ResearchSelection => ({ assumptions: [{ from: { kind: "typed", text: ASSUMPTION }, query }], sites: null });
+  const isResearch = (request: StubRequest) => JSON.stringify(request.body?.tools ?? []).includes("submit_research");
+  /** A promise the test resolves: Tavily's searches wait on it, so a run that went on after a stop would be seen. */
+  const gate = () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    return { held, release };
+  };
+  /**
+   * Token Factory, answering research with its assessment and the conversation's turns with the plan: a repository's
+   * turn reads its README first. Tavily, holding its searches until `search` settles, or its extracts for a while.
+   */
+  async function stubsFor(hold: { search?: Promise<void>; extractMs?: number } = {}) {
+    const turn = (request: StubRequest): Reply => {
+      if (!JSON.stringify(request.body?.tools ?? []).includes("read_file")) return text(PLAN);
+      return request.raw.includes('"role":"tool"')
+        ? toolCall("submit_reply", { answer: PLAN, evidence: [{ statement: "It has a README.", citations: [{ path: "README.md", startLine: 1, endLine: 1 }] }] }, { id: "r1" })
+        : toolCall("read_file", { path: "README.md" }, { id: "r0" });
+    };
+    const model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: (request) => (isResearch(request) ? toolCall("submit_research", ANSWER) : turn(request)) });
+    stubs.push(model);
+    const tavily = await startTavilyStub(async (call) => {
+      if (call.path === "/search") {
+        await hold.search;
+        return { body: searchAnswer([{ url: WHATSNEW, title: "What's New In Python 3.12" }]) };
+      }
+      if (call.path === "/extract") return { body: extractAnswer([{ url: WHATSNEW, chunks: ["## Removed\nThe distutils package has been removed from the standard library."] }]), ...(hold.extractMs ? { delayMs: hold.extractMs } : {}) };
+      return { status: 404, body: {} };
+    });
+    tavilyStubs.push(tavily);
+    return { model, tavily };
+  }
+  const researchRequests = (stub: Stub) => stub.chats().filter(isResearch);
+  const searches = (tavily: TavilyStub) => tavily.calls.filter((call) => call.path === "/search");
+  const reposRoot = () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra research repos "));
+    dirs.push(root);
+    return root;
+  };
+  const calls = (home: string) => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter(Boolean) : []);
+  const starts = (home: string) => calls(home).filter((call) => call === "runs.start").length;
+  /** The latest answer in a conversation, once its last turn is answered. */
+  const answered = (host: Host, conversationId: string) =>
+    waitFor(() => {
+      const view = host.conversation(conversationId);
+      return view.turns.at(-1)?.status === "answered" ? view.messages.filter((m) => m.role === "assistant").at(-1)! : null;
+    }, "the answer");
+  /** A plan saved from the conversation's next answer, with `text` as its text (the answer's own when undefined). */
+  async function planIn(host: Host, conversationId: string, text: string | undefined = PLAN) {
+    await host.sendMessage(conversationId, "How do I move the image to 3.12?");
+    const answer = await answered(host, conversationId);
+    return host.savePlan(conversationId, answer.id, text);
+  }
+  /** The conversation's latest research, once it has ended. */
+  const ended = (host: Host, conversationId: string): Promise<ResearchView> =>
+    waitFor(() => {
+      const last = host.research(conversationId).at(-1);
+      return last && last.status !== "submitting" && last.status !== "running" ? last : null;
+    }, "the research to end", 30_000);
+  const start = async (host: Host, planId: string, picks = selection()) => host.startResearch(planId, picks, (await host.prepareResearch(planId, picks)).expected);
+  /** A host whose local engine is the gated stand-in, research on, both keys saved and a plan already made. */
+  async function gated(scope: "general" | "project") {
+    const { host, root, ids, keys } = makeHost({ localEntry: GATED, projects: [{ targetId: "local", path: "/nowhere/gated" }] });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "release"), "");
+    if (scope === "project") await host.setSharing(ids[0]!, true);
+    const conversation = host.createConversation(scope === "project" ? { kind: "project", projectId: ids[0]! } : { kind: "general" });
+    const plan = await planIn(host, conversation.id, undefined);
+    return { host, root, ids, home, conversation, plan };
+  }
+
+  it("previews what research sends, sends exactly the approved query once, keeps the report bound to its version, and changes nothing else", async () => {
+    const { model, tavily } = await stubsFor();
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    const preview = await host.prepareResearch(plan.id, selection());
+    assert.deepEqual(
+      [preview.planVersion, preview.latestVersion, preview.scope, preview.tavily, preview.model.assumptions, preview.webResearch, preview.blocked],
+      [1, 1, { kind: "general" }, { queries: [{ assumption: "A1", query: QUERY, problems: [] }], sites: null }, [{ id: "A1", text: ASSUMPTION, fromPlan: null }], true, null],
+    );
+    assert.deepEqual([tavily.calls.length, researchRequests(model).length], [0, 0], "a preview sends nothing");
+    const store = readFileSync(join(root, "nivra.json"), "utf8");
+    const started = await host.startResearch(plan.id, selection(), preview.expected);
+    assert.deepEqual([started.status, host.conversation(conversation.id).openResearch], ["submitting", started.id]);
+    const research = await ended(host, conversation.id);
+    assert.equal(research.status, "answered", research.note ?? "");
+    const report = research.report!;
+    assert.deepEqual(
+      [report.outcome, report.planId, report.planVersion, report.request.clientRequestId, report.assessments.map((a) => [a.assumption, a.model, a.shown]), research.note, research.stopCause],
+      ["complete", plan.id, 1, research.id, [["A1", "contradicted", "contradicted"]], null, null],
+    );
+    // What was kept is what the preview was bound by.
+    assert.equal(researchFingerprint({ planId: plan.id, planVersion: 1, packetDigest: research.packetDigest, webResearch: true, modelSharing: null }), preview.expected);
+    assert.deepEqual([report.packetDigest, research.queries], [research.packetDigest, [{ assumption: "A1", text: ASSUMPTION, query: QUERY }]]);
+    // Tavily got the approved query, once, with its own key, and never the plan; the model got one request.
+    assert.deepEqual(searches(tavily).map((call) => [call.body?.["query"], call.authorization]), [[QUERY, `Bearer ${TAVILY}`]]);
+    assert.equal(tavily.calls.some((call) => call.raw.includes(PLAN) || call.raw.includes(KEY)), false);
+    assert.equal(researchRequests(model).length, 1);
+    // Research writes nothing else: not the store, not the plan.
+    assert.equal(readFileSync(join(root, "nivra.json"), "utf8"), store);
+    assert.deepEqual(host.plans(conversation.id).map((p) => [p.version, p.text]), [[1, PLAN]]);
+    assert.equal(host.conversation(conversation.id).openResearch, null);
+  });
+
+  it("refuses to start, sending nothing, when a query fails its checks, research is off, Tavily's key is missing, the project doesn't allow sharing, or the plan moved on", async () => {
+    const { model, tavily } = await stubsFor();
+    const repo = makeRepo(join(reposRoot(), "shop"), { "README.md": "# Shop\n" });
+    const { host, ids, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url, projects: [{ targetId: "local", path: repo }] });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const general = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, general.id);
+    /** The preview says why research can't start, and starting is refused with the same words. */
+    const refused = async (planId: string, picks = selection()) => {
+      const preview = await host.prepareResearch(planId, picks);
+      await assert.rejects(host.startResearch(planId, picks, preview.expected), (error: Error) => error.message === preview.blocked);
+      return preview.blocked;
+    };
+    assert.equal(await refused(plan.id, selection(`${QUERY} https://docs.python.org/3/whatsnew`)), "A1's query holds a web address, so nothing can be sent. Edit it, then preview again.");
+    assert.equal(await refused(plan.id, selection("shop distutils")), "A1's query names one of your projects or its folder, so nothing can be sent. Edit it, then preview again.");
+    await host.setWebResearch(false);
+    assert.equal(await refused(plan.id), "Research queries to Tavily are turned off. Turn them on, then start again.");
+    await host.setWebResearch(true);
+    keys.current = { NEBIUS_API_KEY: KEY };
+    assert.equal(await refused(plan.id), "Nivra has no Tavily API key. Add one in Settings, then start again.");
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    // A project's plan, made while sharing was on; then sharing is turned off.
+    await host.setSharing(ids[0]!, true);
+    const project = host.createConversation({ kind: "project", projectId: ids[0]! });
+    const projectPlan = await planIn(host, project.id);
+    await host.setSharing(ids[0]!, false);
+    assert.equal(await refused(projectPlan.id), "This project doesn't allow sending its content to Token Factory. Allow sharing for it, then start research.");
+    // The plan moved on since its preview: only the latest version can be researched.
+    const preview = await host.prepareResearch(plan.id, selection());
+    await host.revisePlan(plan.id, `${PLAN} Pin setuptools first.`);
+    await assert.rejects(host.startResearch(plan.id, selection(), preview.expected), /^Error: This is v1 of the plan, and v2 is the latest\./);
+    assert.deepEqual([tavily.calls.length, researchRequests(model).length, host.research(general.id).length, host.research(project.id).length], [0, 0, 0, 0], "nothing was stored or sent");
+  });
+
+  it("holds the conversation while research runs, cancels it on request with what it read, and then takes a message again", async () => {
+    const search = gate();
+    const { model, tavily } = await stubsFor({ search: search.held });
+    const { host, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    const started = await start(host, plan.id);
+    await waitFor(() => searches(tavily).length === 1, "the search to reach Tavily");
+    assert.equal(host.conversation(conversation.id).openResearch, started.id);
+    await assert.rejects(host.sendMessage(conversation.id, "Meanwhile?"), /^Error: Research of a plan's assumptions is running in this conversation\. Wait for it, or cancel it, then send again\.$/);
+    assert.equal((await host.prepareReview(plan.id, "council")).blocked, "Research of a plan's assumptions is running in this conversation. Wait for it, or cancel it, then start the review.");
+    await assert.rejects(host.cancelTurn(conversation.id, started.id), /^Error: That message is no longer in this conversation\.$/, "research isn't a message");
+    await host.cancelResearch(conversation.id, started.id);
+    const research = await ended(host, conversation.id);
+    assert.deepEqual(
+      [research.status, research.stopCause, research.note, research.report?.outcome, host.conversation(conversation.id).openResearch],
+      ["cancelled", "person", `Cancelled. ${SENT}`, "cancelled", null],
+    );
+    // The search Tavily held is answered now: a run that went on would read its pages next.
+    search.release();
+    await host.sendMessage(conversation.id, "And now?");
+    await answered(host, conversation.id);
+    await pause(300);
+    assert.deepEqual([searches(tavily).length, tavily.calls.filter((call) => call.path === "/extract").length, researchRequests(model).length], [1, 0, 0], "nothing more was sent");
+  });
+
+  it("stops research turned off during Search: nothing more is sent, and it says why", async () => {
+    const search = gate();
+    const { model, tavily } = await stubsFor({ search: search.held });
+    const { host, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    await start(host, plan.id);
+    await waitFor(() => searches(tavily).length === 1, "the search to reach Tavily");
+    await host.setWebResearch(false);
+    const research = await ended(host, conversation.id);
+    assert.deepEqual(
+      [research.status, research.stopCause, research.note, research.report?.requests.find((request) => request.id === "search-A1")?.failure],
+      ["cancelled", "web-research", `Stopped: research queries to Tavily were turned off. ${SENT}`, "cancelled"],
+    );
+    search.release();
+    await pause(300);
+    assert.deepEqual([tavily.calls.filter((call) => call.path === "/extract").length, researchRequests(model).length], [0, 0]);
+  });
+
+  it("stops research asked to stop while it was being sent, by the person or a permission withdrawn, each with its own cause, once its engine answers", async () => {
+    const NOTES = {
+      person: `Cancelled. ${SENT}`,
+      "web-research": `Stopped: research queries to Tavily were turned off. ${SENT}`,
+      "model-sharing": `Stopped: sharing for this project was turned off. ${SENT}`,
+    } as const;
+    for (const how of ["person", "web-research", "model-sharing"] as const) {
+      const { host, ids, home, conversation, plan } = await gated("project");
+      rmSync(join(home, "release"));
+      const started = await start(host, plan.id);
+      await waitFor(() => starts(home) === 2, "the research's request to reach the engine");
+      if (how === "person") await host.cancelResearch(conversation.id, started.id);
+      else if (how === "web-research") await host.setWebResearch(false);
+      else await host.setSharing(ids[0]!, false);
+      const asked = host.research(conversation.id)[0]!;
+      assert.deepEqual([how, asked.status, asked.stopCause, asked.cancelRequested], [how, "submitting", how, true]);
+      writeFileSync(join(home, "release"), "");
+      const research = await ended(host, conversation.id);
+      const cancelled = readFileSync(join(home, "cancelled.log"), "utf8").split("\n").filter((runId) => runId === research.runId);
+      assert.deepEqual([how, research.status, research.note, cancelled.length, starts(home)], [how, "cancelled", NOTES[how], 1, 2]);
+    }
+  });
+
+  it("names the newest stop's own cause when both permissions are turned off, in either order, while it is being sent", async () => {
+    for (const order of [["web-research", "model-sharing"], ["model-sharing", "web-research"]] as const) {
+      const { host, ids, home, conversation, plan } = await gated("project");
+      rmSync(join(home, "release"));
+      await start(host, plan.id);
+      await waitFor(() => starts(home) === 2, "the research's request to reach the engine");
+      for (const permission of order) {
+        if (permission === "web-research") await host.setWebResearch(false);
+        else await host.setSharing(ids[0]!, false);
+      }
+      writeFileSync(join(home, "release"), "");
+      const research = await ended(host, conversation.id);
+      assert.deepEqual([order.join(" then "), research.status, research.stopCause], [order.join(" then "), "cancelled", order[1]]);
+    }
+  });
+
+  it("stops research its engine had queued when its answer was lost, once it is found by its request id, and sends it once", async () => {
+    const { host, home, conversation, plan } = await gated("general");
+    rmSync(join(home, "release"));
+    writeFileSync(join(home, "accept"), "");
+    await start(host, plan.id);
+    await waitFor(() => starts(home) === 2, "the research's request to reach the engine");
+    await host.setWebResearch(false);
+    writeFileSync(join(home, "error-start"), "");
+    writeFileSync(join(home, "release"), "");
+    const research = await ended(host, conversation.id);
+    assert.deepEqual([research.status, research.stopCause, calls(home).includes("runs.find"), starts(home)], ["cancelled", "web-research", true, 2]);
+    // The same, with the cancel its engine turns down once the run is found: that stop is taken back, the card says
+    // why, and Cancel works again.
+    const refused = await gated("general");
+    rmSync(join(refused.home, "release"));
+    writeFileSync(join(refused.home, "accept"), "");
+    writeFileSync(join(refused.home, "running"), "");
+    await start(refused.host, refused.plan.id);
+    await waitFor(() => starts(refused.home) === 2, "the research's request to reach the engine");
+    await refused.host.setWebResearch(false);
+    writeFileSync(join(refused.home, "fail-cancel-once"), "");
+    writeFileSync(join(refused.home, "error-start"), "");
+    writeFileSync(join(refused.home, "release"), "");
+    const shown = await waitFor(() => refused.host.research(refused.conversation.id).find((view) => view.stopFailed) ?? null, "the failed stop to be shown");
+    const cancels = () => calls(refused.home).filter((call) => call === "runs.cancel").length;
+    assert.deepEqual(
+      [shown.status, shown.cancelRequested, shown.stopCause, shown.stopFailed, cancels()],
+      ["running", false, null, "Research queries to Tavily are off, but Nivra couldn't stop this research (the run couldn't be stopped). Press Cancel to try again, or restart its engine to stop it.", 1],
+    );
+    await pause(500);
+    assert.deepEqual([refused.host.research(refused.conversation.id)[0]!.status, cancels()], ["running", 1], "it goes on, and no cancel is sent again by itself");
+    await refused.host.cancelResearch(refused.conversation.id, shown.id);
+    assert.equal(refused.host.research(refused.conversation.id)[0]!.stopFailed, null, "a newer stop leaves the failure off the card");
+    const stopped = await ended(refused.host, refused.conversation.id);
+    assert.deepEqual([stopped.status, stopped.stopCause, stopped.stopFailed, cancels(), starts(refused.home)], ["cancelled", "person", null, 2, 2]);
+  });
+
+  it("says research its engine has no record of was never sent anywhere, in research's words, once Nivra starts again", async () => {
+    const { host, root, home, conversation, plan } = await gated("general");
+    rmSync(join(home, "release"));
+    await start(host, plan.id);
+    await waitFor(() => starts(home) === 2, "the research's request to reach the engine");
+    // Nivra quits before runs.start answers, and the engine never recorded the run.
+    await host.shutdown();
+    const again = hostAt(root, { localEntry: GATED }).host;
+    await again.openConversation(conversation.id);
+    const research = await ended(again, conversation.id);
+    assert.deepEqual(
+      [research.status, research.note, calls(home).includes("runs.find"), starts(home)],
+      ["not-sent", "Its engine has no record of this research, so it never ran and nothing reached Tavily or Token Factory.", true, 2],
+    );
+  });
+
+  it("takes back a stop its engine couldn't carry out, and never a newer stop", async () => {
+    // A stop that fails is withdrawn: the research goes on, and the person is told.
+    const first = await gated("general");
+    writeFileSync(join(first.home, "running"), "");
+    const started = await start(first.host, first.plan.id);
+    await waitFor(() => first.host.research(first.conversation.id)[0]?.runId ?? null, "the research's run");
+    writeFileSync(join(first.home, "fail-cancel"), "");
+    await assert.rejects(first.host.cancelResearch(first.conversation.id, started.id), /couldn't be stopped/);
+    const going = first.host.research(first.conversation.id)[0]!;
+    assert.deepEqual([going.status, going.stopCause, going.cancelRequested], ["running", null, false]);
+    rmSync(join(first.home, "fail-cancel"));
+    rmSync(join(first.home, "running"));
+    assert.equal((await ended(first.host, first.conversation.id)).status, "answered");
+    // A newer stop made while a failing one was out is kept: only the failing one is taken back.
+    const second = await gated("general");
+    writeFileSync(join(second.home, "running"), "");
+    const out = await start(second.host, second.plan.id);
+    await waitFor(() => second.host.research(second.conversation.id)[0]?.runId ?? null, "the research's run");
+    writeFileSync(join(second.home, "hold-cancel"), "");
+    writeFileSync(join(second.home, "fail-cancel-once"), "");
+    const person = second.host.cancelResearch(second.conversation.id, out.id).then(
+      () => "stopped",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    await waitFor(() => calls(second.home).filter((call) => call === "runs.cancel").length === 1, "the person's stop to reach the engine");
+    const off = second.host.setWebResearch(false);
+    await waitFor(() => calls(second.home).filter((call) => call === "runs.cancel").length === 2, "research's stop to reach the engine");
+    writeFileSync(join(second.home, "release-cancel"), "");
+    assert.match(await person, /couldn't be stopped/);
+    await off;
+    const research = await ended(second.host, second.conversation.id);
+    assert.deepEqual([research.status, research.stopCause, research.note], ["cancelled", "web-research", `Stopped: research queries to Tavily were turned off. ${SENT}`]);
+    // Turning research off when its engine can't stop a run says so, and takes that stop back; research stays off.
+    const third = await gated("general");
+    writeFileSync(join(third.home, "running"), "");
+    await start(third.host, third.plan.id);
+    await waitFor(() => third.host.research(third.conversation.id)[0]?.runId ?? null, "the research's run");
+    writeFileSync(join(third.home, "fail-cancel"), "");
+    await assert.rejects(third.host.setWebResearch(false), /^Error: Research queries to Tavily are off, but Nivra couldn't stop a research run \(.+\)\. Restart its engine to stop it\.$/);
+    const unstopped = third.host.research(third.conversation.id)[0]!;
+    assert.deepEqual([third.host.webResearch(), unstopped.status, unstopped.stopCause, unstopped.cancelRequested], [false, "running", null, false]);
+  });
+
+  it("keeps a project's research stops that worked when another of its runs can't be stopped, and names only what couldn't", async () => {
+    const cancelled = (home: string) => readFileSync(join(home, "cancelled.log"), "utf8").split("\n");
+    // Sharing turned off while research runs: the project's other run (the turn that made the plan) is cancelled first,
+    // and its engine turns that down once. The research's own stop worked, so it stays, with its cause.
+    const known = await gated("project");
+    writeFileSync(join(known.home, "running"), "");
+    await start(known.host, known.plan.id);
+    const runId = await waitFor(() => known.host.research(known.conversation.id)[0]?.runId ?? null, "the research's run");
+    writeFileSync(join(known.home, "fail-cancel-once"), "");
+    await assert.rejects(known.host.setSharing(known.ids[0]!, false), /^Error: Sharing for this project is off, but Nivra couldn't stop an explain run \(.+\)\. Restart the project's engine to stop it\.$/);
+    const stopped = await ended(known.host, known.conversation.id);
+    assert.deepEqual(
+      [stopped.status, stopped.stopCause, stopped.note, cancelled(known.home).includes(runId)],
+      ["cancelled", "model-sharing", `Stopped: sharing for this project was turned off. ${SENT}`, true],
+    );
+    // Its run not known yet, its answer lost: the stop stays, and the run is cancelled once it is found.
+    const lost = await gated("project");
+    writeFileSync(join(lost.home, "running"), "");
+    rmSync(join(lost.home, "release"));
+    writeFileSync(join(lost.home, "accept"), "");
+    await start(lost.host, lost.plan.id);
+    await waitFor(() => starts(lost.home) === 2, "the research's request to reach the engine");
+    writeFileSync(join(lost.home, "hold-find"), "");
+    writeFileSync(join(lost.home, "error-start"), "");
+    writeFileSync(join(lost.home, "release"), "");
+    await waitFor(() => calls(lost.home).includes("runs.find"), "the research to be looked for by its request id");
+    writeFileSync(join(lost.home, "fail-cancel-once"), "");
+    await assert.rejects(lost.host.setSharing(lost.ids[0]!, false), /^Error: Sharing for this project is off, but Nivra couldn't stop an explain run /);
+    const looking = lost.host.research(lost.conversation.id)[0]!;
+    assert.deepEqual([looking.status, looking.runId, looking.stopCause], ["submitting", null, "model-sharing"]);
+    writeFileSync(join(lost.home, "release-find"), "");
+    const found = await ended(lost.host, lost.conversation.id);
+    assert.deepEqual([found.status, found.stopCause, cancelled(lost.home).includes(found.runId!), starts(lost.home)], ["cancelled", "model-sharing", true, 2]);
+    // A removal refused because another run couldn't be stopped: the project stays, and the research's note claims only
+    // that a removal was under way.
+    const refused = await gated("project");
+    writeFileSync(join(refused.home, "running"), "");
+    await start(refused.host, refused.plan.id);
+    await waitFor(() => refused.host.research(refused.conversation.id)[0]?.runId ?? null, "the research's run");
+    writeFileSync(join(refused.home, "fail-cancel-once"), "");
+    await assert.rejects(refused.host.removeProject(refused.ids[0]!), /^Error: Nivra couldn't stop an explain run \(.+\), so the project is still in the list\. Restart its engine, then remove it again\.$/);
+    const kept = await ended(refused.host, refused.conversation.id);
+    assert.deepEqual([refused.host.projects().length, kept.status, kept.stopCause, kept.note], [1, "cancelled", "removal", `Stopped: the project was being removed. ${SENT}`]);
+    // A removal that goes through stops its research the same way.
+    const removed = await gated("project");
+    writeFileSync(join(removed.home, "running"), "");
+    await start(removed.host, removed.plan.id);
+    await waitFor(() => removed.host.research(removed.conversation.id)[0]?.runId ?? null, "the research's run");
+    await removed.host.removeProject(removed.ids[0]!);
+    const gone = await ended(removed.host, removed.conversation.id);
+    assert.deepEqual([removed.host.projects().length, gone.status, gone.stopCause, gone.note], [0, "cancelled", "removal", `Stopped: the project was being removed. ${SENT}`]);
+  });
+
+  it("reports research cut off by a killed engine as interrupted after a restart, keeps the report it saved, and sends nothing again", async () => {
+    const { model, tavily } = await stubsFor({ extractMs: 60_000 });
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    await start(host, plan.id);
+    await waitFor(() => tavily.calls.some((call) => call.path === "/extract"), "the extract to reach Tavily");
+    const { pid } = await online(host, "local");
+    process.kill(pid, "SIGKILL");
+    await waitFor(() => !isAlive(pid), "the engine to die");
+    await host.shutdown();
+    const sent = tavily.calls.length;
+    const again = hostAt(root, { tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    again.keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await again.host.openConversation(conversation.id);
+    const research = await ended(again.host, conversation.id);
+    assert.deepEqual(
+      [research.status, research.note, research.report?.outcome],
+      ["interrupted", "Interrupted: Nivra or its engine stopped before the research finished. A request it was making may have been sent, and its credits are unknown. Nothing was resent.", "interrupted"],
+    );
+    assert.deepEqual(
+      research.report?.requests.map((request) => [request.id, request.state, request.failure]),
+      [
+        ["search-A1", "answered", null],
+        ["extract-A1", "failed", "interrupted"],
+        ["model", "skipped", null],
+      ],
+    );
+    assert.deepEqual([research.report?.pages.length, research.report?.usage.credits], [1, null], "what Search found is kept, and the credits are unknown");
+    await pause(300);
+    assert.deepEqual([tavily.calls.length, researchRequests(model).length], [sent, 0], "nothing was sent again");
+  });
+
+  it("deletes a conversation while its research runs: the run stops, and the workspace keeps nothing of it", async () => {
+    const search = gate();
+    const { model, tavily } = await stubsFor({ search: search.held });
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const canary = `nivra-research-plan-canary-${randomUUID()}`;
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id, `${PLAN} ${canary}`);
+    await start(host, plan.id);
+    await waitFor(() => searches(tavily).length === 1, "the search to reach Tavily");
+    const runId = await waitFor(() => host.research(conversation.id)[0]?.runId ?? null, "the research's run");
+    await host.deleteConversation(conversation.id);
+    assert.throws(() => host.research(conversation.id), /no longer in the list/);
+    await waitFor(async () => (await host.runEvents(runId, 0)).status === "cancelled", "the research's run to stop");
+    search.release();
+    await pause(300);
+    assert.deepEqual([tavily.calls.filter((call) => call.path === "/extract").length, researchRequests(model).length], [0, 0], "nothing more was sent");
+    await host.shutdown();
+    const workspace = new DatabaseSync(join(root, "workspace.db"), { readOnly: true });
+    try {
+      const count = (table: string) => Number(workspace.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
+      assert.deepEqual([count("research"), count("run_links"), count("artifacts")], [0, 0, 0]);
+    } finally {
+      workspace.close();
+    }
+    assert.deepEqual(filesHolding(root, canary).filter((file) => file.startsWith("workspace.db")), []);
+    assert.equal(researchRequests(model).length, 0);
+  });
+
+  it("saves one amended version from research, in one transaction: derived from the researched version, recorded, and never twice", async () => {
+    const { model, tavily } = await stubsFor();
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    await start(host, plan.id);
+    const research = await ended(host, conversation.id);
+    assert.equal(research.status, "answered", research.note ?? "");
+    const AMENDED = `${PLAN} Install setuptools in the 3.12 image first.`;
+    // Two saves at once: exactly one lands, and the other says why.
+    const [first, second] = await Promise.allSettled([host.saveAmendedPlan(research.id, AMENDED, ["setuptools still provides distutils"]), host.saveAmendedPlan(research.id, `${AMENDED} Twice.`, [])]);
+    assert.deepEqual([first.status, second.status], ["fulfilled", "rejected"]);
+    assert.match(String((second as PromiseRejectedResult).reason), /^Error: A version amended from this research was saved already, so nothing new was saved\./);
+    const amended = (first as PromiseFulfilledResult<Awaited<ReturnType<Host["saveAmendedPlan"]>>>).value;
+    assert.deepEqual([amended.version, amended.text, amended.assumptions, amended.latest], [2, AMENDED, ["setuptools still provides distutils"], 2]);
+    assert.deepEqual([host.plans(conversation.id).map((p) => p.version), host.research(conversation.id)[0]?.amended], [[1, 2], { planId: amended.id, version: 2 }]);
+    // One after the other: refused as well, and nothing new is saved.
+    await assert.rejects(host.saveAmendedPlan(research.id, AMENDED, []), /^Error: A version amended from this research was saved already/);
+    assert.equal(host.plans(conversation.id).length, 2);
+    // A later edit is a plain next version: the research still names the version it led to, and nothing more.
+    const v3 = await host.revisePlan(amended.id, `${AMENDED} And test it.`);
+    assert.deepEqual([v3.version, host.research(conversation.id)[0]?.amended?.version], [3, 2]);
+    await host.shutdown();
+    const workspace = new DatabaseSync(join(root, "workspace.db"), { readOnly: true });
+    try {
+      const rows = workspace.prepare("SELECT version, derived_from, content_json FROM artifacts ORDER BY version").all();
+      assert.deepEqual(rows.map((row) => [row["version"], row["derived_from"]]), [[1, null], [2, plan.id], [3, amended.id]], "each version derives from the one before");
+      assert.equal(rows.some((row) => /research/i.test(String(row["content_json"]))), false, "no version's content says anything of the research");
+    } finally {
+      workspace.close();
+    }
+  });
+
+  it("saves no amended version once the plan has moved on since its research, or when it holds a credential", async () => {
+    const { model, tavily } = await stubsFor();
+    const { host, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    await start(host, plan.id);
+    const research = await ended(host, conversation.id);
+    await assert.rejects(host.saveAmendedPlan(research.id, `${PLAN} Use ${KEY} to pull.`, []), /^Error: The plan holds your saved Token Factory key, so nothing was saved\./);
+    await host.revisePlan(plan.id, `${PLAN} Pin setuptools first.`);
+    await assert.rejects(
+      host.saveAmendedPlan(research.id, `${PLAN} Install setuptools first.`, []),
+      /^Error: This plan moved on since it was researched: v1 isn't its latest version any more, so nothing was saved\. Research the latest version, then save an amended one from that\.$/,
+    );
+    assert.deepEqual([host.plans(conversation.id).map((p) => p.version), host.research(conversation.id)[0]?.amended], [[1, 2], null]);
+  });
+
+  it("fails research cleanly when Tavily can't be reached, asks the model nothing, and the conversation goes on", async () => {
+    const { model, tavily } = await stubsFor();
+    await tavily.close();
+    const { host, keys } = makeHost({ tokenFactoryUrl: model.url, tavilyUrl: tavily.url });
+    keys.current = { NEBIUS_API_KEY: KEY, TAVILY_API_KEY: TAVILY };
+    await host.setWebResearch(true);
+    const conversation = host.createConversation({ kind: "general" });
+    const plan = await planIn(host, conversation.id);
+    await start(host, plan.id);
+    const research = await ended(host, conversation.id);
+    assert.deepEqual([research.status, research.report?.stop?.code, researchRequests(model).length], ["failed", "tavily-unavailable", 0], research.note ?? "");
+    await host.sendMessage(conversation.id, "And without research?");
+    await answered(host, conversation.id);
   });
 });

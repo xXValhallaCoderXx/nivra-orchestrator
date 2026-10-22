@@ -20,7 +20,7 @@ describe("childEnv", () => {
 
   it("drops provider keys, NODE_OPTIONS and Electron's variables, and keeps Windows' essentials", () => {
     const env = childEnv(
-      { NEBIUS_API_KEY: "k", NEBIUS_PROJECT_ID: "p", OPENAI_API_KEY: "k", NODE_OPTIONS: "--inspect", ELECTRON_RUN_AS_NODE: "1", SystemRoot: "C:\\Windows", TEMP: "C:\\t", APPDATA: "C:\\a" },
+      { NEBIUS_API_KEY: "k", NEBIUS_PROJECT_ID: "p", TAVILY_API_KEY: "t", OPENAI_API_KEY: "k", NODE_OPTIONS: "--inspect", ELECTRON_RUN_AS_NODE: "1", SystemRoot: "C:\\Windows", TEMP: "C:\\t", APPDATA: "C:\\a" },
       {},
       { platform: "win32" },
     );
@@ -62,6 +62,15 @@ describe("readArgs", () => {
     const args = readArgs(["--stdio", "--home", "/tmp/x", "--heartbeat-ms", "0", "--nivra-engine"]);
     assert.equal(args.heartbeatMs, 0);
     assert.equal(args.instanceId.length, 36);
+  });
+
+  it("takes a test endpoint only on this machine, for Token Factory, Nebius Sandboxes and Tavily alike", () => {
+    for (const flag of ["--token-factory-url", "--sandboxes-url", "--tavily-url"]) {
+      assert.throws(() => readArgs(["--stdio", "--home", "/tmp/x", flag, "https://api.tavily.com"]), ArgsError, flag);
+      assert.throws(() => readArgs(["--stdio", "--home", "/tmp/x", flag, "not an address"]), ArgsError, flag);
+    }
+    const args = readArgs(["--stdio", "--home", "/tmp/x", "--tavily-url", "http://127.0.0.1:4000/"]);
+    assert.deepEqual([args.tavilyUrl, args.tokenFactoryUrl, args.sandboxesUrl], ["http://127.0.0.1:4000", null, null]);
   });
 });
 

@@ -1,5 +1,5 @@
+import { RESEARCH_LIMITS } from "@nivra/domain";
 import { z } from "zod";
-import { RESEARCH_LIMITS } from "./limits.ts";
 import type { ExtractedPage, ExtractRequest, RequestEnd, RequestFailure, RequestTiming, Retrieval, Retrieved, SearchHit, SearchRequest } from "./retrieval.ts";
 
 /**

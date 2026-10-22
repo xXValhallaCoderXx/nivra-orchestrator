@@ -4,6 +4,8 @@
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import type { SandboxStub } from "../../engine/test/stub-sandboxes.ts";
+import type { TavilyStub } from "../../engine/test/stub-tavily.ts";
+import type { Stub, StubRequest } from "../../engine/test/stub-token-factory.ts";
 
 /** What reached the stand-in so far, as `requests` answers. */
 export interface Seen {
@@ -110,4 +112,56 @@ function control(stub: SandboxStub, command: string, arg: unknown): unknown {
     return seen;
   }
   throw new Error(`the stand-in has no command "${command}"`);
+}
+
+// ---- research (D37) ----
+// verify-windows.ts runs stand-ins for Tavily and Token Factory beside the one for Nebius Sandboxes
+// (research-stand-ins.ts), and the harness asks what reached them over this same channel: `@stub research-requests`.
+
+/** What the research checks' plan says, and the query they approve for its assumption. */
+export const RESEARCH_PLAN = "Move the build image from Python 3.11 to 3.12; setup.py keeps importing distutils.";
+export const RESEARCH_QUERY = "Python 3.12 distutils standard library";
+
+/** What reached the research stand-ins so far, as `research-requests` answers. */
+export interface ResearchSeen {
+  searches: number;
+  extracts: number;
+  /** The queries Tavily searched for, oldest first. */
+  queries: string[];
+  /** Whether every Tavily request carried exactly the Tavily key asked about. */
+  tavilyKeyed: boolean;
+  /** Tavily requests holding the plan's text or the model's key. */
+  tavilyLeaking: number;
+  /** The model's research requests, and the conversation's turns. */
+  research: number;
+  turns: number;
+  /** Model requests holding the Tavily key. */
+  modelLeaking: number;
+}
+
+/** A request to the model for research: the assessment's tool is offered. */
+export const isResearchRequest = (request: StubRequest) => JSON.stringify(request.body?.tools ?? []).includes("submit_research");
+
+/** verify-windows.ts's side for research: answers one `research-…` command (a `@stub` line, without it). */
+export function answerResearch(stands: { tavily: TavilyStub; model: Stub }, text: string): string {
+  const [command = "", ...rest] = text.split(" ");
+  try {
+    if (command !== "research-requests") throw new Error(`the research stand-ins have no command "${command}"`);
+    const { tavilyKey, modelKey } = JSON.parse(rest.join(" ") || "null") as { tavilyKey: string; modelKey: string };
+    const calls = stands.tavily.calls;
+    const searches = calls.filter((call) => call.path === "/search");
+    const seen: ResearchSeen = {
+      searches: searches.length,
+      extracts: calls.filter((call) => call.path === "/extract").length,
+      queries: searches.map((call) => String(call.body?.["query"] ?? "")),
+      tavilyKeyed: calls.every((call) => call.authorization === `Bearer ${tavilyKey}`),
+      tavilyLeaking: calls.filter((call) => call.raw.includes(RESEARCH_PLAN) || (modelKey !== "" && call.raw.includes(modelKey))).length,
+      research: stands.model.chats().filter(isResearchRequest).length,
+      turns: stands.model.chats().filter((request) => !isResearchRequest(request)).length,
+      modelLeaking: tavilyKey === "" ? 0 : stands.model.requests.filter((request) => request.raw.includes(tavilyKey)).length,
+    };
+    return `@stub ok ${JSON.stringify(seen)}`;
+  } catch (error) {
+    return `@stub error ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
