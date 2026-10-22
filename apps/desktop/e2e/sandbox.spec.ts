@@ -111,7 +111,7 @@ test("saving the key and project id settles what an earlier session left open, a
   };
   // Through Settings, as a person saves them.
   const saveCredentials = async (window: Page) => {
-    await window.getByLabel("API key").fill("test-key-0123456789");
+    await window.getByLabel("API key", { exact: true }).fill("test-key-0123456789");
     await window.getByTestId("nebius-key-save").click();
     await expect(window.getByTestId("nebius-key-state")).toContainText("Key saved");
     await window.getByTestId("nebius-project-id").fill("project-e00e2esandbox");

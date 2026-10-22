@@ -95,7 +95,14 @@ function start(): void {
   const project = z.tuple([z.uuid()]);
   const settings = async (): Promise<SettingsView> => {
     const state = await secrets.state("NEBIUS_API_KEY");
-    return { nebiusKey: state, keychain: secrets.keychain(), note: secrets.note(state), nebiusProjectId: (await secrets.get("NEBIUS_PROJECT_ID")) ? "set" : "none" };
+    return {
+      nebiusKey: state,
+      keychain: secrets.keychain(),
+      note: secrets.note(state),
+      nebiusProjectId: (await secrets.get("NEBIUS_PROJECT_ID")) ? "set" : "none",
+      tavilyKey: (await secrets.get("TAVILY_API_KEY")) ? "set" : "none",
+      webResearch: host.webResearch(),
+    };
   };
 
   handle(IPC.getAppInfo, none, (): AppInfo => ({
@@ -230,6 +237,24 @@ function start(): void {
   handle(IPC.startReview, z.tuple([Id, Panel, z.string().regex(/^[0-9a-f]{64}$/)]), (_event, planId, panel, expected) => host.startReview(planId, panel, expected));
   handle(IPC.listReviews, z.tuple([Id]), (_event, id) => host.reviews(id));
   handle(IPC.cancelReview, z.tuple([Id, Id]), (_event, id, reviewId) => host.cancelReview(id, reviewId));
+  // Research of plan versions' assumptions (D37). A selection is checked for its shape only: the host refuses what is
+  // too long or can't be sent, in words the person can act on.
+  const Pick = z.strictObject({
+    from: z.discriminatedUnion("kind", [z.strictObject({ kind: z.literal("plan"), index: z.number().int().nonnegative().max(99) }), z.strictObject({ kind: z.literal("typed"), text: LongText })]),
+    query: LongText,
+  });
+  const Selection = z.strictObject({ assumptions: z.array(Pick).max(10), sites: z.strictObject({ mode: z.enum(["prefer", "restrict"]), hosts: Rows }).nullable() });
+  // Tests only, when unpackaged: hold a preview's answer, so a test can change the selection before it arrives.
+  const previewDelayMs = app.isPackaged ? 0 : Number(app.commandLine.getSwitchValue("nivra-test-preview-delay-ms") || 0);
+  handle(IPC.prepareResearch, z.tuple([Id, Selection]), async (_event, planId, selection) => {
+    const preview = await host.prepareResearch(planId, selection);
+    if (previewDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, previewDelayMs));
+    return preview;
+  });
+  handle(IPC.startResearch, z.tuple([Id, Selection, z.string().regex(/^[0-9a-f]{64}$/)]), (_event, planId, selection, expected) => host.startResearch(planId, selection, expected));
+  handle(IPC.listResearch, z.tuple([Id]), (_event, id) => host.research(id));
+  handle(IPC.cancelResearch, z.tuple([Id, Id]), (_event, id, researchId) => host.cancelResearch(id, researchId));
+  handle(IPC.saveAmendedPlan, z.tuple([Id, LongText, Rows]), (_event, researchId, text, assumptions) => host.saveAmendedPlan(researchId, text, assumptions));
   handle(IPC.listTasks, none, () => host.tasks());
   handle(IPC.getTask, z.tuple([Id]), (_event, id) => host.task(id));
   handle(IPC.createTask, z.tuple([z.strictObject({ title: LongText, fields: Fields, projectId: Id.nullable(), planId: Id.nullable() })]), (_event, input) => host.createTask(input));
@@ -258,6 +283,21 @@ function start(): void {
     }
     await secrets.set("NEBIUS_PROJECT_ID", value);
     await host.secretsChanged().catch((error: unknown) => console.error("Could not hand the engine the new project id", error));
+    return settings();
+  });
+  // The Tavily key research needs (D37): kept and handed to the engines the way the Nebius key is (D8).
+  handle(IPC.setTavilyKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {
+    if (key !== null && !/^[\x21-\x7E]+$/.test(key)) {
+      throw new Error("That key holds a space, a line break or a character no Tavily key has, often copied along with it, so it wasn't saved. Copy the key again, then save it.");
+    }
+    await secrets.set("TAVILY_API_KEY", key);
+    await host.secretsChanged().catch((error: unknown) => console.error("Could not hand the engine the new key", error));
+    return settings();
+  });
+  // Research's permission (D37): off until the person turns it on. Turning it off stops research under way, and says so
+  // when a run can't be stopped; it stays off either way.
+  handle(IPC.setWebResearch, z.tuple([z.boolean()]), async (_event, on) => {
+    await host.setWebResearch(on);
     return settings();
   });
 
@@ -374,11 +414,16 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
   // Tests give each run a WSL home of its own too, below the distribution's $HOME.
   const wslSwitch = app.commandLine.getSwitchValue("nivra-wsl-home") || null;
   const wslHome = wslSwitch ? wslHomeFrom(wslSwitch) : WSL_HOMES[channel];
-  // Tests only: loopback stubs of Token Factory and Nebius Sandboxes, honoured only when unpackaged (D22, D36); the
-  // engine refuses any address that isn't on this machine.
+  // Tests only: loopback stubs of Token Factory, Nebius Sandboxes and Tavily, honoured only when unpackaged (D22, D36,
+  // D37); the engine refuses any address that isn't on this machine.
   const stubSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-token-factory-url") || null;
   const sandboxSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-sandboxes-url") || null;
-  const stubArgs = [...(stubSwitch ? ["--token-factory-url", stubSwitch] : []), ...(sandboxSwitch ? ["--sandboxes-url", sandboxSwitch] : [])];
+  const tavilySwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-tavily-url") || null;
+  const stubArgs = [
+    ...(stubSwitch ? ["--token-factory-url", stubSwitch] : []),
+    ...(sandboxSwitch ? ["--sandboxes-url", sandboxSwitch] : []),
+    ...(tavilySwitch ? ["--tavily-url", tavilySwitch] : []),
+  ];
   const extraArgs = stubArgs.length ? { extraArgs: stubArgs } : {};
   const hostTarget = `${platform === "win32" ? "win" : platform === "darwin" ? "mac" : "linux"}-${process.arch}`;
   const readHash = (path: string): string | null => {

@@ -8,10 +8,12 @@ import {
   CONCLUSION_LABEL,
   evidenceFor,
   initialQuery,
+  rejectedQuotes,
   RESEARCH_CAVEAT,
   RESEARCH_RETENTION,
   requestText,
   ruleText,
+  unusableAssessments,
   usageText,
   type AssumptionId,
   type Conclusion,
@@ -24,6 +26,7 @@ import {
   type ResearchSelection,
   type ResearchView,
 } from "../../../shared/research";
+import { PreviewGuard } from "../../../shared/preview-guard";
 import { CONSENT_COVERS, ConsentModal, plural, runBudgetText } from "../shared/evidence";
 import { useRunEvents } from "../shared/runs";
 import { errorMessage } from "../shared/ui";
@@ -33,12 +36,11 @@ import { errorMessage } from "../shared/ui";
  * previews exactly what goes to Tavily and what goes to Token Factory; "Start research" is bound to that preview. Each
  * report stays with the version it researched. Web text is shown as text: titles, addresses and passages are never
  * links, and Nivra never opens a page; the person copies an address to look. The assessments are the model's: Nivra
- * checks only that each quotation is in the page it names.
- *
- * Until research's integration window wires it into a plan's card, its calls come in as `ResearchActions`.
+ * checks only that each quotation is in the page it names. Each assessment keeps four things apart (D37): the model's
+ * conclusion, the quotations found in the source, the quotations not found, and the assessments that couldn't be used.
  */
 
-/** The calls research makes, as the preload will expose them. */
+/** The calls research makes: the preload's, as the conversation passes them. */
 export interface ResearchActions {
   prepare(planId: string, selection: ResearchSelection): Promise<ResearchPreview>;
   start(planId: string, selection: ResearchSelection, expected: string): Promise<ResearchView>;
@@ -151,12 +153,12 @@ function ResearchDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState<"web" | "sharing" | null>(null);
-  // Counts the form's changes: a preview asked for before the latest one is dropped when it arrives.
-  const asked = useRef(0);
+  // Drops a preview asked for before the latest edit, or before a later request, when it arrives.
+  const guard = useRef(new PreviewGuard());
 
   useEffect(() => {
     if (!opened) return;
-    asked.current++;
+    guard.current.changed();
     setRows([]);
     setTyping("");
     setSites("");
@@ -171,7 +173,7 @@ function ResearchDialog({
   };
   /** Any change makes the preview stale: it is cleared, one still on its way is dropped, and Start waits for a new one. */
   const change = (update: () => void) => {
-    asked.current++;
+    guard.current.changed();
     setPreviewed(null);
     setError(null);
     update();
@@ -180,15 +182,15 @@ function ResearchDialog({
   const picked = (index: number) => rows.some((row) => row.from.kind === "plan" && row.from.index === index);
 
   async function prepare() {
-    const mine = ++asked.current;
+    const mine = guard.current.asked();
     const chosen = selection();
     setBusy(true);
     setError(null);
     try {
       const value = await actions.prepare(plan.id, chosen);
-      if (mine === asked.current) setPreviewed({ preview: value, selection: chosen });
+      if (guard.current.current(mine)) setPreviewed({ preview: value, selection: chosen });
     } catch (reason) {
-      if (mine === asked.current) setError(errorMessage(reason));
+      if (guard.current.current(mine)) setError(errorMessage(reason));
     } finally {
       setBusy(false);
     }
@@ -204,7 +206,7 @@ function ResearchDialog({
       onClose();
     } catch (reason) {
       // Whatever stopped it, nothing was sent: the preview is cleared, so a new start shows what it would send first.
-      asked.current++;
+      guard.current.changed();
       setError(errorMessage(reason));
       setPreviewed(null);
     } finally {
@@ -616,6 +618,8 @@ function ResearchProgress({ runId, online }: { runId: string; online: boolean })
 }
 
 function Report({ report }: { report: ResearchReportView }) {
+  const unusable = unusableAssessments(report.attribution);
+  const counts = attributionText(report.attribution);
   return (
     <Stack gap="sm" data-testid="research-report" data-outcome={report.outcome}>
       {report.stop && (
@@ -626,14 +630,19 @@ function Report({ report }: { report: ResearchReportView }) {
       {report.assessments.map((assessment) => (
         <Assessment key={assessment.assumption} assessment={assessment} report={report} />
       ))}
-      {report.attribution && attributionText(report.attribution) && (
-        <Stack gap={2} data-testid="research-attribution">
-          <Text size="xs" c="var(--nivra-text-2)">
-            {attributionText(report.attribution)}
+      {unusable.length > 0 && (
+        <Stack gap={2} data-testid="research-unusable">
+          <Text size="xs" fw={600}>
+            Assessments that couldn't be used
           </Text>
-          {report.attribution.entries.map((entry, index) => (
-            <Text key={index} size="xs" c="var(--nivra-text-3)" style={plain}>
-              {entry.label ? `“${entry.label}”` : "(no assumption named)"}
+          {counts && (
+            <Text size="xs" c="var(--nivra-text-2)" data-testid="research-attribution">
+              {counts}
+            </Text>
+          )}
+          {unusable.map((line, index) => (
+            <Text key={index} size="xs" style={plain} data-testid="research-unusable-item">
+              {line}
             </Text>
           ))}
         </Stack>
@@ -665,51 +674,82 @@ function Report({ report }: { report: ResearchReportView }) {
 function Assessment({ assessment, report }: { assessment: ResearchAssessmentView; report: ResearchReportView }) {
   const query = report.queries.find((item) => item.assumption === assessment.assumption);
   const why = ruleText(assessment);
-  const { shown, left } = evidenceFor(report, assessment);
+  const { shown } = evidenceFor(report, assessment);
+  const rejected = rejectedQuotes(assessment);
   const { applicability } = assessment;
   return (
-    <Stack gap={4} data-testid="research-assessment" data-assumption={assessment.assumption} data-shown={assessment.shown} data-rule={assessment.rule ?? ""}>
+    <Stack gap={6} data-testid="research-assessment" data-assumption={assessment.assumption} data-model={assessment.model ?? ""} data-shown={assessment.shown} data-rule={assessment.rule ?? ""}>
       <Group gap={6} wrap="nowrap" align="flex-start">
         <Badge size="sm" variant="outline" style={{ textTransform: "none" }}>
           {assessment.assumption}
-        </Badge>
-        <Badge size="sm" variant="light" color={CONCLUSION_COLOR[assessment.shown]} style={{ textTransform: "none" }} data-testid="research-shown">
-          {CONCLUSION_LABEL[assessment.shown]}
         </Badge>
         <Text size="sm" fw={600} style={plain}>
           {query?.text ?? ""}
         </Text>
       </Group>
-      <Text size="xs" c="var(--nivra-text-3)">
-        The model's assessment, from the passages Nivra read.
-      </Text>
-      {why && (
-        <Text size="sm" data-testid="research-rule">
-          {why}
+      <Stack gap={4} data-testid="research-conclusion">
+        <Text size="xs" fw={600}>
+          The model's conclusion, from the passages Nivra read
         </Text>
-      )}
-      {assessment.reasoning && (
-        <Text size="sm" style={plain} data-testid="research-reasoning">
-          {assessment.reasoning}
+        <Group gap={6}>
+          <Badge size="sm" variant="light" color={assessment.model ? CONCLUSION_COLOR[assessment.model] : "gray"} style={{ textTransform: "none" }} data-testid="research-model">
+            {assessment.model ? CONCLUSION_LABEL[assessment.model] : "No assessment"}
+          </Badge>
+          {assessment.shown !== assessment.model && (
+            <>
+              <Text size="xs" c="var(--nivra-text-2)">
+                Nivra shows it as
+              </Text>
+              <Badge size="sm" variant="light" color={CONCLUSION_COLOR[assessment.shown]} style={{ textTransform: "none" }} data-testid="research-shown">
+                {CONCLUSION_LABEL[assessment.shown]}
+              </Badge>
+            </>
+          )}
+        </Group>
+        {why && (
+          <Text size="sm" data-testid="research-rule">
+            {why}
+          </Text>
+        )}
+        {assessment.reasoning && (
+          <Text size="sm" style={plain} data-testid="research-reasoning">
+            {assessment.reasoning}
+          </Text>
+        )}
+        {(applicability.plan || applicability.source) && (
+          <Text size="xs" style={plain} data-testid="research-applicability">
+            The plan means {applicability.plan || "no particular version"}; the sources are about {applicability.source || "no particular version"} ({WHERE[applicability.where]}).
+          </Text>
+        )}
+        {assessment.uncertainty && (
+          <Text size="xs" style={plain}>
+            Uncertain: {assessment.uncertainty}
+          </Text>
+        )}
+      </Stack>
+      <Stack gap={4} data-testid="research-found">
+        <Text size="xs" fw={600}>
+          Quotations found in the source
         </Text>
-      )}
-      {(applicability.plan || applicability.source) && (
-        <Text size="xs" style={plain} data-testid="research-applicability">
-          The plan means {applicability.plan || "no particular version"}; the sources are about {applicability.source || "no particular version"} ({WHERE[applicability.where]}).
-        </Text>
-      )}
-      {assessment.uncertainty && (
-        <Text size="xs" style={plain}>
-          Uncertain: {assessment.uncertainty}
-        </Text>
-      )}
-      {shown.map((evidence, index) => (
-        <Quote key={`${index}-${evidence.passage.id}`} evidence={evidence} />
-      ))}
-      {left > 0 && (
-        <Text size="xs" c="var(--nivra-text-3)" data-testid="research-left-out">
-          {plural(left, "quotation")} the model gave {left === 1 ? "wasn't" : "weren't"} found in the passage {left === 1 ? "it names" : "they name"}, and {left === 1 ? "is" : "are"} left out.
-        </Text>
+        {shown.length > 0 ? (
+          shown.map((evidence, index) => <Quote key={`${index}-${evidence.passage.id}`} evidence={evidence} />)
+        ) : (
+          <Text size="xs" c="var(--nivra-text-3)">
+            None.
+          </Text>
+        )}
+      </Stack>
+      {rejected.length > 0 && (
+        <Stack gap={2} data-testid="research-not-found">
+          <Text size="xs" fw={600}>
+            Quotations not found, so not evidence
+          </Text>
+          {rejected.map((item, index) => (
+            <Text key={index} size="xs" c="var(--nivra-text-2)" style={plain} data-testid="research-rejected">
+              “{item.quote}” ({item.passage}): {item.problem}.
+            </Text>
+          ))}
+        </Stack>
       )}
       {assessment.amendment?.kind === "model" && assessment.shown === "contradicted" && shown.length > 0 && (
         <Text size="sm" style={plain} data-testid="research-amendment">

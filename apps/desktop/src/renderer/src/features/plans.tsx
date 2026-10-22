@@ -4,6 +4,7 @@ import { useState } from "react";
 import { TASK_LIMITS, type PlanView } from "../../../shared/ipc";
 import { planText } from "../../../shared/plans";
 import { errorMessage } from "../shared/ui";
+import { PlanResearch, type PlanResearching } from "./research";
 import { PlanReviews, type PlanReviewing } from "./reviews";
 
 /** Plan versions grouped by lineage, each lineage oldest first. */
@@ -56,8 +57,11 @@ function PlanEditor({ initial, saveLabel, onSave, onCancel }: { initial: string;
   );
 }
 
-/** One plan: its latest version, editing into the next one, its earlier versions, a task made from it, and its reviews. */
-function PlanCard({ versions, reviewing, onSaved, onCreateTask }: { versions: PlanView[]; reviewing: PlanReviewing; onSaved(): void; onCreateTask(plan: PlanView): void }) {
+/**
+ * One plan: its latest version, editing into the next one, its earlier versions, a task made from it, its reviews, and
+ * research of its assumptions.
+ */
+function PlanCard({ versions, reviewing, researching, onSaved, onCreateTask }: { versions: PlanView[]; reviewing: PlanReviewing; researching: PlanResearching; onSaved(): void; onCreateTask(plan: PlanView): void }) {
   const latest = versions.at(-1)!;
   const [editing, setEditing] = useState(false);
   const [earlier, setEarlier] = useState(false);
@@ -117,6 +121,7 @@ function PlanCard({ versions, reviewing, onSaved, onCreateTask }: { versions: Pl
               </Stack>
             ))}
         <PlanReviews versions={versions} reviewing={reviewing} />
+        <PlanResearch versions={versions} researching={researching} />
       </Stack>
     </Paper>
   );
@@ -133,6 +138,7 @@ export function AnswerPlans({
   reply,
   plans,
   reviewing,
+  researching,
   onSaved,
   onCreateTask,
 }: {
@@ -142,6 +148,7 @@ export function AnswerPlans({
   /** Every version of the plans saved from this answer. */
   plans: PlanView[];
   reviewing: PlanReviewing;
+  researching: PlanResearching;
   onSaved(): void;
   onCreateTask(plan: PlanView): void;
 }) {
@@ -150,7 +157,7 @@ export function AnswerPlans({
   return (
     <Stack gap="xs">
       {lineages(plans).map((versions) => (
-        <PlanCard key={versions[0]!.lineageId} versions={versions} reviewing={reviewing} onSaved={onSaved} onCreateTask={onCreateTask} />
+        <PlanCard key={versions[0]!.lineageId} versions={versions} reviewing={reviewing} researching={researching} onSaved={onSaved} onCreateTask={onCreateTask} />
       ))}
       {saving ? (
         <PlanEditor

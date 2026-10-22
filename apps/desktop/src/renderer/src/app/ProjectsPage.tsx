@@ -8,7 +8,7 @@ import { HelloRun, TERMINAL, type RunRef } from "../features/hello";
 import { Preferences } from "../features/preferences";
 import { Projects } from "../features/projects";
 import { SandboxCheck } from "../features/sandbox";
-import { Settings } from "../features/settings";
+import { ResearchSettings, Settings } from "../features/settings";
 
 /**
  * Projects & settings: the repositories, each on the engine its folder belongs to (D17), the engineer's preferences
@@ -79,6 +79,7 @@ export function ProjectsPage({
         targetLabel={selected?.targetLabel ?? null}
         onCredentialsSaved={() => setCredentialsSaved((count) => count + 1)}
       />
+      <ResearchSettings />
     </Stack>
   );
 }

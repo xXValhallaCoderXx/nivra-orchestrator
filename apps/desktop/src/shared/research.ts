@@ -251,6 +251,32 @@ export function usageText(report: Pick<ResearchReportView, "usage" | "requests" 
   return `${credits} · ${tokens}`;
 }
 
+/**
+ * The quotations an assessment gave that Nivra didn't find in the passage they name, each with why: shown as the
+ * model's words, never as evidence.
+ */
+export function rejectedQuotes(assessment: Pick<ResearchAssessmentView, "citations">): Array<{ quote: string; passage: string; problem: string }> {
+  return assessment.citations
+    .filter((citation) => !citation.valid)
+    .map((citation) => ({ quote: citation.quote, passage: citation.passage, problem: CITATION_PROBLEM[citation.problem ?? "not-found"] }));
+}
+
+/**
+ * The model's assessments that couldn't be used, each in a sentence with why: set aside because they named no
+ * assumption asked about (or could mean more than one), or matched with no outcome Nivra recognises. Empty when every
+ * one could be used.
+ */
+export function unusableAssessments(attribution: AttributionView | null): string[] {
+  if (!attribution) return [];
+  const setAside = attribution.entries.map((entry) => `${entry.label ? `“${entry.label}”` : "An assessment"} ${REJECTION[entry.reason]}, so it was set aside.`);
+  const unlisted = attribution.rejected - attribution.entries.length;
+  if (unlisted > 0) setAside.push(`${plural(unlisted, "more assessment")} ${unlisted === 1 ? "was" : "were"} set aside, and ${unlisted === 1 ? "isn't" : "aren't"} listed.`);
+  const noOutcome = attribution.unusable.map(
+    (item) => `${item.assumption}'s assessment ${item.outcome ? `gave “${item.outcome}”` : "gave no outcome"}, not supported, contradicted or unresolved, so it can't be used.`,
+  );
+  return [...setAside, ...noOutcome];
+}
+
 /** A valid quotation with the passage and page it came from, as an assessment's evidence. */
 export interface Evidence {
   quote: string;

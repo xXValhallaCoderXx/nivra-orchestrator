@@ -26,8 +26,10 @@ import {
   attributionText,
   evidenceFor,
   initialQuery,
+  rejectedQuotes,
   requestText,
   ruleText,
+  unusableAssessments,
   usageText,
   type ResearchReportView,
   type ResearchRequestView,
@@ -418,6 +420,40 @@ describe("the research window's words and evidence (NIV-45)", () => {
       "1 Tavily credit, as reported · tokens unknown",
     );
     assert.equal(usageText({ outcome: "interrupted", requests: [request({ state: "failed", failure: "interrupted", credits: null })], usage: { credits: null, model: none } }), "Tavily credits unknown · no model call");
+  });
+
+  it("keeps the quotations not found apart, each with why, and the assessments that couldn't be used, each with why", () => {
+    const citation = (quote: string, valid: boolean, problem: "unknown-passage" | "too-short" | "not-found" | null) => ({ passage: "S1.1", stance: "contradicts" as const, quote, valid, problem });
+    assert.deepEqual(
+      rejectedQuotes({
+        citations: [citation("has been removed from the standard library", true, null), citation("a sentence no page holds at all", false, "not-found"), citation("too short", false, "too-short"), citation("no problem said", false, null)],
+      }),
+      [
+        { quote: "a sentence no page holds at all", passage: "S1.1", problem: "isn't in the passage it names" },
+        { quote: "too short", passage: "S1.1", problem: "is too short to check (under 20 characters or 4 words)" },
+        { quote: "no problem said", passage: "S1.1", problem: "isn't in the passage it names" },
+      ],
+      "only the quotations Nivra didn't find, never a valid one",
+    );
+    assert.deepEqual(unusableAssessments(null), []);
+    assert.deepEqual(unusableAssessments({ handedIn: 2, matched: 2, usable: 2, rejected: 0, entries: [], unusable: [] }), []);
+    assert.deepEqual(
+      unusableAssessments({
+        handedIn: 15,
+        matched: 2,
+        usable: 1,
+        rejected: 13,
+        entries: [{ label: "A4", reason: "unknown" }, { label: "", reason: "missing" }, ...Array.from({ length: 8 }, () => ({ label: "A1", reason: "duplicate" as const }))],
+        unusable: [{ assumption: "A2", outcome: "likely" }],
+      }).filter((line, index, all) => all.indexOf(line) === index),
+      [
+        "“A4” named no assumption that was asked about, so it was set aside.",
+        "An assessment named no assumption, so it was set aside.",
+        "“A1” answered an assumption that another assessment answered too, so it was set aside.",
+        "3 more assessments were set aside, and aren't listed.",
+        "A2's assessment gave “likely”, not supported, contradicted or unresolved, so it can't be used.",
+      ],
+    );
   });
 
   it("says what became of the model's assessments when some were set aside, and nothing when all matched", () => {

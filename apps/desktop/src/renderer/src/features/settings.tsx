@@ -1,7 +1,8 @@
-import { Alert, Badge, Button, Code, Group, PasswordInput, Stack, Text, TextInput } from "@mantine/core";
+import { Alert, Badge, Button, Code, Group, PasswordInput, Stack, Switch, Text, TextInput } from "@mantine/core";
 import type { ProviderCheck } from "@nivra/domain";
 import { useEffect, useState } from "react";
 import type { SettingsView } from "../../../shared/ipc";
+import { RESEARCH_RETENTION } from "../../../shared/research";
 import { errorMessage, Section } from "../shared/ui";
 
 const KEY_LOOK = {
@@ -177,6 +178,94 @@ export function Settings({ projectId, online, targetLabel, onCredentialsSaved }:
       )}
       {error && (
         <Text size="sm" c="var(--nivra-error)">
+          {error}
+        </Text>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * Research of saved plans' assumptions (D37): the Tavily key, kept like the Nebius key and shown only as saved or not,
+ * and the app-wide permission to send research queries to Tavily, with what Tavily and Nivra keep. Each run still waits
+ * for its own "Start research".
+ */
+export function ResearchSettings() {
+  const [settings, setSettings] = useState<SettingsView | null>(null);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void window.nivra.getSettings().then(setSettings, (reason: unknown) => setError(errorMessage(reason)));
+  }, []);
+
+  async function act(change: () => Promise<SettingsView>) {
+    setBusy(true);
+    setError(null);
+    try {
+      setSettings(await change());
+    } catch (reason) {
+      setError(errorMessage(reason));
+      // Research turned off stays off even when a run couldn't be stopped: show the settings as they are now.
+      void window.nivra.getSettings().then(setSettings, () => undefined);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section title="Web research" description="Checks a saved plan's assumptions against public web pages, through Tavily, with the queries you approve for each run.">
+      <Group gap="sm" align="flex-end">
+        <PasswordInput
+          label="Tavily API key"
+          placeholder={settings?.tavilyKey === "set" ? "A key is saved; enter a new one to replace it" : "Paste your Tavily API key"}
+          value={key}
+          onChange={(event) => setKey(event.currentTarget.value)}
+          w={380}
+          data-testid="tavily-key"
+        />
+        <Button
+          onClick={() =>
+            void act(async () => {
+              const view = await window.nivra.setTavilyKey(key.trim());
+              setKey("");
+              return view;
+            })
+          }
+          loading={busy}
+          disabled={key.trim().length < 8}
+          data-testid="tavily-key-save"
+        >
+          Save
+        </Button>
+        {settings?.tavilyKey === "set" && (
+          <Button variant="subtle" color="red" onClick={() => void act(() => window.nivra.setTavilyKey(null))} disabled={busy} data-testid="tavily-key-remove">
+            Remove
+          </Button>
+        )}
+        {settings && (
+          <Badge variant="light" color={settings.tavilyKey === "set" ? "green" : "gray"} data-testid="tavily-key-state">
+            {settings.tavilyKey === "set" ? "Key saved" : "No key"}
+          </Badge>
+        )}
+      </Group>
+      <Switch
+        label="Research queries to Tavily"
+        checked={settings?.webResearch === true}
+        onChange={(event) => {
+          const on = event.currentTarget.checked;
+          void act(() => window.nivra.setWebResearch(on));
+        }}
+        disabled={!settings || busy}
+        data-testid="web-research-switch"
+      />
+      <Text size="sm" c="var(--nivra-text-2)" data-testid="web-research-words">
+        When it is on, each run still waits for you to start it. Tavily gets only the queries you approve and the addresses of pages its own search returned:
+        never the plan's text, your repositories or your conversations. Turning it off stops research under way where it can. {RESEARCH_RETENTION}
+      </Text>
+      {error && (
+        <Text size="sm" c="var(--nivra-error)" data-testid="research-settings-error">
           {error}
         </Text>
       )}
