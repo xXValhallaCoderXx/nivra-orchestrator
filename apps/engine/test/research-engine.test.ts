@@ -16,6 +16,7 @@ import { startStub, toolCall, type Reply, type Stub } from "./stub-token-factory
  * network, and no real model is called.
  */
 const MODEL_KEY = "nebius-research-engine-key-0123456789";
+const PROJECT_ID = "project-e00researchengine";
 const TAVILY_KEY = `tvly-dev-research-engine-${"k".repeat(16)}`;
 const MODEL = "nvidia/nemotron-3-super-120b-a12b";
 const PLAN_CANARY = `nivra-plan-canary-${randomUUID()}`;
@@ -175,11 +176,23 @@ describe("research of a saved plan version over stdio (NIV-45, D37)", () => {
     await refusedWith("a query that names a project", startResearch(engine, { packet: naming, deny: { terms: ["nivra-orchestrator"], paths: [] } }), "unsafe-query");
     const keyed: ResearchPacket = { ...PACKET, assumptions: [{ ...PACKET.assumptions[0]!, query: `distutils ${MODEL_KEY}` }] };
     await refusedWith("a query that holds a saved key", startResearch(engine, { packet: keyed }), "unsafe-query");
+    // Every value the vault keeps counts, the project id included, which only the vault's own list holds.
+    await engine.client.call("secrets.update", { set: { NEBIUS_PROJECT_ID: PROJECT_ID } });
+    const projectId: ResearchPacket = { ...PACKET, assumptions: [{ ...PACKET.assumptions[0]!, query: `distutils ${PROJECT_ID}` }] };
+    await refusedWith("a query that holds the saved project id", startResearch(engine, { packet: projectId }), "unsafe-query");
     await engine.client.call("secrets.update", { remove: ["TAVILY_API_KEY"] });
     await refusedWith("no Tavily key", startResearch(engine), "tavily-key-missing");
     await engine.client.call("secrets.update", { set: { TAVILY_API_KEY: TAVILY_KEY }, remove: ["NEBIUS_API_KEY"] });
     await refusedWith("no model key", startResearch(engine), "model-key-missing");
     assert.deepEqual([tavily.calls.length, model.requests.length], [0, 0], "nothing was sent, not even the model listing");
+  });
+
+  it("says in its doctor only whether a Tavily key is set", async () => {
+    const { engine } = await setup();
+    const research = async () => (await engine.client.call("doctor", {})).checks.find((check) => check.id === "research");
+    assert.deepEqual(await research(), { id: "research", status: "ok", title: "Web research", detail: "A Tavily key is set; access not checked yet.", fix: null });
+    await engine.client.call("secrets.update", { remove: ["TAVILY_API_KEY"] });
+    assert.equal((await research())?.detail, "No Tavily key is set. Only research of a plan's assumptions needs one.");
   });
 
   it("stops at a cancel during Search: nothing more is sent, and the report says the searches were cancelled", async () => {
@@ -217,6 +230,25 @@ describe("research of a saved plan version over stdio (NIV-45, D37)", () => {
     assert.deepEqual([stubs.tavily.calls.length, stubs.model.chats().length], [sent, 0], "nothing was sent again");
   });
 
+  it("reads as interrupted after its engine is killed during the model's request, counting that request as one that may have gone", async () => {
+    const stubs = await stubsFor({ answer: { ...toolCall(RESEARCH_TOOL, ANSWER), delayMs: 60_000 } });
+    const first = await engineOn(stubs);
+    const { run } = await startResearch(first.engine);
+    await waitFor(() => (stubs.model.chats().length === 1 ? true : null), { what: "the model's request", timeoutMs: 10_000 });
+    first.engine.kill();
+    await first.engine.exited;
+    const second = await engineOn(stubs, { home: first.home });
+    await finished(second.engine, run.id);
+    const report = await reportOf(second.engine, run.id);
+    const used = report?.budget?.used;
+    assert.deepEqual(
+      [report?.outcome, states(report)["model"], used?.requests, used?.unreportedRequests, used?.reportedInputTokens, used?.reportedOutputTokens, (used?.inputTokens ?? 0) > 0],
+      ["interrupted", "failed:interrupted", 1, 1, null, null, true],
+    );
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(stubs.model.chats().length, 1, "nothing was sent again");
+  });
+
   it("answers a repeated request with its run, and refuses its id reused for another plan version", async () => {
     const { engine, tavily } = await setup();
     const first = await startResearch(engine);
@@ -237,13 +269,22 @@ describe("research of a saved plan version over stdio (NIV-45, D37)", () => {
     const kept = JSON.stringify(await reportOf(engine, run.id));
     assert.deepEqual([kept.includes(TAVILY_KEY), kept.includes(MODEL_KEY), kept.includes("[secret:TAVILY_API_KEY]"), kept.includes("[secret:NEBIUS_API_KEY]")], [false, false, true, true]);
     const events = JSON.stringify((await engine.client.call("runs.events", { runId: run.id, after: 0, limit: 500 })).events);
+    const named = (text: string | Buffer) => [PLAN_CANARY, TAVILY_KEY, MODEL_KEY].filter((secret) => text.includes(secret)).map((secret) => (secret === PLAN_CANARY ? "the plan" : "a key"));
+    /**
+     * Every store file as it is now, each report saved on the way included while the engine runs: closing checkpoints
+     * its log away.
+     */
+    const scan = (when: string) => {
+      const files = readdirSync(home).filter((name) => name.startsWith("nivra.db") || name.startsWith("mastra.db"));
+      for (const file of files) assert.deepEqual(named(readFileSync(join(home, file))), [], `${file}, ${when}`);
+      return files;
+    };
+    const running = scan("while the engine runs");
+    assert.deepEqual(["nivra.db", "nivra.db-wal", "mastra.db"].filter((file) => !running.includes(file)), [], "each store, and the run store's log, read");
     await engine.client.call("shutdown", {});
     await engine.exited;
-    const named = (text: string | Buffer) => [PLAN_CANARY, TAVILY_KEY, MODEL_KEY].filter((secret) => text.includes(secret)).map((secret) => (secret === PLAN_CANARY ? "the plan" : "a key"));
     assert.deepEqual([named(events), named(engine.stderr())], [[], []], "events and logs");
-    for (const file of readdirSync(home).filter((name) => name.startsWith("nivra.db") || name.startsWith("mastra.db"))) {
-      assert.deepEqual(named(readFileSync(join(home, file))), [], file);
-    }
+    scan("after shutdown");
     // Mastra gets nothing of what a run is bound to: the plan's id stays in the run store.
     const mastra = readdirSync(home).filter((name) => name.startsWith("mastra.db"));
     assert.ok(mastra.length > 0);

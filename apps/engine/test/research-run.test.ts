@@ -205,6 +205,16 @@ describe("a research run, in process (NIV-45)", () => {
     const read = asInterrupted(ResearchReport.parse(midSearch));
     assert.deepEqual([read.outcome, read.requests.find((request) => request.id === "search-A1")!.failure, read.usage.credits], ["interrupted", "interrupted", null]);
     assert.equal(asInterrupted(ResearchReport.parse(saved.at(-1)!)).outcome, "complete", "an ended report is left as it was");
+    // Cut off during the model's request, its budget counts that request as one that may have gone: estimated, with
+    // nothing reported.
+    const midModel = asInterrupted(ResearchReport.parse(saved.find((snapshot) => snapshot.requests.find((request) => request.id === "model")!.state === "sending")!));
+    const used = midModel.budget!.used;
+    assert.deepEqual(
+      [midModel.requests.find((request) => request.id === "model")!.failure, used.requests, used.unreportedRequests, used.reportedInputTokens, used.reportedOutputTokens, used.inputTokens > 0],
+      ["interrupted", 1, 1, null, null, true],
+    );
+    const ended = saved.at(-1)!.budget!.used;
+    assert.deepEqual([ended.requests, ended.unreportedRequests, ended.reportedInputTokens, ended.reportedOutputTokens], [1, 0, 6_000, 700], "the request as it went, once it answered");
   });
 
   it("carries on with the other assumption when one search is refused, sending it once, and shows the first as not assessed", async () => {
@@ -344,15 +354,22 @@ describe("a research run, in process (NIV-45)", () => {
   });
 
   it("ends as cancelled when stopped during Search or Extract, sending nothing after the stop and no model request", async () => {
-    const slowSearch: TavilyScript = (call, index) => (call.path === "/search" ? { delayMs: 5_000, ...python(call, index) } : python(call, index));
+    // Each stop lands once Tavily has A1's request, so it is out when the run is stopped, whatever the machine's load.
     const stopped = new AbortController();
-    setTimeout(() => stopped.abort(), 150);
+    const slowSearch: TavilyScript = (call, index) => {
+      if (call.path !== "/search") return python(call, index);
+      if (call.body?.["query"] === Q1) stopped.abort();
+      return { delayMs: 5_000, ...python(call, index) };
+    };
     const duringSearch = await research(slowSearch, undefined, { signal: stopped.signal });
     assert.deepEqual([duringSearch.report.outcome, duringSearch.report.stop?.code, duringSearch.stub.calls.filter((call) => call.path === "/extract").length, duringSearch.model.doGenerateCalls.length], ["cancelled", "cancelled", 0, 0]);
     assert.deepEqual(states(duringSearch.report)["search-A1"], "failed:cancelled");
-    const slowExtract: TavilyScript = (call, index) => (call.path === "/extract" ? { delayMs: 5_000, ...python(call, index) } : python(call, index));
     const later = new AbortController();
-    setTimeout(() => later.abort(), 300);
+    const slowExtract: TavilyScript = (call, index) => {
+      if (call.path !== "/extract") return python(call, index);
+      if (call.body?.["query"] === Q1) later.abort();
+      return { delayMs: 5_000, ...python(call, index) };
+    };
     const duringExtract = await research(slowExtract, undefined, { signal: later.signal });
     assert.deepEqual([duringExtract.report.outcome, duringExtract.model.doGenerateCalls.length, states(duringExtract.report)["extract-A1"]], ["cancelled", 0, "failed:cancelled"]);
   });
@@ -404,6 +421,21 @@ describe("a research run, in process (NIV-45)", () => {
     const capped: Array<{ at: number; totalMs: number }> = [];
     await research(python, undefined, { client: recording(capped), timing: { runMs: 60_000, retrievalCutoffMs: 600, modelMs: 700 } });
     assert.deepEqual(capped.map((call) => call.totalMs), [700]);
+  });
+
+  it("records the model's request as never sent when its admission is refused, out of time or stopped, as its report says it may go", async () => {
+    // On the test's own clock, the save made as the request may go out takes the run past its deadline.
+    let time = 10_000;
+    const now = () => time;
+    const seen: Array<{ at: number; totalMs: number }> = [];
+    const sendingModel = (snapshot: ResearchReportShape) => snapshot.requests.find((request) => request.id === "model")!.state === "sending";
+    const late = await research(python, undefined, { client: recording(seen, undefined, { now }), now, startedAt: now(), timing: { runMs: 4_000, retrievalCutoffMs: 3_000 }, save: (snapshot) => void (sendingModel(snapshot) && (time += 5_000)) });
+    const lateUsed = late.report.budget!.used;
+    assert.deepEqual([late.report.outcome, late.report.stop?.code, states(late.report)["model"], seen.length, lateUsed.requests, lateUsed.unreportedRequests], ["failed", "deadline", "failed:not-sent", 0, 0, 0]);
+    // Stopped while that save is made.
+    const stopped = new AbortController();
+    const cancelled = await research(python, undefined, { client: recording(seen), signal: stopped.signal, save: (snapshot) => void (sendingModel(snapshot) && stopped.abort()) });
+    assert.deepEqual([cancelled.report.outcome, cancelled.report.stop?.code, states(cancelled.report)["model"], seen.length, cancelled.report.budget!.used.requests], ["cancelled", "cancelled", "failed:not-sent", 0, 0]);
   });
 
   it("sends nothing and ends as cancelled when stopped before it began", async () => {

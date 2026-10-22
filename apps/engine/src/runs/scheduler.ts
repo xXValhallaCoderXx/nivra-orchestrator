@@ -1,4 +1,5 @@
-import { isTerminal, type ChatContext, type JsonObject, type ResearchContext, type ReviewContext, type RunContext, type RunStatus, type SandboxContext, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import { isTerminal, type JsonObject, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
+import type { z } from "zod";
 import { errorFacts, internalMessage, publicFailure, Refusal, type Diagnostic, type DiagnosticCode, type ErrorFacts } from "../diagnostics.ts";
 import type { NewEvent, RunStore } from "./store.ts";
 
@@ -115,15 +116,11 @@ function sameResearch(stored: unknown, input: unknown): boolean {
   return keys.every((key) => a[key] === b[key]);
 }
 
-/** The context each kind of run carries (D21), kept with the run's workflow, so each workflow reads only its own. */
-export interface ContextOf {
-  hello: RunContext;
-  explain: RunContext;
-  chat: ChatContext;
-  review: ReviewContext;
-  sandbox: SandboxContext;
-  research: ResearchContext;
-}
+/**
+ * The context each kind of run carries (D21), as the protocol's start parameters define it, kept with the run's
+ * workflow so each workflow reads only its own.
+ */
+export type ContextOf = { [P in z.output<typeof StartRunParams> as P["workflowId"]]: P["context"] };
 
 /**
  * Maps how a Mastra run ended onto Nivra's statuses. Anything but success is a failure, except a cancel that was asked

@@ -1,5 +1,5 @@
 import { createTool } from "@mastra/core/tools";
-import { RESEARCH_LIMITS, RESEARCH_TOOL, type ResearchStop, type ReviewScope, type RunBudgetRecord, type RunRoute, type RunUsage } from "@nivra/domain";
+import { RESEARCH_LIMITS, RESEARCH_TOOL, type ResearchReport, type ResearchRequest, type ResearchStop, type ReviewScope, type RunRoute } from "@nivra/domain";
 import { CHARS_PER_TOKEN } from "../explain/budget.ts";
 import { toolDefinitionChars } from "../explain/tools.ts";
 import { failure, InternalFailure, ModelFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
@@ -58,6 +58,22 @@ export const RESEARCH_STOP_MESSAGES: Readonly<Record<ResearchStopCode, string>> 
 /** A run whose time was used up before anything was sent: its preparation took it all. */
 const OUT_OF_TIME = "The research ran out of time before anything was sent. Start again.";
 
+/**
+ * A report saved as its model request goes out: its budget counts that request as the budget counts one let go (D30),
+ * with `inputTokens` estimated and nothing reported, since it may be sent from here on.
+ */
+function goingOut(report: ResearchReportShape, inputTokens: number): ResearchReportShape {
+  if (!report.budget) return report;
+  const { used } = report.budget;
+  return {
+    ...report,
+    budget: {
+      ...report.budget,
+      used: { ...used, requests: used.requests + 1, inputTokens: used.inputTokens + inputTokens, reportedInputTokens: null, reportedOutputTokens: null, unreportedRequests: used.unreportedRequests + 1 },
+    },
+  };
+}
+
 /** Why nothing could be read, from how the requests ended: Tavily's refusals first, then time, then nothing found at all. */
 function nothingReadStop(requests: readonly ResearchRequestEntry[]): ResearchStopCode {
   const failures = new Set(requests.filter((request) => request.kind !== "model" && request.state === "failed").map((request) => request.failure));
@@ -70,46 +86,11 @@ function nothingReadStop(requests: readonly ResearchRequestEntry[]): ResearchSto
   return "nothing-read";
 }
 
-export interface ResearchRequestEntry {
-  id: "search-A1" | "search-A2" | "search-A3" | "extract-A1" | "extract-A2" | "extract-A3" | "model";
-  kind: "search" | "extract" | "model";
-  assumption: AssumptionId | null;
-  state: "pending" | "sending" | "answered" | "failed" | "skipped";
-  failure: RequestFailure | null;
-  status: number | null;
-  requestId: string | null;
-  credits: number | null;
-  pages: number;
-  /** For an Extract, how many of its pages came back with content; null otherwise, or without an answer. */
-  returned: number | null;
-  elapsedMs: number | null;
-}
+/** One request of the run, as its report keeps it: the domain contract's. */
+export type ResearchRequestEntry = ResearchRequest;
 
-/** The report, in the shape of the domain contract's `ResearchReport`, which a test checks it against. */
-export interface ResearchReportShape {
-  planId: string;
-  planVersion: number;
-  packetDigest: string;
-  outcome: "in-progress" | "complete" | "failed" | "cancelled" | "interrupted";
-  scope: ReviewScope;
-  request: { runId: string; clientRequestId: string };
-  route: RunRoute | null;
-  queries: Array<{ assumption: AssumptionId; text: string; query: string }>;
-  sites: { mode: "prefer" | "restrict"; hosts: string[] } | null;
-  requests: ResearchRequestEntry[];
-  pages: Page[];
-  passages: Passage[];
-  assessments: Assessed["assessments"];
-  checks: Assessed["checks"];
-  /** What the model handed in and how much of it named an assumption asked about; null until it answered. */
-  attribution: Assessed["attribution"];
-  stop: { code: ResearchStopCode; message: string } | null;
-  usage: { credits: number | null; model: RunUsage };
-  budget: RunBudgetRecord | null;
-  elapsedMs: number;
-  updatedAt: string;
-  finishedAt: string | null;
-}
+/** The report: the domain contract's `ResearchReport`. */
+export type ResearchReportShape = ResearchReport;
 
 export interface ResearchRunOptions {
   binding: { planId: string; planVersion: number; packetDigest: string; scope: ReviewScope; request: { runId: string; clientRequestId: string } };
@@ -250,9 +231,8 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     finishedAt,
   });
   let saving: Promise<void> = Promise.resolve();
-  /** Saves the report as it stands now, after every earlier save. */
-  const save = (): Promise<void> => {
-    const snapshot = report();
+  /** Saves the report as it stands now, or `snapshot` when given, after every earlier save. */
+  const save = (snapshot = report()): Promise<void> => {
     saving = saving.then(() => options.save(snapshot));
     return saving;
   };
@@ -355,13 +335,10 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     return finish(nothingReadStop(requests), "failed");
   }
 
-  // The model: one request. The report says it may go out before it is admitted, and its agent is built before then
-  // too, so neither takes the model's time: admitted just before the call, it gets the smaller of its own limit and the
-  // time left, and a guard ends it at that moment whatever the client does.
+  // The model: one request. Its agent is built, and the report says the request may go out, before it is admitted, so
+  // neither takes the model's time: admitted just before the call, it gets the smaller of its own limit and the time
+  // left, and a guard ends it at that moment whatever the client does.
   const message = researchMessage({ planVersion: options.binding.planVersion, planText: packet.planText, assumptions: packet.assumptions, pages, passages, code: options.passageCode ?? passageCode() });
-  const target = request("model");
-  target.state = "sending";
-  await save();
   let handedIn: unknown = null;
   const tool = createTool({
     id: RESEARCH_TOOL,
@@ -373,12 +350,17 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     },
   });
   const agent = options.client.agent({ id: "nivra-research", name: "Nivra research", modelId: options.model, instructions: RESEARCH_INSTRUCTIONS, tools: { [RESEARCH_TOOL]: tool } });
+  const target = request("model");
+  target.state = "sending";
+  // Saved with the request counted as the budget counts one let go (D30), its input estimated and unreported: read back
+  // after its engine stopped, the report then says it may have gone, and that what it used is unknown.
+  await save(goingOut(report(), largest));
   const admitted = hold.admit();
   if (!admitted.ok) {
     hold.release();
-    const cancelled = admitted.refusal.reason === "cancelled";
-    Object.assign(target, { state: "failed", failure: cancelled ? "cancelled" : "deadline" });
-    return cancelled ? finish("cancelled", "cancelled") : finish("deadline", "failed");
+    // Never sent: the request says so, and the stop says why.
+    Object.assign(target, { state: "failed", failure: "not-sent" });
+    return admitted.refusal.reason === "cancelled" ? finish("cancelled", "cancelled") : finish("deadline", "failed");
   }
   const timeUp = new AbortController();
   const timer = setTimeout(() => timeUp.abort(), admitted.ms);

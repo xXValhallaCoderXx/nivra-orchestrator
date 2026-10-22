@@ -170,7 +170,7 @@ export type QueryProblem = z.infer<typeof QueryProblem>;
 export const QUERY_PROBLEM_WORDS: Readonly<Record<QueryProblem, string>> = {
   blank: "is empty",
   "too-long": `is longer than ${RESEARCH_LIMITS.queryChars} characters`,
-  "saved-key": "holds one of your saved keys",
+  "saved-key": "holds one of your saved keys or your Nebius project id",
   credential: "looks like it holds a credential",
   url: "holds a web address",
   path: "holds a file path",
