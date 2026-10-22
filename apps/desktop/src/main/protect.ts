@@ -30,8 +30,8 @@ const SAVED_WORDS: Readonly<Record<string, string>> = {
 
 /**
  * Throws when text the person typed into `field` holds a saved secret or a recognised credential, saying which and what
- * to do. `field` reads as the start of a sentence ("Your message", "The goal"); `action` is what they were doing. A plan
- * version can't change, so for a review or research the way out is a new version; a preview is simply done again.
+ * to do. `field` reads as the start of a sentence ("Your message", "The goal"); `action` is what they were doing. A
+ * plan version can't change, so for a review or research the way out is a new version; a preview is simply done again.
  */
 export function refuseCredentials(field: string, text: string, known: KnownSecrets, action: "send" | "save" | "review" | "research" | "preview" = "save"): void {
   const nothing = action === "save" ? "nothing was saved" : "nothing was sent";

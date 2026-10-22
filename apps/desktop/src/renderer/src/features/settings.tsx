@@ -261,8 +261,8 @@ export function ResearchSettings() {
         data-testid="web-research-switch"
       />
       <Text size="sm" c="var(--nivra-text-2)" data-testid="web-research-words">
-        When it is on, each run still waits for you to start it. Tavily gets only the queries you approve and the addresses of pages its own search returned:
-        never the plan's text, your repositories or your conversations. Turning it off stops research under way where it can. {RESEARCH_RETENTION}
+        When it is on, each run still waits for you to start it. Tavily gets only the queries you approve, the sites you list, if any, and the addresses of pages
+        its own search returned: never the plan's text, your repositories or your conversations. Turning it off stops research under way where it can. {RESEARCH_RETENTION}
       </Text>
       {error && (
         <Text size="sm" c="var(--nivra-error)" data-testid="research-settings-error">

@@ -154,6 +154,13 @@ const RESEARCH_CLOSED = "This plan's project was removed, so its assumptions can
 /** Why research leads to one amended version at most (D37). */
 const AMENDED_ALREADY = "A version amended from this research was saved already, so nothing new was saved. Open the plan to see it.";
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+/**
+ * What a run link is in the person's words, and what nothing sent means for it: research reaches two services (D37).
+ */
+const sendWords = (workflowId: string) => ({
+  what: workflowId === "review" ? "this review" : workflowId === "research" ? "this research" : "this message",
+  nothing: workflowId === "research" ? "nothing reached Tavily or Token Factory" : "nothing reached the model",
+});
 const isRunNotFound = (error: unknown) => error instanceof RpcCallError && error.code === ErrorCode.RunNotFound;
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref?.());
 
@@ -683,24 +690,11 @@ export class Host {
     if (on) return;
     this.#webResearchEpoch++;
     if (this.#workspace.state !== "ready") return;
-    const workspace = this.#workspace.db;
-    const stopped = openResearch(workspace).flatMap((link) => {
-      const token = stopResearch(workspace, link.id, "web-research");
-      return token ? [{ link, token }] : [];
-    });
-    // One still being sent stops at its own check, and one whose run isn't known yet once it is found. A run whose
-    // engine isn't online isn't running any more (D4).
-    const running = stopped.filter(({ link }) => link.runId && this.#engines.get(link.targetId)?.supervisor.state.status === "online");
-    const results = await Promise.allSettled(running.map(({ link }) => this.cancelRun(link.runId!)));
-    const failed = running.flatMap((stop, index) => {
-      const result = results[index]!;
-      return result.status === "rejected" ? [{ ...stop, why: errorText(result.reason) }] : [];
-    });
-    if (this.#workspace.state === "ready") for (const { link, token } of failed) withdrawStop(this.#workspace.db, link.id, token);
+    const failed = await this.#stopResearchRuns(openResearch(this.#workspace.db), "web-research");
     if (failed.length) {
       const one = failed.length === 1;
       throw new Error(
-        `Research queries to Tavily are off, but Nivra couldn't stop ${one ? "a research run" : `${failed.length} research runs`} (${failed[0]!.why}). Restart ${one ? "its engine" : "their engines"} to stop ${one ? "it" : "them"}.`,
+        `Research queries to Tavily are off, but Nivra couldn't stop ${one ? "a research run" : `${failed.length} research runs`} (${failed[0]}). Restart ${one ? "its engine" : "their engines"} to stop ${one ? "it" : "them"}.`,
       );
     }
   }
@@ -972,7 +966,7 @@ export class Host {
     if (!modelContext) {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
       const withdraw = this.#markProjectTurns(projectId, "sharing");
-      await this.#stopExplainRuns(projectId, (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`).catch((error: unknown) => {
+      await this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`).catch((error: unknown) => {
         withdraw();
         throw error;
       });
@@ -1150,7 +1144,7 @@ export class Host {
     this.#cloudEpochs.set(projectId, this.#cloudEpochOf(projectId) + 1);
     const withdraw = this.#markProjectTurns(projectId, "removal");
     try {
-      await this.#stopExplainRuns(projectId, (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
+      await this.#stopProjectRuns(projectId, "removal", (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
       const check = this.#sandboxChecks.get(projectId);
       if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
         await this.#cancelSandboxRun(projectId, check, null, (why) => `Nivra couldn't stop the project's sandbox check (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
@@ -1464,41 +1458,63 @@ export class Host {
     }
   }
 
-  /** Cancels the project's queued and running explain and conversation runs; when one can't be stopped, says so through `refusal`. */
-  async #stopExplainRuns(projectId: string, refusal: (runs: string, why: string, them: "it" | "them") => string): Promise<void> {
+  /**
+   * Cancels the project's queued and running explain and conversation runs, and stops its research with stops of its
+   * own for `cause` (D37), all at once. When any can't be stopped, says so through `refusal`, naming each kind.
+   */
+  async #stopProjectRuns(projectId: string, cause: StopCause, refusal: (runs: string, why: string, them: "it" | "them") => string): Promise<void> {
+    const research = this.#workspace.state === "ready" ? openTurns(this.#workspace.db, { projectId }).filter((link) => link.workflowId === "research") : [];
     // A run whose engine isn't online isn't running any more.
     const all = [...(this.#explainRuns.get(projectId) ?? []), ...(this.#conversationRuns.get(projectId) ?? [])];
     const runs = all.filter((runId) => this.#engines.get(this.#runs.get(runId) ?? "")?.supervisor.state.status === "online");
-    const failed = (await Promise.allSettled(runs.map((runId) => this.cancelRun(runId)))).filter((result) => result.status === "rejected");
-    if (failed.length === 0) return;
-    const why = failed[0]!.reason instanceof Error ? failed[0]!.reason.message : String(failed[0]!.reason);
-    throw new Error(refusal(failed.length === 1 ? "an explain run" : `${failed.length} explain runs`, why, failed.length === 1 ? "it" : "them"));
+    const [results, researchFailed] = await Promise.all([Promise.allSettled(runs.map((runId) => this.cancelRun(runId))), this.#stopResearchRuns(research, cause)]);
+    const failed = results.flatMap((result) => (result.status === "rejected" ? [errorText(result.reason)] : []));
+    if (failed.length === 0 && researchFailed.length === 0) return;
+    const kinds = [
+      failed.length === 0 ? null : failed.length === 1 ? "an explain run" : `${failed.length} explain runs`,
+      researchFailed.length === 0 ? null : researchFailed.length === 1 ? "a research run" : `${researchFailed.length} research runs`,
+    ].filter((kind) => kind !== null);
+    throw new Error(refusal(kinds.join(" and "), [...failed, ...researchFailed][0]!, failed.length + researchFailed.length === 1 ? "it" : "them"));
+  }
+
+  /**
+   * Stops research runs with stops of their own, for `cause` (D37). A run is cancelled on its engine; one still being
+   * sent stops at its own check, and one whose run isn't known yet once it is found. A run whose engine isn't online
+   * isn't running any more (D4). Only a stop whose own cancel failed is taken back, so a stop that worked stays on
+   * record whatever else failed. Returns why each of those failed, for the caller's refusal.
+   */
+  async #stopResearchRuns(links: readonly TurnRecord[], cause: StopCause): Promise<string[]> {
+    if (this.#workspace.state !== "ready") return [];
+    const workspace = this.#workspace.db;
+    const stopped = links.flatMap((link) => {
+      const token = stopResearch(workspace, link.id, cause);
+      return token ? [{ link, token }] : [];
+    });
+    const running = stopped.filter(({ link }) => link.runId && this.#engines.get(link.targetId)?.supervisor.state.status === "online");
+    const results = await Promise.allSettled(running.map(({ link }) => this.cancelRun(link.runId!)));
+    const failed = running.flatMap((stop, index) => {
+      const result = results[index]!;
+      return result.status === "rejected" ? [{ ...stop, why: errorText(result.reason) }] : [];
+    });
+    if (this.#workspace.state === "ready") for (const { link, token } of failed) withdrawStop(this.#workspace.db, link.id, token);
+    return failed.map(({ why }) => why);
   }
 
   /**
    * Records why the project's open conversation turns stop, so each ends as cancelled by that, not by the person.
    * Returns a function that takes the reason back, for when they couldn't be stopped. A turn still being sent stops
-   * through its epoch check either way. Research is stopped with a stop of its own, by cause and token (D37), and only
-   * that stop is taken back.
+   * through its epoch check either way. Research has stops of its own (D37), made by `#stopProjectRuns`.
    */
   #markProjectTurns(projectId: string, reason: CancelReason): () => void {
     if (this.#workspace.state !== "ready") return () => undefined;
     const workspace = this.#workspace.db;
-    const open = openTurns(workspace, { projectId });
-    const marked = open.filter((turn) => requestCancel(workspace, turn.id, reason) && turn.cancelReason === null);
+    const marked = openTurns(workspace, { projectId }).filter((turn) => requestCancel(workspace, turn.id, reason) && turn.cancelReason === null);
     for (const turn of marked) {
       const pending = this.#submissions.get(turn.id);
       if (pending) pending.cancel ??= reason;
     }
-    const cause: StopCause = reason === "sharing" ? "model-sharing" : reason;
-    const stopped = open.flatMap((link) => {
-      const token = link.workflowId === "research" ? stopResearch(workspace, link.id, cause) : null;
-      return token ? [{ id: link.id, token }] : [];
-    });
     return () => {
-      if (this.#workspace.state !== "ready") return;
-      for (const turn of marked) withdrawCancel(this.#workspace.db, turn.id, reason);
-      for (const { id, token } of stopped) withdrawStop(this.#workspace.db, id, token);
+      if (this.#workspace.state === "ready") for (const turn of marked) withdrawCancel(this.#workspace.db, turn.id, reason);
     };
   }
 
@@ -1621,9 +1637,11 @@ export class Host {
    * preview that shows them, with the fingerprint that binds it.
    */
   async #researchRequest(subject: ResearchSubject, selection: ResearchSelection): ReturnType<typeof researchRequest> {
+    const credentials = await this.#options.credentials();
     return researchRequest(subject, selection, {
       webResearch: this.webResearch(),
-      tavilyKey: Boolean((await this.#options.credentials())["TAVILY_API_KEY"]),
+      tavilyKey: Boolean(credentials["TAVILY_API_KEY"]),
+      modelKey: Boolean(credentials["NEBIUS_API_KEY"]),
       known: await this.#knownSecrets(),
       projects: this.#options.store.data.projects.map(({ label, nativePath }) => ({ label, nativePath })),
       busy: this.#busyReason(subject.conversation.id, "start research"),
@@ -1680,9 +1698,7 @@ export class Host {
   async #submit(turnId: string, conversation: ConversationRecord, request: LinkRequest, epoch: number, researchEpoch = this.#webResearchEpoch): Promise<void> {
     const workspace = this.#workspaceDb();
     const label = this.#labelOf(conversation.targetId);
-    const what = request.workflowId === "review" ? "this review" : request.workflowId === "research" ? "this research" : "this message";
-    // Research reaches two services; a turn and a review reach the model alone.
-    const nothing = request.workflowId === "research" ? "nothing reached Tavily or Token Factory" : "nothing reached the model";
+    const { what, nothing } = sendWords(request.workflowId);
     // A stop asked for meanwhile, or a permission withdrawn since: recorded, and research's with its own cause (D37).
     const stopped = (): boolean => {
       if (request.workflowId === "research") {
@@ -1739,7 +1755,8 @@ export class Host {
     }
     this.#runs.set(run.id, conversation.targetId);
     recordRun(workspace, turnId, run.id);
-    if (conversation.projectId !== null) {
+    // Research is stopped from its own records, with stops of its own (D37), never with the project's other runs.
+    if (conversation.projectId !== null && request.workflowId !== "research") {
       const runs = this.#conversationRuns.get(conversation.projectId) ?? new Set<string>();
       runs.add(run.id);
       this.#conversationRuns.set(conversation.projectId, runs);
@@ -1808,8 +1825,9 @@ export class Host {
           const workspace = this.#workspace.db;
           const turn = getTurn(workspace, turnId);
           if (!turn || (turn.status !== "submitting" && turn.status !== "running")) return;
+          const { what, nothing } = sendWords(turn.workflowId);
           if (turn.homeId === null) {
-            this.#settle(turnId, { status: "not-sent", errorMessage: "Nivra stopped before sending this message, so nothing reached the model." });
+            this.#settle(turnId, { status: "not-sent", errorMessage: `Nivra stopped before sending ${what}, so ${nothing}.` });
             return;
           }
           const engine = this.#engines.get(turn.targetId);
@@ -1826,7 +1844,7 @@ export class Host {
               } else {
                 summary = await engine.supervisor.call("runs.find", { clientRequestId: turnId });
                 if (!summary) {
-                  this.#settle(turnId, { status: "not-sent", errorMessage: "Its engine has no record of this message, so it never ran and nothing reached the model." });
+                  this.#settle(turnId, { status: "not-sent", errorMessage: `Its engine has no record of ${what}, so it never ran and ${nothing}.` });
                   return;
                 }
                 this.#runs.set(summary.id, turn.targetId);

@@ -181,9 +181,8 @@ function ResearchDialog({
   const full = rows.length >= 3;
   const picked = (index: number) => rows.some((row) => row.from.kind === "plan" && row.from.index === index);
 
-  async function prepare() {
-    const mine = guard.current.asked();
-    const chosen = selection();
+  /** Previews `chosen`, shown only while nothing changed since `mine` was asked for. */
+  async function prepare(mine = guard.current.asked(), chosen = selection()) {
     setBusy(true);
     setError(null);
     try {
@@ -215,12 +214,15 @@ function ResearchDialog({
   }
 
   async function allowWeb() {
+    // Asked for before the permission is saved, so an edit made meanwhile drops this preview too.
+    const mine = guard.current.asked();
+    const chosen = selection();
     setAsking(null);
     setError(null);
     try {
       await actions.setWebResearch(true);
       onPermissionChanged();
-      await prepare();
+      await prepare(mine, chosen);
     } catch (reason) {
       setError(errorMessage(reason));
     }
@@ -229,11 +231,14 @@ function ResearchDialog({
   async function allowSharing() {
     setAsking(null);
     if (!project) return;
+    // As in allowWeb: asked for before the permission is saved.
+    const mine = guard.current.asked();
+    const chosen = selection();
     setError(null);
     try {
       await window.nivra.setSharing(project.id, true);
       onPermissionChanged();
-      await prepare();
+      await prepare(mine, chosen);
     } catch (reason) {
       setError(errorMessage(reason));
     }

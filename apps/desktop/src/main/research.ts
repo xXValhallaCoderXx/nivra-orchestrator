@@ -135,10 +135,14 @@ export interface ResearchSubject {
   project: { label: string; targetLabel: string; modelSharing: boolean } | null;
 }
 
-/** What the host knows besides the plan: the permission, whether a key is saved, the secrets, every project, and whether the conversation is busy. */
+/**
+ * What the host knows besides the plan: the permission, whether each key is saved, the secrets, every project, and
+ * whether the conversation is busy.
+ */
 export interface ResearchState {
   webResearch: boolean;
   tavilyKey: boolean;
+  modelKey: boolean;
   known: KnownSecrets;
   projects: ReadonlyArray<{ label: string; nativePath: string }>;
   /** Why the conversation can't take another run now (D31); null when it can. */
@@ -171,6 +175,7 @@ export async function researchRequest(
       : null) ??
     (!state.webResearch ? "Research queries to Tavily are turned off. Turn them on, then start again." : null) ??
     (!state.tavilyKey ? "Nivra has no Tavily API key. Add one in Settings, then start again." : null) ??
+    (!state.modelKey ? "Nivra has no Token Factory API key. Add one in Settings, then start again." : null) ??
     (project && !project.modelSharing ? "This project doesn't allow sending its content to Token Factory. Allow sharing for it, then start research." : null) ??
     (failing ? `${failing.assumption}'s query ${failing.problems.join(", and ")}, so nothing can be sent. Edit it, then preview again.` : null);
   const assumptions = packet.assumptions.length;
@@ -242,7 +247,9 @@ export function researchNoteFor(link: TurnRecord, stop: ResearchRecord["stop"]):
         case "model-sharing":
           return `Stopped: sharing for this project was turned off. ${then}`;
         case "removal":
-          return `Stopped: the project was removed. ${then}`;
+          // A stop that worked is kept when the removal is refused for another run, so this claims only that it was
+          // asked.
+          return `Stopped: the project was being removed. ${then}`;
         default:
           return `Cancelled. ${then}`;
       }

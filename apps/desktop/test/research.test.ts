@@ -179,7 +179,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.deepEqual(queryProblems(`distutils ${SAVED}`, deny, values), ["saved-key"], "the same check the engine runs again");
   });
 
-  const state = (change: Partial<ResearchState> = {}): ResearchState => ({ webResearch: true, tavilyKey: true, known: KNOWN, projects: [{ label: "shop", nativePath: "/home/me/code/shop" }], busy: null, ...change });
+  const state = (change: Partial<ResearchState> = {}): ResearchState => ({ webResearch: true, tavilyKey: true, modelKey: true, known: KNOWN, projects: [{ label: "shop", nativePath: "/home/me/code/shop" }], busy: null, ...change });
   const subjectOf = (conversation: ConversationRecord, change: Partial<ResearchSubject> = {}, content: Partial<PlanContent> = {}): ResearchSubject => {
     const plan = planOf(conversation, content);
     return { plan, latestVersion: plan.version, conversation, project: conversation.kind === "project" ? { label: "shop", targetLabel: "Ubuntu", modelSharing: true } : null, ...change };
@@ -235,6 +235,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.match((await blocked({ ...ready, latestVersion: 2 }))!, /^This is v1 of the plan, and v2 is the latest\. Check v2 instead/);
     assert.equal(await blocked(ready, { webResearch: false, tavilyKey: false }), "Research queries to Tavily are turned off. Turn them on, then start again.");
     assert.equal(await blocked(ready, { tavilyKey: false }), "Nivra has no Tavily API key. Add one in Settings, then start again.");
+    assert.equal(await blocked(ready, { modelKey: false }), "Nivra has no Token Factory API key. Add one in Settings, then start again.");
     assert.match((await blocked({ ...ready, project: { label: "shop", targetLabel: "Ubuntu", modelSharing: false } }))!, /^This project doesn't allow sending its content to Token Factory/);
     // A general plan needs no project's sharing.
     assert.equal(await blocked(subjectOf(general()), {}, { assumptions: [typed("a claim", "a claim")], sites: null }), null);
@@ -276,7 +277,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.equal(researchNoteFor(link("cancelled"), { cause: "person", token: "T1" }), `Cancelled. ${SENT}`);
     assert.equal(researchNoteFor(link("cancelled"), { cause: "web-research", token: "T1" }), `Stopped: research queries to Tavily were turned off. ${SENT}`);
     assert.equal(researchNoteFor(link("cancelled"), { cause: "model-sharing", token: "T1" }), `Stopped: sharing for this project was turned off. ${SENT}`);
-    assert.equal(researchNoteFor(link("cancelled"), { cause: "removal", token: "T1" }), `Stopped: the project was removed. ${SENT}`);
+    assert.equal(researchNoteFor(link("cancelled"), { cause: "removal", token: "T1" }), `Stopped: the project was being removed. ${SENT}`);
     // What the host established about the stop is kept.
     assert.equal(researchNoteFor(link("cancelled", "Stopped before it was sent."), { cause: "web-research", token: "T1" }), "Stopped: research queries to Tavily were turned off. Stopped before it was sent.");
     assert.equal(researchNoteFor(link("cancelled", "Stopped before it was sent."), null), "Cancelled. Stopped before it was sent.");

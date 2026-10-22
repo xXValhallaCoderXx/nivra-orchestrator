@@ -210,12 +210,15 @@ test("research of a general plan keeps the model's conclusion, the quotations fo
   await expect(card.getByTestId("research-status")).toHaveText("Complete");
   const a1 = card.locator('[data-testid="research-assessment"][data-assumption="A1"]');
   await expect(a1.getByTestId("research-model")).toHaveText("Contradicted");
+  // Shown as the model gave it, so Nivra's own label isn't repeated.
+  await expect(a1.getByTestId("research-shown")).toHaveCount(0);
   await expect(a1.getByTestId("research-found").getByTestId("research-evidence")).toHaveCount(1);
   await expect(a1.getByTestId("research-found").getByTestId("research-quote")).toHaveText("“has been removed from the standard library”");
   await expect(a1.getByTestId("research-found").getByTestId("research-address")).toHaveText(WHATSNEW);
   await expect(a1.getByTestId("research-not-found").getByTestId("research-rejected")).toHaveText("“distutils stays in the standard library for good” (S1.1): isn't in the passage it names.");
   const a2 = card.locator('[data-testid="research-assessment"][data-assumption="A2"]');
   await expect(a2.getByTestId("research-model")).toHaveText("No assessment");
+  await expect(a2.getByTestId("research-shown")).toHaveText("Unresolved");
   await expect(a2.getByTestId("research-rule")).toHaveText("The model gave no usable assessment of this assumption.");
   await expect(card.getByTestId("research-unusable-item")).toHaveText([
     "“A9” named no assumption that was asked about, so it was set aside.",
@@ -291,12 +294,20 @@ test("deleting a conversation stops its research, keeps nothing of it, and says 
   await page.getByTestId("research-start").click();
   await expect.poll(() => searches().length).toBe(before + 1);
   const conversationId = await page.getByTestId("conversation").getAttribute("data-conversation-id");
+  const runOf = () => page.evaluate((id) => window.nivra.listResearch(id!).then((list) => list[0]?.runId ?? null), conversationId);
+  await expect.poll(runOf).not.toBeNull();
+  const runId = (await runOf())!;
   await page.getByTestId("conversation-delete").click();
   await expect(page.getByTestId("conversation-delete-research")).toHaveText(RESEARCH_RETENTION);
   await page.getByTestId("conversation-delete-confirm").click();
   await expect(page.getByTestId("nav-conversation").filter({ hasText: "Can we move to 3.12?" })).toHaveCount(1);
+  await expect.poll(() => page.evaluate((id) => window.nivra.runEvents(id, 0).then((events) => events.status), runId)).toBe("cancelled");
+  const sent = { extracts: tavily.calls.filter((call) => call.path === "/extract").length, research: researchRequests().length };
+  // The search Tavily held is answered now: a run that went on would read its pages next.
   hold = null;
   release();
+  await page.waitForTimeout(500);
+  expect([tavily.calls.filter((call) => call.path === "/extract").length, researchRequests().length]).toEqual([sent.extracts, sent.research]);
   const gone = await page.evaluate((id) => window.nivra.listResearch(id!).then(() => "listed", (error: unknown) => String(error)), conversationId);
   expect(gone).toContain("That conversation is no longer in the list.");
 });

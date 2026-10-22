@@ -5,10 +5,11 @@ import { renameRetrying } from "./host-store.ts";
 
 /**
  * The host's workspace (D26): conversations, their messages and turns, native tasks, the versions of plans and briefs,
- * the reviews of plan versions (D31) and research of their assumptions (D37), in one SQLite file beside `nivra.json`. The host is its only owner and opens it only on its own OS (D7); the
- * engines keep their own run records. Built on Node's own `node:sqlite`, so Electron's main process loads no addon
- * (D6). Opened like an engine's database: WAL, SQLite's exclusive lock taken at once and held until close (so a second
- * Nivra on the same profile is refused instead of waiting), foreign keys enforced, and deleted rows overwritten.
+ * the reviews of plan versions (D31) and research of their assumptions (D37), in one SQLite file beside `nivra.json`.
+ * The host is its only owner and opens it only on its own OS (D7); the engines keep their own run records. Built on
+ * Node's own `node:sqlite`, so Electron's main process loads no addon (D6). Opened like an engine's database: WAL,
+ * SQLite's exclusive lock taken at once and held until close (so a second Nivra on the same profile is refused instead
+ * of waiting), foreign keys enforced, and deleted rows overwritten.
  *
  * Opening never throws. A file that can't be used is reported as state, so everything that doesn't need the workspace
  * keeps working, and only a damaged file is ever moved: kept aside with its journal files, never deleted. A file that
