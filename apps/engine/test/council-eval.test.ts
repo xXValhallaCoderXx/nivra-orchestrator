@@ -561,12 +561,18 @@ describe("before any inference request, and a run that won't stop (NIV-40)", () 
     assert.equal(stub.chats().length, 0, "not one inference request");
   });
 
-  it("stops within its bound when a run keeps running after it was cancelled, keeps it as unresolved, and never sends it again", async () => {
+  it("stops within its bound when a run keeps running after it was cancelled, keeps it as unresolved, and never sends it again", { timeout: 60_000 }, async (t) => {
     const stub = await stubFor();
     const out = join(scratch(), "evidence");
     const RECONCILE_MS = 1_000;
+    // A runner that waited without limit would never end: the test fails at its own timeout, which stops the command.
+    const run = (args: string[]) => {
+      const command = cli(args);
+      t.signal.addEventListener("abort", command.kill, { once: true });
+      return command.done;
+    };
     const started = performance.now();
-    const { code, stderr } = await cli(["--token-factory-url", stub.url, "--out", out, "--engine", STUCK, "--only", "f1", "--deadline-ms", "1000", "--reconcile-ms", String(RECONCILE_MS)]).done;
+    const { code, stderr } = await run(["--token-factory-url", stub.url, "--out", out, "--engine", STUCK, "--only", "f1", "--deadline-ms", "1000", "--reconcile-ms", String(RECONCILE_MS)]);
     const tookMs = performance.now() - started;
     const note = "The f1 single run was still going 1 s after it was cancelled, so it is kept as unresolved, and the batch stopped. It is never sent again.";
     assert.deepEqual([code, stderr.trim()], [3, note]);
@@ -580,7 +586,9 @@ describe("before any inference request, and a run that won't stop (NIV-40)", () 
     // From the cancel to the end entry, on the batch's monotonic clock: the window to settle, then the separate window
     // to read what the engine says of the run, then an allowance for what no timer bounds (late timers, and the
     // journal's and the evidence's synchronous writes). This bounds the two windows together: it doesn't show that the
-    // window to settle alone ended within its 1 s. A failure says what each clock saw, and whether the read came back.
+    // window to settle alone ended within its 1 s. This engine answers at once, so the read takes milliseconds and its
+    // own window isn't exercised here: a window to settle that ran 8 times its length fails, and one that ran 2 to 6
+    // times its length would pass. A failure says what each clock saw, and whether the read came back.
     const ALLOWANCE_MS = 1_000;
     const bound = RECONCILE_MS + UNRESOLVED_READ_MS + ALLOWANCE_MS;
     assert.equal(typeof cancel.batchElapsedMs, "number", "the cancel is stamped on the monotonic clock");
@@ -591,7 +599,7 @@ describe("before any inference request, and a run that won't stop (NIV-40)", () 
     );
     assert.deepEqual([record.status, record.note, record.summary?.status], ["unknown", note, "running"]);
     // Resumed, it is never sent again: the batch stays stopped.
-    const resumed = await cli(["--resume", out, "--token-factory-url", stub.url, "--engine", STUCK, "--only", "f1", "--deadline-ms", "1000", "--reconcile-ms", "1000"]).done;
+    const resumed = await run(["--resume", out, "--token-factory-url", stub.url, "--engine", STUCK, "--only", "f1", "--deadline-ms", "1000", "--reconcile-ms", String(RECONCILE_MS)]);
     assert.deepEqual([resumed.code, resumed.stderr.trim(), starts(journalOf(out))], [3, note, ["f1:single"]]);
     assert.equal(readFileSync(join(out, "engine home", "calls.log"), "utf8").split("\n").filter((call) => call === "runs.start").length, 1);
     assert.equal(stub.chats().length, 0);

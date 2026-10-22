@@ -38,8 +38,9 @@ export const WAITS = {
 /** The waits around one run, each at its limit: the model listing before it, its start, and reading its record. */
 export const AROUND_RUN_MS = WAITS.checkMs + WAITS.startMs + WAITS.collectMs;
 /**
- * Reading what the engine says of a run still going after its window to settle, before it is kept as unresolved: a
- * window of its own, after the window to settle, for its summary, its events and its report together.
+ * Reading what the engine says of a run kept as unresolved (still going after its window to settle, or when the batch's
+ * time ran out): a window of its own, after the window to settle, for its summary, its events and its report together.
+ * At most 5 s, and less when the batch's time ends sooner.
  */
 export const UNRESOLVED_READ_MS = 5_000;
 
