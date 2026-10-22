@@ -373,20 +373,13 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     return finish(nothingReadStop(requests), "failed");
   }
 
-  // The model: one request. The report says it may go out before it is admitted, so the time the save takes isn't the
-  // model's: admitted now, it gets the smaller of its own limit and the time left, and a guard ends it at that moment
-  // whatever the client does.
+  // The model: one request. The report says it may go out before it is admitted, and its agent is built before then
+  // too, so neither takes the model's time: admitted just before the call, it gets the smaller of its own limit and the
+  // time left, and a guard ends it at that moment whatever the client does.
   const message = researchMessage({ planVersion: options.binding.planVersion, planText: packet.planText, assumptions: packet.assumptions, pages, passages, code: options.passageCode ?? passageCode() });
   const target = request("model");
   target.state = "sending";
   await save();
-  const admitted = hold.admit();
-  if (!admitted.ok) {
-    hold.release();
-    const cancelled = admitted.refusal.reason === "cancelled";
-    Object.assign(target, { state: "failed", failure: cancelled ? "cancelled" : "deadline" });
-    return cancelled ? finish("cancelled", "cancelled") : finish("deadline", "failed");
-  }
   let handedIn: unknown = null;
   const tool = createTool({
     id: RESEARCH_TOOL,
@@ -398,6 +391,13 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     },
   });
   const agent = options.client.agent({ id: "nivra-research", name: "Nivra research", modelId: options.model, instructions: RESEARCH_INSTRUCTIONS, tools: { [RESEARCH_TOOL]: tool } });
+  const admitted = hold.admit();
+  if (!admitted.ok) {
+    hold.release();
+    const cancelled = admitted.refusal.reason === "cancelled";
+    Object.assign(target, { state: "failed", failure: cancelled ? "cancelled" : "deadline" });
+    return cancelled ? finish("cancelled", "cancelled") : finish("deadline", "failed");
+  }
   const timeUp = new AbortController();
   const timer = setTimeout(() => timeUp.abort(), admitted.ms);
   let failed: ModelFailure | null = null;

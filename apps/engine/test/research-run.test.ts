@@ -103,7 +103,7 @@ async function research(script: TavilyScript, doGenerate: (options: unknown) => 
   const report = await runResearch({
     binding: { planId: randomUUID(), planVersion: 4, packetDigest: "a".repeat(64), scope: { kind: "general" }, request: { runId: randomUUID(), clientRequestId: randomUUID() } },
     packet: PACKET,
-    retrieval: createTavily({ apiKey: TAVILY_KEY, base: stub.url }),
+    retrieval: createTavily({ apiKey: TAVILY_KEY, base: stub.url, ...(overrides.now ? { now: overrides.now } : {}) }),
     client: createModelClient({ apiKey: MODEL_KEY, model: () => model }),
     model: MODEL,
     route: { provider: "nebius", endpoint: "loopback-test", model: MODEL },
@@ -376,20 +376,31 @@ describe("a research run, in process (NIV-45)", () => {
     assert.ok(took < 2_500, `the run took ${Math.round(took)} ms of its 1,500`);
   });
 
-  /** A client that records the deadline each call is given, and when, on the run's own clock. */
-  const recording = (seen: Array<{ at: number; totalMs: number }>, doGenerate: (options: unknown) => Promise<Generated> = async () => handIn(ANSWER)): ModelClient => {
+  /**
+   * A client that records the deadline each call is given, and when, on the run's own clock. `setup` runs as an agent
+   * is built, so a test can say how long that takes on its clock.
+   */
+  const recording = (seen: Array<{ at: number; totalMs: number }>, doGenerate: (options: unknown) => Promise<Generated> = async () => handIn(ANSWER), clock: { now: () => number; setup?: () => void } = { now: () => performance.now() }): ModelClient => {
     const model = new MastraLanguageModelV2Mock({ doGenerate: doGenerate as never });
     const client = createModelClient({ apiKey: MODEL_KEY, model: () => model });
-    return { ...client, call: (agent, prompt, options) => (seen.push({ at: performance.now(), totalMs: options.deadlines.totalMs }), client.call(agent, prompt, options)) };
+    return {
+      ...client,
+      agent: (spec) => (clock.setup?.(), client.agent(spec)),
+      call: (agent, prompt, options) => (seen.push({ at: clock.now(), totalMs: options.deadlines.totalMs }), client.call(agent, prompt, options)),
+    };
   };
 
-  it("never lets the model's time pass the run's deadline, a slow save included, and keeps it to its own limit when that is less", async () => {
-    // Every save takes 120 ms: the time the model is given is counted after the save that says it may go out.
+  it("never lets the model's time pass the run's deadline, slow saves and a slow setup included, and keeps it to its own limit when that is less", async () => {
+    // On a clock of the test's own, every save takes 120 ms and building the model's agent takes 50. Neither is the
+    // model's time, and the arithmetic is exact whatever the machine's load: the deadline the model is handed, counted
+    // from the moment it is called, ends no later than the run's.
+    let time = 10_000;
+    const now = () => time;
+    const startedAt = now();
     const seen: Array<{ at: number; totalMs: number }> = [];
-    const startedAt = performance.now();
-    const slowSave = await research(python, undefined, { client: recording(seen), startedAt, timing: { runMs: 4_000, retrievalCutoffMs: 3_000 }, save: () => sleep(120) });
-    assert.deepEqual([slowSave.report.outcome, seen.length], ["complete", 1], slowSave.report.stop?.message);
-    assert.ok(seen[0]!.at + seen[0]!.totalMs <= startedAt + 4_000 + 1, `the model's deadline is ${Math.round(seen[0]!.at + seen[0]!.totalMs - startedAt)} ms into a 4,000 ms run`);
+    const slow = await research(python, undefined, { client: recording(seen, undefined, { now, setup: () => void (time += 50) }), now, startedAt, timing: { runMs: 4_000, retrievalCutoffMs: 3_000 }, save: () => void (time += 120) });
+    assert.deepEqual([slow.report.outcome, seen.length], ["complete", 1], slow.report.stop?.message);
+    assert.ok(seen[0]!.at + seen[0]!.totalMs <= startedAt + 4_000, `the model's deadline is ${seen[0]!.at + seen[0]!.totalMs - startedAt} ms into a 4,000 ms run`);
     // With plenty of time left, the model's own limit is the smaller.
     const capped: Array<{ at: number; totalMs: number }> = [];
     await research(python, undefined, { client: recording(capped), timing: { runMs: 60_000, retrievalCutoffMs: 600, modelMs: 700 } });
