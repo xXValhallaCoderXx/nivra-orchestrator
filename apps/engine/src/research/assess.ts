@@ -81,13 +81,17 @@ export interface Assessment {
 /** Why an assessment the model handed in was set aside instead of being matched to an assumption. */
 export type Rejection = "missing" | "unknown" | "ambiguous" | "conflicting" | "duplicate";
 
-/** What the model handed in, and how much of it named an assumption that was asked about. */
+/** What the model handed in, how much of it named an assumption asked about, and how much of that gave an outcome. */
 export interface Attribution {
   handedIn: number;
   matched: number;
+  /** Of those matched, how many gave a recognised outcome: supported, contradicted or unresolved. */
+  usable: number;
   rejected: number;
   /** At most ten of the assessments set aside: what each named, made plain, masked and clipped, and why. */
   entries: Array<{ label: string; reason: Rejection }>;
+  /** Matched assessments that gave no recognised outcome: the assumption, and what it gave instead, plain, masked and clipped. */
+  unusable: Array<{ assumption: AssumptionId; outcome: string }>;
 }
 
 export interface Assessed {
@@ -143,9 +147,10 @@ function clip(value: string, max: number, mask: (text: string) => string): strin
   return cleaned.length <= max ? cleaned : `${cleaned.slice(0, max - 1)}…`;
 }
 
-/** How many of the assessments set aside are listed, and how much of what each named is kept. */
+/** How many of the assessments set aside are listed, and how much of what each named, or gave as its outcome, is kept. */
 const LISTED = 10;
 const LABEL_CHARS = 80;
+const OUTCOME_CHARS = 40;
 
 /**
  * An assumption named by its id: "A1", in any case, optionally in brackets or after the word "assumption", and
@@ -225,7 +230,12 @@ export function assess(answer: ResearchAnswer, assumptions: ReadonlyArray<{ id: 
     if (result.ok && answers.get(result.id) === 1) used.set(result.id, entry);
     else rejected.push({ label: clip(entry.assumption, LABEL_CHARS, mask), reason: result.ok ? "duplicate" : result.reason });
   }
-  const attribution: Attribution = { handedIn: resolved.length, matched: used.size, rejected: rejected.length, entries: rejected.slice(0, LISTED) };
+  // A matched assessment without one of the three outcomes concludes nothing: it is shown as not assessed, and listed.
+  const unusable = assumptions.flatMap(({ id }) => {
+    const entry = used.get(id);
+    return entry && !OUTCOMES.has(entry.outcome.trim().toLowerCase() as Conclusion) ? [{ assumption: id, outcome: clip(entry.outcome, OUTCOME_CHARS, mask) }] : [];
+  });
+  const attribution: Attribution = { handedIn: resolved.length, matched: used.size, usable: used.size - unusable.length, rejected: rejected.length, entries: rejected.slice(0, LISTED), unusable };
   const assessments = assumptions.map(({ id, text: assumptionText }): Assessment => {
     const raw = used.get(id);
     const versions = versionsIn(assumptionText);

@@ -452,16 +452,16 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     return finish("model-failed", "failed", `The model's assessment couldn't be used: ${unusable(steps, problems)}. The pages and passages read are kept below.`);
   }
   const matched = assess(parsed.data, packet.assumptions, passages, pages, options.mask);
-  if (matched.attribution!.matched === 0) {
-    // An answer that names none of the assumptions asked about assesses nothing: a failure of the model's output. What
-    // was read, what the model used and what it handed in are all kept.
+  if (matched.attribution!.usable === 0) {
+    // An answer with no assessment that names an assumption asked about and gives one of the three outcomes concludes
+    // nothing: a failure of the model's output. What was read, what the model used and what it handed in are all kept.
     Object.assign(target, { state: "failed", failure: "model" });
     assessed = { assessments: [], checks: matched.checks, attribution: matched.attribution };
-    return finish(
-      "model-failed",
-      "failed",
-      "The model's answer named none of the assumptions it was asked about, so nothing was assessed. The pages and passages read are kept below, with a note of what it handed in.",
-    );
+    const why =
+      matched.attribution!.matched === 0
+        ? "The model's answer named none of the assumptions it was asked about"
+        : "The model's answer gave none of the assumptions it named an outcome of supported, contradicted or unresolved";
+    return finish("model-failed", "failed", `${why}, so nothing was assessed. The pages and passages read are kept below, with a note of what it handed in.`);
   }
   target.state = "answered";
   assessed = matched;

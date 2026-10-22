@@ -317,7 +317,7 @@ describe("matching the model's assessments to the assumptions asked about (NIV-4
       ["A2", "About A2."],
       ["A3", "About A3."],
     ]);
-    assert.deepEqual(result.attribution, { handedIn: 3, matched: 3, rejected: 0, entries: [] });
+    assert.deepEqual(result.attribution, { handedIn: 3, matched: 3, usable: 3, rejected: 0, entries: [], unusable: [] });
     assert.deepEqual([result.assessments[1]!.model, result.assessments[1]!.shown, result.assessments[1]!.rule], ["unresolved", "unresolved", null], "a matched unresolved is valid");
   });
 
@@ -379,6 +379,31 @@ describe("matching the model's assessments to the assumptions asked about (NIV-4
       { id: "A2" as const, text: "the same words." },
     ];
     assert.deepEqual(reasons(matching([entry("The same words")], twins)), [["The same words", "ambiguous"]]);
+  });
+
+  it("counts a matched assessment as usable only with an outcome of supported, contradicted or unresolved", () => {
+    // No outcome at all, an outcome Nivra doesn't know, and an outcome sent under another field's name.
+    const result = matching([{ assumption: "A1" }, entry("A2", "maybe"), { assumption: "A3", conclusion: "supported" }]);
+    assert.deepEqual([result.attribution!.matched, result.attribution!.usable, result.attribution!.rejected], [3, 0, 0]);
+    assert.deepEqual(result.attribution!.unusable, [
+      { assumption: "A1", outcome: "" },
+      { assumption: "A2", outcome: "maybe" },
+      { assumption: "A3", outcome: "" },
+    ]);
+    assert.deepEqual(
+      result.assessments.map((assessment) => [assessment.model, assessment.shown, assessment.rule]),
+      [
+        [null, "unresolved", "not-assessed"],
+        [null, "unresolved", "not-assessed"],
+        [null, "unresolved", "not-assessed"],
+      ],
+    );
+    // What an unusable outcome said is kept short, plain and masked.
+    const long = matching([entry("A1", `${KEY} ${"perhaps ".repeat(20)}`)]);
+    assert.deepEqual([long.attribution!.usable, long.attribution!.unusable[0]!.outcome.length <= 40, long.attribution!.unusable[0]!.outcome.includes(KEY)], [0, true, false]);
+    // Case and spaces around a recognised outcome don't matter; one usable assessment is enough.
+    const mixed = matching([entry("A1", " Supported "), entry("A2", "maybe")]);
+    assert.deepEqual([mixed.attribution!.usable, mixed.assessments[0]!.model, mixed.attribution!.unusable.map((item) => item.assumption)], [1, "supported", ["A2"]]);
   });
 
   it("keeps at most ten of those set aside, each made plain, masked and clipped, and counts them all", () => {

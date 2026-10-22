@@ -318,8 +318,10 @@ write(join(out, "check.json"), maskedDeep({
 
 console.log(`Outcome: ${report.outcome}${report.stop ? ` (${report.stop.message})` : ""} in ${(report.elapsedMs / 1000).toFixed(1)} s.`);
 if (report.attribution) {
-  const { handedIn, matched, rejected, entries } = report.attribution;
-  console.log(`  The model handed in ${handedIn} assessments: ${matched} matched an assumption, ${rejected} set aside${rejected ? ` (${entries.map((entry) => entry.reason).join(", ")})` : ""}.`);
+  const { handedIn, matched, usable, rejected, entries, unusable } = report.attribution;
+  console.log(
+    `  The model handed in ${handedIn} assessments: ${matched} matched an assumption, ${usable} of them with a recognised outcome; ${rejected} set aside${rejected ? ` (${entries.map((entry) => entry.reason).join(", ")})` : ""}${unusable.length ? `; no recognised outcome for ${unusable.map((item) => item.assumption).join(", ")}` : ""}.`,
+  );
 }
 for (const assessment of report.assessments) {
   const valid = assessment.citations.filter((citation) => citation.valid).length;

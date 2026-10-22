@@ -400,15 +400,18 @@ export const ResearchRejection = z.enum(["missing", "unknown", "ambiguous", "con
 export type ResearchRejection = z.infer<typeof ResearchRejection>;
 
 /**
- * What the model handed in, and how much of it named an assumption asked about: an assessment counts only by the
- * assumption's id or its exact words, never by its place. At most ten of those set aside are listed, each with what it
- * named, made plain, masked and clipped.
+ * What the model handed in, how much of it named an assumption asked about, and how much of that gave an outcome: an
+ * assessment counts only by the assumption's id or its exact words, never by its place, and concludes something only
+ * with one of the three outcomes. At most ten of those set aside are listed, each with what it named; each matched
+ * assessment without a recognised outcome is listed with what it gave instead. All of it plain, masked and clipped.
  */
 export const ResearchAttribution = z.strictObject({
   handedIn: count,
   matched: count,
+  usable: count,
   rejected: count,
   entries: z.array(z.strictObject({ label: text(80), reason: ResearchRejection })).max(10),
+  unusable: z.array(z.strictObject({ assumption: ResearchAssumptionId, outcome: text(40) })).max(RESEARCH_LIMITS.assumptions),
 });
 export type ResearchAttribution = z.infer<typeof ResearchAttribution>;
 

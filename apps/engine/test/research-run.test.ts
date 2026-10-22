@@ -268,14 +268,58 @@ describe("a research run, in process (NIV-45)", () => {
     assert.deepEqual(report.attribution, {
       handedIn: 2,
       matched: 0,
+      usable: 0,
       rejected: 2,
       entries: [
         { label: "the first assumption", reason: "unknown" },
         { label: "", reason: "missing" },
       ],
+      unusable: [],
     });
     const parsed = ResearchReport.safeParse(report);
     assert.equal(parsed.success, true, parsed.success ? "" : JSON.stringify(parsed.error.issues.slice(0, 3)).slice(0, 500));
+  });
+
+  it("fails as the model's output when every assessment it names has no recognised outcome, keeping what was read, the usage and a note of each", async () => {
+    const outcomeless = {
+      assessments: [
+        { ...ANSWER.assessments[0]!, outcome: undefined },
+        { ...ANSWER.assessments[1]!, outcome: undefined, conclusion: "supported" },
+      ],
+    };
+    const { report, model } = await research(python, async () => handIn(outcomeless));
+    assert.deepEqual([report.outcome, report.stop?.code, states(report)["model"], report.assessments.length, model.doGenerateCalls.length], ["failed", "model-failed", "failed:model", 0, 1]);
+    assert.match(report.stop!.message, /^The model's answer gave none of the assumptions it named an outcome of supported, contradicted or unresolved, so nothing was assessed\./);
+    assert.deepEqual([report.passages.length, report.usage.model.inputTokens, report.usage.model.outputTokens], [5, 6_000, 700]);
+    assert.deepEqual([report.attribution?.matched, report.attribution?.usable, report.attribution?.unusable], [
+      2,
+      0,
+      [
+        { assumption: "A1", outcome: "" },
+        { assumption: "A2", outcome: "" },
+      ],
+    ]);
+    const invalid = await research(python, async () => handIn({ assessments: [{ ...ANSWER.assessments[0]!, outcome: "maybe" }] }));
+    assert.deepEqual([invalid.report.outcome, invalid.report.attribution?.unusable], ["failed", [{ assumption: "A1", outcome: "maybe" }]]);
+    const parsed = ResearchReport.safeParse(report);
+    assert.equal(parsed.success, true, parsed.success ? "" : JSON.stringify(parsed.error.issues.slice(0, 3)).slice(0, 500));
+  });
+
+  it("completes with a single matched unresolved assessment: unresolved is a conclusion", async () => {
+    const unresolved = { assessments: [{ ...ANSWER.assessments[0]!, outcome: "unresolved", citations: [], amendment: "" }] };
+    const { report } = await research(python, async () => handIn(unresolved));
+    assert.deepEqual(
+      [report.outcome, report.stop, report.attribution?.usable, report.assessments.map((assessment) => [assessment.assumption, assessment.model, assessment.rule])],
+      [
+        "complete",
+        null,
+        1,
+        [
+          ["A1", "unresolved", null],
+          ["A2", null, "not-assessed"],
+        ],
+      ],
+    );
   });
 
   it("completes with every assessment named by its id and words or by its exact words, in any order", async () => {

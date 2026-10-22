@@ -191,7 +191,7 @@ describe("the research live check (NIV-45)", () => {
         ],
       );
       assert.deepEqual(check["tokens"], { inputTokens: 9_000, outputTokens: 700, calls: 1, reportedCalls: 1 });
-      assert.deepEqual(check["attribution"], { handedIn: 3, matched: 3, rejected: 0, entries: [] });
+      assert.deepEqual(check["attribution"], { handedIn: 3, matched: 3, usable: 3, rejected: 0, entries: [], unusable: [] });
     } finally {
       await Promise.all([tavily.close(), factory.close()]);
     }
