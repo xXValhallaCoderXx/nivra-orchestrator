@@ -5,6 +5,7 @@
 // runs in a home of this run's own, below ~/.nivra-test, and the release's ~/.nivra must be left as it was (D27). A
 // stand-in for Nebius Sandboxes runs here, on loopback in this distribution, for the harness's sandbox checks through
 // the WSL engine (D36); the harness changes and reads it through `@stub` lines on its stdout, answered on its stdin.
+// Stand-ins for Tavily and Token Factory run beside it for the research checks (D37), asked through the same lines.
 //
 //   pnpm --filter @nivra/desktop verify:windows [--distro <name>] [--skip-stage | --zip <path to Nivra-<version>-win-x64.zip>]
 import { spawn, spawnSync } from "node:child_process";
@@ -15,7 +16,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { build } from "esbuild";
 import { startSandboxStub } from "../../engine/test/stub-sandboxes.ts";
-import { answerStandIn } from "./stand-in.ts";
+import { startResearchStandIns } from "./research-stand-ins.ts";
+import { answerResearch, answerStandIn } from "./stand-in.ts";
 import { testWslHome } from "./test-homes.ts";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -109,6 +111,9 @@ step("Starting the stand-in for Nebius Sandboxes");
 const sandboxes = await startSandboxStub();
 const here = process.env["WSL_DISTRO_NAME"] ?? "";
 console.log(`  ${sandboxes.url}, in ${here || "this distribution"}`);
+step("Starting the stand-ins for Tavily and Token Factory");
+const research = await startResearchStandIns();
+console.log(`  ${research.tavily.url} and ${research.model.url}`);
 
 step("Running the harness on Windows");
 const node = join(runtime, "node", "node.exe");
@@ -129,15 +134,21 @@ const args = [
   sandboxes.url,
   "--sandboxes-distro",
   here,
+  "--tavily-url",
+  research.tavily.url,
+  "--token-factory-url",
+  research.model.url,
   ...(values.distro ? ["--distro", values.distro] : []),
 ];
 const harness = spawn(node, args, { cwd: "/mnt/c", stdio: ["pipe", "pipe", "inherit"] });
 harness.stdin.on("error", () => undefined);
 createInterface({ input: harness.stdout }).on("line", (line) => {
-  if (line.startsWith("@stub ")) harness.stdin.write(`${answerStandIn(sandboxes, line.slice("@stub ".length))}\n`);
+  if (line.startsWith("@stub research-")) harness.stdin.write(`${answerResearch(research, line.slice("@stub ".length))}\n`);
+  else if (line.startsWith("@stub ")) harness.stdin.write(`${answerStandIn(sandboxes, line.slice("@stub ".length))}\n`);
   else console.log(line);
 });
 // "close", not "exit": every line the harness printed has been read by then.
 const code = await new Promise<number | null>((done) => harness.once("close", (exit) => done(exit)));
 await sandboxes.close();
+await research.close();
 process.exit(code ?? 1);

@@ -12,7 +12,8 @@ import { RELEASE_HOME_STATE, releaseHomeChange, REMOVE_TEST_HOME, STALE_TEST_HOM
  * runs on the native engine, a run held on WSL keeps going and cancels on its own engine while the native one starts and
  * works, and quitting leaves no engine on either side. Preferences confirmed in the window reach each engine with its
  * runs (D21): every value intact, and one project's own never in the other's. Explaining asks for each project's
- * consent and, with no key, fails on both engines before any request (D22). The WSL engine runs in a home of this run's own,
+ * consent and, with no key, fails on both engines before any request (D22). Research starts with no Tavily key and its
+ * queries off, and the person turns the permission on and off (D37). The WSL engine runs in a home of this run's own,
  * and the release's ~/.nivra is left exactly as it was (D27).
  */
 test.skip(process.platform !== "linux" || !existsSync("/mnt/c/Windows/System32/cmd.exe"), "runs from WSL on a Windows machine");
@@ -203,6 +204,14 @@ test("the same Windows folder picked through WSL is the Windows project, with a 
   await expect(page.getByTestId("project-target")).toHaveText("Windows · Local");
   await expect(page.getByTestId("project-add-notice")).toContainText(`drive ${nativeRepoWin[0]!.toUpperCase()}:`);
   expect(await page.evaluate(async () => (await window.nivra.listProjects()).length)).toBe(2);
+});
+
+test("research starts with no Tavily key and its queries off, and the permission is the person's to turn on and off (D37)", async () => {
+  const settings = await page.evaluate(() => window.nivra.getSettings());
+  expect([settings.tavilyKey, settings.webResearch]).toEqual(["none", false]);
+  expect((await page.evaluate(() => window.nivra.setWebResearch(true))).webResearch).toBe(true);
+  expect((await page.evaluate(() => window.nivra.setWebResearch(false))).webResearch).toBe(false);
+  expect((await page.evaluate(() => window.nivra.getSettings())).webResearch).toBe(false);
 });
 
 test("quitting leaves no engine on Windows or in the distribution", async () => {

@@ -2,10 +2,12 @@
 // drives the native Windows engine and a WSL engine through the same target and supervisor modules Electron's main
 // process uses, and checks what CI would have: start, hello, cancel, a clean stop, and that an engine dies with its
 // parent when the parent is killed (libuv's kill-on-close job object, D4). It also checks that the native engine's
-// storage driver loads the Visual C++ runtime shipped beside it, not one installed on this machine (D25). The WSL engine
-// runs in a home of this run's own (--wsl-home, below the distribution's $HOME), which is removed at the end, and the
-// release's home, ~/.nivra, must be left exactly as it was (D27). With --sandboxes-url, it also runs sandbox checks
-// through the WSL engine against the stand-in for Nebius Sandboxes that verify-windows.ts runs in the distribution (D36).
+// storage driver loads the Visual C++ runtime shipped beside it, not one installed on this machine (D25). The WSL
+// engine runs in a home of this run's own (--wsl-home, below the distribution's $HOME), which is removed at the end,
+// and the release's home, ~/.nivra, must be left exactly as it was (D27). With --sandboxes-url, it also runs sandbox
+// checks through the WSL engine against the stand-in for Nebius Sandboxes that verify-windows.ts runs in the
+// distribution (D36). With --tavily-url and --token-factory-url, it then runs research checks through the same engine,
+// against the stand-ins for Tavily and Token Factory that verify-windows.ts runs beside it (D37).
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -22,6 +24,7 @@ import { wslHomeFrom } from "../src/main/targets/homes.ts";
 import { discoverWsl, type WslDiscovery, type WslDistro } from "../src/main/targets/wsl-discovery.ts";
 import { instancePattern, WslTarget } from "../src/main/targets/wsl.ts";
 import { renameDllImport, VC_RUNTIME_DLL, vcRuntimeAddons } from "./runtime-files.ts";
+import { researchChecks } from "./research-checks.ts";
 import { sandboxChecks } from "./sandbox-checks.ts";
 import { standInClient } from "./stand-in.ts";
 import { RELEASE_HOME_STATE, releaseHomeChange, REMOVE_TEST_HOME, STALE_TEST_HOMES } from "./test-homes.ts";
@@ -37,6 +40,9 @@ const { values } = parseArgs({
     // The stand-in for Nebius Sandboxes, on loopback in the distribution named by --sandboxes-distro.
     "sandboxes-url": { type: "string" },
     "sandboxes-distro": { type: "string" },
+    // The stand-ins for Tavily and Token Factory, on loopback in the same distribution (D37).
+    "tavily-url": { type: "string" },
+    "token-factory-url": { type: "string" },
     // Child mode: start one engine, print its pid and instance, then wait to be killed.
     "hold-engine": { type: "string" },
   },
@@ -450,6 +456,35 @@ async function main(): Promise<void> {
         root: join(root, "host"),
         logsDir: join(work, "logs", "sandbox"),
         engineHome: wslHome!,
+        stub,
+        check,
+        log: (line) => console.log(`    ${line}`),
+      });
+    }
+
+    // ---- research checks (D37) ---- Through this distribution's engine, once the sandbox checks' host has stopped it,
+    // against the stand-ins for Tavily and Token Factory that verify-windows.ts runs in the distribution
+    // (research-checks.ts says what they cover).
+    console.log("\nResearch checks: the host on Windows, the engine in WSL, stand-ins for Tavily and Token Factory");
+    const tavilyUrl = values["tavily-url"];
+    const modelUrl = values["token-factory-url"];
+    const researching = await check("wsl research: the stand-ins run in the distribution this engine runs in, and answer", async () => {
+      if (!up) throw new Error("not run: the WSL engine didn't start");
+      if (!tavilyUrl || !modelUrl) throw new Error("no --tavily-url or --token-factory-url: verify-windows.ts runs the stand-ins and passes their addresses");
+      const where = values["sandboxes-distro"] ?? "";
+      if (where !== distro.name) throw new Error(`the stand-ins run in ${where || "an unnamed distribution"}, but the engine runs in ${distro.name}. Run verify:windows from ${distro.name}, or pass --distro ${where || "<name>"}.`);
+      await stub("research-requests", { tavilyKey: "", modelKey: "" });
+      return `${tavilyUrl} and ${modelUrl} in ${distro.name}`;
+    });
+    if (researching) {
+      const root = join(work, `host research ${AWKWARD}`);
+      await researchChecks({
+        target: new WslTarget({ distro, wslExe, runtime: { tarball, contentHash: linuxHash }, engineHome: wslHome!, extraArgs: ["--tavily-url", tavilyUrl!, "--token-factory-url", modelUrl!] }),
+        discovery,
+        local: nativeTarget(join(root, "native home")),
+        inDistro,
+        root: join(root, "host"),
+        logsDir: join(work, "logs", "research"),
         stub,
         check,
         log: (line) => console.log(`    ${line}`),
