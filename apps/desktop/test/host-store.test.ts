@@ -18,6 +18,21 @@ const B = "22222222-2222-4222-8222-222222222222";
 const C = "33333333-3333-4333-8333-333333333333";
 
 describe("host records", () => {
+  it("keeps web research off until it is turned on, and off again once a version that doesn't know it rewrites the file (D37)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nivra store "));
+    dirs.push(dir);
+    const path = join(dir, "nivra.json");
+    const store = new HostStore(path);
+    assert.equal(store.data.webResearch === true, false);
+    store.update((data) => ({ ...data, webResearch: true }));
+    assert.equal(new HostStore(path).data.webResearch, true);
+    // An older version reads the file and writes it back without the setting it doesn't know.
+    const older = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    delete older["webResearch"];
+    writeFileSync(path, JSON.stringify(older));
+    assert.equal(new HostStore(path).data.webResearch === true, false);
+  });
+
   it("reads a file an older version wrote, dropping the chosen target it no longer keeps", () => {
     const dir = mkdtempSync(join(tmpdir(), "nivra store "));
     dirs.push(dir);

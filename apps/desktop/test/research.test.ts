@@ -132,9 +132,9 @@ describe("research packets, queries and previews (NIV-45)", () => {
     const packetOf = (selection: Partial<ResearchSelection>, of: ArtifactRecord = plan) => researchPacket(of, conversation, { assumptions: [pick(0, "q")], sites: null, ...selection }, KNOWN, CONTRACT);
     const cases: Array<[string, () => unknown, RegExp]> = [
       ["a long plan", () => packetOf({}, planOf(conversation, { text: "x".repeat(RESEARCH_LIMITS.planChars + 1) })), /is 20,001 characters long, and research can take 20,000\. Edit the plan to shorten it/],
-      ["a token in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${TOKEN} to pull.` })), /^This plan version looks like it holds a credential, so nothing was sent\./],
-      ["a saved key in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${SAVED} to pull.` })), /^This plan version holds one of your saved keys, so nothing was sent\./],
-      ["a saved key typed", () => packetOf({ assumptions: [pick(0, "q"), typed(`The key ${SAVED} works`, "q")] }), /^A2 holds one of your saved keys, so nothing was sent\. Remove it/],
+      ["a token in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${TOKEN} to pull.` })), /^This plan version looks like it holds a GitHub token, so nothing was sent\. Edit the plan to remove it, then research the new version\.$/],
+      ["a saved key in the plan", () => packetOf({}, planOf(conversation, { text: `Use ${SAVED} to pull.` })), /^This plan version holds your saved Token Factory key, so nothing was sent\. Edit the plan to remove it, then research the new version\.$/],
+      ["a saved key typed", () => packetOf({ assumptions: [pick(0, "q"), typed(`The key ${SAVED} works`, "q")] }), /^A2 holds your saved Token Factory key, so nothing was sent\. Remove it, then preview again\.$/],
       ["a blank assumption", () => packetOf({ assumptions: [typed("   ", "q")] }), /^A1 is empty\./],
       ["a long typed assumption", () => packetOf({ assumptions: [typed("y".repeat(301), "q")] }), /^A1 is 301 characters long, and research can take 300/],
       ["a long assumption of the plan", () => packetOf({ assumptions: [pick(1, "q")] }), /assumption 2 is 301 characters long.*Type a shorter version of it instead/],
@@ -319,7 +319,7 @@ describe("research packets, queries and previews (NIV-45)", () => {
   it("refuses a selection whose plan holds a credential before any query is checked or fingerprinted", async () => {
     const conversation = general();
     const message = await refusalOf(() => researchRequest(subjectOf(conversation, {}, { text: `Pull with ${TOKEN}.` }), { assumptions: [typed("a claim", "a claim")], sites: null }, state(), CONTRACT));
-    assert.match(message, /^This plan version looks like it holds a credential, so nothing was sent\./);
+    assert.match(message, /^This plan version looks like it holds a GitHub token, so nothing was sent\./);
   });
 });
 

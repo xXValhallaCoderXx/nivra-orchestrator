@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { getResearch, insertResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "../src/main/research-store.ts";
-import { deleteConversation, getTurn, insertArtifact, insertConversation, insertTurn, openTurns, turnsOf, type ConversationRecord } from "../src/main/workspace.ts";
+import { deleteConversation, getTurn, insertArtifact, insertConversation, insertTurn, openTurns, requestCancel, turnsOf, withdrawCancel, type ConversationRecord } from "../src/main/workspace.ts";
 import { openWorkspace, WORKSPACE_MIGRATIONS, type WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 
 const dirs: string[] = [];
@@ -198,6 +198,20 @@ describe("research of plan versions (NIV-45)", () => {
     insertTurn(db, { id: turn, conversationId: chat.id, sessionId: "s", targetId: "local", preferences: [], history: null, createdAt: AT }, { id: randomUUID(), text: "Still there?" });
     assert.equal(stopResearch(db, turn, "person"), null);
     assert.deepEqual([getTurn(db, turn)?.cancelRequested, getTurn(db, turn)?.cancelReason], [false, null]);
+  });
+
+  it("is stopped only through its own stops: the generic stop and its withdrawal leave a research link as it is", () => {
+    const db = workspace();
+    const conversation = general();
+    insertConversation(db, conversation);
+    const research = researchFor(conversation, planIn(db, conversation.id, "Move the build image to Python 3.12."));
+    assert.equal(insertResearch(db, research, LINK), true);
+    assert.equal(requestCancel(db, research.id, "person"), false, "the generic stop asks nothing of research");
+    assert.equal(getTurn(db, research.id)?.cancelRequested, false);
+    const token = stopResearch(db, research.id, "web-research");
+    assert.ok(token);
+    withdrawCancel(db, research.id, "sharing");
+    assert.deepEqual([getTurn(db, research.id)?.cancelReason, getResearch(db, research.id)?.stop], ["sharing", { cause: "web-research", token }], "the generic withdrawal never clears a research stop");
   });
 
   it("keeps the first outcome and report, and records one amended plan derived from the researched version", () => {

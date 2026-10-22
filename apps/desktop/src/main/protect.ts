@@ -18,19 +18,26 @@ const SHAPE_WORDS: Readonly<Record<string, string>> = {
   "api-key": "an API key",
   "slack-token": "a Slack token",
   "linear-token": "a Linear API key",
+  "tavily-key": "a Tavily API key",
+};
+
+/** Each saved secret in the person's words, as a refusal names it. */
+const SAVED_WORDS: Readonly<Record<string, string>> = {
+  NEBIUS_API_KEY: "your saved Token Factory key",
+  NEBIUS_PROJECT_ID: "your saved Nebius project id",
+  TAVILY_API_KEY: "your saved Tavily key",
 };
 
 /**
- * Throws when text the person typed into `field` holds a saved key or a recognised credential, saying what to do.
- * `field` reads as the start of a sentence ("Your message", "The goal"); `action` is what they were doing. A plan
- * version can't change, so for a review the way out is a new version.
+ * Throws when text the person typed into `field` holds a saved secret or a recognised credential, saying which and what
+ * to do. `field` reads as the start of a sentence ("Your message", "The goal"); `action` is what they were doing. A plan
+ * version can't change, so for a review or research the way out is a new version; a preview is simply done again.
  */
-export function refuseCredentials(field: string, text: string, known: KnownSecrets, action: "send" | "save" | "review" = "save"): void {
+export function refuseCredentials(field: string, text: string, known: KnownSecrets, action: "send" | "save" | "review" | "research" | "preview" = "save"): void {
   const nothing = action === "save" ? "nothing was saved" : "nothing was sent";
-  const then = action === "review" ? "Edit the plan to remove it, then review the new version." : `Remove it, then ${action} again.`;
-  if (known.some(([, value]) => value.length > 0 && text.includes(value))) {
-    throw new Error(`${field} holds your saved Token Factory key, so ${nothing}. ${then}`);
-  }
+  const then = action === "review" || action === "research" ? `Edit the plan to remove it, then ${action} the new version.` : `Remove it, then ${action} again.`;
+  const saved = known.find(([, value]) => value.length > 0 && text.includes(value));
+  if (saved) throw new Error(`${field} holds ${SAVED_WORDS[saved[0]] ?? "one of your saved keys"}, so ${nothing}. ${then}`);
   const [shape] = secretShapes(text);
   if (shape) throw new Error(`${field} looks like it holds ${SHAPE_WORDS[shape] ?? "a credential"}, so ${nothing}. ${then}`);
 }

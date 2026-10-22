@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { domainToASCII } from "node:url";
-import { secretShapes } from "@nivra/domain";
 import type { AssumptionId, ResearchPreview, ResearchSelection, ResearchSites } from "../shared/research.ts";
 import { maskForStorage, refuseCredentials, type KnownSecrets } from "./protect.ts";
 import type { ResearchQuery, ResearchRecord } from "./research-store.ts";
@@ -46,15 +45,6 @@ const inWords = (n: number) => WORDS[n] ?? count(n);
 const segments = (path: string) => path.split(/[\\/]/).filter(Boolean);
 
 /**
- * Refuses text on its way out that holds a saved key or a credential's shape: which field, never the value. The domain's
- * checks and the engine's masking come after; this is the host's own first look.
- */
-function refuseSecret(field: string, text: string, known: KnownSecrets, then: string): void {
-  if (known.some(([, value]) => value.length > 0 && text.includes(value))) throw new Error(`${field} holds one of your saved keys, so nothing was sent. ${then}`);
-  if (secretShapes(text).length > 0) throw new Error(`${field} looks like it holds a credential, so nothing was sent. ${then}`);
-}
-
-/**
  * The sites as hostnames, in punycode and lower case, each once: refused unless each is a public one, named by its place
  * in the list as the person wrote it, and counted once written the same way.
  */
@@ -89,7 +79,8 @@ export function researchPacket(plan: ArtifactRecord, conversation: ConversationR
   if (content.text.length > limits.planChars) {
     throw new Error(`This plan version is ${count(content.text.length)} characters long, and research can take ${count(limits.planChars)}. Edit the plan to shorten it, then check the new version.`);
   }
-  refuseSecret("This plan version", content.text, known, "Edit the plan to remove it, then check the new version.");
+  // The host's own first look, before the domain's checks and the engine's masking: which field, never the value.
+  refuseCredentials("This plan version", content.text, known, "research");
   const picks = selection.assumptions;
   if (picks.length === 0 || picks.length > limits.assumptions) throw new Error(`Pick one to ${inWords(limits.assumptions)} assumptions to check, then preview again.`);
   const picked = new Set<number>();
@@ -100,7 +91,7 @@ export function researchPacket(plan: ArtifactRecord, conversation: ConversationR
       const text = pick.from.text.trim();
       if (!text) throw new Error(`${id} is empty. Write the assumption, or remove it.`);
       if (text.length > limits.assumptionChars) throw new Error(`${id} is ${count(text.length)} characters long, and research can take ${count(limits.assumptionChars)}. Shorten it, then preview again.`);
-      refuseSecret(id, text, known, "Remove it, then preview again.");
+      refuseCredentials(id, text, known, "preview");
       return { id, text, origin: { kind: "typed" }, query };
     }
     const place = pick.from.index;

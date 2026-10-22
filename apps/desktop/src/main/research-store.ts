@@ -12,9 +12,8 @@ import { getTurn, type CancelReason, type TurnRecord, type TurnStatus } from "./
  *
  * Every stop of a research run goes through `stopResearch`, and every withdrawal through `withdrawStop`: the person's
  * cancel, either permission turned off, a project removed and a conversation deleted. The generic `requestCancel` and
- * `withdrawCancel` in `workspace.ts` don't know about tokens, so research's window makes them refuse research links and
- * gives each of the host's stop paths a research branch; a path it missed then fails in tests rather than clearing a
- * newer stop.
+ * `withdrawCancel` in `workspace.ts` don't know about tokens, so they leave research links as they are: each of the
+ * host's stop paths needs a research branch, and a path without one fails in tests rather than clearing a newer stop.
  */
 /** The run link statuses of research still under way, as `workspace.ts` counts them. */
 const OPEN = "('submitting', 'running')";

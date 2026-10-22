@@ -105,9 +105,12 @@ export class SecretStore {
     this.#write(data);
   }
 
-  /** Every saved secret that can be read: the key, and the project id Nebius Sandboxes needs with it (D36). */
+  /**
+   * Every saved secret that can be read: the key, the project id Nebius Sandboxes needs with it (D36), and the Tavily
+   * key research needs (D37).
+   */
   async all(): Promise<Partial<Record<SecretName, string>>> {
-    const names: readonly SecretName[] = ["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID"];
+    const names: readonly SecretName[] = ["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID", "TAVILY_API_KEY"];
     const values = await Promise.all(names.map(async (name) => [name, await this.get(name)] as const));
     return Object.fromEntries(values.filter(([, value]) => value !== null)) as Partial<Record<SecretName, string>>;
   }
