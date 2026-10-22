@@ -196,9 +196,9 @@ describe("a research report (NIV-45)", () => {
       queries: ids.map((assumption) => ({ assumption, text: fill(L.assumptionChars), query: fill(L.queryChars) })),
       sites: { mode: "prefer", hosts: Array.from({ length: L.sites }, () => fill(L.siteChars)) },
       requests: [
-        ...ids.map((assumption) => ({ id: `search-${assumption}` as const, kind: "search" as const, assumption, state: "answered" as const, failure: null, status: 200, requestId: fill(100), credits: 2, pages: 0, elapsedMs: 30_000 })),
-        ...ids.map((assumption) => ({ id: `extract-${assumption}` as const, kind: "extract" as const, assumption, state: "answered" as const, failure: null, status: 200, requestId: fill(100), credits: 1, pages: 5, elapsedMs: 45_000 })),
-        { id: "model", kind: "model", assumption: null, state: "answered", failure: null, status: null, requestId: null, credits: null, pages: 0, elapsedMs: 150_000 },
+        ...ids.map((assumption) => ({ id: `search-${assumption}` as const, kind: "search" as const, assumption, state: "answered" as const, failure: null, status: 200, requestId: fill(100), credits: 2, pages: 0, returned: null, elapsedMs: 30_000 })),
+        ...ids.map((assumption) => ({ id: `extract-${assumption}` as const, kind: "extract" as const, assumption, state: "answered" as const, failure: null, status: 200, requestId: fill(100), credits: 1, pages: 5, returned: 5, elapsedMs: 45_000 })),
+        { id: "model", kind: "model", assumption: null, state: "answered", failure: null, status: null, requestId: null, credits: null, pages: 0, returned: null, elapsedMs: 150_000 },
       ],
       pages: Array.from({ length: L.pages }, (_, index) => ({
         id: `S${index + 1}`,

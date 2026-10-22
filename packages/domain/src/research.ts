@@ -108,11 +108,12 @@ export const ResearchPacket = z
 export type ResearchPacket = z.infer<typeof ResearchPacket>;
 
 /**
- * What no query may name, worked out by the host: every project's label and folder name, and the paths the plan cites.
- * The engine checks the queries against them again before anything is sent.
+ * What no query may name, worked out by the host: every project's label and folder name (a folder name can be 255
+ * characters; a thousand projects fit), and the paths the plan cites (as many as a plan's references). The engine
+ * checks the queries against them again before anything is sent.
  */
 export const ResearchDeny = z.strictObject({
-  terms: z.array(z.string().min(1).max(200)).max(500),
+  terms: z.array(z.string().min(1).max(255)).max(2_000),
   paths: z.array(z.string().min(1).max(500)).max(240),
 });
 export type ResearchDeny = z.infer<typeof ResearchDeny>;
@@ -298,6 +299,8 @@ export const ResearchRequest = z.strictObject({
   credits: z.number().nonnegative().nullable(),
   /** For an Extract, how many pages it asked for. */
   pages: count,
+  /** For an Extract, how many of them came back with content (what Tavily bills by); null otherwise, or without an answer. */
+  returned: count.nullable(),
   elapsedMs: count.nullable(),
 });
 export type ResearchRequest = z.infer<typeof ResearchRequest>;

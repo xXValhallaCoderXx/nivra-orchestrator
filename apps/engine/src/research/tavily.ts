@@ -11,6 +11,31 @@ import type { ExtractedPage, ExtractRequest, RequestEnd, RequestFailure, Request
 
 export const TAVILY_BASE_URL = "https://api.tavily.com";
 
+/**
+ * What every search and every extract sends besides its query, its addresses and the sites: pinned here, so a live
+ * check's approval covers them. Basic depth for both (a search is one credit; an extract one per five pages read), no
+ * answer, raw content, images or favicons, and the usage Tavily reports.
+ */
+export const SEARCH_PARAMETERS = {
+  search_depth: "basic",
+  topic: "general",
+  max_results: RESEARCH_LIMITS.resultsPerSearch,
+  include_answer: false,
+  include_raw_content: false,
+  include_images: false,
+  include_favicon: false,
+  include_usage: true,
+} as const;
+export const EXTRACT_PARAMETERS = {
+  chunks_per_source: RESEARCH_LIMITS.passagesPerExtraction,
+  extract_depth: "basic",
+  format: "markdown",
+  timeout: RESEARCH_LIMITS.extractTimeoutSeconds,
+  include_images: false,
+  include_favicon: false,
+  include_usage: true,
+} as const;
+
 export interface TavilyOptions {
   apiKey: string;
   /** Tests point this at a stub on the loopback; the engine accepts no other. */
@@ -152,14 +177,7 @@ export function createTavily(options: TavilyOptions): Retrieval {
     async search(request: SearchRequest): Promise<Retrieved<{ hits: SearchHit[] }>> {
       const body: Record<string, unknown> = {
         query: request.query,
-        search_depth: "basic",
-        topic: "general",
-        max_results: L.resultsPerSearch,
-        include_answer: false,
-        include_raw_content: false,
-        include_images: false,
-        include_favicon: false,
-        include_usage: true,
+        ...SEARCH_PARAMETERS,
         ...(request.sites ? { include_domains: [...request.sites.hosts], include_domains_mode: request.sites.mode } : {}),
       };
       const sent = await post("/search", body, request, L.searchBodyBytes, SearchAnswer);
@@ -169,17 +187,7 @@ export function createTavily(options: TavilyOptions): Retrieval {
     },
 
     async extract(request: ExtractRequest): Promise<Retrieved<{ pages: ExtractedPage[]; failed: string[] }>> {
-      const body = {
-        urls: [...request.addresses],
-        query: request.query,
-        chunks_per_source: L.passagesPerExtraction,
-        extract_depth: "basic",
-        format: "markdown",
-        timeout: L.extractTimeoutSeconds,
-        include_images: false,
-        include_favicon: false,
-        include_usage: true,
-      };
+      const body = { urls: [...request.addresses], query: request.query, ...EXTRACT_PARAMETERS };
       const sent = await post("/extract", body, request, L.extractBodyBytes, ExtractAnswer);
       if (!sent.ok) return sent;
       // Only pages that were asked for, matched back to the address that was sent; the order Tavily used isn't kept.

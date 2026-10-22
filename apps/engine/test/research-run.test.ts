@@ -124,6 +124,17 @@ describe("a research run, in process (NIV-45)", () => {
     assert.deepEqual([report.outcome, report.stop], ["complete", null]);
     assert.deepEqual(states(report), { "search-A1": "answered", "search-A2": "answered", "extract-A1": "answered", "extract-A2": "answered", model: "answered" });
     assert.deepEqual([stub.calls.length, model.doGenerateCalls.length], [4, 1]);
+    // What each Extract asked for and what came back, which is what Tavily bills by.
+    assert.deepEqual(
+      report.requests.map((request) => [request.id, request.pages, request.returned]),
+      [
+        ["search-A1", 0, null],
+        ["search-A2", 0, null],
+        ["extract-A1", 2, 2],
+        ["extract-A2", 2, 2],
+        ["model", 0, null],
+      ],
+    );
     assert.deepEqual(
       report.pages.map((page) => [page.id, page.status, page.foundBy.map((found) => found.assumption).join(" "), page.extractedFor.join(" ")]),
       [

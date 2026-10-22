@@ -69,6 +69,8 @@ export interface ResearchRequestEntry {
   requestId: string | null;
   credits: number | null;
   pages: number;
+  /** For an Extract, how many of its pages came back with content; null otherwise, or without an answer. */
+  returned: number | null;
   elapsedMs: number | null;
 }
 
@@ -173,6 +175,7 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     requestId: null,
     credits: null,
     pages: 0,
+    returned: null,
     elapsedMs: null,
   });
   const requests: ResearchRequestEntry[] = [
@@ -300,6 +303,7 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
       await save();
       const result = await options.retrieval.extract({ query: assumption.query, addresses: mine.map((page) => page.address), deadlineAt: now() + L.extractMs, cutoffAt, ...(signal ? { signal } : {}) });
       settle(target, result);
+      target.returned = result.ok ? result.pages.length : null;
       await save();
       return { assumption: assumption.id, pages: result.ok ? result.pages : [] };
     }),
