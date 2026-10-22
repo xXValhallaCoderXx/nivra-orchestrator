@@ -338,7 +338,7 @@ export const ResearchCitation = z.strictObject({
   stance: z.enum(["supports", "contradicts"]),
   quote: text(RESEARCH_LIMITS.quoteMaxChars),
   valid: z.boolean(),
-  problem: z.enum(["unknown-passage", "too-short", "too-long", "not-found"]).nullable(),
+  problem: z.enum(["unknown-passage", "bad-stance", "too-short", "too-long", "not-found"]).nullable(),
 });
 export type ResearchCitation = z.infer<typeof ResearchCitation>;
 
