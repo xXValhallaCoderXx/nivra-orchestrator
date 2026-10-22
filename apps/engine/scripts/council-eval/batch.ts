@@ -37,12 +37,18 @@ export const WAITS = {
 } as const;
 /** The waits around one run, each at its limit: the model listing before it, its start, and reading its record. */
 export const AROUND_RUN_MS = WAITS.checkMs + WAITS.startMs + WAITS.collectMs;
+/**
+ * Reading what the engine says of a run still going after its window to settle, before it is kept as unresolved: a
+ * window of its own, after the window to settle, for its summary, its events and its report together.
+ */
+export const UNRESOLVED_READ_MS = 5_000;
 
 export type JournalEntry =
   | { type: "session"; at: string; homeId: string; pid: number; mode: "stub" | "live"; revision: string | null; dirty: boolean; approvalDigest: string }
   | { type: "start"; at: string; fixture: FixtureId; arm: Arm; clientRequestId: string; homeId: string; batchElapsedMs: number }
   | { type: "run"; at: string; fixture: FixtureId; arm: Arm; clientRequestId: string; runId: string | null; how: "started" | "found" | "not-sent" | "unknown" }
-  | { type: "cancel"; at: string; fixture: FixtureId; arm: Arm; runId: string; why: "deadline" | "batch" }
+  // `batchElapsedMs` is on the monotonic clock, as `start` and `end` have it; a journal written before it was added has none.
+  | { type: "cancel"; at: string; fixture: FixtureId; arm: Arm; runId: string; why: "deadline" | "batch"; batchElapsedMs?: number }
   | { type: "end"; at: string; fixture: FixtureId; arm: Arm; clientRequestId: string; runId: string | null; status: RunRecord["status"]; requests: number | null; note: string | null; batchElapsedMs: number }
   | { type: "stop"; at: string; why: string };
 
@@ -273,7 +279,7 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
       if (now >= giveUpAt) return cancelled && cancelAt + reconcileMs <= lastAt ? "unresolved" : "ran-out";
       if (!cancelled && now >= cancelAt) {
         cancelled = true;
-        journal.append({ type: "cancel", at: new Date().toISOString(), fixture, arm, runId, why: now >= startedAt + deadlineOf(arm) ? "deadline" : "batch" });
+        journal.append({ type: "cancel", at: new Date().toISOString(), fixture, arm, runId, why: now >= startedAt + deadlineOf(arm) ? "deadline" : "batch", batchElapsedMs: Math.round(elapsed()) });
         await engine.client.call("runs.cancel", { runId }, { timeoutMs: Math.max(1, within(giveUpAt, 10_000)) }).catch(() => undefined);
         continue;
       }
@@ -293,7 +299,7 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
     }
     // Still going after its window to settle, or when the batch's time ran out: kept as unresolved, with whatever the
     // engine says of it now, never resent.
-    const seen = await collect(engine, fixture, arm, clientRequestId, runId, Math.min(performance.now() + 5_000, batchEnd())).catch(() => null);
+    const seen = await collect(engine, fixture, arm, clientRequestId, runId, Math.min(performance.now() + UNRESOLVED_READ_MS, batchEnd())).catch(() => null);
     const note =
       followed === "unresolved"
         ? `The ${fixture} ${arm} run was still going ${Math.round(reconcileMs / 1000)} s after it was cancelled, so it is kept as unresolved, and the batch stopped. It is never sent again.`

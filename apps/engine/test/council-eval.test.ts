@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { preferencesDigest, ReviewPacket, REVIEW_TOOLS, type ReviewReport } from "@nivra/domain";
-import { Journal, type JournalEntry } from "../scripts/council-eval/batch.ts";
+import { Journal, UNRESOLVED_READ_MS, type JournalEntry } from "../scripts/council-eval/batch.ts";
 import { EMPTY_PREFERENCES_DIGEST, FIXTURE_IDS, loadFrozen, planIdOf, readCredentials, REPOSITORY, requestFor, runOrder, type Arm, type FixtureId } from "../scripts/council-eval/files.ts";
 import { defectMatches, matchedDefects } from "../scripts/council-eval/match.ts";
 import { limitMismatches } from "../scripts/council-eval/plan.ts";
@@ -564,19 +564,31 @@ describe("before any inference request, and a run that won't stop (NIV-40)", () 
   it("stops within its bound when a run keeps running after it was cancelled, keeps it as unresolved, and never sends it again", async () => {
     const stub = await stubFor();
     const out = join(scratch(), "evidence");
+    const RECONCILE_MS = 1_000;
     const started = performance.now();
-    const { code, stderr } = await cli(["--token-factory-url", stub.url, "--out", out, "--engine", STUCK, "--only", "f1", "--deadline-ms", "1000", "--reconcile-ms", "1000"]).done;
+    const { code, stderr } = await cli(["--token-factory-url", stub.url, "--out", out, "--engine", STUCK, "--only", "f1", "--deadline-ms", "1000", "--reconcile-ms", String(RECONCILE_MS)]).done;
     const tookMs = performance.now() - started;
     const note = "The f1 single run was still going 1 s after it was cancelled, so it is kept as unresolved, and the batch stopped. It is never sent again.";
     assert.deepEqual([code, stderr.trim()], [3, note]);
     assert.ok(tookMs < 20_000, `the batch took ${Math.round(tookMs)} ms`);
     const journal = journalOf(out);
     assert.deepEqual(journal.map((entry) => entry.type), ["session", "start", "run", "cancel", "end", "stop"]);
-    const cancelled = Date.parse(journal[3]!.at);
+    const cancel = journal[3] as Extract<JournalEntry, { type: "cancel" }>;
     const end = journal[4] as Extract<JournalEntry, { type: "end" }>;
     assert.deepEqual([end.status, end.requests, end.note], ["unknown", null, note]);
-    assert.ok(Date.parse(end.at) - cancelled < 5_000, "kept as unresolved within its window to settle, and the time to say so");
     const record = JSON.parse(readFileSync(join(out, "runs", "f1-single.json"), "utf8")) as RunRecord;
+    // From the cancel to the end entry, on the batch's monotonic clock: the window to settle, then the separate window
+    // to read what the engine says of the run, then an allowance for what no timer bounds (late timers, and the
+    // journal's and the evidence's synchronous writes). This bounds the two windows together: it doesn't show that the
+    // window to settle alone ended within its 1 s. A failure says what each clock saw, and whether the read came back.
+    const ALLOWANCE_MS = 1_000;
+    const bound = RECONCILE_MS + UNRESOLVED_READ_MS + ALLOWANCE_MS;
+    assert.equal(typeof cancel.batchElapsedMs, "number", "the cancel is stamped on the monotonic clock");
+    const gap = end.batchElapsedMs - cancel.batchElapsedMs!;
+    assert.ok(
+      gap <= bound,
+      `kept as unresolved within its windows to settle and to read: ${gap} ms on the monotonic clock (${Date.parse(end.at) - Date.parse(cancel.at)} ms by the wall clock), over its bound of ${bound} ms; the read ${record.summary ? "came back" : "did not come back"}`,
+    );
     assert.deepEqual([record.status, record.note, record.summary?.status], ["unknown", note, "running"]);
     // Resumed, it is never sent again: the batch stays stopped.
     const resumed = await cli(["--resume", out, "--token-factory-url", stub.url, "--engine", STUCK, "--only", "f1", "--deadline-ms", "1000", "--reconcile-ms", "1000"]).done;
