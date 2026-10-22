@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { domainToASCII } from "node:url";
 import { QUERY_PROBLEM_WORDS, queryProblems, RESEARCH_LIMITS, researchPacketDigest, siteProblem, type ResearchContext, type ResearchDeny, type ResearchInput, type ResearchPacket } from "@nivra/domain";
-import type { AssumptionId, ResearchPreview, ResearchSelection, ResearchSites } from "../shared/research.ts";
+import type { AssumptionId, ResearchPreview, ResearchSelection, ResearchSites, StopCause } from "../shared/research.ts";
 import { maskForStorage, refuseCredentials, type KnownSecrets } from "./protect.ts";
 import type { ResearchQuery, ResearchRecord } from "./research-store.ts";
 import { TASK_LIMITS, type PlanContent } from "./tasks.ts";
@@ -229,6 +229,24 @@ export function researchReportMatches(report: ResearchBinding, research: Researc
 }
 
 const SENT = "What was already sent can't be withdrawn, and nothing was resent.";
+
+/**
+ * What the card says when a stop recorded before research's run was known couldn't be carried out once it was found:
+ * the stop was taken back, so the research goes on, and Cancel works again.
+ */
+export function researchStopFailedText(cause: StopCause, why: string): string {
+  const then = "Press Cancel to try again, or restart its engine to stop it.";
+  switch (cause) {
+    case "web-research":
+      return `Research queries to Tavily are off, but Nivra couldn't stop this research (${why}). ${then}`;
+    case "model-sharing":
+      return `Sharing for this project is off, but Nivra couldn't stop this research (${why}). ${then}`;
+    case "removal":
+      return `The project was being removed, but Nivra couldn't stop this research (${why}). ${then}`;
+    default:
+      return `Nivra couldn't stop this research (${why}). ${then}`;
+  }
+}
 
 /**
  * What happened to research that ended without a complete report, in the person's terms; null while it goes, or once

@@ -14,6 +14,7 @@ import {
   researchPacket,
   researchReportMatches,
   researchRequest,
+  researchStopFailedText,
   type ResearchState,
   type ResearchSubject,
 } from "../src/main/research.ts";
@@ -286,6 +287,20 @@ describe("research packets, queries and previews (NIV-45)", () => {
     assert.equal(researchNoteFor(link("not-sent"), null), "Not sent: nothing reached Tavily or Token Factory.");
     assert.match(researchNoteFor(link("unknown", "its engine stopped"), null)!, /^Nivra can't tell whether this research reached Tavily or Token Factory: its engine stopped\./);
     assert.deepEqual([researchNoteFor(link("running"), null), researchNoteFor(link("answered"), null)], [null, null]);
+  });
+
+  it("says why a stop made before its run was known couldn't be carried out, by its cause, and what to do", () => {
+    const why = "the run couldn't be stopped";
+    const then = "Press Cancel to try again, or restart its engine to stop it.";
+    assert.deepEqual(
+      (["web-research", "model-sharing", "removal", "person"] as const).map((cause) => researchStopFailedText(cause, why)),
+      [
+        `Research queries to Tavily are off, but Nivra couldn't stop this research (${why}). ${then}`,
+        `Sharing for this project is off, but Nivra couldn't stop this research (${why}). ${then}`,
+        `The project was being removed, but Nivra couldn't stop this research (${why}). ${then}`,
+        `Nivra couldn't stop this research (${why}). ${then}`,
+      ],
+    );
   });
 
   it("checks an amended version's text and assumptions as a plan's and a brief's are, and adds nothing of the research to its content", () => {

@@ -77,7 +77,7 @@ import {
   type PreferenceExport,
 } from "./preferences.ts";
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
-import { amendedContent, amendedPlanFields, researchNoteFor, researchReportMatches, researchRequest, type ResearchSubject } from "./research.ts";
+import { amendedContent, amendedPlanFields, researchNoteFor, researchReportMatches, researchRequest, researchStopFailedText, type ResearchSubject } from "./research.ts";
 import { getResearch, insertResearch, openResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
 import { historicalReferences, packetFor, previewFingerprint, reportMatches, REVIEW_REQUESTS, reviewNoteFor } from "./reviews.ts";
 import { BriefContentSchema, BriefFieldsSchema, briefForRepository, briefFrom, briefIsReady, nextState, planFromAnswer, RUN_UNAVAILABLE, sourceFrom, TASK_LIMITS, type PlanContent } from "./tasks.ts";
@@ -254,6 +254,13 @@ export class Host {
   readonly #submissions = new Map<string, { cancel: CancelReason | null }>();
   /** Turns being followed to their end. */
   readonly #following = new Set<string>();
+  /** The last hand-off of changed keys to the engines, which the next one waits for. */
+  #secretsHandOff: Promise<void> = Promise.resolve();
+  /**
+   * Research whose stop, recorded before its run was known, couldn't be carried out once the run was found: why, in the
+   * person's words, until a newer stop is asked for or the research ends (D37).
+   */
+  readonly #researchStopFailures = new Map<string, string>();
   /** Projects being removed: no explanation may start for them, and a late answer to one that did is not accepted. */
   readonly #removing = new Set<string>();
   /** Export files the person chose to import, read and checked, until they are imported; this session only. */
@@ -410,7 +417,7 @@ export class Host {
     const researchStops: Array<{ id: string; token: string }> = [];
     for (const turn of open) {
       if (turn.workflowId === "research") {
-        const token = stopResearch(workspace, turn.id, "deletion");
+        const token = this.#stopResearch(workspace, turn.id, "deletion");
         if (token) researchStops.push({ id: turn.id, token });
         continue;
       }
@@ -1284,8 +1291,18 @@ export class Host {
     return this.#preferenceView(saved!);
   }
 
-  /** Hands every engine the keys as they are now (D8), including one that was still starting when they changed. */
-  async secretsChanged(): Promise<void> {
+  /**
+   * Hands every engine the keys as they are now (D8), including one that was still starting when they changed. Each
+   * call starts once the one before it has ended, and reads the keys afresh, so the last set an engine is given is the
+   * latest.
+   */
+  secretsChanged(): Promise<void> {
+    const done = this.#secretsHandOff.then(() => this.#handSecrets());
+    this.#secretsHandOff = done.catch(() => undefined);
+    return done;
+  }
+
+  async #handSecrets(): Promise<void> {
     const secrets = await this.#options.credentials();
     const remove = (["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID", "TAVILY_API_KEY"] as const).filter((name) => !secrets[name]);
     const results = await Promise.allSettled(
@@ -1487,7 +1504,7 @@ export class Host {
     if (this.#workspace.state !== "ready") return [];
     const workspace = this.#workspace.db;
     const stopped = links.flatMap((link) => {
-      const token = stopResearch(workspace, link.id, cause);
+      const token = this.#stopResearch(workspace, link.id, cause);
       return token ? [{ link, token }] : [];
     });
     const running = stopped.filter(({ link }) => link.runId && this.#engines.get(link.targetId)?.supervisor.state.status === "online");
@@ -1546,7 +1563,7 @@ export class Host {
       // A stop of its own (D37). One being sent stops at its own check, one whose run isn't known yet once it is found;
       // a stop its engine can't carry out is taken back, and a newer stop is never cleared.
       const workspace = this.#workspaceDb();
-      const token = stopResearch(workspace, link.id, "person");
+      const token = this.#stopResearch(workspace, link.id, "person");
       if (!token) return;
       if (link.runId) {
         await this.cancelRun(link.runId).catch((error: unknown) => {
@@ -1669,7 +1686,14 @@ export class Host {
   #recordResearchStop(id: string, cause: StopCause): void {
     if (this.#workspace.state !== "ready") return;
     const workspace = this.#workspace.db;
-    if (!getResearch(workspace, id)?.stop) stopResearch(workspace, id, cause);
+    if (!getResearch(workspace, id)?.stop) this.#stopResearch(workspace, id, cause);
+  }
+
+  /** Asks research to stop (D37), as `stopResearch` does; a newer stop leaves no earlier failure on show. */
+  #stopResearch(workspace: WorkspaceDb, id: string, cause: StopCause): string | null {
+    const token = stopResearch(workspace, id, cause);
+    if (token) this.#researchStopFailures.delete(id);
+    return token;
   }
 
   /** Why a turn must not be sent now (a cancel, or its project's consent gone since it was asked for); null when it may. */
@@ -1852,11 +1876,19 @@ export class Host {
               }
               if (isTerminal(summary.status)) {
                 await this.#finish(turnId, engine, summary);
+                this.#researchStopFailures.delete(turnId);
                 return;
               }
               if (turn.cancelRequested && !cancelSent) {
                 cancelSent = true;
-                await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch(() => undefined);
+                // Research's stop has a token of its own (D37). One its engine can't carry out is taken back by that
+                // token alone, so a newer stop stays on record; the card says why, and Cancel works again. The run is
+                // recorded by now, so a newer stop cancels it directly: this one is sent once.
+                const stop = turn.workflowId === "research" ? (getResearch(workspace, turnId)?.stop ?? null) : null;
+                await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch((error: unknown) => {
+                  if (!stop || this.#workspace.state !== "ready" || !withdrawStop(this.#workspace.db, turnId, stop.token)) return;
+                  this.#researchStopFailures.set(turnId, researchStopFailedText(stop.cause, errorText(error)));
+                });
               }
               delay = 400;
             } catch (error) {
@@ -2057,6 +2089,7 @@ export class Host {
       runId: link.runId,
       cancelRequested: link.cancelRequested,
       stopCause: research.stop?.cause ?? null,
+      stopFailed: open && !research.stop ? (this.#researchStopFailures.get(research.id) ?? null) : null,
       queries: research.queries,
       sites: research.sites,
       packetDigest: research.packetDigest,

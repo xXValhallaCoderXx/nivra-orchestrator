@@ -572,6 +572,11 @@ function ResearchCard({ research, researching, onAgain, onAmend }: { research: R
             {research.note}
           </Text>
         )}
+        {research.stopFailed && (
+          <Text size="sm" c="var(--nivra-warning)" data-testid="research-stop-failed">
+            {research.stopFailed}
+          </Text>
+        )}
         {research.unresolved && (
           <Text size="sm" c="var(--nivra-warning)" data-testid="research-unresolved">
             {research.unresolved}

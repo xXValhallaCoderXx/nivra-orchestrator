@@ -92,7 +92,8 @@ const BROKEN: WslDiscovery = { status: "broken", code: "WSL_E_TEST", message: "W
 
 /**
  * Both engines reach `tokenFactoryUrl`, `sandboxesUrl` and `tavilyUrl` (loopback stubs) when they are set;
- * `beforeWslPrepare` can hold the WSL engine's start.
+ * `beforeWslPrepare` can hold the WSL engine's start; `credentials` stands in for the saved keys, which are otherwise
+ * `keys.current`.
  */
 type HostOptions = {
   localEntry?: string;
@@ -102,6 +103,7 @@ type HostOptions = {
   tavilyUrl?: string;
   beforeWslPrepare?: () => Promise<void>;
   testHooks?: { beforeProjection?(turnId: string): Promise<void> };
+  credentials?: () => Promise<Partial<Record<SecretName, string>>>;
 };
 
 function makeHost(options: HostOptions & { projects?: Array<{ targetId: string; path: string }> } = {}) {
@@ -134,7 +136,7 @@ function hostAt(root: string, options: HostOptions = {}) {
     workspacePath: join(root, "workspace.db"),
     logsDir: join(root, "logs"),
     client: { name: "host-test", version: "0" },
-    credentials: async () => keys.current,
+    credentials: options.credentials ?? (async () => keys.current),
     platform: "win32",
     realpath: (path) => path,
     supervisor: { heartbeatMs: 0, shutdownGraceMs: 300, eofGraceMs: 300 },
@@ -287,6 +289,35 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
       const report = await host.doctor(id);
       assert.match(report.checks.find((check) => check.id === "boundaries")!.detail, /Nebius Sandboxes: key and project id set/);
     }
+  });
+
+  it("hands engines the latest keys when two changes overlap, never an older set after a newer one (D8)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra repos "));
+    dirs.push(root);
+    // The keys as they are when read, the first read held as a slow keychain would hold it.
+    const saved: { current: Partial<Record<SecretName, string>>; gate: Promise<void> | null } = { current: {}, gate: null };
+    const credentials = async () => {
+      const read = { ...saved.current };
+      const gate = saved.gate;
+      saved.gate = null;
+      await gate;
+      return read;
+    };
+    const { host, ids } = makeHost({ credentials, projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
+    await host.open(ids[0]!);
+    await online(host, "local");
+    saved.current = { NEBIUS_API_KEY: "test-key-0123456789" };
+    let release!: () => void;
+    saved.gate = new Promise<void>((resolve) => (release = resolve));
+    const older = host.secretsChanged();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    saved.current = { NEBIUS_API_KEY: "test-key-0123456789", TAVILY_API_KEY: "tavily-test-key-0123456789" };
+    const newer = host.secretsChanged();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    release();
+    await Promise.all([older, newer]);
+    const research = (await host.doctor(ids[0]!)).checks.find((check) => check.id === "research");
+    assert.equal(research?.detail, "A Tavily key is set; access not checked yet.");
   });
 
   it("stops every engine on shutdown, and starts none afterwards", async () => {
@@ -2188,6 +2219,30 @@ describe("Host: research of saved plan versions' assumptions, bound to what its 
     writeFileSync(join(home, "release"), "");
     const research = await ended(host, conversation.id);
     assert.deepEqual([research.status, research.stopCause, calls(home).includes("runs.find"), starts(home)], ["cancelled", "web-research", true, 2]);
+    // The same, with the cancel its engine turns down once the run is found: that stop is taken back, the card says
+    // why, and Cancel works again.
+    const refused = await gated("general");
+    rmSync(join(refused.home, "release"));
+    writeFileSync(join(refused.home, "accept"), "");
+    writeFileSync(join(refused.home, "running"), "");
+    await start(refused.host, refused.plan.id);
+    await waitFor(() => starts(refused.home) === 2, "the research's request to reach the engine");
+    await refused.host.setWebResearch(false);
+    writeFileSync(join(refused.home, "fail-cancel-once"), "");
+    writeFileSync(join(refused.home, "error-start"), "");
+    writeFileSync(join(refused.home, "release"), "");
+    const shown = await waitFor(() => refused.host.research(refused.conversation.id).find((view) => view.stopFailed) ?? null, "the failed stop to be shown");
+    const cancels = () => calls(refused.home).filter((call) => call === "runs.cancel").length;
+    assert.deepEqual(
+      [shown.status, shown.cancelRequested, shown.stopCause, shown.stopFailed, cancels()],
+      ["running", false, null, "Research queries to Tavily are off, but Nivra couldn't stop this research (the run couldn't be stopped). Press Cancel to try again, or restart its engine to stop it.", 1],
+    );
+    await pause(500);
+    assert.deepEqual([refused.host.research(refused.conversation.id)[0]!.status, cancels()], ["running", 1], "it goes on, and no cancel is sent again by itself");
+    await refused.host.cancelResearch(refused.conversation.id, shown.id);
+    assert.equal(refused.host.research(refused.conversation.id)[0]!.stopFailed, null, "a newer stop leaves the failure off the card");
+    const stopped = await ended(refused.host, refused.conversation.id);
+    assert.deepEqual([stopped.status, stopped.stopCause, stopped.stopFailed, cancels(), starts(refused.home)], ["cancelled", "person", null, 2, 2]);
   });
 
   it("says research its engine has no record of was never sent anywhere, in research's words, once Nivra starts again", async () => {

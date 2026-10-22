@@ -90,6 +90,8 @@ export interface ResearchView {
   cancelRequested: boolean;
   /** The newest stop on record, by cause. */
   stopCause: StopCause | null;
+  /** Why the last stop couldn't be carried out, while the research goes on and no newer stop is asked for. */
+  stopFailed: string | null;
   /** The queries the person approved. Whether each was sent is the report's to say. */
   queries: Array<{ assumption: AssumptionId; text: string; query: string }>;
   /** The sites the person chose; null for none. */
