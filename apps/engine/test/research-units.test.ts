@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { combinedMask, maskKnownValues } from "@nivra/domain";
-// Until research's integration window exports it, the domain's contract is read straight from its file (NIV-45).
-import { RESEARCH_LIMITS as DOMAIN_LIMITS, RESEARCH_TOOL as DOMAIN_TOOL, queryProblems, researchPacketDigest, ResearchRequestFailure, ResearchStop, siteProblem } from "../../../packages/domain/src/research.ts";
+import { combinedMask, maskKnownValues, RESEARCH_LIMITS, researchPacketDigest, ResearchRequestFailure, ResearchStop, type ResearchContext, type WorkflowId } from "@nivra/domain";
 import { Refusal } from "../src/diagnostics.ts";
-import { contextRefusal, permissionRefusal, researchRefusal, type ResearchContextShape } from "../src/workflows/research.ts";
+import { Database } from "../src/db/database.ts";
+import { RunScheduler, type RunHandle, type WorkflowEntry } from "../src/runs/scheduler.ts";
+import { RunStore } from "../src/runs/store.ts";
+import { removeDir, tempDir } from "./helpers.ts";
+import { contextRefusal, permissionRefusal, researchRefusal } from "../src/workflows/research.ts";
 import { z } from "zod";
 import { assess, forMatching, namesVersion, ResearchAnswer, versionIn, versionsIn, type Assessed } from "../src/research/assess.ts";
-import { RESEARCH_LIMITS } from "../src/research/limits.ts";
 import { addressProblem, chooseExtractions, collectPages, plainText, type Page } from "../src/research/pages.ts";
 import { chunksOf, neutralised, passagesFrom, type Passage } from "../src/research/passages.ts";
 import { RESEARCH_INSTRUCTIONS, researchMessage } from "../src/research/prompt.ts";
@@ -20,10 +23,8 @@ const mask = combinedMask((text) => maskKnownValues(text, [["NEBIUS_API_KEY", KE
 const AT = "2026-10-22T00:00:00.000Z";
 const hit = (address: string, title = "A page") => ({ address, title, score: 0.5 });
 
-describe("the engine's research limits (NIV-45)", () => {
-  it("are the domain contract's, number for number, with the same tool, failure kinds and stops", () => {
-    assert.deepEqual(RESEARCH_LIMITS, DOMAIN_LIMITS);
-    assert.equal(RESEARCH_TOOL, DOMAIN_TOOL);
+describe("the engine's research contract (NIV-45)", () => {
+  it("names every request failure and stop the domain contract has, each stop with its words", () => {
     const kinds: Record<RequestFailure, true> = {
       auth: true,
       "rate-limit": true,
@@ -433,7 +434,7 @@ describe("matching the model's assessments to the assumptions asked about (NIV-4
 });
 
 describe("the research workflow's checks before anything is sent (NIV-45)", () => {
-  const CONTEXT: ResearchContextShape = {
+  const CONTEXT: ResearchContext = {
     sharing: { modelContext: false, webResearch: true },
     deny: { terms: ["nivra-orchestrator"], paths: ["src/db/migrate.ts"] },
     packet: {
@@ -443,20 +444,19 @@ describe("the research workflow's checks before anything is sent (NIV-45)", () =
       sites: null,
     },
   };
-  const deps = { packetDigest: researchPacketDigest, queryProblems, siteProblem };
 
   it("refuses a packet that isn't the one fingerprinted, and a query that fails the checks, when the engine runs them again", async () => {
     const digest = await researchPacketDigest(CONTEXT.packet);
     const task = { planId: "p", planVersion: 2, packetDigest: digest };
-    assert.equal(await contextRefusal(task, CONTEXT, deps, []), null);
-    assert.equal(await contextRefusal({ ...task, packetDigest: "b".repeat(64) }, CONTEXT, deps, []), "packet-changed");
-    const unsafe: ResearchContextShape = { ...CONTEXT, packet: { ...CONTEXT.packet, assumptions: [{ ...CONTEXT.packet.assumptions[0]!, query: "nivra-orchestrator distutils" }] } };
+    assert.equal(await contextRefusal(task, CONTEXT, []), null);
+    assert.equal(await contextRefusal({ ...task, packetDigest: "b".repeat(64) }, CONTEXT, []), "packet-changed");
+    const unsafe: ResearchContext = { ...CONTEXT, packet: { ...CONTEXT.packet, assumptions: [{ ...CONTEXT.packet.assumptions[0]!, query: "nivra-orchestrator distutils" }] } };
     const unsafeTask = { ...task, packetDigest: await researchPacketDigest(unsafe.packet) };
-    assert.equal(await contextRefusal(unsafeTask, unsafe, deps, []), "unsafe-query", "a project's name, even with the right fingerprint");
-    const keyed: ResearchContextShape = { ...CONTEXT, packet: { ...CONTEXT.packet, assumptions: [{ ...CONTEXT.packet.assumptions[0]!, query: `Python ${KEY}` }] } };
-    assert.equal(await contextRefusal({ ...task, packetDigest: await researchPacketDigest(keyed.packet) }, keyed, deps, [KEY]), "unsafe-query", "a saved key");
+    assert.equal(await contextRefusal(unsafeTask, unsafe, []), "unsafe-query", "a project's name, even with the right fingerprint");
+    const keyed: ResearchContext = { ...CONTEXT, packet: { ...CONTEXT.packet, assumptions: [{ ...CONTEXT.packet.assumptions[0]!, query: `Python ${KEY}` }] } };
+    assert.equal(await contextRefusal({ ...task, packetDigest: await researchPacketDigest(keyed.packet) }, keyed, [KEY]), "unsafe-query", "a saved key");
     // What the domain's schema would refuse is refused here too: a private site, more than five, or a fourth assumption.
-    const withSites = (hosts: string[]): ResearchContextShape => ({ ...CONTEXT, packet: { ...CONTEXT.packet, sites: { mode: "prefer", hosts } } });
+    const withSites = (hosts: string[]): ResearchContext => ({ ...CONTEXT, packet: { ...CONTEXT.packet, sites: { mode: "prefer", hosts } } });
     for (const [name, context, expected] of [
       ["a public site", withSites(["docs.python.org"]), null],
       ["a private site", withSites(["wiki.internal"]), "unsafe-query"],
@@ -467,12 +467,12 @@ describe("the research workflow's checks before anything is sent (NIV-45)", () =
         "internal",
       ],
     ] as const)
-      assert.equal(await contextRefusal({ ...task, packetDigest: await researchPacketDigest(context.packet as never) }, context, deps, []), expected, name);
+      assert.equal(await contextRefusal({ ...task, packetDigest: await researchPacketDigest(context.packet as never) }, context, []), expected, name);
   });
 
   it("refuses research turned off, a project's plan without model sharing, and each missing key, in that order", () => {
     const keys = { model: "model-key-0123456789", tavily: "tvly-key-0123456789abcdef" };
-    const project: ResearchContextShape = { ...CONTEXT, packet: { ...CONTEXT.packet, scope: { kind: "project", headAtStart: null } } };
+    const project: ResearchContext = { ...CONTEXT, packet: { ...CONTEXT.packet, scope: { kind: "project", headAtStart: null } } };
     assert.deepEqual(
       [
         permissionRefusal(CONTEXT, keys),
@@ -487,5 +487,42 @@ describe("the research workflow's checks before anything is sent (NIV-45)", () =
     const refusal = researchRefusal("tavily-key-missing");
     assert.ok(refusal instanceof Refusal);
     assert.deepEqual([refusal.code, refusal.message], ["research-tavily-key-missing", RESEARCH_STOP_MESSAGES["tavily-key-missing"]]);
+  });
+});
+
+describe("a research run in the scheduler (NIV-45, D37)", () => {
+  it("gives its context to research alone, never to a workflow that asks for another kind, and binds its request id to its plan version and packet", async () => {
+    const dir = tempDir();
+    const database = new Database(join(dir, "nivra.db"));
+    try {
+      database.open();
+      const store = new RunStore({ database });
+      const workflows = new Map<WorkflowId, WorkflowEntry>([["research", { id: "research", title: () => "Research" }]]);
+      const scheduler = new RunScheduler({ store, workflows, instanceId: randomUUID(), log: { info: () => undefined, warn: () => undefined, error: () => undefined }, diagnose: () => undefined });
+      // A run that never ends, so its context stays held.
+      const handle: RunHandle = { start: () => new Promise(() => undefined), cancel: async () => undefined, watch: () => () => undefined };
+      scheduler.attach({ getWorkflow: () => ({ createRun: async () => handle }) });
+      scheduler.recover();
+      const context: ResearchContext = {
+        sharing: { modelContext: false, webResearch: true },
+        deny: { terms: [], paths: [] },
+        packet: { scope: { kind: "general" }, planText: "Move to Python 3.12.", assumptions: [{ id: "A1", text: "distutils is still there.", origin: { kind: "typed" }, query: "Python 3.12 distutils" }], sites: null },
+      };
+      const input = { planId: randomUUID(), planVersion: 2, packetDigest: "a".repeat(64) };
+      const clientRequestId = randomUUID();
+      const runId = scheduler.submit({ clientRequestId, workflowId: "research", input, context });
+      assert.deepEqual(
+        (["research", "review", "sandbox", "explain", "hello", "chat"] as const).map((workflow) => scheduler.contextOf(runId, workflow)),
+        [context, null, null, null, null, null],
+      );
+      assert.equal(scheduler.submit({ clientRequestId, workflowId: "research", input, context }), runId, "a repeat is the same run");
+      const conflict = (error: unknown) => error instanceof Refusal && error.code === "request-conflict";
+      assert.throws(() => scheduler.submit({ clientRequestId, workflowId: "research", input: { ...input, planVersion: 3 }, context }), conflict, "another plan version");
+      assert.throws(() => scheduler.submit({ clientRequestId, workflowId: "research", input: { ...input, packetDigest: "b".repeat(64) }, context }), conflict, "another packet");
+      await scheduler.stop("the test ended", 100);
+    } finally {
+      database.close();
+      removeDir(dir);
+    }
   });
 });

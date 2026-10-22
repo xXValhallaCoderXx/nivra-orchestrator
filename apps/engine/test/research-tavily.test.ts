@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, describe, it } from "node:test";
-import { RESEARCH_LIMITS } from "../src/research/limits.ts";
+import { RESEARCH_LIMITS } from "@nivra/domain";
 import { createTavily, sameAddress } from "../src/research/tavily.ts";
 import { extractAnswer, searchAnswer, startTavilyStub, type TavilyScript, type TavilyStub } from "./stub-tavily.ts";
 

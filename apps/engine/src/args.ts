@@ -13,6 +13,8 @@ export interface EngineArgs {
   tokenFactoryUrl: string | null;
   /** Tests only: a stub of Nebius Sandboxes on this machine, in place of the real one (D36). Null in normal use. */
   sandboxesUrl: string | null;
+  /** Tests only: a stub of Tavily on this machine, in place of the real one (D37). Null in normal use. */
+  tavilyUrl: string | null;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "localhost"]);
@@ -27,7 +29,7 @@ export class ArgsError extends Error {
 export const DEFAULT_HEARTBEAT_MS = 30_000;
 
 export function readArgs(argv: readonly string[]): EngineArgs {
-  let values: { stdio?: boolean; home?: string; instance?: string; "heartbeat-ms"?: string; "token-factory-url"?: string; "sandboxes-url"?: string };
+  let values: { stdio?: boolean; home?: string; instance?: string; "heartbeat-ms"?: string; "token-factory-url"?: string; "sandboxes-url"?: string; "tavily-url"?: string };
   try {
     ({ values } = parseArgs({
       args: [...argv],
@@ -38,6 +40,7 @@ export function readArgs(argv: readonly string[]): EngineArgs {
         "heartbeat-ms": { type: "string" },
         "token-factory-url": { type: "string" },
         "sandboxes-url": { type: "string" },
+        "tavily-url": { type: "string" },
         // A marker that lets an orphan check find engine processes by their command line; it means nothing else.
         "nivra-engine": { type: "boolean" },
       },
@@ -59,6 +62,7 @@ export function readArgs(argv: readonly string[]): EngineArgs {
     heartbeatMs: heartbeat,
     tokenFactoryUrl: loopbackUrl("--token-factory-url", values["token-factory-url"]),
     sandboxesUrl: loopbackUrl("--sandboxes-url", values["sandboxes-url"]),
+    tavilyUrl: loopbackUrl("--tavily-url", values["tavily-url"]),
   };
 }
 

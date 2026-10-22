@@ -3,6 +3,7 @@ import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { RunContext } from "./context.ts";
 import { ExplainResult } from "./explain.ts";
 import { ModelEndpoint, ModelFailureKind } from "./models.ts";
+import { ResearchContext, ResearchInput, ResearchReport } from "./research.ts";
 import { ReviewContext, ReviewInput, ReviewReport } from "./review.ts";
 import { ExplainInput, HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
 import { SandboxContext, SandboxInput, SandboxPreview, SandboxReport, SandboxStatus } from "./sandbox.ts";
@@ -14,9 +15,10 @@ import { SandboxContext, SandboxInput, SandboxPreview, SandboxReport, SandboxSta
 
 /**
  * Names of the secrets the engine may hold. Values arrive in `initialize` or `secrets.update` and live in memory only
- * (D8). The project id goes with the key to Nebius Sandboxes (D36).
+ * (D8). The project id goes with the key to Nebius Sandboxes (D36); the Tavily key goes only to Tavily, for research
+ * (D37).
  */
-export const SecretName = z.enum(["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID"]);
+export const SecretName = z.enum(["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID", "TAVILY_API_KEY"]);
 export type SecretName = z.infer<typeof SecretName>;
 
 /** Real keys are long; a very short value would mask ordinary text everywhere it appears. */
@@ -83,6 +85,9 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ReviewContext, workflowId: z.literal("review"), input: ReviewInput }),
   // A sandbox check carries its own upload consent, never model-context consent (D36).
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: SandboxContext, workflowId: z.literal("sandbox"), input: SandboxInput }),
+  // Research of a saved plan's assumptions carries its frozen packet, what no query may name and both permissions
+  // (D37), held in memory like the snapshot.
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ResearchContext, workflowId: z.literal("research"), input: ResearchInput }),
 ]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
@@ -177,6 +182,11 @@ export const Methods = {
    * interrupted. Null until there is one.
    */
   "runs.sandbox": { params: z.strictObject({ runId: RunId }), result: SandboxReport.nullable() },
+  /**
+   * A research run's report (D37), whatever the run's status. A report the engine saved before it stopped reads as
+   * interrupted. Null until there is one.
+   */
+  "runs.research": { params: z.strictObject({ runId: RunId }), result: ResearchReport.nullable() },
   /** What a sandbox check of this checkout would send, with no network: for the person to see before any upload. */
   "sandbox.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096) }), result: SandboxPreview },
   /** Sandbox work an earlier engine left open, and the recovery pass's state. Reads only this engine's memory. */

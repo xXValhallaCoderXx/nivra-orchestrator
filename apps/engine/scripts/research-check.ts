@@ -20,15 +20,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSyn
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
-import { combinedMask, maskKnownValues } from "@nivra/domain";
+import { combinedMask, maskKnownValues, queryProblems, RESEARCH_LIMITS, ResearchPacket, researchPacketDigest, ResearchReport } from "@nivra/domain";
 import { z } from "zod";
-// Until research's integration window exports it, the domain's contract is read straight from its file.
-import { queryProblems, RESEARCH_LIMITS, ResearchPacket, researchPacketDigest, ResearchReport } from "../../../packages/domain/src/research.ts";
 import { createModelClient, ModelFailure, type Endpoint } from "../src/providers/model.ts";
 import { policyFor } from "../src/providers/policy.ts";
 import { pickNemotron, TOKEN_FACTORY_BASE_URL } from "../src/providers/tokenfactory.ts";
 import { ResearchAnswer } from "../src/research/assess.ts";
-import { RESEARCH_LIMITS as ENGINE_LIMITS } from "../src/research/limits.ts";
 import { RESEARCH_INSTRUCTIONS } from "../src/research/prompt.ts";
 import { RESEARCH_TOOL, RESEARCH_TOOL_DESCRIPTION, runResearch, type ResearchReportShape } from "../src/research/run.ts";
 import { createTavily, EXTRACT_PARAMETERS, SEARCH_PARAMETERS, TAVILY_BASE_URL } from "../src/research/tavily.ts";
@@ -63,11 +60,6 @@ const refuse = (message: string, code = 2): never => {
   process.exit(code);
 };
 
-// The run enforces the engine's limits; the packet's digest binds the domain's. They are one set, number for number.
-if (JSON.stringify(Object.entries(ENGINE_LIMITS)) !== JSON.stringify(Object.entries(RESEARCH_LIMITS))) {
-  refuse("The engine's research limits aren't the domain contract's, so this recipe can't say what a run would do. Make them equal, then run --plan again.");
-}
-
 const git = (args: string[]) => spawnSync("git", args, { cwd: REPOSITORY, encoding: "utf8" });
 const commit = git(["rev-parse", "HEAD"]).stdout.trim() || null;
 const dirty = git(["status", "--porcelain"]).stdout.trim().length > 0;
@@ -84,7 +76,7 @@ const digestFor = (run: number) =>
       run,
       PLAN_ID,
       packetDigest,
-      Object.entries(ENGINE_LIMITS),
+      Object.entries(RESEARCH_LIMITS),
       sha256(RESEARCH_INSTRUCTIONS),
       RESEARCH_TOOL,
       sha256(`${RESEARCH_TOOL_DESCRIPTION}\n${JSON.stringify(z.toJSONSchema(ResearchAnswer))}`),

@@ -2,13 +2,12 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, describe, it } from "node:test";
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
-import { combinedMask, maskKnownValues } from "@nivra/domain";
-// Until research's integration window exports it, the domain's contract is read straight from its file (NIV-45).
-import { ResearchReport } from "../../../packages/domain/src/research.ts";
+import { combinedMask, maskKnownValues, ResearchReport } from "@nivra/domain";
 import { createModelClient, type ModelClient } from "../src/providers/model.ts";
 import { policyFor } from "../src/providers/policy.ts";
 import { createTavily } from "../src/research/tavily.ts";
-import { asInterrupted, RESEARCH_TOOL, runResearch, type ResearchReportShape, type ResearchRunOptions } from "../src/research/run.ts";
+import { RESEARCH_TOOL, runResearch, type ResearchReportShape, type ResearchRunOptions } from "../src/research/run.ts";
+import { asInterrupted } from "../src/research/task.ts";
 import { extractAnswer, searchAnswer, startTavilyStub, type TavilyScript, type TavilyStub } from "./stub-tavily.ts";
 
 /**
@@ -203,9 +202,9 @@ describe("a research run, in process (NIV-45)", () => {
       assert.ok(sending >= 0 && sending < ended, id);
     }
     const midSearch = saved.find((snapshot) => snapshot.requests.find((request) => request.id === "search-A1")!.state === "sending")!;
-    const read = asInterrupted(midSearch);
+    const read = asInterrupted(ResearchReport.parse(midSearch));
     assert.deepEqual([read.outcome, read.requests.find((request) => request.id === "search-A1")!.failure, read.usage.credits], ["interrupted", "interrupted", null]);
-    assert.equal(asInterrupted(saved.at(-1)!).outcome, "complete", "an ended report is left as it was");
+    assert.equal(asInterrupted(ResearchReport.parse(saved.at(-1)!)).outcome, "complete", "an ended report is left as it was");
   });
 
   it("carries on with the other assumption when one search is refused, sending it once, and shows the first as not assessed", async () => {

@@ -74,5 +74,13 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     detail: lines.join(" "),
     fix: nebius || openshell ? null : "Coding work that installs packages needs a sandbox: add your Nebius key and project id in Settings, or install OpenShell (Linux and WSL).",
   });
+  // Research of a plan's assumptions needs a Tavily key (D37), and nothing else does: this only says whether it is set.
+  checks.push({
+    id: "research",
+    status: "ok",
+    title: "Web research",
+    detail: deps.vault.has("TAVILY_API_KEY") ? "A Tavily key is set; access not checked yet." : "No Tavily key is set. Only research of a plan's assumptions needs one.",
+    fix: null,
+  });
   return { checks };
 }

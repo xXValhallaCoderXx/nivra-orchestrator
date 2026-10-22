@@ -63,6 +63,15 @@ describe("readArgs", () => {
     assert.equal(args.heartbeatMs, 0);
     assert.equal(args.instanceId.length, 36);
   });
+
+  it("takes a test endpoint only on this machine, for Token Factory, Nebius Sandboxes and Tavily alike", () => {
+    for (const flag of ["--token-factory-url", "--sandboxes-url", "--tavily-url"]) {
+      assert.throws(() => readArgs(["--stdio", "--home", "/tmp/x", flag, "https://api.tavily.com"]), ArgsError, flag);
+      assert.throws(() => readArgs(["--stdio", "--home", "/tmp/x", flag, "not an address"]), ArgsError, flag);
+    }
+    const args = readArgs(["--stdio", "--home", "/tmp/x", "--tavily-url", "http://127.0.0.1:4000/"]);
+    assert.deepEqual([args.tavilyUrl, args.tokenFactoryUrl, args.sandboxesUrl], ["http://127.0.0.1:4000", null, null]);
+  });
 });
 
 describe("startWatchdog", () => {

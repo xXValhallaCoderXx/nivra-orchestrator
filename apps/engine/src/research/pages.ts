@@ -1,4 +1,4 @@
-import { RESEARCH_LIMITS } from "./limits.ts";
+import { RESEARCH_LIMITS } from "@nivra/domain";
 import type { SearchHit } from "./retrieval.ts";
 import { sameAddress } from "./tavily.ts";
 

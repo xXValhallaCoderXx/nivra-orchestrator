@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { RESEARCH_LIMITS } from "./limits.ts";
+import { RESEARCH_LIMITS } from "@nivra/domain";
 import type { AssumptionId, Page } from "./pages.ts";
 import { neutralised, type Passage } from "./passages.ts";
 

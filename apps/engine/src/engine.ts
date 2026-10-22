@@ -12,11 +12,13 @@ import {
   isTerminal,
   LineSplitter,
   PROTOCOL_VERSION,
+  ResearchReport,
   SandboxReport,
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
   type JsonObject,
+  type ResearchContext,
   type ReviewContext,
   type RunContext,
   type SandboxContext,
@@ -41,6 +43,7 @@ import { createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals, ty
 import { takeSnapshot } from "./exec/snapshot.ts";
 import { ChatUnreadable, readChatTask } from "./chat/task.ts";
 import { readTask, TaskUnreadable } from "./explain/task.ts";
+import { asInterrupted, readResearchTask } from "./research/task.ts";
 import { asEnded, readReviewTask, ReviewUnreadable } from "./review/task.ts";
 import { launcherWrite, ProtocolOutput, type RawWrite } from "./rpc/output.ts";
 import { RpcFailure, RpcServer } from "./rpc/server.ts";
@@ -132,6 +135,22 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
       },
     },
   ],
+  [
+    "research",
+    {
+      id: "research",
+      title: (input: unknown) => {
+        const task = readResearchTask(input);
+        return task ? `Research · plan v${task.planVersion}` : "Research";
+      },
+      // Mastra gets nothing of a research run: the plan's id, version and fingerprint stay in the run store, and the
+      // packet in memory (D21, D37).
+      mastraInput: (input: unknown) => {
+        if (!readResearchTask(input)) throw new Refusal("input-unreadable", "This research's plan and fingerprint can't be read back from the engine's store, so nothing was sent. Start the research again.");
+        return {};
+      },
+    },
+  ],
 ]);
 
 export interface EngineOptions extends EngineArgs {
@@ -170,6 +189,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/chat.ts"),
     typeof import("./workflows/review.ts"),
     typeof import("./workflows/sandbox.ts"),
+    typeof import("./workflows/research.ts"),
   ];
   try {
     mastraModules = await Promise.all([
@@ -180,6 +200,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       import("./workflows/chat.ts"),
       import("./workflows/review.ts"),
       import("./workflows/sandbox.ts"),
+      import("./workflows/research.ts"),
     ]);
   } catch (error) {
     database.close();
@@ -193,6 +214,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     { createChatWorkflow, CHAT_WORKFLOW_ID },
     { createReviewWorkflow, REVIEW_WORKFLOW_ID },
     { createSandboxWorkflow, SANDBOX_WORKFLOW_ID },
+    { createResearchWorkflow, RESEARCH_WORKFLOW_ID },
   ] = mastraModules;
 
   const vault = new SecretVault();
@@ -222,24 +244,14 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     arch: process.arch,
   });
 
-  // Each workflow reads the context its own kind of run carries (D21, D26). A sandbox check's alone holds no
-  // preferences: its consent is for uploads, never for a model (D36).
-  const runContext = (runId: string): RunContext | null => {
-    const given = scheduler.contextOf(runId);
-    return given && "preferences" in given && !("history" in given) && !("packet" in given) ? given : null;
-  };
-  const sandboxContext = (runId: string): SandboxContext | null => {
-    const given = scheduler.contextOf(runId);
-    return given && !("preferences" in given) ? given : null;
-  };
-  const reviewContext = (runId: string): ReviewContext | null => {
-    const given = scheduler.contextOf(runId);
-    return given && "packet" in given ? given : null;
-  };
-  const chatContext = (runId: string): ChatContext | null => {
-    const given = scheduler.contextOf(runId);
-    return given && "history" in given ? given : null;
-  };
+  // Each workflow reads only the context its own kind of run carries (D21, D26), chosen by the run's workflow and
+  // never by the context's shape. A sandbox check's holds no preferences: its consent is for uploads, never for a
+  // model (D36).
+  const runContext = (runId: string): RunContext | null => scheduler.contextOf(runId, "explain") ?? scheduler.contextOf(runId, "hello");
+  const sandboxContext = (runId: string): SandboxContext | null => scheduler.contextOf(runId, "sandbox");
+  const reviewContext = (runId: string): ReviewContext | null => scheduler.contextOf(runId, "review");
+  const chatContext = (runId: string): ChatContext | null => scheduler.contextOf(runId, "chat");
+  const researchContext = (runId: string): ResearchContext | null => scheduler.contextOf(runId, "research");
   const recorder = {
     output: (runId: string, stepId: string, message: string, data?: JsonObject) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
     event: (runId: string, type: "model.call" | "tool.called", stepId: string, message: string, data: JsonObject) => void store.append(runId, { type, stepId, message, data }),
@@ -403,6 +415,22 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         mask,
         saveResult: (runId, report) => store.saveArtifact(runId, "sandbox", JSON.stringify(report)),
       }),
+      [RESEARCH_WORKFLOW_ID]: createResearchWorkflow({
+        recorder,
+        context: researchContext,
+        task: (runId) => readResearchTask(store.summary(runId)?.input),
+        requestId: (runId) => store.requestIdOf(runId),
+        modelKey: () => vault.get("NEBIUS_API_KEY"),
+        tavilyKey: () => vault.get("TAVILY_API_KEY"),
+        endpoint,
+        mask,
+        // A query that holds any value the vault keeps is refused before it leaves (D37): the keys and the project id.
+        knownValues: () => vault.values(),
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        saveResult: (runId, report) => store.saveArtifact(runId, "research", JSON.stringify(report)),
+        // Tavily, or a stub on this machine when the loopback-only argument names one (D37).
+        ...(options.tavilyUrl ? { tavilyUrl: options.tavilyUrl } : {}),
+      }),
     },
     storage: new LibSQLStore({ id: "nivra-engine", url: libsqlFileUrl(join(home, "mastra.db")) }),
     logger: false,
@@ -534,6 +562,16 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         const report = SandboxReport.parse(JSON.parse(stored));
         return status && isTerminal(status) && report.outcome === "in-progress" ? { ...report, outcome: "interrupted" as const, finishedAt: report.updatedAt } : report;
       },
+      "runs.research": ({ runId }) => {
+        const status = store.status(runId);
+        if (!status) notFound(runId);
+        const stored = store.artifact(runId, "research");
+        if (stored === null) return null;
+        // A report saved mid-run, of a run that has ended, reads as interrupted: what it was sending may have gone
+        // out (D37).
+        const report = ResearchReport.parse(JSON.parse(stored));
+        return status && isTerminal(status) ? asInterrupted(report) : report;
+      },
       "sandbox.preview": ({ repoPath }) => sandboxPreview(repoPath),
       "sandbox.status": () => {
         rescan();
@@ -609,6 +647,7 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
       import("./workflows/chat.ts"),
       import("./workflows/review.ts"),
       import("./workflows/sandbox.ts"),
+      import("./workflows/research.ts"),
     ]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {

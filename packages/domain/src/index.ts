@@ -7,6 +7,7 @@ export * from "./explain.ts";
 export * from "./chat.ts";
 export * from "./review.ts";
 export * from "./sandbox.ts";
+export * from "./research.ts";
 export * from "./methods.ts";
 export * from "./client.ts";
 export * from "./credentials.ts";

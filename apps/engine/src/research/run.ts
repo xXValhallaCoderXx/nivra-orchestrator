@@ -1,12 +1,11 @@
 import { createTool } from "@mastra/core/tools";
-import type { ReviewScope, RunBudgetRecord, RunRoute, RunUsage } from "@nivra/domain";
+import { RESEARCH_LIMITS, RESEARCH_TOOL, type ResearchStop, type ReviewScope, type RunBudgetRecord, type RunRoute, type RunUsage } from "@nivra/domain";
 import { CHARS_PER_TOKEN } from "../explain/budget.ts";
 import { toolDefinitionChars } from "../explain/tools.ts";
 import { failure, InternalFailure, ModelFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
 import { ANSWER_TOKENS, requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget } from "../providers/run-budget.ts";
 import { assess, ResearchAnswer, type Assessed } from "./assess.ts";
-import { RESEARCH_LIMITS } from "./limits.ts";
 import { chooseExtractions, collectPages, type AssumptionId, type Page } from "./pages.ts";
 import { passagesFrom, type Passage } from "./passages.ts";
 import { passageCode, RESEARCH_INSTRUCTIONS, researchMessage } from "./prompt.ts";
@@ -24,32 +23,15 @@ import type { ExtractedPage, RequestFailure, Retrieval, Retrieved, SearchHit } f
  * sent. Its words are Nivra's, chosen by code; Tavily's and the provider's never pass.
  */
 
-/** The tool the model hands its assessment in with. Mirrors the domain contract's `RESEARCH_TOOL`. */
-export const RESEARCH_TOOL = "submit_research";
+/** The tool the model hands its assessment in with: the domain contract's, which stubs script against. */
+export { RESEARCH_TOOL };
 export const RESEARCH_TOOL_DESCRIPTION = "Hand in the assessment of every assumption, each with its citations. Call this once.";
 const TOOL_SPECS = { [RESEARCH_TOOL]: { description: RESEARCH_TOOL_DESCRIPTION, inputSchema: ResearchAnswer } };
 /** What a request's messages add beyond their text, as a chat template wraps them: an allowance, in tokens. */
 const MESSAGE_ALLOWANCE_TOKENS = 64;
 
-export type ResearchStopCode =
-  | "nothing-read"
-  | "tavily-auth"
-  | "tavily-plan-limit"
-  | "tavily-rate-limit"
-  | "tavily-rejected"
-  | "tavily-unavailable"
-  | "retrieval-time"
-  | "tavily-key-missing"
-  | "model-key-missing"
-  | "model-too-small"
-  | "web-research-off"
-  | "model-sharing-off"
-  | "unsafe-query"
-  | "packet-changed"
-  | "model-failed"
-  | "cancelled"
-  | "deadline"
-  | "internal";
+/** Why a run ended without assessments: the domain contract's codes. */
+export type ResearchStopCode = ResearchStop;
 
 /** Each stop in the person's words: what happened, and what to do. */
 export const RESEARCH_STOP_MESSAGES: Readonly<Record<ResearchStopCode, string>> = {
@@ -471,23 +453,4 @@ export async function runResearch(options: ResearchRunOptions): Promise<Research
     relabelled: assessed.checks.relabelled,
   });
   return finish(null, "complete");
-}
-
-/**
- * A report as the engine reads it back once its run has ended. One saved mid-run, by an engine that stopped, reads as
- * interrupted: a request it was sending may have been sent, so it ends `interrupted` with its credits unknown, and
- * nothing is resent.
- */
-export function asInterrupted(report: ResearchReportShape): ResearchReportShape {
-  if (report.outcome !== "in-progress") return report;
-  const requests = report.requests.map((request) =>
-    request.state === "sending" ? { ...request, state: "failed" as const, failure: "interrupted" as const, credits: null } : request.state === "pending" ? { ...request, state: "skipped" as const } : request,
-  );
-  const sent = requests.filter((request) => request.kind !== "model" && (request.state === "answered" || (request.state === "failed" && request.failure !== "not-sent")));
-  return {
-    ...report,
-    outcome: "interrupted",
-    requests,
-    usage: { ...report.usage, credits: sent.some((request) => request.credits === null) ? null : sent.reduce((sum, request) => sum + request.credits!, 0) },
-  };
 }
