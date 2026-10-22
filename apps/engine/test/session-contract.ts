@@ -53,6 +53,17 @@ export function sessionContract(target: ContractTarget): void {
       }
     });
 
+    it("tells onRunning once a command is running, and only once", async () => {
+      const session = await open();
+      try {
+        let running = 0;
+        const result = await run(session, programs.print("ran", ""), { onRunning: () => running++ });
+        assert.deepEqual([result.exitCode, running], [0, 1]);
+      } finally {
+        await session.close();
+      }
+    });
+
     it("stops a command at its time limit, and says so", async () => {
       const session = await open();
       try {

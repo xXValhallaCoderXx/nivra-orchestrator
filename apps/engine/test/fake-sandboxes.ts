@@ -20,8 +20,8 @@ export interface Behaviour {
   /** The service cut the output off. */
   truncated?: boolean;
   resultImage?: string | null;
-  /** Files a successful operation leaves in its result image. */
-  files?: Record<string, string>;
+  /** Files a successful operation leaves in its result image, as text or bytes. */
+  files?: Record<string, string | Uint8Array>;
   /** Stays executing until something else ends it (a cancel, a subprocess). */
   waits?: boolean;
 }
@@ -50,7 +50,7 @@ export const ANY_SIZE = 1_000_000;
 /** The service: operations as state machines, with faults a test can switch on. */
 export class FakeService {
   readonly operations: FakeOperation[] = [];
-  readonly images = new Map<string, Record<string, string>>();
+  readonly images = new Map<string, Record<string, string | Uint8Array>>();
   readonly requests: TransportRequest[] = [];
   spawns = 0;
   /** The next spawn creates its operation, then its answer is lost. */
@@ -83,8 +83,9 @@ export class FakeService {
   wrongUploadHash = false;
   /** The next spawn's operation is hidden from listing, as if beyond the search window. */
   hideNextSpawn = false;
-  /** Every upload's bytes, as received. */
+  /** Every upload's bytes, as received, and by the id the service gave it. */
   readonly uploads: Uint8Array[] = [];
+  readonly uploadsById = new Map<string, Uint8Array>();
   readonly behave: (body: Record<string, unknown>) => Behaviour;
   constructor(behave: (body: Record<string, unknown>) => Behaviour) {
     this.behave = behave;
@@ -100,8 +101,10 @@ export class FakeService {
     }
     if (request.method === "POST" && path === "/v1/files") {
       const bytes = typeof request.body === "string" ? new TextEncoder().encode(request.body) : (request.body ?? new Uint8Array(0));
+      const uuid = randomUUID();
       this.uploads.push(bytes);
-      return encode({ uuid: randomUUID(), sha256: this.wrongUploadHash ? "0".repeat(64) : createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength }, 201);
+      this.uploadsById.set(uuid, bytes);
+      return encode({ uuid, sha256: this.wrongUploadHash ? "0".repeat(64) : createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength }, 201);
     }
     if (request.method === "POST" && path === "/v1/instances") return this.#spawn(JSON.parse(String(request.body)) as Record<string, unknown>);
     const subprocess = /^\/v1\/operations\/([^/]+)\/subprocesses(?:\/(\d+))?$/.exec(path);
@@ -124,7 +127,7 @@ export class FakeService {
     const download = /^\/v1\/inspect\/([^/]+)\/download$/.exec(path);
     if (download) {
       const content = this.images.get(download[1]!)?.[request.query?.["path"] ?? ""];
-      return content === undefined ? encode({ error: "no such file" }, 404) : { status: 200, headers: {}, body: new TextEncoder().encode(content) };
+      return content === undefined ? encode({ error: "no such file" }, 404) : { status: 200, headers: {}, body: typeof content === "string" ? new TextEncoder().encode(content) : content };
     }
     return encode({ error: "unknown" }, 404);
   };

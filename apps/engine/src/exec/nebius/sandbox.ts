@@ -422,13 +422,15 @@ export class Sandbox {
    * Polls an operation until it ends, within its own timeout plus the margin, or the cap if that comes first. An
    * operation not seen to end by then is journaled as unresolved, for cleanup to settle.
    */
-  async observe(operationId: string, timeoutSeconds: number): Promise<Outcome> {
+  /** Follows an operation to its end; `onStatus` is told each status read on the way. */
+  async observe(operationId: string, timeoutSeconds: number, onStatus?: (status: OperationStatus) => void): Promise<Outcome> {
     const started = this.#now();
     const end = started + timeoutSeconds * 1000 + this.#observeMarginMs;
     for (let deadline = this.#until(end); this.#now() < deadline; deadline = this.#until(end)) {
       const operation = await this.#readBy(operationId, deadline);
       if (!operation) break;
       const status = readStatus(operation.status);
+      if (status !== "UNKNOWN") onStatus?.(status);
       if (status !== "UNKNOWN" && TERMINAL.has(status)) return this.#ended(operationId, operation, status);
       await this.#pause(Math.min(this.#pollMs, deadline - this.#now()), "Observing an operation");
     }

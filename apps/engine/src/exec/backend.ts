@@ -43,6 +43,8 @@ export interface SessionSpec {
   budgetMs?: number;
   /** Stops the session's work, the command under way included, with its reason. It never stops cleanup. */
   signal?: AbortSignal;
+  /** How a session that fails once something was sent cleans up after itself, as `close` takes them: an engine shutting down stops it. */
+  closing?: { signal?: AbortSignal; budgetMs?: number };
 }
 
 export interface ExecRequest {
@@ -57,6 +59,11 @@ export interface ExecRequest {
   signal?: AbortSignal;
   /** Told once the process exists, with its id (null when the backend has none to give). */
   onStart?: (info: { pid: number | null }) => void;
+  /**
+   * Told once, when the command is first known to be running: its process started here, or the sandbox reported it
+   * executing. A command that ended before any read saw it running isn't reported.
+   */
+  onRunning?: () => void;
   /** False: the command's changes are thrown away afterwards (true unless given). A backend that can't refuses it. */
   persist?: boolean;
   /** The engine's name for the step, kept in the session's record; never model text. */
@@ -114,6 +121,8 @@ export interface ExecutionSession {
   exec(request: ExecRequest): Promise<ExecResult>;
   /** A file from the workspace's machine as it now stands, refused past `maxBytes`, with its sha256. */
   download?(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; sha256: string }>;
+  /** The steps recorded so far, as `close` will report them: for a report made before the session closes. */
+  steps?(): readonly SessionStep[];
   /**
    * Stops anything still running and releases the session, within one budget (its own, or the one given), which
    * includes waiting for the command under way to stop. A second call gives the first one's report. It never rejects:

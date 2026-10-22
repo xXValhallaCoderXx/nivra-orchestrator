@@ -1497,6 +1497,134 @@ these in turn fails its own test case. On 4 MiB files the scan takes 39 ms (rand
 - **"Exactly as it is"** means every name, kind, mode, size, modification time and byte, `.git` included. Access times
   aren't compared.
 
+### Nebius sandbox check, B3 (D35, NIV-43)
+
+Track B's third checkpoint: the prescribed path from snapshot to proposal, offline with a fake guest, then live once
+on Nebius through the real adapter. On `feature/niv-43`, stacked on B2:
+
+| Commit | What |
+|---|---|
+| `7e55c0d` | The prescribed path, snapshot to proposal through the real adapter, on a byte-exact fixture, with the offline scenarios |
+| `a074951` | The live check, `--plan` printing its bounded recipe for approval |
+| `87a6f93` | The independent review of the first draft: eight gaps and three concerns, each reproduced against `a074951` and fixed |
+| `c962c94`, `181456e`, `a1622ed` | Main (Track A's PR 10), then the fixes from the reviews of PRs 7 and 8, merged down the stack, each cleanly |
+| `6267895` | Main after PR 7's merge, and the second review of PR 8's fix, merged down cleanly |
+| `a162108` | The review of PR 9: the live check saves the patch and the report as they were bound |
+
+**Offline** (`prescribed.test.ts`, 17 tests, with the fake guest in `test/fake-guest.ts`):
+- the whole recipe proposes exactly the fixed edit, its report telling each step truthfully, each spawn sent once, and
+  the checkout unchanged;
+- without the edit, the check fails truthfully, and nothing is proposed;
+- a lost answer is found by its correlation id, and nothing is sent twice;
+- when the sandbox no longer holds the workspace's state, the run stops, with no second upload and no restart from the
+  commit;
+- the person's cancel stops the step under way, and nothing more runs;
+- an unknown start is never sent again, stays visible, and is settled from the journal by the next engine;
+- an operation the sandbox never stops is left unresolved within closing's budget, with what the provider keeps;
+- refusals send nothing: a backend that isolates nothing, a commit holding a token, a checkout that has moved on;
+- the review's regressions:
+  - a fault while reading the result back ends as an outcome with cleanup's record;
+  - a failed open is told apart (cancelled, or uncertain);
+  - a prescribed stop counts from when its command is seen running;
+  - the network step passes only with loopback alone and both attempts failing for want of a network;
+- the approved fixture's baseline, archive and listing are the pinned ones;
+- the real edit and check scripts, run on this machine's `sh` from any folder, do what the fake guest does.
+
+**The independent review of the first draft (`a074951`)** found eight gaps and three concerns. Each was reproduced,
+then fixed in `87a6f93` with a regression test. The worst:
+1. the network verdict passed with a network: an HTTP 403 from a host it had reached, or no `wget` at all;
+2. a download fault after the paid operations escaped as a throw, losing the result and cleanup's record;
+3. a failed open read "failed" whether it was cancelled or its start was unknown;
+4. a prescribed stop could count a command still pending.
+
+**The live recipe** was printed by `node apps/engine/scripts/sandbox-check.ts --plan` and posted for approval on NIV-43,
+then updated to `a1622ed` after the reviews of PRs 7 and 8. It covers:
+- **the data:** a fixture of 14 entries and 487 bytes, baseline `b04b10a`;
+- **the upload:** its tar, 18,944 bytes, sha256 `7e575cbb…77a`;
+- **the image:** `alpine:3.20`;
+- **the operations:** 8, each of 60 s or less, with networking off, then 7 minutes for closing.
+
+Nate approved it on 21 October, with his credentials in a file of mode 600 outside the repository.
+
+**Attempt 1,** 21 October at 11:38:53 UTC, at `a1622ed`:
+- the account reads passed;
+- the upload (`POST /sandboxes/v1/files`, the tar as `application/octet-stream`) was answered **HTTP 500**, so the
+  session never opened: 0 of 8 operations ran, and nothing was downloaded;
+- the outcome was `failed`, stop `sandbox-failed` at `open`. The 3 checks that could run passed: the fixture's checkout
+  unchanged, `~/.nivra` unchanged, and cleanup leaving nothing unresolved;
+- the request matched the documented contract, which lists no size limit and no 500. D28's uploads through the same
+  method were 642 bytes of text, and this was the first binary body;
+- the adapter never resent the upload, and counted it as possibly stored;
+- evidence: `~/nivra-acceptance/sandbox-check-2026-10-21T113851685Z/`.
+
+**The rerun Nate approved,** 21 October at 18:20:05 UTC (22 October locally), at `a1622ed`, with the same plan,
+printed again and compared. Outcome `proposed`, and **20 of 20 checks passed**:
+
+| Check | What the run gave |
+|---|---|
+| The run proposed a change | `proposed` |
+| The prepare step's listing matched the snapshot's | the session opens only when the digests match |
+| The edit kept its changes | exit 0, persisted, SUCCESS |
+| Network denied by behaviour | interfaces: `lo` alone; `example.com`: "wget: bad address"; `104.20.23.154`: "Network unreachable" |
+| busybox's version recorded | BusyBox v1.36.1 (2025-11-23 14:32:18 UTC) |
+| The passing check passed | "PASS: Hello, Nivra" |
+| The failing check failed, told apart from the operation | exit 1, with the operation's SUCCESS |
+| A timeout told apart from success | timed out, exit -1, SIGKILL, with the operation's SUCCESS |
+| A prescribed stop, once seen running, seen to stop | CANCELLED, after 6,474 ms |
+| The collect step's listing matched its archive | taken only when they match |
+| Networking off for every spawn | 8 spawns, none with networking on |
+| Each operation sent once | 8 spawns for 8 operations |
+| The proposal is bound to the fixture's folder and commit | verified |
+| The patch holds exactly the fixed edit | `old.txt` deleted, a file added under the long path, `data.bin` and `src/greet.sh` edited, and `tool.sh` made executable |
+| The bound report holds what happened | prepare, edit, network, check, failing check, timeout, stop, collect |
+| `git apply --check` passes on a fresh clone | exit 0 |
+| The applied patch gives the bound result tree | `6168c5d…` against `6168c5d…` |
+| The fixture's checkout is unchanged | every name, mode, size, time and byte |
+| The release engine home (`~/.nivra`) is unchanged | every name, mode, size and time |
+| Cleanup left nothing unresolved | 1 stopped, 0 already ended, 0 unresolved |
+
+- **Recorded, not judged:** the service ran each step in `/workspace`, as asked.
+- **The proposal:** hash `a64cf783…5273`, a 1,334-byte patch, with its binding (project, target, destination, baseline,
+  both trees, fingerprint, policy, and the patch's and report's digests) in `proposal.json`.
+- **The service's own figures,** kept raw: each step's usage includes a `cost` whose unit the service doesn't document.
+  7 of the 8 operations reported one, summing to 0.000759. The stopped one reported none, which stays unknown. It is
+  never converted to money.
+- **What Nebius keeps,** from the journal: 1 upload, 3 images and 8 operation records from the rerun, and at most one
+  upload from attempt 1. Images are kept for 180 days, and no API deletes uploads, operation records or logs.
+- **Evidence:** `~/nivra-acceptance/sandbox-check-2026-10-21T182005478Z/` (0700). It holds the result, the report, the
+  patch, the proposal, cleanup's record, the checks and the journal. After each run, a check found neither credential
+  in it, nor in the run's log.
+- **The saved patch and report aren't the bound bytes,** as the review of PR 9 found. The check wrote the patch through
+  its text writer, which added a newline (1,335 bytes saved for 1,334 bound). It wrote the report pretty-printed
+  (14,997 bytes for 9,759). Without the newline the saved patch hashes to `patchSha256`, and the canonical form of the
+  saved report to `reportSha256`. The review reproduced both, as did a check here, so the result stands. Since
+  `a162108` the check saves the bound bytes exactly, with the report's readable copy in `report.readable.json`.
+
+**The credentials.** Nate's were in a git-ignored `.env`, with the key under another name. For each run, a script
+wrote a mode-600 copy, under the names the check reads, into the session's private scratch folder, without printing
+either value. Each copy was shredded after its run.
+
+**Checks**
+- `pnpm verify`: 663 passed (domain 43, engine 421, desktop 199), none skipped, at `a1622ed`.
+- A real engine through `rpc.ts`, on `~/.nivra-dev-track-b`: `doctor` answered, and a `hello` run succeeded.
+- The live run, as above: attempt 1 failed at the upload, and the approved rerun passed 20 of 20 checks.
+- After PR 7's merge, the second review of PR 8's fix, and the evidence saved as bound (`6267895`, `a162108`):
+  `pnpm verify` 666 passed (domain 43, engine 424, desktop 199), none skipped. A real engine answered `doctor` and ran
+  `hello` again. `--plan` still prints exactly the approved recipe.
+- **Not run:**
+  - the Windows and packaged checks: no target, supervisor, staging, main or preload code changed. B4 ran both on the
+    path wired in;
+  - a fresh network control: D28's is reused, as approved.
+
+**Limits**
+- **One passing run:** timings and the upload's reliability weren't measured more than once. Attempt 1 shows an upload
+  can fail on the service's side.
+- **An upload answered with a server error isn't retried** (D33), so a transient 500 ends a check. Retrying an upload,
+  whose worst case is a duplicate file, is left for a later decision.
+- **The fixture is synthetic and tiny:** a real repository's upload wasn't measured live.
+- **`git apply --check` ran on a fresh clone,** never on a person's checkout: applying is NIV-8's.
+- **The live run was from Linux (WSL) only.**
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
