@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { combinedMask, maskKnownValues } from "@nivra/domain";
 // Until research's integration window exports it, the domain's contract is read straight from its file (NIV-45).
-import { RESEARCH_LIMITS as DOMAIN_LIMITS, RESEARCH_TOOL as DOMAIN_TOOL, ResearchRequestFailure, ResearchStop } from "../../../packages/domain/src/research.ts";
+import { RESEARCH_LIMITS as DOMAIN_LIMITS, RESEARCH_TOOL as DOMAIN_TOOL, queryProblems, researchPacketDigest, ResearchRequestFailure, ResearchStop } from "../../../packages/domain/src/research.ts";
+import { Refusal } from "../src/diagnostics.ts";
+import { contextRefusal, permissionRefusal, researchRefusal, type ResearchContextShape } from "../src/workflows/research.ts";
 import { assess, forMatching, namesVersion, ResearchAnswer, versionIn } from "../src/research/assess.ts";
 import { RESEARCH_LIMITS } from "../src/research/limits.ts";
 import { addressProblem, chooseExtractions, collectPages, plainText, type Page } from "../src/research/pages.ts";
@@ -228,5 +230,50 @@ describe("assessing with checked citations (NIV-45)", () => {
       [true, true, false, false],
     );
     assert.equal(forMatching("“Quoted” — text here"), '"quoted" - text here');
+  });
+});
+
+describe("the research workflow's checks before anything is sent (NIV-45)", () => {
+  const CONTEXT: ResearchContextShape = {
+    sharing: { modelContext: false, webResearch: true },
+    deny: { terms: ["nivra-orchestrator"], paths: ["src/db/migrate.ts"] },
+    packet: {
+      scope: { kind: "general" },
+      planText: "Move to Python 3.12.",
+      assumptions: [{ id: "A1", text: "distutils is still there.", origin: { kind: "typed" }, query: "Python 3.12 distutils" }],
+      sites: null,
+    },
+  };
+  const deps = { packetDigest: researchPacketDigest, queryProblems };
+
+  it("refuses a packet that isn't the one fingerprinted, and a query that fails the checks, when the engine runs them again", async () => {
+    const digest = await researchPacketDigest(CONTEXT.packet);
+    const task = { planId: "p", planVersion: 2, packetDigest: digest };
+    assert.equal(await contextRefusal(task, CONTEXT, deps, []), null);
+    assert.equal(await contextRefusal({ ...task, packetDigest: "b".repeat(64) }, CONTEXT, deps, []), "packet-changed");
+    const unsafe: ResearchContextShape = { ...CONTEXT, packet: { ...CONTEXT.packet, assumptions: [{ ...CONTEXT.packet.assumptions[0]!, query: "nivra-orchestrator distutils" }] } };
+    const unsafeTask = { ...task, packetDigest: await researchPacketDigest(unsafe.packet) };
+    assert.equal(await contextRefusal(unsafeTask, unsafe, deps, []), "unsafe-query", "a project's name, even with the right fingerprint");
+    const keyed: ResearchContextShape = { ...CONTEXT, packet: { ...CONTEXT.packet, assumptions: [{ ...CONTEXT.packet.assumptions[0]!, query: `Python ${KEY}` }] } };
+    assert.equal(await contextRefusal({ ...task, packetDigest: await researchPacketDigest(keyed.packet) }, keyed, deps, [KEY]), "unsafe-query", "a saved key");
+  });
+
+  it("refuses research turned off, a project's plan without model sharing, and each missing key, in that order", () => {
+    const keys = { model: "model-key-0123456789", tavily: "tvly-key-0123456789abcdef" };
+    const project: ResearchContextShape = { ...CONTEXT, packet: { ...CONTEXT.packet, scope: { kind: "project", headAtStart: null } } };
+    assert.deepEqual(
+      [
+        permissionRefusal(CONTEXT, keys),
+        permissionRefusal({ ...CONTEXT, sharing: { modelContext: true, webResearch: false } }, keys),
+        permissionRefusal(project, keys),
+        permissionRefusal({ ...project, sharing: { modelContext: true, webResearch: true } }, keys),
+        permissionRefusal(CONTEXT, { ...keys, tavily: null }),
+        permissionRefusal(CONTEXT, { ...keys, model: null }),
+      ],
+      [null, "web-research-off", "model-sharing-off", null, "tavily-key-missing", "model-key-missing"],
+    );
+    const refusal = researchRefusal("tavily-key-missing");
+    assert.ok(refusal instanceof Refusal);
+    assert.deepEqual([refusal.code, refusal.message], ["research-tavily-key-missing", RESEARCH_STOP_MESSAGES["tavily-key-missing"]]);
   });
 });
