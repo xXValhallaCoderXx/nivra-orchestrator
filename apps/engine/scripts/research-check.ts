@@ -1,9 +1,10 @@
 // The research live check (NIV-45): one research run of the demonstration plan, in process, against Tavily and Token
 // Factory. Never part of `pnpm verify`. It runs only with your approval of its digest, which binds the whole recipe: the
-// committed revision, the plan, its assumptions, the queries exactly as sent, the sites, Tavily's request parameters,
-// the model, its instructions and tool, and every limit. One approval is one run. Nothing is retried and no request is
-// added; a different recipe (for one, search_depth "advanced" in place of Extract) is a separate choice with its own
-// approval, never a switch made here.
+// committed revision, which run of the recipe it is, the plan, its assumptions, the queries exactly as sent, the sites,
+// Tavily's request parameters, the model, its instructions and tool, and every limit. One approval is one run: the run
+// claims it atomically before anything is sent, in a folder of its own whatever --out says, and a claimed approval never
+// runs again, even when its run was interrupted. Nothing is retried and no request is added; a different recipe (for
+// one, search_depth "advanced" in place of Extract) is a separate choice with its own approval, never a switch made here.
 //
 // Usage:
 //   node scripts/research-check.ts --plan                         # the request for approval; no network
@@ -17,7 +18,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { combinedMask, maskKnownValues } from "@nivra/domain";
 import { z } from "zod";
@@ -32,6 +33,7 @@ import { RESEARCH_INSTRUCTIONS } from "../src/research/prompt.ts";
 import { RESEARCH_TOOL, RESEARCH_TOOL_DESCRIPTION, runResearch, type ResearchReportShape } from "../src/research/run.ts";
 import { createTavily, EXTRACT_PARAMETERS, SEARCH_PARAMETERS, TAVILY_BASE_URL } from "../src/research/tavily.ts";
 import { insideRepository, REPOSITORY } from "./council-eval/files.ts";
+import { claimApproval, claimOn, claimsFolder, claimText, isDigest, nextRun } from "./research-check/claim.ts";
 
 process.env["MASTRA_TELEMETRY_DISABLED"] = "1";
 // Each key is passed explicitly; none is ever read from the environment (D8).
@@ -73,25 +75,33 @@ const dirty = git(["status", "--porcelain"]).stdout.trim().length > 0;
 const packetDigest = await researchPacketDigest(packet);
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const forced = policyFor(MODEL).forceAnswer;
-const approvalDigest = sha256(
-  JSON.stringify([
-    "nivra.research-check.v2",
-    commit,
-    PLAN_ID,
-    packetDigest,
-    Object.entries(ENGINE_LIMITS),
-    sha256(RESEARCH_INSTRUCTIONS),
-    RESEARCH_TOOL,
-    sha256(`${RESEARCH_TOOL_DESCRIPTION}\n${JSON.stringify(z.toJSONSchema(ResearchAnswer))}`),
-    forced,
-    TAVILY_BASE_URL,
-    SEARCH_PARAMETERS,
-    EXTRACT_PARAMETERS,
-    TOKEN_FACTORY_BASE_URL,
-    MODEL,
-    MAX_CREDITS,
-  ]),
-);
+/** The approval of one run of this recipe at this revision: each run's digest is its own. */
+const digestFor = (run: number) =>
+  sha256(
+    JSON.stringify([
+      "nivra.research-check.v3",
+      commit,
+      run,
+      PLAN_ID,
+      packetDigest,
+      Object.entries(ENGINE_LIMITS),
+      sha256(RESEARCH_INSTRUCTIONS),
+      RESEARCH_TOOL,
+      sha256(`${RESEARCH_TOOL_DESCRIPTION}\n${JSON.stringify(z.toJSONSchema(ResearchAnswer))}`),
+      forced,
+      TAVILY_BASE_URL,
+      SEARCH_PARAMETERS,
+      EXTRACT_PARAMETERS,
+      TOKEN_FACTORY_BASE_URL,
+      MODEL,
+      MAX_CREDITS,
+    ]),
+  );
+// The next run is the first whose approval no run has claimed.
+const claims = claimsFolder();
+const run = nextRun(claims, digestFor);
+const approvalDigest = digestFor(run);
+const before = run > 1 ? claimOn(claims, digestFor(run - 1)) : null;
 
 const n = (value: number) => value.toLocaleString("en");
 const json = (value: unknown) => JSON.stringify(value).replace(/,/g, ", ").replace(/:/g, ": ");
@@ -103,8 +113,11 @@ function approvalRequest(): string[] {
     "",
     `Revision: ${commit ?? "unknown"}${dirty ? " (the working tree has uncommitted changes: this digest can't be approved, and the live check refuses to run, until they are committed)" : ""}`,
     `Approval digest: ${approvalDigest}`,
-    "  It covers the revision, the plan, its assumptions, the queries exactly as sent, the sites, Tavily's request parameters, the model, its",
-    "  instructions and tool, and every limit. A change to any of them changes it. One approval is one run.",
+    `  It covers run ${run} of this recipe at this revision: the revision, the plan, its assumptions, the queries exactly as sent, the sites,`,
+    "  Tavily's request parameters, the model, its instructions and tool, and every limit. A change to any of them changes it.",
+    "  One approval is one run: the run claims it in ~/nivra-acceptance/claims/research-check/ before anything is sent, and a claimed",
+    "  approval never runs again, whatever --out says, even when its run was interrupted. Once it is claimed, --plan prints the next run's digest.",
+    ...(before?.claimed ? [`  The approval before this one was claimed by ${claimText(before.record)}.`] : []),
     "",
     `The plan, a general plan as the demonstration seeds it: "${PLAN}"`,
     "Assumptions, each searched with its own words: a general plan's query starts as its assumption's words, and nothing rewrites it.",
@@ -196,6 +209,10 @@ const stubbed = values["tavily-url"] !== undefined || values["token-factory-url"
 if (live === stubbed) refuse("Give --credentials, --tavily-credentials and --approved for the live check, or --tavily-url and --token-factory-url for stubs. Run --plan to see the request for approval.");
 if (live) {
   if (!values.credentials || !values["tavily-credentials"] || !values.approved) refuse("The live check needs --credentials (the Token Factory key file), --tavily-credentials (the Tavily key file) and --approved (the digest --plan prints). Nothing was sent.");
+  if (!isDigest(values.approved!)) refuse("--approved isn't a digest: 64 lowercase hexadecimal characters, as --plan prints them. Nothing was sent.");
+  // A claimed approval is refused first, whatever else is the matter: it never runs again.
+  const earlier = claimOn(claims, values.approved!);
+  if (earlier.claimed) refuse(`This approval was claimed by ${claimText(earlier.record)}, so it can't run again: one approval is one run. Run --plan, and approve the digest it prints for the next run. Nothing was sent.`);
   if (values.approved !== approvalDigest) refuse(`--approved isn't this recipe's digest: the recipe changed since it was approved, or the digest was mistyped. Run --plan, and approve the digest it prints. Nothing was sent.`);
   if (!commit || dirty) refuse("The live check runs only from a committed revision with no uncommitted changes, so its evidence names exactly what ran. Commit, then run it again. Nothing was sent.");
 } else {
@@ -214,16 +231,9 @@ const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "
 const out = resolve(values.out ?? join(homedir(), "nivra-acceptance", `research-check-${stamp}-${(commit ?? "unknown").slice(0, 7)}`));
 if (existsSync(out) && readdirSync(out).length) refuse(`${out} already holds evidence. Choose another --out. Nothing was sent.`);
 if (live) {
-  // One approval is one run: a run under this digest that got as far as saving its report used it.
-  const parent = dirname(out);
-  const used = (existsSync(parent) ? readdirSync(parent) : [])
-    .filter((name) => name.startsWith("research-check-"))
-    .find((name) => {
-      const folder = join(parent, name);
-      const recipe = join(folder, "recipe.txt");
-      return existsSync(join(folder, "report.json")) && existsSync(recipe) && readFileSync(recipe, "utf8").includes(`Approval digest: ${approvalDigest}`);
-    });
-  if (used) refuse(`This approval was used by the run in ${join(parent, used)}. Another run needs its own approval: run --plan, and approve the digest it prints. Nothing was sent.`);
+  // The last step before anything leaves this computer: of several launches with this approval, one claims it.
+  const claimed = claimApproval(claims, { digest: approvalDigest, run, revision: commit, out, pid: process.pid, claimedAt: new Date().toISOString() });
+  if (!claimed.ok) refuse(`Another run claimed this approval first (${claimText(claimed.record)}), so this one stopped before sending anything. One approval is one run: run --plan, and approve the digest it prints for the next run.`);
 }
 mkdirSync(out, { recursive: true, mode: 0o700 });
 write(join(out, "recipe.txt"), `${approvalRequest().join("\n")}\n`);
@@ -239,7 +249,7 @@ process.once("SIGINT", () => {
 // The run's one deadline counts from here: the listing is part of it.
 const startedAt = performance.now();
 const started = new Date().toISOString();
-console.log(`Research check, ${live ? "live" : "against stubs"}: evidence in ${out}`);
+console.log(`Research check, ${live ? `live, run ${run} of this recipe` : "against stubs"}: evidence in ${out}`);
 let model: string | null = null;
 let contextLength: number | null = null;
 try {
@@ -280,6 +290,7 @@ write(join(out, "check.json"), maskedDeep({
   mode: live ? "live" : "stub",
   revision: commit,
   dirty,
+  run,
   approvalDigest,
   packetDigest,
   model: MODEL,

@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { claimApproval, claimOn, claimsFolder, type Claim } from "../scripts/research-check/claim.ts";
 import { extractAnswer, searchAnswer, startTavilyStub } from "./stub-tavily.ts";
 import { startStub, toolCall } from "./stub-token-factory.ts";
 
@@ -13,6 +14,7 @@ import { startStub, toolCall } from "./stub-token-factory.ts";
  * before anything is sent, and the whole recipe against a loopback Tavily and Token Factory. Never a real request.
  */
 const CLI = fileURLToPath(new URL("../scripts/research-check.ts", import.meta.url));
+const CLAIM = pathToFileURL(fileURLToPath(new URL("../scripts/research-check/claim.ts", import.meta.url))).href;
 const MODEL = "nvidia/nemotron-3-super-120b-a12b";
 const dirs: string[] = [];
 after(() => {
@@ -24,9 +26,13 @@ const scratch = () => {
   return dir;
 };
 
-function cli(args: readonly string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+/**
+ * The script as a person runs it, with a home of its own: its claims and default evidence never touch the real
+ * ~/nivra-acceptance, and one test's claims are never another's.
+ */
+function cli(args: readonly string[], home: string = scratch()): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CLI, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [CLI, ...args], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HOME: home } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
@@ -38,15 +44,18 @@ const digestIn = (text: string) => /^Approval digest: ([0-9a-f]{64})$/m.exec(tex
 
 describe("the research live check (NIV-45)", () => {
   it("prints the request for approval, the same each time, touching no network", async () => {
-    const [first, second] = await Promise.all([cli(["--plan"]), cli(["--plan"])]);
+    const home = scratch();
+    const [first, second] = await Promise.all([cli(["--plan"], home), cli(["--plan"], home)]);
     assert.equal(first.code, 0, first.stderr);
     const digest = digestIn(first.stdout);
     assert.ok(digest);
     assert.equal(digestIn(second.stdout), digest);
     for (const needle of [
       "Nothing here touches the network.",
-      "It covers the revision, the plan, its assumptions, the queries exactly as sent, the sites, Tavily's request parameters, the model, its",
-      "instructions and tool, and every limit. A change to any of them changes it. One approval is one run.",
+      "It covers run 1 of this recipe at this revision: the revision, the plan, its assumptions, the queries exactly as sent, the sites,",
+      "Tavily's request parameters, the model, its instructions and tool, and every limit. A change to any of them changes it.",
+      "One approval is one run: the run claims it in ~/nivra-acceptance/claims/research-check/ before anything is sent, and a claimed",
+      "approval never runs again, whatever --out says, even when its run was interrupted.",
       "Never a key: both files are masked as the engine's store masks.",
       `A1 query "distutils is still in Python 3.12's standard library"`,
       `A2 query "Python 3.12 f-strings can reuse the enclosing quotes"`,
@@ -182,5 +191,92 @@ describe("the research live check (NIV-45)", () => {
     } finally {
       await Promise.all([tavily.close(), factory.close()]);
     }
+  });
+});
+
+describe("the live check's approval, claimed once (NIV-45)", () => {
+  const DIGEST = "d".repeat(64);
+  const claimOf = (out: string, extra: Partial<Claim> = {}): Claim => ({ digest: DIGEST, run: 1, revision: "abc1234", out, pid: process.pid, claimedAt: "2026-10-22T08:00:00.000Z", ...extra });
+  /** A process that tries to claim `digest` in `folder` at `at` (ms since the epoch), says how it went, then waits forever if told to. */
+  const claimer = (folder: string, digest: string, at: number, hold = false) =>
+    spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { claimApproval } from ${JSON.stringify(CLAIM)};
+         while (Date.now() < ${at});
+         const result = claimApproval(${JSON.stringify(folder)}, { digest: ${JSON.stringify(digest)}, run: 1, revision: null, out: "out-" + process.pid, pid: process.pid, claimedAt: new Date().toISOString() });
+         console.log(JSON.stringify({ ok: result.ok, pid: process.pid }));
+         if (${hold}) setInterval(() => {}, 1000);`,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+  const outcome = (child: ReturnType<typeof spawn>) =>
+    new Promise<{ ok: boolean; pid: number } | null>((resolve) => {
+      let text = "";
+      child.stdout!.on("data", (chunk: Buffer) => {
+        text += chunk.toString("utf8");
+        if (text.includes("\n")) resolve(JSON.parse(text.split("\n")[0]!) as { ok: boolean; pid: number });
+      });
+      child.once("exit", () => resolve(null));
+    });
+
+  it("claims an approval once, whatever folder the run's evidence goes to, and keeps the first claim's record", () => {
+    const folder = join(scratch(), "claims");
+    assert.deepEqual(claimApproval(folder, claimOf("/evidence/first")), { ok: true });
+    const again = claimApproval(folder, claimOf("/evidence/second", { pid: 2 }));
+    assert.deepEqual([again.ok, again.ok ? null : again.record?.out], [false, "/evidence/first"]);
+    assert.deepEqual([statSync(folder).mode & 0o777, statSync(join(folder, `${DIGEST}.json`)).mode & 0o777], [0o700, 0o600]);
+    // Another approval is claimed apart.
+    assert.deepEqual(claimApproval(folder, claimOf("/evidence/second", { digest: "e".repeat(64), run: 2 })), { ok: true });
+    assert.throws(() => claimApproval(folder, claimOf("/x", { digest: "../escape" })), /64 lowercase hexadecimal characters/);
+  });
+
+  it("lets exactly one of several simultaneous launches claim an approval", async () => {
+    const folder = join(scratch(), "claims");
+    const at = Date.now() + 1_500;
+    const launches = Array.from({ length: 6 }, () => claimer(folder, DIGEST, at));
+    const results = await Promise.all(launches.map(outcome));
+    assert.deepEqual(
+      results.map((result) => result?.ok ?? "no answer").sort(),
+      [false, false, false, false, false, true],
+    );
+    const winner = results.find((result) => result?.ok)!;
+    const record = claimOn(folder, DIGEST);
+    assert.deepEqual([record.claimed, record.claimed ? record.record?.pid : null], [true, winner.pid]);
+  });
+
+  it("keeps an approval claimed when the run that claimed it is interrupted, so starting again can't spend it again", async () => {
+    const folder = join(scratch(), "claims");
+    const child = claimer(folder, DIGEST, Date.now(), true);
+    const claimed = await outcome(child);
+    assert.equal(claimed?.ok, true);
+    child.kill("SIGKILL");
+    await new Promise((resolve) => child.once("exit", resolve));
+    const again = claimApproval(folder, claimOf("/evidence/restart"));
+    assert.deepEqual([again.ok, again.ok ? null : again.record?.pid], [false, claimed!.pid]);
+  });
+
+  it("prints the next run's digest once an approval is claimed, and refuses a claimed one first, whatever --out says", async () => {
+    const home = scratch();
+    const first = await cli(["--plan"], home);
+    const one = digestIn(first.stdout)!;
+    assert.ok(one);
+    // Run 1 claimed its approval and was interrupted: its claim is all that is left of it.
+    claimApproval(claimsFolder(home), claimOf("/evidence/run-1", { digest: one }));
+    const next = await cli(["--plan"], home);
+    const two = digestIn(next.stdout);
+    assert.ok(two && two !== one, "the next run's approval is a digest of its own");
+    assert.match(next.stdout, /It covers run 2 of this recipe at this revision/);
+    assert.match(next.stdout, /The approval before this one was claimed by run 1 on 2026-10-22T08:00:00\.000Z, with its evidence in \/evidence\/run-1\./);
+
+    const keys = join(home, "keys.env");
+    writeFileSync(keys, "NEBIUS_API_KEY=not-a-key\nTAVILY_API_KEY=tvly-not-a-key\n", { mode: 0o600 });
+    const elsewhere = join(home, "another-evidence-folder");
+    const refused = await cli(["--credentials", keys, "--tavily-credentials", keys, "--approved", one, "--out", elsewhere], home);
+    assert.equal(refused.code, 2, refused.stderr);
+    assert.match(refused.stderr, /^This approval was claimed by run 1 on 2026-10-22T08:00:00\.000Z, with its evidence in \/evidence\/run-1, so it can't run again: one approval is one run\./);
+    assert.deepEqual([existsSync(elsewhere), refused.stdout], [false, ""]);
   });
 });
