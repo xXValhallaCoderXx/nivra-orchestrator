@@ -384,7 +384,7 @@ describe("the research window's words and evidence (NIV-45)", () => {
     assert.equal(ruleText({ rule: "no-valid-citation", model: "supported", version: null }), "The model said supported, but none of its quotations of that kind was found in the pages read, so this is shown as unresolved.");
     assert.equal(ruleText({ rule: "version-not-named", model: "contradicted", version: "3.12" }), "The model said contradicted, but the sources it quoted don't say they are about version 3.12, so this is shown as unresolved.");
     assert.equal(ruleText({ rule: "both-sides", model: "contradicted", version: null }), "The model said contradicted, but it quoted passages on both sides, so this is shown as unresolved. Both are below.");
-    assert.equal(ruleText({ rule: "not-assessed", model: null, version: null }), "The model gave no assessment of this assumption.");
+    assert.equal(ruleText({ rule: "not-assessed", model: null, version: null }), "The model gave no usable assessment of this assumption.");
   });
 
   it("says what each request did, with credits as reported and never 0 for unknown", () => {
@@ -425,23 +425,40 @@ describe("the research window's words and evidence (NIV-45)", () => {
 
   it("says what became of the model's assessments when some were set aside, and nothing when all matched", () => {
     assert.equal(attributionText(null), null);
-    assert.equal(attributionText({ handedIn: 3, matched: 3, rejected: 0, entries: [] }), null);
+    assert.equal(attributionText({ handedIn: 3, matched: 3, usable: 3, rejected: 0, entries: [], unusable: [] }), null);
     assert.equal(
       attributionText({
         handedIn: 4,
         matched: 1,
+        usable: 1,
         rejected: 3,
         entries: [
           { label: "A1", reason: "duplicate" },
           { label: "A1: the same", reason: "duplicate" },
           { label: "", reason: "missing" },
         ],
+        unusable: [],
       }),
       "The model handed in 4 assessments. 1 matched an assumption asked about; 3 were set aside: 2 answered an assumption that another assessment answered too; 1 named no assumption.",
     );
     assert.equal(
-      attributionText({ handedIn: 12, matched: 0, rejected: 12, entries: Array.from({ length: 10 }, () => ({ label: "x", reason: "unknown" as const })) }),
+      attributionText({ handedIn: 12, matched: 0, usable: 0, rejected: 12, entries: Array.from({ length: 10 }, () => ({ label: "x", reason: "unknown" as const })), unusable: [] }),
       "The model handed in 12 assessments. 0 matched an assumption asked about; 12 were set aside: 10 named no assumption that was asked about; 2 more not listed.",
+    );
+    // Matched, but with no outcome Nivra recognises: said, with what each gave.
+    assert.equal(
+      attributionText({
+        handedIn: 2,
+        matched: 2,
+        usable: 0,
+        rejected: 0,
+        entries: [],
+        unusable: [
+          { assumption: "A1", outcome: "" },
+          { assumption: "A2", outcome: "maybe" },
+        ],
+      }),
+      "The model handed in 2 assessments. 2 matched an assumption asked about, and 2 of those gave no outcome Nivra recognises (A1 gave none, A2 gave “maybe”).",
     );
   });
 

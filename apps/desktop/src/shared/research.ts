@@ -133,12 +133,17 @@ export interface ResearchRequestView {
 /** Why an assessment the model handed in was set aside instead of being matched to an assumption. */
 export type Rejection = "missing" | "unknown" | "ambiguous" | "conflicting" | "duplicate";
 
-/** What the model handed in, and how much of it named an assumption asked about: at most ten set aside are listed. */
+/**
+ * What the model handed in, how much of it named an assumption asked about, and how much of that gave an outcome: at
+ * most ten set aside are listed, and every matched assessment without a recognised outcome.
+ */
 export interface AttributionView {
   handedIn: number;
   matched: number;
+  usable: number;
   rejected: number;
   entries: Array<{ label: string; reason: Rejection }>;
+  unusable: Array<{ assumption: AssumptionId; outcome: string }>;
 }
 
 /** A research run's report, as the engine saved it and the host masked it again: the parts the window reads. */
@@ -226,7 +231,7 @@ export function ruleText(assessment: Pick<ResearchAssessmentView, "rule" | "mode
     case "both-sides":
       return `${said}, but it quoted passages on both sides, so this is shown as unresolved. Both are below.`;
     case "not-assessed":
-      return "The model gave no assessment of this assumption.";
+      return "The model gave no usable assessment of this assumption.";
     default:
       return null;
   }
@@ -302,17 +307,21 @@ const REJECTION: Readonly<Record<Rejection, string>> = {
 };
 
 /**
- * What became of the model's assessments when some were set aside, in plain words: how many it handed in, how many
- * matched an assumption, and why the rest didn't. Null when every one matched, or the model handed in nothing.
+ * What became of the model's assessments when some were set aside or gave no recognised outcome, in plain words: how
+ * many it handed in, how many matched an assumption, which of those gave no outcome Nivra recognises and what they gave,
+ * and why the rest were set aside. Null when every one matched with an outcome, or the model handed in nothing.
  */
 export function attributionText(attribution: AttributionView | null): string | null {
-  if (!attribution || attribution.rejected === 0) return null;
+  if (!attribution || (attribution.rejected === 0 && attribution.unusable.length === 0)) return null;
   const counts = new Map<Rejection, number>();
   for (const entry of attribution.entries) counts.set(entry.reason, (counts.get(entry.reason) ?? 0) + 1);
   const unlisted = attribution.rejected - attribution.entries.length;
   const why = [...counts].map(([reason, n]) => `${n} ${REJECTION[reason]}`);
   if (unlisted > 0) why.push(`${unlisted} more not listed`);
-  return `The model handed in ${plural(attribution.handedIn, "assessment")}. ${attribution.matched} matched an assumption asked about; ${attribution.rejected} ${attribution.rejected === 1 ? "was" : "were"} set aside: ${why.join("; ")}.`;
+  const gave = attribution.unusable.map((item) => `${item.assumption} ${item.outcome ? `gave “${item.outcome}”` : "gave none"}`);
+  const matched = `${attribution.matched} matched an assumption asked about${gave.length ? `, and ${gave.length} of those gave no outcome Nivra recognises (${gave.join(", ")})` : ""}`;
+  const rejected = attribution.rejected ? `; ${attribution.rejected} ${attribution.rejected === 1 ? "was" : "were"} set aside: ${why.join("; ")}` : "";
+  return `The model handed in ${plural(attribution.handedIn, "assessment")}. ${matched}${rejected}.`;
 }
 
 /**

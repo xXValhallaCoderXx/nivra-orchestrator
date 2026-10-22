@@ -626,7 +626,7 @@ function Report({ report }: { report: ResearchReportView }) {
       {report.assessments.map((assessment) => (
         <Assessment key={assessment.assumption} assessment={assessment} report={report} />
       ))}
-      {report.attribution && report.attribution.rejected > 0 && (
+      {report.attribution && attributionText(report.attribution) && (
         <Stack gap={2} data-testid="research-attribution">
           <Text size="xs" c="var(--nivra-text-2)">
             {attributionText(report.attribution)}
