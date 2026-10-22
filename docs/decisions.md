@@ -2349,6 +2349,13 @@ the query for each, and sees exactly what would be sent. "Start research" is bou
   4. the smaller ones: research's own words for a send that never happened, the sites in the settings' privacy claim,
      research in the project consent, a preview that could miss an edit made while a permission was saved, a missing
      Token Factory key caught at the preview, R1's types aliased to the domain's, and tests that couldn't fail.
+- **Nate's review of `2fd0f73` (PR 15, 22 October)** found two more, each reproduced there, then fixed (`c786d13`):
+  1. a stop recorded while research's start had lost its answer was sent once the run was found, and a failure was
+     thrown away: the run went on while the card said "Cancelling". The stop is now taken back by its own token, the
+     card says why, and Cancel works again;
+  2. credential changes could overlap: two saves lost one key, and a save racing a removal brought the removed key
+     back. Every change to the secrets file now waits for the one before it, a re-encryption replaces only what it
+     read, and the engines are handed the keys one change at a time.
 
 **Consequences.**
 - **Numbers.** Protocol 9, workspace schema v3 and D37 were checked free on merged `main` (`471b29a`) and with the
