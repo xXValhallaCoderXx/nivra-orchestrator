@@ -108,8 +108,9 @@ async function freeze(distro: string | undefined): Promise<void> {
   const builtWin = `${devWin}\\app`;
   if (!existsSync(join(wslpath("-u", builtWin), "Nivra.exe"))) throw new Error("No Windows build to freeze: run pnpm dev:win --no-launch first.");
   const folderWin = `${devWin}\\r3-${at}`;
-  // robocopy's exit codes below 8 all mean success.
-  const copied = spawnSync("/mnt/c/Windows/System32/cmd.exe", ["/d", "/c", `robocopy "${builtWin}" "${folderWin}\\app" /E /NFL /NDL /NJH /NJS /NP`], { cwd: "/mnt/c", encoding: "utf8" });
+  // Robocopy, given each path as its own argument (through cmd.exe, interop would mangle the quotes); its exit codes
+  // below 8 all mean success.
+  const copied = spawnSync("/mnt/c/Windows/System32/Robocopy.exe", [builtWin, `${folderWin}\\app`, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP"], { cwd: "/mnt/c", encoding: "utf8" });
   if (copied.status === null || copied.status >= 8) throw new Error(`Copying the build failed: ${copied.stdout || copied.stderr}`);
   const folder = wslpath("-u", folderWin);
   const hashes = buildHashes(folder);
