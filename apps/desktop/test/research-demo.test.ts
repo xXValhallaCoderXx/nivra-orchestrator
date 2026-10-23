@@ -7,6 +7,7 @@ import { after, describe, it } from "node:test";
 import { researchPacketDigest } from "@nivra/domain";
 import { seedProjectPlan } from "../e2e/seed-workspace.ts";
 import { DEMO_PROJECT, DEMO_SEED, DEMO_SITES, demoFingerprint, demoPacket } from "../scripts/research-demo.ts";
+import { digestOf, recipeOf, recipeText, type Frozen } from "../scripts/research-live.ts";
 import { HostStore } from "../src/main/host-store.ts";
 import { queryChecks, researchDeny, researchFingerprint, researchPacket } from "../src/main/research.ts";
 import type { PlanContent } from "../src/main/tasks.ts";
@@ -57,6 +58,46 @@ describe("R3's demonstration plan (D37, NIV-45)", () => {
       );
     } finally {
       opening.db.close();
+    }
+  });
+
+  it("binds its approval to the revision, the build, the repository and the preview's fingerprint, and says what it covers", async () => {
+    const frozen: Frozen = {
+      stamp: "20261023T000000Z",
+      revision: "a".repeat(40),
+      folderWin: "C:\\Users\\me\\AppData\\Local\\nivra-dev\\r3-20261023T000000Z",
+      appAsarSha256: "b".repeat(64),
+      runtimeContentHash: "c".repeat(64),
+      distro: "Ubuntu",
+      repo: { path: `/home/me/nivra-r3/${DEMO_PROJECT}`, commit: "d".repeat(40) },
+    };
+    const recipe = await recipeOf(frozen);
+    const digest = digestOf(recipe);
+    assert.deepEqual([recipe.fingerprint, recipe.credits, recipe.assumptions.map((assumption) => assumption.query)], [(await demoFingerprint()).fingerprint, 4, DEMO_SEED.assumptions]);
+    assert.equal(digestOf(await recipeOf(frozen)), digest, "the same recipe gives the same digest");
+    // Where the build was copied to isn't bound; what it is, and where it runs, are.
+    for (const [change, bound] of [
+      [{ folderWin: "D:\\elsewhere" }, false],
+      [{ revision: "e".repeat(40) }, true],
+      [{ appAsarSha256: "f".repeat(64) }, true],
+      [{ runtimeContentHash: "0".repeat(64) }, true],
+      [{ distro: "Debian" }, true],
+      [{ repo: { ...frozen.repo, commit: "1".repeat(40) } }, true],
+    ] as const) {
+      assert.equal(digestOf(await recipeOf({ ...frozen, ...change })) !== digest, bound, JSON.stringify(change));
+    }
+    const text = recipeText(recipe, digest);
+    for (const words of [
+      "Token Factory: one model listing (GET /v1/models), in the run's prepare step",
+      "Tavily: at most 2 searches (POST /search), one for each query",
+      "Tavily: at most 2 extracts (POST /extract), over at most 5 pages its searches returned",
+      "At most 4 Tavily credits.",
+      "Never: Check Token Factory; a chat message; a Nebius project id in the profile; a second Start; a retry or a retake.",
+      `A1: ${DEMO_SEED.assumptions[0]}`,
+      `A2: ${DEMO_SEED.assumptions[1]}`,
+      `Digest: ${digest}`,
+    ]) {
+      assert.ok(text.includes(words), words);
     }
   });
 
