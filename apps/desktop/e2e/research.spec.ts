@@ -302,10 +302,21 @@ test("cancelling research keeps what it saved, sends nothing more, and the conve
   expect([tavily.calls.filter((call) => call.path === "/extract").length, researchRequests().length]).toEqual([before.extracts, before.research]);
 });
 
-test("research and its reports are kept across a relaunch, and reopening sends nothing", async ({}, testInfo) => {
+test("research, its reports and both plan versions are kept across a relaunch, and reopening sends nothing", async ({}, testInfo) => {
   const everyResearch = () => page.evaluate(async () => Promise.all((await window.nivra.listConversations()).conversations.map((c) => window.nivra.listResearch(c.id))));
   const kept = await everyResearch();
   expect(kept.flat().length).toBe(packaged ? 0 : 2);
+  // Every plan version of every conversation: the researched v1 and the v2 amended from it.
+  const everyPlan = () => page.evaluate(async () => Promise.all((await window.nivra.listConversations()).conversations.map((c) => window.nivra.listPlans(c.id))));
+  const plans = await everyPlan();
+  if (!packaged) {
+    const amended = plans.find((versions) => versions.length === 2)!;
+    expect(amended.map((plan) => [plan.version, plan.latest, plan.text === SEEDED.plan])).toEqual([
+      [1, 2, true],
+      [2, 2, false],
+    ]);
+    expect(amended[1]!.text).toContain("Install setuptools in the 3.12 image before switching.");
+  }
   const sent = tavily.calls.length;
   await app.close();
   // A packaged app ignores the test switches: a permission held for 5 s when unpackaged is saved at once.
@@ -321,8 +332,15 @@ test("research and its reports are kept across a relaunch, and reopening sends n
     expect(took).toBeLessThan(2_000);
     return;
   }
+  expect(await everyPlan()).toEqual(plans);
   await openConversation("Can we move to 3.12?");
   await expect(page.getByTestId("research")).toHaveCount(2);
+  // The window shows the amended version, the researched one beneath it, and which research it came from.
+  await expect(page.getByTestId("plan-version")).toHaveText("Plan · v2");
+  await expect(page.getByTestId("plan-text")).toContainText("Install setuptools in the 3.12 image before switching.");
+  await page.getByTestId("plan-earlier-toggle").click();
+  await expect(page.getByTestId("plan-earlier")).toContainText(SEEDED.plan);
+  await expect(page.getByTestId("research-amended")).toHaveText("Saved as v2 from this research.");
   expect(tavily.calls.length).toBe(sent);
 });
 
