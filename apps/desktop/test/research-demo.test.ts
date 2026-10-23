@@ -66,8 +66,10 @@ describe("R3's demonstration plan (D37, NIV-45)", () => {
       stamp: "20261023T000000Z",
       revision: "a".repeat(40),
       folderWin: "C:\\Users\\me\\AppData\\Local\\nivra-dev\\r3-20261023T000000Z",
+      exeSha256: "9".repeat(64),
       appAsarSha256: "b".repeat(64),
-      runtimeContentHash: "c".repeat(64),
+      runtimeTarballSha256: "8".repeat(64),
+      runtimeContentHash: "c".repeat(16),
       distro: "Ubuntu",
       repo: { path: `/home/me/nivra-r3/${DEMO_PROJECT}`, commit: "d".repeat(40) },
     };
@@ -79,17 +81,24 @@ describe("R3's demonstration plan (D37, NIV-45)", () => {
     for (const [change, bound] of [
       [{ folderWin: "D:\\elsewhere" }, false],
       [{ revision: "e".repeat(40) }, true],
+      [{ exeSha256: "7".repeat(64) }, true],
       [{ appAsarSha256: "f".repeat(64) }, true],
-      [{ runtimeContentHash: "0".repeat(64) }, true],
+      [{ runtimeTarballSha256: "6".repeat(64) }, true],
+      [{ runtimeContentHash: "0".repeat(16) }, true],
       [{ distro: "Debian" }, true],
       [{ repo: { ...frozen.repo, commit: "1".repeat(40) } }, true],
     ] as const) {
       assert.equal(digestOf(await recipeOf({ ...frozen, ...change })) !== digest, bound, JSON.stringify(change));
     }
+    // Each approval of the recipe is one run: the next run is another digest, approved on its own.
+    assert.notEqual(digestOf(await recipeOf(frozen, 2)), digest);
     const text = recipeText(recipe, digest);
     for (const words of [
       "Token Factory: one model listing (GET /v1/models), in the run's prepare step",
-      "Tavily: at most 2 searches (POST /search), one for each query",
+      "Tavily: at most 2 searches (POST /search), one for each query, with the sites",
+      "Token Factory: one chat completion, with the plan, the assumptions, and the passages read, each with its page's title, host and address and the assumption it was found for",
+      "the script turns on research's permission, and allows kestrelyard's sharing with Token Factory, each through its own dialog",
+      "A1 and A2 here are R1's A1 and A3",
       "Tavily: at most 2 extracts (POST /extract), over at most 5 pages its searches returned",
       "At most 4 Tavily credits.",
       "Never: Check Token Factory; a chat message; a Nebius project id in the profile; a second Start; a retry or a retake.",

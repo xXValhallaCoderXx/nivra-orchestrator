@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,7 @@ import { _electron as electron, expect, test, type ElectronApplication, type Pag
 import { extractAnswer, searchAnswer, startTavilyStub, type TavilyCall, type TavilyStub } from "../../engine/test/stub-tavily.ts";
 import { startStub, toolCall, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 import { DEMO_PROJECT, DEMO_SEED, DEMO_SITES, demoFingerprint } from "../scripts/research-demo.ts";
-import { amendedVersion, checkKept, followToEnd, hostPreview, openDemo, pickDemo, plansOf, previewAllowing, previewShown, researchOf, startOnce } from "../scripts/research-journey.ts";
+import { hostPreview, openDemo, pickDemo, previewAllowing, previewShown, runApproved } from "../scripts/research-journey.ts";
 import { seedProjectPlan } from "./seed-workspace.ts";
 
 /**
@@ -111,34 +111,63 @@ test("R3's journey, offline: both permissions through their dialogs, a preview b
   expect([preview.blocked, preview.expected]).toEqual([null, expected.fingerprint]);
   expect([tavily.calls.length, model.chats().length]).toEqual([0, 0]);
 
-  const started = await startOnce(page);
-  const research = await followToEnd(page, started.id, 60_000, (line) => log.push(line));
-  expect([research.status, research.report?.outcome, research.report?.packetDigest]).toEqual(["answered", "complete", expected.packetDigest]);
-  expect(research.report?.assessments.map((assessment) => [assessment.assumption, assessment.model, assessment.shown, assessment.citations.filter((citation) => citation.valid).length])).toEqual([
-    ["A1", "contradicted", "contradicted", 1],
-    ["A2", "contradicted", "contradicted", 1],
-  ]);
-  // Exactly the approved queries and sites went to Tavily, and one request to the model.
-  const searched = tavily.calls.filter((call) => call.path === "/search").map((call) => [call.body?.["query"], call.body?.["include_domains"]]);
-  expect(searched).toEqual(DEMO_SEED.assumptions.map((query) => [query, DEMO_SITES.hosts]));
-  expect(model.chats().filter(isResearch)).toHaveLength(1);
+  expect([model.requests.length, tavily.calls.length]).toEqual([0, 0]);
 
-  // The person's part, done here as the e2e's: an amendment picked, edited, and saved as v2. v1 stays as it was.
-  const before = await plansOf(page);
-  const card = page.locator(`[data-testid="research"][data-research-id="${started.id}"]`);
+  // Everything after Start, as the live run does it: runApproved presses Start once and only watches, while the
+  // person's part (here the e2e's) amends the plan; then a go-close file lets it close, relaunch, check and remove the
+  // keys.
+  const evidence = mkdtempSync(join(root, "evidence "));
+  const lines: string[] = [];
+  const saved = new Map<string, unknown>();
+  const running = runApproved({
+    page: () => page,
+    evidence,
+    log: (line) => lines.push(line),
+    save: (name, value) => saved.set(name, value),
+    shot: async (locator, name) => {
+      await locator.screenshot({ path: join(evidence, name) });
+    },
+    close: () => app.close(),
+    relaunch: async () => {
+      await launch(testInfo);
+      return page;
+    },
+    routeProblem: async () => null,
+    packetDigest: expected.packetDigest,
+  });
+  const card = page.getByTestId("research").first();
+  await expect(card.getByTestId("research-status")).toHaveText("Complete");
   await card.getByTestId("research-amend").click();
   await page.getByTestId("research-amend-choice").first().check();
   const text = page.getByTestId("research-amend-text");
   await text.fill(`${await text.inputValue()}\nPin setuptools in the image's requirements.`);
   await page.getByTestId("research-amend-save").click();
-  const plans = await amendedVersion(page, 30_000);
-  expect(plans.find((plan) => plan.version === 1)).toEqual({ ...before[0]!, latest: 2 });
-  expect(plans.find((plan) => plan.version === 2)?.text).toContain("Pin setuptools in the image's requirements.");
+  await expect.poll(() => lines.some((line) => line.startsWith("Waiting for the go-ahead"))).toBe(true);
+  const sent = { requests: model.requests.length, tavily: tavily.calls.length };
+  writeFileSync(join(evidence, "go-close"), "");
+  const outcome = await running;
 
-  const kept = { plans, research: await researchOf(page) };
-  const sent = { tavily: tavily.calls.length, model: model.chats().length };
-  await app.close();
-  await launch(testInfo);
-  expect(await checkKept(page, kept)).toHaveLength(2);
-  expect([tavily.calls.length, model.chats().length]).toEqual([sent.tavily, sent.model]);
+  expect(outcome.failures).toEqual([]);
+  expect([outcome.research?.status, outcome.research?.report?.outcome, outcome.research?.packetDigest, outcome.kept.length, outcome.keysRemoved]).toEqual([
+    "answered",
+    "complete",
+    expected.packetDigest,
+    2,
+    true,
+  ]);
+  expect(outcome.research?.report?.assessments.map((assessment) => [assessment.assumption, assessment.model, assessment.shown, assessment.citations.filter((citation) => citation.valid).length])).toEqual([
+    ["A1", "contradicted", "contradicted", 1],
+    ["A2", "contradicted", "contradicted", 1],
+  ]);
+  const v2 = outcome.amended?.find((plan) => plan.version === 2);
+  expect([outcome.amended?.find((plan) => plan.version === 1)?.latest, v2?.text.includes("Pin setuptools in the image's requirements.")]).toEqual([2, true]);
+  expect([...saved.keys()].sort()).toEqual(["events.json", "plans-after.json", "plans-before.json", "report.json", "research.json"]);
+  expect(readdirSync(evidence).sort()).toEqual(["card.png", "go-close", "plan-v2.png", "relaunched.png"]);
+  // Exactly what the recipe lists went out: one model listing and one chat; the two approved queries with the sites; at
+  // most two extracts. Nothing was sent after the go-ahead: not by the relaunch, not by removing the keys.
+  const listings = model.requests.filter((request) => request.path.endsWith("/models")).length;
+  const searched = tavily.calls.filter((call) => call.path === "/search").map((call) => [call.body?.["query"], call.body?.["include_domains"]]);
+  expect([listings, model.chats().length, tavily.calls.filter((call) => call.path === "/extract").length <= 2]).toEqual([1, 1, true]);
+  expect(searched).toEqual(DEMO_SEED.assumptions.map((query) => [query, DEMO_SITES.hosts]));
+  expect([model.requests.length, tavily.calls.length]).toEqual([sent.requests, sent.tavily]);
 });

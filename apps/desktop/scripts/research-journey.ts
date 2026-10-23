@@ -1,11 +1,14 @@
 // R3's journey through the window (D37, NIV-45), shared by its offline e2e and research-live.ts, so the live run takes
 // no step for the first time. It drives the window as a person would and reads it through the bridge, with string
 // expressions, since scripts are compiled without the DOM's types (as in live-ui.ts).
-import type { Page } from "@playwright/test";
-import type { PlanView } from "../src/shared/ipc.ts";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import type { RunEvent } from "@nivra/domain";
+import type { Locator, Page } from "@playwright/test";
+import type { PlanView, SettingsView } from "../src/shared/ipc.ts";
 import type { ResearchPreview, ResearchView } from "../src/shared/research.ts";
-import { waitFor } from "./live-ui.ts";
-import { DEMO_SEED, DEMO_SITES } from "./research-demo.ts";
+import { sleep, waitFor } from "./live-ui.ts";
+import { DEMO_SEED, DEMO_SITES, demoPacket } from "./research-demo.ts";
 
 const arg = (value: unknown) => JSON.stringify(value);
 const call = <T>(page: Page, expression: string) => page.evaluate(expression) as Promise<T>;
@@ -92,11 +95,39 @@ export async function previewShown(page: Page): Promise<{ queries: string[]; sit
 /** The preview of the demonstration's selection, as the host works it out now (no network): what Start is bound to. */
 export const hostPreview = (page: Page) => call<ResearchPreview>(page, `window.nivra.prepareResearch(${arg(DEMO_SEED.ids.planId)}, ${arg(DEMO_SELECTION)})`);
 
-/** Presses "Start research" once, and returns the research it started. */
+/** Presses "Start research" once, and returns the research it started; a refusal is an error in the dialog's words. */
 export async function startOnce(page: Page): Promise<ResearchView> {
   const before = new Set((await researchOf(page)).map((research) => research.id));
   await page.getByTestId("research-start").click();
-  return waitFor(async () => (await researchOf(page)).find((research) => !before.has(research.id)) ?? null, 30_000, "the research to be recorded");
+  return waitFor(
+    async () => {
+      const refused = page.getByTestId("research-error");
+      if (await refused.isVisible()) throw new Error(`Start research was refused: ${await refused.innerText()}`);
+      return (await researchOf(page)).find((research) => !before.has(research.id)) ?? null;
+    },
+    30_000,
+    "the research to be recorded",
+  );
+}
+
+/** Every event of a run, page by page. */
+export async function eventsOf(page: Page, runId: string): Promise<{ status: string; events: RunEvent[] }> {
+  const events: RunEvent[] = [];
+  let after = 0;
+  for (;;) {
+    const next = await call<{ events: RunEvent[]; next: number; status: string }>(page, `window.nivra.runEvents(${arg(runId)}, ${after})`);
+    events.push(...next.events);
+    if (!next.events.length || next.next === after) return { status: next.status, events };
+    after = next.next;
+  }
+}
+
+/** Removes both keys from the profile, through the calls Settings' own buttons make, and checks they are gone. */
+export async function removeKeys(page: Page): Promise<void> {
+  await call(page, "window.nivra.setNebiusKey(null)");
+  await call(page, "window.nivra.setTavilyKey(null)");
+  const settings = await call<SettingsView>(page, "window.nivra.getSettings()");
+  if (settings.nebiusKey !== "none" || settings.tavilyKey !== "none") throw new Error("A key is still saved in the profile: remove it in Settings.");
 }
 
 /** Follows research to its end, saying each status once. */
@@ -144,4 +175,126 @@ export async function checkKept(page: Page, before: { plans: PlanView[]; researc
     `${plans.length} plan versions and ${research.length} research run(s), unchanged`,
     `the window shows ${version.trim()}, the original version beneath it, and "${amended.trim()}"`,
   ];
+}
+
+/** What `runApproved` needs from where it runs: the live script on Windows, or the offline e2e. */
+export interface ApprovedRun {
+  /** The window as it is now; a relaunch replaces it. */
+  page(): Page;
+  /** The evidence folder, where the person's files are looked for: go-close (close, relaunch, check) and stop (end). */
+  evidence: string;
+  log(line: string): void;
+  save(name: string, value: unknown): void;
+  shot(locator: Locator, name: string): Promise<void>;
+  /** Closes the app, and waits until its engines have stopped. */
+  close(): Promise<void>;
+  /** Opens the app again on the same profile and engine home, and returns its window. */
+  relaunch(): Promise<Page>;
+  /** What is wrong with the route now (the native engine running, say), or null when it is as approved. */
+  routeProblem(): Promise<string | null>;
+  /** The approved packet's digest, which the research must be bound to. */
+  packetDigest: string;
+}
+
+export interface ApprovedOutcome {
+  research: ResearchView | null;
+  amended: PlanView[] | null;
+  kept: string[];
+  keysRemoved: boolean;
+  /** Each step that failed, in its own words; the run's evidence says what happened anyway. */
+  failures: string[];
+}
+
+const open = (research: ResearchView) => research.status === "submitting" || research.status === "running";
+
+/** Polls `check` until it gives a value, or `stopped()` says to stop (then null). */
+async function until<T>(check: () => Promise<T | null>, stopped: () => boolean): Promise<T | null> {
+  for (;;) {
+    if (stopped()) return null;
+    const value = await check().catch(() => null);
+    if (value !== null) return value;
+    await sleep(500);
+  }
+}
+
+/**
+ * Presses "Start research" once, and sees the run through, with nothing able to throw out of it: each step that fails
+ * is recorded, and the rest still happen. It follows the research to its end; saves its report, events and
+ * screenshots; hands the window to the person, who amends and saves v2, and only watches for it; waits for the go-ahead
+ * to close, never closing on its own while the research is open; relaunches and checks what was kept; and removes the
+ * keys.
+ */
+export async function runApproved(io: ApprovedRun): Promise<ApprovedOutcome> {
+  const failures: string[] = [];
+  const attempt = async <T>(what: string, step: () => Promise<T>): Promise<{ value: T } | null> => {
+    try {
+      return { value: await step() };
+    } catch (error) {
+      const why = error instanceof Error ? error.message : String(error);
+      failures.push(`${what}: ${why}`);
+      io.log(`${what} failed: ${why}`);
+      return null;
+    }
+  };
+  const asked = (name: string) => existsSync(join(io.evidence, name));
+  const stopAsked = () => asked("stop");
+
+  const started = (await attempt("Pressing Start research", () => startOnce(io.page())))?.value ?? null;
+  let research: ResearchView | null = null;
+  if (!started) io.log(`Nothing more is pressed: the window is yours. Create the file go-close or stop in ${io.evidence} to end.`);
+  else {
+    if (started.packetDigest !== io.packetDigest) failures.push(`The research is bound to packet ${started.packetDigest}, not the approved ${io.packetDigest}.`);
+    research = (await attempt("Following the research", () => followToEnd(io.page(), started.id, 15 * 60_000, io.log)))?.value ?? null;
+  }
+  if (research) {
+    const report = research.report;
+    io.save("research.json", research);
+    io.save("report.json", report);
+    io.log(
+      `Research ended: ${research.status}, report ${report?.outcome ?? "none"}. Model ${report?.route?.model ?? "unknown"}; credits ${report?.usage.credits ?? "not reported"}; tokens ${report?.usage.model.inputTokens ?? "unreported"} in, ${report?.usage.model.outputTokens ?? "unreported"} out; ${report?.elapsedMs ?? "?"} ms.`,
+    );
+    const runId = research.runId;
+    if (runId) await attempt("Saving the run's events", async () => io.save("events.json", await eventsOf(io.page(), runId)));
+    await attempt("The card's screenshot", () => io.shot(io.page().locator(`[data-testid="research"][data-research-id="${research!.id}"]`), "card.png"));
+    await attempt("Saving the plan versions", async () => io.save("plans-before.json", await plansOf(io.page())));
+  }
+
+  let amended: PlanView[] | null = null;
+  if (research) {
+    io.log(`Over to you: read the card, open an address to check its page, then press Amend, edit the amended version and save it. I only watch for v2. To end without saving, create the file stop in ${io.evidence}.`);
+    amended = await until(async () => {
+      const plans = await plansOf(io.page());
+      return plans.some((plan) => plan.version === 2) ? plans : null;
+    }, stopAsked);
+    if (amended) {
+      io.save("plans-after.json", amended);
+      const original = amended.find((plan) => plan.version === 1)!;
+      const unchanged = original.text === demoPacket().planText && original.latest === 2;
+      if (!unchanged) failures.push("v1 isn't as it was seeded, or v2 isn't its latest version.");
+      io.log(`v2 saved: ${amended.find((plan) => plan.version === 2)!.id}. v1 is ${unchanged ? "unchanged, with v2 the latest" : "not as it was seeded"}.`);
+      const named = (await attempt("Reading the research again", () => researchOf(io.page())))?.value.find((candidate) => candidate.id === research!.id);
+      if (named?.amended?.version !== 2) failures.push("v2 wasn't saved from this research: its card doesn't name it.");
+      await attempt("The plan's screenshot", () => io.shot(io.page().getByTestId("plan").first(), "plan-v2.png"));
+    } else io.log("Ended without an amended version.");
+  }
+
+  io.log(`Waiting for the go-ahead to close the app: create the file go-close in ${io.evidence}.`);
+  await until(async () => (asked("go-close") || stopAsked() ? true : null), () => false);
+  // Never closed while the research is open, unless the person said stop.
+  await until(async () => ((await researchOf(io.page())).some(open) ? null : true), stopAsked);
+  const before = (await attempt("Reading what must be kept", async () => ({ plans: await plansOf(io.page()), research: await researchOf(io.page()) })))?.value ?? null;
+  let kept: string[] = [];
+  if (await attempt("Closing the app", () => io.close())) {
+    if (await attempt("Relaunching the app", () => io.relaunch())) {
+      if (amended && before) kept = (await attempt("Checking what the relaunch kept", () => checkKept(io.page(), before)))?.value ?? [];
+      for (const line of kept) io.log(`After the relaunch: ${line}.`);
+      if (amended) await attempt("The relaunched plan's screenshot", () => io.shot(io.page().getByTestId("plan").first(), "relaunched.png"));
+    }
+  }
+  const keysRemoved = (await attempt("Removing the keys", () => removeKeys(io.page()))) !== null;
+  if (keysRemoved) io.log("Both keys are removed from the profile.");
+  const route = (await attempt("Checking the route again", () => io.routeProblem()))?.value ?? null;
+  if (route) failures.push(route);
+  await attempt("Closing the app", () => io.close());
+  return { research, amended, kept, keysRemoved, failures };
 }
