@@ -308,10 +308,19 @@ test("research and its reports are kept across a relaunch, and reopening sends n
   expect(kept.flat().length).toBe(packaged ? 0 : 2);
   const sent = tavily.calls.length;
   await app.close();
-  await launch(testInfo);
+  // A packaged app ignores the test switches: a permission held for 5 s when unpackaged is saved at once.
+  await launch(testInfo, packaged ? ["--nivra-test-permission-delay-ms=5000"] : []);
   expect(await everyResearch()).toEqual(kept);
   expect((await page.evaluate(() => window.nivra.getSettings())).webResearch).toBe(true);
-  if (packaged) return;
+  if (packaged) {
+    const took = await page.evaluate(async () => {
+      const started = performance.now();
+      await window.nivra.setWebResearch(true);
+      return performance.now() - started;
+    });
+    expect(took).toBeLessThan(2_000);
+    return;
+  }
   await openConversation("Can we move to 3.12?");
   await expect(page.getByTestId("research")).toHaveCount(2);
   expect(tavily.calls.length).toBe(sent);
@@ -348,9 +357,10 @@ test("deleting a conversation stops its research, keeps nothing of it, and says 
 
 test("a project's plan: every query starts empty, and Use the assumption's words fills one only when pressed", async ({}, testInfo) => {
   test.skip(packaged, "a packaged app ignores the stand-in switches");
-  // From here on, a preview's answer is held, so a test can change the selection before it arrives.
+  // From here on, a preview's answer and a permission's save are each held, so a test can change the selection before
+  // either ends.
   await app.close();
-  await launch(testInfo, ["--nivra-test-preview-delay-ms=1500"]);
+  await launch(testInfo, ["--nivra-test-preview-delay-ms=1500", "--nivra-test-permission-delay-ms=1500"]);
   await newChat("alpha");
   await page.getByTestId("composer").fill("Plan the move to 3.12");
   await page.getByTestId("composer-send").click();
@@ -413,4 +423,61 @@ test("a preview's answer that arrives after an edit is never shown", async () =>
   await expect(page.getByTestId("research-preview-queries")).toContainText("setuptools distutils");
   await expect(page.getByTestId("research-preview-queries")).not.toContainText("setuptools distutils shim");
   await page.getByTestId("research-dialog-cancel").click();
+});
+
+/**
+ * Opens the dialog on the project's plan with its assumption picked, its query as its words, and a preview asked for.
+ */
+async function previewProjectPlan() {
+  await page.getByTestId("plan-research-open").click();
+  await page.getByRole("checkbox", { name: "Deploys are rolling." }).check();
+  await page.getByTestId("research-use-words").first().click();
+  await page.getByTestId("research-preview-button").click();
+}
+
+/** After a held permission and the preview it leads to, nothing is shown, and a new preview shows the edited query. */
+async function editedDuringSave(query: string) {
+  await page.waitForTimeout(3_500);
+  await expect(page.getByTestId("research-preview")).toBeHidden();
+  await expect(page.getByTestId("research-start")).toBeHidden();
+  await page.getByTestId("research-preview-button").click();
+  await expect(page.getByTestId("research-preview-queries")).toContainText(query);
+  await page.getByTestId("research-dialog-cancel").click();
+}
+
+test("a query edited while research's permission is being saved clears the preview that permission leads to", async () => {
+  test.skip(packaged, "a packaged app ignores the test switches");
+  await page.evaluate(() => window.nivra.setWebResearch(false));
+  await previewProjectPlan();
+  await expect(page.getByTestId("research-blocked")).toContainText("Research queries to Tavily are turned off. Turn them on, then start again.");
+  await page.getByTestId("research-allow-web").click();
+  await page.getByTestId("research-permission-allow").click();
+  // The permission is saved 1.5 s from now: the query changes before then.
+  await page.getByTestId("research-query").first().fill("Rolling deploys keep one node serving");
+  expect((await page.evaluate(() => window.nivra.getSettings())).webResearch).toBe(false);
+  await expect.poll(() => page.evaluate(() => window.nivra.getSettings()).then((settings) => settings.webResearch)).toBe(true);
+  await editedDuringSave("Rolling deploys keep one node serving");
+});
+
+test("a query edited while a project's sharing is being allowed for research clears the preview it leads to, and the consent says what goes to Token Factory", async () => {
+  test.skip(packaged, "a packaged app ignores the test switches");
+  const alpha = async () => (await page.evaluate(() => window.nivra.listProjects())).find((project) => project.label === "alpha")!;
+  await page.evaluate((id) => window.nivra.setSharing(id, false), (await alpha()).id);
+  await previewProjectPlan();
+  await expect(page.getByTestId("research-blocked")).toContainText("This project doesn't allow sending its content to Token Factory. Allow sharing for it, then start research.");
+  await page.getByTestId("research-allow-sharing").click();
+  const consent = page.getByTestId("research-consent");
+  for (const words of [
+    "To check the assumptions of plans from conversations about alpha, Nivra sends Nebius Token Factory:",
+    "the plan version's text and the assumptions you pick;",
+    "passages read from public web pages, with each page's title, host and address.",
+    "This is for the whole project: its explanations, its conversations, and the reviews and research of its plans. You can turn it off at any time, which stops them all.",
+  ]) {
+    await expect(consent).toContainText(words);
+  }
+  await page.getByTestId("research-consent-allow").click();
+  await page.getByTestId("research-query").first().fill("Rolling deploys drain one node first");
+  expect((await alpha()).sharing.modelContext).toBe(false);
+  await expect.poll(async () => (await alpha()).sharing.modelContext).toBe(true);
+  await editedDuringSave("Rolling deploys drain one node first");
 });
