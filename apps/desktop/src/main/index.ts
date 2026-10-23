@@ -459,9 +459,14 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
   const appPath = app.getAppPath();
   const stage = join(appPath, "build", "stage");
   const hash = platform === "win32" ? readHash(join(stage, "runtime-linux-x64.json")) : null;
+  // Tests only, unpackaged: a stand-in engine from the app's own test fixtures, named, never a path ("gated" is
+  // test/fixtures/gated-engine.mjs), for what a real engine never does, such as losing a start's answer.
+  const fixture = app.commandLine.getSwitchValue("nivra-test-engine") || null;
+  if (fixture !== null && !/^[a-z]+$/.test(fixture)) throw new Error(`--nivra-test-engine takes a fixture's name, such as gated, not "${fixture}".`);
+  const entry = fixture ? join(appPath, "test", "fixtures", `${fixture}-engine.mjs`) : join(appPath, "..", "engine", "src", "main.mjs");
   return {
     local: {
-      runtime: { node: process.env["npm_node_execpath"] ?? process.env["NODE"] ?? "node", entry: join(appPath, "..", "engine", "src", "main.mjs"), runtimeHash: null },
+      runtime: { node: process.env["npm_node_execpath"] ?? process.env["NODE"] ?? "node", entry, runtimeHash: null },
       home: homeSwitch ?? join(homedir(), ".nivra-dev"),
       ...extraArgs,
     },
