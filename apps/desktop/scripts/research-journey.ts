@@ -226,13 +226,38 @@ async function until<T>(check: () => Promise<T | null>, stopped: () => boolean):
  */
 export async function runApproved(io: ApprovedRun): Promise<ApprovedOutcome> {
   const failures: string[] = [];
+  // Writing the evidence can fail too (a full disk, say). That is recorded once, and said on stderr while that works,
+  // but never stops the run: the person's go-ahead, the relaunch and the keys' removal still come.
+  const note = (what: string, error: unknown) => {
+    const line = `${what}: ${error instanceof Error ? error.message : String(error)}`;
+    if (failures.includes(line)) return;
+    failures.push(line);
+    try {
+      process.stderr.write(`${line}\n`);
+    } catch {
+      // Nowhere left to say it: it is kept in the outcome.
+    }
+  };
+  const log = (line: string) => {
+    try {
+      io.log(line);
+    } catch (error) {
+      note("Logging", error);
+    }
+  };
+  const save = (name: string, value: unknown) => {
+    try {
+      io.save(name, value);
+    } catch (error) {
+      note(`Saving ${name}`, error);
+    }
+  };
   const attempt = async <T>(what: string, step: () => Promise<T>): Promise<{ value: T } | null> => {
     try {
       return { value: await step() };
     } catch (error) {
-      const why = error instanceof Error ? error.message : String(error);
-      failures.push(`${what}: ${why}`);
-      io.log(`${what} failed: ${why}`);
+      note(what, error);
+      log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   };
@@ -241,44 +266,44 @@ export async function runApproved(io: ApprovedRun): Promise<ApprovedOutcome> {
 
   const started = (await attempt("Pressing Start research", () => startOnce(io.page())))?.value ?? null;
   let research: ResearchView | null = null;
-  if (!started) io.log(`Nothing more is pressed: the window is yours. Create the file go-close or stop in ${io.evidence} to end.`);
+  if (!started) log(`Nothing more is pressed: the window is yours. Create the file go-close or stop in ${io.evidence} to end.`);
   else {
     if (started.packetDigest !== io.packetDigest) failures.push(`The research is bound to packet ${started.packetDigest}, not the approved ${io.packetDigest}.`);
-    research = (await attempt("Following the research", () => followToEnd(io.page(), started.id, 15 * 60_000, io.log)))?.value ?? null;
+    research = (await attempt("Following the research", () => followToEnd(io.page(), started.id, 15 * 60_000, log)))?.value ?? null;
   }
   if (research) {
     const report = research.report;
-    io.save("research.json", research);
-    io.save("report.json", report);
-    io.log(
+    save("research.json", research);
+    save("report.json", report);
+    log(
       `Research ended: ${research.status}, report ${report?.outcome ?? "none"}. Model ${report?.route?.model ?? "unknown"}; credits ${report?.usage.credits ?? "not reported"}; tokens ${report?.usage.model.inputTokens ?? "unreported"} in, ${report?.usage.model.outputTokens ?? "unreported"} out; ${report?.elapsedMs ?? "?"} ms.`,
     );
     const runId = research.runId;
-    if (runId) await attempt("Saving the run's events", async () => io.save("events.json", await eventsOf(io.page(), runId)));
+    if (runId) await attempt("Saving the run's events", async () => save("events.json", await eventsOf(io.page(), runId)));
     await attempt("The card's screenshot", () => io.shot(io.page().locator(`[data-testid="research"][data-research-id="${research!.id}"]`), "card.png"));
-    await attempt("Saving the plan versions", async () => io.save("plans-before.json", await plansOf(io.page())));
+    await attempt("Saving the plan versions", async () => save("plans-before.json", await plansOf(io.page())));
   }
 
   let amended: PlanView[] | null = null;
   if (research) {
-    io.log(`Over to you: read the card, open an address to check its page, then press Amend, edit the amended version and save it. I only watch for v2. To end without saving, create the file stop in ${io.evidence}.`);
+    log(`Over to you: read the card, open an address to check its page, then press Amend, edit the amended version and save it. I only watch for v2. To end without saving, create the file stop in ${io.evidence}.`);
     amended = await until(async () => {
       const plans = await plansOf(io.page());
       return plans.some((plan) => plan.version === 2) ? plans : null;
     }, stopAsked);
     if (amended) {
-      io.save("plans-after.json", amended);
+      save("plans-after.json", amended);
       const original = amended.find((plan) => plan.version === 1)!;
       const unchanged = original.text === demoPacket().planText && original.latest === 2;
       if (!unchanged) failures.push("v1 isn't as it was seeded, or v2 isn't its latest version.");
-      io.log(`v2 saved: ${amended.find((plan) => plan.version === 2)!.id}. v1 is ${unchanged ? "unchanged, with v2 the latest" : "not as it was seeded"}.`);
+      log(`v2 saved: ${amended.find((plan) => plan.version === 2)!.id}. v1 is ${unchanged ? "unchanged, with v2 the latest" : "not as it was seeded"}.`);
       const named = (await attempt("Reading the research again", () => researchOf(io.page())))?.value.find((candidate) => candidate.id === research!.id);
       if (named?.amended?.version !== 2) failures.push("v2 wasn't saved from this research: its card doesn't name it.");
       await attempt("The plan's screenshot", () => io.shot(io.page().getByTestId("plan").first(), "plan-v2.png"));
-    } else io.log("Ended without an amended version.");
+    } else log("Ended without an amended version.");
   }
 
-  io.log(`Waiting for the go-ahead to close the app: create the file go-close in ${io.evidence}.`);
+  log(`Waiting for the go-ahead to close the app: create the file go-close in ${io.evidence}.`);
   await until(async () => (asked("go-close") || stopAsked() ? true : null), () => false);
   // Never closed while the research is open, unless the person said stop.
   await until(async () => ((await researchOf(io.page())).some(open) ? null : true), stopAsked);
@@ -287,12 +312,12 @@ export async function runApproved(io: ApprovedRun): Promise<ApprovedOutcome> {
   if (await attempt("Closing the app", () => io.close())) {
     if (await attempt("Relaunching the app", () => io.relaunch())) {
       if (amended && before) kept = (await attempt("Checking what the relaunch kept", () => checkKept(io.page(), before)))?.value ?? [];
-      for (const line of kept) io.log(`After the relaunch: ${line}.`);
+      for (const line of kept) log(`After the relaunch: ${line}.`);
       if (amended) await attempt("The relaunched plan's screenshot", () => io.shot(io.page().getByTestId("plan").first(), "relaunched.png"));
     }
   }
   const keysRemoved = (await attempt("Removing the keys", () => removeKeys(io.page()))) !== null;
-  if (keysRemoved) io.log("Both keys are removed from the profile.");
+  if (keysRemoved) log("Both keys are removed from the profile.");
   const route = (await attempt("Checking the route again", () => io.routeProblem()))?.value ?? null;
   if (route) failures.push(route);
   await attempt("Closing the app", () => io.close());

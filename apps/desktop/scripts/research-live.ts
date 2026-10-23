@@ -238,11 +238,25 @@ async function nextRecipe(frozen: Frozen) {
   }
 }
 
+/**
+ * The demonstration repository as it was frozen: the same commit, nothing changed or added since, in this distribution,
+ * which is the one the engine runs in. The approval records that commit, so a changed checkout is refused.
+ */
+export function checkRepo(repo: Frozen["repo"], distro: string, here = process.env["WSL_DISTRO_NAME"] ?? null): void {
+  if (here !== null && here !== distro) throw new Error(`This runs in ${here}, but the demonstration was frozen in ${distro}. Run it there.`);
+  const head = run("git", ["rev-parse", "HEAD"], repo.path);
+  if (head !== repo.commit) throw new Error(`The demonstration repository (${repo.path}) is at ${head.slice(0, 7)}, not the frozen ${repo.commit.slice(0, 7)}. Freeze again, and ask for a new approval.`);
+  if (run("git", ["status", "--porcelain", "--untracked-files=all"], repo.path)) {
+    throw new Error(`The demonstration repository (${repo.path}) has changes since it was frozen. Freeze again, and ask for a new approval.`);
+  }
+}
+
 function checkedFrozen(): Frozen {
   const frozen = readFrozen();
   const revision = cleanRevision();
   if (revision !== frozen.revision) throw new Error(`HEAD is ${revision.slice(0, 7)}, but the build was frozen at ${frozen.revision.slice(0, 7)}. Freeze again.`);
   checkBuild(frozen);
+  checkRepo(frozen.repo, frozen.distro);
   return frozen;
 }
 
@@ -320,21 +334,47 @@ function evidenceFolder(kind: string, revision: string): string {
   mkdirSync(folder, { recursive: true, mode: 0o700 });
   return folder;
 }
+/**
+ * The evidence folder's writer. Its log and saves never throw: a write that fails (a full disk, say) is kept in
+ * `problems` and said on stderr while that works, so no step that must follow, the keys' removal above all, is skipped.
+ */
 function writer(folder: string) {
   const lines: string[] = [];
+  const problems: string[] = [];
+  const failed = (what: string, error: unknown) => {
+    const line = `${what}: ${message(error)}`;
+    if (problems.includes(line)) return;
+    problems.push(line);
+    try {
+      process.stderr.write(`${line}\n`);
+    } catch {
+      // Nowhere left to say it: it is kept in `problems`.
+    }
+  };
+  const write = (name: string, text: string) => {
+    try {
+      writeFileSync(join(folder, name), text, { mode: 0o600 });
+    } catch (error) {
+      failed(`Writing ${name}`, error);
+    }
+  };
   const log = (line: string) => {
     const stamped = `${new Date().toISOString()} ${line}`;
     lines.push(stamped);
-    console.log(stamped);
-    writeFileSync(join(folder, "log.txt"), `${lines.join("\n")}\n`, { mode: 0o600 });
+    try {
+      console.log(stamped);
+    } catch (error) {
+      failed("Printing the log", error);
+    }
+    write("log.txt", `${lines.join("\n")}\n`);
   };
-  const save = (name: string, value: unknown) => writeFileSync(join(folder, name), typeof value === "string" ? value : `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const save = (name: string, value: unknown) => write(name, typeof value === "string" ? value : `${JSON.stringify(value, null, 2)}\n`);
   /** A screenshot of part of the window, kept as private as the rest of the evidence. */
   const shot = async (locator: Locator, name: string) => {
     await locator.screenshot({ path: join(folder, name) });
     chmodSync(join(folder, name), 0o600);
   };
-  return { log, save, shot };
+  return { log, save, shot, problems };
 }
 
 /** The files a scan must have read: a clean result from a scan that read none of them would prove nothing. */
@@ -416,7 +456,7 @@ async function live(approved: string): Promise<number> {
   const { recipe, digest } = await nextRecipe(frozen);
   if (digest !== approved) throw new Error(`The next unclaimed run of this recipe digests to ${digest}, not the approved ${approved}: it is claimed already, or something changed. Nothing was started.`);
   const evidence = evidenceFolder("live", frozen.revision);
-  const { log, save, shot } = writer(evidence);
+  const { log, save, shot, problems } = writer(evidence);
   save("recipe.txt", `${recipeText(recipe, digest)}\n`);
   log(`Evidence: ${evidence}. This run is detached from the terminal that started it.`);
   const homes = homeStates();
@@ -447,6 +487,8 @@ async function live(approved: string): Promise<number> {
     if (problem) throw new Error(problem);
     await shot(ui.page.getByTestId("research-preview"), "preview.png");
     log(`The preview shows ${shown.queries.join(" | ")}; ${shown.sites}. Its fingerprint is the approved one.`);
+    // The repository could have changed while the keys were awaited: checked again, just before the approval is spent.
+    checkRepo(frozen.repo, frozen.distro);
     const claimed = claimApproval(CLAIMS, { digest, run: recipe.run, revision: frozen.revision, out: evidence, pid: process.pid, claimedAt: new Date().toISOString() });
     if (!claimed.ok) throw new Error("This approval was claimed by another run first.");
   } catch (error) {
@@ -529,8 +571,14 @@ async function live(approved: string): Promise<number> {
   for (const line of homesResult.lines) log(line);
   if (scan) log(`Credential scan: ${scan.summary}. ${SCAN_NOTE}`);
   if (!outcome.keysRemoved) log("The keys may still be in the profile: run this script with --cleanup.");
+  // Evidence that couldn't be written is a failure of the run's record, said last, after everything else was tried.
+  failures.push(...problems);
+  try {
+    chmodSync(evidence, 0o700);
+  } catch (error) {
+    failures.push(`Closing the evidence folder to others: ${message(error)}`);
+  }
   log(failures.length ? `Done, with ${failures.length} failure(s): ${failures.join(" | ")}` : "Done, with no failure.");
-  chmodSync(evidence, 0o700);
   return failures.length ? 1 : 0;
 }
 

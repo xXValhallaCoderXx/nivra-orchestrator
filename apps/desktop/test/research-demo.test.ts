@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { researchPacketDigest } from "@nivra/domain";
 import { seedProjectPlan } from "../e2e/seed-workspace.ts";
 import { DEMO_PROJECT, DEMO_SEED, DEMO_SITES, demoFingerprint, demoPacket } from "../scripts/research-demo.ts";
-import { digestOf, recipeOf, recipeText, type Frozen } from "../scripts/research-live.ts";
+import { checkRepo, digestOf, recipeOf, recipeText, type Frozen } from "../scripts/research-live.ts";
 import { HostStore } from "../src/main/host-store.ts";
 import { queryChecks, researchDeny, researchFingerprint, researchPacket } from "../src/main/research.ts";
 import type { PlanContent } from "../src/main/tasks.ts";
@@ -108,6 +109,32 @@ describe("R3's demonstration plan (D37, NIV-45)", () => {
     ]) {
       assert.ok(text.includes(words), words);
     }
+  });
+
+  it("refuses a demonstration repository changed since it was frozen: an edit, a new commit, or another distribution", () => {
+    const path = mkdtempSync(join(tmpdir(), "nivra research demo repo "));
+    dirs.push(path);
+    const git = (...args: string[]) => {
+      const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: path, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    writeFileSync(join(path, "setup.py"), "from distutils.core import setup\n");
+    git("init", "-q", "-b", "main");
+    git("add", "-A");
+    git("commit", "-q", "-m", "The build image");
+    const repo = { path, commit: git("rev-parse", "HEAD") };
+    checkRepo(repo, "Ubuntu", "Ubuntu");
+    writeFileSync(join(path, "setup.py"), "import setuptools\n");
+    assert.throws(() => checkRepo(repo, "Ubuntu", "Ubuntu"), /has changes since it was frozen\. Freeze again, and ask for a new approval\.$/);
+    git("commit", "-qam", "Changed after the freeze");
+    assert.throws(() => checkRepo(repo, "Ubuntu", "Ubuntu"), /is at [0-9a-f]{7}, not the frozen [0-9a-f]{7}\. Freeze again, and ask for a new approval\.$/);
+    git("reset", "-q", "--hard", repo.commit);
+    writeFileSync(join(path, "notes.txt"), "an untracked file\n");
+    assert.throws(() => checkRepo(repo, "Ubuntu", "Ubuntu"), /has changes since it was frozen/);
+    rmSync(join(path, "notes.txt"));
+    checkRepo(repo, "Ubuntu", "Ubuntu");
+    assert.throws(() => checkRepo(repo, "Ubuntu", "Debian"), /^Error: This runs in Debian, but the demonstration was frozen in Ubuntu\. Run it there\.$/);
   });
 
   it("refuses to seed a project the app hasn't added", () => {

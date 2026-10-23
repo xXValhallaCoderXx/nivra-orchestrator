@@ -50,7 +50,7 @@ let model: Stub;
 let tavily: TavilyStub;
 let app: ElectronApplication;
 let page: Page;
-const log: string[] = [];
+const roots: string[] = [];
 
 const isResearch = (request: StubRequest) => JSON.stringify(request.body?.tools ?? []).includes("submit_research");
 async function answer(call: TavilyCall) {
@@ -66,9 +66,14 @@ async function launch(testInfo: TestInfo) {
   void testInfo;
 }
 
-test.beforeAll(async ({}, testInfo) => {
-  test.skip(testInfo.project.metadata["executable"] !== undefined, "a packaged app ignores the stand-in switches");
+/**
+ * A fresh profile for one test: the app adds the project, as the person would; the plan is seeded into its conversation
+ * with the app closed; then the app opens on it.
+ */
+async function fresh(testInfo: TestInfo) {
+  await app?.close().catch(() => undefined);
   root = mkdtempSync(join(tmpdir(), "nivra e2e research journey "));
+  roots.push(root);
   const repo = join(root, DEMO_PROJECT);
   mkdirSync(repo, { recursive: true });
   writeFileSync(join(repo, "setup.py"), "from distutils.core import setup\n\nsetup(name='kestrelyard', version='1.0')\n");
@@ -76,9 +81,6 @@ test.beforeAll(async ({}, testInfo) => {
     const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
     if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   }
-  model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: (request) => (isResearch(request) ? toolCall("submit_research", ASSESSED) : toolCall("submit_reply", {})) });
-  tavily = await startTavilyStub(answer);
-  // The app adds the project, as the person would; the plan is seeded into its conversation with the app closed.
   await launch(testInfo);
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
@@ -88,27 +90,52 @@ test.beforeAll(async ({}, testInfo) => {
   await app.close();
   expect(seedProjectPlan(join(root, "user data"), DEMO_SEED).targetId).toBe("local");
   await launch(testInfo);
+}
+
+/** The keys saved, then the journey to a preview whose fingerprint is the recipe's. */
+async function toPreview(lines: string[]) {
+  await page.evaluate(() => Promise.all([window.nivra.setNebiusKey("test-key-0123456789"), window.nivra.setTavilyKey("tavily-test-key-0123456789")]));
+  const settings = await page.evaluate(() => window.nivra.getSettings());
+  expect([settings.webResearch, settings.nebiusProjectId]).toEqual([false, "none"]);
+  await openDemo(page);
+  await pickDemo(page);
+  await previewAllowing(page, (line) => lines.push(line));
+  await previewShown(page);
+  const expected = await demoFingerprint();
+  const preview = await hostPreview(page);
+  expect([preview.blocked, preview.expected]).toEqual([null, expected.fingerprint]);
+  return expected;
+}
+
+/** The person's part, done here as the e2e's while runApproved only watches: an amendment picked, edited and saved. */
+async function amend() {
+  const card = page.getByTestId("research").first();
+  await expect(card.getByTestId("research-status")).toHaveText("Complete");
+  await card.getByTestId("research-amend").click();
+  await page.getByTestId("research-amend-choice").first().check();
+  const text = page.getByTestId("research-amend-text");
+  await text.fill(`${await text.inputValue()}\nPin setuptools in the image's requirements.`);
+  await page.getByTestId("research-amend-save").click();
+}
+
+test.beforeAll(async ({}, testInfo) => {
+  test.skip(testInfo.project.metadata["executable"] !== undefined, "a packaged app ignores the stand-in switches");
+  model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: (request) => (isResearch(request) ? toolCall("submit_research", ASSESSED) : toolCall("submit_reply", {})) });
+  tavily = await startTavilyStub(answer);
 });
 
 test.afterAll(async () => {
   await app?.close().catch(() => undefined);
   await model?.close();
   await tavily?.close();
-  if (root) rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+  for (const made of roots) rmSync(made, { recursive: true, force: true, maxRetries: 5 });
 });
 
 test("R3's journey, offline: both permissions through their dialogs, a preview bound to the recipe's fingerprint, one start, the report, an amended version, and a relaunch that keeps them all", async ({}, testInfo) => {
-  await page.evaluate(() => Promise.all([window.nivra.setNebiusKey("test-key-0123456789"), window.nivra.setTavilyKey("tavily-test-key-0123456789")]));
-  const settings = await page.evaluate(() => window.nivra.getSettings());
-  expect([settings.webResearch, settings.nebiusProjectId]).toEqual([false, "none"]);
-  await openDemo(page);
-  await pickDemo(page);
-  await previewAllowing(page, (line) => log.push(line));
+  await fresh(testInfo);
+  const log: string[] = [];
+  const expected = await toPreview(log);
   expect(log).toEqual(["The preview asks for research's permission: turning it on through its dialog.", "The preview asks for the project's sharing: allowing it through the research consent."]);
-  await previewShown(page);
-  const expected = await demoFingerprint();
-  const preview = await hostPreview(page);
-  expect([preview.blocked, preview.expected]).toEqual([null, expected.fingerprint]);
   expect([tavily.calls.length, model.chats().length]).toEqual([0, 0]);
 
   expect([model.requests.length, tavily.calls.length]).toEqual([0, 0]);
@@ -135,13 +162,7 @@ test("R3's journey, offline: both permissions through their dialogs, a preview b
     routeProblem: async () => null,
     packetDigest: expected.packetDigest,
   });
-  const card = page.getByTestId("research").first();
-  await expect(card.getByTestId("research-status")).toHaveText("Complete");
-  await card.getByTestId("research-amend").click();
-  await page.getByTestId("research-amend-choice").first().check();
-  const text = page.getByTestId("research-amend-text");
-  await text.fill(`${await text.inputValue()}\nPin setuptools in the image's requirements.`);
-  await page.getByTestId("research-amend-save").click();
+  await amend();
   await expect.poll(() => lines.some((line) => line.startsWith("Waiting for the go-ahead"))).toBe(true);
   const sent = { requests: model.requests.length, tavily: tavily.calls.length };
   writeFileSync(join(evidence, "go-close"), "");
@@ -170,4 +191,46 @@ test("R3's journey, offline: both permissions through their dialogs, a preview b
   expect([listings, model.chats().length, tavily.calls.filter((call) => call.path === "/extract").length <= 2]).toEqual([1, 1, true]);
   expect(searched).toEqual(DEMO_SEED.assumptions.map((query) => [query, DEMO_SITES.hosts]));
   expect([model.requests.length, tavily.calls.length]).toEqual([sent.requests, sent.tavily]);
+});
+
+test("a full disk after Start can't end the run early: the person still decides when to close, and the keys are still removed", async ({}, testInfo) => {
+  await fresh(testInfo);
+  const expected = await toPreview([]);
+  // Every log, save and screenshot fails, as on a full disk, from the moment the run starts.
+  const full = () => {
+    throw new Error("ENOSPC: no space left on device, write");
+  };
+  const evidence = mkdtempSync(join(root, "evidence "));
+  const lines: string[] = [];
+  const calls = { close: 0, relaunch: 0 };
+  const running = runApproved({
+    page: () => page,
+    evidence,
+    log: (line) => {
+      lines.push(line);
+      full();
+    },
+    save: () => full(),
+    shot: async () => full(),
+    close: async () => {
+      calls.close++;
+      await app.close();
+    },
+    relaunch: async () => {
+      calls.relaunch++;
+      await launch(testInfo);
+      return page;
+    },
+    routeProblem: async () => null,
+    packetDigest: expected.packetDigest,
+  });
+  await amend();
+  await expect.poll(() => lines.some((line) => line.startsWith("Waiting for the go-ahead"))).toBe(true);
+  expect(calls.close).toBe(0);
+  writeFileSync(join(evidence, "go-close"), "");
+  const outcome = await running;
+  expect([calls.close, calls.relaunch, outcome.keysRemoved, outcome.kept.length, outcome.research?.status]).toEqual([2, 1, true, 2, "answered"]);
+  // Each failure is a write that couldn't be made, said once; nothing else failed.
+  expect(outcome.failures.length).toBeGreaterThan(0);
+  expect(outcome.failures.filter((failure) => !failure.includes("ENOSPC"))).toEqual([]);
 });
