@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
 import { extractAnswer, searchAnswer, startTavilyStub, type TavilyCall, type TavilyStub } from "../../engine/test/stub-tavily.ts";
 import { startStub, text, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
-import { RESEARCH_RETENTION } from "../src/shared/research.ts";
 import { seedPlan } from "./seed-workspace.ts";
 
 /**
@@ -24,6 +23,9 @@ const SEEDED = { question: "Can we move the build image to Python 3.12?", plan: 
 const ASSUMPTION = "distutils is still in Python 3.12's standard library.";
 const WHATSNEW = "https://docs.python.org/3/whatsnew/3.12.html";
 const REMOVED = "The distutils package has been removed from the standard library.";
+/** What the permission, Settings, the preview and the delete dialog say is kept, pinned here word for word. */
+const RETENTION =
+  "Tavily keeps what it receives, under its own terms. Nivra's engine keeps each research report and can't delete it yet: the assumptions and queries, the pages' titles and addresses, the passages read, and the model's assessments with their reasoning, uncertainty and suggested amendments. What was already sent can't be withdrawn.";
 
 // Each test builds on the one before (one profile, the same keys and conversations): see workspace.spec.ts.
 test.describe.configure({ mode: "serial" });
@@ -174,16 +176,41 @@ test("with research off and no Tavily key, a seeded plan's preview says what kee
   await page.getByTestId("research-preview-button").click();
   await expect(page.getByTestId("research-preview-queries")).toContainText(ASSUMPTION);
   await expect(page.getByTestId("research-preview-not-sent")).toHaveText("Not sent: the repository's files, this conversation, other plans or versions, your preferences and your tasks.");
+  await expect(page.getByTestId("research-preview-model")).toContainText(
+    "The passages read from those pages, with each page's title, host and address, and the assumption it was found for.",
+  );
+  await expect(page.getByTestId("research-preview-limits")).toHaveText(
+    "At most 1 search and 1 read of up to 5 pages in all, 1 model call, 2 Tavily credits and 240 seconds. Nothing is retried.",
+  );
+  await expect(page.getByTestId("research-preview-footnote")).toHaveText(
+    `Nivra checks each query for keys, addresses, paths and your projects' names. The checks can't catch everything: read each query before you start. ${RETENTION}`,
+  );
   await expect(page.getByTestId("research-blocked")).toContainText("Research queries to Tavily are turned off. Turn them on, then start again.");
   await expect(page.getByTestId("research-start")).toBeDisabled();
   await page.getByTestId("research-allow-web").click();
-  await expect(page.getByTestId("research-permission")).toContainText(RESEARCH_RETENTION);
-  await expect(page.getByTestId("research-permission")).toContainText("Never the plan's text, your repositories, their paths, your preferences or your conversations.");
+  const permission = page.getByTestId("research-permission");
+  for (const words of [
+    "Research sends Tavily, a web search service:",
+    "the queries you approve for each run, exactly as the preview shows them;",
+    "the addresses of pages its own search returned, so it can read passages from them;",
+    "the sites you list, if any.",
+    "Nothing else goes to Tavily: no other words from the plan, and none of your repositories, their paths, your preferences or your conversations. Nivra checks each query for keys, addresses, paths and your projects' names before it is sent, but those checks can't catch everything: read each query before you start.",
+    RETENTION,
+    "This is for the whole app, apart from sharing a project with Token Factory or uploading it to a sandbox. Each run still waits for you to start it. Turning it off stops further requests and cancels research where it can.",
+  ]) {
+    await expect(permission).toContainText(words);
+  }
   await page.getByTestId("research-permission-allow").click();
   await expect(page.getByTestId("research-blocked")).toContainText("Nivra has no Tavily API key. Add one in Settings, then start again.");
   await expect(page.getByTestId("research-start")).toBeDisabled();
   await page.getByTestId("research-dialog-cancel").click();
   expect((await page.evaluate(() => window.nivra.getSettings())).webResearch).toBe(true);
+  // Settings say the same of what Tavily gets and what is kept.
+  await page.getByTestId("nav-projects").click();
+  await expect(page.getByTestId("web-research-words")).toHaveText(
+    `When it is on, each run still waits for you to start it. Tavily gets only the queries you approve, the sites you list, if any, and the addresses of pages its own search returned: no other words from the plan, and none of your repositories or conversations. Turning it off stops research under way where it can. ${RETENTION}`,
+  );
+  await page.getByTestId("nav-planning").click();
   if (!packaged) expect([tavily.calls.length, researchRequests().length]).toEqual([0, 0]);
 });
 
@@ -229,6 +256,13 @@ test("research of a general plan keeps the model's conclusion, the quotations fo
   // Tavily got the approved queries, and never the plan or a key; the model got one request.
   const sent = tavily.calls.map((call) => call.raw).join("\n");
   expect([sent.includes("Python 3.12 distutils standard library"), sent.includes(SEEDED.plan), sent.includes(KEY), researchRequests().length]).toEqual([true, false, false, 1]);
+  // Tavily read only the addresses its own search returned.
+  expect([...new Set(tavily.calls.filter((call) => call.path === "/extract").flatMap((call) => call.body?.["urls"] as string[]))]).toEqual([WHATSNEW]);
+  // The model got what the preview and the consent say: the plan, the assumptions, and the passages with each page's
+  // title, host and address.
+  const asked = researchRequests()[0]!.raw;
+  const missing = [SEEDED.plan, ASSUMPTION, REMOVED, "What's New In Python 3.12", "| docs.python.org |", WHATSNEW].filter((part) => !asked.includes(part));
+  expect(missing).toEqual([]);
 });
 
 test("an amended version is saved from the research once; a second save is refused and saves nothing", async () => {
@@ -298,7 +332,7 @@ test("deleting a conversation stops its research, keeps nothing of it, and says 
   await expect.poll(runOf).not.toBeNull();
   const runId = (await runOf())!;
   await page.getByTestId("conversation-delete").click();
-  await expect(page.getByTestId("conversation-delete-research")).toHaveText(RESEARCH_RETENTION);
+  await expect(page.getByTestId("conversation-delete-research")).toHaveText(RETENTION);
   await page.getByTestId("conversation-delete-confirm").click();
   await expect(page.getByTestId("nav-conversation").filter({ hasText: "Can we move to 3.12?" })).toHaveCount(1);
   await expect.poll(() => page.evaluate((id) => window.nivra.runEvents(id, 0).then((events) => events.status), runId)).toBe("cancelled");

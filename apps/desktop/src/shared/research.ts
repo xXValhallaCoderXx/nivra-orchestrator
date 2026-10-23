@@ -115,7 +115,7 @@ export const RESEARCH_CAVEAT = "Nivra checked that each quotation is in the page
 
 /** What the retention copy says in the permission, the delete dialog and the decision. */
 export const RESEARCH_RETENTION =
-  "Tavily keeps what it receives, under its own terms. Nivra's engine keeps each research report, with its queries, addresses and passages, and can't delete it yet. What was already sent can't be withdrawn.";
+  "Tavily keeps what it receives, under its own terms. Nivra's engine keeps each research report and can't delete it yet: the assumptions and queries, the pages' titles and addresses, the passages read, and the model's assessments with their reasoning, uncertainty and suggested amendments. What was already sent can't be withdrawn.";
 
 export const CONCLUSION_LABEL: Readonly<Record<Conclusion, string>> = { supported: "Supported", contradicted: "Contradicted", unresolved: "Unresolved" };
 
