@@ -6,6 +6,7 @@ import { createNebiusBackend } from "../src/exec/nebius/session.ts";
 import { createModelClient } from "../src/providers/model.ts";
 import { policyFor } from "../src/providers/policy.ts";
 import { operationsForBrief, runWorker, type TaskBrief, type WorkerRun } from "../src/task/worker.ts";
+import { TASK_BRIEF, TASK_FIX, TASK_FIXTURE } from "../scripts/task-fixture.ts";
 import { clock } from "./fake-sandboxes.ts";
 import { RealGuest } from "./real-guest.ts";
 import { changedSince, folderState, GIT, localSession, repoWith, scratch, snap } from "./workspace-fixtures.ts";
@@ -20,21 +21,10 @@ export const KEY = "nebius-test-key-0123456789";
 export const PROJECT = "project-e00test0000000000";
 export const MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
-/** The fixture: greet with no name prints "Hello, " instead of "Hello, world". */
-export const FIXTURE = {
-  "greet.sh": "greet() {\n  printf 'Hello, %s\\n' \"$1\"\n}\n",
-  "check.sh": '. ./greet.sh\ngot=$(greet Ada; greet)\nwant=$(printf \'Hello, Ada\\nHello, world\')\nif [ "$got" = "$want" ]; then echo ok; else printf \'got: %s\\n\' "$got"; exit 1; fi\n',
-};
-export const BRIEF: TaskBrief = {
-  goal: "greet with no name says Hello, world",
-  acceptanceCriteria: ["check.sh passes"],
-  scope: "",
-  exclusions: "",
-  context: "",
-  checks: ["/bin/sh check.sh"],
-  acceptanceCases: [{ name: "greet with and without a name", command: ". ./greet.sh; greet Ada; greet", expectedOutput: "Hello, Ada\nHello, world\n", expectedExitCode: 0 }],
-};
-export const FIX = { path: "greet.sh", old_text: '"$1"', new_text: '"${1:-world}"' };
+/** The fixture (`scripts/task-fixture.ts`): greet with no name prints "Hello, " instead of "Hello, world". */
+export const FIXTURE: Record<string, string> = Object.fromEntries(TASK_FIXTURE.map((file) => [file.path, String(file.bytes)]));
+export const BRIEF: TaskBrief = TASK_BRIEF;
+export const FIX = TASK_FIX;
 
 export type Call = [tool: string, input: Record<string, unknown>];
 /** One model response: one tool call, or several in one step. */

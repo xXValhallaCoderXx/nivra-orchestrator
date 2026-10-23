@@ -51,9 +51,9 @@ const IDENTITY: Readonly<Record<string, string>> = {
 };
 
 /** Builds the fixture as a repository at `root` with `git`, and gives its baseline. */
-export function buildFixture(root: string, git: string): { root: string; baseline: string } {
+export function buildFixture(root: string, git: string, files: readonly FixtureFile[] = FIXTURE, message = "The synthetic fixture for Nivra's sandbox check"): { root: string; baseline: string } {
   mkdirSync(root, { recursive: true });
-  for (const file of FIXTURE) {
+  for (const file of files) {
     const full = join(root, file.path);
     mkdirSync(dirname(full), { recursive: true });
     if (file.link !== undefined) symlinkSync(file.link, full);
@@ -71,7 +71,7 @@ export function buildFixture(root: string, git: string): { root: string; baselin
   };
   run(["init", "-q", "-b", "main"]);
   run(["add", "-A"]);
-  run(["commit", "-q", "-m", "The synthetic fixture for Nivra's sandbox check"]);
+  run(["commit", "-q", "-m", message]);
   return { root, baseline: run(["rev-parse", "HEAD"]).trim() };
 }
 
