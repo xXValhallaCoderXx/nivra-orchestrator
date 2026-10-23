@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChatResult } from "@nivra/domain";
-import { HostStore } from "../src/main/host-store.ts";
 import { planFromAnswer } from "../src/main/tasks.ts";
 import { insertArtifact, insertConversation, insertTurn, projectAnswer } from "../src/main/workspace.ts";
 import { openWorkspace } from "../src/main/workspace-db.ts";
@@ -53,7 +53,9 @@ export interface ProjectSeed {
  * that owns the file (D7), with the app closed.
  */
 export function seedProjectPlan(userData: string, seed: ProjectSeed): { conversationId: string; planId: string; targetId: string } {
-  const project = new HostStore(join(userData, "nivra.json")).data.projects.find((candidate) => candidate.label === seed.projectLabel);
+  // Read here, not through HostStore, which moves a file it can't read aside: a seed leaves the profile as it found it.
+  const projects = (JSON.parse(readFileSync(join(userData, "nivra.json"), "utf8")) as { projects?: Array<{ id: string; label: string; targetId: string }> }).projects ?? [];
+  const project = projects.find((candidate) => candidate.label === seed.projectLabel);
   if (!project) throw new Error(`No project is labelled ${seed.projectLabel} in this profile. Add its folder in the app first.`);
   const opening = openWorkspace(join(userData, "workspace.db"));
   if (opening.state !== "ready") throw new Error(opening.reason);

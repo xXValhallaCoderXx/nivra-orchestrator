@@ -25,7 +25,7 @@ const WHATSNEW = "https://docs.python.org/3/whatsnew/3.12.html";
 const REMOVED = "The distutils package has been removed from the standard library.";
 /** What the permission, Settings, the preview and the delete dialog say is kept, pinned here word for word. */
 const RETENTION =
-  "Tavily keeps what it receives, under its own terms. Nivra's engine keeps each research report and can't delete it yet: the assumptions and queries, the pages' titles and addresses, the passages read, and the model's assessments with their reasoning, uncertainty and suggested amendments. What was already sent can't be withdrawn.";
+  "Tavily keeps what it receives, under its own terms. Nivra's engine keeps each research report and can't delete it yet: the assumptions, queries and sites, the pages' titles and addresses, the passages read, and the model's assessments with their quotations, reasoning, uncertainty and suggested amendments, and a note of any it handed in that couldn't be used. What was already sent can't be withdrawn.";
 
 // Each test builds on the one before (one profile, the same keys and conversations): see workspace.spec.ts.
 test.describe.configure({ mode: "serial" });
@@ -176,9 +176,9 @@ test("with research off and no Tavily key, a seeded plan's preview says what kee
   await page.getByTestId("research-preview-button").click();
   await expect(page.getByTestId("research-preview-queries")).toContainText(ASSUMPTION);
   await expect(page.getByTestId("research-preview-not-sent")).toHaveText("Not sent: the repository's files, this conversation, other plans or versions, your preferences and your tasks.");
-  await expect(page.getByTestId("research-preview-model")).toContainText(
-    "The passages read from those pages, with each page's title, host and address, and the assumption it was found for.",
-  );
+  for (const words of [`The plan's text: ${SEEDED.plan.length} characters.`, `A1: ${ASSUMPTION}`, "The passages read from those pages, with each page's title, host and address, and the assumption it was found for."]) {
+    await expect(page.getByTestId("research-preview-model")).toContainText(words);
+  }
   await expect(page.getByTestId("research-preview-limits")).toHaveText(
     "At most 1 search and 1 read of up to 5 pages in all, 1 model call, 2 Tavily credits and 240 seconds. Nothing is retried.",
   );
@@ -190,13 +190,16 @@ test("with research off and no Tavily key, a seeded plan's preview says what kee
   await page.getByTestId("research-allow-web").click();
   const permission = page.getByTestId("research-permission");
   for (const words of [
+    "Send research queries to Tavily?",
     "Research sends Tavily, a web search service:",
+    "your Tavily key, which identifies your account;",
     "the queries you approve for each run, exactly as the preview shows them;",
     "the addresses of pages its own search returned, so it can read passages from them;",
     "the sites you list, if any.",
-    "Nothing else goes to Tavily: no other words from the plan, and none of your repositories, their paths, your preferences or your conversations. Nivra checks each query for keys, addresses, paths and your projects' names before it is sent, but those checks can't catch everything: read each query before you start.",
+    "Nothing else of yours goes to Tavily: no other words from the plan, and none of your repositories, their paths, your preferences or your conversations. Nivra checks each query for keys, addresses, paths and your projects' names before it is sent, but those checks can't catch everything: read each query before you start.",
     RETENTION,
     "This is for the whole app, apart from sharing a project with Token Factory or uploading it to a sandbox. Each run still waits for you to start it. Turning it off stops further requests and cancels research where it can.",
+    "Turn on",
   ]) {
     await expect(permission).toContainText(words);
   }
@@ -208,7 +211,7 @@ test("with research off and no Tavily key, a seeded plan's preview says what kee
   // Settings say the same of what Tavily gets and what is kept.
   await page.getByTestId("nav-projects").click();
   await expect(page.getByTestId("web-research-words")).toHaveText(
-    `When it is on, each run still waits for you to start it. Tavily gets only the queries you approve, the sites you list, if any, and the addresses of pages its own search returned: no other words from the plan, and none of your repositories or conversations. Turning it off stops research under way where it can. ${RETENTION}`,
+    `When it is on, each run still waits for you to start it. Tavily gets your Tavily key, the queries you approve, the sites you list, if any, and the addresses of pages its own search returned: no other words from the plan, and none of your repositories or conversations. Turning it off stops research under way where it can. ${RETENTION}`,
   );
   await page.getByTestId("nav-planning").click();
   if (!packaged) expect([tavily.calls.length, researchRequests().length]).toEqual([0, 0]);
@@ -261,8 +264,11 @@ test("research of a general plan keeps the model's conclusion, the quotations fo
   // The model got what the preview and the consent say: the plan, the assumptions, and the passages with each page's
   // title, host and address.
   const asked = researchRequests()[0]!.raw;
-  const missing = [SEEDED.plan, ASSUMPTION, REMOVED, "What's New In Python 3.12", "| docs.python.org |", WHATSNEW].filter((part) => !asked.includes(part));
+  const missing = [SEEDED.plan, ASSUMPTION, REMOVED, "What's New In Python 3.12", "| docs.python.org |", WHATSNEW, "found for A1"].filter((part) => !asked.includes(part));
   expect(missing).toEqual([]);
+  // Nor anything the preview says isn't sent: the queries, the conversation, the keys.
+  const leaked = ["Python 3.12 distutils standard library", "Can we move to 3.12?", "Meanwhile?", KEY, TAVILY].filter((part) => asked.includes(part));
+  expect(leaked).toEqual([]);
 });
 
 test("an amended version is saved from the research once; a second save is refused and saves nothing", async () => {
@@ -378,7 +384,7 @@ test("a project's plan: every query starts empty, and Use the assumption's words
   // From here on, a preview's answer and a permission's save are each held, so a test can change the selection before
   // either ends.
   await app.close();
-  await launch(testInfo, ["--nivra-test-preview-delay-ms=1500", "--nivra-test-permission-delay-ms=1500"]);
+  await launch(testInfo, ["--nivra-test-preview-delay-ms=1500", "--nivra-test-permission-delay-ms=3000"]);
   await newChat("alpha");
   await page.getByTestId("composer").fill("Plan the move to 3.12");
   await page.getByTestId("composer-send").click();
@@ -455,7 +461,7 @@ async function previewProjectPlan() {
 
 /** After a held permission and the preview it leads to, nothing is shown, and a new preview shows the edited query. */
 async function editedDuringSave(query: string) {
-  await page.waitForTimeout(3_500);
+  await page.waitForTimeout(5_000);
   await expect(page.getByTestId("research-preview")).toBeHidden();
   await expect(page.getByTestId("research-start")).toBeHidden();
   await page.getByTestId("research-preview-button").click();
@@ -470,7 +476,7 @@ test("a query edited while research's permission is being saved clears the previ
   await expect(page.getByTestId("research-blocked")).toContainText("Research queries to Tavily are turned off. Turn them on, then start again.");
   await page.getByTestId("research-allow-web").click();
   await page.getByTestId("research-permission-allow").click();
-  // The permission is saved 1.5 s from now: the query changes before then.
+  // The permission is saved 3 s from now: the query changes before then.
   await page.getByTestId("research-query").first().fill("Rolling deploys keep one node serving");
   expect((await page.evaluate(() => window.nivra.getSettings())).webResearch).toBe(false);
   await expect.poll(() => page.evaluate(() => window.nivra.getSettings()).then((settings) => settings.webResearch)).toBe(true);
@@ -488,7 +494,7 @@ test("a query edited while a project's sharing is being allowed for research cle
   for (const words of [
     "To check the assumptions of plans from conversations about alpha, Nivra sends Nebius Token Factory:",
     "the plan version's text and the assumptions you pick;",
-    "passages read from public web pages, with each page's title, host and address.",
+    "passages read from public web pages, each with its page's title, host and address, and the assumption it was found for.",
     "This is for the whole project: its explanations, its conversations, and the reviews and research of its plans. You can turn it off at any time, which stops them all.",
   ]) {
     await expect(consent).toContainText(words);

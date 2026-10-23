@@ -120,6 +120,8 @@ test("the person's own cancel, turned down by the engine, says why, and Cancel w
   // From here, runs.start is answered at once, and the run keeps running until it is cancelled.
   unflag("error-start");
   unflag("accept");
+  flag("release");
+  flag("running");
   const card = await startResearch();
   await expect(card.getByTestId("research-status")).toHaveText("Researching");
   flag("fail-cancel-once");

@@ -406,7 +406,7 @@ function ResearchDialog({
         onClose={() => setAsking(null)}
         onAllow={() => void allowSharing()}
         intro={`To check the assumptions of plans from conversations about ${project?.label ?? "this project"}, Nivra sends Nebius Token Factory:`}
-        sends={["the plan version's text and the assumptions you pick;", "passages read from public web pages, with each page's title, host and address."]}
+        sends={["the plan version's text and the assumptions you pick;", "passages read from public web pages, each with its page's title, host and address, and the assumption it was found for."]}
         after={CONSENT_COVERS}
         testId="research-consent"
       />
@@ -424,12 +424,13 @@ function WebResearchModal({ opened, onClose, onAllow }: { opened: boolean; onClo
       <Stack gap="sm">
         <Text size="sm">Research sends Tavily, a web search service:</Text>
         <List size="sm">
+          <List.Item>your Tavily key, which identifies your account;</List.Item>
           <List.Item>the queries you approve for each run, exactly as the preview shows them;</List.Item>
           <List.Item>the addresses of pages its own search returned, so it can read passages from them;</List.Item>
           <List.Item>the sites you list, if any.</List.Item>
         </List>
         <Text size="sm">
-          Nothing else goes to Tavily: no other words from the plan, and none of your repositories, their paths, your preferences or your conversations. Nivra checks
+          Nothing else of yours goes to Tavily: no other words from the plan, and none of your repositories, their paths, your preferences or your conversations. Nivra checks
           each query for keys, addresses, paths and your projects' names before it is sent, but those checks can't catch everything: read each query before you start.
         </Text>
         <Text size="sm">{RESEARCH_RETENTION}</Text>
