@@ -372,6 +372,40 @@ cd apps/engine && node --test test/research-run.test.ts test/research-engine.tes
   Token Factory, in process, and only with an approval of its printed digest. `--plan` prints the recipe with no
   network. Each key comes from a file of its own (mode 600, outside the repository), never from the environment.
   Evidence goes to `~/nivra-acceptance/research-check-<UTC>-<revision>/`. One approval is one run.
+- **Two more switches for the window's tests (D38),** also ignored by a packaged app:
+  - `--nivra-test-permission-delay-ms` holds research's permission and a project's sharing before they are saved;
+  - `--nivra-test-engine=gated` runs `apps/desktop/test/fixtures/gated-engine.mjs` as the local engine: it takes only
+    a fixture's name. Its switches are files in its engine home (see the fixture's header), and
+    `research-cancel.spec.ts` shows how a lost start's answer and a refused cancel are set up.
+
+R3's demonstration through the app (NIV-45, D37) researches one seeded project plan on the WSL engine of the Windows
+app. Its values (the plan, its two assumptions, the queries, the sites, the project's name and the fixed ids) live in
+`apps/desktop/scripts/research-demo.ts`. The journey (`scripts/research-journey.ts`) is shared by an offline e2e and
+the live script:
+
+```bash
+cd apps/desktop && xvfb-run -a pnpm -s test:e2e research-journey.spec.ts   # the whole journey, against stand-ins
+node scripts/research-live.ts --freeze      # builds the Windows app from this clean tree, copies it to %LOCALAPPDATA%\nivra-dev\r3-<UTC>, records its hashes
+node scripts/research-live.ts --plan        # the recipe and its digest, for approval; no app, no network
+node scripts/research-live.ts --rehearse    # the journey on the frozen build with fake keys, up to the preview; nothing starts
+node scripts/research-live.ts --live --approved <digest>   # the approved run, detached; follow its log
+node scripts/research-live.ts --cleanup     # opens the last live profile and removes its keys, if a run left them
+```
+
+- **The plan is seeded,** so no model call makes it: the app adds the project through its window, then
+  `seedProjectPlan` (`e2e/seed-workspace.ts`, run by the staged `node.exe` with the app closed) saves a project
+  conversation's repository answer as plan v1 under fixed ids. Its preview's fingerprint is known in advance, and the
+  approval binds it, with the revision and the frozen build's `Nivra.exe`, `app.asar` and WSL runtime.
+- **One approval is one run.** `--live` claims the approval in `~/nivra-acceptance/claims/research-r3/`, just before it
+  presses Start, and only once the window's preview has the approved fingerprint. A failure before then removes the
+  keys and spends nothing.
+- **The person's part.** They paste the keys into Settings, and save the amended version themselves. The script waits
+  for files in the evidence folder (`go-close`, `stop`), and nothing after Start can throw it out of the run.
+- **Homes and evidence.** Each mode uses a profile of its own under the frozen folder and a WSL home under
+  `~/.nivra-dev-track-a/`. It proves the route (the WSL engine, never the native one), and checks `~/.nivra` and
+  `~/.nivra-dev` are unchanged. It scans the evidence, the profile and the engine's home for credential shapes
+  (`scripts/shape-scan-cli.ts`), which can't see a Token Factory key. Evidence goes to
+  `~/nivra-acceptance/research-r3-<mode>-<UTC>-<revision>/`.
 
 ## Where things will live
 
