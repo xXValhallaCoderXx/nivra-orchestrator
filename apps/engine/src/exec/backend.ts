@@ -119,8 +119,12 @@ export interface CloseReport {
 export interface ExecutionSession {
   readonly capabilities: ExecutionCapabilities;
   exec(request: ExecRequest): Promise<ExecResult>;
-  /** A file from the workspace's machine as it now stands, refused past `maxBytes`, with its sha256. */
-  download?(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; sha256: string }>;
+  /**
+   * A file from the workspace's machine as it now stands, refused past `maxBytes`, with its sha256. `timeoutMs` is its
+   * own deadline, within the session's: a read that doesn't finish by then is refused, so a slow one can't use up the
+   * time kept for what comes after it.
+   */
+  download?(path: string, maxBytes: number, options?: { timeoutMs?: number }): Promise<{ bytes: Uint8Array; sha256: string }>;
   /** The steps recorded so far, as `close` will report them: for a report made before the session closes. */
   steps?(): readonly SessionStep[];
   /**

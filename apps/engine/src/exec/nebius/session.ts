@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join, posix } from "node:path";
 import { BoundaryUnavailableError, checkRequirements, ExecRefusedError, ExecUncertainError, SessionOpenError, type CloseReport, type ExecRequest, type ExecResult, type ExecutionBackend, type ExecutionCapabilities, type ExecutionSession, type SessionSnapshot, type SessionSpec, type SessionStep } from "../backend.ts";
-import { fetchTransport, SandboxApi, SandboxCancelledError, SandboxHttpError, SandboxNotSentError, SandboxTooLargeError, sleepFor, type Transport } from "./api.ts";
+import { fetchTransport, SandboxApi, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, SandboxTooLargeError, sleepFor, type Transport } from "./api.ts";
 import { Journal, RETENTION, Sandbox, SandboxLateSpawnError, SandboxRefusal, type JournalEntry, type Outcome, type SandboxOptions, type StepSpec } from "./sandbox.ts";
 
 /**
@@ -613,18 +613,22 @@ class NebiusSession implements ExecutionSession {
     return new ExecUncertainError(`Starting ${step.command} failed (${error instanceof Error ? error.message : String(error)}); it may have reached the sandbox, so it won't be sent again. Closing the session looks for it.`);
   }
 
-  async download(path: string, maxBytes: number): Promise<{ bytes: Uint8Array; sha256: string }> {
+  async download(path: string, maxBytes: number, options: { timeoutMs?: number } = {}): Promise<{ bytes: Uint8Array; sha256: string }> {
     if (this.#closing) throw new ExecRefusedError("This session is closed.");
     // A stale session's image is older than what its last command was meant to leave: reading it would mislead.
     if (this.#state.kind !== "open") throw new ExecRefusedError(`Nothing can be read from this session now (${this.#state.why}).`);
     if (!guestPath(path)) throw new ExecRefusedError(`Give the file's full path on the sandbox's machine; "${path}" isn't one.`);
     if (!(maxBytes > 0) || maxBytes > this.#limits.maxDownloadBytes) throw new ExecRefusedError(`A download may be at most ${this.#limits.maxDownloadBytes} bytes.`);
-    const sandbox = this.#sandbox(this.#client(this.#work.signal), () => this.#deadline, this.#work.signal);
+    if (options.timeoutMs !== undefined && !(options.timeoutMs > 0)) throw new ExecRefusedError("A download needs some time to run.");
+    // Its own deadline, within the session's: the earlier of the two.
+    const until = options.timeoutMs === undefined ? this.#deadline : Math.min(this.#deadline, this.#now() + options.timeoutMs);
+    const sandbox = this.#sandbox(this.#client(this.#work.signal), () => until, this.#work.signal);
     try {
       return await sandbox.download(this.#image, path, maxBytes, null);
     } catch (error) {
       if (error instanceof SandboxHttpError && error.status === 404) throw new ExecRefusedError(`There's no file at ${path} in the sandbox.`);
       if (error instanceof SandboxTooLargeError) throw new ExecRefusedError(`${path} is longer than the ${maxBytes} bytes asked for, so it wasn't read.`);
+      if (error instanceof SandboxDeadlineError && options.timeoutMs !== undefined && !this.#work.signal.aborted) throw new ExecRefusedError(`${path} wasn't read back within its ${Math.round(options.timeoutMs / 1000)} s.`);
       throw error;
     }
   }

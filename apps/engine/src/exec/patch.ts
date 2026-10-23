@@ -4,7 +4,7 @@ import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { hiddenReason, OUTPUT_DIRS } from "../repo/deny.ts";
 import { ExecRefusedError, type ExecRequest, type ExecResult, type ExecutionSession } from "./backend.ts";
-import { runGitBytes, WorkspaceCancelled, WorkspaceRefusal, type GitTool, type RefusalCode } from "./git-tool.ts";
+import { runGitBytes, WorkspaceCancelled, WorkspaceRefusal, type GitTool, type PhaseDeadline, type RefusalCode } from "./git-tool.ts";
 import { credentialKinds, isLfsPointer, type Counted, type Snapshot, type SnapshotFile } from "./snapshot.ts";
 import { readTar, TarRefusal, type TarLimits } from "./tar.ts";
 import { byBytes, caseKey, isGitControlFile, proposedPathProblem } from "./workspace-rules.ts";
@@ -168,8 +168,11 @@ export function checkCollected(stdout: string, archive: { bytes: Uint8Array; sha
   return { entries, archiveSha256: archive.sha256, listingSha256: listing.sha256 };
 }
 
-/** Runs the collect step in `session` and reads its archive and listing back, checked against each other. */
-export async function collectResult(session: ExecutionSession, options: { workspace: string; applets?: string; timeoutMs?: number; limits?: Partial<CollectLimits>; signal?: AbortSignal }): Promise<{ collected: Collected; ran: ExecResult }> {
+/**
+ * Runs the collect step in `session` and reads its archive and listing back, checked against each other. Each read has
+ * `downloadTimeoutMs` of its own when given, so the time kept for what comes after collecting is never spent here.
+ */
+export async function collectResult(session: ExecutionSession, options: { workspace: string; applets?: string; timeoutMs?: number; downloadTimeoutMs?: number; limits?: Partial<CollectLimits>; signal?: AbortSignal }): Promise<{ collected: Collected; ran: ExecResult }> {
   const limits: CollectLimits = { ...COLLECT_LIMITS, ...options.limits };
   if (!session.download) throw new WorkspaceRefusal("This execution session can't hand files back, so the result can't be collected.", "collect");
   const ran = await session.exec({ ...collectRequest(options.workspace, options), ...(options.signal ? { signal: options.signal } : {}) });
@@ -179,8 +182,9 @@ export async function collectResult(session: ExecutionSession, options: { worksp
     throw new WorkspaceRefusal(`The sandbox couldn't collect its result (${why}), so no change was proposed.`, "collect", ran.stderr.trim().split("\n").at(-1)?.slice(0, 300) || null);
   }
   try {
-    const archive = await session.download(RESULT_ARCHIVE, limits.maxBytes);
-    const listing = await session.download(RESULT_LISTING, limits.maxListingBytes);
+    const reading = options.downloadTimeoutMs === undefined ? undefined : { timeoutMs: options.downloadTimeoutMs };
+    const archive = await session.download(RESULT_ARCHIVE, limits.maxBytes, reading);
+    const listing = await session.download(RESULT_LISTING, limits.maxListingBytes, reading);
     return { collected: checkCollected(ran.stdout, archive, listing, limits), ran };
   } catch (error) {
     if (error instanceof ExecRefusedError) throw new WorkspaceRefusal("The sandbox's result couldn't be read back, so no change was proposed.", "collect", error.message);
@@ -485,6 +489,8 @@ export interface PatchOptions {
   /** Where the temporary object store goes: never inside a repository. */
   scratch?: string;
   signal?: AbortSignal;
+  /** One deadline for all of the patch's git commands. */
+  deadline?: PhaseDeadline;
 }
 
 /** A file for the store, at its path in the repository. */
@@ -554,7 +560,7 @@ async function openStore(options: PatchOptions): Promise<{ dir: string; tool: Gi
     const gitDir = join(dir, "store.git");
     const isolated = { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: devNull, HOME: home, XDG_CONFIG_HOME: home, GIT_ATTR_NOSYSTEM: "1" };
     const config = ["-c", "core.attributesFile=", "-c", `core.hooksPath=${home}`, "-c", "core.protectNTFS=true", "-c", "core.protectHFS=true", "-c", "core.autocrlf=false", "-c", "core.safecrlf=false"];
-    const init: GitTool = { session: options.session, git: options.git, cwd: dir, env: isolated, config, signal: options.signal };
+    const init: GitTool = { session: options.session, git: options.git, cwd: dir, env: isolated, config, signal: options.signal, deadline: options.deadline };
     await runGitBytes(init, ["init", "-q", "--bare", "--template=", ...(options.snapshot.objectFormat === "sha256" ? ["--object-format=sha256"] : []), gitDir]);
     return { dir, tool: { ...init, env: { ...isolated, GIT_DIR: gitDir, GIT_INDEX_FILE: join(dir, "index") } } };
   } catch (error) {
@@ -583,7 +589,7 @@ export async function buildPatch(options: PatchOptions): Promise<PatchResult> {
   const policy: PatchPolicy = { ...PATCH_POLICY, ...options.policy };
   const { snapshot } = options;
   const changes = findChanges(snapshot, options.collected, { ...(options.knownValues ? { knownValues: options.knownValues } : {}), policy });
-  const repository: GitTool = { session: options.session, git: options.git, cwd: snapshot.folder, signal: options.signal };
+  const repository: GitTool = { session: options.session, git: options.git, cwd: snapshot.folder, signal: options.signal, deadline: options.deadline };
   const present = await runGitBytes(repository, ["cat-file", "-e", `${snapshot.baseline}^{commit}`], { okCodes: [1, 128] });
   if (present.exitCode !== 0) throw new WorkspaceRefusal(`The commit this run started from (${snapshot.baseline.slice(0, 12)}) is no longer in the repository, so no patch was made.`, "patch");
   const full = (rel: string) => (snapshot.prefix ? `${snapshot.prefix}/${rel}` : rel);

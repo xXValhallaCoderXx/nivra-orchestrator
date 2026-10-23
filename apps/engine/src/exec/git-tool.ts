@@ -71,6 +71,18 @@ export interface GitTool {
   /** `-c name=value` pairs, after the pins. */
   config?: readonly string[];
   signal?: AbortSignal | undefined;
+  /**
+   * One deadline for a whole phase's git commands (a snapshot, a patch), on the monotonic clock unless `now` is given:
+   * each command gets its own limit or the time left, whichever is less, so the phase never runs past it.
+   */
+  deadline?: PhaseDeadline | undefined;
+}
+
+export interface PhaseDeadline {
+  at: number;
+  /** The phase, for a refusal's words: "Building the patch". */
+  what: string;
+  now?: () => number;
 }
 
 /**
@@ -78,7 +90,11 @@ export interface GitTool {
  * exit not in `okCodes` is a refusal. git's own words go in the refusal's `detail`, never its message.
  */
 export async function runGitBytes(tool: GitTool, args: readonly string[], options: { stdin?: Uint8Array; timeoutMs?: number; maxBytes?: number; okCodes?: readonly number[]; tooBig?: { message: string; code: RefusalCode } } = {}): Promise<{ bytes: Uint8Array; text: string; exitCode: number }> {
-  const timeoutMs = options.timeoutMs ?? 60_000;
+  const own = options.timeoutMs ?? 60_000;
+  const left = tool.deadline ? Math.floor(tool.deadline.at - (tool.deadline.now ?? (() => performance.now()))()) : Number.POSITIVE_INFINITY;
+  const outOfTime = () => new WorkspaceRefusal(`${tool.deadline!.what} took longer than the time it's given, so it was stopped.`, "git");
+  if (left < 1) throw outOfTime();
+  const timeoutMs = Math.min(own, left);
   const maxBytes = options.maxBytes ?? 4 * 1024 * 1024;
   const result = await tool.session.exec({
     argv: [tool.git, ...GIT_PINS, ...(tool.config ?? []), ...args],
@@ -93,7 +109,7 @@ export async function runGitBytes(tool: GitTool, args: readonly string[], option
   });
   const what = `git ${args[0] ?? ""}`;
   if (result.cancelled) throw new WorkspaceCancelled();
-  if (result.timedOut) throw new WorkspaceRefusal(`${what} took longer than ${Math.round(timeoutMs / 1000)} s, so it was stopped.`, "git");
+  if (result.timedOut) throw timeoutMs < own ? outOfTime() : new WorkspaceRefusal(`${what} took longer than ${Math.round(timeoutMs / 1000)} s, so it was stopped.`, "git");
   if (result.truncated) throw options.tooBig ? new WorkspaceRefusal(options.tooBig.message, options.tooBig.code) : new WorkspaceRefusal(`${what} gave more than the ${maxBytes} bytes Nivra reads, so it was stopped.`, "git");
   const exitCode = result.exitCode ?? -1;
   if (exitCode !== 0 && !(options.okCodes ?? []).includes(exitCode)) {
