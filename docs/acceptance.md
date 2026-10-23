@@ -1846,6 +1846,150 @@ After each merge, Linear should be checked for NIV-34 being closed by mistake.
     the window, or a live call;
   - the project id is masked in what the engine stores, like every vault value.
 
+### Research of saved-plan assumptions: NIV-45 completion record (D37, D38)
+
+Prepared 23 October 2026, after R3's live run, at `main` `8110e0a`.
+- **R1** (PR 13, `471b29a`) built research offline and ran the live check twice in process.
+- **R2** (PR 15, `a49a4b8`) wired it into the engine, the host and the window (D37).
+- **R3** (PR 16, `8110e0a`) corrected its wording (D38), closed three UI gaps, and ran the demonstration once through
+  the real app.
+
+This is R3's focused app acceptance, not a repeat comparable with R1: two assumptions, chosen because both decide
+whether the plan works.
+
+| NIV-45 acceptance item | Evidence | Where it stands |
+|---|---|---|
+| 1. The plan identity and version, assumptions, scope and research limits frozen; the result bound to them; later edits can't change a run under way | The packet (plan text, assumptions with their origin, queries, sites, scope) is digested canonically, and the preview's fingerprint binds it with both permissions. Start sends exactly the previewed selection, and the engine refuses a packet that isn't the one fingerprinted. Tests: domain `research.test.ts` ("takes the plan version and the packet's fingerprint…", "changes with a query, a site, an assumption's origin or the scope"); `research-units.test.ts` ("refuses a packet that isn't the one fingerprinted…"); host ("…or the plan moved on"); e2e (an edit, a late preview answer, or an edit during a permission's save, each clears the preview). Live (R3): the preview's fingerprint was the approved one, and the run's packet digest was the approved `1cd35b2a…` | Evidenced |
+| 2. A focused Tavily adapter behind a small provider-neutral retrieval contract; no new framework or package | `apps/engine/src/research/retrieval.ts` (the contract) and `tavily.ts` (Search, then Extract of Search's own addresses), R1. No dependency added | Evidenced |
+| 3. Numeric budgets before live work (at most 3 searches and 5 extracted pages a run, as product limits); reported usage kept apart from estimates and unknowns | `RESEARCH_LIMITS`: 3 searches, 3 extracts over 5 pages, 15 passages, 1 model request, 240 s with retrieval stopping at 90 s, and the model held to the smaller of 150 s and the time left (D37). Credits are as Tavily reported them, null when it didn't, never 0. Tokens are as reported, beside the run's estimated budget (D30). Tests: `research-run.test.ts` ("never sends a fourth search…", "stops retrieval at its cutoff…", "never lets the model's time pass the run's deadline…", "keeps credits unknown…, never 0"). Live: R1 4 and 4 credits; R3 3 of at most 4 | Evidenced |
+| 4. Permission for Tavily queries apart from model-context and workspace-upload consent; the exact outgoing queries shown; private text, names, paths and credentials not included by default; unsafe queries refused, not masked | `webResearch` is app-wide and off until the person turns it on, apart from a project's sharing and its uploads (D37). The preview lists exactly what goes to Tavily and to Token Factory, and the wording matches the code (D38, pinned word for word in `research.spec.ts`). Queries holding a saved key, a credential shape, an address, a path, a cited path, a project's name or folder, an email address or a private host are refused by kind, never masked (domain `research.test.ts`; the engine checks again). A project's queries start empty | Evidenced |
+| 5. Credentials in the host's secure storage and the engine's memory transport only; retrieved content untrusted, never instructions | `TAVILY_API_KEY` is kept like the Nebius key, and handed over only in `initialize` and `secrets.update` (D8). Changes to the secrets file run one at a time (`c786d13`). The key travels in a header only, and is masked in what the engine keeps ("sends Tavily only the approved queries…", "…masks both keys in what it keeps"). Passages are made plain and framed with the request's code, so page text can't pose as instructions ("frames each passage…"). Live (R3): no credential shape in the evidence, the profile or the engine's home, 77 files read; a Token Factory key has no shape the scan could see | Evidenced |
+| 6. Cancellation, deadlines, partial source failures and restart or uncertain-run handling visible and bounded, with no hidden replay; reports reopen after a restart; project isolation; deliberate deletion and retention | Stops carry their own cause and token, the newest wins, and a failed one is taken back and shown (R2, `c786d13`, `research-cancel.spec.ts`). Tests cover: a cancel during Search or Extract; one search refused while the other goes on; an engine killed mid-Extract or mid-model-call, reading as interrupted and never resent; a lost start found by its request id; a relaunch keeping the report and both versions. A run's context reaches research alone. Deleting a conversation stops its research and keeps nothing of it in the workspace. The engine's report is kept and can't be deleted yet, and every place that asks for consent says so (D38) | Evidenced, except that the engine can't yet delete its reports (disclosed in the copy) |
+| 7. Evidence cards and supported, contradicted or unresolved outcomes beside proposed amendments; a source mismatch or a missing version match stays unresolved | The card keeps four things apart: the model's conclusion, the quotations found, the quotations not found, and the assessments that couldn't be used (e2e "research of a general plan keeps…apart"). Unresolved is shown under a stated rule: no valid quotation, a version no cited source names, or quotations on both sides (`research-units.test.ts`). Amendments are offered only for a contradiction with valid quotations, or as a fixed note for an unresolved assessment | Evidenced |
+| 8. Missing Tavily credentials or an outage disable only the optional research action; chat, plan-only council review and execution stay available | Without a key the preview blocks Start, saying why ("blocks Start research with the first reason that applies"). A Tavily that can't be reached fails research alone, asks the model nothing, and the conversation goes on (host). Council review and execution have no path through Tavily | Evidenced for research and chat. Council review and execution don't depend on Tavily at all |
+| 9. Offline tests cover a useful contradiction, a supported assumption, insufficient or conflicting sources, citation-to-excerpt mapping, private-data canaries, consent revocation, cancellation, limits and stale plan versions | `research-run.test.ts`: the contradiction and the supported assumption; nothing readable; an unusable answer; the cutoff and the deadline. `research-units.test.ts`: quotations checked against the passage each names; quotations on both sides kept unresolved. `research-engine.test.ts`: a plan canary kept out of events, logs and every store, read while the engine runs. Host and e2e: permissions withdrawn, cancels, and a plan that moved on | Evidenced |
+| 10. The real-engine, UI, packaged and Windows checks for the surfaces changed; any live acceptance under a separately approved, bounded recipe, recording the actual requests, usage and limits | Real engine: `research-engine.test.ts` over stdio, and `rpc.ts` against stand-ins (R2). UI: `research.spec.ts`, `research-cancel.spec.ts`, `research-journey.spec.ts`. Packaged: 27 passed. Windows: `verify:windows`'s five research checks through the WSL engine (37 of 37), `test:windows` 12 of 12, and four rehearsals of the live script. Live: R1's two runs in process, each under its own digest; R3's run through the app under `fdde7a81…` (below) | Evidenced |
+| 11. A plausible upgrade plan with a known wrong compatibility assumption: retrieval exposes the missing requirement, the person inspects the source and saves an amended version; whether the evidence improved the plan recorded, not URL counts | R3's live run, below. Both wrong assumptions were contradicted from the official 3.12 release notes. Nate checked the page himself and saved v2. His judgement: the evidence improved the plan, "but its just a simple example" | Evidenced, through the Windows app and its WSL engine, on one simple example |
+
+**R3's live run (23 October, 07:33 to 07:49 UTC).** Approved by Nate under digest
+`fdde7a81807e2fd67919334c7a24eed03412072ef5781ccc71139b5471441a9b`. The recipe was posted on NIV-45 after a passing
+rehearsal from the same frozen build. The approval is claimed, run 1.
+
+- **Build:** frozen from `8110e0a`, a clean tree, the app built from it. Nivra.exe `fd783774…1406`, app.asar
+  `a332582f…dc62`, WSL runtime `c7dddc0b…1c54` (`af5c48c5666be22e`).
+- **Route, as shown:** a profile of its own, then `wsl:Ubuntu` in a home of its own, on the project `kestrelyard`
+  (commit `21bdbdc`). The engine reported that home on linux; the native Windows engine never ran.
+- **The plan,** seeded with no model call: "Move the build image from Python 3.11 to 3.12. The image creates a fresh
+  virtual environment with python -m venv /opt/venv, then builds the wheel inside it with python setup.py bdist_wheel,
+  installing nothing else into it first. setup.py keeps importing distutils.core."
+  - A1: "distutils is still in Python 3.12's standard library"
+  - A2: "Python 3.12's venv still pre-installs setuptools" (R1's A3, now naming 3.12)
+
+  Each query was the assumption's own words; the sites preferred were docs.python.org and peps.python.org.
+- **Steps:**
+  1. Nate pasted both keys into Settings.
+  2. The script gave research's permission and the project's sharing, each through its own dialog.
+  3. The preview showed exactly the two queries and the sites, with the approved fingerprint.
+  4. The approval was claimed and Start pressed once.
+
+| Request | State | Pages asked / read | Credits (as reported) | Time |
+|---|---|---|---|---|
+| search-A1 | answered | | 1 | 1.8 s |
+| search-A2 | answered | | 1 | 3.4 s |
+| extract-A1 | answered | 3 / 3 | 0 | 0.6 s |
+| extract-A2 | answered | 2 / 2 | 1 | 0.9 s |
+| model | answered | | | 3.9 s |
+
+- **Totals:** complete in 8.8 s; 3 Tavily credits; `nvidia/nemotron-3-super-120b-a12b`; 5,484 input and 595 output
+  tokens, both reported; 1 model call. Nothing failed, nothing was retried, and nothing was set aside.
+- **Pages read:**
+  - "What's New In Python 3.12" on docs.python.org, found first for both queries;
+  - for A1, two community pages: software.codidact.com and Stack Overflow;
+  - for A2, a GitHub issue.
+
+  Every quotation the model cited came from the docs.python.org page.
+- **A1: contradicted,** 2 of 2 quotations found in their passages:
+  - "Of note, the `distutils` package has been removed from the standard library."
+  - "gh-95299: Do not pre-install `setuptools` in virtual environments created with `venv`."
+
+  Suggested amendment: "Update the plan to install distutils via setuptools or use an alternative build system."
+- **A2: contradicted,** 2 of 2 quotations found:
+  - "gh-95299: Do not pre-install `setuptools` in virtual environments created with `venv`."
+  - "Remove the bundled setuptools wheel from `ensurepip`, and stop installing setuptools in environments created by
+    `venv`."
+
+  Suggested amendment: "Modify the plan to install setuptools explicitly after creating the venv (e.g., run `pip
+  install setuptools`)."
+- **The person's part:** Nate opened the address himself and found the quotations there ("they are valid i checked").
+  He saved v2 from the research: v1's text with A1's suggestion added under "From web research". v1 stayed unchanged,
+  and v2 became the latest.
+- **After the go-ahead:**
+  - the app was closed and relaunched on the same profile and home;
+  - the plan versions and the research were unchanged, and the window showed "Plan · v2", the original beneath it, and
+    "Saved as v2 from this research.";
+  - both keys were removed from the profile;
+  - `~/.nivra` and `~/.nivra-dev` were unchanged.
+
+  Failures recorded: none.
+
+**Nate's judgement, against the rubric, in his words:**
+1. Was the evidence about Python 3.12? "Yes"
+2. Official or community? "Official"
+3. Did each found quotation support its conclusion? "Yes"
+4. Was each conclusion warranted? "Yes"
+5. Did the evidence support the amendment? "Yes"
+6. Did the saved amendment improve the plan? "Yes but its just a simple example"
+7. Were the four distinctions readable? "Yes i think so we can improve this flow later after we lay groundwork"
+
+**Recorded alongside, not judged:**
+- **A1's second quotation** is about venv and setuptools, not distutils. It was found in the source, which proves
+  where its words came from; A1's conclusion rests on the first quotation.
+- **v2 keeps v1's text** and adds one suggestion. The step "installing nothing else into it first" and both assumptions
+  are still in it, and A2's more concrete suggestion (install setuptools after creating the venv) wasn't added. Research
+  saves one version only; a later edit would be an ordinary revision.
+- **A separate plan** with v1's text was also saved from the same answer at 07:43. It isn't linked to the research.
+- **The card's screenshot** was taken just before the window refreshed, so it shows "Researching". The full report is
+  in `report.json`.
+
+**Evidence:**
+- R3's run: `~/nivra-acceptance/research-r3-live-20261023T073352Z-8110e0a` (0700). It holds the recipe, the report,
+  the run's events, both plan listings, check.json, the log and screenshots.
+- Its rehearsal: `research-r3-rehearsal-20261023T072752Z-8110e0a`.
+- R1's two runs: `research-check-20261022T074430Z-aa3a81b` and `research-check-20261022T081246Z-f9d690b`, kept
+  unchanged.
+- No credential appears in any of them.
+
+**R1's live check, for the record** (in process, through `research-check.ts`, not the app):
+- **Run 1,** 22 Oct 07:44 UTC: 4 credits, 4,685 and 1,050 tokens, 10.2 s. All three assessments came out "not
+  assessed", because none named its assumption. The matching rules were fixed before run 2.
+- **Run 2,** 08:12 UTC: complete in 7.9 s, 4 credits, 4,945 and 1,012 tokens. A1 contradicted (3 of 3 quotations
+  valid), A2 supported (1 of 2), A3 contradicted (1 of 1). Its caveats are on NIV-45.
+
+**Checks, as run:**
+
+| Check | R2 (PR 15) | R3 (PR 16) |
+|---|---|---|
+| `pnpm verify` | 60, 263, 515 | 60, 267, 515 |
+| `test:e2e`, the built app | passed in full once two stale assertions were fixed (1 skipped, packaged only); research.spec 9 of 9 | 61 passed, 1 skipped; the research specs 16 of 16 after every fix |
+| `test:packaged` | 26 passed | 27 passed, both switches shown ignored |
+| `verify:windows` | 37 of 37, five research checks | not affected (no target, supervisor or staging change) |
+| `test:windows` | 12 of 12, twice | 12 of 12, twice |
+| Real engine | `rpc.ts` against stand-ins | the live script's rehearsals, four passed |
+| Live | none (R1's two runs before it) | one approved run through the app, above |
+
+**Limits:**
+- **Platform:** from Windows, research is shown through the WSL engine only; nothing is claimed for the native Windows
+  engine. On Linux it is shown offline, against stand-ins.
+- **One run, one example:** R3 is one live run of one simple plan, and its judgement says so. It doesn't measure how
+  often research helps, or how it fares on harder questions.
+- **What a check proves:** a found quotation proves where its words came from, not that they support the conclusion.
+  The model's assessment stays the model's, and the person judges it.
+- **Retention:** the engine keeps every report and can't delete it yet.
+- **Keys:** the credential scan can't see a Token Factory key. The engine's offline tests check that no key value
+  reaches its stores.
+- **The flow:** Nate's own note on readability: "we can improve this flow later after we lay groundwork". The broader
+  research and memory work stays with NIV-33.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
