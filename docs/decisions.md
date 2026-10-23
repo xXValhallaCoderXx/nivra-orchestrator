@@ -2444,4 +2444,9 @@ assumptions and the passages read"; that Tavily never gets "the plan's text"; an
     tree it records;
   - the credential scan reads the whole profile and engine home, and says it can't see a Token Factory key, which has
     no shape of its own.
+- **Nate's review of `c3efeb8` (PR 16, 23 October)** found two more, each reproduced there, then fixed (`da42965`):
+  1. a log or save that failed after Start (a full disk, say) could still end the run before the person's go-ahead
+     and the keys' removal. Every write is now recorded if it fails, never fatal, and a test fails every one of them;
+  2. the demonstration repository the approval records wasn't checked again after the freeze. A changed checkout (an
+     edit, a new commit, an untracked file, another distribution) is now refused, and again just before the claim.
 - The live run and its record are R3's acceptance, in `docs/acceptance.md`.
