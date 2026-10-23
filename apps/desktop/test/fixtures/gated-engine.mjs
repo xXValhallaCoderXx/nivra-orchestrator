@@ -19,6 +19,8 @@
 // For research (D37): runs.start records each research request and what it was bound to (`research.log`), and
 // runs.research answers with a report that repeats it: complete, or cancelled for a run it was asked to cancel. With a
 // `fail-cancel-once` file, the next runs.cancel it answers is turned down, and the file is removed.
+// It takes secrets.update, and turns down at once any other method it doesn't stand in for, so no caller waits out its
+// time limit. The window's tests run it as the local engine with --nivra-test-engine=gated (unpackaged only).
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -201,9 +203,13 @@ process.stdin.on("data", (chunk) => {
       };
       if (!existsSync(join(home, "hold-cancel"))) answer();
       else heldCancels.push(answer);
+    } else if (request.method === "secrets.update") {
+      send({ id: request.id, result: { ok: true } });
     } else if (request.method === "shutdown") {
       send({ id: request.id, result: { ok: true } });
       setTimeout(() => process.exit(0), 10);
+    } else {
+      send({ id: request.id, error: { code: -32601, message: `The gated engine doesn't stand in for ${request.method}.` } });
     }
   }
 });

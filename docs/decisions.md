@@ -2388,3 +2388,65 @@ the query for each, and sees exactly what would be sent. "Start research" is bou
   - deferred: research from chat or in council reviews, opening pages from the app, and deleting the engine's
     research records.
 - **Evidence:** R3 adds the acceptance record to `docs/acceptance.md`, after one approved live run through the app.
+
+## D38. What research sends and what its engine keeps, said exactly; two switches for the window's tests (2026-10-23)
+
+**Decision.** R3 of NIV-45 checked research's wording against what the code sends and keeps (D37). Behaviour is
+unchanged; the words change. This supersedes three statements in D37: that Token Factory gets "the plan's text, the
+assumptions and the passages read"; that Tavily never gets "the plan's text"; and that the engine keeps each report
+"with its queries, addresses and passages".
+
+- **Token Factory** gets the plan's text, the assumptions, and the passages read, each with its page's title, host and
+  address and the assumption it was found for (the engine's `research/prompt.ts`). The preview's Token Factory list and
+  the research consent say so.
+- **Tavily** gets the person's Tavily key, the queries they approve, the sites they list, and the addresses its own
+  search returned. Nothing else of theirs, and no other words from the plan. "Use the assumption's words" can put a
+  plan's own words into a query, which the person sees and approves, so "never the plan's text" was more than was true.
+- **What the engine keeps:** each research report, which it can't delete yet. The report holds:
+  - the assumptions, queries and sites;
+  - the pages' titles and addresses, and the passages read;
+  - the model's assessments with their quotations, reasoning, uncertainty and suggested amendments;
+  - a note of any assessment it handed in that couldn't be used.
+
+  `RESEARCH_RETENTION` says so wherever it is shown: the permission, Settings, the preview and the delete dialog.
+- **Two switches for the window's tests,** honoured only by an unpackaged app, as D22's stand-ins are:
+  - `--nivra-test-permission-delay-ms` holds a permission's save (research's, and a project's sharing) before the host
+    makes it, so a test can edit the research dialog meanwhile;
+  - `--nivra-test-engine=gated` runs a stand-in engine from the app's own test fixtures, by name, never by path, so a
+    test can lose a start's answer or have a cancel turned down, as a real engine never does.
+
+**Why.**
+- **Nate's outline for R3** asks that the consent wording describe accurately what is sent and kept. A consent that
+  says less than what leaves is as wrong as one that claims more.
+- **The checks were made against the code,** not the copy: the model's message is built in `researchMessage`, and the
+  report's schema is the domain's `ResearchReport`.
+- **The independent review of R3's app changes (23 October)** found the first correction still short. The report also
+  keeps the sites, the model's quotations and the note of unusable assessments, and Tavily also gets the key. Both are
+  in the wording now (`8d64386`).
+- **The switches close two of R3's UI gaps,** which no seam reached before:
+  - an edit made while a permission is being saved clears the preview that follows it (9230fb6's fix);
+  - a cancel that fails, deferred or the person's own, says why on the card, and Cancel works again (c786d13's fix).
+
+**Consequences.**
+- research.spec pins every research consent and retention string word for word, not through the constants, so changing
+  them is deliberate. It also checks the model's request holds what the preview lists and nothing it says isn't sent.
+  The Linear guide's summary of what leaves the app says the same.
+- `research-cancel.spec.ts` runs `gated-engine.mjs` as the window's local engine. The fixture now takes
+  `secrets.update`, and turns down at once any method it doesn't stand in for. The packaged project shows both switches
+  are ignored there.
+- R3's journey (`scripts/research-journey.ts`) runs offline end to end in `research-journey.spec.ts`, everything after
+  Start included (`runApproved`), on the functions `scripts/research-live.ts` drives the Windows app with.
+- The independent review of the live run (23 October) shaped `research-live.ts` (`6b3f018`):
+  - after Start nothing throws out of the run, and the app closes only on the person's go-ahead;
+  - `--live` runs detached, so it outlives its terminal;
+  - a failure before Start removes the keys and leaves the approval unspent, and `--cleanup` removes any keys left;
+  - the digest binds `Nivra.exe`, `app.asar` and the WSL runtime's tarball, and `--freeze` builds the app from the clean
+    tree it records;
+  - the credential scan reads the whole profile and engine home, and says it can't see a Token Factory key, which has
+    no shape of its own.
+- **Nate's review of `c3efeb8` (PR 16, 23 October)** found two more, each reproduced there, then fixed (`da42965`):
+  1. a log or save that failed after Start (a full disk, say) could still end the run before the person's go-ahead
+     and the keys' removal. Every write is now recorded if it fails, never fatal, and a test fails every one of them;
+  2. the demonstration repository the approval records wasn't checked again after the freeze. A changed checkout (an
+     edit, a new commit, an untracked file, another distribution) is now refused, and again just before the claim.
+- The live run and its record are R3's acceptance, in `docs/acceptance.md`.

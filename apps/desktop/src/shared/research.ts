@@ -113,9 +113,9 @@ export const initialQuery = (scope: "general" | "project", assumption: string): 
 /** What the card says under every assessment: the check is of provenance, and the judgement is the person's. */
 export const RESEARCH_CAVEAT = "Nivra checked that each quotation is in the page it names. Whether it supports the conclusion is for you to judge.";
 
-/** What the retention copy says in the permission, the delete dialog and the decision. */
+/** What is kept, said in the permission, Settings, the preview and the delete dialog (D37, D38). */
 export const RESEARCH_RETENTION =
-  "Tavily keeps what it receives, under its own terms. Nivra's engine keeps each research report, with its queries, addresses and passages, and can't delete it yet. What was already sent can't be withdrawn.";
+  "Tavily keeps what it receives, under its own terms. Nivra's engine keeps each research report and can't delete it yet: the assumptions, queries and sites, the pages' titles and addresses, the passages read, and the model's assessments with their quotations, reasoning, uncertainty and suggested amendments, and a note of any it handed in that couldn't be used. What was already sent can't be withdrawn.";
 
 export const CONCLUSION_LABEL: Readonly<Record<Conclusion, string>> = { supported: "Supported", contradicted: "Contradicted", unresolved: "Unresolved" };
 

@@ -193,7 +193,14 @@ function start(): void {
     (_event, previewId, choice) => host.importPreferences(previewId, choice),
   );
   handle(IPC.startHello, z.tuple([z.uuid(), z.number().int().min(0).max(600_000)]), (_event, id, holdMs) => host.startHello(id, holdMs));
-  handle(IPC.setSharing, z.tuple([z.uuid(), z.boolean()]), (_event, id, modelContext) => host.setSharing(id, modelContext));
+  // Tests only, when unpackaged: hold a permission before it is saved, so a test can edit the research dialog
+  // meanwhile.
+  const permissionDelayMs = app.isPackaged ? 0 : Number(app.commandLine.getSwitchValue("nivra-test-permission-delay-ms") || 0);
+  const permissionHeld = () => (permissionDelayMs > 0 ? new Promise((resolve) => setTimeout(resolve, permissionDelayMs)) : Promise.resolve());
+  handle(IPC.setSharing, z.tuple([z.uuid(), z.boolean()]), async (_event, id, modelContext) => {
+    await permissionHeld();
+    return host.setSharing(id, modelContext);
+  });
   // Sandbox checks (D36): upload consent of its own, and a check bound to its preview's fingerprint (SHA-256 in hex).
   handle(IPC.setCloudExecution, z.tuple([z.uuid(), z.boolean()]), (_event, id, cloudExecution) => host.setCloudExecution(id, cloudExecution));
   handle(IPC.previewSandboxCheck, project, (_event, id) => host.previewSandboxCheck(id));
@@ -297,6 +304,7 @@ function start(): void {
   // Research's permission (D37): off until the person turns it on. Turning it off stops research under way, and says so
   // when a run can't be stopped; it stays off either way.
   handle(IPC.setWebResearch, z.tuple([z.boolean()]), async (_event, on) => {
+    await permissionHeld();
     await host.setWebResearch(on);
     return settings();
   });
@@ -451,9 +459,14 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
   const appPath = app.getAppPath();
   const stage = join(appPath, "build", "stage");
   const hash = platform === "win32" ? readHash(join(stage, "runtime-linux-x64.json")) : null;
+  // Tests only, unpackaged: a stand-in engine from the app's own test fixtures, named, never a path ("gated" is
+  // test/fixtures/gated-engine.mjs), for what a real engine never does, such as losing a start's answer.
+  const fixture = app.commandLine.getSwitchValue("nivra-test-engine") || null;
+  if (fixture !== null && !/^[a-z]+$/.test(fixture)) throw new Error(`--nivra-test-engine takes a fixture's name, such as gated, not "${fixture}".`);
+  const entry = fixture ? join(appPath, "test", "fixtures", `${fixture}-engine.mjs`) : join(appPath, "..", "engine", "src", "main.mjs");
   return {
     local: {
-      runtime: { node: process.env["npm_node_execpath"] ?? process.env["NODE"] ?? "node", entry: join(appPath, "..", "engine", "src", "main.mjs"), runtimeHash: null },
+      runtime: { node: process.env["npm_node_execpath"] ?? process.env["NODE"] ?? "node", entry, runtimeHash: null },
       home: homeSwitch ?? join(homedir(), ".nivra-dev"),
       ...extraArgs,
     },
