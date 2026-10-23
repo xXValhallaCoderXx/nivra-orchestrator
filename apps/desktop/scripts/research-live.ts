@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { RESEARCH_LIMITS } from "@nivra/domain";
-import { _electron as electron } from "@playwright/test";
+import { _electron as electron, type Locator } from "@playwright/test";
 import { build } from "esbuild";
 import { claimApproval, claimOn, isDigest } from "../../engine/scripts/research-check/claim.ts";
 import type { ResearchView } from "../src/shared/research.ts";
@@ -291,17 +291,36 @@ async function sentinel(folder: string, name: string): Promise<void> {
   while (!existsSync(join(folder, name))) await sleep(1_000);
 }
 
+/** A screenshot of part of the window, kept as private as the rest of the evidence. */
+async function shot(locator: Locator, path: string): Promise<void> {
+  await locator.screenshot({ path });
+  chmodSync(path, 0o600);
+}
+
+/** The files a scan must have read: a clean result from a scan that read none of them would prove nothing. */
+const REQUIRED = ["nivra.db", "mastra.db", "workspace.db", "nivra.json"];
+
 /**
- * Credential shapes in every file of the evidence, the WSL engine's stores and the profile's files: which shapes, never
- * the text. The engine's stores are read once no engine of this profile runs, and the profile's on Windows (D7).
+ * Credential shapes in every file of the evidence, the WSL engine's stores, and the profile's records and logs: which
+ * shapes, never the text. The engine's stores are read once no engine of this profile runs, and the profile's files on
+ * Windows (D7). Says how many files were read and which were missing, and refuses a scan that missed a required file.
  */
-function scans(frozen: Frozen, session: Session, evidence: string): Array<{ file: string; shapes: string[] | null }> {
+function scans(frozen: Frozen, session: Session, evidence: string): { results: Array<{ file: string; shapes: string[] | null }>; summary: string } {
   const home = join(homedir(), session.wslHome);
   const local = [...["nivra.db", "nivra.db-wal", "mastra.db", "mastra.db-wal"].map((file) => join(home, file)), ...readdirSync(evidence).map((file) => join(evidence, file))];
   const scan = (node: string, script: string, files: string[]) => JSON.parse(run(node, [script, ...files], node === process.execPath ? homedir() : "/mnt/c")) as Array<{ file: string; shapes: string[] | null }>;
   const folder = folderOf(frozen);
-  const windowsFiles = ["workspace.db", "workspace.db-wal", "nivra.json", "secrets.json"].map((file) => `${session.profileWin}\\user data\\${file}`);
-  return [...scan(process.execPath, join(folder, "shape-scan.mjs"), local), ...scan(join(folder, "node.exe"), `${frozen.folderWin}\\shape-scan.mjs`, windowsFiles)];
+  const userData = `${session.profileWin}\\user data`;
+  const logs = wslpath("-u", `${userData}\\logs`);
+  const windowsFiles = [
+    ...["workspace.db", "workspace.db-wal", "nivra.json", "secrets.json"].map((file) => `${userData}\\${file}`),
+    ...(existsSync(logs) ? readdirSync(logs).map((file) => `${userData}\\logs\\${file}`) : []),
+  ];
+  const results = [...scan(process.execPath, join(folder, "shape-scan.mjs"), local), ...scan(join(folder, "node.exe"), `${frozen.folderWin}\\shape-scan.mjs`, windowsFiles)];
+  const missing = results.filter((result) => result.shapes === null).map((result) => result.file);
+  const unread = REQUIRED.filter((name) => !results.some((result) => result.shapes !== null && (result.file.endsWith(`/${name}`) || result.file.endsWith(`\\${name}`))));
+  if (unread.length) throw new Error(`The credential scan didn't read ${unread.join(", ")}, so it proves nothing: check the profile and the WSL home.`);
+  return { results, summary: `${results.length - missing.length} files read, ${missing.length} absent (${missing.map((file) => file.split(/[\\/]/).at(-1)).join(", ") || "none"})` };
 }
 
 // ---- rehearse -------------------------------------------------------------------------------------------------------
@@ -328,7 +347,7 @@ async function rehearse(): Promise<void> {
     const preview = await hostPreview(ui.page);
     if (preview.blocked !== null || preview.expected !== recipe.fingerprint) throw new Error(`The preview's fingerprint is ${preview.expected} (blocked: ${preview.blocked}), not the recipe's ${recipe.fingerprint}.`);
     log(`The preview shows ${shown.queries.join(" | ")}; ${shown.sites}. Its fingerprint is the recipe's.`);
-    await ui.page.getByTestId("research-preview").screenshot({ path: join(evidence, "preview.png") });
+    await shot(ui.page.getByTestId("research-preview"), join(evidence, "preview.png"));
     await ui.page.getByTestId("research-dialog-cancel").click();
     await ui.call("window.nivra.setNebiusKey(null)");
     await ui.call("window.nivra.setTavilyKey(null)");
@@ -348,9 +367,10 @@ async function rehearse(): Promise<void> {
   await stopped(session);
   const after = homesAfter(homes);
   for (const line of after.lines) log(line);
-  const found = scans(frozen, session, evidence).filter((scan) => scan.shapes && scan.shapes.length > 0);
-  log(found.length ? `Credential shapes found in: ${found.map((scan) => scan.file).join("; ")}.` : "No credential shape in the evidence, the engine's stores or the profile.");
-  save("rehearsal.json", { revision, recipe: digestOf(recipe), route: session.route, homes: after.lines, shapes: found, profile: session.profileWin, wslHome: session.wslHome });
+  const scanned = scans(frozen, session, evidence);
+  const found = scanned.results.filter((scan) => scan.shapes && scan.shapes.length > 0);
+  log(`Credential scan: ${scanned.summary}. ${found.length ? `Shapes found in: ${found.map((scan) => scan.file).join("; ")}.` : "No credential shape."}`);
+  save("rehearsal.json", { revision, recipe: digestOf(recipe), route: session.route, homes: after.lines, scan: scanned, profile: session.profileWin, wslHome: session.wslHome });
   if (!after.unchanged || found.length) throw new Error("The rehearsal changed a home it must not touch, or left a credential shape: see above.");
   log(`Rehearsal passed. Evidence: ${evidence}.`);
 }
@@ -392,7 +412,7 @@ async function live(approved: string): Promise<void> {
   if (preview.blocked !== null || preview.expected !== recipe.fingerprint) {
     throw new Error(`The preview's fingerprint is ${preview.expected} (blocked: ${preview.blocked}), not the approved ${recipe.fingerprint}. Nothing was started, and the approval isn't claimed.`);
   }
-  await ui.page.getByTestId("research-preview").screenshot({ path: join(evidence, "preview.png") });
+  await shot(ui.page.getByTestId("research-preview"), join(evidence, "preview.png"));
   log(`The preview shows ${shown.queries.join(" | ")}; ${shown.sites}. Its fingerprint is the approved one.`);
   const claimed = claimApproval(CLAIMS, { digest, run: 1, revision, out: evidence, pid: process.pid, claimedAt: new Date().toISOString() });
   if (!claimed.ok) throw new Error("This approval was claimed by another run first. Nothing was started.");
@@ -406,7 +426,7 @@ async function live(approved: string): Promise<void> {
     save("research.json", research);
     save("report.json", research.report);
     if (research.runId) save("events.json", await ui.events(research.runId));
-    await ui.page.locator(`[data-testid="research"][data-research-id="${research.id}"]`).screenshot({ path: join(evidence, "card.png") });
+    await shot(ui.page.locator(`[data-testid="research"][data-research-id="${research.id}"]`), join(evidence, "card.png"));
     const report = research.report;
     log(`Research ended: ${research.status}, report ${report?.outcome ?? "none"}. Model ${report?.route?.model ?? "unknown"}; credits ${report?.usage.credits ?? "not reported"}; tokens ${report?.usage.model.inputTokens ?? "?"} in, ${report?.usage.model.outputTokens ?? "?"} out; ${report?.elapsedMs ?? "?"} ms.`);
     save("plans-before.json", await plansOf(ui.page));
@@ -421,7 +441,7 @@ async function live(approved: string): Promise<void> {
   const amended = await Promise.race([amendedVersion(ui.page, 3 * 60 * 60_000), sentinel(evidence, "stop").then(() => null)]);
   if (amended) {
     save("plans-after.json", amended);
-    await ui.page.getByTestId("plan-version").first().screenshot({ path: join(evidence, "plan-v2.png") });
+    await shot(ui.page.getByTestId("plan-version").first(), join(evidence, "plan-v2.png"));
     log(`v2 saved: ${amended.find((plan) => plan.version === 2)!.id}. v1 is unchanged: ${amended.find((plan) => plan.version === 1)!.text === demoPacket().planText ? "yes" : "no"}.`);
   } else log("Ended without an amended version.");
 
@@ -433,7 +453,7 @@ async function live(approved: string): Promise<void> {
   ui = await launch(frozen, session.profileWin, session.wslHome);
   const kept = amended ? await checkKept(ui.page, before) : [];
   for (const line of kept) log(`After the relaunch: ${line}.`);
-  if (amended) await ui.page.getByTestId("plan-version").first().screenshot({ path: join(evidence, "relaunched.png") });
+  if (amended) await shot(ui.page.getByTestId("plan-version").first(), join(evidence, "relaunched.png"));
   await ui.call("window.nivra.setNebiusKey(null)");
   await ui.call("window.nivra.setTavilyKey(null)");
   const settings = await ui.settings();
@@ -473,14 +493,14 @@ async function live(approved: string): Promise<void> {
     amended: amended ? amended.find((plan) => plan.version === 2)!.id : null,
     relaunch: kept,
     homes: homesAfter(homes).lines,
-    scans: [] as Array<{ file: string; shapes: string[] | null }>,
+    scan: null as ReturnType<typeof scans> | null,
   };
   save("check.json", check);
-  check.scans = scans(frozen, session, evidence);
+  check.scan = scans(frozen, session, evidence);
   save("check.json", check);
-  const found = check.scans.filter((scan) => scan.shapes && scan.shapes.length > 0);
+  const found = check.scan.results.filter((scan) => scan.shapes && scan.shapes.length > 0);
   for (const line of check.homes) log(line);
-  log(found.length ? `Credential shapes found in: ${found.map((scan) => `${scan.file} (${scan.shapes!.join(", ")})`).join("; ")}.` : `No credential shape in ${check.scans.filter((scan) => scan.shapes).length} files scanned.`);
+  log(`Credential scan: ${check.scan.summary}. ${found.length ? `Shapes found in: ${found.map((scan) => `${scan.file} (${scan.shapes!.join(", ")})`).join("; ")}.` : "No credential shape."}`);
   chmodSync(evidence, 0o700);
   log(`Done. Evidence: ${evidence}.`);
 }
