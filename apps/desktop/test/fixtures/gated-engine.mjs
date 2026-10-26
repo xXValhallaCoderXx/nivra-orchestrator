@@ -20,7 +20,8 @@
 // runs.research answers with a report that repeats it: complete, or cancelled for a run it was asked to cancel. With a
 // `fail-cancel-once` file, the next runs.cancel it answers is turned down, and the file is removed; with a
 // `fail-cancel-for` file, runs.cancel for the run whose id it holds is turned down.
-// For task runs (D39, D40): runs.start records each task run's request id and input (`tasks.log`). While a
+// For task runs (D39, D40): task.preview answers that the checkout is ready to run, with a fixed snapshot, so the
+// window can start one. runs.start records each task run's request id and input (`tasks.log`). While a
 // `task-report` file exists, runs.task answers such a run with a finished report that proposes the change `TASK_HASH`
 // names, every acceptance case passed, and runs.proposal with that proposal. task.apply records each request id and
 // the applied change it answers with (`applies.log`), unless a `refuse-apply` file exists; its answer is held while a
@@ -274,6 +275,19 @@ process.stdin.on("data", (chunk) => {
       send({
         id: request.id,
         result: { hash: TASK_HASH, baseline: "a".repeat(40), prefix: "", paths: [{ path: "greet.sh", change: "changed", before: { mode: "100644", sha256: sha }, after: { mode: "100644", sha256: "9".repeat(64) } }], patch: "--- a/greet.sh\n+++ b/greet.sh\n", patchBytes: 30, truncated: false },
+      });
+    } else if (request.method === "task.preview") {
+      const none = { count: 0, sample: [] };
+      send({
+        id: request.id,
+        result: {
+          status: "ready",
+          snapshot: { baseline: "a".repeat(40), prefix: "", files: 2, bytes: 3072, leftOut: { secret: none, output: none, submodule: none, excluded: none }, untracked: none, lfsPointers: 0, fingerprint: "c".repeat(64), retention: "Images are retained for 180 days." },
+          programs: ["."],
+          unprobed: 0,
+          caseFiles: [],
+          limits: { modelRequests: 12, requestSeconds: 150, outputTokensPerRequest: 8000, estimatedInputTokens: 160000, toolCalls: 24, writes: 8, writeBytes: 32768, runs: 4, operations: 17, checkSeconds: 60, sessionMinutes: 20, runMinutes: 33 },
+        },
       });
     } else if (request.method === "task.apply") {
       const { requestId, runId } = request.params;
