@@ -297,8 +297,17 @@ describe("revalidating a proposal before it is applied (NIV-8, D40)", () => {
     await refused(root, proposal, "attributes", "greet.sh");
   });
 
-  it("refuses when the picked folder can't be read, as git's failure", async () => {
+  it("refuses when the picked folder, or a folder the change writes in, can't be read, saying so", async () => {
     const { proposal, root } = await proposed();
-    await refused(root, proposal, "git", null, { repoPath: join(root, "gone") });
+    await refused(root, proposal, "filesystem", null, { repoPath: join(root, "gone") });
+    // A folder made unreadable once git's status has been read.
+    const nested = await proposed({ files: { ...FIXTURE, "lib/notes.txt": "a\n" }, calls: [["edit_file", { path: "lib/notes.txt", old_text: "a", new_text: "b" }]] });
+    const lib = join(nested.root, "lib");
+    try {
+      const error = await refusalOf(nested.root, nested.proposal, {}, racing(() => chmodSync(lib, 0)));
+      assert.deepEqual([error.code, error.path], ["filesystem", null], `${error.message} (${error.detail})`);
+    } finally {
+      chmodSync(lib, 0o755);
+    }
   });
 });

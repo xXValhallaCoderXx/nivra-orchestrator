@@ -86,7 +86,7 @@ export type ApplyRefusalCode =
   | "git"
   /** The recovery folder can't be on the same filesystem as the change, or hard links don't work there. */
   | "recovery"
-  /** A file the change touches couldn't be read, or the git folder written, before anything of the person's was. */
+  /** The folder or a file the change touches couldn't be read, or the git folder written, before anything of the person's was. */
   | "filesystem"
   /** Another apply is open for this folder. */
   | "busy"
@@ -96,7 +96,7 @@ export type ApplyRefusalCode =
 const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   proposal: "This proposal isn't the one you approved, isn't intact, or wasn't made for this folder, run or engine, so nothing was written. Run the task again.",
   "baseline-moved": "Your checkout has moved to another commit since the proposal was made, so nothing was written. Run the task again from the commit it is on now.",
-  uncommitted: "Your checkout has uncommitted changes, so nothing was written. Commit or stash them, then apply again.",
+  uncommitted: "Your checkout has uncommitted changes, or git can't show whether it has (files it is told not to look at, or a split index), so nothing was written. Commit or stash the changes, or clear those settings, then apply again.",
   operation: "A merge, rebase, cherry-pick, revert or bisect is under way in this checkout, so nothing was written. Finish or abort it, then apply again.",
   "changed-since": "A file the change replaces is no longer as it was in the commit, so nothing was written. Restore it, or run the task again.",
   collision: "Something is already where the change adds a file, or has a name that differs from it only by case or Unicode form, so nothing was written. Move it aside, or run the task again.",
@@ -104,7 +104,7 @@ const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   path: "The change holds a path Nivra doesn't apply (outside the folder, through a link, a deletion, a link or a mode change), so nothing was written.",
   git: "Git failed while Nivra checked your checkout, so nothing was written. Try again; if it keeps happening, report it with the engine log.",
   recovery: "Nivra keeps a copy of every file it replaces in the repository's git folder, and that folder isn't on the same disk as the change, or doesn't take hard links, so nothing was written.",
-  filesystem: "Nivra couldn't read a file the change touches, or write in the repository's git folder, so nothing was written. Check the folder's permissions and free space, then apply again.",
+  filesystem: "Nivra couldn't read the project's folder or a file the change touches, or write in the repository's git folder, so nothing was written. Check that the folder is there, its permissions and its free space, then apply again.",
   busy: "Another change is being applied to this folder, so nothing was written. Wait for it to finish, then apply again.",
   duplicate: "This proposal has already been applied, so it wasn't applied again.",
 };

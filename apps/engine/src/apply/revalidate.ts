@@ -37,7 +37,7 @@ function refusalOf(error: unknown, code: "git" = "git"): unknown {
 }
 
 /** A file or folder Nivra couldn't read, with what the filesystem said kept to its detail. */
-const unreadable = (error: unknown, what: string): ApplyRefusal => new ApplyRefusal("git", null, `${(error as NodeJS.ErrnoException).code ?? "an error"} reading ${what}`);
+const unreadable = (error: unknown, what: string): ApplyRefusal => new ApplyRefusal("filesystem", null, `${(error as NodeJS.ErrnoException).code ?? "an error"} reading ${what}`);
 
 /** A path's state on disk, never following a link. */
 function stateOf(path: string): PathState {
@@ -174,12 +174,19 @@ export async function revalidate(input: RevalidationInput): Promise<RevalidatedP
     if (held !== undefined && (held.path !== path || held.kind !== kind)) throw new ApplyRefusal("collision", owner, "two of the proposal's names differ only by case or Unicode form, or name a file and a folder");
     keys.set(key, { path, kind });
   };
+  /** Whether a name is in its folder exactly: a filesystem that folds case would find another one for it. */
+  const exactly = (relative: string): boolean => {
+    const parts = relative.split("/");
+    return namesIn(join(folder, ...parts.slice(0, -1))).includes(parts.at(-1)!);
+  };
   for (const [path, one] of [...bound].sort(([a], [b]) => byBytes(a, b))) {
     claim(path, "file", path);
-    // 5–6. Its folders: real ones all the way down, never through a link; for an added path, the missing ones are made.
+    // 5–6. Its folders: real ones all the way down, never through a link, each by its exact name; for an added path,
+    // the missing ones are made.
     let absentFrom: string | null = null;
     for (const parent of parentsOf(path)) {
       const kind = stateOf(join(folder, parent)).kind;
+      if (kind === "folder" && !exactly(parent)) throw new ApplyRefusal(one.change === "changed" ? "changed-since" : "collision", path, `${parent} is there under another case or form`);
       if (kind === "folder") continue;
       if (kind !== "absent" || one.change === "changed") throw new ApplyRefusal(one.change === "changed" ? "changed-since" : "collision", path, `${parent} is a ${kind}`);
       absentFrom = parent;
@@ -188,6 +195,7 @@ export async function revalidate(input: RevalidationInput): Promise<RevalidatedP
     if (one.change === "changed") {
       const pre = stateOf(join(folder, path));
       if (pre.kind !== "file" || pre.mode !== one.before!.mode || pre.sha256 !== one.before!.sha256) throw new ApplyRefusal("changed-since", path, `it is a ${pre.kind}${pre.kind === "file" ? ` of mode ${pre.mode}` : ""}`);
+      if (!exactly(path)) throw new ApplyRefusal("changed-since", path, "it is there under another case or form");
       paths.push({ path, change: "changed", pre, post: { mode: one.after!.mode as "100644" | "100755", size: bytesOf.get(path)!.byteLength, sha256: one.after!.sha256 }, bytes: bytesOf.get(path)! });
       continue;
     }
