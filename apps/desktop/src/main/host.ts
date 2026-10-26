@@ -1770,6 +1770,12 @@ export class Host {
       proposal: null,
       progress: [],
       unresolved: null,
+      decision: null,
+      decidedAt: null,
+      revisionNote: null,
+      apply: null,
+      acceptedAt: null,
+      actions: [],
       createdAt: attempt.createdAt,
       settledAt: attempt.settledAt,
     };
