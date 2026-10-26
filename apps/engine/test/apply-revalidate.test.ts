@@ -298,6 +298,13 @@ describe("revalidating a proposal before it is applied (NIV-8, D40)", () => {
       if (attributes.includes("eol=lf")) await check(root, proposal);
       else await refused(root, proposal, "attributes", "greet.sh");
     }
+    // core.eol=crlf converts a file marked as text, and only that.
+    const marked = await proposed({ files: { ...FIXTURE, ".gitattributes": "greet.sh text\n" } });
+    git(marked.root, ["config", "core.eol", "crlf"]);
+    await refused(marked.root, marked.proposal, "attributes", "greet.sh");
+    const unmarked = await proposed();
+    git(unmarked.root, ["config", "core.eol", "crlf"]);
+    await check(unmarked.root, unmarked.proposal);
     // core.autocrlf alone converts every file not marked binary: refused for that, never as a file changed since.
     const plain = await proposed();
     git(plain.root, ["config", "core.autocrlf", "true"]);
