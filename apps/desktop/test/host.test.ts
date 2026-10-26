@@ -2554,13 +2554,14 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     assert.equal(task.runBlocked, null);
     const before = folderState(repo);
     const preview = await host.previewTaskRun(task.summary.id);
-    assert.deepEqual([preview.blocked, preview.snapshot?.files, preview.programs, preview.unprobed, preview.cases.map((c) => [c.number, c.name]), preview.checks, preview.consents, preview.project.targetLabel], [
+    assert.deepEqual([preview.blocked, preview.snapshot?.files, preview.programs, preview.unprobed, preview.cases.map((c) => [c.number, c.name]), preview.checks, preview.caseFiles, preview.consents, preview.project.targetLabel], [
       null,
       2,
       [".", "/bin/sh"],
       0,
       [[1, CASE.name]],
       [{ number: 1, command: "/bin/sh check.sh" }],
+      [{ number: 1, files: ["greet.sh"], unclear: false }],
       { modelContext: true, cloudExecution: true },
       "Test · WSL",
     ]);
@@ -2571,6 +2572,8 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const done = await ended(host, task.summary.id, started.id);
     assert.equal(done.status, "answered", done.note ?? done.unresolved ?? "");
     assert.deepEqual([done.report?.outcome, done.report?.verified, done.report?.checks.map((check) => check.verdict), done.proposal?.paths.map((path) => path.path), done.note], ["proposed", true, ["passed", "passed"], ["greet.sh"], null]);
+    // The case sources greet.sh, which the change changes; the check runs check.sh, which it doesn't.
+    assert.deepEqual(done.report?.checks.map((check) => [check.changedFiles, check.unclear]), [[["greet.sh"], false], [[], false]]);
     assert.match(done.proposal?.patch ?? "", /^\+ {2}printf 'Hello, %s\\n' "\$\{1:-world\}"$/m);
     assert.ok(done.progress.some((line) => line === "Final checks: case 1 passed, check 1 passed"), done.progress.join(" | "));
     assert.deepEqual(changedSince(before, repo), []);

@@ -154,6 +154,27 @@ const plural = (count: number, one: string, many = `${one}s`) => `${count.toLoca
 const sizeText = (bytes: number) => (bytes < 1024 ? plural(bytes, "byte") : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`);
 const open = (status: TurnStatus) => status === "submitting" || status === "running";
 
+/** The repository files the cases run, which the worker can change, and the cases whose files Nivra can't tell. */
+function caseFilesText(caseFiles: TaskRunPreview["caseFiles"]): string {
+  const named = caseFiles.filter((one) => one.files.length > 0);
+  const unclear = caseFiles.filter((one) => one.unclear).map((one) => one.number);
+  const said: string[] = [];
+  if (named.length > 0) said.push(`${named.map((one) => `Case ${one.number} runs ${one.files.join(", ")}`).join("; ")}, from the repository, which the worker can change.`);
+  if (unclear.length === 1) said.push(`Nivra can't tell for sure which repository files case ${unclear[0]} runs, so the worker may be able to change what it prints.`);
+  if (unclear.length > 1)
+    said.push(`Nivra can't tell for sure which repository files cases ${unclear.slice(0, -1).join(", ")} and ${unclear.at(-1)} run, so the worker may be able to change what they print.`);
+  said.push("Nivra judges only what a case prints, so give it an expected output that only the right behaviour gives, not just what a test script prints when it passes.");
+  return said.join(" ");
+}
+
+/** The files a case's or check's command runs that the change also changes, or may: its result can't vouch for them. */
+function checkFilesText(check: TaskCheck): string {
+  const kind = check.kind === "case" ? "case" : "check";
+  const named = check.changedFiles.length > 0 ? `The change also changes ${check.changedFiles.join(", ")}, which this ${kind} runs` : null;
+  const said = named && check.unclear ? `${named}, and Nivra can't tell for sure which other files it runs` : (named ?? `Nivra can't tell for sure which files this ${kind} runs, so it may run a file the change changes`);
+  return check.kind === "case" ? `${said}: Nivra judged only what it printed.` : `${said}.`;
+}
+
 /**
  * Running a task: Run, with why it can't when it can't; the preview of what a run would send, and the start bound to
  * it; and the latest run, or one chosen from the list, with its progress and what Nivra found.
@@ -343,8 +364,7 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
         </List>
         {preview.caseFiles.length > 0 && (
           <Text size="xs" c="var(--nivra-warning)" data-testid="task-run-preview-case-files">
-            {preview.caseFiles.map((named) => `Case ${named.number} runs ${named.files.join(", ")}`).join("; ")}, from the repository, which the worker can change. Nivra judges only
-            what a case prints, so give it an expected output that only the right behaviour gives, not just what a test script prints when it passes.
+            {caseFilesText(preview.caseFiles)}
           </Text>
         )}
         {preview.programs.length > 0 && (
@@ -547,11 +567,9 @@ function Found({ report, proposal }: { report: TaskReport; proposal: TaskAttempt
                         {check.difference ? ` (line ${check.difference.line}: expected "${check.difference.expected}", got "${check.difference.got}")` : ""}
                       </Text>
                     )}
-                    {check.changedFiles.length > 0 && (
+                    {(check.changedFiles.length > 0 || check.unclear) && (
                       <Text size="xs" c="var(--nivra-warning)" data-testid="task-attempt-check-files">
-                        {check.kind === "case"
-                          ? `The change also changes ${check.changedFiles.join(", ")}, which this case runs: Nivra judged only what it printed.`
-                          : `The change also changes ${check.changedFiles.join(", ")}, which this check runs.`}
+                        {checkFilesText(check)}
                       </Text>
                     )}
                   </Stack>
