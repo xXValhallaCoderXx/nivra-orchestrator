@@ -590,14 +590,6 @@ export function acceptChange(workspace: WorkspaceDb, attemptId: string, requestI
   return Number(workspace.db.prepare("UPDATE attempt_records SET accepted_at = ? WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND accepted_at IS NULL").run(at, attemptId, requestId).changes) === 1;
 }
 
-/** Applies asked for whose engine hasn't said how they ended: followed by their request ids, never sent again. */
-export function unsettledApplies(workspace: WorkspaceDb): Array<{ attemptId: string; requestId: string }> {
-  return workspace.db
-    .prepare("SELECT attempt_id, apply_request_id FROM attempt_records WHERE apply_request_id IS NOT NULL AND decision = 'approved' AND apply_note IS NULL AND (apply_json IS NULL OR json_extract(apply_json, '$.status') IN ('claimed', 'writing'))")
-    .all()
-    .map((row) => ({ attemptId: str(row["attempt_id"]), requestId: str(row["apply_request_id"]) }));
-}
-
 /** A review of one saved plan version (D31): what it was bound to, the report its engine saved, and its run link. */
 export interface ReviewRecord {
   /** The run link's id, sent as the request id. */

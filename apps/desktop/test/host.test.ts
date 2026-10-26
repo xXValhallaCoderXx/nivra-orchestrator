@@ -2979,6 +2979,49 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     assert.deepEqual([read.decision, read.actions, calls().filter((call) => call === "task.apply").length], ["approved", ["accept"], 1]);
   });
 
+  it("reads a settle back by its request id when its answer is lost, never leaving the run stuck: accepted once, the task completed", async () => {
+    const { host, ids, home, calls } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    const applied = await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    assert.deepEqual([applied.apply?.status, applied.actions], ["applied", ["accept"]]);
+    // The engine accepts it, then its answer is an error: nothing is offered while Nivra reads it back.
+    writeFileSync(join(home, "error-settle"), "");
+    const lost = await host.settleTaskChange(taskId, attemptId, "accepted");
+    assert.deepEqual([lost.actions, lost.apply?.unresolved], [[], "Nivra didn't hear back from the engine about settling this change, so it is asking how that went."]);
+    const settled = await waitFor(async () => {
+      const view = await host.taskAttempt(taskId, attemptId);
+      return view.apply?.resolution === "accepted" && view.apply.unresolved === null ? view : null;
+    }, "the settle to be read back");
+    assert.deepEqual([settled.actions, settled.acceptedAt !== null, host.task(taskId).summary.state, calls().filter((call) => call === "task.dismiss").length], [[], true, "completed", 1]);
+    rmSync(join(home, "error-settle"));
+    // Settled, the task can go.
+    host.deleteTask(taskId);
+  });
+
+  it("doesn't offer keeping a partial apply as it is while a file is moved aside, and refuses deleting a task whose applied change isn't settled", async () => {
+    const { host, ids, home } = await gatedHost();
+    writeFileSync(join(home, "partial-apply"), "");
+    writeFileSync(join(home, "aside-apply"), "");
+    const first = await gatedRun(host, ids[0]!);
+    const partial = await host.approveTaskChange(first.taskId, first.attemptId, GATED_HASH);
+    assert.deepEqual([partial.apply?.status, partial.apply?.paths.map((one) => `${one.path} ${one.place}`), partial.actions], ["partial", ["greet.sh post", "README.md aside"], ["restore"]]);
+    await assert.rejects(host.settleTaskChange(first.taskId, first.attemptId, "kept"), /^Error: A file the change replaces is missing from your checkout, its original kept aside/);
+    const restored = await host.restoreTaskChange(first.taskId, first.attemptId);
+    assert.deepEqual([restored.apply?.status, restored.actions], ["not-applied", ["dismiss"]]);
+    // Not applied, and not yet dismissed: the engine keeps a record of it, so the task stays until it is settled.
+    assert.throws(() => host.deleteTask(first.taskId), /^Error: Settle this task's change first/);
+    await host.settleTaskChange(first.taskId, first.attemptId, "dismissed");
+    host.deleteTask(first.taskId);
+
+    rmSync(join(home, "partial-apply"));
+    rmSync(join(home, "aside-apply"));
+    const second = await gatedRun(host, ids[0]!, "Greet again");
+    await host.approveTaskChange(second.taskId, second.attemptId, GATED_HASH);
+    assert.throws(() => host.deleteTask(second.taskId), /^Error: Settle this task's change first/);
+    await host.settleTaskChange(second.taskId, second.attemptId, "accepted");
+    host.deleteTask(second.taskId);
+  });
+
   it("keeps a partial apply as it is, or restores its originals and then dismisses it, and refuses deleting or revising its task meanwhile", async () => {
     const { host, ids, home } = await gatedHost();
     writeFileSync(join(home, "partial-apply"), "");

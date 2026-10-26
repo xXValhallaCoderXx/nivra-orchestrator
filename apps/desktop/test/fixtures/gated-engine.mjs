@@ -25,8 +25,11 @@
 // names, every acceptance case passed, and runs.proposal with that proposal. task.apply records each request id and
 // the applied change it answers with (`applies.log`), unless a `refuse-apply` file exists; its answer is held while a
 // `hold-apply` file exists, until a `release-apply` file appears, and is an internal error while an `error-apply` file
-// exists; with a `partial-apply` file, the change it records was applied in part. task.applyStatus answers a recorded
-// apply by its request id, or null; task.restore answers one taken back to its originals, and task.dismiss settles one.
+// exists; with a `partial-apply` file, the change it records was applied in part, and with an `aside-apply` file as well,
+// one more file of it was moved aside with nothing in its place. task.applyStatus answers a recorded apply by its
+// request id, or null; task.restore takes one back to its originals and task.dismiss settles one, each kept in
+// `applies.log` so a later applyStatus reads it; with an `error-settle` file, either does its work, then answers with an
+// internal error, as an engine whose answer is lost.
 // It takes secrets.update, and turns down at once any other method it doesn't stand in for, so no caller waits out its
 // time limit. The window's tests run it as the local engine with --nivra-test-engine=gated (unpackaged only).
 import { randomUUID } from "node:crypto";
@@ -275,7 +278,10 @@ process.stdin.on("data", (chunk) => {
     } else if (request.method === "task.apply") {
       const { requestId, runId } = request.params;
       const known = logged("applies.log", requestId);
-      const view = known ?? { ...appliedView(requestId, runId), ...(existsSync(join(home, "partial-apply")) ? { status: "partial" } : {}) };
+      const partial = existsSync(join(home, "partial-apply"));
+      const aside = { path: "README.md", change: "changed", place: "aside", found: { kind: "absent", mode: null, size: null }, kept: ["orig-1"], changedSince: false };
+      const fresh = appliedView(requestId, runId);
+      const view = known ?? { ...fresh, ...(partial ? { status: "partial" } : {}), ...(partial && existsSync(join(home, "aside-apply")) ? { paths: [...fresh.paths, aside] } : {}) };
       if (!known && !existsSync(join(home, "refuse-apply"))) appendFileSync(join(home, "applies.log"), `${requestId} ${JSON.stringify(view)}\n`);
       const answer = () => {
         if (existsSync(join(home, "error-apply"))) send({ id: request.id, error: { code: -32603, message: "the engine failed while it applied the change" } });
@@ -293,11 +299,20 @@ process.stdin.on("data", (chunk) => {
     } else if (request.method === "task.applyStatus") {
       send({ id: request.id, result: logged("applies.log", request.params.requestId) });
     } else if (request.method === "task.dismiss" || request.method === "task.restore") {
-      const line = existsSync(join(home, "applies.log")) ? readFileSync(join(home, "applies.log"), "utf8").split("\n").map((entry) => entry && JSON.parse(entry.slice(entry.indexOf(" ") + 1))).find((view) => view && view.applyId === request.params.applyId) : undefined;
+      const file = join(home, "applies.log");
+      const lines = existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+      const at = lines.findIndex((entry) => JSON.parse(entry.slice(entry.indexOf(" ") + 1)).applyId === request.params.applyId);
       const updatedAt = new Date().toISOString();
-      if (!line) send({ id: request.id, error: { code: -32602, message: "This engine has no apply by that id." } });
-      else if (request.method === "task.restore") send({ id: request.id, result: { ...line, status: "not-applied", paths: line.paths.map((path) => ({ ...path, place: "pre" })), updatedAt } });
-      else send({ id: request.id, result: { ...line, resolution: request.params.as, updatedAt } });
+      if (at < 0) send({ id: request.id, error: { code: -32602, message: "This engine has no apply by that id." } });
+      else {
+        const line = JSON.parse(lines[at].slice(lines[at].indexOf(" ") + 1));
+        const next = request.method === "task.restore" ? { ...line, status: "not-applied", paths: line.paths.map((path) => ({ ...path, place: "pre", found: { kind: "file", mode: "100644", size: 10 } })), updatedAt } : { ...line, resolution: request.params.as, updatedAt };
+        // Kept, as an engine keeps it: a later applyStatus reads it.
+        lines[at] = `${line.requestId} ${JSON.stringify(next)}`;
+        writeFileSync(file, `${lines.join("\n")}\n`);
+        if (existsSync(join(home, "error-settle"))) send({ id: request.id, error: { code: -32603, message: "the engine failed after it settled the change" } });
+        else send({ id: request.id, result: next });
+      }
     } else if (request.method === "secrets.update") {
       send({ id: request.id, result: { ok: true } });
     } else if (request.method === "shutdown") {
