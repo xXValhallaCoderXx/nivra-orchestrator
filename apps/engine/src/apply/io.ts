@@ -13,7 +13,10 @@ export interface ApplyIo {
   /** Fails if anything is there. */
   mkdir(path: string): void;
   rmdir(path: string): void;
-  /** Creates a file that mustn't exist (O_EXCL), with exactly `mode`, whatever the umask, and makes it durable. */
+  /**
+   * Creates a file that mustn't exist (O_EXCL), with exactly `mode`, whatever the umask, and makes it durable; one that
+   * can't be written whole is removed again.
+   */
   create(path: string, bytes: Uint8Array, mode: number): void;
   read(path: string): Uint8Array;
   /** Within one folder tree on one filesystem: the source is gone, and what was at the target is replaced. */
@@ -46,9 +49,17 @@ export const nodeIo: ApplyIo = {
       fs.fchmodSync(fd, mode);
       for (let at = 0; at < bytes.byteLength; ) at += fs.writeSync(fd, bytes, at, bytes.byteLength - at);
       fs.fsyncSync(fd);
-    } finally {
+    } catch (error) {
+      // A file that wasn't written whole isn't left behind: it was made here, and holds nothing anyone else wrote.
       fs.closeSync(fd);
+      try {
+        fs.unlinkSync(path);
+      } catch {
+        // Already gone.
+      }
+      throw error;
     }
+    fs.closeSync(fd);
   },
   read: (path) => {
     const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));

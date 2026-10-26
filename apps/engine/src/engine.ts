@@ -252,7 +252,18 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const locateGit = () => findGit({ env: toolEnv });
   // Applying proposals to the person's checkout (D40). An apply an earlier engine left writing is reconciled here,
   // before any apply call is answered, writing nothing of the person's.
-  const applies = new ApplyService({ database, proposal: (runId) => store.proposal(runId), homeId, backend, findGit: locateGit, platform: process.platform });
+  const applies = new ApplyService({
+    database,
+    proposal: (runId) => store.proposal(runId),
+    verified: (runId) => {
+      const stored = store.artifact(runId, "task");
+      return stored !== null && TaskReport.parse(JSON.parse(stored)).verified;
+    },
+    homeId,
+    backend,
+    findGit: locateGit,
+    platform: process.platform,
+  });
   /** A request the apply service refused before claiming anything, in Nivra's words. */
   const applyCall = async <T>(work: () => Promise<T>): Promise<T> => {
     try {

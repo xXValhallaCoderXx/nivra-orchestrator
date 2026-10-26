@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { type ApplyIo, nodeIo } from "../src/apply/io.ts";
@@ -88,8 +88,11 @@ async function apply(root: string, options: { changes?: Record<string, { text: s
   return { outcome, plan, journal, applyId, recovery: join(plan.gitDir, "nivra-apply", applyId) };
 }
 
-/** Wraps the filesystem, counting each call: one fails with `code` at a chosen count, so every step can be failed. */
-function faulty(fail: Array<{ at: number; code: string }> = []): ApplyIo & { calls: string[] } {
+/**
+ * Wraps the filesystem, counting each call: one fails with `code` at a chosen count, so every step can be failed;
+ * with `after`, the call is made first, then reported as failed, as one that did its work and then hit an error.
+ */
+function faulty(fail: Array<{ at: number; code: string; after?: boolean }> = []): ApplyIo & { calls: string[] } {
   const calls: string[] = [];
   const io = { calls } as ApplyIo & { calls: string[] };
   for (const name of Object.keys(nodeIo) as Array<keyof ApplyIo>) {
@@ -97,8 +100,10 @@ function faulty(fail: Array<{ at: number; code: string }> = []): ApplyIo & { cal
       const at = calls.length;
       calls.push(name);
       const failing = fail.find((one) => one.at === at);
-      if (failing) throw Object.assign(new Error(`injected ${failing.code}`), { code: failing.code });
-      return (nodeIo[name] as (...given: unknown[]) => unknown)(...args);
+      if (failing && !failing.after) throw Object.assign(new Error(`injected ${failing.code}`), { code: failing.code });
+      const done = (nodeIo[name] as (...given: unknown[]) => unknown)(...args);
+      if (failing) throw Object.assign(new Error(`injected ${failing.code} after the call`), { code: failing.code });
+      return done;
     };
   }
   return io;
@@ -185,7 +190,7 @@ describe("the apply writer (NIV-8, D40)", () => {
     writeFileSync(join(root, ".git", "nivra-apply", "lock"), JSON.stringify({ engine: "engine-home-b", applyId: "theirs" }));
     const before = folderState(root);
     const run = await apply(root);
-    assert.ok(run.outcome instanceof ApplyRefusal && run.outcome.code === "busy");
+    assert.ok(run.outcome instanceof ApplyRefusal && run.outcome.code === "locked");
     assert.deepEqual([...folderState(root)].filter(([key, value]) => before.get(key) !== value), []);
   });
 
@@ -294,6 +299,55 @@ describe("the apply writer (NIV-8, D40)", () => {
         holds(run.outcome, run, `${code} at call ${at} (${clean.calls[at]})`);
       }
     }
+  });
+
+  it("keeps every version when a call does its work and then fails, at every step: what it made is never taken for not made", async () => {
+    const fresh = copies();
+    const clean = faulty();
+    await apply(fresh(), { io: clean });
+    for (let at = 0; at < clean.calls.length; at++) {
+      const root = fresh();
+      const run = await apply(root, { io: faulty([{ at, code: "EIO", after: true }]) });
+      holds(run.outcome, run, `EIO after call ${at} (${clean.calls[at]})`);
+      // Never a lock left behind by a refusal: the next apply isn't held out.
+      if (run.outcome instanceof ApplyRefusal) assert.ok(!existsSync(join(root, ".git", "nivra-apply", "lock")), `EIO after call ${at} (${clean.calls[at]}): a refusal left the lock`);
+    }
+  });
+
+  it("leaves no lock when writing it fails, so the next apply isn't held out", async () => {
+    const root = repoWith(FILES);
+    const clean = faulty();
+    await apply(repoWith(FILES), { io: clean });
+    const first = clean.calls.indexOf("create");
+    const refused = await apply(root, { io: faulty([{ at: first, code: "ENOSPC" }]) });
+    assert.ok(refused.outcome instanceof ApplyRefusal && refused.outcome.code === "filesystem");
+    const area = join(root, ".git", "nivra-apply");
+    assert.deepEqual(existsSync(area) ? readdirSync(area) : [], []);
+    const next = await apply(root);
+    assert.ok(!(next.outcome instanceof ApplyRefusal) && next.outcome.state === "applied");
+  });
+
+  it("leaves a folder swapped in for a file at the last moment where it is: not applied, nothing moved", async () => {
+    const root = repoWith(FILES);
+    const run = await apply(root, {
+      before: (step) => {
+        if (step !== "aside 0") return;
+        rmSync(join(root, "README.md"));
+        mkdirSync(join(root, "README.md"));
+        writeFileSync(join(root, "README.md", "work.txt"), "work\n");
+      },
+    });
+    assert.ok(!(run.outcome instanceof ApplyRefusal));
+    assert.deepEqual([run.outcome.state, run.outcome.paths[0]?.place, run.outcome.paths[0]?.found.kind, existsSync(join(run.recovery, "orig-0"))], ["not-applied", "theirs", "folder", false]);
+    assert.equal(String(readFileSync(join(root, "README.md", "work.txt"))), "work\n");
+  });
+
+  it("names only the folders the apply recorded making, never one made just before a crash and not recorded", async () => {
+    const root = repoWith(FILES);
+    const run = await apply(root);
+    assert.ok(!(run.outcome instanceof ApplyRefusal));
+    const record = run.journal.get(run.applyId)!;
+    assert.deepEqual([reconcile(record.intent!, nodeIo, record.created).folders, reconcile(record.intent!, nodeIo, ["notes"]).folders, reconcile(record.intent!).folders], [["notes", "notes/2026"], ["notes"], []]);
   });
 
   it("keeps every version when rollback's own steps fail too: partial or unknown, never anything lost", async () => {

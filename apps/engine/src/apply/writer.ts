@@ -155,9 +155,11 @@ function keptFor(io: ApplyIo, intent: ApplyIntent, index: number, one: IntendedP
  * Where every path is against the intent, writing nothing: what reconciling at engine start reports, and what an
  * apply that stopped part way leaves.
  */
-export function reconcile(intent: ApplyIntent, io: ApplyIo = nodeIo): ApplyResult {
+export function reconcile(intent: ApplyIntent, io: ApplyIo = nodeIo, created: readonly string[] = []): ApplyResult {
   const paths = intent.paths.map((_, index) => outcomeOf(io, intent, index));
-  const folders = intent.folders.filter((folder) => io.lstat(absPath(intent.folder, folder))?.isDirectory() === true);
+  // Only the folders the apply recorded making: one that was there already, or made just before a crash and never
+  // recorded, isn't called Nivra's.
+  const folders = created.filter((folder) => io.lstat(absPath(intent.folder, folder))?.isDirectory() === true);
   return { state: overall(paths), paths, folders, failure: null };
 }
 
@@ -220,6 +222,14 @@ export async function restore(intent: ApplyIntent, options: { io?: ApplyIo; crea
       // Not empty, or not Nivra's to remove after all: it stays.
       if (codeOf(error) !== "ENOTEMPTY" && codeOf(error) !== "EEXIST") failure ??= { step: `remove folder ${folder}`, code: codeOf(error) };
       if (io.lstat(absPath(intent.folder, folder))) left.push(folder);
+    }
+  }
+  // What restore changed is made durable before its result is recorded: the folders it touched, and the recovery folder.
+  for (const folder of new Set([...intent.paths.map((one) => dirname(absPath(intent.folder, one.path))), intent.recovery])) {
+    try {
+      if (io.lstat(folder)?.isDirectory()) io.syncDir(folder);
+    } catch {
+      // Best effort: a folder that can't be synced still holds what it holds.
     }
   }
   const state = overall(paths);
@@ -299,50 +309,66 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
     throw new ApplyRefusal("filesystem", null, codeOf(error));
   }
 
-  // The lock, the recovery folder, and a hard link in it; anything made here is taken back on a refusal.
+  // The lock, the recovery folder, and a hard link in it; anything made here is taken back on a refusal. The lock is
+  // written whole under a name of this apply's own, then linked into place, which fails rather than replace another:
+  // whatever stops the write, a lock is never left empty.
+  const lockTemp = join(area, `lock-${applyId}`);
   let madeArea = false;
   let madeLock = false;
-  let madeRecovery = false;
   const takeBack = () => {
-    for (const name of madeRecovery ? ["probe-link", "probe"] : []) {
+    // This apply's own names first, whether or not their call said it made them: one can fail after doing its work.
+    for (const undo of [() => io.unlink(join(recovery, "probe-link")), () => io.unlink(join(recovery, "probe")), () => io.unlink(lockTemp), () => io.rmdir(recovery)]) {
       try {
-        io.unlink(join(recovery, name));
+        undo();
       } catch {
         // Not made, or already gone.
       }
     }
-    for (const [made, undo] of [[madeRecovery, () => io.rmdir(recovery)], [madeLock, () => io.unlink(lock)], [madeArea, () => io.rmdir(area)]] as const) {
-      try {
-        if (made) undo();
-      } catch {
-        // Left in the git folder: it holds nothing of the person's.
-      }
+    // The lock, when it is this apply's own: made, or linked by a call that then reported failure.
+    try {
+      const held = JSON.parse(new TextDecoder().decode(io.read(lock))) as { engine?: unknown; applyId?: unknown };
+      if (madeLock || (held.engine === input.engineId && held.applyId === applyId)) io.unlink(lock);
+    } catch {
+      // None, or another's.
+    }
+    try {
+      if (madeArea) io.rmdir(area);
+    } catch {
+      // Left in the git folder: it holds nothing of the person's.
     }
   };
+  /** A lock that is there: another engine's (or one that can't be read) refuses; this engine's own, over, is taken over. */
+  const judgeLock = () => {
+    let held: { engine?: unknown; applyId?: unknown } = {};
+    try {
+      held = JSON.parse(new TextDecoder().decode(io.read(lock))) as typeof held;
+    } catch {
+      // Unreadable or empty: not this engine's, as far as it can tell.
+    }
+    if (held.engine !== input.engineId || typeof held.applyId !== "string") throw new ApplyRefusal("locked");
+    if (!input.journal.settled(held.applyId)) throw new ApplyRefusal("busy");
+    io.unlink(lock);
+  };
   try {
+    // A lock already there is judged before anything is written.
+    if (io.lstat(lock)) judgeLock();
     if (!io.lstat(area)) {
       io.mkdir(area);
       madeArea = true;
     }
-    const holder = new TextEncoder().encode(`${JSON.stringify({ engine: input.engineId, applyId })}\n`);
+    io.create(lockTemp, new TextEncoder().encode(`${JSON.stringify({ engine: input.engineId, applyId })}\n`), 0o600);
     try {
-      io.create(lock, holder, 0o600);
+      io.link(lockTemp, lock);
     } catch (error) {
-      if (codeOf(error) !== "EEXIST") throw error;
-      let held: { engine?: unknown; applyId?: unknown } = {};
-      try {
-        held = JSON.parse(new TextDecoder().decode(io.read(lock))) as typeof held;
-      } catch {
-        // Unreadable: another engine's, as far as this one can tell.
-      }
-      if (held.engine !== input.engineId || typeof held.applyId !== "string" || !input.journal.settled(held.applyId)) throw new ApplyRefusal("busy");
-      // This engine's own, left by an apply that is over: taken over.
-      io.unlink(lock);
-      io.create(lock, holder, 0o600);
+      // The lock is a hard link too: one refused for another reason means links don't work in the git folder.
+      if (codeOf(error) !== "EEXIST") throw new ApplyRefusal("recovery", null, codeOf(error));
+      // One that appeared since it was looked at.
+      judgeLock();
+      io.link(lockTemp, lock);
     }
     madeLock = true;
+    io.unlink(lockTemp);
     io.mkdir(recovery);
-    madeRecovery = true;
     io.syncDir(area);
     io.create(join(recovery, "probe"), new Uint8Array(0), 0o600);
     try {
@@ -429,14 +455,24 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
       const aside = join(recovery, one.aside!);
       step = `aside ${index}`;
       await before(step);
+      // Only a file is moved aside: anything else there now (a folder, a link) is left where it is.
+      if (!io.lstat(target)?.isFile()) {
+        theirs.set(index, false);
+        throw new Stop(`changed ${index}`);
+      }
       io.rename(target, aside);
       if (!isPre(stateOf(io, aside), one)) {
-        // Not the original after all (saved since it was checked): it goes back, and the apply rolls back.
+        // Not the original after all (saved since it was checked): it goes back, and the apply rolls back. A folder
+        // swapped in at the last instant can't be linked, so it is renamed back, only into an empty place.
         theirs.set(index, false);
         step = `put back ${index}`;
         await before(step);
-        io.link(aside, target);
-        io.unlink(aside);
+        if (io.lstat(aside)?.isDirectory()) {
+          if (!io.lstat(target)) io.rename(aside, target);
+        } else {
+          io.link(aside, target);
+          io.unlink(aside);
+        }
         throw new Stop(`changed ${index}`);
       }
       step = `link ${index}`;
@@ -467,6 +503,8 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
     // Durable, then read back. A file another program changed after Nivra wrote it is reported, never overwritten.
     step = "sync";
     for (const folder of new Set(paths.map((one) => dirname(absPath(plan.folder, one.path))))) io.syncDir(folder);
+    // The originals moved into the recovery folder, too.
+    io.syncDir(recovery);
     step = "read back";
     await before(step);
     for (const [index, one] of paths.entries()) {

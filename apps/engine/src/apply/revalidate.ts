@@ -21,10 +21,11 @@ import { ABSENT, ApplyRefusal, type PathState, type PlannedPath, type Revalidate
  * 3. the proposal's own shape: paths Nivra applies, and a post-image holding exactly the bound files;
  * 4. the picked folder clean, by the snapshot's own check (tracked changes, staged or not, and files git is told not to
  *    look at); untracked files matter only where they collide;
- * 5. each changed path the baseline's own file, through real folders;
- * 6. each added path free, its parents real folders or absent, and no name beside it that differs only by case or
- *    Unicode form;
- * 7. no touched path with an attribute that rewrites it on checkout.
+ * 5. no touched path that git rewrites on checkout (a filter, ident, an encoding, or a conversion to CRLF), checked
+ *    before the files themselves so a converted checkout is refused for that;
+ * 6. each changed path the baseline's own file, through real folders;
+ * 7. each added path free, its parents real folders or absent, and no name beside it that differs only by case or
+ *    Unicode form.
  */
 
 const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
@@ -164,6 +165,31 @@ export async function revalidate(input: RevalidationInput): Promise<RevalidatedP
     throw error;
   }
 
+  // 5. Attributes, and configuration, that would make what git checks out differ from what Nivra writes: checked before
+  // any file, so a checkout git converts is refused for that, never as a file changed since.
+  const touched = [...bound.keys()];
+  const listed = (await run(["check-attr", "-z", "filter", "ident", "working-tree-encoding", "eol", "crlf", "text", "--", ...touched])).bytes;
+  const fields = oneLine(listed).split("\0");
+  const said = new Map<string, Map<string, string>>();
+  for (let at = 0; at + 2 < fields.length; at += 3) {
+    const [path, attribute, value] = [fields[at]!, fields[at + 1]!, fields[at + 2]!];
+    if (!said.has(path)) said.set(path, new Map());
+    said.get(path)!.set(attribute, value);
+  }
+  const autocrlf = /^(true|yes|on|1)$/.test((await run(["config", "--get", "core.autocrlf"], { okCodes: [1] })).text.trim().toLowerCase());
+  const eolCrlf = (await run(["config", "--get", "core.eol"], { okCodes: [1] })).text.trim().toLowerCase() === "crlf";
+  for (const path of touched) {
+    const of = (attribute: string) => said.get(path)?.get(attribute) ?? "unspecified";
+    const [text, crlf, eol] = [of("text"), of("crlf"), of("eol")];
+    // Line endings are converted on checkout only to CRLF: by `eol=crlf`; by text (or the old `crlf`) when the
+    // configuration asks for CRLF; and by `core.autocrlf`, for any file not marked binary. `eol=lf` (or the old
+    // `crlf=input`) keeps LF whatever the configuration says.
+    const keepsLf = eol === "lf" || crlf === "input";
+    const toCrlf = eol === "crlf" || (!keepsLf && (((text === "set" || text === "auto" || crlf === "set") && (autocrlf || eolCrlf)) || (autocrlf && text !== "unset" && crlf !== "unset")));
+    const rewrites = of("filter") !== "unspecified" || of("working-tree-encoding") !== "unspecified" || of("ident") === "set" || toCrlf;
+    if (rewrites) throw new ApplyRefusal("attributes", path, [...(said.get(path) ?? new Map())].map(([name, value]) => `${name}: ${value}`).join(", ") || "core.autocrlf");
+  }
+
   const paths: PlannedPath[] = [];
   const folders = new Set<string>();
   // Two names one filesystem would take for one: the proposal's own paths and the folders it creates.
@@ -181,7 +207,7 @@ export async function revalidate(input: RevalidationInput): Promise<RevalidatedP
   };
   for (const [path, one] of [...bound].sort(([a], [b]) => byBytes(a, b))) {
     claim(path, "file", path);
-    // 5–6. Its folders: real ones all the way down, never through a link, each by its exact name; for an added path,
+    // 6–7. Its folders: real ones all the way down, never through a link, each by its exact name; for an added path,
     // the missing ones are made.
     let absentFrom: string | null = null;
     for (const parent of parentsOf(path)) {
@@ -212,21 +238,6 @@ export async function revalidate(input: RevalidationInput): Promise<RevalidatedP
       }
     }
     paths.push({ path, change: "added", pre: ABSENT, post: { mode: one.after!.mode as "100644" | "100755", size: bytesOf.get(path)!.byteLength, sha256: one.after!.sha256 }, bytes: bytesOf.get(path)! });
-  }
-
-  // 7. Attributes that would make what git checks out differ from what Nivra writes.
-  const listed = (await run(["check-attr", "-z", "filter", "ident", "working-tree-encoding", "eol", "crlf", "text", "--", ...paths.map((one) => one.path)])).bytes;
-  const fields = oneLine(listed).split("\0");
-  const autocrlf = (await run(["config", "--get", "core.autocrlf"], { okCodes: [1] })).text.trim().toLowerCase();
-  const eol = (await run(["config", "--get", "core.eol"], { okCodes: [1] })).text.trim().toLowerCase();
-  const converts = /^(true|yes|on|1)$/.test(autocrlf) || eol === "crlf";
-  for (let at = 0; at + 2 < fields.length; at += 3) {
-    const [path, attribute, value] = [fields[at]!, fields[at + 1]!, fields[at + 2]!];
-    const rewrites =
-      ((attribute === "filter" || attribute === "working-tree-encoding" || attribute === "eol" || attribute === "crlf") && value !== "unspecified") ||
-      (attribute === "ident" && value === "set") ||
-      (attribute === "text" && (value === "set" || value === "auto") && converts);
-    if (rewrites) throw new ApplyRefusal("attributes", bound.has(path) ? path : null, `${attribute}: ${value}`);
   }
 
   return { folder, topLevel, gitDir, folders: [...folders].sort(byBytes), paths };

@@ -80,7 +80,7 @@ export type ApplyRefusalCode =
   | "changed-since"
   /** An added path is taken, a parent isn't a folder, or a name there differs from it only by case or Unicode form. */
   | "collision"
-  /** A touched path has a filter, ident, working-tree-encoding or end-of-line conversion attribute. */
+  /** Git rewrites a touched path on checkout: a filter, ident, working-tree-encoding, or a conversion to CRLF. */
   | "attributes"
   /** A path Nivra doesn't apply: outside the folder, through a link, a deletion, a link or a mode change. */
   | "path"
@@ -107,7 +107,7 @@ const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   operation: "A merge, rebase, cherry-pick, revert or bisect is under way in this checkout, so nothing was written. Finish or abort it, then apply again.",
   "changed-since": "A file the change replaces is no longer as it was in the commit, so nothing was written. Restore it, or run the task again.",
   collision: "Something is already where the change adds a file, or has a name that differs from it only by case or Unicode form, so nothing was written. Move it aside, or run the task again.",
-  attributes: "A file the change touches has a git attribute that rewrites it on checkout (a filter, ident, an encoding or line-ending conversion), so nothing was written: what Nivra wrote wouldn't be what you approved.",
+  attributes: "Git rewrites a file the change touches when it checks it out (a filter, ident, an encoding, or a conversion to CRLF line endings from its attributes or core.autocrlf), so nothing was written: what Nivra wrote wouldn't be what you approved.",
   path: "The change holds a path Nivra doesn't apply (outside the folder, through a link, a deletion, a link or a mode change), so nothing was written.",
   git: "Git failed while Nivra checked your checkout, so nothing was written. Try again; if it keeps happening, report it with the engine log.",
   recovery: "Nivra keeps a copy of every file it replaces in the repository's git folder, and that folder isn't on the same disk as the change, or doesn't take hard links, so nothing was written.",

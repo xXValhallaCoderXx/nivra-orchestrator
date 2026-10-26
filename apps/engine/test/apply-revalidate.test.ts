@@ -286,15 +286,22 @@ describe("revalidating a proposal before it is applied (NIV-8, D40)", () => {
   });
 
   it("refuses a touched file with an attribute that rewrites it on checkout: a filter, ident, eol, crlf, or text that converts", async () => {
-    for (const attributes of ["greet.sh filter=x\n", "greet.sh ident\n", "greet.sh eol=crlf\n", "greet.sh crlf\n", "greet.sh working-tree-encoding=UTF-8\n"]) {
+    for (const attributes of ["greet.sh filter=x\n", "greet.sh ident\n", "greet.sh eol=crlf\n", "greet.sh working-tree-encoding=UTF-8\n"]) {
       const { proposal, root } = await proposed({ files: { ...FIXTURE, ".gitattributes": attributes } });
       await refused(root, proposal, "attributes", "greet.sh");
     }
-    // Text alone converts nothing, until the repository's configuration asks for CRLF.
-    const { proposal, root } = await proposed({ files: { ...FIXTURE, ".gitattributes": "greet.sh text\n" } });
-    await check(root, proposal);
-    git(root, ["config", "core.autocrlf", "true"]);
-    await refused(root, proposal, "attributes", "greet.sh");
+    // Text, or the old crlf, converts nothing on checkout until the configuration asks for CRLF; eol=lf never does.
+    for (const attributes of ["greet.sh text\n", "greet.sh crlf\n", "* text=auto eol=lf\n"]) {
+      const { proposal, root } = await proposed({ files: { ...FIXTURE, ".gitattributes": attributes } });
+      await check(root, proposal);
+      git(root, ["config", "core.autocrlf", "true"]);
+      if (attributes.includes("eol=lf")) await check(root, proposal);
+      else await refused(root, proposal, "attributes", "greet.sh");
+    }
+    // core.autocrlf alone converts every file not marked binary: refused for that, never as a file changed since.
+    const plain = await proposed();
+    git(plain.root, ["config", "core.autocrlf", "true"]);
+    await refused(plain.root, plain.proposal, "attributes", "greet.sh");
   });
 
   it("refuses when the picked folder, or a folder the change writes in, can't be read, saying so", async () => {

@@ -21,6 +21,8 @@ import { reconcile, restore, writeChange, type ApplyResult } from "./writer.ts";
 export interface ApplyServiceDeps {
   database: Database;
   proposal(runId: string): Proposal | null;
+  /** Whether the run's report shows every acceptance case passing: only a verified change is applied (D39, D40). */
+  verified(runId: string): boolean;
   /** This engine's home: the proposal must have been made on it, and a lock it left is its own. */
   homeId: string;
   backend: ExecutionBackend;
@@ -61,7 +63,7 @@ export class ApplyService {
       if (!record.intent) continue;
       let result: ApplyResult;
       try {
-        result = reconcile(record.intent, this.#io);
+        result = reconcile(record.intent, this.#io, record.created);
       } catch {
         result = { state: "unknown", paths: [], folders: [], failure: { step: "reconcile", code: null } };
       }
@@ -69,19 +71,31 @@ export class ApplyService {
     }
   }
 
+  /**
+   * Everything up to the claim runs the moment the request arrives, before it waits its turn: a status asked while it
+   * waits finds it claimed, never nothing (which would mean it never reached this engine).
+   */
   apply(params: ApplyParams): Promise<ApplyView> {
-    return this.#serialised(async () => {
-      const repeated = this.#journal.byRequest(params.requestId);
-      if (repeated) return this.view(repeated);
-      if (this.#deps.platform === "win32") throw new ApplyRequestRefusal("Applying changes on Windows itself isn't available yet, so nothing was written.");
-      const proposal = this.#deps.proposal(params.runId);
-      if (!proposal) throw new ApplyRequestRefusal("This engine has no proposal for that run, so nothing was written. Run the task again.");
-      const git = this.#deps.findGit();
-      if (!git) throw new ApplyRequestRefusal("Git isn't installed on this target, or isn't on its PATH, so nothing was written. Install it, then apply again.");
-      const applyId = randomUUID();
-      // A claim that finds the request already there (a race with the lookup above) gives that apply, never a second.
-      const { record, repeated: again } = this.#journal.claim({ applyId, requestId: params.requestId, runId: params.runId, proposalHash: proposal.hash, destination: proposal.binding.destination.root });
-      if (again || record.state === "refused") return this.view(record);
+    const repeated = this.#journal.byRequest(params.requestId);
+    if (repeated) return Promise.resolve(this.view(repeated));
+    if (this.#deps.platform === "win32") return Promise.reject(new ApplyRequestRefusal("Applying changes on Windows itself isn't available yet, so nothing was written."));
+    const proposal = this.#deps.proposal(params.runId);
+    if (!proposal) return Promise.reject(new ApplyRequestRefusal("This engine has no proposal for that run, so nothing was written. Run the task again."));
+    const git = this.#deps.findGit();
+    if (!git) return Promise.reject(new ApplyRequestRefusal("Git isn't installed on this target, or isn't on its PATH, so nothing was written. Install it, then apply again."));
+    const applyId = randomUUID();
+    const { record } = this.#journal.claim({ applyId, requestId: params.requestId, runId: params.runId, proposalHash: proposal.hash, destination: proposal.binding.destination.root });
+    if (record.state === "refused") return Promise.resolve(this.view(record));
+    // Only a verified change is applied, whoever asks: the host offers Approve only then, and this is the backstop.
+    if (!this.#deps.verified(params.runId)) {
+      this.#journal.refuse(applyId, new ApplyRefusal("unverified"));
+      return Promise.resolve(this.view(this.#journal.get(applyId)!));
+    }
+    return this.#serialised(() => this.#write(applyId, params, proposal, git));
+  }
+
+  async #write(applyId: string, params: ApplyParams, proposal: Proposal, git: string): Promise<ApplyView> {
+    {
       let session: Awaited<ReturnType<ExecutionBackend["open"]>> | null = null;
       try {
         session = await this.#deps.backend.open({ workspace: params.repoPath });
@@ -98,7 +112,7 @@ export class ApplyService {
         await session?.close();
       }
       return this.view(this.#journal.get(applyId)!);
-    });
+    }
   }
 
   status(requestId: string): ApplyView | null {
@@ -106,12 +120,18 @@ export class ApplyService {
     return record ? this.view(record) : null;
   }
 
-  /** Takes a partial apply back to its originals, never overwriting a version another program saved since. */
+  /**
+   * Takes a partial apply back to its originals, never overwriting a version another program saved since, and keeping
+   * what the apply knew of such versions. Asked again once it isn't partial (an answer lost on the way back), it gives
+   * the apply as it is, writing nothing.
+   */
   restore(applyId: string): Promise<ApplyView> {
     return this.#serialised(async () => {
       const record = this.#record(applyId);
+      if (record.resolution === null && (record.state === "not-applied" || record.state === "unknown")) return this.view(record);
       if (record.state !== "partial" || record.resolution !== null || !record.intent) throw new ApplyRequestRefusal("Only a change that was applied in part can be restored this way, so nothing was written.");
-      const result = await restore(record.intent, { io: this.#io, created: record.created });
+      const theirs = new Map((record.result?.paths ?? []).flatMap((one, index) => (one.place === "theirs" ? [[index, one.changedSince] as const] : [])));
+      const result = await restore(record.intent, { io: this.#io, created: record.created, theirs });
       this.#journal.settle(applyId, result);
       return this.view(this.#journal.get(applyId)!);
     });
@@ -125,8 +145,12 @@ export class ApplyService {
   dismiss(applyId: string, as: ApplyResolution): Promise<ApplyView> {
     return this.#serialised(async () => {
       const record = this.#record(applyId);
+      // Settled that way already (an answer lost on the way back): the same apply, and nothing more.
+      if (record.resolution === as) return this.view(record);
       const allowed: Record<ApplyResolution, readonly string[]> = { accepted: ["applied"], dismissed: ["refused", "not-applied", "unknown"], kept: ["partial"] };
       if (record.resolution !== null || !allowed[as].includes(record.state)) throw new ApplyRequestRefusal("This apply can't be settled that way now, so nothing changed.");
+      // Keeping it as it is would leave a file the change replaces missing: its original is restored, not kept.
+      if (as === "kept" && (record.result?.paths ?? []).some((one) => one.place === "aside")) throw new ApplyRequestRefusal("A file the change replaces is missing from your checkout, and its original is kept, so this can't be kept as it is. Restore the originals instead.");
       if (record.intent) this.#release(record);
       this.#journal.resolve(applyId, as);
       return this.view(this.#journal.get(applyId)!);
@@ -139,7 +163,14 @@ export class ApplyService {
     const releasable = new Map<string, string>();
     for (const [index, one] of intent.paths.entries()) {
       releasable.set(one.temp, one.post.sha256);
-      if (one.aside && one.pre.sha256) releasable.set(one.aside, one.pre.sha256);
+      // The original of a file missing from the checkout is the only copy of it here: it stays, whatever was decided.
+      let missing = true;
+      try {
+        missing = io.lstat(join(intent.folder, ...one.path.split("/"))) === null;
+      } catch {
+        // Can't be read: kept, as if missing.
+      }
+      if (one.aside && one.pre.sha256 && !missing) releasable.set(one.aside, one.pre.sha256);
       // A version taken back is releasable only when it is Nivra's own.
       for (const name of this.#names(intent.recovery).filter((name) => name.startsWith(`back-${index}-`))) releasable.set(name, one.post.sha256);
     }
@@ -191,9 +222,9 @@ export class ApplyService {
   view(record: ApplyRecord): ApplyView {
     const result = record.result;
     const intent = record.intent;
-    const paths =
-      result?.paths ??
-      (intent?.paths.map((one) => ({ path: one.path, place: "pre" as const, found: one.pre, kept: [], changedSince: false })) ?? []);
+    // Only what was read from the disk: while an apply writes, where its paths are isn't known yet. Bounded as the
+    // protocol bounds it, so a result can always be read back (a change can make hundreds of folders).
+    const paths = (result?.paths ?? []).slice(0, 500);
     return {
       applyId: record.id,
       requestId: record.requestId,
@@ -205,7 +236,7 @@ export class ApplyService {
         const change = intent?.paths.find((planned) => planned.path === one.path)?.change ?? "changed";
         return { path: one.path, change, place: one.place, found: { kind: one.found.kind, mode: one.found.mode, size: one.found.size }, kept: one.kept.slice(0, 32), changedSince: one.changedSince };
       }),
-      folders: result?.folders ?? [],
+      folders: (result?.folders ?? []).slice(0, 500),
       recovery: intent ? `nivra-apply/${record.id}` : null,
       failure: result?.failure ? { step: result.failure.step.slice(0, 80), code: result.failure.code } : null,
       resolution: record.resolution,
