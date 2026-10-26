@@ -2057,10 +2057,12 @@ fixture's checkout was unchanged.
   - the host: a task run's stop skipped when the check's or an explanation's stop failed, an offline engine's run
     blocking removal, a turned-down stop never sent again.
 
+- **The Windows turn** (approved by Nate, 26 October): `pnpm dev:win --no-launch` built `b994bea`, and `test:windows`
+  passed 12 of 12 on that build: the window, both engines, the workspace kept across relaunches, quitting leaving no
+  engine, and `~/.nivra` unchanged. None of them drives a task run: that is checkpoint 3's. Targets, the supervisor and
+  staging didn't change, so `verify:windows` wasn't called for.
+
 **Not shown yet:**
-- **The Windows turn:** `pnpm dev:win --no-launch`, then `test:windows`, which this checkpoint's main-process and
-  preload changes call for (AGENTS.md). It needs Nate's approval. Targets, the supervisor and staging didn't change, so
-  `verify:windows` isn't called for.
 - **One live worker run,** and the packaged journey through the Windows app: checkpoint 3 (NIV-35), each with its own
   approval.
 
