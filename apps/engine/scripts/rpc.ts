@@ -34,6 +34,11 @@
 // for Nebius and Token Factory, pass --sandboxes-url and --token-factory-url:
 //   pnpm rpc task.preview '{"repoPath":"/path/to/repo","brief":{"goal":"…","acceptanceCriteria":[],"scope":"","exclusions":"","context":"","checks":[],"acceptanceCases":[{"name":"…","command":"…","expectedOutput":"…\n","expectedExitCode":0}]}}'
 //   pnpm rpc runs.start '{"workflowId":"task","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"modelContext":true,"cloudExecution":true},"brief":{…}}}' --follow --sandboxes-url http://127.0.0.1:<port> --token-factory-url http://127.0.0.1:<port>/v1
+// Applying a finished task run's proposal (D40) needs only the run's id: the approval is filled in from the run, its
+// report and its proposal, and this engine's home, as the host would send it, with a new request id. It writes to the
+// run's checkout:
+//   pnpm rpc task.apply '{"runId":"<uuid>"}'
+//   pnpm rpc task.dismiss '{"applyId":"<uuid>","as":"accepted"}'
 //
 // The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, NEBIUS_PROJECT_ID and
 // TAVILY_API_KEY, when set, are passed to the engine in `initialize`, the way the app does it (D8).
@@ -134,7 +139,7 @@ const exited = new Promise<number | null>((resolve) =>
 
 let status = 0;
 try {
-  await client.call("initialize", { protocolVersion: PROTOCOL_VERSION, client: { name: "rpc.ts", version: "0" }, secrets });
+  const info = await client.call("initialize", { protocolVersion: PROTOCOL_VERSION, client: { name: "rpc.ts", version: "0" }, secrets });
   // A check is bound to what its preview showed (D36): taken now, from the same engine, when the request leaves it out.
   const input = params["input"] as Record<string, unknown> | undefined;
   if (sandbox && input && input["preview"] === undefined) {
@@ -151,6 +156,16 @@ try {
     if (shown.status !== "ready") throw new Error(`The preview refused this checkout (${shown.code}): ${shown.message}`);
     console.error(`preview: ${shown.snapshot.files} files, ${shown.snapshot.bytes} bytes from ${shown.snapshot.baseline}; programs ${shown.programs.join(", ") || "none"}; fingerprint ${shown.snapshot.fingerprint}`);
     input["preview"] = shown.snapshot.fingerprint;
+  }
+  // An approval of a run's proposal, filled in as the host would: from the run, its report, its proposal and this engine.
+  if (method === "task.apply") {
+    const runId = String(params["runId"] ?? "");
+    const summary = await client.call("runs.get", { runId });
+    const [report, proposal] = [await client.call("runs.task", { runId }), await client.call("runs.proposal", { runId })];
+    if (!report || !proposal) throw new Error("That run has no task report and proposal on this engine, so there is nothing to apply.");
+    const input = summary.input as { repoPath: string; project: string; target: string };
+    const task = { attempt: { taskId: report.task.taskId, attemptId: report.task.attemptId, runId }, engine: { homeId: info.homeId }, brief: { version: report.task.briefVersion, sha256: report.task.briefDigest } };
+    params = { requestId: randomUUID(), approvedHash: proposal.hash, repoPath: input.repoPath, project: input.project, target: input.target, task, ...params };
   }
   const result = await client.call(method as MethodName, params as never);
   console.log(JSON.stringify(result, null, 2));
