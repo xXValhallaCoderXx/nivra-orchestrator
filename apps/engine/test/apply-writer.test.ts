@@ -274,6 +274,14 @@ describe("the apply writer (NIV-8, D40)", () => {
     assert.equal(String(readFileSync(join(run.recovery, "orig-0"))), FILES["README.md"]);
   });
 
+  it("reports a file another program saved after Nivra wrote it, and never overwrites it: still applied", async () => {
+    const root = repoWith(FILES);
+    const run = await apply(root, { before: (step) => void (step === "read back" && writeFileSync(join(root, "greet.sh"), "saved after the write\n")) });
+    assert.ok(!(run.outcome instanceof ApplyRefusal));
+    assert.deepEqual([run.outcome.state, run.outcome.paths.map((one) => `${one.path} ${one.place}${one.changedSince ? " since" : ""}`)], ["applied", ["README.md post", "greet.sh theirs since", "notes/2026/today.md post"]]);
+    assert.equal(String(files(root, "greet.sh")), "saved after the write\n");
+  });
+
   it("keeps every version and says where each path is when any filesystem call fails, at every step", async () => {
     const fresh = copies();
     const clean = faulty();

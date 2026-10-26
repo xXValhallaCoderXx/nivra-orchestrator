@@ -468,6 +468,7 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
     step = "sync";
     for (const folder of new Set(paths.map((one) => dirname(absPath(plan.folder, one.path))))) io.syncDir(folder);
     step = "read back";
+    await before(step);
     for (const [index, one] of paths.entries()) {
       found[index] = stateOf(io, absPath(plan.folder, one.path));
       if (!isPost(found[index], one)) theirs.set(index, true);
