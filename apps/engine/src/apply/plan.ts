@@ -68,6 +68,8 @@ export interface RevalidationInput {
 export type ApplyRefusalCode =
   /** Not intact, not the approved hash, or not for this project, target, folder, attempt, engine or brief. */
   | "proposal"
+  /** Its run didn't show every acceptance case passing: only a verified change is applied. */
+  | "unverified"
   /** HEAD isn't the commit the proposal was made from. */
   | "baseline-moved"
   /** Tracked changes in the worktree or the index, files git is told not to look at, or a split index. */
@@ -90,6 +92,8 @@ export type ApplyRefusalCode =
   | "filesystem"
   /** Another apply is open for this folder. */
   | "busy"
+  /** The repository's apply lock is held by another engine, or can't be read. */
+  | "locked"
   /** This proposal has already been applied. */
   | "duplicate"
   /** The engine stopped after the apply was claimed and before it wrote anything. */
@@ -97,6 +101,7 @@ export type ApplyRefusalCode =
 
 const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   proposal: "This proposal isn't the one you approved, isn't intact, or wasn't made for this folder, run or engine, so nothing was written. Run the task again.",
+  unverified: "Not every acceptance case was shown to pass for this change, so it isn't applied, and nothing was written.",
   "baseline-moved": "Your checkout has moved to another commit since the proposal was made, so nothing was written. Run the task again from the commit it is on now.",
   uncommitted: "Your checkout has uncommitted changes, or git can't show whether it has (files it is told not to look at, or a split index), so nothing was written. Commit or stash the changes, or clear those settings, then apply again.",
   operation: "A merge, rebase, cherry-pick, revert or bisect is under way in this checkout, so nothing was written. Finish or abort it, then apply again.",
@@ -107,7 +112,8 @@ const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   git: "Git failed while Nivra checked your checkout, so nothing was written. Try again; if it keeps happening, report it with the engine log.",
   recovery: "Nivra keeps a copy of every file it replaces in the repository's git folder, and that folder isn't on the same disk as the change, or doesn't take hard links, so nothing was written.",
   filesystem: "Nivra couldn't read the project's folder or a file the change touches, or write in the repository's git folder, so nothing was written. Check that the folder is there, its permissions and its free space, then apply again.",
-  busy: "Another change is being applied to this folder, so nothing was written. Wait for it to finish, then apply again.",
+  busy: "Another change is being applied to this folder, or one applied in part is waiting for you to settle it, so nothing was written. Settle it, then apply again.",
+  locked: "Another Nivra engine holds this repository's apply lock (nivra-apply/lock in its git folder), so nothing was written. If no other Nivra is applying a change here, remove that file, then apply again.",
   duplicate: "This proposal has already been applied, so it wasn't applied again.",
   interrupted: "Nivra stopped before it wrote anything, so nothing was written. Apply again.",
 };

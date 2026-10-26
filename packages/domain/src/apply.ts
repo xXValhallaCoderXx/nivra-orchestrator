@@ -15,7 +15,7 @@ const Sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 const RelativePath = z.string().min(1).max(1_024);
 
 /** Why an apply was refused before anything of the person's was written. The words are chosen by the code. */
-export const ApplyRefusalCode = z.enum(["proposal", "baseline-moved", "uncommitted", "operation", "changed-since", "collision", "attributes", "path", "git", "recovery", "filesystem", "busy", "duplicate", "interrupted"]);
+export const ApplyRefusalCode = z.enum(["proposal", "unverified", "baseline-moved", "uncommitted", "operation", "changed-since", "collision", "attributes", "path", "git", "recovery", "filesystem", "busy", "locked", "duplicate", "interrupted"]);
 export type ApplyRefusalCode = z.infer<typeof ApplyRefusalCode>;
 
 /**
