@@ -84,8 +84,9 @@ export class ApplyService {
     const git = this.#deps.findGit();
     if (!git) return Promise.reject(new ApplyRequestRefusal("Git isn't installed on this target, or isn't on its PATH, so nothing was written. Install it, then apply again."));
     const applyId = randomUUID();
-    const { record } = this.#journal.claim({ applyId, requestId: params.requestId, runId: params.runId, proposalHash: proposal.hash, destination: proposal.binding.destination.root });
-    if (record.state === "refused") return Promise.resolve(this.view(record));
+    // A claim that finds the request already there gives that apply, never a second.
+    const { record, repeated: again } = this.#journal.claim({ applyId, requestId: params.requestId, runId: params.runId, proposalHash: proposal.hash, destination: proposal.binding.destination.root });
+    if (again || record.state === "refused") return Promise.resolve(this.view(record));
     // Only a verified change is applied, whoever asks: the host offers Approve only then, and this is the backstop.
     if (!this.#deps.verified(params.runId)) {
       this.#journal.refuse(applyId, new ApplyRefusal("unverified"));

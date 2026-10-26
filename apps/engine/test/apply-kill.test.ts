@@ -5,6 +5,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { nodeIo } from "../src/apply/io.ts";
 import { ApplyJournal } from "../src/apply/journal.ts";
 import type { RevalidatedPlan } from "../src/apply/plan.ts";
 import { type IntendedPath, reconcile, restore } from "../src/apply/writer.ts";
@@ -141,7 +142,8 @@ async function holds(run: Run, what: string): Promise<string> {
   const intent = record.intent;
   const rows = rowsIn(run.database);
   const before = folderState(run.root);
-  const seen = reconcile(intent);
+  // With the folders the journal recorded making, as the engine reconciles at start.
+  const seen = reconcile(intent, nodeIo, record.created);
   assert.deepEqual(changedSince(before, run.root), [], `${what}: reconciling wrote something`);
   const kept = digestsIn(intent.recovery);
   for (const [index, one] of intent.paths.entries()) {
@@ -161,7 +163,7 @@ async function holds(run: Run, what: string): Promise<string> {
   assert.equal(git(run.root, ["status", "--porcelain"]), "", `${what}: git sees changes after restoring`);
   const posts = new Set(intent.paths.map((one) => one.post.sha256));
   assert.deepEqual([...treeOf(run.root).values()].filter((entry) => posts.has(entry.split(" ")[2] ?? "")), [], `${what}: Nivra's new bytes are in the working tree after restoring`);
-  assert.equal(reconcile(intent).state, "not-applied", `${what}: reconciling after restoring isn't not-applied`);
+  assert.equal(reconcile(intent, nodeIo, record.created).state, "not-applied", `${what}: reconciling after restoring isn't not-applied`);
   // Every original still kept, or back in place: nothing lost by restoring.
   for (const one of intent.paths) if (one.change === "changed") assert.equal(onDisk(run.root, intent.recovery, one), "pre", `${what}: ${one.path} isn't its original after restoring`);
   assert.deepEqual(rowsIn(run.database), rows, `${what}: reconciling or restoring started or changed an apply`);
