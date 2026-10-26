@@ -86,6 +86,8 @@ export type ApplyRefusalCode =
   | "git"
   /** The recovery folder can't be on the same filesystem as the change, or hard links don't work there. */
   | "recovery"
+  /** A file the change touches couldn't be read, or the git folder written, before anything of the person's was. */
+  | "filesystem"
   /** Another apply is open for this folder. */
   | "busy"
   /** This proposal has already been applied. */
@@ -102,6 +104,7 @@ const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   path: "The change holds a path Nivra doesn't apply (outside the folder, through a link, a deletion, a link or a mode change), so nothing was written.",
   git: "Git failed while Nivra checked your checkout, so nothing was written. Try again; if it keeps happening, report it with the engine log.",
   recovery: "Nivra keeps a copy of every file it replaces in the repository's git folder, and that folder isn't on the same disk as the change, or doesn't take hard links, so nothing was written.",
+  filesystem: "Nivra couldn't read a file the change touches, or write in the repository's git folder, so nothing was written. Check the folder's permissions and free space, then apply again.",
   busy: "Another change is being applied to this folder, so nothing was written. Wait for it to finish, then apply again.",
   duplicate: "This proposal has already been applied, so it wasn't applied again.",
 };
