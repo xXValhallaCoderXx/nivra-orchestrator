@@ -440,6 +440,37 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e task-run.spec.ts
   recipe, and refuses a fixture or write that isn't the pinned one; `--recover <folder>` settles what a cut-short
   cleanup left. Evidence goes to `~/nivra-acceptance/task-probe-<UTC>/`. It passed 10 of 10 on 26 October (D39).
 
+Applying a task's change (NIV-8, D40): the person approves a verified proposal by its hash, and the engine that owns the
+checkout applies it itself, never with git apply: each file it replaces is moved aside into
+`<git folder>/nivra-apply/<apply id>/` and checked, each new file is linked into place without replacing anything, and
+nothing is staged. The approval is the apply request, idempotent by the host's request id. With a finished run on the
+stand-ins (above):
+
+```bash
+pnpm rpc task.apply '{"runId":"<uuid>"}'                     # fills in the approval from the run, as the host would
+pnpm rpc task.applyStatus '{"requestId":"<uuid>"}'
+pnpm rpc task.dismiss '{"applyId":"<uuid>","as":"accepted"}'   # or dismissed (not applied), kept (partial)
+pnpm rpc task.restore '{"applyId":"<uuid>"}'                   # a partial apply only
+cd apps/engine && node --test test/apply-*.test.ts
+cd apps/desktop && xvfb-run -a pnpm -s test:e2e task-apply.spec.ts
+```
+
+- **The engine's parts** (`apps/engine/src/apply/`): `plan.ts` (the shared contract and the refusals' words),
+  `revalidate.ts` (the checks before anything is written), `writer.ts` (the write, rollback and restore, and
+  reconciling), `io.ts` (every filesystem call the writer makes, so a test can fail any of them), `journal.ts` (engine
+  migration 5) and `service.ts` (the protocol's four calls, one apply at a time, and reconciling at start).
+- **Recovery folder names** are positional: `new-<n>` (Nivra's bytes), `orig-<n>` (the original moved aside),
+  `back-<n>-<m>` (a version taken back by rollback or restore). `nivra-apply/lock` names the engine and the apply that
+  hold the folder.
+- **The writer's tests** fail every filesystem call in turn (`apply-writer.test.ts`), save a file at each gap through
+  the writer's step hooks, and kill a child process at every call (`apply-kill.test.ts`, with `apply-kill-child.ts`);
+  `apply-fixtures.ts` holds the plan helpers. Revalidation's tests use real proposals from `attempt()`.
+- **The gated engine** stands in for the apply calls in the host's tests: `task-report` makes runs.task answer with a
+  verified proposal; `refuse-apply`, `hold-apply`/`release-apply`, `error-apply` and `partial-apply` shape
+  `task.apply`'s answer, and `applies.log` records each request id.
+- **The window's journey** (`e2e/task-apply.spec.ts`) approves, applies and accepts one run, rejects another, and asks
+  for a revision of a third, on the built app against the stand-ins.
+
 ## Where things will live
 
 | What | Where |
@@ -468,6 +499,3 @@ distribution. One engine holds a home at a time (D7), so the second to start is 
 - Capturing the login shell's PATH for tools the engine starts. Until then, tools are looked up in the engine's own
   PATH, with WSL's leaked Windows folders removed. **Required before agents run builds (D15)**: nvm and similar are
   invisible to `wsl.exe --exec`.
-- Approved apply for agent writes (D15, NIV-8). Commit snapshots, patch checks and proposals bound by one hash are
-  built (D34), and so is the Nebius execution session they run with (D33). The engine runs them as a sandbox check
-  (D36), which proposes nothing, and as a task run (D39), whose proposal is kept exactly and shown, never applied.

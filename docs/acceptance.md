@@ -2066,12 +2066,92 @@ fixture's checkout was unchanged.
 - **One live worker run,** and the packaged journey through the Windows app: checkpoint 3 (NIV-35), each with its own
   approval.
 
+### Apply and the result view, checkpoint 2 (D40, NIV-8, NIV-13)
+
+The execution milestone's second checkpoint, offline: a verified proposal approved by its hash and applied by the
+engine that owns the checkout, every original moved aside and kept, every end said file by file, and the window that
+decides on it. On `feature/niv-8-apply`, stacked on checkpoint 1 (`f0c960d`). Built in parallel: the writer and the
+engine's calls here, revalidation, the kill tests, the host and the window each by a helper in a worktree of its own,
+against a contract committed first, then reviewed and merged.
+
+| Commit | What |
+|---|---|
+| `3b085a0` | The plan and refusals revalidation and the writer share |
+| `2785609` | The apply writer, its journal (engine migration 5) and its fault tests |
+| `a85efeb`, `923b9ce` | Revalidation, then refusing what it can't read as a filesystem problem and finding names exactly |
+| `1569e11` | An apply killed at every step, then reconciled |
+| `54d4377`, `ccd6cf3` | Protocol 11's apply, the service, reconciling at start |
+| `b842c21` | `rpc.ts` applies a finished run's proposal |
+| `3d46a93`, `897bc8f`, `1f6ccfd` | Tests the mutation checks asked for |
+| `bfefb24` | The contract between host and window |
+| `4903fcd`, `0012e80`, `4491a2b` | The window: the decision, the apply file by file, the runs list, and its journey |
+| `18e00c3`, `da220d3`, `b8dc600` | The host: workspace migration 4, the five calls, their tests |
+| `3ce9962` | The runs list from the workspace, with no engine |
+| `d698dc7` | R3's journey compares its concurrent searches in either order |
+| `0c13808`, `751ef51`, `d1daef5`, `dc6168b`, `6362895` | The review's engine findings: claims on arrival, the lock, missing files' originals, the view's bounds, idempotent settling, line endings, unverified changes |
+| `7021b89`, `7017ea5`, `17ca434` | The review's host and window findings: lost settle answers, Keep as is, deleting, the card's copy, a partial apply through the window |
+| this record | D40, AGENTS.md's agent write rules, the development notes, and this section |
+
+**NIV-8's remaining scope (20 October), shown:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| Approve the exact validated patch hash, destination, owning engine and baseline; reject changes to any binding; revalidate immediately before a serialised apply | `apply-revalidate.test.ts`; `task-engine.test.ts`, "refuses an apply that isn't the approved proposal…"; `host.test.ts` (approve refused for another hash, an unverified change) | Another hash, attempt, engine or brief is refused as `proposal`; a moved HEAD as `baseline-moved`; an edited checkout as `uncommitted`, all writing nothing. Applies run one at a time on an engine, each claimed, revalidated and written in one go |
+| Record intent before writing; recover an interrupted apply as applied, not applied or unknown; never replay a write or claim success while the state is unknown | `apply-writer.test.ts`, `apply-kill.test.ts`, `apply-service.test.ts` | The intent is kept with synchronous FULL before anything of the person's is touched. A child killed at each of the apply's 52 calls (and in rollback) reconciles writing nothing, every original kept, and restores to the commit; an engine started after a kill settles the apply from the disk (partial), and one killed before its intent reads as interrupted. Nothing is replayed |
+| Rejection leaves the checkout untouched; only the owning engine applies; the worker works only in its workspace | `host.test.ts` (reject), `task-apply.spec.ts` | A rejected change sends nothing: the checkout and the git folder are untouched. The host never writes repository files: `task.apply` goes to the engine on the attempt's own target and home |
+| Persist and reconcile remote operation references; a disconnected client isn't cancellation | D33, D39 (checkpoint 1) | Unchanged here: the sandbox session's journal and recovery |
+| Cancel owned child work and report usage and masked failures; pending-approval behaviour across a restart chosen and tested | `host.test.ts` (read back after a restart, sent once), `apply-service.test.ts` | A proposal waiting for a decision survives a restart; an approval made before one is never resent: the host asks `task.applyStatus`, and an apply its engine never recorded is taken back in the engine's words |
+| Distinguish task state, run status, provider operation status, command exit and user acceptance | `host.test.ts`, workspace migration 4 | The worker handing in, Nivra's verification, the change applied, and the person's acceptance are kept apart; a task is completed only on acceptance |
+
+**NIV-13's scope (20 October), shown:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| A task's attempt history, the exact patch and changed files, the brief's version, the checks and evidence | `task-apply.spec.ts`, `task-run.spec.ts` | Every run listed newest first with its brief version, outcome, decision and apply, from the workspace; each card shows the change as text, each case's and check's verdict, and the apply file by file |
+| Passed, failed, not run and unknown kept apart; partial evidence after a cancel or failure | checkpoint 1 (`task-run.spec.ts`), `task-apply.tsx` | Verdicts as in checkpoint 1; an apply that stopped says each path's place and where it stopped |
+| Approval controls identify the exact patch and baseline | `task-apply.spec.ts` | Approve shows the change's hash and commit, and sends that hash |
+| A revision is another attempt under the same task; accepting an applied change is distinct from the worker's success | `host.test.ts` (revision), `task-apply.spec.ts` | A revision's note becomes a new brief version, and the next run is a new attempt; acceptance completes the task, the worker's handing in never does |
+| Reopen after a restart with durable routing and honest unavailable states | `host.test.ts` (restart), `TaskApplyView.unresolved` | The workspace keeps each attempt's outcome and decision; an apply whose engine can't be read says so, and is never resent |
+
+**Checks:**
+- `pnpm verify`: 980 tests (domain 66, desktop 284, engine 630) at `6362895`, none skipped.
+- The built app (`test:e2e`): 67 passed and 1 skipped (`explain.spec.ts`'s test that only a packaged app can run).
+  Among them the apply journeys: `task-apply.spec.ts` (approved, applied and accepted; rejected; a revision asked)
+  and `task-apply-partial.spec.ts` (a change applied in part, only Restore offered while a file is moved aside,
+  restored, then dismissed).
+- The packaged app (`test:packaged`, a runtime staged from this code): 27 passed and 41 skipped, the tests that need the
+  stand-in switches.
+- `rpc.ts` against the stand-ins: a run's proposal applied (`greet.sh` changed, unstaged), accepted (the recovery
+  folder and the lock removed, the change kept), and applied again refused as a duplicate.
+- **Mutation checks:** 58 of 58 apply rules broken on purpose each failed a test (three scripts):
+  - the writer and service, 28: the move-aside check, both no-replace links, restore's two guards and its memory of
+    another program's save, the read back, the same-filesystem check, another engine's lock and a refusal's own lock,
+    folders Nivra didn't make, accepting a changed copy, a missing file's original, keeping with a file moved aside,
+    reconciling at start and the folders it names, an interrupted claim, a queued apply's status, a repeated request,
+    a repeated settle or restore, a duplicate apply, an unverified change, the view's bounds, a moved HEAD, native
+    Windows;
+  - revalidation's 24, the line-ending rules among them;
+  - the kill tests' 6.
+  Two rules, the last-moment check of what is moved aside and the rename that puts back a folder, each stand behind the
+  other, so neither alone fails a test. The host's own pass caught 9 of 10, the tenth a second route to the same
+  follow-up.
+- **The independent review (27 October):** five findings shown by its scripts and several smaller ones, all fixed
+  with a test each (D40, *Why*). Its own verdict: no version of a person's file was destroyed in any scenario it ran.
+
+**Not shown yet:**
+- **The Windows turn** for this checkpoint (`pnpm dev:win --no-launch`, then `test:windows`): main-process and preload
+  behaviour changed. It needs Nate's approval.
+- **A partial or unknown apply through the host on a real engine:** getting one takes a crash mid-write, so the host's
+  partial, restore and keep tests run on the gated engine, and the writer's own tests and the kill tests show the real
+  thing.
+- **One live worker run, and the packaged journey through the Windows app:** checkpoint 3 (NIV-35).
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
 |---|---|
 | New project | Relevant confirmed defaults are proposed without being entered again. |
-| Approved writes | A change reaches a checkout only as an approved, checked patch. Denied actions never run, and writes are never replayed. |
+| Approved writes | Shown by *Apply and the result view, checkpoint 2* above: a change reaches a checkout only as an approved, checked proposal, applied by its own engine, never replayed. |
 
 ## Bootstrap exit checks
 
