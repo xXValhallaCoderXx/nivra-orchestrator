@@ -22,9 +22,12 @@ const APPLY_STATE: Record<ApplyStatus, string> = {
   refused: "The change wasn't applied, and nothing was written.",
   applied: "The change is applied to your checkout. Nothing is staged or committed.",
   "not-applied": "The change isn't applied: none of it is in your checkout.",
-  partial: "The change is applied in part: some files are as the change leaves them, the rest as they were.",
+  partial: "The change is applied in part. Some files are as the change leaves them; the others are as they were, or moved aside with their original kept and nothing in their place.",
   unknown: "Nivra can't tell where every file is. Each one is listed below, with the copies it kept.",
 };
+
+/** A refusal because the change is in place already: the generic headline would say less than what happened. */
+const DUPLICATE = "This change was already applied by an earlier approval; this one wrote nothing.";
 
 const APPLY_COLOR: Record<ApplyStatus, string> = { claimed: "blue", writing: "blue", refused: "gray", applied: "green", "not-applied": "gray", partial: "yellow", unknown: "yellow" };
 const APPLY_BADGE: Record<ApplyStatus, string> = { claimed: "Checking", writing: "Applying", refused: "Refused", applied: "Applied", "not-applied": "Not applied", partial: "Applied in part", unknown: "Unknown" };
@@ -65,7 +68,7 @@ function foundText(found: ApplyPath["found"]): string {
 const SETTLE: Record<"accept" | "dismiss" | "restore" | "keep", { label: string; says: string; testid: string }> = {
   accept: { label: "Accept the change", says: "The task is completed. Nivra removes the copies it kept that are still your original or its own; your checkout stays as it is.", testid: "task-apply-accept" },
   dismiss: { label: "Dismiss", says: "Closes this result. Nivra removes the copies it kept that are still your original or its own, and keeps any other.", testid: "task-apply-dismiss" },
-  restore: { label: "Restore the originals", says: "Puts each original back where the change replaced it, never over a version another program saved. Nothing else in your checkout changes.", testid: "task-apply-restore" },
+  restore: { label: "Restore the originals", says: "Puts each original back where the change replaced it, and takes out the files and folders the change added, never over a version another program saved.", testid: "task-apply-restore" },
   keep: { label: "Keep as is", says: "Leaves your checkout as it is now. Nivra removes the copies it kept that are still your original or its own.", testid: "task-apply-keep" },
 };
 
@@ -98,8 +101,17 @@ function stepText(step: string): string {
 /** Error codes a person can act on, in plain words; any other is shown as its code. */
 const ERROR_WORDS: Record<string, string> = { changed: "a file changed after Nivra checked it", ENOSPC: "the disk is full", EACCES: "permission was denied", EPERM: "the operation isn't permitted", EBUSY: "a file was busy", EIO: "the disk reported an error", EXDEV: "a file was on another disk", EEXIST: "something was already there" };
 
-/** An apply that hasn't ended yet, or whose engine can't be read: read again while that lasts. */
-export const applyGoing = (apply: TaskApplyView | null) => apply !== null && (apply.status === null || apply.status === "claimed" || apply.status === "writing" || apply.unresolved !== null);
+/** An approval taken back (its request never reached the engine): no apply stands, and the change can be decided on again. */
+const takenBack = (value: { decision: AttemptDecision | null; apply: { status: ApplyStatus | null } | null }) => value.decision === null && value.apply !== null && value.apply.status === null;
+
+/**
+ * An apply that hasn't ended yet, or whose engine can't be read, or a settle of it Nivra is reading back: read again
+ * while that lasts. An approval taken back waits on nothing.
+ */
+export const applyGoing = (value: Pick<TaskAttemptView, "decision" | "apply">) => {
+  const apply = value.apply;
+  return apply !== null && !takenBack(value) && (apply.status === null || apply.status === "claimed" || apply.status === "writing" || apply.unresolved !== null);
+};
 
 /**
  * The person's decision on a run's change: approve it by its hash, reject it, or ask for a revision; or what was
@@ -237,6 +249,23 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
     return act(() => window.nivra.settleTaskChange(value.taskId, value.id, as[action]));
   };
   const offered = (["accept", "dismiss", "restore", "keep"] as const).filter((action) => value.actions.includes(action));
+  // The approval was taken back: the host's note says why, and nothing else of this apply stands.
+  if (takenBack(value)) {
+    return (
+      <Stack gap="sm" data-testid="task-apply" data-status="taken-back" data-resolution="">
+        <Group gap="sm">
+          <Badge color="gray" variant="light">
+            Approval taken back
+          </Badge>
+          <Text size="sm" data-testid="task-apply-status">
+            {apply.unresolved ?? "The approval was taken back, and nothing was written. You can decide on the change again."}
+          </Text>
+        </Group>
+      </Stack>
+    );
+  }
+  const savedOver = apply.status === "applied" ? apply.paths.filter((one) => one.place === "theirs" && one.changedSince) : [];
+  const keepWithheld = apply.status === "partial" && apply.resolution === null && value.actions.includes("restore") && !value.actions.includes("keep") && apply.paths.some((one) => one.place === "aside");
   return (
     <Stack gap="sm" data-testid="task-apply" data-status={apply.status ?? "waiting"} data-resolution={apply.resolution ?? ""}>
       <Group gap="sm">
@@ -244,9 +273,19 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
           {apply.status === null ? "Waiting for its engine" : APPLY_BADGE[apply.status]}
         </Badge>
         <Text size="sm" data-testid="task-apply-status">
-          {apply.status === null ? "Nivra sent the approval to the repository's engine and is waiting for its answer. It won't be sent again." : APPLY_STATE[apply.status]}
+          {apply.status === null
+            ? "Nivra sent the approval to the repository's engine and is waiting for its answer. It won't be sent again."
+            : apply.status === "refused" && apply.refusal?.code === "duplicate"
+              ? DUPLICATE
+              : APPLY_STATE[apply.status]}
         </Text>
       </Group>
+      {savedOver.length > 0 && (
+        <Text size="sm" c="var(--nivra-warning)" data-testid="task-apply-saved-over">
+          Since Nivra wrote {savedOver.length === 1 ? "it" : "them"}, another program has saved over {savedOver.map((one) => one.path).join(", ")}. {savedOver.length === 1 ? "That version is" : "Those versions are"}{" "}
+          kept as {savedOver.length === 1 ? "it is" : "they are"}.
+        </Text>
+      )}
       {apply.refusal && (
         <Alert color="gray" variant="light" data-testid="task-apply-refusal" data-code={apply.refusal.code}>
           <Text size="sm">{apply.refusal.message}</Text>
@@ -305,6 +344,11 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
           {RESOLVED[apply.resolution]}
         </Text>
       )}
+      {keepWithheld && (
+        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-keep-unavailable">
+          Keeping this as it is isn't offered: a file the change replaces is missing from your checkout, its original kept aside. Restore the originals to put it back.
+        </Text>
+      )}
       {offered.length > 0 && (
         <Group gap="sm" align="flex-start">
           {offered.map((action) => (
@@ -348,8 +392,11 @@ const OUTCOME_WORD: Record<TaskReport["outcome"], string> = {
 const DECISION_WORD: Record<AttemptDecision, string> = { approved: "approved", rejected: "rejected", revision: "revision asked" };
 
 /** An apply's state, as a few words for the list. */
-function applyWord(apply: { status: ApplyStatus | null; resolution: ApplyResolution | null }, acceptedAt: string | null): string {
-  if (acceptedAt || apply.resolution === "accepted") return "accepted";
+function applyWord(attempt: TaskView["attempts"][number], apply: NonNullable<TaskView["attempts"][number]["apply"]>): string {
+  if (attempt.acceptedAt || apply.resolution === "accepted") return "accepted";
+  if (takenBack(attempt)) return "approval taken back";
+  if (apply.resolution === "dismissed") return "dismissed";
+  if (apply.resolution === "kept") return "kept as is";
   if (apply.status === null) return "waiting for its engine";
   const words: Record<ApplyStatus, string> = { claimed: "applying", writing: "applying", refused: "apply refused", applied: "applied", "not-applied": "not applied", partial: "applied in part", unknown: "apply unknown" };
   return words[apply.status];
@@ -371,7 +418,7 @@ export function AttemptsList({ attempts, shown, onChoose }: { attempts: TaskView
         const parts = [`brief v${attempt.briefVersion}`, STATUS_WORD[attempt.status]];
         if (attempt.outcome) parts.push(attempt.outcome === "proposed" ? (attempt.verified ? "a verified change" : "an unverified change") : OUTCOME_WORD[attempt.outcome]);
         if (attempt.decision) parts.push(DECISION_WORD[attempt.decision]);
-        if (attempt.apply) parts.push(applyWord(attempt.apply, attempt.acceptedAt));
+        if (attempt.apply) parts.push(applyWord(attempt, attempt.apply));
         return (
           <Button
             key={attempt.id}
@@ -382,7 +429,7 @@ export function AttemptsList({ attempts, shown, onChoose }: { attempts: TaskView
             data-testid="task-attempt-row"
             data-attempt-id={attempt.id}
             data-decision={attempt.decision ?? ""}
-            data-apply={attempt.apply ? (attempt.apply.status ?? "waiting") : ""}
+            data-apply={attempt.apply ? (takenBack(attempt) ? "taken-back" : (attempt.apply.status ?? "waiting")) : ""}
           >
             Run {number}: {parts.join(", ")}
           </Button>

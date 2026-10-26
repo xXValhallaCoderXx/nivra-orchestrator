@@ -426,7 +426,7 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
 function Attempt({ taskId, attemptId, onEnded, onDecided }: { taskId: string; attemptId: string; onEnded(): void; onDecided(): void }) {
   const attempt = usePoll<TaskAttemptView>(
     () => window.nivra.getTaskAttempt(taskId, attemptId),
-    (value) => (value && open(value.status) ? 1_500 : value && applyGoing(value.apply) ? (value.apply?.unresolved ? 5_000 : 1_500) : null),
+    (value) => (value && open(value.status) ? 1_500 : value && applyGoing(value) ? (value.apply?.unresolved ? 5_000 : 1_500) : null),
     [taskId, attemptId],
   );
   const [busy, setBusy] = useState(false);
