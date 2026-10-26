@@ -75,6 +75,29 @@ const RESOLVED: Record<ApplyResolution, string> = {
   kept: "You kept the change as it is.",
 };
 
+/** What the writer was doing when it stopped, in plain words, from its step's name; the step itself is kept beside it. */
+function stepText(step: string): string {
+  const doing: Array<[RegExp, string]> = [
+    [/^temp /, "writing a new file into the recovery folder"],
+    [/^sync recovery$/, "making the recovery folder's files durable"],
+    [/^folder /, "making a folder"],
+    [/^aside /, "moving a file aside"],
+    [/^put back /, "putting a file back"],
+    [/^changed /, "finding that a file changed after it was checked"],
+    [/^link /, "putting a new file in place"],
+    [/^sync$/, "making the change durable"],
+    [/^read back$/, "reading the change back"],
+    [/^(take back|restore) /, "putting an original back"],
+    [/^remove folder /, "removing a folder it made"],
+    [/^interrupted$/, "applying, when its engine stopped"],
+    [/^reconcile$/, "reading where each file is, after its engine stopped"],
+  ];
+  return doing.find(([pattern]) => pattern.test(step))?.[1] ?? "applying the change";
+}
+
+/** Error codes a person can act on, in plain words; any other is shown as its code. */
+const ERROR_WORDS: Record<string, string> = { changed: "a file changed after Nivra checked it", ENOSPC: "the disk is full", EACCES: "permission was denied", EPERM: "the operation isn't permitted", EBUSY: "a file was busy", EIO: "the disk reported an error", EXDEV: "a file was on another disk", EEXIST: "something was already there" };
+
 /** An apply that hasn't ended yet, or whose engine can't be read: read again while that lasts. */
 export const applyGoing = (apply: TaskApplyView | null) => apply !== null && (apply.status === null || apply.status === "claimed" || apply.status === "writing" || apply.unresolved !== null);
 
@@ -235,9 +258,9 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
         </Alert>
       )}
       {apply.failure && (
-        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-failure">
-          It stopped at: {apply.failure.step}
-          {apply.failure.code ? ` (${apply.failure.code})` : ""}.
+        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-failure" data-step={apply.failure.step}>
+          It stopped while {stepText(apply.failure.step)}
+          {apply.failure.code ? `: ${ERROR_WORDS[apply.failure.code] ?? apply.failure.code}` : ""}.
         </Text>
       )}
       {apply.unresolved && (
