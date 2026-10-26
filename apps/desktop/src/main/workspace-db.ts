@@ -208,6 +208,36 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
       AND NOT EXISTS (SELECT 1 FROM run_links WHERE id = OLD.id AND status IN ('submitting', 'running')))
   BEGIN SELECT RAISE(ABORT, 'research never changes what it was bound to, keeps its first report and its amended plan, and changes its stop only while it runs'); END;
   `,
+  `
+  -- What became of a task's attempt (D40), recorded apart: how its run ended, kept when it ended, so the history shows
+  -- without its engine; the person's decision on its proposal; its apply, by the request id saved before task.apply is
+  -- sent, with the engine's last answer about it (or the host's own note when the engine couldn't say); and the person's
+  -- acceptance of an applied change.
+  CREATE TABLE attempt_records (
+    attempt_id TEXT PRIMARY KEY REFERENCES run_links(id) ON DELETE CASCADE,
+    outcome TEXT,
+    verified INTEGER CHECK (verified IN (0, 1)),
+    proposal_hash TEXT,
+    baseline TEXT,
+    outcome_at TEXT,
+    decision TEXT CHECK (decision IN ('approved', 'rejected', 'revision')),
+    decided_at TEXT,
+    revision_note TEXT,
+    apply_request_id TEXT UNIQUE,
+    apply_json TEXT,
+    apply_read_at TEXT,
+    apply_note TEXT,
+    accepted_at TEXT,
+    CHECK ((outcome IS NULL) = (outcome_at IS NULL)),
+    CHECK ((decision IS NULL) = (decided_at IS NULL)),
+    CHECK ((apply_json IS NULL) = (apply_read_at IS NULL)),
+    CHECK (revision_note IS NULL OR decision = 'revision'),
+    CHECK (accepted_at IS NULL OR (decision = 'approved' AND apply_request_id IS NOT NULL))
+  ) STRICT;
+  CREATE TRIGGER attempt_records_task BEFORE INSERT ON attempt_records
+  WHEN NOT EXISTS (SELECT 1 FROM run_links WHERE id = NEW.attempt_id AND workflow_id = 'task')
+  BEGIN SELECT RAISE(ABORT, 'an attempt record belongs to a task run'); END;
+  `,
 ];
 
 export type WorkspaceOpening =

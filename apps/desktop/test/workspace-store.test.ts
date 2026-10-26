@@ -73,7 +73,7 @@ describe("the workspace database (D26)", () => {
     assert.deepEqual([workspace.schemaVersion, workspace.notice], [WORKSPACE_MIGRATIONS.length, null]);
     assert.match(workspace.sqlite, /^3\.\d+\.\d+$/);
     const pragma = (name: string) => Object.values(workspace.db.db.prepare(`PRAGMA ${name}`).get() ?? {})[0];
-    assert.deepEqual([pragma("journal_mode"), pragma("foreign_keys"), pragma("secure_delete"), pragma("locking_mode"), pragma("user_version")], ["wal", 1, 1, "exclusive", 3]);
+    assert.deepEqual([pragma("journal_mode"), pragma("foreign_keys"), pragma("secure_delete"), pragma("locking_mode"), pragma("user_version")], ["wal", 1, 1, "exclusive", WORKSPACE_MIGRATIONS.length]);
     // The lock is held from the start: no shared-memory file is ever made.
     assert.equal(existsSync(`${path}-shm`), false);
   });
@@ -110,7 +110,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v3\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v4\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -270,7 +270,7 @@ describe("the workspace database (D26)", () => {
   it("creates its folder when it is missing", () => {
     const dir = join(folder(), "nested", "deeper");
     const workspace = ready(join(dir, "workspace.db"));
-    assert.equal(workspace.schemaVersion, 3);
+    assert.equal(workspace.schemaVersion, WORKSPACE_MIGRATIONS.length);
     mkdirSync(dir, { recursive: true });
   });
 });
@@ -423,7 +423,7 @@ describe("reviews of plan versions (D31)", () => {
     v1.close();
 
     const migrated = ready(path);
-    assert.equal(migrated.schemaVersion, 3);
+    assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
     assert.deepEqual(dump(migrated.db.db), before);
     assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM reviews").get()?.["n"]), 0);
     assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM research").get()?.["n"]), 0);
@@ -458,7 +458,7 @@ describe("reviews of plan versions (D31)", () => {
     v2.close();
 
     const migrated = ready(path);
-    assert.equal(migrated.schemaVersion, 3);
+    assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
     assert.deepEqual(dump(migrated.db.db), before);
     assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM research").get()?.["n"]), 0);
     assert.deepEqual(reviewsOf(migrated.db, conversation.id).map((row) => row.id), [review.id]);
