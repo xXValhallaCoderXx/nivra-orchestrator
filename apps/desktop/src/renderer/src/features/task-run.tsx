@@ -4,11 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import type { AcceptanceCaseView, TaskAttemptView, TaskRunPreview, TaskView, TurnStatus } from "../../../shared/ipc";
 import { CONSENT_COVERS } from "../shared/evidence";
 import { errorMessage, Section, usePoll } from "../shared/ui";
+import { applyGoing, ApplyResult, AttemptsList, Decision } from "./task-apply";
 
 /**
  * A task's runs (D39): its acceptance cases, written with the brief; a preview of what a run would send and where, from
  * its repository's own engine; then the run, its progress, and what Nivra found. The verdict comes from the acceptance
- * cases alone; what the worker said is shown apart from it. Nothing reaches the checkout: applying a change comes later.
+ * cases alone; what the worker said is shown apart from it. A run never writes the checkout: a verified change reaches
+ * it only once the person approves it, and applying it is shown file by file (D40, `task-apply.tsx`).
  */
 
 /** One acceptance case as the form holds it: its expected output without its last newline, and whether it has one. */
@@ -165,6 +167,8 @@ export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void
   const [chosen, setChosen] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumped when the person decides on a run's change, so the list of runs is read again.
+  const [decided, setDecided] = useState(0);
   // The preview's Start stays on screen while its dialog fades out, so a second press must not start a second run.
   const starting = useRef(false);
   const latest = view.attempts.at(-1) ?? null;
@@ -234,19 +238,19 @@ export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void
           {error}
         </Text>
       )}
-      {view.attempts.length > 1 && (
-        <Group gap={6} data-testid="task-attempts">
-          <Text size="xs" c="var(--nivra-text-3)">
-            Runs:
-          </Text>
-          {view.attempts.map((attempt, index) => (
-            <Button key={attempt.id} size="compact-xs" variant={attempt.id === shown ? "light" : "subtle"} onClick={() => setChosen(attempt.id)} data-testid="task-attempt-choose">
-              {index + 1}. brief v{attempt.briefVersion}, {STATUS_LOOK[attempt.status].label.toLowerCase()}
-            </Button>
-          ))}
-        </Group>
+      <AttemptsList taskId={taskId} attempts={view.attempts} shown={shown} refreshKey={decided} onChoose={setChosen} />
+      {shown && (
+        <Attempt
+          key={shown}
+          taskId={taskId}
+          attemptId={shown}
+          onEnded={onChanged}
+          onDecided={() => {
+            setDecided((n) => n + 1);
+            onChanged();
+          }}
+        />
       )}
-      {shown && <Attempt key={shown} taskId={taskId} attemptId={shown} onEnded={onChanged} />}
       <Modal opened={previewing} onClose={() => setPreviewing(false)} title="Run this task?" size="xl" data-testid="task-run-preview">
         {preview ? (
           <RunPreview preview={preview} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={() => setPreviewing(false)} />
@@ -273,7 +277,7 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
       <Text size="sm">
         Brief v{preview.briefVersion}, on {preview.project.label}
         {preview.project.targetLabel ? ` · ${preview.project.targetLabel}` : ""}. A worker changes a copy of the commit in a Nebius sandbox, with networking off. It can read and
-        write files there and run the cases and checks below, and nothing else. Nothing comes back to your checkout.
+        write files there and run the cases and checks below, and nothing else. Nothing comes back to your checkout unless you approve the change afterwards.
       </Text>
       {preview.blocked && !asking && (
         <Alert color="yellow" variant="light" data-testid="task-run-preview-blocked">
@@ -420,9 +424,16 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
   );
 }
 
-/** One run: its status, progress, and what Nivra found, read again while it goes. */
-function Attempt({ taskId, attemptId, onEnded }: { taskId: string; attemptId: string; onEnded(): void }) {
-  const attempt = usePoll<TaskAttemptView>(() => window.nivra.getTaskAttempt(taskId, attemptId), (value) => (value && open(value.status) ? 1_500 : null), [taskId, attemptId]);
+/**
+ * One run: its status, progress, and what Nivra found, read again while it goes; then the decision on its change and
+ * what applying it did, read again while the apply goes or its engine can't be read.
+ */
+function Attempt({ taskId, attemptId, onEnded, onDecided }: { taskId: string; attemptId: string; onEnded(): void; onDecided(): void }) {
+  const attempt = usePoll<TaskAttemptView>(
+    () => window.nivra.getTaskAttempt(taskId, attemptId),
+    (value) => (value && open(value.status) ? 1_500 : value && applyGoing(value.apply) ? (value.apply?.unresolved ? 5_000 : 1_500) : null),
+    [taskId, attemptId],
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const value = attempt.value;
@@ -432,6 +443,15 @@ function Attempt({ taskId, attemptId, onEnded }: { taskId: string; attemptId: st
     if (ended) onEnded();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ended]);
+  // An apply that moves on by itself (its engine answered, or a restart reconciled it): the list of runs is read again.
+  const applyState = value?.apply ? `${value.apply.status ?? "waiting"}:${value.apply.resolution ?? ""}` : "";
+  const seenApply = useRef<string | null>(null);
+  useEffect(() => {
+    if (value === null) return;
+    if (seenApply.current !== null && seenApply.current !== applyState) onDecided();
+    seenApply.current = applyState;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyState, value === null]);
   if (!value) {
     return attempt.error ? (
       <Text size="sm" c="var(--nivra-error)">
@@ -452,6 +472,20 @@ function Attempt({ taskId, attemptId, onEnded }: { taskId: string; attemptId: st
       setBusy(false);
     }
   };
+  /** One of the decisions or settlements, then the run read again; a refusal says why, in the host's words. */
+  const act = (work: () => Promise<TaskAttemptView>) => {
+    setBusy(true);
+    setError(null);
+    void work()
+      .then(
+        () => {
+          attempt.refresh();
+          onDecided();
+        },
+        (reason: unknown) => setError(errorMessage(reason)),
+      )
+      .finally(() => setBusy(false));
+  };
   return (
     <Section title={`Run of brief v${value.briefVersion}`}>
       <Stack gap="sm" data-testid="task-attempt" data-status={value.status} data-attempt-id={value.id}>
@@ -469,7 +503,7 @@ function Attempt({ taskId, attemptId, onEnded }: { taskId: string; attemptId: st
           )}
         </Group>
         {error && (
-          <Text size="sm" c="var(--nivra-error)">
+          <Text size="sm" c="var(--nivra-error)" data-testid="task-attempt-error">
             {error}
           </Text>
         )}
@@ -493,6 +527,8 @@ function Attempt({ taskId, attemptId, onEnded }: { taskId: string; attemptId: st
           </Stack>
         )}
         {report && <Found report={report} proposal={value.proposal} />}
+        <Decision value={value} busy={busy} act={act} />
+        <ApplyResult value={value} busy={busy} act={act} />
       </Stack>
     </Section>
   );
@@ -515,8 +551,8 @@ function Found({ report, proposal }: { report: TaskReport; proposal: TaskAttempt
         <Alert color={report.verified ? "green" : "yellow"} variant="light" data-testid="task-attempt-verdict">
           <Text size="sm">
             {report.verified
-              ? "Every acceptance case passed: the change is verified. Nivra doesn't apply changes yet, so it's kept with the run, and your checkout hasn't been touched."
-              : "Not every acceptance case was shown to pass, so the change isn't verified. It's kept with the run, and your checkout hasn't been touched."}
+              ? "Every acceptance case passed: the change is verified. It's kept with the run until you decide, and your checkout hasn't been touched by the run."
+              : "Not every acceptance case was shown to pass, so the change isn't verified and can't be approved. It's kept with the run, and your checkout hasn't been touched."}
           </Text>
         </Alert>
       )}
