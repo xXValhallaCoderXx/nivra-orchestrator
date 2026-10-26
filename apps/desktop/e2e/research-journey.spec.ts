@@ -187,9 +187,11 @@ test("R3's journey, offline: both permissions through their dialogs, a preview b
   // Exactly what the recipe lists went out: one model listing and one chat; the two approved queries with the sites; at
   // most two extracts. Nothing was sent after the go-ahead: not by the relaunch, not by removing the keys.
   const listings = model.requests.filter((request) => request.path.endsWith("/models")).length;
+  // The searches go out together, so they reach the stand-in in either order: each query once, with the sites.
+  const byQuery = (a: unknown[], b: unknown[]) => String(a[0]).localeCompare(String(b[0]));
   const searched = tavily.calls.filter((call) => call.path === "/search").map((call) => [call.body?.["query"], call.body?.["include_domains"]]);
   expect([listings, model.chats().length, tavily.calls.filter((call) => call.path === "/extract").length <= 2]).toEqual([1, 1, true]);
-  expect(searched).toEqual(DEMO_SEED.assumptions.map((query) => [query, DEMO_SITES.hosts]));
+  expect(searched.sort(byQuery)).toEqual(DEMO_SEED.assumptions.map((query) => [query, DEMO_SITES.hosts]).sort(byQuery));
   expect([model.requests.length, tavily.calls.length]).toEqual([sent.requests, sent.tavily]);
 });
 
