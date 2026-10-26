@@ -2,11 +2,12 @@ import { Alert, Anchor, Badge, Button, Group, List, Modal, Select, Stack, Table,
 import { useState, type ChangeEvent, type ReactNode } from "react";
 import type { BriefContent, BriefFields, PlanView, ProjectView, TaskState, TaskSummary, TasksView, TaskView } from "../../../shared/ipc";
 import { errorMessage, Section, usePoll } from "../shared/ui";
+import { caseDraftOf, caseOf, CasesInput, CasesRead, TaskRun, type CaseDraft } from "./task-run";
 
 /**
  * Native tasks (D26, NIV-32): a brief written directly or made from a plan, the same form either way. Every change to a
- * brief is a new version, made from the task as it was read; a task that changed meanwhile is read again. Nothing runs
- * yet, and the window says why in plain words.
+ * brief is a new version, made from the task as it was read; a task that changed meanwhile is read again. A ready task
+ * with acceptance cases runs in a sandbox (D39), and the window says in plain words what keeps one from running.
  */
 
 const STATE_LOOK: Record<TaskState, { label: string; color: string }> = {
@@ -34,9 +35,10 @@ interface Draft {
   context: string;
   assumptions: string;
   checks: string;
+  cases: CaseDraft[];
 }
 
-const EMPTY: Draft = { goal: "", criteria: "", scope: "", exclusions: "", context: "", assumptions: "", checks: "" };
+const EMPTY: Draft = { goal: "", criteria: "", scope: "", exclusions: "", context: "", assumptions: "", checks: "", cases: [] };
 
 const draftOf = (content: BriefFields): Draft => ({
   goal: content.goal,
@@ -46,6 +48,7 @@ const draftOf = (content: BriefFields): Draft => ({
   context: content.context,
   assumptions: content.assumptions.join("\n"),
   checks: content.checks.join("\n"),
+  cases: content.acceptanceCases.map(caseDraftOf),
 });
 
 // Empty lines are dropped by main, which numbers an entry as it was written.
@@ -57,10 +60,11 @@ const fieldsOf = (draft: Draft): BriefFields => ({
   context: draft.context,
   assumptions: draft.assumptions.split("\n"),
   checks: draft.checks.split("\n"),
+  acceptanceCases: draft.cases.map(caseOf),
 });
 
 function BriefInputs({ draft, onChange }: { draft: Draft; onChange(next: Draft): void }) {
-  const bind = (key: keyof Draft) => ({ value: draft[key], onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...draft, [key]: event.currentTarget.value }) });
+  const bind = (key: Exclude<keyof Draft, "cases">) => ({ value: draft[key], onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...draft, [key]: event.currentTarget.value }) });
   return (
     <Stack gap="sm">
       <Textarea label="Goal" description="What the task is for." autosize minRows={2} maxRows={8} {...bind("goal")} data-testid="brief-goal" />
@@ -69,7 +73,16 @@ function BriefInputs({ draft, onChange }: { draft: Draft; onChange(next: Draft):
       <Textarea label="Exclusions" description="What it leaves alone." autosize minRows={1} maxRows={8} {...bind("exclusions")} data-testid="brief-exclusions" />
       <Textarea label="Context" description="Background the work needs, such as a plan." autosize minRows={3} maxRows={14} {...bind("context")} data-testid="brief-context" />
       <Textarea label="Assumptions" description="What it takes as true without checking. One per line." autosize minRows={1} maxRows={8} {...bind("assumptions")} data-testid="brief-assumptions" />
-      <Textarea label="Checks" description="What to run to check the work, such as a test command. One per line." autosize minRows={1} maxRows={8} {...bind("checks")} data-testid="brief-checks" />
+      <Textarea
+        label="Checks"
+        description="The repository's own commands to run, such as sh test.sh. One per line. A run reports them; they don't decide its result."
+        autosize
+        minRows={1}
+        maxRows={8}
+        {...bind("checks")}
+        data-testid="brief-checks"
+      />
+      <CasesInput cases={draft.cases} onChange={(cases) => onChange({ ...draft, cases })} />
     </Stack>
   );
 }
@@ -133,8 +146,11 @@ function BriefRead({ content }: { content: BriefContent }) {
       <Field label="Checks" testId="task-brief-checks">
         {listOr(content.checks)}
       </Field>
+      <Field label="Acceptance cases" testId="task-brief-cases">
+        <CasesRead cases={content.acceptanceCases} />
+      </Field>
       <Text size="xs" c="var(--nivra-text-3)">
-        When tasks can run, this one will run alone, with no network, and only once you approve it.
+        A run of this task goes alone, in a sandbox with networking off, and nothing it changes reaches your checkout unless you approve it.
       </Text>
     </Stack>
   );
@@ -551,17 +567,10 @@ export function TaskDetail({
             </Button>
           )}
         </Group>
-        <Text size="sm" data-testid="task-attempts">
-          Attempts: {view.attempts.length ? view.attempts.map((attempt) => `brief v${attempt.briefVersion}, ${attempt.status}`).join("; ") : "none"}
-        </Text>
-        <Group>
-          <Button size="xs" disabled data-testid="task-run">
-            Run
-          </Button>
-        </Group>
-        <Text size="sm" c="var(--nivra-text-2)" data-testid="task-run-note">
-          {view.runUnavailable}
-        </Text>
+      </Section>
+
+      <Section title="Runs">
+        <TaskRun view={view} onChanged={reread} />
       </Section>
 
       <Modal opened={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete this task?" data-testid="task-delete-dialog">

@@ -15,6 +15,10 @@ import type {
   SandboxPreview,
   SandboxReport,
   SandboxStatus,
+  SnapshotPreview,
+  TaskProposal,
+  TaskReport,
+  TaskRunLimits,
 } from "@nivra/domain";
 import type { ResearchPreview, ResearchSelection, ResearchView } from "./research.ts";
 
@@ -92,6 +96,10 @@ export const IPC = {
   setTaskState: "tasks:state",
   renameTask: "tasks:rename",
   deleteTask: "tasks:delete",
+  previewTaskRun: "tasks:preview-run",
+  startTaskRun: "tasks:start-run",
+  cancelTaskRun: "tasks:cancel-run",
+  getTaskAttempt: "tasks:attempt",
 } as const;
 
 /** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
@@ -328,7 +336,7 @@ export interface ConversationView {
   openResearch: string | null;
 }
 
-/** A task's states (D26). `active` and `review` come only from attempts, which can't start yet. */
+/** A task's states (D26). `active` and `review` can't be set by hand. */
 export const TASK_STATES = ["draft", "ready", "active", "review", "completed"] as const;
 export type TaskState = (typeof TASK_STATES)[number];
 
@@ -348,6 +356,18 @@ export interface BriefSource {
   citations: Array<{ path: string; startLine: number; endLine: number }>;
 }
 
+/**
+ * An acceptance case (D39): a command, run in the sandbox, and the exact output and exit code it must give. A run's
+ * verdict comes from these alone; repository checks are reported and never decide it.
+ */
+export interface AcceptanceCaseView {
+  name: string;
+  command: string;
+  /** Exactly what the command must print, trailing newlines included. */
+  expectedOutput: string;
+  expectedExitCode: number;
+}
+
 /** What a task asks for, as one immutable version. A direct task and one made from a plan have the same shape. */
 export interface BriefContent {
   goal: string;
@@ -356,7 +376,10 @@ export interface BriefContent {
   exclusions: string;
   context: string;
   assumptions: string[];
+  /** The repository's own commands, which a run reports and which never decide its verdict (D39). */
   checks: string[];
+  /** What a run is judged by (D39). A brief saved before them has none. */
+  acceptanceCases: AcceptanceCaseView[];
   executionPolicy: { concurrency: 1; network: "off"; approval: "required" };
   sources: BriefSource[];
   /** Parts cleared because the task's repository changed: to write again for the new one. */
@@ -364,7 +387,7 @@ export interface BriefContent {
 }
 
 /** The parts of a brief the person writes. */
-export type BriefFields = Pick<BriefContent, "goal" | "acceptanceCriteria" | "scope" | "exclusions" | "context" | "assumptions" | "checks">;
+export type BriefFields = Pick<BriefContent, "goal" | "acceptanceCriteria" | "scope" | "exclusions" | "context" | "assumptions" | "checks" | "acceptanceCases">;
 
 export interface PlanView {
   id: string;
@@ -457,9 +480,65 @@ export interface TaskView {
   versions: Array<{ id: string; version: number; createdAt: string }>;
   /** Each plan the brief came from: the version it used, and the latest there is (its id to update from), or that it was deleted. */
   sourcePlans: Array<{ planLineage: string; usedVersion: number; latestVersion: number | null; latestPlanId: string | null; conversationId: string | null }>;
-  attempts: Array<{ id: string; briefVersion: number; status: TurnStatus; createdAt: string }>;
-  /** Why the task can't run, in plain words; running tasks isn't available yet. */
-  runUnavailable: string;
+  /** Its runs, oldest first, each bound to the brief version it ran. */
+  attempts: Array<{ id: string; briefVersion: number; status: TurnStatus; note: string | null; createdAt: string; settledAt: string | null }>;
+  /** Why Run can't be pressed now, in plain words; null when it can (the preview then says what it would send). */
+  runBlocked: string | null;
+}
+
+/**
+ * What a run of a task would send, and where, worked out from its brief and its repository's commit as they are now
+ * (D39). Nothing is sent. `expected` binds a start to this preview: starting is refused when anything here changed.
+ */
+export interface TaskRunPreview {
+  taskId: string;
+  briefVersion: number;
+  /** The repository the task runs on, and its engine. */
+  project: { label: string; targetLabel: string };
+  /** What the commit's snapshot sends to Nebius; null when the preview stopped first (see `blocked`). */
+  snapshot: SnapshotPreview | null;
+  /** What goes to each service, in plain words, and what each keeps: Nebius's own terms come with the snapshot. */
+  sends: { tokenFactory: string[]; nebius: string[] };
+  keeps: { tokenFactory: string; nebius: string | null };
+  cases: Array<AcceptanceCaseView & { number: number }>;
+  checks: Array<{ number: number; command: string }>;
+  /** The programs the run looks for before the model starts, and how many commands start with something it can't read. */
+  programs: string[];
+  unprobed: number;
+  /** The bounds the engine holds the run to; null when the preview stopped first. */
+  limits: TaskRunLimits | null;
+  /** The project's two consents, as they are now: both are needed. */
+  consents: { modelContext: boolean; cloudExecution: boolean };
+  /** Why it can't start now, in plain words; null when it can. */
+  blocked: string | null;
+  expected: string;
+  /** The snapshot's own fingerprint, which the engine checks again before uploading; null with no snapshot. */
+  snapshotFingerprint: string | null;
+}
+
+/**
+ * One run of a task (D39): how it went, and, read from its engine when it can be, the engine's report and its change.
+ * `not-sent` and `unknown` mean what they mean for a turn. Nothing is ever resent: running again makes a new attempt.
+ */
+export interface TaskAttemptView {
+  id: string;
+  taskId: string;
+  briefVersion: number;
+  status: TurnStatus;
+  /** What happened, in Nivra's words, when it ended without a report of its run; null while it goes. */
+  note: string | null;
+  runId: string | null;
+  cancelRequested: boolean;
+  /** The engine's report: what the worker did, each case's and check's verdict, cleanup's record; null until there is one. */
+  report: TaskReport | null;
+  /** The change it proposes, as text to read; null when it proposed none, or can't be read now. */
+  proposal: TaskProposal | null;
+  /** The run's latest progress, oldest first. */
+  progress: string[];
+  /** Why its engine can't be read now, while that lasts. */
+  unresolved: string | null;
+  createdAt: string;
+  settledAt: string | null;
 }
 
 /** The workspace's state and every task, the most recently changed first; none while the workspace can't be used. */
@@ -601,5 +680,14 @@ export interface NivraApi {
   /** Moves a task to the state asked for, when its brief allows it. */
   setTaskState(taskId: string, revision: number, state: TaskState): Promise<TaskView>;
   renameTask(taskId: string, revision: number, title: string): Promise<TaskView>;
+  /** Deletes a task with its brief versions and runs; refused while a run of it goes. */
   deleteTask(taskId: string): Promise<void>;
+  /** What a run of the task would send, and where, with its fingerprint. Nothing is sent or stored. */
+  previewTaskRun(taskId: string): Promise<TaskRunPreview>;
+  /** Starts the run previewed; refused when anything it would send changed since (`expected`, `snapshot`). */
+  startTaskRun(taskId: string, expected: string, snapshot: string): Promise<TaskAttemptView>;
+  /** Stops a run being sent or going; its end is recorded as cancelled by the person. What it uploaded stays with Nebius. */
+  cancelTaskRun(taskId: string, attemptId: string): Promise<TaskAttemptView>;
+  /** One run of a task as it is now, read from its engine when that is online. */
+  getTaskAttempt(taskId: string, attemptId: string): Promise<TaskAttemptView>;
 }

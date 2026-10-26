@@ -271,7 +271,7 @@ export function HistoryDetails({ history, prefix }: { history: HistoryRecord; pr
 
 /** What a project's consent covers (D20, D31, D37), said wherever it is asked for. */
 export const CONSENT_COVERS =
-  "This is for the whole project: its explanations, its conversations, and the reviews and research of its plans. You can turn it off at any time, which stops them all.";
+  "This is for the whole project: its explanations, its conversations, the reviews and research of its plans, and its task runs. You can turn it off at any time, which stops them all.";
 
 /**
  * The project's consent to send its content to Token Factory (D20), asked once, the first time it is needed. It covers
