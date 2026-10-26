@@ -14,7 +14,7 @@ import { failure as failure_, InternalFailure, ModelFailure, type ModelClient, t
 import { requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget, type Hold, type Refusal } from "../providers/run-budget.ts";
 import { WorkspaceCopy } from "./copy.ts";
-import { checkRequest, couldntRun, failedToSend, judgeCase, judgeCheck, namedFiles, notRun, programsOf, refusalWords, verified, type AcceptanceCase, type CheckResult } from "./harness.ts";
+import { checkRequest, commandFiles, couldntRun, failedToSend, judgeCase, judgeCheck, notRun, programsOf, refusalWords, verified, type AcceptanceCase, type CheckResult, type NamedFiles } from "./harness.ts";
 import { AFTER_SESSION_MS, operationsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
 import { firstWord, toolchainFindings, toolchainRequest, writeContentProblem, writeRequest } from "./scripts.ts";
 
@@ -668,9 +668,13 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   return { result, core: coreOf() };
 }
 
-/** The files a case's or check's command names that the worker wrote. */
-function changedNamed(command: string, copy: WorkspaceCopy): string[] {
-  return namedFiles(command, new Set(copy.written));
+/**
+ * The files a case's or check's command names that the worker wrote, and whether its command can't say: unclear only
+ * once the worker has written something, which it may run.
+ */
+function changedNamed(command: string, copy: WorkspaceCopy): NamedFiles {
+  const named = commandFiles(command, new Set(copy.written));
+  return { files: named.files, unclear: named.unclear && copy.written.length > 0 };
 }
 
 /** The operations a run's backend allows, for its brief. */
