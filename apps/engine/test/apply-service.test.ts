@@ -80,6 +80,16 @@ describe("the apply service at start (NIV-8, D40)", () => {
     assert.equal(String(readFileSync(join(run.recovery, "orig-0"))), "written through an open file\n");
   });
 
+  it("refuses to apply on Windows itself, before claiming anything", async () => {
+    const work = tempDir();
+    dirs.push(work);
+    const service = new ApplyService({ database: new Database(join(work, "nivra.db")), proposal: () => null, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "win32" });
+    const task = { attempt: { taskId: "task", attemptId: randomUUID(), runId: randomUUID() }, engine: { homeId: randomUUID() }, brief: { version: 1, sha256: "b".repeat(64) } };
+    const requestId = randomUUID();
+    await assert.rejects(service.apply({ requestId, runId: task.attempt.runId, approvedHash: "a".repeat(64), repoPath: work, project: "project", target: "local", task }), /^ApplyRequestRefusal: Applying changes on Windows itself isn't available yet/);
+    assert.equal(service.status(requestId), null);
+  });
+
   it("reads a claim its engine stopped before it wrote anything as interrupted, the checkout as it was", async () => {
     const fresh = copies(dirs);
     const run = await cut(fresh, 0);

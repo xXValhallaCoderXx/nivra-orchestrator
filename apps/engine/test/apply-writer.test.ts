@@ -323,6 +323,16 @@ describe("the apply writer (NIV-8, D40)", () => {
     assert.ok(restored.paths[0]!.kept.includes("orig-0"), restored.paths[0]!.kept.join(", "));
   });
 
+  it("never removes a folder another program made where the change makes one, even empty", async () => {
+    const root = repoWith(FILES);
+    const run = await apply(root, { before: (step) => void (step === "folder notes" && mkdirSync(join(root, "notes"))) });
+    assert.ok(!(run.outcome instanceof ApplyRefusal) && run.outcome.state === "applied");
+    const record = run.journal.get(run.applyId)!;
+    assert.deepEqual(record.created, ["notes/2026"]);
+    const restored = await restore(record.intent!, { created: record.created });
+    assert.deepEqual([restored.state, existsSync(join(root, "notes")), existsSync(join(root, "notes", "2026"))], ["not-applied", true, false]);
+  });
+
   it("restores the originals of a partial apply without overwriting anything, and removes only the folders it made", async () => {
     const root = repoWith(FILES);
     const run = await apply(root);
