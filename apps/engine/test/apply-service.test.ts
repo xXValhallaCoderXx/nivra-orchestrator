@@ -90,6 +90,13 @@ describe("the apply service at start (NIV-8, D40)", () => {
     assert.ok(existsSync(join(run.recovery, "orig-0")), "the missing file's original went");
     const restored = await service.restore(view.applyId);
     assert.deepEqual([restored.status, String(readFileSync(join(run.root, "README.md")))], ["not-applied", APPLY_FILES["README.md"]]);
+    // Unknown (another file changed by hand too) and dismissed: the missing file's original still stays.
+    const other = await cut(fresh, counted.calls.indexOf("rename") + 1);
+    writeFileSync(join(other.root, "greet.sh"), "edited by hand\n");
+    const unknown = serviceOn(other.job.database).status(other.job.requestId)!;
+    assert.deepEqual([unknown.status, unknown.paths.map((one) => one.place)], ["unknown", ["aside", "other", "pre"]]);
+    await serviceOn(other.job.database).dismiss(unknown.applyId, "dismissed");
+    assert.equal(String(readFileSync(join(other.recovery, "orig-0"))), APPLY_FILES["README.md"]);
   });
 
   it("keeps what the apply knew of another program's save when it restores: still partial, never unknown", async () => {
