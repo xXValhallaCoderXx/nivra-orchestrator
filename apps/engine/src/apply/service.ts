@@ -79,8 +79,9 @@ export class ApplyService {
       const git = this.#deps.findGit();
       if (!git) throw new ApplyRequestRefusal("Git isn't installed on this target, or isn't on its PATH, so nothing was written. Install it, then apply again.");
       const applyId = randomUUID();
-      const { record } = this.#journal.claim({ applyId, requestId: params.requestId, runId: params.runId, proposalHash: proposal.hash, destination: proposal.binding.destination.root });
-      if (record.state === "refused") return this.view(record);
+      // A claim that finds the request already there (a race with the lookup above) gives that apply, never a second.
+      const { record, repeated: again } = this.#journal.claim({ applyId, requestId: params.requestId, runId: params.runId, proposalHash: proposal.hash, destination: proposal.binding.destination.root });
+      if (again || record.state === "refused") return this.view(record);
       let session: Awaited<ReturnType<ExecutionBackend["open"]>> | null = null;
       try {
         session = await this.#deps.backend.open({ workspace: params.repoPath });

@@ -305,6 +305,16 @@ describe("the apply writer (NIV-8, D40)", () => {
     }
   });
 
+  it("never takes away a version another program saved just before restore moves the file: it goes back in place, and the original stays kept", async () => {
+    const root = repoWith(FILES);
+    const run = await apply(root);
+    assert.ok(!(run.outcome instanceof ApplyRefusal) && run.outcome.state === "applied");
+    const record = run.journal.get(run.applyId)!;
+    const restored = await restore(record.intent!, { created: record.created, before: (step) => void (step === "take back 0" && writeFileSync(join(root, "README.md"), "saved as restore began\n")) });
+    assert.deepEqual([restored.state, restored.paths[0]?.place, restored.paths[0]?.changedSince, String(files(root, "README.md"))], ["partial", "theirs", true, "saved as restore began\n"]);
+    assert.ok(restored.paths[0]!.kept.includes("orig-0"), restored.paths[0]!.kept.join(", "));
+  });
+
   it("restores the originals of a partial apply without overwriting anything, and removes only the folders it made", async () => {
     const root = repoWith(FILES);
     const run = await apply(root);

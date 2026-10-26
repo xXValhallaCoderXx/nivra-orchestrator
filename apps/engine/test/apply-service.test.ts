@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -66,6 +66,18 @@ describe("the apply service at start (NIV-8, D40)", () => {
     await assert.rejects(service.restore(view.applyId), /Only a change that was applied in part can be restored/);
     const settled = await service.dismiss(view.applyId, "dismissed");
     assert.deepEqual([settled.resolution, existsSync(run.recovery), existsSync(join(run.plan.gitDir, "nivra-apply", "lock"))], ["dismissed", false, false]);
+  });
+
+  it("keeps a copy that changed since when the change is accepted, and removes the ones still the original's or Nivra's", async () => {
+    const fresh = copies(dirs);
+    const run = await cut(fresh, null);
+    const service = serviceOn(run.job.database);
+    assert.equal(service.status(run.job.requestId)?.status, "applied");
+    // A program that had README.md open before the apply writes through it into the original kept aside.
+    writeFileSync(join(run.recovery, "orig-0"), "written through an open file\n");
+    const accepted = await service.dismiss(service.status(run.job.requestId)!.applyId, "accepted");
+    assert.deepEqual([accepted.resolution, readdirSync(run.recovery).sort()], ["accepted", ["orig-0"]]);
+    assert.equal(String(readFileSync(join(run.recovery, "orig-0"))), "written through an open file\n");
   });
 
   it("reads a claim its engine stopped before it wrote anything as interrupted, the checkout as it was", async () => {
