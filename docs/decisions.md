@@ -2450,3 +2450,157 @@ assumptions and the passages read"; that Tavily never gets "the plan's text"; an
   2. the demonstration repository the approval records wasn't checked again after the freeze. A changed checkout (an
      edit, a new commit, an untracked file, another distribution) is now refused, and again just before the claim.
 - The live run and its record are R3's acceptance, in `docs/acceptance.md`.
+
+## D39. A task run: one worker in a Nebius sandbox, judged by acceptance cases it can't edit, inside one deadline, its change proposed and kept exactly (2026-10-26)
+
+**Decision.** This is checkpoint 1 of the execution milestone (NIV-7). One ready task's brief is run by one worker,
+through `ModelClient`, on a copy of one commit in a Nebius sandbox with networking off (D33), on the prescribed path
+(D35). The result is a proposal the engine has checked (D34), kept exactly. Nothing is applied: approval and apply are
+checkpoint 2's (NIV-8, D40), and the window shows a run read-only.
+
+- **What the worker can do.** It reads files from the engine's own copy of the workspace (the snapshot plus its own
+  writes, which the sandbox was seen to keep), and lists them. It edits or creates text files, each write one
+  persisted operation through the engine's write script, read back and compared before the copy changes. It runs the
+  brief's acceptance cases and repository checks, by number. It hands in with a summary. It never chooses a command,
+  and nothing it says is interpolated into one: everything goes to the engine's fixed scripts as positional arguments.
+- **The acceptance harness: the verdict comes from outside what the worker can edit.**
+  - An acceptance case is a command and the exact output and exit code it must give, frozen with the brief. It runs as
+    `/bin/sh -c` in the workspace, as one disposable operation from collect's image, and the engine compares what came
+    back on this computer, byte for byte.
+  - Verdicts: passed; failed, with the first line that differs; couldn't run (the toolchain probe found its program
+    missing); unknown (an uncertain dispatch, or output that couldn't be read); not run (the run stopped first).
+  - A final check whose start isn't known is never sent again: nothing more runs in the session, and the run ends
+    uncertain, with every verdict kept and nothing proposed.
+  - A change is verified only when there is one and every acceptance case passed in the final checks. A run that
+    changed nothing is never verified, whatever its cases say.
+  - Repository checks (the brief's own commands) run the same way, and exit 0 reads as passed, but they decide
+    nothing.
+  - **A case judges only what it prints.** Each case and check is shown with the files its command names that the
+    change touched, and the preview warns, before anything is sent, when a case runs a file from the repository. A
+    case's pass still counts when its file changed: the fixture's own case sources `greet.sh`, the file the fix must
+    change. So a case's expected output should be one only the right behaviour gives, not what a test script prints
+    when it passes, and the window says so.
+  - Both bypasses fail: replacing `check.sh` with `exit 0` passes the check, which is shown as changed, and the case
+    still fails; an `exit 0` at the top of `greet.sh` leaves the case's output empty, and it fails.
+  - Output the sandbox didn't report as text (a stream missing, or bytes that aren't UTF-8) is unknown, never compared
+    as if it were empty.
+- **The toolchain probe.** Before the model starts, `command -v` looks for each case's and check's first word in the
+  sandbox. A missing one stops the run, and nothing is installed. A command whose first word isn't a plain program (a
+  quote, a variable, an assignment, a subshell, a path inside the workspace such as `./x.sh`, or a function the line
+  defines) is never guessed: it runs, and a missing program fails it. An exit code proves no cause: a script that
+  exits 127 on purpose reads as failed, with its code, never as missing.
+- **Integrity.** After collect, the result must be exactly the commit plus the writes the engine read back and
+  compared: a file added, changed or removed by anything else refuses the run, and nothing is proposed.
+- **Time: one deadline, phases inside it.** The run has 33 minutes from its start. The model is chosen first (30 s at
+  most), then the snapshot (2 minutes), the session (20 minutes), close (7), the patch (3) and the report.
+  - The snapshot and the session each get their cap or the time left before close, the patch and the report,
+    whichever is less; close and the patch each get their cap or the time left. A session the deadline leaves less
+    than 3 minutes isn't opened, and nothing is sent.
+  - Inside the session, the time collect, its two reads and every final check need is kept before the worker starts:
+    each operation's start request (30 s, the session's own allowance), its timeout, the minute it is watched past
+    that, and a write's margin. That is 578 s for two cases and checks and 882 s for four, which leaves the worker
+    about 10 and 5 minutes. The rest is the work window: the model's whole time, and a tool sends an operation only
+    when the window still holds it, its margin and its read.
+  - **A model timeout isn't a cancel.** The model's deadline never stops an operation under way: one in flight when
+    the model's time ends finishes, and the run goes on to collect. The person's cancel, and a withdrawn consent, stop
+    the operation under way, and the run ends where the cancel lands, the final checks included, with no proposal;
+    cleanup still runs.
+- **Bounds, all enforced by the engine:** 12 model requests, each up to 150 s with 8,000 output tokens, admitted
+  against an estimated 160,000 input tokens (an estimate, not a cap; D30); 24 tool calls, of which 8 writes of up to
+  32 KiB and 4 runs of a case or check; at most four cases and checks in all, each command up to 1,000 characters and
+  each expected output up to 4 KB; Nebius operations limited to the brief's own count (17 for two cases and checks).
+- **The proposal binds more (binding v2):** the attempt (task, attempt and run ids), the engine's home id, the brief's
+  version and digest (which cover its cases), every changed path's mode and digest before and after, and a canonical
+  archive of the new files' bytes, which applying will write from. `verifyProposal` checks each, and refuses a
+  proposal made by another attempt, on another engine's records or from another version of the brief.
+- **Kept exactly: engine migration 4.** A `proposals` table holds the binding and the exact patch, report and
+  post-image bytes, never masked, since their digests are what the person approves, and a trigger keeps each row as it
+  was written. A proposal holding any value the vault keeps isn't kept: the run is refused at `proposal`. (Nebius's own
+  session already refuses any command holding the key or project id, D33, so a write naming either never leaves.)
+- **Protocol 10.** `runs.start` gains a `task` branch: input `{ repoPath, project, target, preview, taskId,
+  briefVersion, briefDigest }`, the attempt being the request id; context `{ sharing: { modelContext, cloudExecution },
+  brief }`, held in memory (D21). `task.preview` gives what a run of this checkout and brief would send to Nebius, with
+  no network, and its bounds. `runs.task` gives the report; one saved before its engine stopped reads as interrupted.
+  `runs.proposal` gives the proposal as text to read, masked and cut at 512 KB; the stored bytes stay exact.
+- **The report fits its store.** Every text in it is masked first, as the store would mask it, control characters and
+  lone surrogates become U+FFFD, and then it is cut to its field's length; output tails are shortened until the whole
+  report is at most 200,000 bytes, below the store's 256,000. The report is saved before the proposal, and a proposal
+  that can't be kept replaces it with one saying nothing was proposed.
+- **Both consents.** A run needs the project's model sharing (D20: the brief, file contents and command output go to
+  Token Factory) and its uploads (D36: the commit, and every write as a command's arguments, go to Nebius). Neither
+  stands in for the other. **This extends D36,** where `cloudExecution` "governs a check and nothing else": it now
+  governs a project's sandbox checks and its task runs, and its dialog says so. Model sharing's wording names task runs
+  too. The host checks both at the start, again against their epochs before sending, and once more on the answer;
+  turning either off, or removing the project, stops the run and records why. Every one of the project's stops is
+  tried, whatever another's fate, and any that failed is reported. A stop the engine turned down isn't said to be
+  under way (D36); one asked for before the run was known, or while its engine was offline, is sent once the run can
+  be reached, and again until it is taken. An offline engine isn't running the run any more (D4), so removing its
+  project only records the stop.
+- **The preview binds the start.** The host's `taskRunFingerprint` covers the task, the brief version and its digest,
+  the project, the target, both consents and the snapshot's fingerprint; a start whose fingerprint differs is refused,
+  and the engine checks the snapshot again before the upload.
+- **One task at a time, on a slot of its own.** The host records an attempt only while no other is open, and the
+  engine refuses a second task run on one engine, recording nothing. The scheduler gives task runs their own slot, so a
+  half-hour run never holds up conversations, explanations, reviews, research or checks, nor waits behind them.
+- **Not on Windows itself.** The host refuses a task whose repository is on the native Windows target, and the engine
+  refuses one on win32, recording nothing. Linux and Windows-to-WSL are the targets.
+- **Recovery (D33) covers every run that can hold a Nebius session.** The journal list is read again only while no
+  check or task is going, so saving the key during a task run starts no pass over its journal; `sandbox.recover` is
+  refused then.
+- **Attempts in the workspace.** An attempt is a run link with workflow `task`, bound to one brief version, its id the
+  request id, saved before the request is sent. Its end is recorded as a turn's is: a lost answer is found by its
+  request id and never resent; absent from the same store, it wasn't sent, in the engine's own words when it gave
+  some. Its report and change stay in the engine's store and are read from there. A task can't be deleted while its
+  run goes. No workspace migration: briefs gain acceptance cases as an optional field, so every stored brief parses.
+- **What leaves the engine (D29).** A stopped run's words are chosen by its code and where it stopped; only a stop
+  before the upload says nothing was sent (the workflow's step before the prescribed path is `start`; `run` is the
+  worker's own run of a case or check). A refusal reaches the worker, the run's events and its report only in Nivra's
+  fixed words, never in its own text, which can hold a path on this computer. The worker's summary is its own claim,
+  masked, kept apart from what Nivra checked, and never called verified.
+
+**Why.**
+- **NIV-7** asks for one native task through a bounded worker: the brief and its project, one worker at a time, tools
+  only in the sandbox, bounded steps and time, credentials outside model inputs and guests, real progress and
+  verification with the validated patch, worker success apart from acceptance, and denied actions, failing checks,
+  cancellation, provider failure and lost observation covered without duplicate submissions.
+- **Nate's review of the first plan (24 October)** kept the three checkpoints and asked for stronger verification and
+  recovery, not more features: a harness the worker can't edit or bypass, the time after the work reserved, a model
+  timeout told apart from a cancel, and no missing tool inferred from an exit code. This is that plan's first
+  checkpoint.
+- **The live toolchain probe (26 October, 13:00 UTC, approved by Nate)** passed 10 of 10 at `867497b`, in five
+  operations with no model: busybox lists 304 applets (`sh`, `printf`, `sha256sum`, `tar`, `sed`, `awk`, `diff` among
+  them; `git`, `node` and `python3` aren't applets); a 32 KiB write of awkward text came back byte for byte; the case
+  saw the write across operations; collect gave exactly the fixture plus the write. **Nebius keeps a write's content
+  in its operation record** (`metadata.args[7]`), with no API to delete it, so the preview says what the worker writes
+  stays there. Evidence: `~/nivra-acceptance/task-probe-2026-10-26T130001539Z/`.
+- **One deadline,** because work between phases can eat into a later phase's time (Nate's rule from NIV-45's review):
+  caps alone summed to 32.75 minutes with the model's listing, and a stop in flight could add 92 s.
+- **Proposals in their own table,** because a run artefact is masked and capped at 256 KB, and an approved hash needs
+  the exact bytes.
+- **The independent review (26 October)** found twelve problems, five of them shown by scripts of its own. All are
+  fixed here, each with a test:
+  - turning uploads off skipped a task run's stop when the project's check couldn't be stopped first, and the consent
+    wording promised every stop;
+  - a case that runs a script the worker rewrote passed, and nothing said so;
+  - a refusal's own words could carry the session journal's path to the model;
+  - a report over the store's limit, or one whose masked text outgrew its field, made a run that proposed a change
+    read as failed, with its proposal kept;
+  - smaller ones: an uncertain final check still ended in a proposal; the reserve left out start requests; the probe
+    took a workspace path or a function for a program; `verifyProposal` didn't check the attempt; a missing output
+    stream read as empty; a run on an offline engine kept its project from being removed; a stop the follow loop sent
+    once and saw turned down wasn't sent again; and wording that claimed more than the run showed.
+  - Turning the review's scripts into tests showed that a cancel during the final checks was stopped only by the
+    patch build's own git calls, so the report named a stage the run never reached; it now stops where it lands.
+
+**Consequences.**
+- **Limits of this checkpoint:**
+  - nothing is applied, and the card offers no approval: checkpoint 2 (NIV-8, NIV-13, D40);
+  - a proposal holds additions and changes of text files only: no deletions, mode changes or links;
+  - one worker, editing an existing repository; no model-chosen command, no installs, no trackers;
+  - with four cases and checks, the reserve leaves the worker about 5 minutes: a brief should use as few as show the
+    change;
+  - the window reads a run's report from its engine, so it shows it while that engine is online with the same store;
+    checkpoint 2 keeps attempts' outcomes in the workspace (its migration 4);
+  - Windows-to-WSL is shown here by host tests on a stand-in WSL target and by Linux runs; the packaged journey through
+    the Windows app, and one live worker run, are checkpoint 3's (NIV-35).
+- **Evidence:** `docs/acceptance.md`, *Task run, checkpoint 1 (D39, NIV-7)*.

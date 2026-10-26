@@ -407,6 +407,39 @@ node scripts/research-live.ts --cleanup     # opens the last live profile and re
   (`scripts/shape-scan-cli.ts`), which can't see a Token Factory key. Evidence goes to
   `~/nivra-acceptance/research-r3-<mode>-<UTC>-<revision>/`.
 
+A task run (NIV-7, D39) changes a copy of one commit in Nebius Sandboxes with a model, and checks the result itself:
+the brief's acceptance cases decide it, each a command with the exact output and exit code it must give, judged by
+the engine. The brief's checks are the repository's own commands, reported and never deciding. A run needs the key and
+the project id (Settings, or `NEBIUS_API_KEY` and `NEBIUS_PROJECT_ID` for `rpc.ts`) and both of the project's
+consents, model sharing and uploads. Windows itself is refused; Linux and Windows-to-WSL are the targets. Without the
+real services, point the engine at the stand-ins with `--sandboxes-url` and `--token-factory-url` (loopback only):
+
+```bash
+pnpm rpc task.preview '{"repoPath":"/path/to/repo","brief":{"goal":"…","acceptanceCriteria":[],"scope":"","exclusions":"","context":"","checks":[],"acceptanceCases":[{"name":"…","command":"…","expectedOutput":"…\n","expectedExitCode":0}]}}'
+pnpm rpc runs.start '{"workflowId":"task","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"modelContext":true,"cloudExecution":true},"brief":{…}}}' --follow --sandboxes-url http://127.0.0.1:<port> --token-factory-url http://127.0.0.1:<port>/v1
+cd apps/engine && node --test test/task-engine.test.ts test/task-run.test.ts test/task-worker.test.ts test/task-timing.test.ts
+cd apps/desktop && xvfb-run -a pnpm -s test:e2e task-run.spec.ts
+```
+
+- **`rpc.ts` fills in** the brief's digest and the preview's fingerprint (from `task.preview`), a project, a task,
+  brief version 1 and the local target when the request leaves them out, and prints the report and the proposal after
+  `--follow`. A run without both consents in its context is refused at its check.
+- **Stand-ins.** `stub-sandboxes.ts` takes a guest: `test/real-guest.ts` runs each command with this machine's tools,
+  in a folder per image, and with `busybox = true` stands in for an image that has busybox (the engine names
+  `/bin/busybox`; its applets are this machine's tools). `stub-token-factory.ts` scripts the worker's tool calls, by
+  request. The fixture, `greet.sh` with its no-name bug and `check.sh`, is `apps/engine/scripts/task-fixture.ts`.
+- **What the engine keeps.** The report is the run's `task` artefact (masked); the proposal is a row of `proposals`
+  (engine migration 4), with its exact bytes, read with `runs.proposal` as masked text. Journals are the sandbox
+  check's (`<home>/sandbox/`).
+- **The window's tests** pass `--nivra-sandboxes-url` and `--nivra-token-factory-url` to an unpackaged app:
+  `task-run.spec.ts` writes an acceptance case into a brief, gives both consents in the Run preview, runs the task,
+  and reads what Nivra found, with the checkout untouched. The host's tests run the WSL stand-in target, since a host
+  on Windows refuses a task on the local one; `wslEntry` puts the gated engine there for lost answers.
+- **The live toolchain probe** (`apps/engine/scripts/task-probe.ts`): five operations on Nebius with no model, the
+  fixture only. `--plan` prints the recipe with no network; `--run --credentials <file>` needs an approval of that
+  recipe, and refuses a fixture or write that isn't the pinned one; `--recover <folder>` settles what a cut-short
+  cleanup left. Evidence goes to `~/nivra-acceptance/task-probe-<UTC>/`. It passed 10 of 10 on 26 October (D39).
+
 ## Where things will live
 
 | What | Where |
@@ -436,5 +469,5 @@ distribution. One engine holds a home at a time (D7), so the second to start is 
   PATH, with WSL's leaked Windows folders removed. **Required before agents run builds (D15)**: nvm and similar are
   invisible to `wsl.exe --exec`.
 - Approved apply for agent writes (D15, NIV-8). Commit snapshots, patch checks and proposals bound by one hash are
-  built (D34), and so is the Nebius execution session they run with (D33). The engine runs them only as a sandbox
-  check (D36), which proposes nothing; a model choosing commands is NIV-7's.
+  built (D34), and so is the Nebius execution session they run with (D33). The engine runs them as a sandbox check
+  (D36), which proposes nothing, and as a task run (D39), whose proposal is kept exactly and shown, never applied.
