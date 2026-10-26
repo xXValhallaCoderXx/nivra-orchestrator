@@ -914,7 +914,7 @@ export class Host {
       checks: content.checks.map((command, index) => ({ number: index + 1, command })),
       consents,
     };
-    const stopped = (blocked: string): TaskRunPreview => ({ ...base, keeps: { tokenFactory: TOKEN_FACTORY_KEEPS, nebius: null }, snapshot: null, programs: [], unprobed: 0, limits: null, blocked, expected: "", snapshotFingerprint: null });
+    const stopped = (blocked: string): TaskRunPreview => ({ ...base, keeps: { tokenFactory: TOKEN_FACTORY_KEEPS, nebius: null }, snapshot: null, programs: [], unprobed: 0, caseFiles: [], limits: null, blocked, expected: "", snapshotFingerprint: null });
     const early = this.#runBlocked(task, content);
     if (early || !project) return stopped(early ?? "Choose the repository this task runs on first.");
     const packet = (taskBriefOf(content) as { brief: TaskBrief }).brief;
@@ -930,6 +930,7 @@ export class Host {
       snapshot: shown.snapshot,
       programs: shown.programs,
       unprobed: shown.unprobed,
+      caseFiles: shown.caseFiles,
       limits: shown.limits,
       blocked,
       expected,
@@ -1114,11 +1115,14 @@ export class Host {
     if (!modelContext) {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
       const withdraw = this.#markProjectTurns(projectId, "sharing");
-      await this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`).catch((error: unknown) => {
-        withdraw();
-        throw error;
-      });
-      await this.#stopProjectAttempts(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`);
+      // Every stop is tried, whatever another's fate, and then any that failed is reported (D39).
+      const [runs, attempts] = await Promise.allSettled([
+        this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`),
+        this.#stopProjectAttempts(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
+      ]);
+      if (runs.status === "rejected") withdraw();
+      const failed = [runs, attempts].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      if (failed.length) throw new Error(failed.join(" "));
     }
     return this.#view(this.#project(projectId));
   }
@@ -1134,13 +1138,21 @@ export class Host {
     this.#options.store.update((data) => ({ ...data, projects: data.projects.map((p) => (p.id === projectId ? { ...p, sharing: { ...p.sharing, cloudExecution } } : p)) }));
     if (!cloudExecution) {
       this.#cloudEpochs.set(projectId, this.#cloudEpochOf(projectId) + 1);
-      const check = this.#sandboxChecks.get(projectId);
-      // A check whose state can't be read is treated as going: stopping one that had ended does no harm.
-      if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
-        await this.#stopForUploads(projectId, check, UPLOADS_STOPPED);
-        this.#notices.set(projectId, UPLOADS_STOPPED);
-      }
-      await this.#stopProjectAttempts(projectId, "sharing", (why) => `Uploads for this project are off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`);
+      const stopCheck = async () => {
+        const check = this.#sandboxChecks.get(projectId);
+        // A check whose state can't be read is treated as going: stopping one that had ended does no harm.
+        if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
+          await this.#stopForUploads(projectId, check, UPLOADS_STOPPED);
+          this.#notices.set(projectId, UPLOADS_STOPPED);
+        }
+      };
+      // Every stop is tried, whatever another's fate, and then any that failed is reported (D39).
+      const stops = await Promise.allSettled([
+        stopCheck(),
+        this.#stopProjectAttempts(projectId, "sharing", (why) => `Uploads for this project are off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
+      ]);
+      const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      if (failed.length) throw new Error(failed.join(" "));
     }
     return this.#view(this.#project(projectId));
   }
@@ -1294,12 +1306,20 @@ export class Host {
     this.#cloudEpochs.set(projectId, this.#cloudEpochOf(projectId) + 1);
     const withdraw = this.#markProjectTurns(projectId, "removal");
     try {
-      await this.#stopProjectRuns(projectId, "removal", (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
-      const check = this.#sandboxChecks.get(projectId);
-      if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
-        await this.#cancelSandboxRun(projectId, check, null, (why) => `Nivra couldn't stop the project's sandbox check (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
-      }
-      await this.#stopProjectAttempts(projectId, "removal", (why) => `Nivra couldn't stop the project's task run (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
+      const stopCheck = async () => {
+        const check = this.#sandboxChecks.get(projectId);
+        if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
+          await this.#cancelSandboxRun(projectId, check, null, (why) => `Nivra couldn't stop the project's sandbox check (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
+        }
+      };
+      // Every stop is tried, whatever another's fate; any that failed keeps the project in the list, and says why.
+      const stops = await Promise.allSettled([
+        this.#stopProjectRuns(projectId, "removal", (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
+        stopCheck(),
+        this.#stopProjectAttempts(projectId, "removal", (why) => `Nivra couldn't stop the project's task run (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
+      ]);
+      const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      if (failed.length) throw new Error(failed.join(" "));
     } catch (error) {
       withdraw();
       this.#removing.delete(projectId);
@@ -1655,7 +1675,11 @@ export class Host {
               }
               if (attempt.cancelRequested && !cancelSent) {
                 cancelSent = true;
-                await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch((error: unknown) => this.#options.log(`A task run couldn't be cancelled yet: ${errorText(error)}`));
+                // A cancel its engine turned down is tried again on the next look, never left for the run to outlast.
+                await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch((error: unknown) => {
+                  cancelSent = false;
+                  this.#options.log(`A task run couldn't be cancelled yet, so Nivra tries again: ${errorText(error)}`);
+                });
               }
               delay = 400;
             } catch (error) {
@@ -1716,11 +1740,17 @@ export class Host {
     } else if (!pending) this.#followAttempt(attempt.id);
   }
 
-  /** Stops the project's task run started this session, for `reason`; says through `refusal` when it couldn't. */
+  /**
+   * Stops the project's task run started this session, for `reason`; says through `refusal` when it couldn't. A run
+   * whose engine isn't online, and isn't being sent, isn't going any more (D4): its stop is recorded, and nothing is sent.
+   */
   async #stopProjectAttempts(projectId: string, reason: CancelReason, refusal: (why: string) => string): Promise<void> {
     if (this.#workspace.state !== "ready") return;
-    const attempts = openAttempts(this.#workspace.db).filter((attempt) => this.#taskRuns.get(attempt.id)?.projectId === projectId);
-    const results = await Promise.allSettled(attempts.map((attempt) => this.#cancelAttempt(attempt, reason)));
+    const workspace = this.#workspace.db;
+    const attempts = openAttempts(workspace).filter((attempt) => this.#taskRuns.get(attempt.id)?.projectId === projectId);
+    const going = (attempt: AttemptRecord) => this.#submissions.has(attempt.id) || this.#engines.get(attempt.targetId)?.supervisor.state.status === "online";
+    for (const attempt of attempts.filter((one) => !going(one))) requestCancel(workspace, attempt.id, reason);
+    const results = await Promise.allSettled(attempts.filter(going).map((attempt) => this.#cancelAttempt(attempt, reason)));
     const failed = results.flatMap((result) => (result.status === "rejected" ? [errorText(result.reason)] : []));
     if (failed.length) throw new Error(refusal(failed[0]!));
   }

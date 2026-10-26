@@ -505,6 +505,8 @@ export interface TaskRunPreview {
   /** The programs the run looks for before the model starts, and how many commands start with something it can't read. */
   programs: string[];
   unprobed: number;
+  /** The commit's files each acceptance case runs: the worker can change them, and a case judges only what it prints. */
+  caseFiles: Array<{ number: number; files: string[] }>;
   /** The bounds the engine holds the run to; null when the preview stopped first. */
   limits: TaskRunLimits | null;
   /** The project's two consents, as they are now: both are needed. */

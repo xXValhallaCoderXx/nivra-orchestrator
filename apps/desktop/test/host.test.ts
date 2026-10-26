@@ -2675,7 +2675,8 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const refused = await host.startTaskRun(task.summary.id, await expected(snapshot), snapshot);
     const notSent = await ended(host, task.summary.id, refused.id, "the refused run to settle");
     assert.deepEqual([notSent.status, notSent.note], ["not-sent", "The engine didn't start the run, so nothing was uploaded and nothing reached the model. The engine refused the run."]);
-    // Model sharing turned off while the start is out: the run the engine made is stopped as soon as it answers.
+    // Model sharing turned off while the start is out: the run the engine made is stopped as soon as it answers, and a
+    // stop its engine turns down is sent again until it is taken.
     rmSync(join(home, "error-start"));
     rmSync(join(home, "release"));
     writeFileSync(join(home, "accept"), "");
@@ -2683,9 +2684,110 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const late = await host.startTaskRun(task.summary.id, await expected(snapshot), snapshot);
     await waitFor(() => calls().filter((call) => call === "runs.start").length === before + 1, "the run's request to reach the engine");
     await host.setSharing(ids[0]!, false);
+    // Running until it is stopped, and every stop turned down for now.
+    writeFileSync(join(home, "running"), "");
+    writeFileSync(join(home, "fail-cancel"), "");
+    const cancels = calls().filter((call) => call === "runs.cancel").length;
     writeFileSync(join(home, "release"), "");
+    await waitFor(() => calls().filter((call) => call === "runs.cancel").length >= cancels + 3, "the stop to be turned down and sent again");
+    rmSync(join(home, "fail-cancel"));
     const withdrawn: TaskAttemptView = await ended(host, task.summary.id, late.id, "the withdrawn run to stop");
     assert.deepEqual([withdrawn.status, logged("cancelled.log").includes(withdrawn.runId ?? "none")], ["cancelled", true]);
     assert.match(withdrawn.note ?? "", /^Stopped: this project's sharing or uploads were turned off/);
+  });
+
+  it("stops a task run when uploads are turned off though the project's check couldn't be stopped, and the check though the run couldn't", async () => {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    const { host, ids, keys, root } = made;
+    keys.current = SECRETS;
+    await host.setSharing(ids[0]!, true);
+    await host.setCloudExecution(ids[0]!, true);
+    const home = join(root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    const cancelled = () => (existsSync(join(home, "cancelled.log")) ? readFileSync(join(home, "cancelled.log"), "utf8").split("\n").filter(Boolean) : []);
+    for (const flag of ["accept", "release", "running"]) writeFileSync(join(home, flag), "");
+    const task = await readyTask(host, ids[0]!);
+    const view = host.task(task.summary.id);
+    const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
+    const snapshot = "c".repeat(64);
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const going = async () => {
+      const started = await host.startTaskRun(task.summary.id, expected, snapshot);
+      const running = await waitFor(async () => {
+        const seen = await host.taskAttempt(task.summary.id, started.id);
+        return seen.status === "running" && seen.runId ? seen : null;
+      }, "the task's run to be going");
+      return { id: started.id, runId: running.runId! };
+    };
+    // The project's sandbox check and a task's run, both going; the engine turns the check's stop down.
+    const check = await host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    const first = await going();
+    writeFileSync(join(home, "fail-cancel-for"), check.runId!);
+    await assert.rejects(host.setCloudExecution(ids[0]!, false), /^Error: Nivra couldn't stop the sandbox check \(the run couldn't be stopped\)\./);
+    assert.equal(host.projects()[0]?.sharing.cloudExecution, false);
+    const stopped = await ended(host, task.summary.id, first.id, "the task's run to stop");
+    assert.deepEqual([stopped.status, cancelled()], ["cancelled", [first.runId]]);
+    // The other way round: the run's stop is turned down, the check is stopped, and the run isn't said to be stopping.
+    await host.setCloudExecution(ids[0]!, true);
+    const second = await going();
+    writeFileSync(join(home, "fail-cancel-for"), second.runId);
+    await assert.rejects(host.setCloudExecution(ids[0]!, false), /^Error: Uploads for this project are off, but Nivra couldn't stop its task run \(the run couldn't be stopped\)\. Restart the project's engine to stop it\.$/);
+    const left = await host.taskAttempt(task.summary.id, second.id);
+    assert.deepEqual([left.status, left.cancelRequested, cancelled()], ["running", false, [first.runId, check.runId]]);
+    rmSync(join(home, "fail-cancel-for"));
+    await host.cancelTaskRun(task.summary.id, second.id);
+    assert.equal((await ended(host, task.summary.id, second.id, "the second run to stop")).status, "cancelled");
+  });
+
+  it("stops a task run when sharing is turned off though the project's explanation couldn't be stopped, and says so", async () => {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    const { host, ids, keys, root } = made;
+    keys.current = SECRETS;
+    await host.setSharing(ids[0]!, true);
+    await host.setCloudExecution(ids[0]!, true);
+    const home = join(root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    const cancelled = () => (existsSync(join(home, "cancelled.log")) ? readFileSync(join(home, "cancelled.log"), "utf8").split("\n").filter(Boolean) : []);
+    for (const flag of ["accept", "release", "running"]) writeFileSync(join(home, flag), "");
+    const explain = await host.startExplain(ids[0]!, "", []);
+    const task = await readyTask(host, ids[0]!);
+    const view = host.task(task.summary.id);
+    const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
+    const snapshot = "c".repeat(64);
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const started = await host.startTaskRun(task.summary.id, expected, snapshot);
+    const running = await waitFor(async () => {
+      const seen = await host.taskAttempt(task.summary.id, started.id);
+      return seen.status === "running" && seen.runId ? seen : null;
+    }, "the task's run to be going");
+    writeFileSync(join(home, "fail-cancel-for"), explain.id);
+    await assert.rejects(host.setSharing(ids[0]!, false), /^Error: Sharing for this project is off, but Nivra couldn't stop an explain run \(the run couldn't be stopped\)\./);
+    const stopped = await ended(host, task.summary.id, started.id, "the task's run to stop");
+    assert.deepEqual([stopped.status, cancelled()], ["cancelled", [running.runId]]);
+    assert.match(stopped.note ?? "", /^Stopped: this project's sharing or uploads were turned off/);
+  });
+
+  it("removes a project whose task run's engine has stopped: the run's stop is recorded, and nothing is sent", async () => {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    const { host, ids, keys, root } = made;
+    keys.current = SECRETS;
+    await host.setSharing(ids[0]!, true);
+    await host.setCloudExecution(ids[0]!, true);
+    const home = join(root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "release", "running"]) writeFileSync(join(home, flag), "");
+    const task = await readyTask(host, ids[0]!);
+    const view = host.task(task.summary.id);
+    const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
+    const snapshot = "c".repeat(64);
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const started = await host.startTaskRun(task.summary.id, expected, snapshot);
+    await waitFor(async () => (await host.taskAttempt(task.summary.id, started.id)).runId, "the task's run to be going");
+    const { pid } = await online(host, "wsl:Test");
+    process.kill(pid, "SIGKILL");
+    await waitFor(() => !isAlive(pid) && stateOf(host, "wsl:Test")?.status !== "online", "the engine to stop");
+    await host.removeProject(ids[0]!);
+    const left = await host.taskAttempt(task.summary.id, started.id);
+    assert.deepEqual([host.projects().length, left.cancelRequested, readFileSync(join(home, "calls.log"), "utf8").includes("runs.cancel")], [0, true, false]);
   });
 });

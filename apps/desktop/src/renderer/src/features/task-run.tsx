@@ -121,7 +121,7 @@ const STATUS_LOOK: Record<TurnStatus, { label: string; color: string }> = {
 /** What each outcome means, without claiming more than the run showed. */
 const OUTCOME: Record<TaskReport["outcome"], string> = {
   "in-progress": "The run is going.",
-  proposed: "The worker changed the code, and Nivra checked the result.",
+  proposed: "The worker changed the code. What Nivra's own checks of it found is below.",
   unchanged: "The run changed nothing.",
   refused: "The run was refused.",
   cancelled: "The run was stopped.",
@@ -325,7 +325,8 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
           How Nivra checks the result
         </Text>
         <Text size="sm">
-          Every acceptance case must print exactly what it should and give its exit code. Nivra compares that itself, on this computer; the worker can't change the cases.
+          Every acceptance case must print exactly what it should and give its exit code. Nivra compares that itself, on this computer; the worker can't change the cases
+          themselves.
           {preview.checks.length ? " The repository's checks run too: they're reported, and don't decide the result." : ""}
         </Text>
         <List size="sm">
@@ -340,6 +341,12 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
             </List.Item>
           ))}
         </List>
+        {preview.caseFiles.length > 0 && (
+          <Text size="xs" c="var(--nivra-warning)" data-testid="task-run-preview-case-files">
+            {preview.caseFiles.map((named) => `Case ${named.number} runs ${named.files.join(", ")}`).join("; ")}, from the repository, which the worker can change. Nivra judges only
+            what a case prints, so give it an expected output that only the right behaviour gives, not just what a test script prints when it passes.
+          </Text>
+        )}
         {preview.programs.length > 0 && (
           <Text size="xs" c="var(--nivra-text-3)">
             Before the worker starts, Nivra checks that the sandbox has each command's program ({preview.programs.map((program) => `"${program}"`).join(", ")}). If one is
@@ -385,8 +392,8 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
               for a project whose commits hold secrets you can't share.
             </Text>
             <Text size="sm">
-              This is separate from sending content to Token Factory, and it is for this project only: its sandbox checks and its task runs. You can turn it off at any time,
-              which stops a check or a run under way; what was already uploaded stays with Nebius.
+              This is separate from sending content to Token Factory, and it is for this project only: its sandbox checks and its task runs. You can turn it off at any time:
+              Nivra then stops a check or a run under way, and says so if it can't. What was already uploaded stays with Nebius.
             </Text>
             <Group>
               <Button size="xs" onClick={() => onAllow("uploads")} disabled={busy} data-testid="task-run-allow-uploads">
@@ -509,7 +516,7 @@ function Found({ report, proposal }: { report: TaskReport; proposal: TaskAttempt
           <Text size="sm">
             {report.verified
               ? "Every acceptance case passed: the change is verified. Nivra doesn't apply changes yet, so it's kept with the run, and your checkout hasn't been touched."
-              : "Not every acceptance case passed, so the change isn't verified. It's kept with the run, and your checkout hasn't been touched."}
+              : "Not every acceptance case was shown to pass, so the change isn't verified. It's kept with the run, and your checkout hasn't been touched."}
           </Text>
         </Alert>
       )}
@@ -541,8 +548,10 @@ function Found({ report, proposal }: { report: TaskReport; proposal: TaskAttempt
                       </Text>
                     )}
                     {check.changedFiles.length > 0 && (
-                      <Text size="xs" c="var(--nivra-warning)">
-                        The change also changes {check.changedFiles.join(", ")}, which this check runs.
+                      <Text size="xs" c="var(--nivra-warning)" data-testid="task-attempt-check-files">
+                        {check.kind === "case"
+                          ? `The change also changes ${check.changedFiles.join(", ")}, which this case runs: Nivra judged only what it printed.`
+                          : `The change also changes ${check.changedFiles.join(", ")}, which this check runs.`}
                       </Text>
                     )}
                   </Stack>

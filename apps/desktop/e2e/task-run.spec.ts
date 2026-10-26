@@ -115,6 +115,8 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Case 1, greet with and without a name");
   await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Check 1:");
   await expect(preview.getByTestId("task-run-preview-limits")).toContainText("(an estimate, not a cap)");
+  // The case sources greet.sh, which the worker may change: the preview says the case judges only what it prints.
+  await expect(preview.getByTestId("task-run-preview-case-files")).toContainText("Case 1 runs greet.sh, from the repository, which the worker can change. Nivra judges only what a case prints");
   await expect(preview.getByTestId("task-run-preview-blocked")).toHaveCount(0);
   expect([sandbox.requests.length, model.chats().length]).toEqual([0, 0]);
   // A double press starts one run: the dialog stays on screen while it fades, and its button takes the first only.
@@ -129,6 +131,7 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   await expect(report.getByTestId("task-attempt-verdict")).toContainText("Every acceptance case passed: the change is verified.");
   await expect(report.getByTestId("task-attempt-check")).toHaveCount(2);
   for (const row of await report.getByTestId("task-attempt-check").all()) await expect(row).toHaveAttribute("data-verdict", "passed");
+  await expect(report.getByTestId("task-attempt-check-files")).toHaveText("The change also changes greet.sh, which this case runs: Nivra judged only what it printed.");
   await expect(report.getByTestId("task-attempt-summary")).toHaveText("The worker's own account, which Nivra didn't check: Defaulted the name to world.");
   await expect(report.getByTestId("task-attempt-patch")).toContainText(`printf 'Hello, %s\\n' "\${1:-world}"`);
   await expect(report.getByTestId("task-attempt-cleanup")).toContainText("Nebius keeps 1 upload");
