@@ -1,6 +1,6 @@
 import { Alert, Badge, Button, Code, Group, Modal, Stack, Table, Text, Textarea } from "@mantine/core";
 import type { ApplyPath, ApplyResolution, ApplyStatus, TaskReport } from "@nivra/domain";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { AttemptDecision, TaskApplyView, TaskAttemptView, TaskView, TurnStatus } from "../../../shared/ipc";
 import { errorMessage } from "../shared/ui";
 
@@ -348,8 +348,8 @@ const OUTCOME_WORD: Record<TaskReport["outcome"], string> = {
 const DECISION_WORD: Record<AttemptDecision, string> = { approved: "approved", rejected: "rejected", revision: "revision asked" };
 
 /** An apply's state, as a few words for the list. */
-function applyWord(apply: TaskApplyView): string {
-  if (apply.resolution === "accepted") return "accepted";
+function applyWord(apply: { status: ApplyStatus | null; resolution: ApplyResolution | null }, acceptedAt: string | null): string {
+  if (acceptedAt || apply.resolution === "accepted") return "accepted";
   if (apply.status === null) return "waiting for its engine";
   const words: Record<ApplyStatus, string> = { claimed: "applying", writing: "applying", refused: "apply refused", applied: "applied", "not-applied": "not applied", partial: "applied in part", unknown: "apply unknown" };
   return words[apply.status];
@@ -357,27 +357,9 @@ function applyWord(apply: TaskApplyView): string {
 
 /**
  * Every run of the task, newest first: its brief version, how it ended and what it found, the decision on its change,
- * and its apply. Each opens its card. Each run's own view is read for this, once when the runs change.
+ * and its apply, as the workspace keeps them, so the list needs no engine. Each opens its card.
  */
-export function AttemptsList({ taskId, attempts, shown, refreshKey, onChoose }: { taskId: string; attempts: TaskView["attempts"]; shown: string | null; refreshKey: number; onChoose(id: string): void }) {
-  const [views, setViews] = useState<Map<string, TaskAttemptView>>(new Map());
-  const [error, setError] = useState<string | null>(null);
-  const key = `${attempts.map((one) => `${one.id}:${one.status}:${one.settledAt ?? ""}`).join("|")}#${refreshKey}`;
-  useEffect(() => {
-    let active = true;
-    void Promise.all(attempts.map((one) => window.nivra.getTaskAttempt(taskId, one.id).then((view) => [one.id, view] as const))).then(
-      (read) => {
-        if (!active) return;
-        setViews(new Map(read));
-        setError(null);
-      },
-      (reason: unknown) => active && setError(errorMessage(reason)),
-    );
-    return () => {
-      active = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId, key]);
+export function AttemptsList({ attempts, shown, onChoose }: { attempts: TaskView["attempts"]; shown: string | null; onChoose(id: string): void }) {
   if (!attempts.length) return null;
   return (
     <Stack gap={4} data-testid="task-attempts">
@@ -386,12 +368,10 @@ export function AttemptsList({ taskId, attempts, shown, refreshKey, onChoose }: 
       </Text>
       {[...attempts].reverse().map((attempt) => {
         const number = attempts.indexOf(attempt) + 1;
-        const view = views.get(attempt.id);
-        const report = view?.report ?? null;
         const parts = [`brief v${attempt.briefVersion}`, STATUS_WORD[attempt.status]];
-        if (report) parts.push(report.outcome === "proposed" ? (report.verified ? "a verified change" : "an unverified change") : OUTCOME_WORD[report.outcome]);
-        if (view?.decision) parts.push(DECISION_WORD[view.decision]);
-        if (view?.apply) parts.push(applyWord(view.apply));
+        if (attempt.outcome) parts.push(attempt.outcome === "proposed" ? (attempt.verified ? "a verified change" : "an unverified change") : OUTCOME_WORD[attempt.outcome]);
+        if (attempt.decision) parts.push(DECISION_WORD[attempt.decision]);
+        if (attempt.apply) parts.push(applyWord(attempt.apply, attempt.acceptedAt));
         return (
           <Button
             key={attempt.id}
@@ -401,18 +381,13 @@ export function AttemptsList({ taskId, attempts, shown, refreshKey, onChoose }: 
             onClick={() => onChoose(attempt.id)}
             data-testid="task-attempt-row"
             data-attempt-id={attempt.id}
-            data-decision={view?.decision ?? ""}
-            data-apply={view?.apply ? (view.apply.status ?? "waiting") : ""}
+            data-decision={attempt.decision ?? ""}
+            data-apply={attempt.apply ? (attempt.apply.status ?? "waiting") : ""}
           >
             Run {number}: {parts.join(", ")}
           </Button>
         );
       })}
-      {error && (
-        <Text size="xs" c="var(--nivra-error)">
-          {error}
-        </Text>
-      )}
     </Stack>
   );
 }

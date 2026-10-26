@@ -805,14 +805,22 @@ export class Host {
         const latest = versionsOf(workspace, source.planLineage).at(-1);
         return { planLineage: source.planLineage, usedVersion: source.planVersion, latestVersion: latest?.version ?? null, latestPlanId: latest?.id ?? null, conversationId: source.conversationId };
       }),
-      attempts: attemptsOf(workspace, taskId).map((attempt) => ({
-        id: attempt.id,
-        briefVersion: byId.get(attempt.briefId) ?? getArtifact(workspace, attempt.briefId)?.version ?? 0,
-        status: attempt.status,
-        note: attemptNote(attempt),
-        createdAt: attempt.createdAt,
-        settledAt: attempt.settledAt,
-      })),
+      attempts: attemptsOf(workspace, taskId).map((attempt) => {
+        const record = attemptRecord(workspace, attempt.id);
+        return {
+          id: attempt.id,
+          briefVersion: byId.get(attempt.briefId) ?? getArtifact(workspace, attempt.briefId)?.version ?? 0,
+          status: attempt.status,
+          note: attemptNote(attempt),
+          outcome: (record.outcome?.outcome ?? null) as TaskReport["outcome"] | null,
+          verified: record.outcome?.verified ?? false,
+          decision: record.decision,
+          apply: record.apply ? { status: record.apply.view?.status ?? null, resolution: record.apply.view?.resolution ?? null } : null,
+          acceptedAt: record.acceptedAt,
+          createdAt: attempt.createdAt,
+          settledAt: attempt.settledAt,
+        };
+      }),
       runBlocked: this.#runBlocked(task, content),
     };
   }

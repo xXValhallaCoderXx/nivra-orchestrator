@@ -490,7 +490,21 @@ export interface TaskView {
   /** Each plan the brief came from: the version it used, and the latest there is (its id to update from), or that it was deleted. */
   sourcePlans: Array<{ planLineage: string; usedVersion: number; latestVersion: number | null; latestPlanId: string | null; conversationId: string | null }>;
   /** Its runs, oldest first, each bound to the brief version it ran. */
-  attempts: Array<{ id: string; briefVersion: number; status: TurnStatus; note: string | null; createdAt: string; settledAt: string | null }>;
+  attempts: Array<{
+    id: string;
+    briefVersion: number;
+    status: TurnStatus;
+    note: string | null;
+    /** What became of it, as the workspace keeps it (D40): read without its engine. */
+    outcome: TaskReport["outcome"] | null;
+    verified: boolean;
+    decision: AttemptDecision | null;
+    /** Its apply's last known status, null while its engine hasn't said; and how the person settled it. */
+    apply: { status: ApplyStatus | null; resolution: ApplyResolution | null } | null;
+    acceptedAt: string | null;
+    createdAt: string;
+    settledAt: string | null;
+  }>;
   /** Why Run can't be pressed now, in plain words; null when it can (the preview then says what it would send). */
   runBlocked: string | null;
 }

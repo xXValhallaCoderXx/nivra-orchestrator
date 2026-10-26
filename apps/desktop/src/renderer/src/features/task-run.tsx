@@ -167,8 +167,6 @@ export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void
   const [chosen, setChosen] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Bumped when the person decides on a run's change, so the list of runs is read again.
-  const [decided, setDecided] = useState(0);
   // The preview's Start stays on screen while its dialog fades out, so a second press must not start a second run.
   const starting = useRef(false);
   const latest = view.attempts.at(-1) ?? null;
@@ -238,17 +236,14 @@ export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void
           {error}
         </Text>
       )}
-      <AttemptsList taskId={taskId} attempts={view.attempts} shown={shown} refreshKey={decided} onChoose={setChosen} />
+      <AttemptsList attempts={view.attempts} shown={shown} onChoose={setChosen} />
       {shown && (
         <Attempt
           key={shown}
           taskId={taskId}
           attemptId={shown}
           onEnded={onChanged}
-          onDecided={() => {
-            setDecided((n) => n + 1);
-            onChanged();
-          }}
+          onDecided={onChanged}
         />
       )}
       <Modal opened={previewing} onClose={() => setPreviewing(false)} title="Run this task?" size="xl" data-testid="task-run-preview">
