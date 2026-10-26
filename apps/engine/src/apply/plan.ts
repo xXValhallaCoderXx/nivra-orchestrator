@@ -91,7 +91,9 @@ export type ApplyRefusalCode =
   /** Another apply is open for this folder. */
   | "busy"
   /** This proposal has already been applied. */
-  | "duplicate";
+  | "duplicate"
+  /** The engine stopped after the apply was claimed and before it wrote anything. */
+  | "interrupted";
 
 const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   proposal: "This proposal isn't the one you approved, isn't intact, or wasn't made for this folder, run or engine, so nothing was written. Run the task again.",
@@ -107,6 +109,7 @@ const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   filesystem: "Nivra couldn't read the project's folder or a file the change touches, or write in the repository's git folder, so nothing was written. Check that the folder is there, its permissions and its free space, then apply again.",
   busy: "Another change is being applied to this folder, so nothing was written. Wait for it to finish, then apply again.",
   duplicate: "This proposal has already been applied, so it wasn't applied again.",
+  interrupted: "Nivra stopped before it wrote anything, so nothing was written. Apply again.",
 };
 
 /** An apply refused before anything was written. */

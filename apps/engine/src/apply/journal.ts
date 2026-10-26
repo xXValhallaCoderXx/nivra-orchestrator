@@ -1,5 +1,5 @@
 import { type Database, type Row, str } from "../db/database.ts";
-import { ApplyRefusal } from "./plan.ts";
+import { ApplyRefusal, type ApplyRefusalCode } from "./plan.ts";
 import type { ApplyIntent, ApplyJournalPort, ApplyResult, ApplyState } from "./writer.ts";
 
 /** Where an apply is: claimed while it is revalidated, refused, writing once its intent is kept, then its result. */
@@ -13,10 +13,13 @@ export interface ApplyRecord {
   /** The repository's top level: one apply is open there at a time. */
   destination: string;
   state: ApplyRecordState;
+  /** Why it was refused, by code, and the proposal's path the refusal names. */
+  refusal: { code: ApplyRefusalCode; path: string | null } | null;
   intent: ApplyIntent | null;
   /** The folders the apply created, in order. */
   created: string[];
   result: ApplyResult | null;
+  resolution: "accepted" | "dismissed" | "kept" | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -46,26 +49,36 @@ export class ApplyJournal implements ApplyJournalPort {
     return this.#database.tx((db) => {
       const existing = db.prepare("SELECT * FROM applies WHERE request_id = ?").get(input.requestId);
       if (existing) return { record: recordOf(existing), repeated: true };
-      if (db.prepare("SELECT 1 FROM applies WHERE run_id = ? AND state = 'applied'").get(input.runId)) throw new ApplyRefusal("duplicate");
       const at = this.#now().toISOString();
-      try {
-        db.prepare("INSERT INTO applies (id, request_id, run_id, proposal_hash, destination, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'claimed', ?, ?)").run(input.applyId, input.requestId, input.runId, input.proposalHash, input.destination, at, at);
-      } catch (error) {
-        if (openElsewhere(error)) throw new ApplyRefusal("busy");
-        throw error;
+      const insert = (state: "claimed" | "refused", refusal: ApplyRefusal | null) =>
+        db
+          .prepare("INSERT INTO applies (id, request_id, run_id, proposal_hash, destination, state, refusal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(input.applyId, input.requestId, input.runId, input.proposalHash, input.destination, state, refusal && JSON.stringify({ code: refusal.code, path: refusal.path }), at, at);
+      // A refused claim is kept too, under its request id: a repeat gets the same answer, and nothing more.
+      if (db.prepare("SELECT 1 FROM applies WHERE run_id = ? AND state = 'applied'").get(input.runId)) insert("refused", new ApplyRefusal("duplicate"));
+      else {
+        try {
+          insert("claimed", null);
+        } catch (error) {
+          if (!openElsewhere(error)) throw error;
+          insert("refused", new ApplyRefusal("busy"));
+        }
       }
       return { record: recordOf(db.prepare("SELECT * FROM applies WHERE id = ?").get(input.applyId)!), repeated: false };
     });
   }
 
   /** A claim refused before anything was written: the folder is free again. */
-  refuse(applyId: string): void {
-    this.#update(applyId, "UPDATE applies SET state = 'refused', updated_at = ? WHERE id = ? AND state = 'claimed'");
+  refuse(applyId: string, refusal: ApplyRefusal): void {
+    this.#database
+      .open()
+      .prepare("UPDATE applies SET state = 'refused', refusal = ?, updated_at = ? WHERE id = ? AND state = 'claimed'")
+      .run(JSON.stringify({ code: refusal.code, path: refusal.path }), this.#now().toISOString(), applyId);
   }
 
   settled(applyId: string): boolean {
-    const row = this.#database.open().prepare("SELECT state FROM applies WHERE id = ?").get(applyId);
-    return !row || ["refused", "applied", "not-applied"].includes(str(row["state"]));
+    const row = this.#database.open().prepare("SELECT state, resolution FROM applies WHERE id = ?").get(applyId);
+    return !row || ["refused", "applied", "not-applied"].includes(str(row["state"])) || row["resolution"] !== null;
   }
 
   intend(applyId: string, intent: ApplyIntent): void {
@@ -86,9 +99,23 @@ export class ApplyJournal implements ApplyJournalPort {
   settle(applyId: string, result: ApplyResult): void {
     const changed = this.#database
       .open()
-      .prepare("UPDATE applies SET state = ?, result = ?, updated_at = ? WHERE id = ? AND state IN ('writing', 'partial', 'unknown')")
+      .prepare("UPDATE applies SET state = ?, result = ?, updated_at = ? WHERE id = ? AND state IN ('writing', 'partial', 'unknown') AND resolution IS NULL")
       .run(result.state, JSON.stringify(result), this.#now().toISOString(), applyId);
-    if (Number(changed.changes) !== 1) throw new Error("Only an apply that has started writing can be settled.");
+    if (Number(changed.changes) !== 1) throw new Error("Only an apply that has started writing, and isn't settled by the person, can be given a result.");
+  }
+
+  /** How the person settled an apply: it is over, and its folder free for the next one. */
+  resolve(applyId: string, resolution: "accepted" | "dismissed" | "kept"): void {
+    const changed = this.#database
+      .open()
+      .prepare("UPDATE applies SET resolution = ?, updated_at = ? WHERE id = ? AND state IN ('refused', 'applied', 'not-applied', 'partial', 'unknown') AND resolution IS NULL")
+      .run(resolution, this.#now().toISOString(), applyId);
+    if (Number(changed.changes) !== 1) throw new Error("Only an apply that has ended, and isn't settled yet, can be settled.");
+  }
+
+  /** A claim whose engine stopped before it recorded an intent: nothing of the person's was written. */
+  interrupted(): ApplyRecord[] {
+    return this.#database.open().prepare("SELECT * FROM applies WHERE state = 'claimed' ORDER BY created_at").all().map(recordOf);
   }
 
   get(applyId: string): ApplyRecord | null {
@@ -106,9 +133,6 @@ export class ApplyJournal implements ApplyJournalPort {
     return this.#database.open().prepare("SELECT * FROM applies WHERE state = 'writing' ORDER BY created_at").all().map(recordOf);
   }
 
-  #update(applyId: string, sql: string): void {
-    this.#database.open().prepare(sql).run(this.#now().toISOString(), applyId);
-  }
 }
 
 function recordOf(row: Row): ApplyRecord {
@@ -120,9 +144,11 @@ function recordOf(row: Row): ApplyRecord {
     proposalHash: str(row["proposal_hash"]),
     destination: str(row["destination"]),
     state: str(row["state"]) as ApplyRecordState,
+    refusal: json<ApplyRecord["refusal"]>(row["refusal"]),
     intent: json<ApplyIntent>(row["intent"]),
     created: json<string[]>(row["created_folders"]) ?? [],
     result: json<ApplyResult>(row["result"]),
+    resolution: (row["resolution"] ?? null) as ApplyRecord["resolution"],
     createdAt: str(row["created_at"]),
     updatedAt: str(row["updated_at"]),
   };

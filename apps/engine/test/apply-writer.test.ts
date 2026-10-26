@@ -82,7 +82,7 @@ async function apply(root: string, options: { changes?: Record<string, { text: s
     outcome = await writeChange({ applyId, plan, journal, engineId: ENGINE, ...(options.io ? { io: options.io } : {}), ...(options.before ? { before: options.before } : {}) });
   } catch (error) {
     if (!(error instanceof ApplyRefusal)) throw error;
-    journal.refuse(applyId);
+    journal.refuse(applyId, error);
     outcome = error;
   }
   return { outcome, plan, journal, applyId, recovery: join(plan.gitDir, "nivra-apply", applyId) };
@@ -166,16 +166,17 @@ describe("the apply writer (NIV-8, D40)", () => {
     const journal = journalIn();
     const claim = (requestId: string, runId: string) => journal.claim({ applyId: randomUUID(), requestId, runId, proposalHash: "a".repeat(64), destination: "/repo" });
     const first = claim("request-1", "run-1");
-    assert.equal(claim("request-1", "run-1").record.id, first.record.id);
-    assert.equal(claim("request-1", "run-1").repeated, true);
-    assert.throws(() => claim("request-2", "run-2"), (error: Error) => error instanceof ApplyRefusal && error.code === "busy");
+    assert.deepEqual([claim("request-1", "run-1").record.id, claim("request-1", "run-1").repeated, first.record.state], [first.record.id, true, "claimed"]);
+    // Refused while one is open, and kept under its request id: a repeat gets the same refusal.
+    const busy = claim("request-2", "run-2");
+    assert.deepEqual([busy.record.state, busy.record.refusal, claim("request-2", "run-2").record.id], ["refused", { code: "busy", path: null }, busy.record.id]);
     journal.intend(first.record.id, { version: 1, applyId: first.record.id, folder: "/repo", gitDir: "/repo/.git", recovery: "/repo/.git/nivra-apply/x", folders: [], paths: [] });
     journal.settle(first.record.id, { state: "applied", paths: [], folders: [], failure: null });
-    assert.throws(() => claim("request-3", "run-1"), (error: Error) => error instanceof ApplyRefusal && error.code === "duplicate");
-    // A refused claim frees the folder.
+    assert.deepEqual(claim("request-3", "run-1").record.refusal, { code: "duplicate", path: null });
+    // A claim refused after it was made frees the folder; so does an applied one.
     const second = claim("request-4", "run-2");
-    journal.refuse(second.record.id);
-    assert.equal(claim("request-5", "run-2").repeated, false);
+    journal.refuse(second.record.id, new ApplyRefusal("collision", "a.txt"));
+    assert.deepEqual([journal.get(second.record.id)?.refusal, claim("request-5", "run-2").record.state], [{ code: "collision", path: "a.txt" }, "claimed"]);
   });
 
   it("refuses while another engine holds the folder's lock, writing nothing", async () => {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ApplyParams, ApplyResolution, ApplyView } from "./apply.ts";
 import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { RunContext } from "./context.ts";
 import { ExplainResult } from "./explain.ts";
@@ -200,6 +201,20 @@ export const Methods = {
   "runs.proposal": { params: z.strictObject({ runId: RunId }), result: TaskProposal.nullable() },
   /** What a task run of this checkout would send to Nebius, with no network, and the bounds it runs under (D39). */
   "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief }), result: TaskPreview },
+  /**
+   * Applies a task's proposal (D40): the approval itself, bound to the hash and the attempt, checked again, then
+   * written. Idempotent by its request id: a repeat gets the apply it started. A refusal is a result, not an error.
+   */
+  "task.apply": { params: ApplyParams, result: ApplyView },
+  /** An apply by its request id, or null when this engine has none: what the host asks after a restart, never resending. */
+  "task.applyStatus": { params: z.strictObject({ requestId: z.uuid() }), result: ApplyView.nullable() },
+  /** Takes a partial apply back to the originals, never overwriting a version another program saved. */
+  "task.restore": { params: z.strictObject({ applyId: z.uuid() }), result: ApplyView },
+  /**
+   * Settles an apply as the person decided: removes the copies still equal to the baseline or to Nivra's own bytes, keeps
+   * any other, and frees the folder for the next apply.
+   */
+  "task.dismiss": { params: z.strictObject({ applyId: z.uuid(), as: ApplyResolution }), result: ApplyView },
   /** What a sandbox check of this checkout would send, with no network: for the person to see before any upload. */
   "sandbox.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096) }), result: SandboxPreview },
   /** Sandbox work an earlier engine left open, and the recovery pass's state. Reads only this engine's memory. */
