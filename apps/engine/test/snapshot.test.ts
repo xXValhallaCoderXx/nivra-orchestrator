@@ -447,6 +447,7 @@ describe("commit snapshots, after the review", () => {
       ["a PGP private key", Buffer.from("-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\n"), ["a private key"]],
       ["a key's first line, its last missing", Buffer.from("const key = `-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA`;\n"), ["a private key"]],
       ["a public certificate", Buffer.from("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"), []],
+      ["a Tavily key (D37), named for what it is", Buffer.from(`TAVILY_API_KEY=tvly-dev-${"k".repeat(24)}\n`), ["a Tavily API key"]],
       ["an image in base64", Buffer.from(`url(data:image/png;base64,${Buffer.from(new Uint8Array(600).map((_, i) => (i * 7) % 256)).toString("base64")})`), []],
     ];
     for (const [what, bytes, kinds] of cases) assert.deepEqual(credentialKinds(bytes, []), kinds, what);

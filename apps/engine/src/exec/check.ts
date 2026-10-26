@@ -135,11 +135,11 @@ export function safeUnresolved(item: string): string {
   return UNRESOLVED_WORDS.some((words) => words.test(item)) ? item : "Something Nivra started in a sandbox couldn't be settled, and may still be running. It stays journaled, for the next recovery pass.";
 }
 
-/** A stop's code as a check reports it: a code only a task's work gives can't happen here, and reads as a fault. */
-export const sandboxCode = (code: PrescribedStopCode): SandboxStopCode => (code === "toolchain" ? "fault" : code);
+/** A stop's code as a check reports it: a code only a task's run gives can't happen here, and reads as a fault. */
+export const sandboxCode = (code: PrescribedStopCode): SandboxStopCode => (code === "toolchain" || code === "time" ? "fault" : code);
 
-/** A step's record as the report gives it: what it did, its provider's status and usage, and the end of its output. */
-function stepOf(step: PrescribedResult["steps"][number]): SandboxStep {
+/** A step's record as a report gives it: what it did, its provider's status and usage, and the end of its output. */
+export function stepOf(step: PrescribedResult["steps"][number]): SandboxStep {
   return {
     label: clip(step.label, 64),
     exitCode: step.exitCode,

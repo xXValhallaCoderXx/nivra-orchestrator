@@ -162,6 +162,7 @@ const SHAPE_WORDS: Readonly<Record<string, string>> = {
   "api-key": "an API key",
   "slack-token": "a Slack token",
   "linear-token": "a Linear token",
+  "tavily-key": "a Tavily API key",
 };
 /** A private key's first line is enough before an upload: a key cut short, or its last line missing, still counts. */
 const KEY_START = new RegExp(KEY_HEADER);

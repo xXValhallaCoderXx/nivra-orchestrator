@@ -15,7 +15,7 @@ import { requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget, type Hold, type Refusal } from "../providers/run-budget.ts";
 import { WorkspaceCopy } from "./copy.ts";
 import { checkRequest, couldntRun, failedToSend, judgeCase, judgeCheck, namedFiles, notRun, programsOf, verified, type AcceptanceCase, type CheckResult } from "./harness.ts";
-import { operationsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
+import { AFTER_SESSION_MS, operationsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
 import { firstWord, toolchainFindings, toolchainRequest, writeContentProblem, writeRequest } from "./scripts.ts";
 
 /**
@@ -103,6 +103,11 @@ export interface WorkerRun {
   /** What runs the engine's scripts' tools in the sandbox: busybox unless given. */
   applets?: string;
   now?: () => number;
+  /**
+   * The run's one absolute deadline, on `now`'s clock (D39): from when the run started, which can be before the worker
+   * does. `TASK_LIMITS.runMs` from now unless given.
+   */
+  deadline?: number;
   /**
    * A cap on the model's share of the work window: its whole time, and the run budget's. Operations stay bounded by
    * the window itself, so one under way when the model's time ends still finishes before the reserve (tests).
@@ -195,6 +200,7 @@ export const WORKER_TOOL_SPECS = {
 /** Runs one task attempt. It never throws once the session is open: every stop is an outcome, with cleanup's record. */
 export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   const now = run.now ?? (() => performance.now());
+  const deadline = run.deadline ?? now() + TASK_LIMITS.runMs;
   const workspace = run.workspace ?? WORKSPACE;
   const { brief, mask } = run;
   const finalChecks = brief.acceptanceCases.length + brief.checks.length;
@@ -241,7 +247,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       verified: verified(results),
     };
 
-  /** One operation, its record kept whatever happens. */
+  /** One operation, its record kept whatever happens. A command refused before it was sent never ran: it is no step. */
   const recorded = async (session: ExecutionSession, context: WorkContext, label: string, send: () => Promise<ExecResult>): Promise<ExecResult> => {
     const before = session.steps?.().length ?? 0;
     try {
@@ -249,7 +255,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       context.steps.push(stepRecord(label, ran, session.steps?.().slice(before).at(-1)));
       return ran;
     } catch (error) {
-      context.steps.push(stoppedStepRecord(label, session.steps?.().slice(before).at(-1)));
+      if (!(error instanceof ExecRefusedError)) context.steps.push(stoppedStepRecord(label, session.steps?.().slice(before).at(-1)));
       throw error;
     }
   };
@@ -648,6 +654,8 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     downloadTimeoutMs: TASK_LIMITS.collect.downloadMs,
     snapshotMs: TASK_LIMITS.snapshotMs,
     patchMs: TASK_LIMITS.patchMs,
+    deadline,
+    afterSessionMs: AFTER_SESSION_MS,
     now,
     ...(run.signal ? { signal: run.signal } : {}),
     ...(run.closeSignal ? { closeSignal: run.closeSignal } : {}),

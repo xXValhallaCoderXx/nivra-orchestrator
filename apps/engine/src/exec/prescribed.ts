@@ -75,7 +75,9 @@ export type PrescribedStopCode =
   /** The snapshot isn't the one the person was shown (D36): nothing was sent. */
   | "preview"
   /** A task's: a program its checks need isn't in the sandbox image (D39). Nothing was installed. */
-  | "toolchain";
+  | "toolchain"
+  /** A task's: its run's deadline left no time for a session (D39). Nothing was sent. */
+  | "time";
 
 export interface PrescribedResult {
   outcome: PrescribedOutcome;
@@ -143,6 +145,14 @@ export interface PrescribedRun {
   /** One deadline for the snapshot's git commands, and one for the patch's, from when each begins. */
   snapshotMs?: number;
   patchMs?: number;
+  /**
+   * The run's one absolute deadline, on `now`'s clock (D39). The snapshot and the session each get their cap or the time
+   * left before `afterSessionMs`, whichever is less, so what comes after the session keeps its time; close and the
+   * patch then each get their cap or the time left, whichever is less. With no deadline, each phase has its cap.
+   */
+  deadline?: number;
+  /** What the session leaves before `deadline`: close's, the patch's and the report's time. */
+  afterSessionMs?: number;
   /** The monotonic clock those deadlines are read on: tests give theirs. */
   now?: () => number;
   /** Folders never sent (the engine home). */
@@ -166,6 +176,8 @@ export interface PrescribedRun {
 }
 
 const WORKSPACE = "/workspace";
+/** The least time a session is opened with under a run's deadline: an upload, a prepare and a collect, at the least. */
+const MIN_SESSION_MS = 3 * 60_000;
 const realTimer = (ms: number, fire: () => void) => {
   const handle = setTimeout(fire, ms);
   return () => clearTimeout(handle);
@@ -205,11 +217,18 @@ export async function runPrescribed(run: PrescribedRun): Promise<PrescribedResul
 
   const now = run.now ?? (() => performance.now());
   const within = (ms: number | undefined, what: string) => (ms === undefined ? {} : { deadline: { at: now() + ms, what, now } });
+  // A phase's cap, or the time left before the run's deadline less `keep`, whichever is less (D39).
+  const capped = (cap: number | undefined, keep = 0): number | undefined => {
+    if (run.deadline === undefined) return cap;
+    const left = Math.max(0, Math.floor(run.deadline - now() - keep));
+    return cap === undefined ? left : Math.min(cap, left);
+  };
+  const afterSession = run.afterSessionMs ?? 0;
 
   // 1. The snapshot: nothing is sent unless it is taken. A fault here is thrown: nothing was sent, nothing needs cleaning.
   let snapshot: Snapshot;
   try {
-    snapshot = await takeSnapshot({ folder: run.folder, session: run.local, git: run.git, ...(run.baseline ? { baseline: run.baseline } : {}), ...(run.exclude ? { exclude: run.exclude } : {}), ...(run.knownValues ? { knownValues: run.knownValues } : {}), ...(run.signal ? { signal: run.signal } : {}), ...within(run.snapshotMs, "Taking the snapshot") });
+    snapshot = await takeSnapshot({ folder: run.folder, session: run.local, git: run.git, ...(run.baseline ? { baseline: run.baseline } : {}), ...(run.exclude ? { exclude: run.exclude } : {}), ...(run.knownValues ? { knownValues: run.knownValues } : {}), ...(run.signal ? { signal: run.signal } : {}), ...within(capped(run.snapshotMs, afterSession), "Taking the snapshot") });
   } catch (error) {
     if (!(error instanceof WorkspaceRefusal || error instanceof WorkspaceCancelled)) throw error;
     const stop = stopOf(error, cancelled());
@@ -221,10 +240,15 @@ export async function runPrescribed(run: PrescribedRun): Promise<PrescribedResul
     return ended("refused", { snapshot: summary, stopped: { code: "preview", message: "snapshot: what would be sent changed since it was previewed, so nothing was sent.", step: "snapshot", detail: null } });
   }
 
-  // 2. The session. A backend that can't keep commands away from this computer's files is refused here.
+  // 2. The session. A backend that can't keep commands away from this computer's files is refused here, and so is a
+  // session the run's deadline leaves too little time to settle.
+  const sessionMs = capped(run.budgetMs, afterSession);
+  if (run.deadline !== undefined && sessionMs !== undefined && sessionMs < MIN_SESSION_MS) {
+    return ended("failed", { snapshot: summary, stopped: { code: "time", message: "open: the run's time ran out before a session could be opened, so nothing was sent.", step: "open", detail: null } });
+  }
   let session: ExecutionSession;
   try {
-    session = await run.backend.open({ workspace, network: "deny", requires: { isolatesFilesystem: true }, snapshot: snapshot.archive, closing, ...(run.budgetMs ? { budgetMs: run.budgetMs } : {}), ...(run.signal ? { signal: run.signal } : {}) });
+    session = await run.backend.open({ workspace, network: "deny", requires: { isolatesFilesystem: true }, snapshot: snapshot.archive, closing, ...(sessionMs ? { budgetMs: sessionMs } : {}), ...(run.signal ? { signal: run.signal } : {}) });
   } catch (error) {
     // Before anything was sent, a refusal is the backend's; once something was, the open's own cleanup has its record.
     const stop = error instanceof ExecRefusedError ? (cancelled() ? { outcome: "cancelled" as const, code: "cancelled" as const } : { outcome: "refused" as const, code: "sandbox-refused" as const }) : stopOf(error, cancelled());
@@ -267,12 +291,13 @@ export async function runPrescribed(run: PrescribedRun): Promise<PrescribedResul
     stopped = stoppedBy(error, stop.code, context.stage);
   }
   // 6. Close, whatever happened: its record is cleanup's own, outside what is approved. Nothing after it needs the session.
-  const cleanup = await session.close(closing);
+  const closeMs = capped(run.closeBudgetMs);
+  const cleanup = await session.close({ ...closing, ...(closeMs !== undefined ? { budgetMs: closeMs } : {}) });
   // 7–8. The patch, the report and the proposal, from what was collected.
   if (collected && !stopped) {
     try {
       context.stage = "patch";
-      const patch = await buildPatch({ snapshot, collected, session: run.local, git: run.git, ...(run.knownValues ? { knownValues: run.knownValues } : {}), ...(run.policy ? { policy: run.policy } : {}), ...(run.scratch ? { scratch: run.scratch } : {}), ...(run.signal ? { signal: run.signal } : {}), ...within(run.patchMs, "Building the patch") });
+      const patch = await buildPatch({ snapshot, collected, session: run.local, git: run.git, ...(run.knownValues ? { knownValues: run.knownValues } : {}), ...(run.policy ? { policy: run.policy } : {}), ...(run.scratch ? { scratch: run.scratch } : {}), ...(run.signal ? { signal: run.signal } : {}), ...within(capped(run.patchMs), "Building the patch") });
       context.stage = "report";
       const operations = session.steps?.() ?? [];
       if (run.finish) ({ report, proposal } = run.finish({ snapshot, patch, steps, operations }));

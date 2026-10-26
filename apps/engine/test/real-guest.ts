@@ -14,7 +14,8 @@ import { scratch } from "./workspace-fixtures.ts";
  * engine's own scripts are given their paths inside that copy; any other command (an acceptance case, a repository
  * check) runs as it is, in the copy's workspace. It is for tests only, on fixtures the tests write: the commands it
  * runs are the fixtures', never a model's or a person's. Busybox isn't assumed here, so the engine's scripts are given
- * an empty applets argument, as `guestRun` gives them.
+ * an empty applets argument, as `guestRun` gives them; with `busybox`, it stands in for an image that has busybox, for
+ * a real engine, which names `/bin/busybox`: this machine's own tools run in its place.
  */
 export class RealGuest {
   readonly baseImage: string;
@@ -35,6 +36,8 @@ export class RealGuest {
   alter: (command: { label: string; args: readonly string[] }, folder: string) => void = () => {};
   /** Each operation that ends on its own ends at its first read. */
   quick = false;
+  /** Runs the engine's scripts' `/bin/busybox` as this machine's own tools, as an image with busybox would run its applets. */
+  busybox = false;
   #images = 0;
 
   constructor(baseImage = "base-image") {
@@ -77,7 +80,7 @@ export class RealGuest {
     if (program !== "/bin/sh") return { statuses: ["PENDING", "FAILED"] };
     const cwd = join(folder, String(body["cwd"] ?? "/"));
     mkdirSync(cwd, { recursive: true });
-    const ran = spawnSync("/bin/sh", mapped(args, folder), {
+    const ran = spawnSync("/bin/sh", mapped(args, folder, this.busybox), {
       cwd,
       env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", LC_ALL: "C", HOME: folder },
       timeout: Number(body["timeout"] ?? 60) * 1000,
@@ -107,15 +110,25 @@ const PATHS = new Map<string, readonly number[]>([
   [TOOLCHAIN_SCRIPT, []],
 ]);
 
+/** The engine's own scripts, by their text: which of their arguments names what runs their tools. */
+const APPLETS = new Map<string, number>([
+  [PREPARE_SCRIPT, 5],
+  [COLLECT_SCRIPT, 5],
+  [WRITE_SCRIPT, 4],
+  [PROBE_SCRIPT, 4],
+]);
+
 /** A command's label, as the tests name it: the engine's script by its `$0`, anything else `command`. */
 function labelOf(args: readonly string[]): string {
   return args[0] === "-c" && args[1] !== undefined && PATHS.has(args[1]) ? (args[2] ?? "script") : "command";
 }
 
-/** The arguments, the engine's paths on the guest given inside `folder`. */
-function mapped(args: readonly string[], folder: string): string[] {
-  const positions = args[0] === "-c" && args[1] !== undefined ? PATHS.get(args[1]) : undefined;
-  return args.map((arg, index) => (positions?.includes(index) && arg.startsWith("/") ? join(folder, arg) : arg));
+/** The arguments, the engine's paths on the guest given inside `folder`, and with `busybox`, its busybox as this machine's tools. */
+function mapped(args: readonly string[], folder: string, busybox: boolean): string[] {
+  const script = args[0] === "-c" ? args[1] : undefined;
+  const positions = script === undefined ? undefined : PATHS.get(script);
+  const applets = busybox && script !== undefined ? APPLETS.get(script) : undefined;
+  return args.map((arg, index) => (index === applets && arg === "/bin/busybox" ? "" : positions?.includes(index) && arg.startsWith("/") ? join(folder, arg) : arg));
 }
 
 /** Every regular file in an image, by its path on the guest. */

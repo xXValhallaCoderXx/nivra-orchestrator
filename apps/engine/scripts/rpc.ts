@@ -28,6 +28,12 @@
 // --follow, its report is printed. Against stand-ins for Tavily and Token Factory, pass --tavily-url and
 // --token-factory-url:
 //   pnpm rpc runs.start '{"workflowId":"research","input":{"planId":"<uuid>","planVersion":1},"context":{"sharing":{"modelContext":false,"webResearch":true},"packet":{"scope":{"kind":"general"},"planText":"Plan text","assumptions":[{"id":"A1","text":"An assumption","origin":{"kind":"typed"},"query":"A query"}],"sites":null}}}' --follow
+// A task run (D39) needs its brief and both consents; without them it has neither. Its brief's digest and its preview's
+// fingerprint (from `task.preview`) are worked out here when they are left out, and a project id, a task id, brief
+// version 1 and the local target are filled in; after --follow, its report and proposal are printed. Against stand-ins
+// for Nebius and Token Factory, pass --sandboxes-url and --token-factory-url:
+//   pnpm rpc task.preview '{"repoPath":"/path/to/repo","brief":{"goal":"…","acceptanceCriteria":[],"scope":"","exclusions":"","context":"","checks":[],"acceptanceCases":[{"name":"…","command":"…","expectedOutput":"…\n","expectedExitCode":0}]}}'
+//   pnpm rpc runs.start '{"workflowId":"task","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"modelContext":true,"cloudExecution":true},"brief":{…}}}' --follow --sandboxes-url http://127.0.0.1:<port> --token-factory-url http://127.0.0.1:<port>/v1
 //
 // The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, NEBIUS_PROJECT_ID and
 // TAVILY_API_KEY, when set, are passed to the engine in `initialize`, the way the app does it (D8).
@@ -37,7 +43,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { isMethodName, isTerminal, LineSplitter, Methods, packetDigest, preferencesDigest, PROTOCOL_VERSION, researchPacketDigest, RpcCallError, RpcClient, type MethodName } from "@nivra/domain";
+import { isMethodName, isTerminal, LineSplitter, Methods, packetDigest, preferencesDigest, PROTOCOL_VERSION, researchPacketDigest, RpcCallError, RpcClient, taskBriefDigest, type MethodName, type TaskBrief } from "@nivra/domain";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -71,6 +77,16 @@ if (method === "runs.start" && params["workflowId"] === "research") {
   const context = { sharing: { modelContext: false, webResearch: false }, deny: { terms: [], paths: [] }, ...given };
   const input = (params["input"] ?? {}) as Record<string, unknown>;
   if (context.packet && input["packetDigest"] === undefined) input["packetDigest"] = await researchPacketDigest(context.packet);
+  params = { ...params, input, context };
+}
+// A task run without the rest of its context: no consent to share or upload (D39). Its brief's digest is worked out from
+// the brief it carries, and a project, a task, a brief version and the local target are filled in, when left out.
+const task = method === "runs.start" && params["workflowId"] === "task";
+if (task) {
+  const given = (params["context"] ?? {}) as { sharing?: unknown; brief?: TaskBrief };
+  const context = { sharing: { modelContext: false, cloudExecution: false }, ...given };
+  const input: Record<string, unknown> = { project: randomUUID(), target: "local", taskId: randomUUID(), briefVersion: 1, ...(params["input"] as Record<string, unknown>) };
+  if (context.brief && input["briefDigest"] === undefined) input["briefDigest"] = await taskBriefDigest(context.brief);
   params = { ...params, input, context };
 }
 const sandbox = method === "runs.start" && params["workflowId"] === "sandbox";
@@ -127,6 +143,15 @@ try {
     console.error(`preview: ${shown.files} files, ${shown.bytes} bytes from ${shown.baseline}; fingerprint ${shown.fingerprint}`);
     input["preview"] = shown.fingerprint;
   }
+  // A task run is bound to what its preview showed too (D39), taken the same way.
+  if (task && input && input["preview"] === undefined) {
+    const brief = (params["context"] as { brief?: TaskBrief }).brief;
+    if (!brief) throw new Error("A task run needs its brief in the context, to preview what it would send.");
+    const shown = await client.call("task.preview", { repoPath: String(input["repoPath"]), brief });
+    if (shown.status !== "ready") throw new Error(`The preview refused this checkout (${shown.code}): ${shown.message}`);
+    console.error(`preview: ${shown.snapshot.files} files, ${shown.snapshot.bytes} bytes from ${shown.snapshot.baseline}; programs ${shown.programs.join(", ") || "none"}; fingerprint ${shown.snapshot.fingerprint}`);
+    input["preview"] = shown.snapshot.fingerprint;
+  }
   const result = await client.call(method as MethodName, params as never);
   console.log(JSON.stringify(result, null, 2));
   if (values.follow && method === "runs.start") {
@@ -143,6 +168,10 @@ try {
         if ((result as { workflowId?: string }).workflowId === "review") console.log(JSON.stringify(await client.call("runs.review", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "sandbox") console.log(JSON.stringify(await client.call("runs.sandbox", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "research") console.log(JSON.stringify(await client.call("runs.research", { runId }), null, 2));
+        if ((result as { workflowId?: string }).workflowId === "task") {
+          console.log(JSON.stringify(await client.call("runs.task", { runId }), null, 2));
+          console.log(JSON.stringify(await client.call("runs.proposal", { runId }), null, 2));
+        }
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 250));

@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { CHECK_IMAGE } from "../src/exec/check.ts";
 import type { TransportRequest } from "../src/exec/nebius/api.ts";
+import type { FakeService } from "./fake-sandboxes.ts";
 import { FakeGuest } from "./fake-guest.ts";
 
 /**
@@ -21,10 +22,16 @@ export interface StubbedRequest {
   body: string;
 }
 
-export interface SandboxStub {
+/** What the stub needs of a guest: the fake service it answers through, and whether its operations end at once. */
+export interface StubGuest {
+  service: FakeService;
+  quick: boolean;
+}
+
+export interface SandboxStub<G extends StubGuest = FakeGuest> {
   /** The base URL to pass as `--sandboxes-url`. */
   url: string;
-  guest: FakeGuest;
+  guest: G;
   requests: StubbedRequest[];
   /** Called with each request once it is recorded, before the service answers it: a promise holds it until it settles. */
   before: (request: StubbedRequest) => Promise<void> | undefined;
@@ -37,9 +44,14 @@ async function read(request: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-/** Starts the stub. Each operation that ends on its own ends at its first read, unless `quick` is false. */
-export async function startSandboxStub(options: { quick?: boolean } = {}): Promise<SandboxStub> {
-  const guest = new FakeGuest(CHECK_IMAGE.uuid);
+/**
+ * Starts the stub, on the fake guest unless given another (one that really runs each command, say), its base image the
+ * check's. Each operation that ends on its own ends at its first read, unless `quick` is false.
+ */
+export async function startSandboxStub(options?: { quick?: boolean }): Promise<SandboxStub>;
+export async function startSandboxStub<G extends StubGuest>(options: { quick?: boolean; guest: G }): Promise<SandboxStub<G>>;
+export async function startSandboxStub(options: { quick?: boolean; guest?: StubGuest } = {}): Promise<SandboxStub<StubGuest>> {
+  const guest = options.guest ?? new FakeGuest(CHECK_IMAGE.uuid);
   guest.quick = options.quick ?? true;
   const requests: StubbedRequest[] = [];
   const server = createServer((request, response) => {
@@ -73,7 +85,7 @@ export async function startSandboxStub(options: { quick?: boolean } = {}): Promi
       }
     })();
   });
-  const stub: SandboxStub = {
+  const stub: SandboxStub<StubGuest> = {
     url: "",
     guest,
     requests,

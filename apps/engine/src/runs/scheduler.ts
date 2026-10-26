@@ -12,6 +12,14 @@ import type { NewEvent, RunStore } from "./store.ts";
  */
 
 export const MAX_CONCURRENT_RUNS = 2;
+/**
+ * Task runs (D39) have a slot of their own: one at a time, each as long as half an hour, never holding up the shared
+ * slots that conversations, explanations, reviews, research and sandbox checks take, nor held up by them.
+ */
+export const MAX_TASK_RUNS = 1;
+
+/** Which slots a run takes: its own for a task, the shared ones for everything else. */
+const slotKind = (workflowId: WorkflowId): "task" | "shared" => (workflowId === "task" ? "task" : "shared");
 
 /** The parts of a Mastra run the scheduler drives. `watch` is Mastra internal API: re-test on every upgrade (D11). */
 export interface RunHandle {
@@ -54,12 +62,14 @@ export interface SchedulerOptions {
   workflows: ReadonlyMap<WorkflowId, WorkflowEntry>;
   instanceId: string;
   maxConcurrent?: number;
+  maxTasks?: number;
   log: SchedulerLog;
   /** Writes one safe diagnostic line (NIV-27): how each failure is logged, never by an error's own words. */
   diagnose: (diagnostic: Diagnostic) => void;
 }
 
 interface Slot {
+  workflowId: WorkflowId;
   cancelRequested: boolean;
   run: RunHandle | null;
   done: Promise<void>;
@@ -116,6 +126,14 @@ function sameResearch(stored: unknown, input: unknown): boolean {
   return keys.every((key) => a[key] === b[key]);
 }
 
+/** Whether a stored task run's input names the same checkout, project, target, preview, task and brief as a new one (D39). */
+function sameTask(stored: unknown, input: unknown): boolean {
+  const keys = ["repoPath", "project", "target", "preview", "taskId", "briefVersion", "briefDigest"] as const;
+  const a = (stored ?? {}) as Record<string, unknown>;
+  const b = (input ?? {}) as Record<string, unknown>;
+  return keys.every((key) => a[key] === b[key]);
+}
+
 /**
  * The context each kind of run carries (D21), as the protocol's start parameters define it, kept with the run's
  * workflow so each workflow reads only its own.
@@ -144,6 +162,7 @@ export class RunScheduler {
   readonly #workflows: ReadonlyMap<WorkflowId, WorkflowEntry>;
   readonly #instanceId: string;
   readonly #maxConcurrent: number;
+  readonly #maxTasks: number;
   readonly #log: SchedulerLog;
   readonly #diagnose: (diagnostic: Diagnostic) => void;
   readonly #slots = new Map<string, Slot>();
@@ -159,6 +178,7 @@ export class RunScheduler {
     this.#workflows = options.workflows;
     this.#instanceId = options.instanceId;
     this.#maxConcurrent = options.maxConcurrent ?? MAX_CONCURRENT_RUNS;
+    this.#maxTasks = options.maxTasks ?? MAX_TASK_RUNS;
     this.#log = options.log;
     this.#diagnose = options.diagnose;
   }
@@ -190,14 +210,15 @@ export class RunScheduler {
     });
     // A repeated request returns the run it already created, which keeps the context it came with. The same id with
     // other work is refused: a review is bound to its plan version and fingerprints (D30), a check to its preview (D36),
-    // research to its plan version and packet (D37), and nothing is sent twice.
+    // research to its plan version and packet (D37), a task run to its preview and brief (D39), and nothing is sent twice.
     if (!created) {
       const existing = this.#store.summary(id);
       const other =
         existing &&
         ((request.workflowId === "review" && !sameReview(existing.input, request.input)) ||
           (request.workflowId === "sandbox" && !sameSandbox(existing.input, request.input)) ||
-          (request.workflowId === "research" && !sameResearch(existing.input, request.input)));
+          (request.workflowId === "research" && !sameResearch(existing.input, request.input)) ||
+          (request.workflowId === "task" && !sameTask(existing.input, request.input)));
       if (existing && (existing.workflowId !== request.workflowId || other)) {
         throw new Refusal("request-conflict", "This request id already started another run, with other input. Send the new request with a new id.");
       }
@@ -253,17 +274,28 @@ export class RunScheduler {
     clearTimeout(timer);
   }
 
-  /** Starts queued runs while there is capacity. Synchronous, so slots are reserved before anything awaits. */
+  /**
+   * Starts queued runs, oldest first, each while its kind of slot has room: a task waits only for a task, and other
+   * runs only for each other. Synchronous, so slots are reserved before anything awaits.
+   */
   pump(): void {
     if (!this.#recovered || !this.#source || this.#stopping) return;
-    while (this.#slots.size < this.#maxConcurrent) {
-      const runId = this.#store.nextQueued();
-      if (!runId) return;
+    for (;;) {
+      const next = this.#store.queued().find((queued) => this.#hasRoom(queued.workflowId));
+      if (!next) return;
+      const runId = next.id;
       if (!this.#store.transition(runId, "running", { type: "run.started", message: "Started", instanceId: this.#instanceId })) return;
-      const slot: Slot = { cancelRequested: false, run: null, done: Promise.resolve(), startedAt: performance.now(), failedStep: null };
+      const slot: Slot = { workflowId: next.workflowId, cancelRequested: false, run: null, done: Promise.resolve(), startedAt: performance.now(), failedStep: null };
       this.#slots.set(runId, slot);
       slot.done = this.#execute(runId, slot).catch((error: unknown) => this.#diagnose({ code: "record-failed", stage: "run.settle", run: runId, error: errorFacts(error) }));
     }
+  }
+
+  /** Whether a run of `workflowId` would find a slot of its kind free. */
+  #hasRoom(workflowId: WorkflowId): boolean {
+    const kind = slotKind(workflowId);
+    const used = [...this.#slots.values()].filter((slot) => slotKind(slot.workflowId) === kind).length;
+    return used < (kind === "task" ? this.#maxTasks : this.#maxConcurrent);
   }
 
   async #execute(runId: string, slot: Slot): Promise<void> {

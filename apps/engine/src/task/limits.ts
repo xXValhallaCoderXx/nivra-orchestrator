@@ -1,3 +1,4 @@
+import { TASK_BRIEF_LIMITS, type TaskRunLimits } from "@nivra/domain";
 import { MAX_WRITE_BYTES } from "./scripts.ts";
 
 /**
@@ -13,8 +14,8 @@ export const TASK_LIMITS = {
   /** Tool calls the model may make, of which writes and runs of a case or check are operations. */
   tools: { calls: 24, writes: 8, runs: 4, readBytes: 16_384, readTotalBytes: 256 * 1024 },
   write: { timeoutMs: 30_000, downloadMs: 30_000, maxBytes: MAX_WRITE_BYTES },
-  /** Acceptance cases plus repository checks, as the brief gives them. */
-  checks: { max: 4, timeoutMs: 60_000, outputTailBytes: 16_384, expectedOutputBytes: 4_096, commandChars: 1_000 },
+  /** Acceptance cases plus repository checks, as the brief gives them (the domain's brief limits). */
+  checks: { max: TASK_BRIEF_LIMITS.finalChecks, timeoutMs: 60_000, outputTailBytes: 16_384, expectedOutputBytes: TASK_BRIEF_LIMITS.expectedOutputBytes, commandChars: TASK_BRIEF_LIMITS.commandChars },
   toolchain: { timeoutMs: 30_000 },
   prepareTimeoutSeconds: 60,
   collect: { timeoutMs: 60_000, downloadMs: 60_000 },
@@ -44,3 +45,24 @@ export const operationsFor = (finalChecks: number): number => 1 + 1 + TASK_LIMIT
 /** What a tool needs left in the work window before it sends an operation: the operation, and its read when it has one. */
 export const writeNeedsMs = (): number => operationMs(TASK_LIMITS.write.timeoutMs) + TASK_LIMITS.write.downloadMs;
 export const runNeedsMs = (): number => operationMs(TASK_LIMITS.checks.timeoutMs);
+
+/** The time the session leaves for what comes after it: close, the patch, and the report and proposal. */
+export const AFTER_SESSION_MS = TASK_LIMITS.closeMs + TASK_LIMITS.patchMs + TASK_LIMITS.reportMs;
+
+/** A run's bounds for a brief with `finalChecks` cases and checks, as its preview shows them (D39). */
+export function runLimitsFor(finalChecks: number): TaskRunLimits {
+  return {
+    modelRequests: TASK_LIMITS.model.requests,
+    requestSeconds: TASK_LIMITS.model.stepMs / 1000,
+    outputTokensPerRequest: TASK_LIMITS.model.outputTokensPerRequest,
+    estimatedInputTokens: TASK_LIMITS.model.estimatedInputTokens,
+    toolCalls: TASK_LIMITS.tools.calls,
+    writes: TASK_LIMITS.tools.writes,
+    writeBytes: TASK_LIMITS.write.maxBytes,
+    runs: TASK_LIMITS.tools.runs,
+    operations: operationsFor(finalChecks),
+    checkSeconds: TASK_LIMITS.checks.timeoutMs / 1000,
+    sessionMinutes: TASK_LIMITS.sessionMs / 60_000,
+    runMinutes: TASK_LIMITS.runMs / 60_000,
+  };
+}

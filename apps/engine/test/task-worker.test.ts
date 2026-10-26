@@ -101,6 +101,20 @@ describe("a task's worker (NIV-7, D39)", () => {
     assert.deepEqual(run.core!.worker.written.length, 8);
   });
 
+  it("refuses a tool call past its calls, leaves the worker only handing in, and counts it", async () => {
+    const listing: Call[] = Array.from({ length: 25 }, () => ["list_files", {}]);
+    const run = await attempt({ calls: [listing] });
+    assert.deepEqual([run.core!.worker.tools.calls, run.core!.worker.tools.refused, run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended], [26, 1, "tool-calls", true, "submitted"]);
+  });
+
+  it("offers only handing in on its last request, and stops at its requests when the worker never hands in", async () => {
+    const listing: Call[] = Array.from({ length: 13 }, () => ["list_files", {}]);
+    const run = await attempt({ calls: listing });
+    assert.deepEqual([run.requests(), run.core!.worker.usage.calls, run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended], [12, 12, "last-request", false, "requests"]);
+    // The run still collects and checks: the worker's limits end its loop, never the run.
+    assert.deepEqual([run.result.outcome, verdicts(run.core)], ["unchanged", ["case 1 failed", "check 1 failed"]]);
+  });
+
   it("goes on when a write doesn't take, and says the file is as it was", async () => {
     const run = await attempt({ setup: (guest) => void (guest.intercept = ({ label }) => (label === "nivra-write" ? { statuses: ["SUCCESS"], exitCode: 1 } : undefined)), calls: [["edit_file", FIX]] });
     assert.deepEqual([run.result.outcome, run.core!.worker.written, run.core!.worker.tools.refused], ["unchanged", [], 1]);

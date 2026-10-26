@@ -7,6 +7,7 @@ import { ResearchContext, ResearchInput, ResearchReport } from "./research.ts";
 import { ReviewContext, ReviewInput, ReviewReport } from "./review.ts";
 import { ExplainInput, HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
 import { SandboxContext, SandboxInput, SandboxPreview, SandboxReport, SandboxStatus } from "./sandbox.ts";
+import { TaskBrief, TaskContext, TaskInput, TaskPreview, TaskProposal, TaskReport } from "./task.ts";
 
 /**
  * Every request the host may send the engine, with its parameters and result as zod schemas. The engine validates
@@ -88,6 +89,9 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   // Research of a saved plan's assumptions carries its frozen packet, what no query may name and both permissions
   // (D37), held in memory like the snapshot.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ResearchContext, workflowId: z.literal("research"), input: ResearchInput }),
+  // A task run carries its frozen brief and both consents, model sharing and uploads, held in memory like the snapshot
+  // (D39): neither consent stands in for the other.
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: TaskContext, workflowId: z.literal("task"), input: TaskInput }),
 ]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
@@ -187,6 +191,15 @@ export const Methods = {
    * interrupted. Null until there is one.
    */
   "runs.research": { params: z.strictObject({ runId: RunId }), result: ResearchReport.nullable() },
+  /**
+   * A task run's report (D39), whatever the run's status. A report the engine saved before it stopped reads as
+   * interrupted. Null until there is one.
+   */
+  "runs.task": { params: z.strictObject({ runId: RunId }), result: TaskReport.nullable() },
+  /** A task run's proposal, as the person reads it before deciding: null when the run proposed nothing (D39). */
+  "runs.proposal": { params: z.strictObject({ runId: RunId }), result: TaskProposal.nullable() },
+  /** What a task run of this checkout would send to Nebius, with no network, and the bounds it runs under (D39). */
+  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief }), result: TaskPreview },
   /** What a sandbox check of this checkout would send, with no network: for the person to see before any upload. */
   "sandbox.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096) }), result: SandboxPreview },
   /** Sandbox work an earlier engine left open, and the recovery pass's state. Reads only this engine's memory. */
