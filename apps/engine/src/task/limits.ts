@@ -25,13 +25,21 @@ export const TASK_LIMITS = {
   patchMs: 3 * 60_000,
   reportMs: 15_000,
   runMs: 33 * 60_000,
-  /** As the Nebius session counts them (D33): an operation is watched this long past its timeout, and a write needs this much left to be sent. */
+  /**
+   * As the Nebius session counts them (D33): the request that starts an operation, which comes before its timeout does;
+   * how long it is watched past its timeout; and what a write needs left to be sent.
+   */
+  startRequestMs: 30_000,
   observeMarginMs: 60_000,
   minWriteMs: 2_000,
 } as const;
 
-/** The most an operation of `timeoutMs` can take, as the session counts it before sending it (D33). */
-export const operationMs = (timeoutMs: number): number => Math.ceil(timeoutMs / 1000) * 1000 + TASK_LIMITS.observeMarginMs + TASK_LIMITS.minWriteMs;
+/**
+ * The most an operation of `timeoutMs` can take once it is sent: its start request, its timeout and the watch past it,
+ * with a write's margin. A start whose answer is lost is searched for besides; then what comes after it may be left
+ * not run, never run on a workspace whose state isn't known.
+ */
+export const operationMs = (timeoutMs: number): number => TASK_LIMITS.startRequestMs + Math.ceil(timeoutMs / 1000) * 1000 + TASK_LIMITS.observeMarginMs + TASK_LIMITS.minWriteMs;
 
 /** The time kept, before the worker starts, for collect, its two reads and `finalChecks` checks, with a write's margin. */
 export function reserveMs(finalChecks: number): number {

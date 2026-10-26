@@ -200,9 +200,10 @@ export function createTaskWorkflow(deps: TaskDeps) {
         let reported = false;
         try {
           // Checked again here: the key and project id can be removed between the steps. A refusal saves its own report.
+          // Its step is `start`: what the worker's own runs of a case or check are called comes after the upload.
           let given;
           try {
-            given = await allowed(runId, "run");
+            given = await allowed(runId, "start");
           } catch (error) {
             reported = true;
             throw error;
@@ -243,10 +244,20 @@ export function createTaskWorkflow(deps: TaskDeps) {
           if (result.proposal && holdsValue(result.proposal, deps.vaultValues())) {
             result = { ...result, outcome: "refused", stopped: { code: "change", message: "proposal: it holds a value the vault keeps.", step: "proposal", detail: null }, report: null, proposal: null };
           }
-          if (result.proposal) deps.saveProposal(runId, result.proposal);
           if (outcome.core) deps.setMeta(runId, { usage: outcome.core.worker.usage });
-          deps.saveReport(runId, taskReport({ result, core: outcome.core, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, now: now() }));
+          // The report first: a proposal is kept only once the report that describes it is, so neither says what the
+          // other doesn't.
+          deps.saveReport(runId, taskReport({ result, core: outcome.core, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, now: now(), mask: deps.mask }));
           reported = true;
+          if (result.proposal) {
+            try {
+              deps.saveProposal(runId, result.proposal);
+            } catch (error) {
+              // Not kept: the report that said it was is replaced by one saying nothing was proposed.
+              early(runId, task, "failed", "fault", "proposal", true);
+              throw error;
+            }
+          }
           const unresolved = result.cleanup?.unresolved.length ?? 0;
           deps.recorder.output(runId, "run", `Run ${result.outcome}${result.outcome === "proposed" ? (outcome.core?.verified ? ", every acceptance case passed" : ", not every acceptance case passed") : ""}${unresolved ? `; ${unresolved} left open` : ""}.`, { outcome: result.outcome, verified: result.outcome === "proposed" && outcome.core?.verified === true, unresolved });
           if (result.outcome === "proposed" || result.outcome === "unchanged") return { outcome: result.outcome };
@@ -257,7 +268,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
           // can't be saved after it leaves the fault's words, which claim nothing about what was sent.
           if (!reported) {
             const cancelled = abortSignal.aborted;
-            early(runId, task, cancelled ? "cancelled" : "failed", cancelled ? "cancelled" : error instanceof RepoError ? "git" : "fault", "run", true);
+            early(runId, task, cancelled ? "cancelled" : "failed", cancelled ? "cancelled" : error instanceof RepoError ? "git" : "fault", "start", true);
           }
           throw error;
         } finally {

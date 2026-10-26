@@ -283,6 +283,9 @@ export async function runPrescribed(run: PrescribedRun): Promise<PrescribedResul
         context.stage = "verify";
         await run.verify(session, { ...context, collected: collecting.collected });
       }
+      // The person's cancel ends the run where it lands, during the checks after collect as well as before: no patch is
+      // begun after it, and the report names the stage it stopped in.
+      if (cancelled()) throw new WorkspaceCancelled();
       collected = collecting.collected;
     }
   } catch (error) {

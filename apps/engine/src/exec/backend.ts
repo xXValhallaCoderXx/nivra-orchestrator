@@ -87,6 +87,11 @@ export interface ExecResult {
   persisted: boolean;
   /** Standard output as bytes, when asked for with `output: "bytes"`. */
   stdoutBytes?: Uint8Array;
+  /**
+   * False when the backend can't say standard output is exactly what was printed: none was reported, or it wasn't
+   * text that reads back exactly. Left out by a backend that always can.
+   */
+  stdoutExact?: boolean;
 }
 
 /**

@@ -114,8 +114,9 @@ describe("what a task run gives back (NIV-7)", () => {
   const snapshot = { baseline: "b".repeat(40), prefix: "", files: 2, bytes: 3_072, leftOut: { secret: counted, output: counted, submodule: counted, excluded: counted }, untracked: counted, lfsPointers: 0, fingerprint: FINGERPRINT, retention: "Images are retained for 180 days." };
 
   it("previews what a run would send and what bounds it, or why it can't, never both", () => {
-    const ready = { status: "ready", snapshot, programs: [".", "/bin/sh"], unprobed: 0, limits };
+    const ready = { status: "ready", snapshot, programs: [".", "/bin/sh"], unprobed: 0, caseFiles: [{ number: 1, files: ["greet.sh"] }], limits };
     assert.equal(TaskPreview.safeParse(ready).success, true);
+    assert.equal(TaskPreview.safeParse({ ...ready, caseFiles: [{ number: 5, files: ["greet.sh"] }] }).success, false, "a case is numbered one to four");
     assert.equal(TaskPreview.safeParse({ status: "refused", code: "content", message: "src/a.ts in this commit holds what looks like a private key." }).success, true);
     assert.equal(TaskPreview.safeParse({ ...ready, status: "refused", code: "content", message: "x" }).success, false);
     assert.equal(TaskPreview.safeParse({ ...ready, programs: ["a", "b", "c", "d", "e"] }).success, false, "four cases and checks have four programs at most");

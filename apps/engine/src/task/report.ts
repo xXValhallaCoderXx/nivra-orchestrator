@@ -4,7 +4,7 @@ import { previewOf, safeUnresolved, stepOf } from "../exec/check.ts";
 import type { PrescribedResult } from "../exec/prescribed.ts";
 import type { Proposal } from "../exec/proposal.ts";
 import type { Snapshot } from "../exec/snapshot.ts";
-import { programsOf } from "./harness.ts";
+import { namedFiles, programsOf } from "./harness.ts";
 import { runLimitsFor } from "./limits.ts";
 import { firstWord } from "./scripts.ts";
 import type { TaskReportCore } from "./worker.ts";
@@ -51,7 +51,7 @@ export const TASK_STOP_MESSAGES: Readonly<Record<TaskStopCode, string>> = {
   credentials: "A task run needs your Nebius key and project id, and they aren't both set, so nothing was sent. Add them in Settings, then run the task again.",
   preview: "What would be sent changed since you previewed the run, so nothing was sent. Preview it again.",
   toolchain:
-    "The sandbox image doesn't have a program the brief's cases or checks need, so the run stopped before the worker started: your commit was uploaded to Nebius, and Token Factory got nothing. Nothing was installed, and nothing ran on your computer. The checks below say which program is missing.",
+    "The sandbox image doesn't have a program the brief's cases or checks need, so the run stopped before the worker started: your commit was uploaded to Nebius, and nothing from your repository went to Token Factory. Nothing was installed, and nothing ran on your computer. The checks below say which program is missing.",
   time: "The run's time ran out before a sandbox could be opened, so nothing was sent. Run the task again.",
   "model-sharing": "This project doesn't allow sending its content to Token Factory, and the worker reads its files there, so nothing was sent. Allow sharing for it, then run the task again.",
   brief: "This run's brief isn't the version it was started for, so nothing was sent. Run the task again.",
@@ -59,8 +59,12 @@ export const TASK_STOP_MESSAGES: Readonly<Record<TaskStopCode, string>> = {
   "native-windows": "Running tasks on Windows itself isn't available yet, so nothing was sent. Add the repository from a WSL distribution, then run the task there.",
 };
 
-/** Where a run stops before anything is uploaded: its own checks, the model's choice, the snapshot, and a session refused before sending. */
-const BEFORE_UPLOAD = new Set(["check", "prepare", "run", "snapshot", "open"]);
+/**
+ * Where a run stops before anything is uploaded: its own checks, the model's choice, its start before the prescribed
+ * path, the snapshot, and a session refused before sending. The worker's own runs of a case or check (`run`) come
+ * after the upload.
+ */
+const BEFORE_UPLOAD = new Set(["check", "prepare", "start", "snapshot", "open"]);
 
 /** Words for a stop once the commit was uploaded, for codes whose own words say nothing was sent. */
 const AFTER_UPLOAD: Partial<Record<TaskStopCode, string>> = {
@@ -77,7 +81,27 @@ export function taskStopWords(code: TaskStopCode, step: string | null): string {
 }
 
 const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
-const clip = (text: string, max: number) => (text.length > max ? text.slice(-max) : text);
+
+/**
+ * What a report may take of the store's 256,000 bytes (`MAX_ARTIFACT_BYTES`), with room to spare: a report that
+ * couldn't be stored would leave a run that proposed a change reading as if it had failed.
+ */
+export const REPORT_BYTES = 200_000;
+
+/**
+ * Text as a report keeps it: masked first, as the store masks it, so storing it changes nothing; control characters
+ * other than tabs and line breaks, and lone surrogates, made U+FFFD, so none costs six bytes as JSON; then cut to
+ * `max` characters, keeping the start, or the end for a tail.
+ */
+function kept(text: string, max: number, mask: Mask, end: "start" | "end" = "start"): string {
+  const clean = mask(text)
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "\uFFFD");
+  return clean.length <= max ? clean : whole(end === "end" ? clean.slice(-max) : clean.slice(0, max));
+}
+
+/** Text cut between the halves of a character outside the BMP: the half left at either end is dropped. */
+const whole = (text: string): string => text.replace(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/g, "");
 
 /** What a run is bound to, as its report repeats it. */
 export type TaskBound = TaskReport["task"];
@@ -85,35 +109,64 @@ export type TaskBound = TaskReport["task"];
 /**
  * A run's report from what the worker and the prescribed path gave. The stop's words are chosen by its code and where
  * it happened. A change is verified only when there is one and every acceptance case passed in the final checks.
+ * Every text is masked, then cut to the protocol's bounds, and the whole is fitted under `REPORT_BYTES`.
  */
-export function taskReport(input: { result: PrescribedResult; core: TaskReportCore | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; now: Date }): TaskReport {
-  const { result, core } = input;
+export function taskReport(input: { result: PrescribedResult; core: TaskReportCore | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; now: Date; mask: Mask }): TaskReport {
+  const { result, core, mask } = input;
   const { cleanup } = result;
-  return {
+  const report: TaskReport = {
     outcome: result.outcome,
-    stopped: result.stopped ? { code: result.stopped.code, step: result.stopped.step === null ? null : result.stopped.step.slice(0, 64), message: taskStopWords(result.stopped.code, result.stopped.step) } : null,
+    stopped: result.stopped ? { code: result.stopped.code, step: result.stopped.step === null ? null : kept(result.stopped.step, 64, mask), message: taskStopWords(result.stopped.code, result.stopped.step) } : null,
     task: input.task,
     snapshot: result.snapshot,
-    toolchain: core?.toolchain ?? [],
+    toolchain: (core?.toolchain ?? []).map((tool) => ({ program: kept(tool.program, 128, mask), finding: tool.finding })),
     worker: core
       ? {
           ...core.worker,
-          summary: core.worker.summary === null ? null : core.worker.summary.slice(0, 2_000),
+          summary: core.worker.summary === null ? null : kept(core.worker.summary, 2_000, mask),
           failure: (core.worker.failure as NonNullable<TaskReport["worker"]>["failure"]) ?? null,
-          written: core.worker.written.slice(0, 32),
+          model: kept(core.worker.model, 200, mask),
+          written: core.worker.written.slice(0, 32).map((path) => kept(path, 1_024, mask)),
         }
       : null,
-    checks: (core?.checks ?? []).map((check) => ({ ...check, name: check.name.slice(0, 1_000), reason: check.reason === null ? null : check.reason.slice(0, 600), stdoutTail: clip(check.stdoutTail, 4_000), stderrTail: clip(check.stderrTail, 4_000), changedFiles: check.changedFiles.slice(0, 20) })),
+    checks: (core?.checks ?? []).map((check) => ({
+      ...check,
+      name: kept(check.name, 1_000, mask),
+      reason: check.reason === null ? null : kept(check.reason, 600, mask),
+      stdoutTail: kept(check.stdoutTail, 4_000, mask, "end"),
+      stderrTail: kept(check.stderrTail, 4_000, mask, "end"),
+      difference: check.difference && { line: check.difference.line, expected: kept(check.difference.expected, 200, mask), got: kept(check.difference.got, 200, mask) },
+      changedFiles: check.changedFiles.slice(0, 20).map((path) => kept(path, 1_024, mask)),
+    })),
     verified: result.outcome === "proposed" && core?.verified === true,
-    steps: result.steps.slice(0, 24).map(stepOf),
+    steps: result.steps.slice(0, 24).map((step) => {
+      const shown = stepOf(step);
+      return { ...shown, label: kept(shown.label, 64, mask), signal: shown.signal === null ? null : kept(shown.signal, 32, mask), status: shown.status === null ? null : kept(shown.status, 32, mask), stdoutTail: kept(shown.stdoutTail, 1_000, mask, "end"), stderrTail: kept(shown.stderrTail, 1_000, mask, "end") };
+    }),
     proposal: result.proposal ? { hash: result.proposal.hash, patchSha256: sha256(result.proposal.patch), patchBytes: result.proposal.patch.byteLength, files: result.proposal.binding.paths.length } : null,
     reportSha256: result.report ? sha256(result.report) : null,
-    cleanup: cleanup ? { stopped: cleanup.stopped.length, alreadyEnded: cleanup.alreadyEnded.length, unresolved: cleanup.unresolved.slice(0, 50).map(safeUnresolved), retained: cleanup.retained } : null,
+    cleanup: cleanup ? { stopped: cleanup.stopped.length, alreadyEnded: cleanup.alreadyEnded.length, unresolved: cleanup.unresolved.slice(0, 50).map((item) => kept(safeUnresolved(item), 400, mask)), retained: cleanup.retained && { ...cleanup.retained, note: kept(cleanup.retained.note, 1_000, mask) } } : null,
     route: input.route,
     request: input.request,
     updatedAt: input.now.toISOString(),
     finishedAt: input.now.toISOString(),
   };
+  return fitted(report);
+}
+
+/** The report with its output tails cut shorter, halving them, until it fits in `REPORT_BYTES`. */
+export function fitted(report: TaskReport): TaskReport {
+  const size = (value: TaskReport) => Buffer.byteLength(JSON.stringify(value));
+  let current = report;
+  for (let room = 2_000; size(current) > REPORT_BYTES && room >= 32; room = Math.floor(room / 2)) {
+    const cut = (text: string, max: number) => (text.length > max ? whole(text.slice(-max)) : text);
+    current = {
+      ...current,
+      checks: current.checks.map((check) => ({ ...check, stdoutTail: cut(check.stdoutTail, room), stderrTail: cut(check.stderrTail, room) })),
+      steps: current.steps.map((step) => ({ ...step, stdoutTail: cut(step.stdoutTail, room / 4), stderrTail: cut(step.stderrTail, room / 4) })),
+    };
+  }
+  return current;
 }
 
 /** A report for a run that stopped before the prescribed path ran, or one still going, in the same shape. */
@@ -142,7 +195,11 @@ export function earlyTaskReport(input: { outcome: TaskReport["outcome"]; code: T
 export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "acceptanceCases" | "checks">): TaskPreview {
   const { status: _ready, ...shown } = previewOf(snapshot) as Extract<ReturnType<typeof previewOf>, { status: "ready" }>;
   const commands = [...brief.acceptanceCases.map((given) => given.command), ...brief.checks];
-  return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, limits: runLimitsFor(commands.length) };
+  const paths = new Set(snapshot.files.map((file) => file.path));
+  // A name past the protocol's bound is shortened, never left out: the warning is what matters.
+  const named = (path: string) => (path.length > 1_024 ? `${path.slice(0, 1_023)}\u2026` : path);
+  const caseFiles = brief.acceptanceCases.map((given, index) => ({ number: index + 1, files: namedFiles(given.command, paths).slice(0, 20).map(named) })).filter((one) => one.files.length > 0);
+  return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, caseFiles, limits: runLimitsFor(commands.length) };
 }
 
 /**

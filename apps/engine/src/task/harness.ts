@@ -37,7 +37,7 @@ export interface CheckResult {
   stderrTail: string;
   /** For a case that failed on its output: the first line that differs, both sides clipped. */
   difference: { line: number; expected: string; got: string } | null;
-  /** For a repository check: files its command names that the change adds or changes. */
+  /** Files its command names that the change adds or changes: a check's, and a case's, which judges only what it prints. */
   changedFiles: string[];
   durationMs: number | null;
 }
@@ -84,10 +84,27 @@ export function couldntRun(kind: CheckResult["kind"], number: number, name: stri
   return { ...base(kind, number, name), verdict: "couldnt-run", reason: `couldn't run: ${program} isn't in the sandbox image (nothing was installed, and nothing ran on your computer)` };
 }
 
+/**
+ * A session's refusal in Nivra's fixed words (D29). Its own templates name a program, a guest path or an HTTP status,
+ * but one can wrap text from below them, a journal's path among it, so only these words leave the engine: to the
+ * model, the run's events or its report.
+ */
+export function refusalWords(error: ExecRefusedError): string {
+  const said = error.message;
+  if (/There isn't enough time left in this run|There wasn't time left in this run|The time for this work ran out/.test(said)) return "there isn't time left in this run for it";
+  if (/^This session has started \d+ operations, the most one session may/.test(said)) return "this run has started the most operations it may";
+  if (/holds the sandbox's key or project id/.test(said)) return "it holds the sandbox's key or project id, which no command may carry";
+  if (/cancelled before anything was sent/.test(said)) return "the run was cancelled";
+  if (/^The sandbox no longer has this workspace's saved state/.test(said)) return "the sandbox no longer has the workspace's saved state, so nothing more can run in this session";
+  if (/^Nebius turned the key down/.test(said)) return "Nebius turned the key down";
+  if (/^Nebius is limiting requests/.test(said)) return "Nebius is limiting requests";
+  return "the sandbox session refused it";
+}
+
 /** What sending it threw, as a result: an uncertain dispatch is unknown; a refusal means it never ran. */
 export function failedToSend(kind: CheckResult["kind"], number: number, name: string, error: unknown): CheckResult {
   if (error instanceof ExecUncertainError) return { ...base(kind, number, name), verdict: "unknown", reason: "it isn't known whether it started, so it wasn't sent again" };
-  if (error instanceof ExecRefusedError) return notRun(kind, number, name, `it wasn't sent: ${error.message}`);
+  if (error instanceof ExecRefusedError) return notRun(kind, number, name, `it wasn't sent: ${refusalWords(error)}`);
   return { ...base(kind, number, name), verdict: "unknown", reason: "the sandbox couldn't say how it went" };
 }
 
@@ -97,12 +114,18 @@ function ending(ran: ExecResult, timeoutMs: number): Pick<CheckResult, "verdict"
   if (ran.timedOut) return { verdict: "failed", reason: `it ran out of its ${Math.round(timeoutMs / 1000)} s` };
   if (ran.signal) return { verdict: "failed", reason: `a signal (${ran.signal}) ended it` };
   if (ran.exitCode === null) return { verdict: "unknown", reason: "the sandbox didn't say how it ended" };
+  // Output the sandbox didn't report as text is never taken for what was printed: an empty string would match "".
+  if (ran.stdoutExact === false) return { verdict: "unknown", reason: "the sandbox didn't report what it printed as text, so it couldn't be compared" };
   return null;
 }
 
-/** An acceptance case, judged by the engine: the exact output and exit code, or a failure saying what differed. */
-export function judgeCase(number: number, given: AcceptanceCase, ran: ExecResult, timeoutMs: number = TASK_LIMITS.checks.timeoutMs): CheckResult {
-  const result: CheckResult = { ...base("case", number, given.name), exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), durationMs: ran.durationMs };
+/**
+ * An acceptance case, judged by the engine: the exact output and exit code, or a failure saying what differed. The
+ * files its command names that the change adds or changes are named beside it: a case judges only what its command
+ * prints, and a script it runs is the worker's to change.
+ */
+export function judgeCase(number: number, given: AcceptanceCase, ran: ExecResult, changedFiles: string[] = [], timeoutMs: number = TASK_LIMITS.checks.timeoutMs): CheckResult {
+  const result: CheckResult = { ...base("case", number, given.name), exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), changedFiles, durationMs: ran.durationMs };
   const ended = ending(ran, timeoutMs);
   if (ended) return { ...result, ...ended };
   // Output cut off is longer than any expected output may be: it can't be the one expected.

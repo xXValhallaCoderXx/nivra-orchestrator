@@ -491,6 +491,7 @@ class NebiusSession implements ExecutionSession {
       signal: signalName(outcome.signal),
       stdout: stdout.text,
       stderr: stderr.text,
+      stdoutExact: outcome.stdoutExact,
       truncated: outcome.stdoutTruncated || outcome.stderrTruncated || stdout.truncated || stderr.truncated,
       timedOut: outcome.timedOut,
       cancelled: outcome.verdict === "cancelled",

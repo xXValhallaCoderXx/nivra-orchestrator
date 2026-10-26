@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import type { ExecutionSession } from "../src/exec/backend.ts";
+import { NEBIUS_LIMITS } from "../src/exec/nebius/session.ts";
 import { RESULT_ARCHIVE, RESULT_LISTING } from "../src/exec/patch.ts";
 import { reserveMs, TASK_LIMITS } from "../src/task/limits.ts";
 import type { RealGuest } from "./real-guest.ts";
@@ -34,7 +35,44 @@ describe("a task run's time (NIV-7, D39)", () => {
   it("keeps the reserve: the caps after the session fit in the run's deadline, and the reserve holds collect, its reads and every final check", () => {
     const after = TASK_LIMITS.closeMs + TASK_LIMITS.patchMs + TASK_LIMITS.reportMs;
     assert.ok(TASK_LIMITS.snapshotMs + TASK_LIMITS.sessionMs + after <= TASK_LIMITS.runMs, "the phases' caps don't fit in the run's deadline");
-    assert.deepEqual([reserveMs(2), reserveMs(4)], [488_000, 732_000]);
+    assert.deepEqual([reserveMs(2), reserveMs(4)], [578_000, 882_000]);
+    // The start request's allowance is the session's own.
+    assert.equal(TASK_LIMITS.startRequestMs, NEBIUS_LIMITS.requestTimeoutMs);
+  });
+
+  it("keeps the reserve when every start request after the work takes its whole allowance and each operation ends at the end of its watch", async () => {
+    const time = slowClock();
+    let windowEnd = Number.NaN;
+    const slowed = new Set<string>();
+    let collecting = false;
+    // Collect and the final checks, by what their operations run.
+    const after = /nivra-collect|greet Ada|check\.sh/;
+    const run = await attempt({
+      time,
+      calls: [["edit_file", FIX]],
+      extra: { progress: (message, data) => void (message.startsWith("Work window") && (windowEnd = time.now() + Number(data["windowMs"]))) },
+      // The worker hands in as its window ends: collect starts with only the reserve left.
+      beforeRequest: (index) => void (index === 1 && time.advance(windowEnd - time.now() - 1_000)),
+      wrap: (transport, guest) => async (request) => {
+        if (request.method === "POST" && request.path === "/v1/instances" && after.test(String(request.body))) {
+          collecting = true;
+          time.advance(TASK_LIMITS.startRequestMs - 500);
+        }
+        const answer = await transport(request);
+        const read = /^\/v1\/operations\/([^/]+)$/.exec(request.path);
+        const op = read && request.method === "GET" ? guest.service.operations.find((candidate) => candidate.uuid === read[1]) : undefined;
+        if (op && after.test(JSON.stringify(op.body["args"])) && !slowed.has(op.uuid)) {
+          slowed.add(op.uuid);
+          // Seen to end 5 s before its watch would have: its timeout, then 55 s of the minute's margin.
+          time.advance(TASK_LIMITS.checks.timeoutMs + 55_000);
+        }
+        // Collect's two reads, each 5 s inside its allowance.
+        if (collecting && /\/download$/.test(request.path)) time.advance(TASK_LIMITS.collect.downloadMs - 5_000);
+        return answer;
+      },
+    });
+    assert.equal(slowed.size, 3, "collect and both final checks weren't each slowed");
+    assert.deepEqual([run.result.outcome, verdicts(run.core)], ["proposed", ["case 1 passed", "check 1 passed"]]);
   });
 
   it("lets a write under way finish when the model's time ends, then collects and runs every final check", async () => {

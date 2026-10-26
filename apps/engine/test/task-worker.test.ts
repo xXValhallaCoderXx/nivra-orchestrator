@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { appendFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
+import type { ExecutionBackend } from "../src/exec/backend.ts";
+import type { Transport } from "../src/exec/nebius/api.ts";
+import { createNebiusBackend } from "../src/exec/nebius/session.ts";
 import { verifyProposal } from "../src/exec/proposal.ts";
+import { operationsForBrief } from "../src/task/worker.ts";
+import { clock } from "./fake-sandboxes.ts";
 import type { RealGuest } from "./real-guest.ts";
-import { attempt, BRIEF, FIX, FIXTURE, KEY, labels, verdicts, type Call } from "./task-fixtures.ts";
-import { cleanUp } from "./workspace-fixtures.ts";
+import { attempt, BRIEF, FIX, FIXTURE, KEY, labels, PROJECT, verdicts, type Call } from "./task-fixtures.ts";
+import { cleanUp, scratch } from "./workspace-fixtures.ts";
 
 /**
  * A task's worker (NIV-7, D39) on the production session and prescribed path, against the fake Nebius service with a
@@ -19,6 +24,8 @@ describe("a task's worker (NIV-7, D39)", () => {
     assert.deepEqual([run.result.outcome, run.result.stopped], ["proposed", null]);
     assert.deepEqual(run.changed, [], "the checkout changed");
     assert.deepEqual(verdicts(run.core), ["case 1 passed", "check 1 passed"]);
+    // The case sources greet.sh, which the fix changes: named beside it, as a case judges only what it prints.
+    assert.deepEqual(run.core!.checks.map((check) => check.changedFiles), [["greet.sh"], []]);
     assert.deepEqual([run.core!.verified, run.core!.worker.handedIn, run.core!.worker.ended, run.core!.worker.written], [true, true, "submitted", ["greet.sh"]]);
     // Each operation, in order: the workspace, the toolchain, the write, the worker's run, collect, the final checks.
     assert.deepEqual(labels(run.guest), ["nivra-prepare", "nivra-toolchain", "nivra-write", "command", "nivra-collect", "command", "command"]);
@@ -29,8 +36,98 @@ describe("a task's worker (NIV-7, D39)", () => {
     assert.equal(proposal.binding.task?.brief.sha256, "b".repeat(64));
     const report = JSON.parse(new TextDecoder().decode(proposal.report)) as { kind: string; verified: boolean; worker: { summary: string } };
     assert.deepEqual([report.kind, report.verified, report.worker.summary], ["task", true, "Defaulted the name to world."]);
-    verifyProposal(proposal, { project: proposal.binding.project, target: "local", destination: proposal.binding.destination, head: proposal.binding.baseline, approvedHash: proposal.hash });
+    const expected = { project: proposal.binding.project, target: "local", destination: proposal.binding.destination, head: proposal.binding.baseline, approvedHash: proposal.hash };
+    verifyProposal(proposal, expected);
+    verifyProposal(proposal, { ...expected, task: proposal.binding.task! });
+    // Another attempt, another engine's records or another brief version: refused, whatever else matches.
+    for (const task of [
+      { ...proposal.binding.task!, attempt: { ...proposal.binding.task!.attempt, attemptId: "another" } },
+      { ...proposal.binding.task!, engine: { homeId: "another" } },
+      { ...proposal.binding.task!, brief: { ...proposal.binding.task!.brief, version: 2 } },
+    ]) {
+      assert.throws(() => verifyProposal(proposal, { ...expected, task }), /made by another run, on another engine's records, or from another version of the brief/);
+    }
     assert.equal(run.result.cleanup?.unresolved.length, 0);
+  });
+
+  it("names a script a case runs that the worker rewrote, beside the case's pass: the case judges only what it prints", async () => {
+    const brief = { ...BRIEF, checks: [], acceptanceCases: [{ name: "check passes", command: "/bin/sh check.sh", expectedOutput: "ok\n", expectedExitCode: 0 }] };
+    const run = await attempt({ brief, calls: [["edit_file", { path: "check.sh", old_text: FIXTURE["check.sh"], new_text: "echo ok\n" }]] });
+    assert.deepEqual([run.result.outcome, verdicts(run.core), run.core!.checks[0]!.changedFiles], ["proposed", ["case 1 passed"], ["check.sh"]]);
+  });
+
+  it("passes on no refusal's own words: a damaged journal's path never reaches the model, the run's events or its report", async () => {
+    const journalDir = scratch("journal path");
+    const time = clock();
+    let guest: RealGuest | null = null;
+    let damaged = false;
+    const progress: string[] = [];
+    // Once the toolchain probe has ended, a line of the session's journal is damaged (a disk fault, say).
+    const backend: ExecutionBackend = createNebiusBackend({
+      credentials: () => ({ key: KEY, project: PROJECT }),
+      baseImage: "base-image",
+      journalDir,
+      transport: (): Transport => async (request) => {
+        const answer = await guest!.service.transport(request);
+        const read = /^\/v1\/operations\/([^/]+)$/.exec(request.path);
+        const operation = read && request.method === "GET" ? guest!.service.operations.find((candidate) => candidate.uuid === read[1]) : undefined;
+        if (!damaged && operation && JSON.stringify(operation.body["args"]).includes("nivra-toolchain") && operation.status === "SUCCESS") {
+          damaged = true;
+          for (const name of readdirSync(journalDir).filter((file) => file.endsWith(".jsonl"))) appendFileSync(join(journalDir, name), "not json\n");
+        }
+        return answer;
+      },
+      applets: "",
+      limits: { maxOperations: operationsForBrief(BRIEF), maxTimeoutSeconds: 60, prepareTimeoutSeconds: 60, pollMs: 10 },
+      now: time.now,
+      sleep: time.sleep,
+    });
+    const run = await attempt({ time, setup: (given) => void (guest = given), extra: { backend, progress: (message) => void progress.push(message) } });
+    const sent = JSON.stringify((run.model as unknown as { doGenerateCalls: unknown[] }).doGenerateCalls);
+    assert.equal(damaged, true);
+    assert.deepEqual([progress.filter((line) => line.includes(journalDir)), sent.includes(journalDir), JSON.stringify(run.core).includes(journalDir)], [[], false, false]);
+    assert.ok(progress.some((line) => line === "edit_file refused: the write wasn't sent: the sandbox session refused it"), progress.join(" | "));
+    assert.equal(run.result.proposal, null);
+  });
+
+  it("stops where the person's cancel lands during the final checks: the checks left read as not run, and nothing is proposed", async () => {
+    const cancel = new AbortController();
+    // The worker fixes greet.sh and hands in; the case's final run is read back, and then the person cancels.
+    const run = await attempt({
+      calls: [["edit_file", FIX]],
+      signal: cancel.signal,
+      wrap: (transport, guest) => async (request) => {
+        const answer = await transport(request);
+        const read = /^\/v1\/operations\/([^/]+)$/.exec(request.path);
+        const operation = read && request.method === "GET" ? guest.service.operations.find((candidate) => candidate.uuid === read[1]) : undefined;
+        if (operation && JSON.stringify(operation.body["args"]).includes("greet Ada") && operation.status === "SUCCESS" && !cancel.signal.aborted) cancel.abort(new Error("the person cancelled"));
+        return answer;
+      },
+    });
+    // It stops where the cancel landed, and no patch is begun after it.
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.result.stopped?.step, run.result.proposal, run.result.cleanup?.unresolved.length], ["cancelled", "cancelled", "verify", null, 0]);
+    assert.deepEqual(run.core!.checks.map((check) => `${check.kind} ${check.number} ${check.verdict}`), ["case 1 passed", "check 1 not-run"]);
+    assert.equal(run.core!.checks[1]!.reason, "the run was cancelled before it ran");
+  });
+
+  it("calls a case whose output the sandbox didn't report unknown, never a pass on empty output", async () => {
+    const brief = { ...BRIEF, checks: [], acceptanceCases: [{ name: "prints nothing", command: "true", expectedOutput: "", expectedExitCode: 0 }] };
+    // The service answers the case's operation with no stdout stream at all.
+    const run = await attempt({
+      brief,
+      calls: [],
+      wrap: (transport, guest) => async (request) => {
+        const answer = await transport(request);
+        const read = /^\/v1\/operations\/([^/]+)$/.exec(request.path);
+        const operation = read && request.method === "GET" ? guest.service.operations.find((candidate) => candidate.uuid === read[1]) : undefined;
+        if (!operation || (operation.body["args"] as string[])[1] !== "true") return answer;
+        const body = JSON.parse(new TextDecoder().decode(answer.body)) as { metadata?: { result?: { stdout?: unknown } | null } };
+        if (body.metadata?.result) delete body.metadata.result.stdout;
+        return { ...answer, body: new TextEncoder().encode(JSON.stringify(body)) };
+      },
+    });
+    assert.deepEqual(run.core!.checks.map((check) => [check.verdict, check.reason]), [["unknown", "the sandbox didn't report what it printed as text, so it couldn't be compared"]]);
+    assert.equal(run.core!.verified, false);
   });
 
   it("isn't fooled by a replaced repository check: the check passes, its change is shown, and the case still fails", async () => {
@@ -145,6 +242,28 @@ describe("a task's worker (NIV-7, D39)", () => {
     });
     assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.result.proposal], ["uncertain", "uncertain", null]);
     assert.equal(labels(run.guest).filter((label) => label === "nivra-write").length, 1);
+  });
+
+  it("never sends a final check twice when its start isn't known: the checks after it aren't run, and nothing is proposed", async () => {
+    let lost = false;
+    const run = await attempt({
+      calls: [["edit_file", FIX]],
+      wrap: (transport, guest) => (request) => {
+        // The case's final run: its start's answer is lost, and the service doesn't list it.
+        if (request.method === "POST" && request.path === "/v1/instances" && String(request.body).includes("greet Ada") && !lost) {
+          lost = true;
+          guest.service.dropNextSpawnAnswer = true;
+          guest.service.hideNextSpawn = true;
+        }
+        return transport(request);
+      },
+    });
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.result.stopped?.step, run.result.proposal], ["uncertain", "uncertain", "verify", null]);
+    assert.deepEqual(run.core!.checks.map((check) => [check.kind, check.verdict, check.reason]), [
+      ["case", "unknown", "it isn't known whether it started, so it wasn't sent again"],
+      ["check", "not-run", "an earlier check's start wasn't settled, so nothing more ran in the session"],
+    ]);
+    assert.deepEqual([run.core!.verified, run.guest.ran.filter((ran) => ran.script?.includes("greet Ada")).length, labels(run.guest).includes("command")], [false, 1, true]);
   });
 
   it("stops the operation under way when the person cancels, collects nothing, and still cleans up", async () => {

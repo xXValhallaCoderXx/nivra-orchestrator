@@ -61,13 +61,16 @@ export const TOOLCHAIN_SCRIPT = ['for name in "$@"; do', '  if command -v "$name
 const PROGRAM = /^[A-Za-z0-9_./+][A-Za-z0-9_./+-]{0,127}$/;
 
 /**
- * The first word of a command line, when it is a plain one: the program the line runs, or a built-in such as `.`.
- * Null when the line starts with anything a plain word can't say (a quote, a variable, an assignment, a subshell), so
- * its program is never guessed.
+ * The first word of a command line, when it is a plain one that names something in the image: a program by name or
+ * absolute path, or a built-in such as `.`. Null when the line starts with anything a plain word can't say (a quote, a
+ * variable, an assignment, a subshell), so its program is never guessed; for a path inside the workspace (`./x.sh`,
+ * `bin/x`), which is the commit's, not the image's; and for a function the line defines (`f() { … }; f`).
  */
 export function firstWord(line: string): string | null {
-  const word = /^\s*([^\s;&|()<>]+)/.exec(line)?.[1] ?? null;
-  if (word === null || /["'`$\\=*?[\]{}~#!]/.test(word)) return null;
+  const match = /^\s*([^\s;&|()<>]+)(\s*\()?/.exec(line);
+  const word = match?.[1] ?? null;
+  if (word === null || match?.[2] !== undefined || /["'`$\\=*?[\]{}~#!]/.test(word)) return null;
+  if (word.includes("/") && !word.startsWith("/")) return null;
   return PROGRAM.test(word) ? word : null;
 }
 

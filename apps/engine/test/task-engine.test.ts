@@ -11,7 +11,7 @@ import { TASK_BRIEF, TASK_FIX, TASK_FIXTURE } from "../scripts/task-fixture.ts";
 import { removeDir, startEngine, tempDir, waitFor, type EngineProcess } from "./helpers.ts";
 import { RealGuest } from "./real-guest.ts";
 import { startSandboxStub, type SandboxStub } from "./stub-sandboxes.ts";
-import { startStub, toolCall, type Stub } from "./stub-token-factory.ts";
+import { httpError, startStub, toolCall, type Reply, type Stub, type StubRequest } from "./stub-token-factory.ts";
 import { changedSince, cleanUp, folderState, repoWith } from "./workspace-fixtures.ts";
 
 /**
@@ -58,12 +58,12 @@ function engineAt(home: string, sandbox: SandboxStub<RealGuest>, model: Stub): E
   return engine;
 }
 
-async function setup(options: { credentials?: boolean; calls?: Call[]; files?: Record<string, string> } = {}): Promise<Setup> {
+async function setup(options: { credentials?: boolean; calls?: Call[]; files?: Record<string, string>; chat?: (request: StubRequest, index: number) => Reply } = {}): Promise<Setup> {
   const guest = new RealGuest(CHECK_IMAGE.uuid);
   guest.busybox = true;
   const sandbox = await startSandboxStub({ guest });
   const calls = options.calls ?? WORK;
-  const model = await startStub({ chat: (_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }) });
+  const model = await startStub({ chat: options.chat ?? ((_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` })) });
   stubs.push(sandbox, model);
   const root = tempDir("nivra task engine");
   dirs.push(root);
@@ -94,6 +94,19 @@ const spawned = (stub: SandboxStub<RealGuest>, name: string) => spawns(stub).fil
 const verdicts = (shown: TaskReport) => shown.checks.map((check) => `${check.kind} ${check.number} ${check.verdict}`);
 
 describe("a task run through a real engine (NIV-7)", () => {
+  it("goes on to collect and judge when the provider fails partway, and never sends the failed request again", async () => {
+    // The worker reads and fixes greet.sh; Token Factory then answers its third request with an error.
+    const { sandbox, model, engine, repo } = await setup({ chat: (_request, index) => (index < 2 ? toolCall(WORK[index]![0], WORK[index]![1], { id: `call_${index}` }) : httpError(500, "the provider is down")) });
+    const shown = ready(await preview(engine, repo));
+    const run = await start(engine, repo, shown.snapshot.fingerprint);
+    const page = await ended(engine, run.id);
+    const done = await report(engine, run.id);
+    assert.deepEqual([page.status, done.outcome, done.worker?.ended, done.worker?.handedIn, done.worker?.failure, done.worker?.written], ["succeeded", "proposed", "model-failed", false, "provider", ["greet.sh"]]);
+    // Nivra's own checks of the change, apart from the worker's failure.
+    assert.deepEqual([verdicts(done), done.verified, spawned(sandbox, "nivra-collect")], [["case 1 passed", "check 1 passed"], true, 1]);
+    assert.equal(model.chats().length, 3, "the request that failed was sent again");
+  });
+
   it("previews what a run would send with no network, the programs it looks for and its bounds, and refuses a commit holding the vault's key", async () => {
     const { sandbox, model, engine, repo } = await setup();
     const shown = ready(await preview(engine, repo));

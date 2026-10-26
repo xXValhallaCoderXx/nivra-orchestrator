@@ -15,7 +15,8 @@ import type { Proposal } from "../src/exec/proposal.ts";
 import { createModelClient } from "../src/providers/model.ts";
 import { RunScheduler, type RunHandle, type WorkflowEntry } from "../src/runs/scheduler.ts";
 import { RunStore } from "../src/runs/store.ts";
-import { holdsValue, proposalView, TASK_STOP_MESSAGES, taskStopWords } from "../src/task/report.ts";
+import { TASK_LIMITS } from "../src/task/limits.ts";
+import { holdsValue, proposalView, REPORT_BYTES, TASK_STOP_MESSAGES, taskReport, taskStopWords } from "../src/task/report.ts";
 import { operationsForBrief } from "../src/task/worker.ts";
 import { createTaskWorkflow, type TaskDeps } from "../src/workflows/task.ts";
 import { buildFixture, fixtureRecipe } from "../scripts/sandbox-fixture.ts";
@@ -24,6 +25,7 @@ import { FakeGuest } from "./fake-guest.ts";
 import { clock } from "./fake-sandboxes.ts";
 import { removeDir, tempDir, waitFor } from "./helpers.ts";
 import { RealGuest } from "./real-guest.ts";
+import { attempt } from "./task-fixtures.ts";
 import { cleanUp, GIT, localSession, repoWith, scratch, snap } from "./workspace-fixtures.ts";
 
 /**
@@ -222,14 +224,37 @@ describe("what a task run's report says (D39)", () => {
       [],
     );
     for (const code of TaskStopCode.options) {
+      // "run" is the worker's own run of a case or check, inside the session; the workflow's start before the
+      // prescribed path is "start".
       for (const step of ["toolchain", "worker", "write", "run", "collect", "final check", "patch", "proposal"]) {
-        // "run" is the workflow's step before the prescribed path: nothing has been uploaded by then.
-        if (step === "run") continue;
         assert.ok(!taskStopWords(code, step).includes("nothing was sent"), `${code} at ${step} says nothing was sent`);
       }
-      for (const step of ["check", "prepare", "run", "snapshot", "open", null]) assert.equal(taskStopWords(code, step), TASK_STOP_MESSAGES[code]);
+      for (const step of ["check", "prepare", "start", "snapshot", "open", null]) assert.equal(taskStopWords(code, step), TASK_STOP_MESSAGES[code]);
     }
     assert.match(taskStopWords("git", "patch"), /^Git failed while Nivra checked what came back from the sandbox, so nothing was proposed\. Your commit was uploaded/);
+  });
+
+  it("fits the store at the most a run can give it: masked, control characters made U+FFFD, cut, and tails shortened until it fits", async () => {
+    const run = await attempt();
+    const SECRET = "nivra-report-secret-0123456789";
+    // Three bytes a character, the most a code unit costs once a control character or a lone surrogate is replaced.
+    const wide = (chars: number) => "\u20ac".repeat(chars);
+    const noisy = (chars: number) => `${SECRET}${"\u0001\ud800".repeat(chars / 2)}${SECRET}`;
+    // Every file the worker may write, each at the longest path a tool takes, and every check naming them all.
+    const paths = Array.from({ length: TASK_LIMITS.tools.writes }, (_, at) => `${at}${wide(1_100)}`);
+    const core = {
+      ...run.core!,
+      toolchain: Array.from({ length: 4 }, (_, at) => ({ program: `${at}${wide(200)}`, finding: "present" as const })),
+      // Emoji cut between their halves: at the summary's end, and at the start of a tail.
+      worker: { ...run.core!.worker, summary: `x${"\u{1F600}".repeat(3_000)}${noisy(100)}`, model: wide(300), written: paths },
+      checks: Array.from({ length: 4 }, (_, at) => ({ ...run.core!.checks[0]!, number: at + 1, name: wide(1_200), reason: noisy(800), stdoutTail: at ? noisy(10_000) : `${"\u{1F600}".repeat(5_000)}x`, stderrTail: noisy(10_000), difference: { line: 1, expected: wide(300), got: noisy(300) }, changedFiles: paths })),
+    };
+    const result = { ...run.result, steps: Array.from({ length: 30 }, () => ({ ...run.result.steps[0]!, label: wide(100), stdoutTail: noisy(10_000), stderrTail: noisy(10_000) })), cleanup: { ...run.result.cleanup!, unresolved: Array.from({ length: 80 }, (_, at) => `operation ${at}: ${wide(500)}`) } };
+    const report = taskReport({ result, core, task: { taskId: "task", attemptId: "attempt", briefVersion: 1, briefDigest: "d".repeat(64) }, request: { runId: randomUUID(), clientRequestId: randomUUID() }, route: null, now: new Date(), mask: (text) => text.replaceAll(SECRET, "[secret]") });
+    const json = JSON.stringify(report);
+    assert.ok(Buffer.byteLength(json) <= REPORT_BYTES, `${Buffer.byteLength(json)} bytes`);
+    assert.deepEqual([json.includes(SECRET), /\\u00[01]|\\ud[89a-f]/i.test(json), report.checks.map((check) => check.changedFiles.length)], [false, false, [8, 8, 8, 8]]);
+    TaskReport.parse(report);
   });
 });
 
@@ -238,7 +263,7 @@ describe("a task run's workflow, in process (D39)", () => {
   const MODEL = "nvidia/nemotron-3-super-120b-a12b";
   type Call = [string, Record<string, unknown>];
 
-  async function workflow(options: { platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string> } = {}) {
+  async function workflow(options: { platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string>; keep?: (proposal: Proposal) => void } = {}) {
     const root = repoWith(options.files ?? FILES);
     const guest = new RealGuest();
     guest.busybox = true;
@@ -259,6 +284,8 @@ describe("a task run's workflow, in process (D39)", () => {
     const listing = (async () => new Response(JSON.stringify({ object: "list", data: [{ id: MODEL }] }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
     const reports: TaskReport[] = [];
     const proposals: Proposal[] = [];
+    // What was saved, in order: each report by its outcome, and the proposal.
+    const saves: string[] = [];
     let opened = 0;
     const deps: TaskDeps = {
       recorder: { output: () => undefined, event: () => undefined },
@@ -281,13 +308,20 @@ describe("a task run's workflow, in process (D39)", () => {
       endpoint: { url: "http://127.0.0.1:9/v1", kind: "loopback-test" },
       mask: (text) => text,
       setMeta: () => undefined,
-      saveReport: (_runId, report) => void reports.push(TaskReport.parse(report)),
-      saveProposal: (_runId, proposal) => void proposals.push(proposal),
+      saveReport: (_runId, report) => {
+        reports.push(TaskReport.parse(report));
+        saves.push(`report ${report.outcome}`);
+      },
+      saveProposal: (_runId, proposal) => {
+        options.keep?.(proposal);
+        proposals.push(proposal);
+        saves.push("proposal");
+      },
       modelClient: (key, endpoint) => createModelClient({ apiKey: key, endpoint, model: () => model, fetch: listing }),
     };
     const run = await createTaskWorkflow(deps).createRun({ runId });
     const result = (await run.start({ inputData: {} })) as { status: string; error?: { message?: string } };
-    return { result, reports, proposals, opened, requests: () => requests, guest, operations: operationsForBrief(brief) };
+    return { result, reports, proposals, saves, opened, requests: () => requests, guest, operations: operationsForBrief(brief) };
   }
 
   it("proposes a verified change, keeping the proposal and a report the protocol takes", async () => {
@@ -295,6 +329,19 @@ describe("a task run's workflow, in process (D39)", () => {
     assert.equal(done.result.status, "success", done.result.error?.message);
     const final = done.reports.at(-1)!;
     assert.deepEqual([final.outcome, final.verified, done.proposals.length, done.proposals[0]?.hash === final.proposal?.hash, done.reports[0]?.outcome], ["proposed", true, 1, true, "in-progress"]);
+    // The report that describes the proposal is kept first.
+    assert.deepEqual(done.saves, ["report in-progress", "report proposed", "proposal"]);
+  });
+
+  it("says nothing was proposed when the proposal can't be kept, replacing the report that described it", async () => {
+    const done = await workflow({
+      keep: () => {
+        throw new Error("disk I/O error");
+      },
+    });
+    const final = done.reports.at(-1)!;
+    assert.deepEqual([done.result.status, done.saves, done.proposals.length], ["failed", ["report in-progress", "report proposed", "report failed"], 0]);
+    assert.deepEqual([final.outcome, final.stopped?.code, final.stopped?.step, final.proposal, final.stopped?.message], ["failed", "fault", "proposal", null, TASK_STOP_MESSAGES.fault]);
   });
 
   it("calls nothing verified when nothing changed, though every case passed: there is no change to verify", async () => {

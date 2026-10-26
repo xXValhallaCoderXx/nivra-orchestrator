@@ -14,7 +14,7 @@ import { failure as failure_, InternalFailure, ModelFailure, type ModelClient, t
 import { requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget, type Hold, type Refusal } from "../providers/run-budget.ts";
 import { WorkspaceCopy } from "./copy.ts";
-import { checkRequest, couldntRun, failedToSend, judgeCase, judgeCheck, namedFiles, notRun, programsOf, verified, type AcceptanceCase, type CheckResult } from "./harness.ts";
+import { checkRequest, couldntRun, failedToSend, judgeCase, judgeCheck, namedFiles, notRun, programsOf, refusalWords, verified, type AcceptanceCase, type CheckResult } from "./harness.ts";
 import { AFTER_SESSION_MS, operationsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
 import { firstWord, toolchainFindings, toolchainRequest, writeContentProblem, writeRequest } from "./scripts.ts";
 
@@ -348,7 +348,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       try {
         ran = await recorded(session, context, "write", () => session.exec({ ...writeRequest({ workspace, path, content, created, timeoutMs: TASK_LIMITS.write.timeoutMs, ...(run.applets !== undefined ? { applets: run.applets } : {}) }) }));
       } catch (error) {
-        if (error instanceof ExecRefusedError) return refuse(tool, `the write wasn't sent: ${error.message}`);
+        if (error instanceof ExecRefusedError) return refuse(tool, `the write wasn't sent: ${refusalWords(error)}`);
         haltFor("write", error);
         return { refused: "The run has stopped." };
       }
@@ -395,7 +395,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       try {
         ran = await recorded(session, context, "run", () => session.exec(checkRequest({ workspace, command, label: "run" })));
       } catch (error) {
-        if (error instanceof ExecRefusedError) return refuse(tool, `it wasn't sent: ${error.message}`);
+        if (error instanceof ExecRefusedError) return refuse(tool, `it wasn't sent: ${refusalWords(error)}`);
         haltFor("run", error);
         return { refused: "The run has stopped." };
       }
@@ -403,7 +403,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
         halt({ going: false, outcome: "cancelled", stopped: { code: "cancelled", message: "run: the run was cancelled while it ran.", step: "run", detail: null } });
         return { refused: "Cancelled." };
       }
-      const judged = kind === "case" ? judgeCase(number, brief.acceptanceCases[number - 1]!, ran) : judgeCheck(number, command, ran, changedNamed(command, copy));
+      const judged = kind === "case" ? judgeCase(number, brief.acceptanceCases[number - 1]!, ran, changedNamed(command, copy)) : judgeCheck(number, command, ran, changedNamed(command, copy));
       progress(`${tool} ${number}: ${judged.verdict}`, { tool, number, verdict: judged.verdict });
       return { number, ...publicResult(judged) };
     };
@@ -590,22 +590,27 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     if (!copy) return;
     copy.checkIntegrity(context.collected);
     context.stage = "final check";
-    let unsettled = false;
+    // The first start whose answer was lost: nothing more runs in the session, and the run ends uncertain (rule 9).
+    let unsettled: ExecUncertainError | null = null;
     const finalOne = async (kind: "case" | "check", number: number, command: string, name: string): Promise<CheckResult> => {
       const missing = missingFor(command);
       if (missing) return couldntRun(kind, number, name, missing);
       if (unsettled) return notRun(kind, number, name, "an earlier check's start wasn't settled, so nothing more ran in the session");
+      // Cancelled before it was sent: it never ran, and isn't said to have been stopped while it ran.
+      if (run.signal?.aborted) return notRun(kind, number, name, "the run was cancelled before it ran");
       try {
         const ran = await recorded(session, context, "final check", () => session.exec(checkRequest({ workspace, command, label: "final check" })));
-        return kind === "case" ? judgeCase(number, brief.acceptanceCases[number - 1]!, ran) : judgeCheck(number, command, ran, changedNamed(command, copy!));
+        return kind === "case" ? judgeCase(number, brief.acceptanceCases[number - 1]!, ran, changedNamed(command, copy!)) : judgeCheck(number, command, ran, changedNamed(command, copy!));
       } catch (error) {
-        if (error instanceof ExecUncertainError) unsettled = true;
+        if (error instanceof ExecUncertainError) unsettled ??= error;
         return failedToSend(kind, number, name, error);
       }
     };
     for (const [index, given] of brief.acceptanceCases.entries()) results.push(await finalOne("case", index + 1, given.command, given.name));
     for (const [index, check] of brief.checks.entries()) results.push(await finalOne("check", index + 1, check, check));
     progress(`Final checks: ${results.map((result) => `${result.kind} ${result.number} ${result.verdict}`).join(", ")}`, { verified: verified(results) });
+    // Every verdict is kept; what may still be running is closing's to record, and nothing is proposed.
+    if (unsettled) throw unsettled;
   };
 
   const taskBinding: TaskBinding = {
@@ -663,7 +668,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   return { result, core: coreOf() };
 }
 
-/** The files a repository check names that the worker wrote. */
+/** The files a case's or check's command names that the worker wrote. */
 function changedNamed(command: string, copy: WorkspaceCopy): string[] {
   return namedFiles(command, new Set(copy.written));
 }

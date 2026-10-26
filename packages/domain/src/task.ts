@@ -163,6 +163,11 @@ export const TaskPreview = z.discriminatedUnion("status", [
     programs: z.array(z.string().max(128)).max(TASK_BRIEF_LIMITS.finalChecks),
     /** Cases and checks whose program can't be read from their first word: they run, and a missing one fails them. */
     unprobed: count,
+    /**
+     * The commit's files each acceptance case's command names: the worker can change them, and a case judges only what
+     * its command prints, so the person is told before the run.
+     */
+    caseFiles: z.array(z.strictObject({ number: z.number().int().min(1).max(TASK_BRIEF_LIMITS.finalChecks), files: z.array(z.string().max(1_024)).max(20) })).max(TASK_BRIEF_LIMITS.finalChecks),
     limits: TaskRunLimits,
   }),
   z.strictObject({ status: z.literal("refused"), code: z.string().max(64), message: z.string().max(2_000) }),

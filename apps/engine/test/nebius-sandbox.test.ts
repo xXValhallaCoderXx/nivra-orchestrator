@@ -457,7 +457,7 @@ describe("Nebius Sandboxes, offline: every request, writes included, ends by its
     journal.append({ kind: "refused", wall: "2026-10-20T00:00:02.000Z", correlation: "c1", status: 400 });
     assert.deepEqual([new Journal(path).entries.map((e) => e.kind), readFileSync(path, "utf8").includes('"corr\n')], [["intent", "refused"], false]);
     writeFileSync(path, '{"kind":"intent","wall":"w","correlation":"c1","label":"one"}\nnot a line\n{"kind":"refused","wall":"w","correlation":"c1","status":400}\n');
-    assert.throws(() => new Journal(path).entries, /^SandboxRefusal: The journal at .* is damaged at line 2, so what it records can't be trusted\./);
+    assert.throws(() => new Journal(path).entries, /^SandboxRefusal: A session's journal is damaged at line 2, so what it records can't be trusted\./);
   });
 
   it("leaves a spawn answered with a redirect uncertain, never followed and never taken as refused", async () => {

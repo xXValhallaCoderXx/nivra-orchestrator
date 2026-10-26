@@ -108,6 +108,13 @@ describe("the toolchain probe (NIV-7, D39)", () => {
       ["(cd sub; make)", null],
       ["-rf /", null],
       ["", null],
+      // A path inside the workspace is the commit's, not the image's; a function the line defines isn't a program.
+      ["./check.sh", null],
+      ["bin/check --all", null],
+      ["../tools/x", null],
+      ["/usr/bin/env node x.js", "/usr/bin/env"],
+      ["f() { echo hi; }; f", null],
+      ["f () { echo hi; }; f", null],
     ];
     assert.deepEqual(cases.map(([line]) => firstWord(line)), cases.map(([, word]) => word));
   });

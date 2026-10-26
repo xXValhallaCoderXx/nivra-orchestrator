@@ -149,6 +149,8 @@ export interface ProposalExpectation {
   approvedHash: string;
   /** The rules a proposal must have been made under: Nivra's own unless a check says otherwise. */
   policy?: PatchPolicy;
+  /** For a task's proposal: the attempt, the engine's home and the brief it must have been made for (D39). */
+  task?: TaskBinding;
 }
 
 /** Refuses a proposal that isn't intact, isn't the one approved, or isn't for these rules, this destination and commit. */
@@ -164,6 +166,9 @@ export function verifyProposal(proposal: Proposal, expected: ProposalExpectation
   if (binding.project !== expected.project || binding.target !== expected.target) throw refuse("This proposal was made for another project, or on another target, so it can't be applied here.");
   if (binding.destination.root !== expected.destination.root || binding.destination.prefix !== expected.destination.prefix) throw refuse("This proposal was made for another folder, so it can't be applied here.");
   if (binding.baseline !== expected.head) throw refuse(`Your checkout has moved to another commit (HEAD is ${short(expected.head)}, and the proposal was made from ${short(binding.baseline)}). Run the task again from the commit it is on now.`);
+  if (expected.task !== undefined && canonicalJson(binding.task) !== canonicalJson(expected.task)) {
+    throw refuse("This proposal was made by another run, on another engine's records, or from another version of the brief, so it can't be applied here.");
+  }
 }
 
 /** One step the run took, as its report shows it. */
