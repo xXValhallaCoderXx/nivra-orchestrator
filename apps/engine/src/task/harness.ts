@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { TASK_BRIEF_LIMITS, type BaselineSelection, type TaskBaselineCheck } from "@nivra/domain";
 import { ExecRefusedError, ExecUncertainError, type ExecRequest, type ExecResult } from "../exec/backend.ts";
 import { TASK_LIMITS } from "./limits.ts";
 import { firstWord } from "./scripts.ts";
@@ -120,6 +121,27 @@ function ending(ran: ExecResult, timeoutMs: number): Pick<CheckResult, "verdict"
   // Output the sandbox didn't report as text is never taken for what was printed: an empty string would match "".
   if (ran.stdoutExact === false) return { verdict: "unknown", reason: "the sandbox didn't report what it printed as text, so it couldn't be compared" };
   return null;
+}
+
+/**
+ * A baseline selection, judged by the engine before the model (D41): its exit code, and its exact output or a pattern
+ * over its whole output. A selection that fails for the bug the task fixes matches when it fails as the brief says:
+ * that is told apart from one that can't run. A pattern is matched against at most `patternInputBytes` of output.
+ */
+export function judgeBaseline(number: number, given: BaselineSelection, ran: ExecResult, timeoutMs: number = TASK_LIMITS.checks.timeoutMs): TaskBaselineCheck {
+  const result: TaskBaselineCheck = { number, name: given.name, matched: false, reason: null, exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), durationMs: ran.durationMs };
+  const ended = ending(ran, timeoutMs);
+  if (ended) return { ...result, matched: ran.cancelled ? null : false, reason: ended.reason };
+  if (ran.truncated) return { ...result, reason: "it printed more than Nivra compares" };
+  let why: string | null = null;
+  if (given.expectedOutput !== undefined) {
+    const difference = firstDifference(given.expectedOutput, ran.stdout);
+    if (difference) why = `its output differs from the expected output at line ${difference.line}`;
+  } else if (Buffer.byteLength(ran.stdout) > TASK_BRIEF_LIMITS.patternInputBytes) why = "its output is longer than Nivra matches a pattern against";
+  else if (!new RegExp(given.outputPattern ?? "(?!)").test(ran.stdout)) why = "its output doesn't match the pattern";
+  const exit = ran.exitCode === given.expectedExitCode ? null : `it exited ${String(ran.exitCode)}, not ${given.expectedExitCode}`;
+  if (!why && !exit) return { ...result, matched: true };
+  return { ...result, reason: [why, exit].filter(Boolean).join(", and ") };
 }
 
 /**
