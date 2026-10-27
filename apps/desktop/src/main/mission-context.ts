@@ -1,4 +1,4 @@
-import { MissionReviewComposition, taskRef, type BoundTask, type ContextBinding, type ContextChange, type FindingRef, type MissionContent, type MissionRef, type PacketTask, type ReviewFinding } from "@nivra/domain";
+import { StoredMissionReviewComposition, taskRef, type MissionReviewComposition, type BoundTask, type ContextBinding, type ContextChange, type FindingRef, type MissionContent, type MissionRef, type PacketTask, type ReviewFinding } from "@nivra/domain";
 import type { BriefContent } from "../shared/ipc.ts";
 import { getMission, latestMissionVersion, missionOfTask, missionRefOf } from "./mission-store.ts";
 import { getArtifact, getReview, getTask, reviewsOf, versionsOf, type ArtifactRecord } from "./workspace.ts";
@@ -43,11 +43,15 @@ export function packetTaskOf(title: string, brief: Pick<BriefContent, "goal" | "
 /** A mission review plan's content: the composition, the text the reviewers read, and the mission's conversation. */
 export const missionPlanContent = (composition: MissionReviewComposition, conversationId: string): MissionPlanContent => ({ kind: "mission", text: composition.text, conversationId, mission: composition });
 
-/** A plan version's mission composition, or null for a plan made from an answer (or one that doesn't read as a composition). */
+/**
+ * A plan version's mission composition, or null for a plan made from an answer (or one that doesn't read as a
+ * composition). Read back as it was stored, without the checks made when it was composed, so an old report stays
+ * readable after a later version renders or checks differently.
+ */
 export function compositionOf(plan: ArtifactRecord): MissionReviewComposition | null {
   const content = plan.content as Partial<MissionPlanContent> | null;
   if (plan.kind !== "plan" || content?.kind !== "mission") return null;
-  const parsed = MissionReviewComposition.safeParse(content.mission);
+  const parsed = StoredMissionReviewComposition.safeParse(content.mission);
   return parsed.success ? parsed.data : null;
 }
 
