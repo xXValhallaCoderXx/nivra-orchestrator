@@ -3010,3 +3010,69 @@ be applied. Landing it first gives the coach an integration window before the sh
   is follow-up work.
 - Seeds for checks that can't reach a model: `seedMission` and `seedMissionReview` (`e2e/seed-workspace.ts`).
 - **Evidence:** `docs/acceptance.md`, *Mission foundation (D42, NIV-52)*.
+
+## D43. The task readiness coach: what a brief is missing, worked out without a model; one bounded call when the person asks; and only the changes they tick, saved as the next version from the version it read (2026-10-28)
+
+**Decision.** NIV-53, built on D42's seam. A person turns a vague native task into a small, testable brief, with no
+tracker, repository or mission required. Nate's choices on 27 October: the coach's contract goes on NIV-53, linked from
+NIV-52; a suggested check is plain text to copy with the keyboard; a question points to the field that answers it, in
+the existing editor, with no answer boxes. His review of the plan added these rules: an edit keeps the revision it
+started from; the accepting transaction is synchronous; wording claims no more than was shown; and a reused request id
+compares the whole request.
+
+- **What a brief is missing, without a model** (`shared/task-guidance.ts`). Fixed rules over the brief's own fields:
+  a blank goal; no criterion; a short, vague criterion; a fix that doesn't say what happens now; a large brief with no
+  scope; no failure case; more than eight criteria; parts a repository move cleared; and, only to run it, no acceptance
+  case. Every needed gap shows, and at most three that could help. Finding none says "No basic gaps detected", never
+  that the brief is complete. It never asks for a repository, a baseline or an environment.
+- **The coach is one specialist** (`task-readiness-coach`, version 1, in D42's catalogue): patient, precise, encouraging
+  and concise. It asks at most three questions, each naming a field the person updates, and proposes at most one
+  change per field among six (the goal, criteria, scope, exclusions, context and assumptions), each with its reason.
+  Nothing is deleted: a goal, scope or exclusions is replaced; context is added to; criteria and assumptions are added
+  and reworded by number. Suggested checks and expected results are text, labelled as not run. A test pins the
+  instructions' hash to the version.
+- **What it reads** (`renderCoachPacket`): exactly what a mission review sends for a task (D42's `packetTaskOf`), plus
+  the brief's version, how many baseline checks and frozen files it has, the gaps the rules found, and the mission and
+  findings the person ticks. Not sent: the cases' commands and outputs, baseline checks, frozen files, sources, the
+  execution policy, the state, the repository and its runs, and keys. One renderer makes the text the preview shows and
+  the coach reads.
+- **One bounded call per explicit action.** One model listing, then one forced request, inside one 180 s deadline from
+  the run's first step (the listing within it), the request within min(150 s, time left), at most 4,000 output tokens,
+  an estimated 60,000 input tokens for admission (an estimate, not a cap), no retries and no repair asks. A model whose
+  answer the policy can't force, or another than the one a live recipe names, is refused before any inference.
+- **Bound to what was sent.** The preview's fingerprint covers D42's context binding (the task's brief version and title,
+  the ticked mission and findings, the coach's version), the packet, the preferences, the sharing and an allowed model;
+  a start that differs is refused, with nothing sent. Start reads the task again just before it stores the coaching, so
+  a move, a rename, a brief edit or a deletion during its checks refuses it too, and a finding ticked twice is refused.
+  The packet and preferences stay in the scheduler's memory (D21): the run stores ids and fingerprints, Mastra gets
+  nothing, and the run's title names only the brief version. Credentials are checked over the whole packet, preferences
+  included. A reused request id with any other part of the request is refused.
+- **A coaching is a task-owned run link** (workflow `coach`) with a `coachings` row (workspace migration 7), sent,
+  followed and settled as a task's run is, on the task's project's engine or local. One is open per task. Moving or
+  deleting the task is refused while it is open, and turning sharing off or removing the project stops it. Its report is
+  kept once; what was saved from it, once. A stored binding that can't be read back blocks only the save.
+- **Saving is the person's.** They tick changes; the host resolves what needs waiting for, then in one synchronous
+  transaction re-reads the task, runs D42's `validateBinding` and the coach's own checks (the repository, the coach's
+  version, a save already made, a usable answer), makes the ticked changes to the version the coach read, all or
+  nothing, checks them as any edit is checked, and writes the next version, the task's change and the applied mark.
+  Anything stale refuses the save and says what changed. A masked change can't be ticked. Saving never calls the model.
+- **The coach never** changes Ready, Active or Completed, waives a run prerequisite, grants consent, approves a patch,
+  adds an acceptance case or writes a ticket. A task's attempts are its runs alone (`attemptsOf`), so a coaching never
+  stands in for one.
+- **An edit keeps its base.** The task page saves an edit from the revision it started from, never the one a refresh
+  shows; a refused save keeps the editor open with the text and says what changed.
+
+**Why.** A filled field isn't a testable brief, and a person often can't see what is missing. A model can ask the few
+questions that matter and propose wording, but it can't know the task, so its output is a suggestion the person picks
+from, saved only against the version it read. Fixed rules catch the common gaps for free, and spare a small, clear task
+a questionnaire.
+
+**Consequences.**
+- Protocol 13 and workspace migration 7. A profile this build opens is refused by older builds ("saved by a newer
+  version of Nivra"); a v6 profile moves to v7 with every row as it was. The engine's migrations are unchanged. Track
+  B's mission review merges after this and takes the next numbers (protocol 14, D44).
+- The coach is advisory: its answers are kept with their binding and stay readable after a restart, labelled when stale.
+  A preference changed since an answer is a note, not a block.
+- Deferred by Nate's choice: a Copy button with a clipboard bridge, and answer boxes with a conversation history.
+- Stand-ins prove the contract, not the coach's quality. No live coaching has run; one needs its own approved recipe.
+- **Evidence:** `docs/acceptance.md`, *Task readiness coach (D43, NIV-53)*.
