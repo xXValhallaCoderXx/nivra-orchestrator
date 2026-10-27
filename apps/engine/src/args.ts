@@ -15,6 +15,11 @@ export interface EngineArgs {
   sandboxesUrl: string | null;
   /** Tests only: a stub of Tavily on this machine, in place of the real one (D37). Null in normal use. */
   tavilyUrl: string | null;
+  /**
+   * Tests only (NIV-35): a file naming the apply writer's step to hold before, so a test can stop the engine there and
+   * see the apply reconciled after a restart. The host passes it only when unpackaged. Null in normal use.
+   */
+  applyHold: string | null;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "localhost"]);
@@ -29,7 +34,7 @@ export class ArgsError extends Error {
 export const DEFAULT_HEARTBEAT_MS = 30_000;
 
 export function readArgs(argv: readonly string[]): EngineArgs {
-  let values: { stdio?: boolean; home?: string; instance?: string; "heartbeat-ms"?: string; "token-factory-url"?: string; "sandboxes-url"?: string; "tavily-url"?: string };
+  let values: { stdio?: boolean; home?: string; instance?: string; "heartbeat-ms"?: string; "token-factory-url"?: string; "sandboxes-url"?: string; "tavily-url"?: string; "apply-hold"?: string };
   try {
     ({ values } = parseArgs({
       args: [...argv],
@@ -41,6 +46,7 @@ export function readArgs(argv: readonly string[]): EngineArgs {
         "token-factory-url": { type: "string" },
         "sandboxes-url": { type: "string" },
         "tavily-url": { type: "string" },
+        "apply-hold": { type: "string" },
         // A marker that lets an orphan check find engine processes by their command line; it means nothing else.
         "nivra-engine": { type: "boolean" },
       },
@@ -63,7 +69,13 @@ export function readArgs(argv: readonly string[]): EngineArgs {
     tokenFactoryUrl: loopbackUrl("--token-factory-url", values["token-factory-url"]),
     sandboxesUrl: loopbackUrl("--sandboxes-url", values["sandboxes-url"]),
     tavilyUrl: loopbackUrl("--tavily-url", values["tavily-url"]),
+    applyHold: values["apply-hold"] === undefined ? null : absolute("--apply-hold", values["apply-hold"]),
   };
+}
+
+function absolute(flag: string, value: string): string {
+  if (!isAbsolute(value)) throw new ArgsError(`${flag} must be an absolute path.`);
+  return value;
 }
 
 /** A test endpoint must be on this machine, so the key can never be sent anywhere else through it. */

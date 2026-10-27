@@ -8,7 +8,7 @@ import { type ApplyIo, nodeIo } from "./io.ts";
 import { ApplyJournal, type ApplyRecord } from "./journal.ts";
 import { ApplyRefusal, applyRefusalWords } from "./plan.ts";
 import { revalidate } from "./revalidate.ts";
-import { reconcile, release, restore, writeChange, type ApplyResult } from "./writer.ts";
+import { reconcile, release, restore, writeChange, type ApplyHook, type ApplyResult } from "./writer.ts";
 
 /**
  * Applying proposals on the engine that owns the checkout (D40): one at a time, each claimed, checked again and
@@ -28,6 +28,8 @@ export interface ApplyServiceDeps {
   findGit(): string | null;
   platform: NodeJS.Platform;
   io?: ApplyIo;
+  /** Called before each of the writer's steps, by name: a test's hold (`--apply-hold`), never set in normal use. */
+  before?: ApplyHook;
   now?: () => Date;
 }
 
@@ -98,7 +100,7 @@ export class ApplyService {
       try {
         session = await this.#deps.backend.open({ workspace: params.repoPath });
         const plan = await revalidate({ proposal, approvedHash: params.approvedHash, repoPath: params.repoPath, project: params.project, target: params.target, task: params.task, git: { session, git } });
-        await writeChange({ applyId, plan, journal: this.#journal, engineId: this.#deps.homeId, io: this.#io });
+        await writeChange({ applyId, plan, journal: this.#journal, engineId: this.#deps.homeId, io: this.#io, ...(this.#deps.before ? { before: this.#deps.before } : {}) });
       } catch (error) {
         if (error instanceof ApplyRefusal) this.#journal.refuse(applyId, error);
         // Anything else before the intent was recorded wrote nothing of the person's: the claim is let go.

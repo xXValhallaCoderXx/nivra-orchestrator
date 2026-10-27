@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   ChatInput,
@@ -37,6 +37,7 @@ import {
 } from "@nivra/domain";
 import { installGitAdvice } from "./advice.ts";
 import { ApplyRequestRefusal, ApplyService } from "./apply/service.ts";
+import type { ApplyHook } from "./apply/writer.ts";
 import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
 import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, type Diagnostic } from "./diagnostics.ts";
 import { Database, EngineLockedError } from "./db/database.ts";
@@ -213,6 +214,25 @@ export interface Engine {
 }
 
 /**
+ * A test's hold on the apply writer (NIV-35): before the step its file names, the writer writes `<file>.held` and
+ * waits forever, so the test stops the engine with the apply part way and sees it reconciled after a restart. The
+ * engine answers everything else meanwhile. With no file, or another step named, it holds nothing.
+ */
+function applyHold(file: string): ApplyHook {
+  return async (step) => {
+    let wanted: string;
+    try {
+      wanted = readFileSync(file, "utf8").trim();
+    } catch {
+      return;
+    }
+    if (step !== wanted) return;
+    writeFileSync(`${file}.held`, `${step}\n`, { mode: 0o600 });
+    await new Promise<never>(() => undefined);
+  };
+}
+
+/**
  * Builds the engine for one home: takes the home's lock (D7), recovers interrupted runs, and answers the host over
  * `output`. Mastra and its storage driver are imported here rather than at the top, so a damaged runtime is reported
  * as such instead of crashing the import.
@@ -279,6 +299,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // Applying proposals to the person's checkout (D40). An apply an earlier engine left writing is reconciled here,
   // before any apply call is answered, writing nothing of the person's.
   const applies = new ApplyService({
+    ...(options.applyHold ? { before: applyHold(options.applyHold) } : {}),
     database,
     proposal: (runId) => store.proposal(runId),
     verified: (runId) => {
