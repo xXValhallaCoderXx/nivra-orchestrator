@@ -2443,7 +2443,8 @@ their own PR.
 
 Track C: what a task's brief is missing, worked out without a model; the task readiness coach, one bounded call when
 the person asks; and only the changes the person ticks, saved as the next brief version from the version the coach read.
-On `feature/niv-53`, from `main` at `c854b50`, carrying Track B's foundation (D42, up to `23dd16b`) until it is on main.
+On `feature/niv-53` (PR 27), from `main` at `c854b50`, with Track B's foundation (D42, PR 26) merged in up to `23dd16b`,
+as it then landed on main (`fc1c98a`).
 No tracker, repository or mission is needed.
 
 | Commit | What |
@@ -2516,9 +2517,13 @@ No tracker, repository or mission is needed.
   - a race in Start, Update FIELD working over a save or another edit, and copy that claimed more than it showed.
   They are fixed in `7f0755c`, `d6ab221` and `95f5f99`. With its guard removed, the test for the finding ticked twice,
   the binding check, the race and the removal stop each fails (above).
-- **Not run: `test:windows`.** AGENTS.md asks for it when the main process and the preload change, and the Windows
-  store spec now expects v7. A Windows turn needs Nate's approval; Track A has cleared one from its side. Nothing here
-  changes a target, the supervisor or staging, so `verify:windows` isn't needed.
+- `test:windows` at `a8c9905` (the code as at `95f5f99`), in one offline Windows turn that Nate approved and Track A
+  cleared (28 Oct, 02:42 to 02:45 SGT). It ran under the shared lock, after `stage:runtime all` and
+  `pnpm dev:win --no-launch`, with no Nivra running on Windows and no engine from a test or release home in WSL
+  beforehand. 12 passed (`windows.spec.ts` 8, `workspace-windows.spec.ts` 4, the store at v7), none failed or skipped.
+  This includes the check that the release's WSL home, `~/.nivra`, was as it was. This turn tests Track C's branch on
+  its own; the combined build of Tracks B and C still needs its own validation, on candidate 3. Nothing here changes a
+  target, the supervisor or staging, so `verify:windows` isn't needed.
 - **Not run: a live coaching.** A recipe is prepared, and not approved. The stand-ins prove the contract, not the coach's
   quality.
 
