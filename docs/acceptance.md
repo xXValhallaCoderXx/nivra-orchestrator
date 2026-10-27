@@ -2322,11 +2322,12 @@ and the engine here; then an independent review.
   until these checks (`80608bc`, `c491eed`).
 - **The independent review** (27 October) found nine problems; each is fixed with a test that fails with its fix
   undone (D41).
+- **The Windows turn:** `pnpm dev:win --no-launch`, then `test:windows`, 12 of 12 passed on the Windows build of
+  `3a56d75` (this branch's code, with NIV-35's tests on top). Targets, the supervisor and staging didn't change, so
+  `verify:windows` wasn't run.
 
-**Not shown here:**
-- The Windows turn (`pnpm dev:win --no-launch`, then `test:windows`). Targets, the supervisor and staging didn't
-  change, so `verify:windows` isn't needed.
-- A task run from the environment with the real model: that is NIV-35's live run, with its own recipe.
+**Not shown here:** a task run from the environment with the real model. That is NIV-35's live run, with its own
+recipe.
 
 ### Deferred to a later milestone (kept, not dropped)
 
