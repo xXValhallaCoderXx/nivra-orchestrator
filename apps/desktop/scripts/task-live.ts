@@ -185,9 +185,9 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
       "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
       "the script adds the repository as a project, and allows its model sharing and its uploads, each through its own dialog",
       "the script previews the environment and checks its fingerprint is the one above, claims the approval, and presses Prepare once",
-      "once it is prepared, the script creates the task with the brief above, marks it ready, and previews the run. It checks the preview is bound to this brief's digest, this commit's snapshot and the environment just prepared (the fingerprint Start sends, which the app checks again), and shows the frozen files above with their hashes, then presses Start once",
+      "once it is prepared, the script creates the task with the brief above, marks it ready, and previews the run. It checks the preview is bound to this brief's digest, this commit's snapshot and the environment just prepared (the fingerprint Start sends, which the app checks again), shows the frozen files above with their hashes, and names the model above in the app's own words, then presses Start once",
       "Nate reads the proposal and its checks, with the review points below, and decides: Approve and then Accept, Reject, or a revision (which this approval doesn't run)",
-      "on Nate's go-ahead, the app is closed and relaunched, the keys are removed, and ~/.nivra is checked unchanged",
+      "on Nate's go-ahead, the script removes the keys through Settings' own calls and checks they are gone, closes the app, and checks that ~/.nivra and ~/.nivra-dev are unchanged",
     ],
     requests: [
       `Nebius: the image listing; an import of ${ENVIRONMENT_BASE.tag} if the project has none; one upload of the environment's inputs (${shown.environment.sentBytes} bytes); one preparation with networking on`,
