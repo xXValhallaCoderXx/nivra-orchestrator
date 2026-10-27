@@ -237,6 +237,8 @@ const APPLY_OPEN = "This task's change is being applied, or what was applied nee
 const APPLY_NEVER_SENT = "The approval never reached the engine, so nothing was written. Approve the change again when you're ready.";
 const SETTLE_LOST = "Nivra didn't hear back from the engine about settling this change, so it is asking how that went.";
 const SETTLE_ASKING = "Nivra is still asking the engine how settling this change went. Wait for it, then try again.";
+const BRIEF_MOVED = "The task isn't completed: its brief changed after this run. Run it on the new brief, or complete the task yourself.";
+const REPOSITORY_MOVED = "The task isn't completed: it now runs on another repository than the one this run changed. Run it there, or complete the task yourself.";
 const KEEP_ASIDE = "A file the change replaces is missing from your checkout, its original kept aside, so this can't be kept as it is. Restore the originals instead.";
 const SETTLE_BEFORE_DELETE = "Settle this task's change first: accept it, keep or restore what was applied, or dismiss it. Then delete the task.";
 const DECIDING = "A decision on this run is being sent. Wait for it, then try again.";
@@ -868,7 +870,7 @@ export class Host {
     const workspace = this.#workspaceDb();
     const task = this.#taskAt(taskId, revision);
     if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
-    if (this.#applyOpen(taskId)) throw new Error(APPLY_OPEN);
+    this.#holdForSettling(taskId, "its brief can't change");
     const fields = this.#briefFields(input);
     this.#refuseInBrief(task.title, fields, await this.#knownSecrets());
     const latest = versionsOf(workspace, taskId).at(-1)!;
@@ -885,7 +887,7 @@ export class Host {
     const workspace = this.#workspaceDb();
     const task = this.#taskAt(taskId, revision);
     if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
-    if (this.#applyOpen(taskId)) throw new Error(APPLY_OPEN);
+    this.#holdForSettling(taskId, "its brief can't change");
     const plan = getArtifact(workspace, planId);
     if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
     const latest = versionsOf(workspace, taskId).at(-1)!;
@@ -905,7 +907,7 @@ export class Host {
   setTaskProject(taskId: string, revision: number, projectId: string | null): TaskView {
     const workspace = this.#workspaceDb();
     const task = this.#taskAt(taskId, revision);
-    if (this.#applyOpen(taskId)) throw new Error(APPLY_OPEN);
+    this.#holdForSettling(taskId, "it can't move to another repository");
     if (projectId !== null) this.#project(projectId);
     const latest = versionsOf(workspace, taskId).at(-1)!;
     const cleared = briefForRepository(BriefContentSchema.parse(latest.content), projectId);
@@ -1062,7 +1064,7 @@ export class Host {
       if (!brief || !packet || "blocked" in packet) throw new Error("The brief this run ran can't be read as it was, so its change can't be approved. Run the task again.");
       const requestId = randomUUID();
       // Saved before anything is sent: after this, the apply is only ever asked about by its request id.
-      if (!decide(workspace, attempt.id, { kind: "approved", requestId }, new Date().toISOString())) throw new Error(DECIDED);
+      if (!decide(workspace, attempt.id, { kind: "approved", requestId, projectId: project.id }, new Date().toISOString())) throw new Error(DECIDED);
       const params: ApplyParams = {
         requestId,
         runId: attempt.runId!,
@@ -1110,6 +1112,7 @@ export class Host {
       const task = getTask(workspace, taskId);
       if (!task) throw new Error("That task is no longer in the list.");
       if (task.state === "completed") throw new Error("This task is completed. Reopen it to ask for a revision.");
+      this.#holdForSettling(taskId, "its brief can't change", attempt.id);
       const latest = versionsOf(workspace, taskId).at(-1)!;
       const before = BriefContentSchema.parse(latest.content);
       const context = before.context ? `${before.context}\n${text}` : text;
@@ -1124,8 +1127,9 @@ export class Host {
   }
 
   /**
-   * Settles an attempt's apply as the person decides (D40): accepts an applied change, which completes the task;
-   * dismisses one that wasn't applied, so its change can be decided on again; or keeps a partial one as it is. Its engine removes the copies it kept that still match the original or its own bytes. Which
+   * Settles an attempt's apply as the person decides (D40): accepts an applied change, which completes the task unless
+   * it has moved on since the run; dismisses one that wasn't applied, so its change can be decided on again; or keeps a
+   * partial one as it is. Its engine removes the copies it kept that still match the original or its own bytes. Which
    * way is saved before it is sent, so an answer that doesn't come back is read back, after a restart too, never resent.
    */
   async settleTaskChange(taskId: string, attemptId: string, as: ApplyResolution): Promise<TaskAttemptView> {
@@ -1186,7 +1190,9 @@ export class Host {
   /**
    * Records what an apply's engine says after a settle or a restore, and what follows from it, in one write: the
    * settling saved before it was sent is answered; a dismissed result takes the approval back, so the change can be
-   * decided on again; an accepted change completes its task, which only the person's acceptance does.
+   * decided on again; an accepted change completes its task, which only the person's acceptance does, unless the task
+   * has moved on since the run (its brief has a newer version, or it runs on another repository): then the acceptance
+   * keeps why the task isn't completed.
    */
   async #recordSettled(attempt: AttemptRecord, requestId: string, view: ApplyView): Promise<void> {
     this.#keepSettled(attempt, requestId, maskValue(view, await this.#knownSecrets()));
@@ -1200,9 +1206,11 @@ export class Host {
       clearSettle(workspace, attempt.id, requestId);
       if (view.resolution === "dismissed") withdrawDecision(workspace, attempt.id, requestId, null);
       if (view.resolution !== "accepted") return;
-      if (!acceptChange(workspace, attempt.id, requestId, at)) return;
       const task = getTask(workspace, attempt.taskId);
-      if (task && task.state !== "completed") updateTask(workspace, attempt.taskId, task.revision, { state: "completed" }, at);
+      const sentFor = attemptRecord(workspace, attempt.id).apply?.projectId;
+      const movedOn = !task ? null : versionsOf(workspace, task.id).at(-1)?.id !== attempt.briefId ? BRIEF_MOVED : task.projectId !== sentFor ? REPOSITORY_MOVED : null;
+      if (!acceptChange(workspace, attempt.id, requestId, at, movedOn)) return;
+      if (task && !movedOn && task.state !== "completed") updateTask(workspace, attempt.taskId, task.revision, { state: "completed" }, at);
     });
   }
 
@@ -2017,6 +2025,7 @@ export class Host {
       revisionNote: record.revisionNote,
       apply: this.#applyView(attempt, record),
       acceptedAt: record.acceptedAt,
+      acceptNote: record.acceptNote,
       // From what was kept when the run ended, until its report is read below.
       actions: this.#actionsOf(attempt, record, record.outcome?.verified ?? false, Boolean(record.outcome?.proposalHash)),
       createdAt: attempt.createdAt,
@@ -2315,6 +2324,21 @@ export class Host {
       const view = record.apply?.view;
       return this.#applyCalls.has(attempt.id) || record.settle !== null || applyUnsettled(record) || (view !== undefined && view !== null && view.resolution === null && (view.status === "partial" || view.status === "unknown"));
     });
+  }
+
+  /**
+   * Refuses changing what a task's runs answer to, its brief or its repository, while any of its applies isn't settled
+   * (D40): one going or being settled, or one its engine reported and the person hasn't settled. Accepting an older
+   * run's change would otherwise settle a task that has moved on. `except` is the attempt being decided on now.
+   */
+  #holdForSettling(taskId: string, what: string, except?: string): void {
+    const workspace = this.#workspaceDb();
+    for (const attempt of attemptsOf(workspace, taskId)) {
+      if (attempt.id === except) continue;
+      const record = attemptRecord(workspace, attempt.id);
+      if (this.#applyCalls.has(attempt.id) || applyUnsettled(record) || record.settle) throw new Error(`This task's change is still being applied or settled, so ${what}. Wait for it to finish, then try again.`);
+      if (this.#applyUnresolved(record)) throw new Error(`This task's change needs settling first, so ${what}: accept it, keep or restore what was applied, or dismiss it. Then try again.`);
+    }
   }
 
   /**

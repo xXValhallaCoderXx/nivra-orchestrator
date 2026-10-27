@@ -3014,14 +3014,14 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     // Before its engine is online, the saved settling holds the task, and nothing about the change is offered.
     const waiting = again.host.task(taskId);
     assert.deepEqual([waiting.summary.state, waiting.runBlocked], ["active", "The last run's change is being applied or settled. Wait for it to finish, then try again."]);
-    await assert.rejects(again.host.reviseBrief(taskId, waiting.revision, { ...FIELDS, context: "More." }), /^Error: This task's change is being applied, or what was applied needs settling/);
+    await assert.rejects(again.host.reviseBrief(taskId, waiting.revision, { ...FIELDS, context: "More." }), /^Error: This task's change is still being applied or settled, so its brief can't change/);
     // Its engine coming online is enough: nothing asks for the run.
     await again.host.open(ids[0]!);
     await waitFor(() => again.host.task(taskId).summary.state === "completed", "the settle to be read back after the restart");
     const read = await again.host.taskAttempt(taskId, attemptId);
     assert.deepEqual(
-      [read.apply?.resolution, read.apply?.unresolved, read.acceptedAt !== null, read.actions, calls().filter((call) => call === "task.dismiss").length],
-      ["accepted", null, true, [], 1],
+      [read.apply?.resolution, read.apply?.unresolved, read.acceptedAt !== null, read.acceptNote, read.actions, calls().filter((call) => call === "task.dismiss").length],
+      ["accepted", null, true, null, [], 1],
     );
   });
 
@@ -3039,6 +3039,39 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     assert.deepEqual([read.decision, read.apply?.resolution, read.actions, calls().filter((call) => call === "task.dismiss").length], [null, "dismissed", ["approve", "reject", "revise"], 0]);
   });
 
+  it("refuses changing a task's brief, or moving it to another repository, while its change isn't settled", async () => {
+    const { host, ids } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    const applied = await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    assert.deepEqual([applied.apply?.status, applied.actions], ["applied", ["accept"]]);
+    // Applied and not yet accepted: the brief it ran stays the task's, and so does its repository.
+    const task = host.task(taskId);
+    await assert.rejects(
+      host.reviseBrief(taskId, task.revision, { ...FIELDS, context: "More." }),
+      /^Error: This task's change needs settling first, so its brief can't change: accept it, keep or restore what was applied, or dismiss it\. Then try again\.$/,
+    );
+    assert.throws(() => host.setTaskProject(taskId, task.revision, null), /^Error: This task's change needs settling first, so it can't move to another repository: accept it/);
+    const accepted = await host.settleTaskChange(taskId, attemptId, "accepted");
+    const after = host.task(taskId);
+    assert.deepEqual([accepted.apply?.resolution, accepted.acceptNote, after.summary.state, after.brief.version, after.summary.projectId], ["accepted", null, "completed", 1, ids[0]]);
+  });
+
+  it("settles a change made for an older brief when it is accepted, but doesn't complete the task, and says why", async () => {
+    const { host, ids } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    // The brief moves on while the run waits on a decision; then the older run's change is approved and accepted.
+    await host.reviseBrief(taskId, host.task(taskId).revision, { ...FIELDS, context: "Greet in French too." });
+    assert.equal(host.task(taskId).brief.version, 2);
+    const applied = await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    assert.deepEqual([applied.apply?.status, applied.actions], ["applied", ["accept"]]);
+    const accepted = await host.settleTaskChange(taskId, attemptId, "accepted");
+    assert.deepEqual(
+      [accepted.apply?.resolution, accepted.acceptedAt !== null, accepted.actions, accepted.acceptNote],
+      ["accepted", true, [], "The task isn't completed: its brief changed after this run. Run it on the new brief, or complete the task yourself."],
+    );
+    const after = host.task(taskId);
+    assert.deepEqual([after.summary.state, after.runBlocked, after.attempts[0]?.acceptedAt !== null], ["ready", null, true]);
+  });
 
   it("doesn't offer keeping a partial apply as it is while a file is moved aside, and refuses deleting a task whose applied change isn't settled", async () => {
     const { host, ids, home } = await gatedHost();

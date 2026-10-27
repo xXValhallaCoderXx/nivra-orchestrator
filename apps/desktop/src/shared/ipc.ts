@@ -597,8 +597,10 @@ export interface TaskAttemptView {
   revisionNote: string | null;
   /** Its apply, once approved. */
   apply: TaskApplyView | null;
-  /** When the person accepted the applied change: only then is the task completed. */
+  /** When the person accepted the applied change: only that completes the task, and only when it hasn't moved on. */
   acceptedAt: string | null;
+  /** Why accepting didn't complete the task: its brief or its repository changed after this run. */
+  acceptNote: string | null;
   /** What the person may do now. */
   actions: AttemptAction[];
   createdAt: string;

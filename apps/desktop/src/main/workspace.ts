@@ -511,7 +511,7 @@ export type SettleIntent = "accepted" | "dismissed" | "kept" | "restore";
  * What became of an attempt (D40), recorded apart: its run's outcome, the person's decision on its proposal, its apply
  * (the request id saved before it was sent, the engine's last answer about it, or the host's own note when the engine
  * couldn't say), a settling of it saved before it was sent and not yet answered, and the person's acceptance of an
- * applied change.
+ * applied change, with why it didn't complete the task when the task had moved on since the run.
  */
 export interface AttemptDecisionRecord {
   attemptId: string;
@@ -519,15 +519,16 @@ export interface AttemptDecisionRecord {
   decision: "approved" | "rejected" | "revision" | null;
   decidedAt: string | null;
   revisionNote: string | null;
-  apply: { requestId: string; view: ApplyView | null; readAt: string | null; note: string | null } | null;
+  apply: { requestId: string; projectId: string; view: ApplyView | null; readAt: string | null; note: string | null } | null;
   settle: { intent: SettleIntent; at: string } | null;
   acceptedAt: string | null;
+  acceptNote: string | null;
 }
 
 /** An attempt's record, or an empty one: nothing decided, nothing applied. */
 export function attemptRecord(workspace: WorkspaceDb, attemptId: string): AttemptDecisionRecord {
   const row = workspace.db.prepare("SELECT * FROM attempt_records WHERE attempt_id = ?").get(attemptId);
-  if (!row) return { attemptId, outcome: null, decision: null, decidedAt: null, revisionNote: null, apply: null, settle: null, acceptedAt: null };
+  if (!row) return { attemptId, outcome: null, decision: null, decidedAt: null, revisionNote: null, apply: null, settle: null, acceptedAt: null, acceptNote: null };
   const requestId = strOrNull(row["apply_request_id"]);
   return {
     attemptId,
@@ -535,9 +536,10 @@ export function attemptRecord(workspace: WorkspaceDb, attemptId: string): Attemp
     decision: strOrNull(row["decision"]) as AttemptDecisionRecord["decision"],
     decidedAt: strOrNull(row["decided_at"]),
     revisionNote: strOrNull(row["revision_note"]),
-    apply: requestId === null ? null : { requestId, view: row["apply_json"] ? (JSON.parse(str(row["apply_json"])) as ApplyView) : null, readAt: strOrNull(row["apply_read_at"]), note: strOrNull(row["apply_note"]) },
+    apply: requestId === null ? null : { requestId, projectId: str(row["apply_project_id"]), view: row["apply_json"] ? (JSON.parse(str(row["apply_json"])) as ApplyView) : null, readAt: strOrNull(row["apply_read_at"]), note: strOrNull(row["apply_note"]) },
     settle: row["settle_intent"] === null ? null : { intent: str(row["settle_intent"]) as SettleIntent, at: str(row["settle_requested_at"]) },
     acceptedAt: strOrNull(row["accepted_at"]),
+    acceptNote: strOrNull(row["accept_note"]),
   };
 }
 
@@ -571,17 +573,18 @@ export function recordOutcome(workspace: WorkspaceDb, attemptId: string, outcome
 
 /**
  * Records the person's decision on an attempt's proposal, once: false when one is recorded already. An approval saves
- * its apply's request id with it, before anything is sent, and starts a new apply record.
+ * its apply's request id and the repository it is sent for with it, before anything is sent, and starts a new apply
+ * record.
  */
-export function decide(workspace: WorkspaceDb, attemptId: string, decision: { kind: "approved"; requestId: string } | { kind: "rejected" } | { kind: "revision"; note: string }, at: string): boolean {
+export function decide(workspace: WorkspaceDb, attemptId: string, decision: { kind: "approved"; requestId: string; projectId: string } | { kind: "rejected" } | { kind: "revision"; note: string }, at: string): boolean {
   return workspace.tx((db) => {
     db.prepare("INSERT INTO attempt_records (attempt_id) VALUES (?) ON CONFLICT (attempt_id) DO NOTHING").run(attemptId);
     const approved = decision.kind === "approved";
     const changed = db
       .prepare(
-        `UPDATE attempt_records SET decision = ?, decided_at = ?, revision_note = ?${approved ? ", apply_request_id = ?, apply_json = NULL, apply_read_at = NULL, apply_note = NULL" : ""} WHERE attempt_id = ? AND decision IS NULL AND accepted_at IS NULL`,
+        `UPDATE attempt_records SET decision = ?, decided_at = ?, revision_note = ?${approved ? ", apply_request_id = ?, apply_project_id = ?, apply_json = NULL, apply_read_at = NULL, apply_note = NULL" : ""} WHERE attempt_id = ? AND decision IS NULL AND accepted_at IS NULL`,
       )
-      .run(...([decision.kind, at, decision.kind === "revision" ? decision.note : null, ...(approved ? [decision.requestId] : []), attemptId] as string[]));
+      .run(...([decision.kind, at, decision.kind === "revision" ? decision.note : null, ...(approved ? [decision.requestId, decision.projectId] : []), attemptId] as string[]));
     return Number(changed.changes) === 1;
   });
 }
@@ -610,9 +613,12 @@ export function withdrawDecision(workspace: WorkspaceDb, attemptId: string, requ
   );
 }
 
-/** The person accepted the change its apply wrote. */
-export function acceptChange(workspace: WorkspaceDb, attemptId: string, requestId: string, at: string): boolean {
-  return Number(workspace.db.prepare("UPDATE attempt_records SET accepted_at = ? WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND accepted_at IS NULL").run(at, attemptId, requestId).changes) === 1;
+/**
+ * The person accepted the change its apply wrote; `note` says why that didn't complete the task (its brief or its
+ * repository changed since the run), when it didn't.
+ */
+export function acceptChange(workspace: WorkspaceDb, attemptId: string, requestId: string, at: string, note: string | null = null): boolean {
+  return Number(workspace.db.prepare("UPDATE attempt_records SET accepted_at = ?, accept_note = ? WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND accepted_at IS NULL").run(at, note, attemptId, requestId).changes) === 1;
 }
 
 /** A review of one saved plan version (D31): what it was bound to, the report its engine saved, and its run link. */

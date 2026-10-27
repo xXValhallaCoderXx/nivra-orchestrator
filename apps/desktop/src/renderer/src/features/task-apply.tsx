@@ -66,7 +66,7 @@ function foundText(found: ApplyPath["found"]): string {
 
 /** What each way of settling an apply does, said beside its button. */
 const SETTLE: Record<"accept" | "dismiss" | "restore" | "keep", { label: string; says: string; testid: string }> = {
-  accept: { label: "Accept the change", says: "The task is completed. Nivra removes the copies it kept that are still your original or its own; your checkout stays as it is.", testid: "task-apply-accept" },
+  accept: { label: "Accept the change", says: "Completes the task, unless its brief or repository changed after this run. Nivra removes the copies it kept that are still your original or its own; your checkout stays as it is.", testid: "task-apply-accept" },
   dismiss: { label: "Dismiss", says: "Closes this result. Nivra removes the copies it kept that are still your original or its own, and keeps any other.", testid: "task-apply-dismiss" },
   restore: { label: "Restore the originals", says: "Puts each original back where the change replaced it, and takes out the files and folders the change added, never over a version another program saved.", testid: "task-apply-restore" },
   keep: { label: "Keep as is", says: "Leaves your checkout as it is now. Nivra removes the copies it kept that are still your original or its own.", testid: "task-apply-keep" },
@@ -341,7 +341,12 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
       )}
       {apply.resolution && (
         <Text size="sm" data-testid="task-apply-resolution">
-          {RESOLVED[apply.resolution]}
+          {apply.resolution === "accepted" && value.acceptNote ? "You accepted the change." : RESOLVED[apply.resolution]}
+        </Text>
+      )}
+      {apply.resolution === "accepted" && value.acceptNote && (
+        <Text size="sm" c="var(--nivra-warning)" data-testid="task-apply-accept-note">
+          {value.acceptNote}
         </Text>
       )}
       {keepWithheld && (

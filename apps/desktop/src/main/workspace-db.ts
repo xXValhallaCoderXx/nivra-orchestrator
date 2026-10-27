@@ -211,9 +211,10 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   `
   -- What became of a task's attempt (D40), recorded apart: how its run ended, kept when it ended, so the history shows
   -- without its engine; the person's decision on its proposal; its apply, by the request id saved before task.apply is
-  -- sent, with the engine's last answer about it (or the host's own note when the engine couldn't say); a settling of it
-  -- (accepted, dismissed, kept, or a restore), saved before it is sent, so a restart reads its end back rather than
-  -- sending it again; and the person's acceptance of an applied change.
+  -- sent and the repository it was sent for, with the engine's last answer about it (or the host's own note when the
+  -- engine couldn't say); a settling of it (accepted, dismissed, kept, or a restore), saved before it is sent, so a
+  -- restart reads its end back rather than sending it again; and the person's acceptance of an applied change, with why
+  -- it didn't complete the task when the task had moved on since the run.
   CREATE TABLE attempt_records (
     attempt_id TEXT PRIMARY KEY REFERENCES run_links(id) ON DELETE CASCADE,
     outcome TEXT,
@@ -225,19 +226,23 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
     decided_at TEXT,
     revision_note TEXT,
     apply_request_id TEXT UNIQUE,
+    apply_project_id TEXT,
     apply_json TEXT,
     apply_read_at TEXT,
     apply_note TEXT,
     settle_intent TEXT CHECK (settle_intent IN ('accepted', 'dismissed', 'kept', 'restore')),
     settle_requested_at TEXT,
     accepted_at TEXT,
+    accept_note TEXT,
     CHECK ((outcome IS NULL) = (outcome_at IS NULL)),
     CHECK ((decision IS NULL) = (decided_at IS NULL)),
+    CHECK ((apply_project_id IS NULL) = (apply_request_id IS NULL)),
     CHECK ((apply_json IS NULL) = (apply_read_at IS NULL)),
     CHECK (revision_note IS NULL OR decision = 'revision'),
     CHECK (accepted_at IS NULL OR (decision = 'approved' AND apply_request_id IS NOT NULL)),
     CHECK ((settle_intent IS NULL) = (settle_requested_at IS NULL)),
-    CHECK (settle_intent IS NULL OR (decision = 'approved' AND apply_request_id IS NOT NULL))
+    CHECK (settle_intent IS NULL OR (decision = 'approved' AND apply_request_id IS NOT NULL)),
+    CHECK (accept_note IS NULL OR accepted_at IS NOT NULL)
   ) STRICT;
   CREATE TRIGGER attempt_records_task BEFORE INSERT ON attempt_records
   WHEN NOT EXISTS (SELECT 1 FROM run_links WHERE id = NEW.attempt_id AND workflow_id = 'task')
