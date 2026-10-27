@@ -2495,10 +2495,14 @@ of up to five selected tasks by the council's specialists, findings that open th
   showed a named model the listing lacks refused with no chat request.
 - An independent review by a fresh agent at `1be62b3` found four defects and eight smaller points, all fixed in
   `51d2e68`, `9cfe752` and `61b4193`. Each fix has a test that fails without it; three were shown by undoing the fix.
-- **Not run: `test:windows`**, which AGENTS.md asks for when the main process or preload changes. It needs a Windows
-  turn, with Nate's approval and Track A's clearance; `workspace-windows.spec.ts` gains a mission test (`7745c6e`) for
-  it. Nothing here changes a target, the supervisor or staging, so `verify:windows` isn't needed.
-- **Not run: the live check.** Its recipe and digest wait for Nate's approval; no paid call was made.
+- **Not run on this branch: `test:windows`**, which AGENTS.md asks for when the main process or preload changes. By
+  Nate's decision (28 Oct, 01:44 SGT), one Windows staging and test run on the final candidate containing Tracks B and
+  C covers it, in Track A's candidate step, including `workspace-windows.spec.ts`'s mission test (`7745c6e`). Windows
+  validation is pending on that candidate. Nothing here changes a target, the supervisor or staging, so
+  `verify:windows` isn't needed for this branch.
+- **Not run: the live check.** Nate deferred it until after the integration with Track C and the renumbering. The
+  digest printed at `68a49df` is withdrawn: a fresh recipe and digest will be printed for the revision to be tested,
+  and nothing runs under the old one. No paid call was made.
 
 ### Deferred to a later milestone (kept, not dropped)
 
