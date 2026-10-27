@@ -247,7 +247,8 @@ function cancelsIn(entries: readonly JournalEntry[]): { stopped: string[]; alrea
 }
 
 /** What the service keeps from a session, counted from its journal: the record that outlives any client. */
-function retainedIn(entries: readonly JournalEntry[]): CloseReport["retained"] {
+/** What the provider keeps of what a journal records: its uploads, the images reported, and every operation known or maybe started. */
+export function retainedIn(entries: readonly JournalEntry[]): CloseReport["retained"] {
   const uploads = entries.filter((e) => e.kind === "upload").length;
   const images = new Set(entries.flatMap((e) => (e.kind === "image" ? [e.image] : []))).size;
   const known = new Set(entries.flatMap((e) => (e.kind === "submitted" || e.kind === "found" ? [e.operationId] : [])));
@@ -261,7 +262,7 @@ function retainedIn(entries: readonly JournalEntry[]): CloseReport["retained"] {
  * only the journals that may still need something, however many sessions came before. It is kept, not deleted: it is
  * the record of what was sent.
  */
-function settleJournal(path: string): void {
+export function settleJournal(path: string): void {
   const folder = join(dirname(path), "settled");
   mkdirSync(folder, { recursive: true, mode: 0o700 });
   renameSync(path, join(folder, basename(path)));
