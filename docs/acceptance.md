@@ -2392,7 +2392,10 @@ their own PR.
 | `6a09497` | Workspace migration 6, the mission store, the context check, the conversation guards, the seeds |
 | `ac01522` | The coach's catalogue entry in Track C's own words (NIV-53, comment `32ce2944`) |
 | `bca7110` | The packaged and Windows store specs expect v6; migration 5's text pinned now that 6 follows it |
-| this record | D42, the development notes and this section |
+| `64fc1c3` | D42, the development notes and this section |
+| `2b61660` | A stored composition reads back without the checks made when it was composed, so an old report stays readable; a composition's profiles must be its packet's |
+| `1c27882` | The independent review's fixes: a finding stays its review's mission's, bound or not; version numbers compared; the binding parsed before it is read; the v5 to v6 migration tested |
+| this record | The record brought up to date with the review and the checks at `1c27882` |
 
 **What it shows:**
 
@@ -2403,12 +2406,12 @@ their own PR.
 | A mission's conversation is never the person's | `missions.test.ts`, `host.test.ts` | It isn't listed. A trigger refuses a mission on a project's conversation or on one with messages. Sixteen conversation and plan calls refuse it and its review plans; nothing is written and no engine starts |
 | Deleting a mission takes its versions, backlog, review plans and reviews, and leaves its tasks | `missions.test.ts` | Once its conversation goes, no mission row or seeded review is left; both tasks are still there, in no backlog |
 | What was sent is bound by version and by title | `mission.test.ts` (domain) | `bindingDigest` is pinned, and changes with a title, a version, the order, the mission, the findings or the profiles; duplicates, malformed or foreign references and a task without its title are refused |
-| The context check names a mission change and a membership removal while the brief stays as it was | `missions.test.ts` | `mission-changed` (v1 to v2) and `membership-removed` (taken out, or moved to another mission), the brief untouched each time |
+| The context check names a mission change and a membership removal while the brief stays as it was | `missions.test.ts` | `mission-changed` (v1 to v2) and `membership-removed` (taken out, or moved to another mission), the brief untouched each time; a finding bound without its mission still reports its task leaving that mission, and one bound to a task it doesn't name is refused; wrong version numbers and a binding with a task twice are caught |
 | A rename is caught, though it makes no brief version | `missions.test.ts` | `title-changed` with one brief version; a later brief version adds `brief-changed`, each in the person's words |
 | A stale suggestion saves nothing inside its transaction, while hand edits go on | `missions.test.ts` | The coach's pattern (check, then the next brief version, in one `workspace.tx`) is refused after a mission edit and writes nothing; a hand edit then saves v2 |
 | The coach's view of a task's mission names only findings about that task | `missions.test.ts` | Of three seeded findings, a task gets the two naming its reference, another task its one; a brief edit shows as a change; out of the backlog, a task gets no mission and no findings |
 | The mission review's packet keeps D30's text limit, and sends acceptance case names only | `mission.test.ts` (domain), `missions.test.ts` | A packet over 20,000 characters is refused, never shortened; a case's command and expected output never enter it |
-| Older profiles move to v6 with every row, and every earlier table, as they were | `workspace-store.test.ts` | v1, v2 and v4 files migrate with their rows and their tables' schemas unchanged; a newer schema is refused, naming v6 |
+| Older profiles move to v6 with every row, and every earlier table, as they were | `workspace-store.test.ts` | v1, v2, v4 and v5 files migrate with their rows and their tables' schemas unchanged (v5's with an environment's preparation); a v5 file gets no mission and keeps its conversations listed; a newer schema is refused, naming v6 |
 
 **Checks:**
 - `pnpm verify` at `6a09497`: 1,103 (domain 87, engine 687, desktop 329), none skipped. The baseline at `c854b50` was
@@ -2419,6 +2422,14 @@ their own PR.
   49 skipped (they need the stub switch a packaged app ignores); `workspace-store.spec.ts` failed only on its schema
   pin, fixed in `bca7110`, where that spec then passed against the same packaged build (1 passed).
 - `pnpm verify` at `bca7110`: 1,103 (domain 87, engine 687, desktop 329), none skipped.
+- Reviews: a helper's review of `4aa1aa6` found that a stored composition could stop reading under a later renderer
+  (`2b61660`). An independent review of the whole diff found that a finding bound without its mission escaped the
+  membership check, and that version numbers and the binding's own shape went unchecked (`1c27882`). Each fix has a
+  test that fails without it.
+- `pnpm verify` at `1c27882`: 1,107 (domain 88, engine 687, desktop 332), none skipped.
+- The built and packaged specs weren't run again after `ac01522` on this branch: `2b61660` and `1c27882` change the
+  composition reader, the context check, tests and a seed's comment, and no window or IPC code. The mission review PR's
+  packaged run, at a commit holding all of this branch's code, passed (31 passed, 53 skipped for the stub switch).
 - **Not run: `test:windows`**, which AGENTS.md asks for when the main process changes (the guards). A Windows turn needs
   Nate's approval and Track A's clearance, and Track A's candidate holds the Windows folders tonight. Track B proposes
   to run it in its full PR's turn (Wed 12:00 to 14:00 SGT), which covers these changes too. Nothing here changes a
