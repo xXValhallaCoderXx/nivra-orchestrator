@@ -63,7 +63,7 @@ const unnamed = (reply: Reply): Reply => {
 describe("the mission review's live check (NIV-52)", () => {
   it("prints the recipe for approval, with its bounds, its one model and a digest, and sends nothing", async () => {
     const { code, stdout } = await run(["--plan"]);
-    assert.match(stdout, /One approval is one run\. This one covers run 1 of this recipe at this revision\. The first launch that presents it claims it in ~\/nivra-acceptance\/claims\/mission-review\//);
+    assert.match(stdout, /One approval is one run\. This one covers run 1 of this recipe at this revision\. The first launch that presents it claims it in ~\/nivra-acceptance\/claims\/mission-review\/ before the checkout is checked, the key is read or anything is sent/);
     assert.equal(code, 0);
     assert.match(stdout, /Model: nvidia\/nemotron-3-super-120b-a12b only\. The engine refuses any other before the first inference request/);
     assert.match(stdout, /at most 3 requests \(two reviewers, then the chair\), 4,000 output tokens each, 150 s each and 330 s in all/);

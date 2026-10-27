@@ -3,8 +3,9 @@
 // runs only with Nate's approval of the recipe's digest, which binds the run, the revision, the fixture, the profiles,
 // their instructions and the forms they hand in, the model and the limits, and only from a clean checkout. One approval
 // is one run: the first launch that presents it claims it, atomically, in ~/nivra-acceptance/claims/mission-review/
-// whatever --out or --home says, before anything else is checked or read, and the claim is never removed. A claimed
-// approval never runs again, even when its launch stopped early; the next run needs the next digest --plan prints.
+// whatever --out or --home says, before the checkout is checked, the key is read or anything is sent, and the claim is
+// never removed. A claimed approval never runs again, even when its launch stopped early; the next run needs the next
+// digest --plan prints. The checks that come before the claim send nothing and leave the approval unused.
 //
 // Usage:
 //   node scripts/mission-review-live.ts --plan                                         # the recipe for approval; no network
@@ -110,7 +111,7 @@ if (values.plan) {
   console.log(`- Where: ${recipe.endpoint}, from a fresh engine home under ~/.nivra-dev-niv52.`);
   console.log(`- Evidence: ${recipe.evidence}.`);
   console.log(
-    `- One approval is one run. This one covers run ${run} of this recipe at this revision. The first launch that presents it claims it in ~/nivra-acceptance/claims/mission-review/ before anything else is checked or read, whatever --out or --home says, and nothing runs under it again, even if that launch stops early.`,
+    `- One approval is one run. This one covers run ${run} of this recipe at this revision. The first launch that presents it claims it in ~/nivra-acceptance/claims/mission-review/ before the checkout is checked, the key is read or anything is sent, whatever --out or --home says, and nothing runs under it again, even if that launch stops early.`,
   );
   if (before?.claimed) console.log(`- The approval before this one was claimed by ${claimText(before.record)}.`);
   console.log(`- Approval digest: ${digest}`);
@@ -143,8 +144,9 @@ if (existsSync(out) && readdirSync(out).length) refuse(`${out} already holds evi
 /** A refusal after the claim: the approval stays used, so the words say how to go on. */
 const used = (message: string): never => refuse(`${message} This approval is now used: run --plan, and ask for approval of the digest it prints for the next run.`);
 if (live) {
-  // Claimed before anything else is checked or read: of several launches presenting this approval, exactly one claims
-  // it, and the claim is kept whatever happens next, so a retry always needs the next run's approval.
+  // Claimed before the checkout is checked, the key is read or anything is sent: of several launches presenting this
+  // approval, exactly one claims it, and the claim is kept whatever happens next, so a retry always needs the next
+  // run's approval. The checks above it send nothing and leave the approval unused.
   const claimed = claimApproval(CLAIMS, { digest, run, revision: commit, out, pid: process.pid, claimedAt: new Date().toISOString() });
   if (!claimed.ok) refuse(`Another launch claimed this approval first (${claimText(claimed.record)}), so this one stopped before sending anything. One approval is one run: run --plan, and ask for approval of the digest it prints for the next run.`);
   if (dirty) used("The checkout has changes, so this isn't the approved revision's code. Nothing was sent.");
