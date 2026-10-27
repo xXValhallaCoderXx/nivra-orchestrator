@@ -253,7 +253,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual([chats.length, chats.every((chat) => chat.authorization === `Bearer ${KEY}`), chats.some((chat) => chat.raw.includes(KEY))], [4, true, false]);
     assert.match(chats[0]!.raw, /greet with no name says Hello, world/);
     assert.match(chats[1]!.raw, /printf 'Hello, %s/);
-    assert.deepEqual(((chats[0]!.body?.tools ?? []) as Array<{ function: { name: string } }>).map((tool) => tool.function.name).sort(), ["create_file", "edit_file", "list_files", "read_file", "run_case", "run_check", "submit"]);
+    assert.deepEqual(((chats[0]!.body?.tools ?? []) as Array<{ function: { name: string } }>).map((tool) => tool.function.name).sort(), ["create_file", "edit_file", "list_files", "read_file", "run_case", "run_check", "search_files", "submit"]);
     // Nothing of the key in the run's record, and the session's journal moved aside, with nothing open.
     assert.ok(!JSON.stringify(page.events).includes(KEY));
     assert.deepEqual([readdirSync(join(home, "sandbox")).filter((name) => name.endsWith(".jsonl")).length, readdirSync(join(home, "sandbox", "settled")).length], [0, 1]);
@@ -296,6 +296,21 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.equal(shown.stopped?.message, "Token Factory couldn't be reached, or doesn't offer this key nvidia/nemotron-3-super-120b-a12b, the only model task runs use, so the run stopped before anything from your repository was sent. Check the key in Settings, then run the task again.");
     // The listing was the one request Token Factory received: no model was asked anything, and nothing reached Nebius.
     assert.deepEqual([model.requests.map((request) => `${request.method} ${request.path}`), model.chats().length, sandbox.requests.length], [["GET /v1/models"], 0, 0]);
+  });
+
+  it("finds with search_files, reads, edits and checks on the production adapter, and the model is told what is left with each answer (NIV-35)", async () => {
+    const calls: Call[] = [["search_files", { text: "greet()", in: "content" }], ["read_file", { path: "greet.sh" }], ["edit_file", TASK_FIX], ["run_case", { number: 1 }], ["submit", { summary: "Defaulted the name to world." }]];
+    const { model, engine, repo } = await setup({ calls });
+    const run = await start(engine, repo, ready(await preview(engine, repo)).snapshot.fingerprint);
+    assert.equal((await ended(engine, run.id)).status, "succeeded");
+    const done = await report(engine, run.id);
+    assert.deepEqual([done.outcome, done.verified, verdicts(done), done.worker?.written], ["proposed", true, ["case 1 passed", "check 1 passed"], ["greet.sh"]]);
+    // The search tool as Token Factory received it, and its answer as the next request carried it.
+    const chats = model.chats();
+    assert.ok(((chats[0]!.body?.tools ?? []) as Array<{ function: { name: string } }>).some((tool) => tool.function.name === "search_files"));
+    const answers = (chats[1]!.body?.messages ?? []) as Array<{ role: string; content: unknown }>;
+    const searched = JSON.parse(String(answers.find((message) => message.role === "tool")?.content)) as { matches: unknown[]; total: number; left: { modelRequests: number; toolCalls: number; writes: number; runs: number } };
+    assert.deepEqual([searched.matches, searched.total, searched.left.modelRequests, searched.left.toolCalls, searched.left.writes, searched.left.runs], [[{ path: "greet.sh", line: 1, text: "greet() {" }], 1, 23, 47, 8, 4]);
   });
 
   it("takes the model as Token Factory lists it, whatever its case, and sends that id (NIV-35)", async () => {

@@ -9,10 +9,17 @@ import { MAX_WRITE_BYTES } from "./scripts.ts";
  * and have caps of their own.
  */
 export const TASK_LIMITS = {
-  /** Hard: requests, each one's time, and the output cap sent with each; estimated: the run's input budget (D30). */
-  model: { requests: 12, stepMs: 150_000, outputTokensPerRequest: 8_000, estimatedInputTokens: 160_000 },
-  /** Tool calls the model may make, of which writes and runs of a case or check are operations. */
-  tools: { calls: 24, writes: 8, runs: 4, readBytes: 16_384, readTotalBytes: 256 * 1024 },
+  /**
+   * Hard: requests, each one's time, and the output cap sent with each; estimated: the run's input budget (D30).
+   * Room for a real repository's discovery, change and check (NIV-35): the first live run spent all of 12 requests,
+   * about 133,000 input tokens, finding its way, so the requests, the tool calls and the input estimate rise together.
+   */
+  model: { requests: 24, stepMs: 150_000, outputTokensPerRequest: 8_000, estimatedInputTokens: 480_000 },
+  /**
+   * Tool calls the model may make, of which writes and runs of a case or check are operations. A search returns at most
+   * `searchMatches` matches, each line cut to `searchLineChars` characters.
+   */
+  tools: { calls: 48, writes: 8, runs: 4, readBytes: 16_384, readTotalBytes: 256 * 1024, searchMatches: 40, searchLineChars: 200 },
   write: { timeoutMs: 30_000, downloadMs: 30_000, maxBytes: MAX_WRITE_BYTES },
   /** Acceptance cases plus repository checks, as the brief gives them (the domain's brief limits). */
   checks: { max: TASK_BRIEF_LIMITS.finalChecks, timeoutMs: 60_000, outputTailBytes: 16_384, expectedOutputBytes: TASK_BRIEF_LIMITS.expectedOutputBytes, commandChars: TASK_BRIEF_LIMITS.commandChars },

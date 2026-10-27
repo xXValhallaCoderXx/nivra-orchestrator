@@ -64,9 +64,14 @@ export async function attempt(options: Attempt = {}) {
   const backend = createNebiusBackend({ credentials: () => ({ key: KEY, project: PROJECT }), baseImage: guest.baseImage, journalDir: scratch("journals"), transport: () => (options.wrap ? options.wrap(guest.service.transport, guest) : guest.service.transport), applets: "", limits: { maxOperations: operationsForBrief(brief), maxTimeoutSeconds: 60, prepareTimeoutSeconds: 60, pollMs: 10 }, now: time.now, sleep: time.sleep });
   const script = [...(options.calls ?? [["read_file", { path: "greet.sh" }], ["edit_file", FIX], ["run_case", { number: 1 }]]), ["submit", { summary: "Defaulted the name to world." }]] as Step[];
   let requests = 0;
+  // What each request carried, and the tools it offered: what the worker was told, as the model would read it.
+  const prompts: string[] = [];
+  const offered: string[][] = [];
   const model = new MastraLanguageModelV2Mock({
-    doGenerate: (async () => {
+    doGenerate: (async (call: { prompt: unknown; tools?: Array<{ name: string }> }) => {
       const index = requests++;
+      prompts.push(JSON.stringify(call.prompt));
+      offered.push((call.tools ?? []).map((tool) => tool.name).sort());
       options.beforeRequest?.(index);
       return calling(script[Math.min(index, script.length - 1)]!, index);
     }) as never,
@@ -96,7 +101,7 @@ export async function attempt(options: Attempt = {}) {
       ...(options.signal ? { signal: options.signal } : {}),
       ...options.extra,
     });
-    return { ...outcome, guest, model, root, changed: changedSince(before, root), requests: () => requests };
+    return { ...outcome, guest, model, root, changed: changedSince(before, root), requests: () => requests, prompts: () => prompts, offered: () => offered };
   } finally {
     await opened.close();
   }

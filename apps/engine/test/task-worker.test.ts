@@ -216,17 +216,57 @@ describe("a task's worker (NIV-7, D39)", () => {
   });
 
   it("refuses a tool call past its calls, leaves the worker only handing in, and counts it", async () => {
-    const listing: Call[] = Array.from({ length: 25 }, () => ["list_files", {}]);
+    const listing: Call[] = Array.from({ length: 49 }, () => ["list_files", {}]);
     const run = await attempt({ calls: [listing] });
-    assert.deepEqual([run.core!.worker.tools.calls, run.core!.worker.tools.refused, run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended], [26, 1, "tool-calls", true, "submitted"]);
+    assert.deepEqual([run.core!.worker.tools.calls, run.core!.worker.tools.refused, run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended], [50, 1, "tool-calls", true, "submitted"]);
   });
 
   it("offers only handing in on its last request, and stops at its requests when the worker never hands in", async () => {
-    const listing: Call[] = Array.from({ length: 13 }, () => ["list_files", {}]);
+    const listing: Call[] = Array.from({ length: 25 }, () => ["list_files", {}]);
     const run = await attempt({ calls: listing });
-    assert.deepEqual([run.requests(), run.core!.worker.usage.calls, run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended], [12, 12, "last-request", false, "requests"]);
+    assert.deepEqual([run.requests(), run.core!.worker.usage.calls, run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended], [24, 24, "last-request", false, "requests"]);
     // The run still collects and checks: the worker's limits end its loop, never the run.
     assert.deepEqual([run.result.outcome, verdicts(run.core)], ["unchanged", ["case 1 failed", "check 1 failed"]]);
+  });
+
+  it("finds with search_files what it then reads, edits and checks, and proposes the verified change (NIV-35)", async () => {
+    const run = await attempt({ calls: [["search_files", { text: "GREET()", in: "content" }], ["read_file", { path: "greet.sh" }], ["edit_file", FIX], ["run_case", { number: 1 }]] });
+    assert.deepEqual([run.result.outcome, run.core!.verified, verdicts(run.core), run.core!.worker.written], ["proposed", true, ["case 1 passed", "check 1 passed"], ["greet.sh"]]);
+    // The search's answer, as the next request carried it: the line where greet is defined, found ignoring case, and
+    // what the attempt has left once that first request is answered.
+    assert.ok(run.prompts()[1]!.includes('"matches":[{"path":"greet.sh","line":1,"text":"greet() {"}],"total":1,"truncated":false'), run.prompts()[1]!.slice(-600));
+    assert.match(run.prompts()[1]!, /"left":\{"modelRequests":23,"toolCalls":47,"writes":8,"runs":4,"seconds":\d+\}/);
+    // After the write and the run, what is left counts them.
+    assert.match(run.prompts()[4]!, /"left":\{"modelRequests":20,"toolCalls":44,"writes":7,"runs":3,"seconds":\d+\}/);
+    assert.ok(!run.prompts().some((prompt) => prompt.includes("near its end")), "no end note in a short attempt");
+  });
+
+  it("says what is left with every answer, and before its last request that handing in unchanged is fair; it never makes the worker write (NIV-35)", async () => {
+    const searching: Call[] = Array.from({ length: 23 }, () => ["search_files", { text: "greet", in: "names" }]);
+    const run = await attempt({ calls: searching });
+    const note = "This attempt is near its end: 4 model requests are left, and the last of them can only hand in. If you have a change you can justify, write it and run its case now. If you don't, hand in and say what you found: handing in unchanged is a fair result.";
+    // The note comes with the answers once 4 requests are left after the one under way, never before.
+    assert.deepEqual([run.prompts()[19]!.includes("near its end"), run.prompts()[20]!.includes(note)], [false, true]);
+    assert.ok(run.prompts()[23]!.includes("1 model request is left, and the last of them can only hand in"), run.prompts()[23]!.slice(-800));
+    // The last request offers only handing in; the worker hands in with nothing written, and nothing was written for it.
+    assert.deepEqual([run.offered()[22]!.length, run.offered()[23]], [8, ["submit"]]);
+    assert.deepEqual([run.requests(), run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended, run.core!.worker.tools.writes, run.core!.worker.written], [24, "last-request", true, "submitted", 0, []]);
+    assert.ok(!labels(run.guest).includes("nivra-write"), "a write was sent");
+    assert.deepEqual([run.result.outcome, verdicts(run.core)], ["unchanged", ["case 1 failed", "check 1 failed"]]);
+  });
+
+  it("searches only the workspace it was given, within its bounds: a folder outside it is refused, and a long result is cut and counted (NIV-35)", async () => {
+    const files = { ...FIXTURE, "notes/many.txt": Array.from({ length: 50 }, (_, index) => `hit ${index}`).join("\n") };
+    const run = await attempt({ files, calls: [["search_files", { text: "hit", in: "content", folder: "../outside" }], ["search_files", { text: "hit", in: "content", folder: "notes" }], ["search_files", { text: "/etc/passwd", in: "names" }]] });
+    assert.ok(run.prompts()[1]!.includes('"refused":"folder must be one inside the repository, as list_files shows it, e.g. packages/domain"'), run.prompts()[1]!.slice(-600));
+    const results = (JSON.parse(run.prompts()[2]!) as Array<{ role: string; content: unknown }>)
+      .filter((message) => message.role === "tool")
+      .flatMap((message) => message.content as Array<{ output: { value: unknown } }>)
+      .map((part) => part.output.value);
+    const found = results[1] as { matches: Array<{ path: string; line: number; text: string }>; total: number; truncated: boolean } | undefined;
+    assert.deepEqual([found?.matches.length, found?.total, found?.truncated, found?.matches[0], found?.matches.at(-1)?.line], [40, 50, true, { path: "notes/many.txt", line: 1, text: "hit 0" }, 40]);
+    // A path the workspace doesn't hold is simply not found: nothing outside the copy is read.
+    assert.ok(run.prompts()[3]!.includes('"matches":[],"total":0,"truncated":false'), run.prompts()[3]!.slice(-600));
   });
 
   it("goes on when a write doesn't take, and says the file is as it was", async () => {
