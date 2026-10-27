@@ -3081,7 +3081,11 @@ of the plan, 27 October).
   stop paths, and is follow-up work.
 - The mission mode has no labelled evaluation as the plan mode had (D32): its offline tests show the plumbing, not the
   quality of findings. Live evidence needs Nate's approval of `scripts/mission-review-live.ts`'s recipe, whose digest
-  binds the forms' definitions as well as the instructions.
+  binds the forms' definitions as well as the instructions. One approval is one run (Nate's review of #25): the first
+  launch that presents it claims it atomically in `~/nivra-acceptance/claims/mission-review/`, apart from `--out` and
+  the engine's home, before the checkout is checked, the key is read or anything is sent, and the claim is kept after
+  an interruption, so neither a repeated nor a simultaneous launch can spend again. The checks before the claim send
+  nothing and leave the approval unused. The next run needs the next digest `--plan` prints.
 - An independent review before review found four defects, all fixed with tests that fail without them: the plan
   review's form given to mission reviewers, a key block across two parts sent redacted, an unknown basis shown as what
   was sent, and findings with no title or detail read as a clean review. The plan review has the same unknown-basis

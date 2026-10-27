@@ -2458,6 +2458,8 @@ of up to five selected tasks by the council's specialists, findings that open th
 | `51d2e68` | The independent review's engine fixes: the mission's own form, a message that masking would change refused, an unknown basis an assumption, empty findings counted apart |
 | `9cfe752` | Its host and window fixes: a key across two parts refused naming both, an unreadable report's version unknown, the card's words |
 | `61b4193` | Its live check fixes: the forms bound in the recipe, the model held only when every answer named it, engine homes checked by containment |
+| `a46fe7c` | Nate's review of #25: the live check's approval is used once, claimed atomically and kept, whatever `--out` or `--home` says |
+| `ca44e48` | The claim's place said as it is: before the checkout is checked, the key is read or anything is sent |
 | `65094d7`, `1be62b3`, `9427884` | Merges of the foundation, bringing its review fixes (`2b61660`, `1c27882`) and its record |
 | this record | D43, the development notes and this section |
 
@@ -2474,6 +2476,7 @@ of up to five selected tasks by the council's specialists, findings that open th
 | Rejected output isn't a clean review | engine tests, `host.test.ts`, `missions.spec.ts` | Two findings naming T7 and E1 fail the stage as malformed with "2 findings named nothing in the selection"; the review is incomplete; the chair is skipped; the model's references aren't repeated. Findings sent with the wrong keys (no title, no detail) are counted apart, never as over the limit, and a reviewer of only those fails its stage the same way |
 | A sound selection may get no findings | engine tests, `missions.spec.ts` | Complete, with "Raised nothing material. That isn't an approval" |
 | The model enforced before inference | engine tests, `mission-review-live.test.ts` | A packet naming a model the listing lacks fails with no chat request; the live script's stub run holds the approved model, fails its evidence when an answer names another, and calls it unknown, never held, when the answers name none. Its recipe binds the forms with the instructions; an engine home inside `~/.nivra` or `~/.nivra-dev` is refused before the key is read |
+| One approval is one paid run | `mission-review-live.test.ts` | Of six launches started together with one approval, exactly one claims it (its own process, in the claims folder) and the other five stop before any key is read or evidence made. A launch killed after claiming leaves its claim; a relaunch with another `--out` and `--home` is refused; `--plan` moves on to run 2's digest. Both fail with the claim removed |
 | Findings open the existing task editor; a hand edit saves | `missions.spec.ts` | T1's chip opens Store runs' page; Edit brief saves v2 |
 | Stale reports, readable | `host.test.ts`, `missions.spec.ts` | After a brief edit and a rename, the report names both changes and keeps its findings |
 | Persistence across restart | `host.test.ts`, `missions.spec.ts` | Reopened after a restart and a relaunch: every review, its stale lines and the board, with nothing sent again |
@@ -2495,6 +2498,10 @@ of up to five selected tasks by the council's specialists, findings that open th
   showed a named model the listing lacks refused with no chat request.
 - An independent review by a fresh agent at `1be62b3` found four defects and eight smaller points, all fixed in
   `51d2e68`, `9cfe752` and `61b4193`. Each fix has a test that fails without it; three were shown by undoing the fix.
+- Nate's review of #25 (28 Oct): one finding, the live approval reusable, fixed in `a46fe7c`. `pnpm verify` there:
+  1,150 (domain 90, engine 713, desktop 347), none skipped. The two claim tests fail with the claim removed. After the
+  wording fix in `ca44e48`, the live check's tests again: 10 passed. Only the live script and its test changed since
+  `61b4193`, so the built and packaged runs above still stand for the app.
 - **Not run on this branch: `test:windows`**, which AGENTS.md asks for when the main process or preload changes. By
   Nate's decision (28 Oct, 01:44 SGT), one Windows staging and test run on the final candidate containing Tracks B and
   C covers it, in Track A's candidate step, including `workspace-windows.spec.ts`'s mission test (`7745c6e`). Windows

@@ -114,7 +114,10 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
   The digest binds the revision (a clean checkout), the fixture, the three profiles, their instructions' hashes and the
   forms they hand in (the tools' definitions), the model and the limits. The engine home is a fresh folder under
   `~/.nivra-dev-niv52` (one inside `~/.nivra` or `~/.nivra-dev` is refused); evidence goes to
-  `~/nivra-acceptance/mission-review-<UTC>-<rev>/`. The model counts as held only when every answer named it.
+  `~/nivra-acceptance/mission-review-<UTC>-<rev>/`. The model counts as held only when every answer named it. One
+  approval is one run: a launch claims it in `~/nivra-acceptance/claims/mission-review/` before the checkout is
+  checked, the key is read or anything is sent, the claim is kept whatever happens next, and `--plan` then prints the
+  next run's digest.
 - **The window's tests** (`e2e/missions.spec.ts`) drive missions with the token factory stub: the council's roles are
   told apart by the instructions' first line, as for plan reviews. A packaged app runs only the parts that need no
   model.
