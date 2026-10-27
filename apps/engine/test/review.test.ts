@@ -374,7 +374,7 @@ describe("a review's outcomes, stops and bindings over stdio (NIV-38, D30)", () 
   });
 
   it("reaches no repository and no execution backend: the review's code imports neither", () => {
-    const sources = ["src/review/run.ts", "src/review/answers.ts", "src/review/prompt.ts", "src/review/task.ts", "src/workflows/review.ts"];
+    const sources = ["src/review/run.ts", "src/review/answers.ts", "src/review/prompt.ts", "src/review/mission-answers.ts", "src/review/mission-prompt.ts", "src/review/task.ts", "src/workflows/review.ts"];
     const root = join(import.meta.dirname, "..");
     for (const source of sources) assert.equal(/from "\.\.\/(repo|exec)\//.test(readFileSync(join(root, source), "utf8")), false, source);
     assert.equal(reviewRoleMarker("risks"), "Nivra review role: risks");

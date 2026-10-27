@@ -23,10 +23,10 @@ import {
 } from "@nivra/domain";
 import { createModelClient } from "../src/providers/model.ts";
 import { policyFor, requestBudget } from "../src/providers/policy.ts";
-import { largestReport, ReviewAnswer } from "../src/review/answers.ts";
-import { missionRefChecker, normaliseMissionReview, rejectedReason } from "../src/review/mission-answers.ts";
+import { largestReport } from "../src/review/answers.ts";
+import { MissionReviewAnswer, missionRefChecker, normaliseMissionReview, rejectedProblems, rejectedReason } from "../src/review/mission-answers.ts";
 import { MISSION_CHAIR_INSTRUCTIONS, MISSION_INSTRUCTIONS, MISSION_PROFILE, missionReviewerInstructions, renderMissionChairMessage, renderMissionMessage } from "../src/review/mission-prompt.ts";
-import { estimateRequest, REVIEW_LIMITS, runReview, type ReviewRunOptions } from "../src/review/run.ts";
+import { estimateRequest, incompleteFailure, missionToolDefinitions, REVIEW_LIMITS, runReview, type ReviewRunOptions } from "../src/review/run.ts";
 import { removeDir, startEngine, tempDir, waitFor, type EngineProcess } from "./helpers.ts";
 import { httpError, startStub, toolCall, type Reply, type Stub, type StubRequest } from "./stub-token-factory.ts";
 
@@ -71,7 +71,7 @@ const PACKET: MissionReviewPacket = {
   othersInBacklog: 2,
 };
 
-const answer = (value: unknown) => ReviewAnswer.parse(value);
+const answer = (value: unknown) => MissionReviewAnswer.parse(value);
 
 describe("what the engine keeps of a mission reviewer's answer (NIV-52)", () => {
   it("names only the selected tasks, the mission, the backlog and preferences, normalised, and drops everything else", () => {
@@ -89,6 +89,7 @@ describe("what the engine keeps of a mission reviewer's answer (NIV-52)", () => 
       { title: "Unselected task", detail: "d", refs: ["T7"] },
       { title: "Only a preference", detail: "d", refs: [PERSONAL.id] },
       { title: "The mission's criterion", detail: "d", basis: "evidence", refs: ["mission"] },
+      { title: "No basis given", detail: "d", basis: "  ", refs: ["T2"] },
     ];
     const kept = normaliseMissionReview("risks", answer({ summary: "Summary.", findings }), PACKET, PREFERENCES, mask);
     assert.equal(kept.kind, "kept");
@@ -98,10 +99,11 @@ describe("what the engine keeps of a mission reviewer's answer (NIV-52)", () => 
       [
         ["risk-1", ["T3", "T1"], "plan", false, "high"],
         ["risk-2", ["backlog"], "assumption", false, "low"],
-        ["risk-3", ["mission"], "plan", true, null],
+        ["risk-3", ["mission"], "assumption", true, null],
+        ["risk-4", ["T2"], "plan", false, null],
       ],
     );
-    assert.deepEqual(kept.report.adjusted, { dropped: 0, refsDropped: 4, relabelled: 1, shortened: 0, unanchored: 2 }, "T9, plan, A1 and T7 dropped; two findings set aside");
+    assert.deepEqual(kept.report.adjusted, { dropped: 0, refsDropped: 4, relabelled: 1, shortened: 0, unanchored: 2, empty: 0 }, "T9, plan, A1 and T7 dropped; two findings set aside");
   });
 
   it("tells a sound selection from an empty answer, and from one whose every finding named nothing in the selection", () => {
@@ -115,9 +117,39 @@ describe("what the engine keeps of a mission reviewer's answer (NIV-52)", () => 
       PREFERENCES,
       mask,
     );
-    assert.deepEqual(rejected, { kind: "rejected", setAside: 3 }, "a summary doesn't make findings that named nothing a clean review");
+    assert.deepEqual(rejected, { kind: "rejected", setAside: 3, empty: 0 }, "a summary doesn't make findings that named nothing a clean review");
     assert.equal(rejectedReason(3), "its 3 findings named nothing in the selection, so none could be kept");
     assert.equal(rejectedReason(1), "its one finding named nothing in the selection, so it couldn't be kept");
+  });
+
+  it("never reads a form filled in wrongly as a clean review: findings with neither a title nor a detail are counted apart", () => {
+    // Keys the form doesn't have are dropped by its reading, so these arrive with no title and no detail.
+    const misnamed = [
+      { issue: "T1 can't be tested", description: "Its criterion says 'works well'.", refs: ["T1"] },
+      { recommendation: "Add a check", refs: ["T2"] },
+    ];
+    const rejected = normaliseMissionReview("risks", answer({ summary: "Two serious problems.", findings: misnamed }), PACKET, PREFERENCES, mask);
+    assert.deepEqual(rejected, { kind: "rejected", setAside: 0, empty: 2 });
+    const mixed = normaliseMissionReview("risks", answer({ summary: "One problem.", findings: [...misnamed, { title: "T1 can't be tested", detail: "d", refs: ["T1"] }, { title: "Nothing it names", detail: "d", refs: ["T9"] }] }), PACKET, PREFERENCES, mask);
+    assert.equal(mixed.kind, "kept");
+    if (mixed.kind !== "kept") return;
+    assert.deepEqual([mixed.report.findings.length, mixed.report.adjusted.empty, mixed.report.adjusted.unanchored, mixed.report.adjusted.dropped], [1, 2, 1, 0], "an empty finding isn't counted as over the limit");
+    assert.deepEqual(
+      [rejectedReason(0, 2), rejectedReason(0, 1), rejectedReason(2, 1)],
+      [
+        "its 2 findings had no title or detail, so none could be kept",
+        "its one finding had no title or detail, so it couldn't be kept",
+        "of its 3 findings, 2 named nothing in the selection and 1 had no title or detail, so none could be kept",
+      ],
+    );
+    assert.deepEqual(rejectedProblems(2, 1), ["findings: 2 named no selected task, the mission or the backlog", "findings: 1 had no title or detail"]);
+  });
+
+  it("names a mission review's stage by its profile when the review ends incomplete", () => {
+    const stage = (role: "architecture" | "risks" | "chair", status: "answered" | "failed") => ({ stage: role === "chair" ? "chair" : "reviewer", role, status, reason: null, kind: status === "failed" ? "malformed" : null, message: null, problems: [], requests: 1, estimatedInputTokens: null, inputTokens: null, outputTokens: null, elapsedMs: null, finishReason: null, servedModel: null }) as ReviewReport["stages"][number];
+    const final = { stages: [stage("architecture", "failed"), stage("risks", "answered"), stage("chair", "answered")], reviewers: [] } as unknown as ReviewReport;
+    assert.match(incompleteFailure(final, PACKET).message, /The product architect's review didn't finish\./);
+    assert.match(incompleteFailure(final).message, /The architecture review didn't finish\./, "a plan review's words are unchanged");
   });
 });
 
@@ -146,6 +178,11 @@ describe("what a mission review sends (NIV-52)", () => {
     };
     const actual = Object.fromEntries(Object.entries(MISSION_INSTRUCTIONS).map(([id, text]) => [id, [SPECIALISTS[id as keyof typeof MISSION_INSTRUCTIONS].version, createHash("sha256").update(text).digest("hex")]]));
     assert.deepEqual(actual, pinned);
+    // What the profiles hand in is pinned with them: the forms' fields and their descriptions, as the model reads them.
+    assert.deepEqual(
+      [MISSION_COUNCIL.map((id) => SPECIALISTS[id].version), createHash("sha256").update(missionToolDefinitions()).digest("hex")],
+      [[1, 1, 1], "0be8707a8c551b91a40ad801561017e7004931b36d3b7da3b92953ed9ab28419"],
+    );
   });
 
   it("fits the largest mission packet, with the most preferences, in a request's window and the council's budget", () => {
@@ -161,7 +198,7 @@ describe("what a mission review sends (NIV-52)", () => {
     assert.equal(renderMissionPacket(largest).length, MISSION_REVIEW_LIMITS.textChars);
     assert.equal(MissionReviewPacket.safeParse(largest).success, true);
     const message = renderMissionMessage(largest, preferences, mask);
-    const reviewer = Math.max(...(["architecture", "risks"] as const).map((role) => estimateRequest(missionReviewerInstructions(role), message, "reviewer")));
+    const reviewer = Math.max(...(["architecture", "risks"] as const).map((role) => estimateRequest(missionReviewerInstructions(role), message, "mission-reviewer")));
     const chair = estimateRequest(MISSION_CHAIR_INSTRUCTIONS, renderMissionChairMessage(message, [largestReport("architecture"), largestReport("risks")], (text) => text), "chair");
     const window = requestBudget(131_072);
     assert.ok(reviewer <= window && chair <= window, `reviewer ${reviewer}, chair ${chair}, window ${window}`);
@@ -361,6 +398,11 @@ describe("a mission review over stdio (NIV-52)", () => {
     assert.equal(userMessage(architecture), userMessage(risks), "both reviewers read the same message, byte for byte");
     assert.ok(userMessage(architecture).includes("T3. Sync to the club's server") && userMessage(architecture).includes("The backlog holds 2 other tasks, which weren't sent."));
     assert.ok(userMessage(chair).includes("The product architect's report.") && userMessage(chair).includes("The risk and testability reviewer's report."));
+    // The form each reviewer was given asks for this mode's references, never the plan review's.
+    const form = (chat: StubRequest | undefined) => JSON.stringify(((chat?.body?.tools ?? []) as Array<{ function: { name: string } }>).find((tool) => tool.function.name === REVIEW_TOOLS.reviewer) ?? null);
+    for (const reviewer of [architecture, risks]) {
+      assert.deepEqual([form(reviewer).includes("T1, T2, ... for the selected tasks it concerns"), form(reviewer).includes("for the mission"), /\bA1\b|\bE3\b|the plan says/.test(form(reviewer))], [true, true, false]);
+    }
     assert.deepEqual(
       report.reviewers.map((reviewer) => [reviewer.role, reviewer.findings.map((finding) => [finding.id, finding.refs]), reviewer.adjusted.unanchored]),
       [
@@ -394,20 +436,27 @@ describe("a mission review over stdio (NIV-52)", () => {
     assert.deepEqual([failedEvent(notNvidia)?.data?.["kind"], unlisted.stub.chats().length], ["model-unavailable", 0], "a named model must be an NVIDIA one");
   });
 
-  it("refuses before any request: other profile versions, a single reviewer, a packet it wasn't asked for, a project preference", async () => {
+  it("refuses before any request: other profile versions, a single reviewer, a packet it wasn't asked for, a project preference, text that masking would change", async () => {
     const { stub, engine } = await setup(scripted(COUNCIL));
     const versions = { ...PACKET, specialists: PACKET.specialists.map((ref, index) => (index === 1 ? { ...ref, version: ref.version + 1 } : ref)) };
     const PROJECT_PREFERENCE = { id: randomUUID(), statement: "Use the club's API client", scope: "project" as const, intent: "default" as const, revision: 1 };
+    // A key block's first line in one part and its last in another: each part alone holds none, the message does.
+    const spanning = {
+      ...PACKET,
+      tasks: [task("Flag key files", { goal: "Flag a file whose first line is -----BEGIN RSA PRIVATE KEY-----.", acceptanceCriteria: ["A file holding only -----END RSA PRIVATE KEY----- isn't flagged."] }), ...PACKET.tasks.slice(1)],
+    };
     const pages = [
       await finished(engine, (await start(engine, { packet: versions })).run.id),
       await finished(engine, (await start(engine, { panel: "single" })).run.id),
       await finished(engine, (await start(engine, { packetDigest: "b".repeat(64) })).run.id),
       await finished(engine, (await start(engine, { preferences: { revision: 3, records: [PERSONAL, PROJECT_PREFERENCE] } })).run.id),
+      await finished(engine, (await start(engine, { packet: spanning })).run.id),
     ];
     assert.deepEqual(
       pages.map((page) => [page.status, failedEvent(page)?.data?.["kind"]]),
       pages.map(() => ["failed", "internal"]),
     );
+    assert.match(failedEvent(pages[4]!)?.message ?? "", /the text to review holds what looks like a credential, so nothing was sent/);
     assert.equal(stub.chats().length, 0);
     assert.equal(stub.requests.filter((request) => request.path.endsWith("/models")).length, 0, "each was refused with what it was sent, before even the listing");
 

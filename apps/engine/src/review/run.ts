@@ -18,6 +18,7 @@ import {
   type ReviewerReport,
   type RunRoute,
 } from "@nivra/domain";
+import { z } from "zod";
 import { failure, InternalFailure, ModelFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
 import { ANSWER_TOKENS, requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget, type Hold, type RunLimits } from "../providers/run-budget.ts";
@@ -25,7 +26,7 @@ import { usageOf } from "../explain/reading.ts";
 import { CHARS_PER_TOKEN } from "../explain/budget.ts";
 import { toolDefinitionChars } from "../explain/tools.ts";
 import { largestReport, normaliseReview, normaliseSynthesis, REVIEW_TOOL_DESCRIPTION, ReviewAnswer, SYNTHESIS_TOOL_DESCRIPTION, SynthesisAnswer } from "./answers.ts";
-import { normaliseMissionReview, rejectedReason } from "./mission-answers.ts";
+import { MissionReviewAnswer, normaliseMissionReview, rejectedProblems, rejectedReason } from "./mission-answers.ts";
 import { MISSION_CHAIR_INSTRUCTIONS, missionReviewerInstructions, renderMissionChairMessage, renderMissionMessage } from "./mission-prompt.ts";
 import { CHAIR_INSTRUCTIONS, renderChairMessage, renderPacket, reviewerInstructions } from "./prompt.ts";
 import type { ReviewTask } from "./task.ts";
@@ -51,10 +52,24 @@ const MESSAGE_ALLOWANCE_TOKENS = 64;
 const TOOL_SPECS = {
   reviewer: { [REVIEW_TOOLS.reviewer]: { description: REVIEW_TOOL_DESCRIPTION, inputSchema: ReviewAnswer } },
   chair: { [REVIEW_TOOLS.chair]: { description: SYNTHESIS_TOOL_DESCRIPTION, inputSchema: SynthesisAnswer } },
+  /** A mission reviewer's: the same form, its fields described for a mission (NIV-52). */
+  "mission-reviewer": { [REVIEW_TOOLS.reviewer]: { description: REVIEW_TOOL_DESCRIPTION, inputSchema: MissionReviewAnswer } },
 };
 
+/**
+ * The tools a mission review's stages are given (NIV-52), as JSON: what the model reads besides the instructions. A test
+ * pins its hash to the profiles' version, and the live recipe binds it.
+ */
+export function missionToolDefinitions(): string {
+  return JSON.stringify(
+    [TOOL_SPECS["mission-reviewer"], TOOL_SPECS.chair].flatMap((specs) =>
+      Object.entries(specs).map(([name, spec]) => ({ name, description: spec.description, parameters: z.toJSONSchema(spec.inputSchema, { target: "draft-7", io: "input", unrepresentable: "any" }) })),
+    ),
+  );
+}
+
 /** A whole request's estimated input: instructions, message, every tool definition, and the template's allowance (D30). */
-export function estimateRequest(instructions: string, message: string, tools: "reviewer" | "chair"): number {
+export function estimateRequest(instructions: string, message: string, tools: keyof typeof TOOL_SPECS): number {
   return Math.ceil((instructions.length + message.length + toolDefinitionChars(TOOL_SPECS[tools])) / CHARS_PER_TOKEN) + MESSAGE_ALLOWANCE_TOKENS;
 }
 
@@ -78,6 +93,9 @@ interface ReviewMode {
   instructions: (role: ReviewRole) => string;
   chairInstructions: string;
   chairMessage: (reports: readonly ReviewerReport[], mask: Mask) => string;
+  /** The form a reviewer hands in, and the tools its request's estimate counts. */
+  answer: typeof ReviewAnswer | typeof MissionReviewAnswer;
+  tools: "reviewer" | "mission-reviewer";
   /** The report the engine keeps of an answer, or why the stage can't use it, in Nivra's words. */
   normalise: (role: ReviewRole, answer: ReviewAnswer) => { report: ReviewerReport } | { unusable: string; problems: string[] };
   label: Readonly<Record<ReviewRole | "chair", string>>;
@@ -96,6 +114,8 @@ function planMode(packet: ReviewPacket, context: ReviewContext, task: ReviewTask
     instructions: reviewerInstructions,
     chairInstructions: CHAIR_INSTRUCTIONS,
     chairMessage: (reports, chairMask) => renderChairMessage(message, reports, chairMask),
+    answer: ReviewAnswer,
+    tools: "reviewer",
     normalise: (role, answer) => {
       const kept = normaliseReview(role, answer, packet, context.preferences, mask);
       return kept ? { report: kept } : { unusable: "it handed in an empty review", problems: [] };
@@ -116,10 +136,12 @@ function missionMode(packet: MissionReviewPacket, context: ReviewContext, task: 
     instructions: (role) => missionReviewerInstructions(role === "risks" ? "risks" : "architecture"),
     chairInstructions: MISSION_CHAIR_INSTRUCTIONS,
     chairMessage: (reports, chairMask) => renderMissionChairMessage(message, reports, chairMask),
+    answer: MissionReviewAnswer,
+    tools: "mission-reviewer",
     normalise: (role, answer) => {
       const kept = normaliseMissionReview(role, answer, packet, context.preferences, mask);
       if (kept.kind === "kept") return { report: kept.report };
-      if (kept.kind === "rejected") return { unusable: rejectedReason(kept.setAside), problems: [`findings: ${kept.setAside} named no selected task, the mission or the backlog`] };
+      if (kept.kind === "rejected") return { unusable: rejectedReason(kept.setAside, kept.empty), problems: rejectedProblems(kept.setAside, kept.empty) };
       return { unusable: "it handed in an empty review", problems: [] };
     },
     label: MISSION_LABEL,
@@ -190,7 +212,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
   const mode = isMission(context.packet) ? missionMode(context.packet, context, task, mask) : planMode(context.packet, context, task, mask);
   const packetMessage = mode.message;
   const instructions = new Map(roles.map((role) => [role, mode.instructions(role)] as const));
-  const reviewerAsk = roles.map((role) => ({ inputTokens: estimateRequest(instructions.get(role)!, packetMessage, "reviewer"), ms: requestMs }));
+  const reviewerAsk = roles.map((role) => ({ inputTokens: estimateRequest(instructions.get(role)!, packetMessage, mode.tools), ms: requestMs }));
   // The chair's room is reserved at its largest: the packet and both reports as large as the engine lets them be.
   const chairAsk = { inputTokens: estimateRequest(mode.chairInstructions, mode.chairMessage(roles.map(largestReport), (text) => text), "chair"), ms: requestMs };
 
@@ -254,7 +276,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
   const request = async <A>(
     entry: ReviewStage,
     hold: Hold,
-    spec: { role: ReviewRole | "chair"; instructions: string; message: string; tool: string; description: string; schema: typeof ReviewAnswer | typeof SynthesisAnswer; estimated: number },
+    spec: { role: ReviewRole | "chair"; instructions: string; message: string; tool: string; description: string; schema: typeof ReviewAnswer | typeof MissionReviewAnswer | typeof SynthesisAnswer; estimated: number },
   ): Promise<A | null> => {
     const admitted = hold.admit();
     if (!admitted.ok) {
@@ -349,7 +371,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
         message: packetMessage,
         tool: REVIEW_TOOLS.reviewer,
         description: REVIEW_TOOL_DESCRIPTION,
-        schema: ReviewAnswer,
+        schema: mode.answer,
         estimated: reviewerAsk[index]!.inputTokens,
       });
       if (answer) {
@@ -415,12 +437,16 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
   return final;
 }
 
-/** The failure a review that didn't complete ends the run with, after its report is saved: Nivra's words, and which stage. */
-export function incompleteFailure(final: ReviewReport): ModelFailure {
+/**
+ * The failure a review that didn't complete ends the run with, after its report is saved: Nivra's words, and which
+ * stage, named as its mode names it.
+ */
+export function incompleteFailure(final: ReviewReport, packet?: ReviewContext["packet"]): ModelFailure {
   const failed = final.stages.find((entry) => entry.status === "failed") ?? final.stages.find((entry) => entry.status === "skipped" && entry.reason !== "single-panel");
   const kind: ModelFailureKind = failed?.kind ?? (failed?.reason === "budget" ? "budget-exhausted" : failed?.reason === "deadline" ? "timeout" : "malformed");
   const kept = final.reviewers.length ? `What ${final.reviewers.length === 1 ? "the other reviewer" : "the reviewers"} found is kept. ` : "";
-  const what = failed?.message ?? `${failed ? ROLE_NOUN[failed.role] : "A stage"} didn't finish.`;
+  const noun = packet && isMission(packet) ? MISSION_NOUN : ROLE_NOUN;
+  const what = failed?.message ?? `${failed ? noun[failed.role] : "A stage"} didn't finish.`;
   const error = new ModelFailure(kind, `This review is incomplete. ${what} ${kept}Start a new review to try again.`.replace(/\s+/g, " ").trim());
   (error as ModelFailure & { stage?: string }).stage = failed?.stage === "chair" ? "chair" : failed?.role ?? "review";
   return error;

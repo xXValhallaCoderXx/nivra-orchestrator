@@ -191,6 +191,8 @@ const Adjusted = z.strictObject({
   shortened: count,
   /** A mission review's findings set aside for naming no selected task, the mission or the backlog (NIV-52). */
   unanchored: count.optional(),
+  /** A mission review's findings left out for having neither a title nor a detail (NIV-52); a plan review counts them as dropped. */
+  empty: count.optional(),
 });
 
 export const ReviewerReport = z.strictObject({

@@ -76,7 +76,10 @@ export function renderMissionReport(report: ReviewerReport): string {
   return lines.join("\n");
 }
 
-/** What the chair reads: the same message as the reviewers, then their reports. */
+/**
+ * What the chair reads: the same message as the reviewers, then their reports. Each report is masked on its own, so no
+ * mask spans the person's text and a report: the message was refused before any request if masking would change it.
+ */
 export function renderMissionChairMessage(packetMessage: string, reports: readonly ReviewerReport[], mask: Mask): string {
-  return mask(`${packetMessage}\n\nThe reviewers' reports:\n\n${reports.map(renderMissionReport).join("\n\n")}`);
+  return `${packetMessage}\n\nThe reviewers' reports:\n\n${reports.map((report) => mask(renderMissionReport(report))).join("\n\n")}`;
 }

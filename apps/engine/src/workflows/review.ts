@@ -20,6 +20,7 @@ import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClie
 import { policyFor } from "../providers/policy.ts";
 import type { RunLimits } from "../providers/run-budget.ts";
 import { isNvidiaModel, pickNemotron } from "../providers/tokenfactory.ts";
+import { renderMissionMessage } from "../review/mission-prompt.ts";
 import { incompleteFailure, runReview } from "../review/run.ts";
 import { ReviewUnreadable, type ReviewTask } from "../review/task.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -118,6 +119,12 @@ export function createReviewWorkflow(deps: ReviewDeps) {
         if (JSON.stringify(sent.packet.specialists) !== JSON.stringify(expected)) {
           throw failure("internal", "the review was asked for profile versions this engine doesn't hold").because("input-refused", "review.context");
         }
+        // The reviewers read what the person previewed, never a redacted copy: text that masking would change is
+        // refused here, before the listing. The host refuses it first, naming the part; this holds whoever sends.
+        const message = renderMissionMessage(sent.packet, sent.preferences, (text) => text);
+        if (deps.mask(message) !== message) {
+          throw failure("internal", "the text to review holds what looks like a credential, so nothing was sent").because("input-refused", "review.context");
+        }
       }
       // A general plan's review gets personal preferences only (D21).
       if (sent.packet.scope.kind === "general" && sent.preferences.records.some((record) => record.scope === "project")) {
@@ -198,7 +205,7 @@ export function createReviewWorkflow(deps: ReviewDeps) {
       deps.setMeta(runId, { usage: final.usage });
       if (final.outcome === "complete") return { outcome: final.outcome, findings: final.reviewers.reduce((sum, report) => sum + report.findings.length, 0) };
       if (final.outcome === "cancelled") throw new ModelFailure("cancelled", "Cancelled.");
-      throw incompleteFailure(final);
+      throw incompleteFailure(final, sent.packet);
     }),
   });
 
