@@ -12,6 +12,7 @@ import { SecretStore, type KeyCrypto } from "./secret-store.ts";
 import { channelOf, WSL_HOMES, wslHomeFrom, type Channel } from "./targets/homes.ts";
 import { runtimeIn, type RuntimeLayout } from "./targets/local.ts";
 import { targetFactory } from "./targets/registry.ts";
+import { testEngineArgs } from "./test-switches.ts";
 import type { EnginePlatform } from "./targets/types.ts";
 import type { WslRuntime } from "./targets/wsl.ts";
 import { defaultZoom, restoreBounds, stepZoom } from "./window-state.ts";
@@ -454,16 +455,10 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
   // Tests give each run a WSL home of its own too, below the distribution's $HOME.
   const wslSwitch = app.commandLine.getSwitchValue("nivra-wsl-home") || null;
   const wslHome = wslSwitch ? wslHomeFrom(wslSwitch) : WSL_HOMES[channel];
-  // Tests only: loopback stubs of Token Factory, Nebius Sandboxes and Tavily, honoured only when unpackaged (D22, D36,
-  // D37); the engine refuses any address that isn't on this machine.
-  const stubSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-token-factory-url") || null;
-  const sandboxSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-sandboxes-url") || null;
-  const tavilySwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-tavily-url") || null;
-  const stubArgs = [
-    ...(stubSwitch ? ["--token-factory-url", stubSwitch] : []),
-    ...(sandboxSwitch ? ["--sandboxes-url", sandboxSwitch] : []),
-    ...(tavilySwitch ? ["--tavily-url", tavilySwitch] : []),
-  ];
+  // Tests only, honoured only when unpackaged: loopback stubs of Token Factory, Nebius Sandboxes and Tavily, which the
+  // engine refuses unless they are on this machine (D22, D36, D37), and a file that holds an apply before a named writer
+  // step (D40). They go to the local engine alone.
+  const stubArgs = testEngineArgs(app.isPackaged, (name) => app.commandLine.getSwitchValue(name));
   const extraArgs = stubArgs.length ? { extraArgs: stubArgs } : {};
   const hostTarget = `${platform === "win32" ? "win" : platform === "darwin" ? "mac" : "linux"}-${process.arch}`;
   const readHash = (path: string): string | null => {
