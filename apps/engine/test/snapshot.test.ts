@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { WorkspaceRefusal } from "../src/exec/git-tool.ts";
-import { compressSnapshot, PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
+import { compressSnapshot, NEBIUS_LIMITS, PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
+import { COLLECT_LIMITS } from "../src/exec/patch.ts";
+import { TASK_LIMITS } from "../src/task/limits.ts";
+import { MAX_WRITE_BYTES } from "../src/task/scripts.ts";
 import { credentialKinds, SNAPSHOT_LIMITS, withoutBreaks } from "../src/exec/snapshot.ts";
 import { readTar } from "../src/exec/tar.ts";
 import { tempDir } from "./helpers.ts";
@@ -304,8 +307,16 @@ describe("commit snapshots", () => {
     await assert.rejects(snap(root, { limits: { maxUploadBytes: 64 } }), refusal(/^The folder's snapshot comes to \d+ bytes compressed, over the 64 a sandbox run takes\. Pick a smaller folder, then try again\.$/, "limit"));
   });
 
+  it("never takes a snapshot collect couldn't read back once a task's worker has written into it (NIV-49)", () => {
+    // What collect reads back is the snapshot's archive plus every write a worker may make, each with its header.
+    const writes = TASK_LIMITS.tools.writes * (MAX_WRITE_BYTES + 1_024);
+    const readBack = Math.min(COLLECT_LIMITS.maxBytes, NEBIUS_LIMITS.maxDownloadBytes);
+    assert.ok(SNAPSHOT_LIMITS.maxArchiveBytes + writes <= readBack, `a ${SNAPSHOT_LIMITS.maxArchiveBytes}-byte snapshot and ${writes} bytes of writes can't come back in ${readBack}`);
+    assert.ok(SNAPSHOT_LIMITS.maxBytes < SNAPSHOT_LIMITS.maxArchiveBytes);
+  });
+
   it("takes a folder over the old limits (6 MiB of content, an 8 MiB tar) when its archive, compressed as it is uploaded, fits (NIV-49)", async () => {
-    assert.deepEqual(SNAPSHOT_LIMITS, { maxFiles: 4_000, maxFileBytes: 2 * 1024 * 1024, maxBytes: 24 * 1024 * 1024, maxArchiveBytes: 32 * 1024 * 1024, maxUploadBytes: 8 * 1024 * 1024 });
+    assert.deepEqual(SNAPSHOT_LIMITS, { maxFiles: 4_000, maxFileBytes: 2 * 1024 * 1024, maxBytes: 14 * 1024 * 1024, maxArchiveBytes: 15 * 1024 * 1024, maxUploadBytes: 8 * 1024 * 1024 });
     // Five files of source, each under the 2 MiB one file may be: about 9.5 MiB in all, as a real repository's can be.
     const line = "export const line = 'source repeats itself, and so it compresses well';\n";
     const root = repoWith(Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`src/part-${index}.ts`, line.repeat(Math.floor((1.9 * 1024 * 1024) / line.length))])));

@@ -149,6 +149,21 @@ describe("an environment's preparation through a real engine (NIV-49, D41)", () 
     await engine.client.call("runs.cancel", { runId: run.id });
     assert.equal((await ended(engine, run.id)).status, "cancelled");
     const done = await report(engine, run.id);
-    assert.deepEqual([done.outcome, done.cleanup?.stopped, done.cleanup?.unresolved, done.prepared], ["cancelled", 1, [], null]);
+    // The pass that stopped it moved the journal into settled/: what is retained is still read from it.
+    assert.deepEqual([done.outcome, done.cleanup?.stopped, done.cleanup?.unresolved, done.cleanup?.retained?.uploads, done.prepared], ["cancelled", 1, [], 1, null]);
+  });
+
+  it("prepares nothing when the image can't be listed, or the sandbox stored other bytes than the inputs sent, and says so", async () => {
+    for (const [fault, step, uploads] of [["listing", "image", 0], ["upload", "upload", 1]] as const) {
+      const { stub, engine, repo } = await setup();
+      const shown = ready(await preview(engine, repo));
+      // A slow-down answer longer than the read's time stops it before anything is journaled.
+      if (fault === "listing") stub.guest.service.rateLimitNextRead = 100_000;
+      else stub.guest.service.wrongUploadHash = true;
+      const run = await start(engine, repo, shown.fingerprint);
+      assert.equal((await ended(engine, run.id)).status, "failed", fault);
+      const done = await report(engine, run.id);
+      assert.deepEqual([done.outcome, done.stopped?.code, done.stopped?.step, done.cleanup?.retained?.uploads, done.prepared, spawns(stub).length], ["failed", "sandbox-failed", step, uploads, null, 0], fault);
+    }
   });
 });

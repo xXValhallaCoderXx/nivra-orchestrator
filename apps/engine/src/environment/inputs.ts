@@ -40,7 +40,7 @@ export interface EnvironmentInputs {
 }
 
 /** Scripts a package manager runs during an install: each needs the repository's sources, which preparation never has. */
-const LIFECYCLE = ["preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare", "prepublish"];
+const LIFECYCLE = ["pnpm:devPreinstall", "preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare", "prepublish"];
 const PNPMFILES = [".pnpmfile.cjs", ".pnpmfile.mjs"];
 const ROOT_INPUTS = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"];
 /** Files of the kind that would be inputs, as the snapshot names them when it leaves one out. */

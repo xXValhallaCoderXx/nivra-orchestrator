@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
-import { PATCH_SHOWN_BYTES, taskBriefDigest, TaskReport, TaskStopCode, type TaskContext, type WorkflowId } from "@nivra/domain";
+import { PATCH_SHOWN_BYTES, taskBriefDigest, TaskReport, TaskStopCode, type EnvironmentContext, type TaskContext, type WorkflowId } from "@nivra/domain";
 import { Database } from "../src/db/database.ts";
 import { MIGRATIONS } from "../src/db/migrations.ts";
 import type { ExecutionBackend, ExecutionSession } from "../src/exec/backend.ts";
@@ -115,6 +115,41 @@ describe("a task run's one deadline (D39)", () => {
 });
 
 describe("a task run's slot (D39)", () => {
+  it("gives a preparation a slot of its own too: it starts while the shared slots and a task's are full, and waits only for another preparation (D41)", async () => {
+    const dir = tempDir();
+    dirs.push(dir);
+    const database = new Database(join(dir, "nivra.db"));
+    database.open();
+    const store = new RunStore({ database });
+    const workflows = new Map<WorkflowId, WorkflowEntry>([
+      ["hello", { id: "hello", title: () => "Hello" }],
+      ["task", { id: "task", title: () => "Task" }],
+      ["environment", { id: "environment", title: () => "Environment" }],
+    ]);
+    const scheduler = new RunScheduler({ store, workflows, instanceId: randomUUID(), log: { info: () => undefined, warn: () => undefined, error: () => undefined }, diagnose: () => undefined });
+    const release = new Map<string, () => void>();
+    scheduler.attach({ getWorkflow: () => ({ createRun: async ({ runId }) => ({ start: () => new Promise((resolve) => release.set(runId, () => resolve({ status: "success" }))), cancel: async () => undefined, watch: () => () => undefined }) }) });
+    scheduler.recover();
+    const hello = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: "/repo", holdMs: 0 }, context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } } });
+    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: TASK_BRIEF };
+    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(TASK_BRIEF) }, context: taskContext });
+    const environmentContext: EnvironmentContext = { sharing: { cloudExecution: true }, spec: { filters: [] } };
+    const prepare = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "environment", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "e".repeat(64) }, context: environmentContext });
+    const [h1, h2] = [hello(), hello()];
+    const t1 = await task();
+    const [e1, e2] = [prepare(), prepare()];
+    const status = (runId: string) => store.status(runId);
+    await waitFor(() => (release.has(t1) && release.has(e1)) || null, { what: "the task and the first preparation to start" });
+    assert.deepEqual([h1, h2, t1, e1, e2].map(status), ["running", "running", "running", "running", "queued"]);
+    release.get(t1)!();
+    await waitFor(() => status(t1) === "succeeded" || null, { what: "the task to end" });
+    assert.equal(status(e2), "queued", "a task's slot freeing up started a preparation");
+    release.get(e1)!();
+    await waitFor(() => status(e2) === "running" || null, { what: "the second preparation" });
+    for (const runId of [h1, h2, e2]) release.get(runId)!();
+    await waitFor(() => [h1, h2, e2].every((runId) => status(runId) === "succeeded") || null, { what: "every run to end" });
+  });
+
   it("takes a slot of its own: it starts while the shared slots are full, and waits only for another task", async () => {
     const dir = tempDir();
     dirs.push(dir);

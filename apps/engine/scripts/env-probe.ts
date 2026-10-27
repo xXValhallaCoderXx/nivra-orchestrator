@@ -60,7 +60,7 @@ const STOP_SECONDS = Math.round((NEBIUS_LIMITS.minWriteMs + NEBIUS_LIMITS.reques
 /** The whole run at its longest, cleanup and one recovery pass included: the token must outlast it. */
 const NEEDED_SECONDS = PROBE.importSeconds + 60 + 180 + PROBE.prepareSeconds + 60 + PROBE.sessionMinutes * 60 + STOP_SECONDS + 2 * PROBE.cleanupMinutes * 60;
 /** Scripts a package manager runs during an install: each needs the repository's sources, which preparation never has. */
-const LIFECYCLE = ["preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare", "prepublish"];
+const LIFECYCLE = ["pnpm:devPreinstall", "preinstall", "install", "postinstall", "preprepare", "prepare", "postprepare", "prepublish"];
 const PNPMFILES = [".pnpmfile.cjs", ".pnpmfile.mjs"];
 
 const Config = z.strictObject({

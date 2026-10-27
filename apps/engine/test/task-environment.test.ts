@@ -5,7 +5,8 @@ import { after, describe, it } from "node:test";
 import { projectFingerprint, type TaskEnvironment } from "@nivra/domain";
 import { environmentInputs } from "../src/environment/inputs.ts";
 import type { ExecResult } from "../src/exec/backend.ts";
-import { judgeBaseline } from "../src/task/harness.ts";
+import { judgeBaseline, notRun, type CheckResult } from "../src/task/harness.ts";
+import { verifiedWith } from "../src/task/worker.ts";
 import { attempt, BRIEF, FIX, FIXTURE, PROJECT, verdicts } from "./task-fixtures.ts";
 import { cleanUp, repoWith, scratch, snap } from "./workspace-fixtures.ts";
 
@@ -55,6 +56,23 @@ describe("a baseline selection's judgement (D41)", () => {
     ];
     for (const [given, result, reason] of cases) assert.deepEqual([judgeBaseline(1, given, result).matched, judgeBaseline(1, given, result).reason], [false, reason]);
     assert.equal(judgeBaseline(1, REPRODUCED, ran("", null, { cancelled: true })).matched, null, "a cancelled one didn't run to its end");
+  });
+
+  it("stops a pattern that backtracks without end at its time limit, and says so", () => {
+    const started = performance.now();
+    const judged = judgeBaseline(1, { name: "p", command: "x", expectedExitCode: 1, outputPattern: "(a+)+" }, ran(`${"a".repeat(40)}!`, 1));
+    assert.deepEqual([judged.matched, judged.reason], [false, "matching its pattern took longer than 1 s, so it was stopped"]);
+    assert.ok(performance.now() - started < 5_000, "the pattern wasn't stopped at its limit");
+  });
+});
+
+describe("a change's verification with frozen files (D41)", () => {
+  it("is verified only when every case passed and every frozen file came back unchanged", () => {
+    const passed: CheckResult = { ...notRun("case", 1, "c", ""), verdict: "passed", reason: null };
+    assert.deepEqual(
+      [verifiedWith([passed], []), verifiedWith([passed], [{ unchanged: true }]), verifiedWith([passed], [{ unchanged: false }]), verifiedWith([passed], [{ unchanged: null }]), verifiedWith([{ ...passed, verdict: "failed" }], [{ unchanged: true }])],
+      [true, true, false, false, false],
+    );
   });
 });
 

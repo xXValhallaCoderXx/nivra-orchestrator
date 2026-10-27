@@ -52,13 +52,16 @@ export interface SnapshotLimits {
   maxFileBytes: number;
   /** All the included files' content. */
   maxBytes: number;
-  /** The archive, headers included. */
+  /**
+   * The archive, headers included: no more than collect can read back once a task's worker has written into it
+   * (`COLLECT_LIMITS.maxBytes`, a session's `maxDownloadBytes`), which a test ties together.
+   */
   maxArchiveBytes: number;
   /** The archive compressed, as it is uploaded (`compressSnapshot`): no more than the sandbox session takes. */
   maxUploadBytes: number;
 }
 
-export const SNAPSHOT_LIMITS: Readonly<SnapshotLimits> = Object.freeze({ maxFiles: 4_000, maxFileBytes: 2 * 1024 * 1024, maxBytes: 24 * 1024 * 1024, maxArchiveBytes: 32 * 1024 * 1024, maxUploadBytes: NEBIUS_LIMITS.maxUploadBytes });
+export const SNAPSHOT_LIMITS: Readonly<SnapshotLimits> = Object.freeze({ maxFiles: 4_000, maxFileBytes: 2 * 1024 * 1024, maxBytes: 14 * 1024 * 1024, maxArchiveBytes: 15 * 1024 * 1024, maxUploadBytes: NEBIUS_LIMITS.maxUploadBytes });
 
 /** The oldest git with every command and flag snapshots and patches use (`status --no-renames` came last, in 2.18). */
 export const MIN_GIT: readonly [number, number] = [2, 18];

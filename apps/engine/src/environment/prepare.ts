@@ -96,9 +96,12 @@ export async function prepareIn(run: PrepareRun): Promise<PrepareOutcome> {
 
     // 2. The inputs, journaled before they are sent.
     at = "upload";
-    run.journal.append({ kind: "upload", wall: wall(), sha256: createHash("sha256").update(run.archive).digest("hex"), bytes: run.archive.byteLength });
+    const sent = createHash("sha256").update(run.archive).digest("hex");
+    run.journal.append({ kind: "upload", wall: wall(), sha256: sent, bytes: run.archive.byteLength });
     const uploaded = await run.api.upload(run.archive, { until: run.until() });
     run.journal.append({ kind: "uploaded", wall: wall(), uuid: uploaded.uuid });
+    // Bytes the sandbox stored that aren't the ones sent would prepare from other manifests: nothing is prepared from them.
+    if (uploaded.sha256 !== null && uploaded.sha256 !== sent) return stopped("sandbox-failed");
 
     // 3. The preparation, networking on, declared.
     at = "install";

@@ -1,5 +1,7 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { projectFingerprint, type EnvironmentContext, type EnvironmentReport, type EnvironmentStopCode, type Mask, type SandboxCleanup, type StoredEnvironmentInput } from "@nivra/domain";
+import { existsSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import { Refusal } from "../diagnostics.ts";
@@ -55,6 +57,12 @@ export interface EnvironmentDeps {
 
 const Input = z.strictObject({ repoPath: z.string() });
 const Done = z.strictObject({ outcome: z.literal("prepared") });
+
+/** A journal's entries wherever it is now: settling moves one with nothing left open into `settled/` beside it. */
+function entriesAt(path: string) {
+  const settled = join(dirname(path), "settled", basename(path));
+  return new Journal(existsSync(path) || !existsSync(settled) ? path : settled).entries;
+}
 
 /** Ends a preparation that won't go on, in its code's words; the report says the same. */
 const stop = (code: EnvironmentStopCode) => new Refusal(`environment-${code}`, ENVIRONMENT_STOP_MESSAGES[code]);
@@ -163,10 +171,11 @@ export function createEnvironmentWorkflow(deps: EnvironmentDeps) {
           if (open.operations.length || open.uncertain.length) {
             const passes = await deps.settle(path, credentials).catch(() => [] as RecoveryResult[]);
             const unresolved = passes.length ? passes.flatMap((pass) => pass.unresolved) : ["Something Nivra started in a sandbox couldn't be settled, and may still be running. It stays journaled, for the next recovery pass."];
-            cleanup = { stopped: passes.reduce((sum, pass) => sum + pass.stopped.length, 0), alreadyEnded: passes.reduce((sum, pass) => sum + pass.alreadyEnded.length, 0), unresolved: unresolved.slice(0, 50).map((item) => deps.mask(safeUnresolved(item)).slice(0, 400)), retained: retainedIn(journal.entries) };
+            cleanup = { stopped: passes.reduce((sum, pass) => sum + pass.stopped.length, 0), alreadyEnded: passes.reduce((sum, pass) => sum + pass.alreadyEnded.length, 0), unresolved: unresolved.slice(0, 50).map((item) => deps.mask(safeUnresolved(item)).slice(0, 400)), retained: retainedIn(entriesAt(path)) };
           } else {
-            cleanup = { stopped: 0, alreadyEnded: 0, unresolved: [], retained: retainedIn(journal.entries) };
-            settleJournal(path);
+            cleanup = { stopped: 0, alreadyEnded: 0, unresolved: [], retained: retainedIn(entriesAt(path)) };
+            // A preparation stopped before anything was journaled leaves no journal to move.
+            if (existsSync(path)) settleJournal(path);
           }
 
           const finished = now().toISOString();

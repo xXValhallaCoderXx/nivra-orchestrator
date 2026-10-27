@@ -65,6 +65,7 @@ describe("an environment's inputs (NIV-49, D41)", () => {
     const cases: Array<[Record<string, string>, RegExp]> = [
       [{ ...MONOREPO, "packages/data/package.json": json({ name: "@mono/data", scripts: { postinstall: "node build.js" } }) }, /packages\/data\/package\.json runs postinstall during an install/],
       [{ ...MONOREPO, "package.json": json({ name: "mono", packageManager: "pnpm@11.5.3", scripts: { prepare: "husky" } }) }, /^package\.json runs prepare/],
+      [{ ...MONOREPO, "package.json": json({ name: "mono", packageManager: "pnpm@11.5.3", scripts: { "pnpm:devPreinstall": "node setup.js" } }) }, /^package\.json runs pnpm:devPreinstall during an install/],
       [{ ...MONOREPO, ".pnpmfile.cjs": "module.exports = {};\n" }, /has \.pnpmfile\.cjs, which runs code from the repository/],
       [{ ...MONOREPO, "pnpm-workspace.yaml": "packages:\n  - packages/*\npatchedDependencies:\n  left-pad: patches/left-pad.patch\n" }, /patches its dependencies/],
       [{ ...MONOREPO, "package.json": json({ name: "mono", packageManager: "pnpm@11.5.3", pnpm: { patchedDependencies: { a: "p.patch" } } }) }, /patches its dependencies/],
