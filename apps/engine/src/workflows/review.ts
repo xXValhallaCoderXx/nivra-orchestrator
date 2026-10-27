@@ -1,10 +1,25 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { packetDigest, preferencesDigest, ReviewOutcome, ReviewPanel, type Mask, type ReviewContext, type ReviewReport, type RunRoute, type RunUsage } from "@nivra/domain";
+import {
+  MISSION_COUNCIL,
+  missionPacketDigest,
+  packetDigest,
+  preferencesDigest,
+  renderMissionPacket,
+  ReviewOutcome,
+  ReviewPanel,
+  specialistRef,
+  type Mask,
+  type MissionReviewPacket,
+  type ReviewContext,
+  type ReviewReport,
+  type RunRoute,
+  type RunUsage,
+} from "@nivra/domain";
 import { z } from "zod";
 import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
 import { policyFor } from "../providers/policy.ts";
 import type { RunLimits } from "../providers/run-budget.ts";
-import { pickNemotron } from "../providers/tokenfactory.ts";
+import { isNvidiaModel, pickNemotron } from "../providers/tokenfactory.ts";
 import { incompleteFailure, runReview } from "../review/run.ts";
 import { ReviewUnreadable, type ReviewTask } from "../review/task.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -38,6 +53,24 @@ export interface ReviewDeps {
 }
 
 const Input = z.strictObject({ panel: ReviewPanel });
+
+const isMission = (packet: ReviewContext["packet"]): packet is MissionReviewPacket => "kind" in packet && packet.kind === "mission";
+
+/**
+ * The model a review may use: the one the listing gives (D22), or, when a mission packet names one, exactly that model,
+ * found in the listing (NIV-52). Any other is refused here, before any inference request: a listing isn't one.
+ */
+export function reviewModel(packet: ReviewContext["packet"], listed: readonly string[]): string {
+  if (isMission(packet) && packet.model !== null) {
+    const named = packet.model;
+    const match = isNvidiaModel(named) ? listed.find((id) => id === named) : undefined;
+    if (!match) throw failure("model-unavailable", `this review may use only ${named}, and this key's listing ${listed.length ? "doesn't include it" : "is empty"}, so nothing was sent`);
+    return match;
+  }
+  const model = pickNemotron(listed);
+  if (!model) throw failure("model-unavailable", "no NVIDIA model is listed for this key");
+  return model;
+}
 const Prepared = z.strictObject({ model: z.string(), contextLength: z.number().nullable() });
 const Reviewed = z.strictObject({ outcome: ReviewOutcome, findings: z.number().int().nonnegative() });
 
@@ -74,15 +107,38 @@ export function createReviewWorkflow(deps: ReviewDeps) {
     execute: async ({ inputData, runId }) => guard("review.context", deps.mask, async () => {
       const task = taskOf(runId);
       const sent = given(runId);
-      const [packet, preferences] = await Promise.all([packetDigest(sent.packet), preferencesDigest(sent.preferences.records)]);
+      const [packet, preferences] = await Promise.all([isMission(sent.packet) ? missionPacketDigest(sent.packet) : packetDigest(sent.packet), preferencesDigest(sent.preferences.records)]);
       if (packet !== task.packetDigest || preferences !== task.preferencesDigest) {
         throw failure("internal", "what was sent isn't what this review was asked for").because("input-refused", "review.context");
+      }
+      // A mission review is the council, with the profiles this engine holds, at their versions (NIV-52).
+      if (isMission(sent.packet)) {
+        if (task.panel !== "council") throw failure("internal", "a mission review needs the council").because("input-refused", "review.context");
+        const expected = MISSION_COUNCIL.map(specialistRef);
+        if (JSON.stringify(sent.packet.specialists) !== JSON.stringify(expected)) {
+          throw failure("internal", "the review was asked for profile versions this engine doesn't hold").because("input-refused", "review.context");
+        }
       }
       // A general plan's review gets personal preferences only (D21).
       if (sent.packet.scope.kind === "general" && sent.preferences.records.some((record) => record.scope === "project")) {
         throw failure("internal", "a general plan's review was sent a project's own preference").because("input-refused", "review.context");
       }
       const described = await describePreferences(sent.preferences);
+      if (isMission(sent.packet)) {
+        const textChars = renderMissionPacket(sent.packet).length;
+        deps.recorder.output(runId, "context", `Mission review: ${sent.packet.tasks.length} selected ${sent.packet.tasks.length === 1 ? "task" : "tasks"}, ${textChars.toLocaleString("en")} characters. ${described.message}`, {
+          planVersion: task.planVersion,
+          scope: sent.packet.scope.kind,
+          tasks: sent.packet.tasks.length,
+          othersInBacklog: sent.packet.othersInBacklog,
+          textChars,
+          model: sent.packet.model,
+          specialists: sent.packet.specialists.map((ref) => `${ref.id}@${ref.version}`),
+          packetDigest: packet,
+          ...described.data,
+        });
+        return inputData;
+      }
       deps.recorder.output(runId, "context", `Plan v${task.planVersion}: ${sent.packet.text.length.toLocaleString("en")} characters, ${sent.packet.assumptions.length} assumptions, ${sent.packet.references.length} historical references. ${described.message}`, {
         planVersion: task.planVersion,
         scope: sent.packet.scope.kind,
@@ -102,11 +158,10 @@ export function createReviewWorkflow(deps: ReviewDeps) {
     inputSchema: Input,
     outputSchema: Prepared,
     execute: async ({ runId, abortSignal }) => guard("review.prepare", deps.mask, async () => {
-      const { key } = allowed(runId);
+      const { context: sent, key } = allowed(runId);
       const client = clientFor(key);
       const models = await client.listModels({ signal: abortSignal, timeoutMs: 30_000 });
-      const model = pickNemotron(models.ids);
-      if (!model) throw failure("model-unavailable", "no NVIDIA model is listed for this key");
+      const model = reviewModel(sent.packet, models.ids);
       deps.setMeta(runId, { route: { provider: "nebius", endpoint: deps.endpoint.kind, model } });
       const contextLength = models.contextLengths.get(model) ?? null;
       deps.recorder.output(runId, "prepare", `Model ${model}`, { model, contextLength });
