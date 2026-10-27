@@ -23,6 +23,8 @@ export interface Seen {
   leaking: number;
   /** Whether each probe's operation, oldest first, was cancelled. */
   probesCancelled: boolean[];
+  /** How many times the engine has read each probe's operation, oldest first. */
+  probeReads: number[];
 }
 
 export type StandIn = <T = null>(command: string, arg?: unknown) => Promise<T>;
@@ -98,6 +100,7 @@ function control(stub: SandboxStub, command: string, arg: unknown): unknown {
     const { key, project, home } = arg as { key: string; project: string; home: string };
     const spawns = stub.requests.filter((request) => request.method === "POST" && request.path === "/v1/instances");
     const networking = (body: string) => (JSON.parse(body) as { networking?: { enabled?: boolean } }).networking?.enabled;
+    const probeOperations = service.operations.filter((operation) => isProbe((operation.body["args"] as string[] | undefined) ?? []));
     const seen: Seen = {
       total: stub.requests.length,
       uploads: stub.requests.filter((request) => request.path === "/v1/files").length,
@@ -107,7 +110,8 @@ function control(stub: SandboxStub, command: string, arg: unknown): unknown {
       deletes: stub.requests.filter((request) => request.method === "DELETE").length,
       credentialed: stub.requests.every((request) => request.authorization === `Bearer ${key}` && request.project === project),
       leaking: stub.requests.filter((request) => [key, project, home].some((value) => request.body.includes(value))).length,
-      probesCancelled: service.operations.filter((operation) => isProbe((operation.body["args"] as string[] | undefined) ?? [])).map((operation) => operation.cancelled),
+      probesCancelled: probeOperations.map((operation) => operation.cancelled),
+      probeReads: probeOperations.map((operation) => operation.reads),
     };
     return seen;
   }

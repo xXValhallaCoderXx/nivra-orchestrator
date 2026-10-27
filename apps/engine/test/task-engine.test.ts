@@ -92,6 +92,12 @@ const ended = (engine: EngineProcess, runId: string) => engine.waitForRun(runId,
 const report = async (engine: EngineProcess, runId: string): Promise<TaskReport> => (await engine.client.call("runs.task", { runId }))!;
 const spawns = (stub: SandboxStub<RealGuest>) => stub.requests.filter((request) => request.method === "POST" && request.path === "/v1/instances");
 const spawned = (stub: SandboxStub<RealGuest>, name: string) => spawns(stub).filter((request) => request.body.includes(name)).length;
+/**
+ * Whether the engine has read the nth operation whose arguments name `name` (the first unless given). It reads one only
+ * once the spawn's answer is in and journaled, so a cancel after that read can't race the answer, as one after the
+ * spawn alone can.
+ */
+const operationRead = (stub: SandboxStub<RealGuest>, name: string, nth = 1) => (stub.guest.service.operations.filter((operation) => JSON.stringify(operation.body["args"] ?? []).includes(name))[nth - 1]?.reads ?? 0) > 0;
 const verdicts = (shown: TaskReport) => shown.checks.map((check) => `${check.kind} ${check.number} ${check.verdict}`);
 
 /** A finished run's proposal, and the approval of it the host would send: bound to the attempt, this engine and the brief. */
@@ -284,7 +290,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     const fingerprint = ready(await preview(engine, repo)).snapshot.fingerprint;
     const requestId = randomUUID();
     const first = await start(engine, repo, fingerprint, { requestId });
-    await waitFor(() => spawned(sandbox, "nivra-toolchain") === 1, { timeoutMs: 30_000, what: "the toolchain probe's spawn" });
+    await waitFor(() => operationRead(sandbox, "nivra-toolchain"), { timeoutMs: 30_000, what: "the engine's first read of the toolchain probe's operation" });
     const second = randomUUID();
     await assert.rejects(start(engine, repo, fingerprint, { requestId: second }), /A task is already running on this engine, so another wasn't started\. Wait for it to end, or cancel it, then run this one again\./);
     assert.equal(await engine.client.call("runs.find", { clientRequestId: second }), null);
@@ -305,7 +311,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     const { sandbox, guest, engine, repo } = await setup();
     guest.override = ({ label }) => (label === "nivra-write" ? { waits: true } : undefined);
     const run = await start(engine, repo, ready(await preview(engine, repo)).snapshot.fingerprint);
-    await waitFor(() => spawned(sandbox, "nivra-write") === 1, { timeoutMs: 30_000, what: "the write's spawn" });
+    await waitFor(() => operationRead(sandbox, "nivra-write"), { timeoutMs: 30_000, what: "the engine's first read of the write's operation" });
     const status = (): Promise<SandboxStatus> => engine.client.call("sandbox.status", {});
     assert.deepEqual([(await status()).open.length, (await status()).pass.state], [0, "idle"], "the task's own journal reads as open work");
     await engine.client.call("secrets.update", { set: CREDENTIALS, remove: [] });
@@ -326,7 +332,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     const hash = (await report(engine, proposed.id)).proposal?.hash;
     guest.override = ({ label }) => (label === "nivra-toolchain" ? { waits: true } : undefined);
     const dying = await start(engine, repo, fingerprint);
-    await waitFor(() => spawned(sandbox, "nivra-toolchain") === 2, { timeoutMs: 30_000, what: "the second run's probe" });
+    await waitFor(() => operationRead(sandbox, "nivra-toolchain", 2), { timeoutMs: 30_000, what: "the engine's first read of the second toolchain probe's operation" });
     engine.kill();
     await engine.exited;
     const sent = spawns(sandbox).length;
