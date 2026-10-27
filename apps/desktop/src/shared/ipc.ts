@@ -7,10 +7,14 @@ import type {
   ChatResult,
   DoctorReport,
   EngineInfo,
+  EnvironmentPreview,
+  EnvironmentReport,
+  EnvironmentSpec,
   ExplainResult,
   HistoryRecord,
   PreferenceIntent,
   PreferenceScope,
+  PreparedEnvironment,
   ProviderCheck,
   ReviewPanel,
   ReviewReport,
@@ -21,6 +25,7 @@ import type {
   SandboxReport,
   SandboxStatus,
   SnapshotPreview,
+  TaskEnvironment,
   TaskProposal,
   TaskReport,
   TaskRunLimits,
@@ -52,6 +57,10 @@ export const IPC = {
   cancelSandboxCheck: "sandbox:cancel",
   getSandboxCheck: "sandbox:get",
   getSandboxStatus: "sandbox:status",
+  getEnvironment: "environment:get",
+  previewEnvironment: "environment:preview",
+  prepareEnvironment: "environment:prepare",
+  cancelPreparation: "environment:cancel",
   listPreferences: "preferences:list",
   addPreference: "preferences:add",
   editPreference: "preferences:edit",
@@ -190,6 +199,46 @@ export interface SandboxCheckView {
   report: SandboxReport | null;
   /** Something to tell the person about it: stopped because uploads were turned off, say; null otherwise. */
   note: string | null;
+}
+
+/**
+ * A preparation of a project's environment (D41), as the workspace keeps it and its engine reports it. `not-sent` and
+ * `unknown` mean what they mean for a turn. Nothing is ever resent: preparing again makes a new preparation.
+ */
+export interface PreparationView {
+  id: string;
+  runId: string | null;
+  status: TurnStatus;
+  /** What happened, in Nivra's words, when it ended without its report or was stopped; null while it goes. */
+  note: string | null;
+  /** Why its engine can't be read now, while that lasts. */
+  unresolved: string | null;
+  cancelRequested: boolean;
+  /** The packages it installs, as pnpm filters; none is the whole workspace. */
+  spec: EnvironmentSpec;
+  /** Its engine's report: kept when it ended, read from its engine while it goes; null until there is one. */
+  report: EnvironmentReport | null;
+  /** Its latest progress, oldest first. */
+  progress: string[];
+  createdAt: string;
+  settledAt: string | null;
+}
+
+/**
+ * A project's environment (D41): the packages chosen with its last preparation, what its last successful preparation
+ * left, which its task runs start from, and its latest preparation.
+ */
+export interface EnvironmentView {
+  projectId: string;
+  /** The spec accepted when its last preparation was started; null before the first. */
+  spec: EnvironmentSpec | null;
+  /** What its task runs start from; null until a preparation ends prepared. */
+  prepared: PreparedEnvironment | null;
+  preparation: PreparationView | null;
+  /** Why Prepare can't be pressed now, in plain words; null when it can. Uploads, when off, are asked for when it is pressed. */
+  blocked: string | null;
+  /** Something to know about the prepared environment, such as that it was made in another Nebius project; null otherwise. */
+  notice: string | null;
 }
 
 /** One of the engineer's preferences, from the host's canonical store (D21). */
@@ -534,6 +583,15 @@ export interface TaskRunPreview {
   keeps: { tokenFactory: string; nebius: string | null };
   cases: Array<AcceptanceCaseView & { number: number }>;
   checks: Array<{ number: number; command: string }>;
+  /**
+   * The brief's baseline checks (D41): each runs once before the worker, on the commit as it is, and the run stops there
+   * when one doesn't give what the brief expects.
+   */
+  baseline: Array<BaselineSelection & { number: number }>;
+  /** The brief's frozen files, with their SHA-256 in the commit once its engine has read them (null before). */
+  frozen: Array<{ path: string; sha256: string | null }>;
+  /** The prepared environment the run starts from, as its engine checked it against the commit; null without one. */
+  environment: (TaskEnvironment & { preparedAt: string }) | null;
   /** The programs the run looks for before the model starts, and how many commands start with something it can't read. */
   programs: string[];
   unprobed: number;
@@ -684,6 +742,17 @@ export interface NivraApi {
   getSandboxCheck(projectId: string): Promise<SandboxCheckView | null>;
   /** What the project's engine has left open in Nebius from earlier sessions, and its recovery pass. */
   getSandboxStatus(projectId: string): Promise<SandboxStatus>;
+  /** The project's environment (D41): its chosen packages, what its task runs start from, and its latest preparation. */
+  getEnvironment(projectId: string): Promise<EnvironmentView>;
+  /** What preparing the project's environment with these packages would send and run, from its own engine with no network. Nothing is stored. */
+  previewEnvironment(projectId: string, spec: EnvironmentSpec): Promise<EnvironmentPreview>;
+  /**
+   * Prepares the environment previewed (D41); refused when uploads are off, the key or project id is missing, on Windows
+   * itself, or when what it would send changed since the preview (`expected`).
+   */
+  prepareEnvironment(projectId: string, spec: EnvironmentSpec, expected: string): Promise<EnvironmentView>;
+  /** Stops the project's preparation; what it uploaded stays with Nebius. */
+  cancelPreparation(projectId: string): Promise<EnvironmentView>;
   /**
    * Explains the project's repository with evidence (NIV-6); refused while sharing is off. An empty question means the
    * default. `choices` are this task's explicit decisions, up to five: they outrank everything for this run only and

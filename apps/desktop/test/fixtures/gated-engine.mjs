@@ -31,9 +31,18 @@
 // request id, or null; task.restore takes one back to its originals and task.dismiss settles one, each kept in
 // `applies.log` so a later applyStatus reads it; with an `error-settle` file, either does its work, then answers with an
 // internal error, as an engine whose answer is lost, and with a `hold-settle` file, does its work and never answers.
+// For environments (D41): environment.preview records what it was asked (`env-previews.log`) and answers a ready preview
+// whose fingerprint covers the spec it was given, and also an `env-changed` file while one exists, as a commit that
+// changed would. runs.start records each preparation with its input and context (`environments.log`). runs.environment
+// answers with a report: in progress while a `running` file exists, cancelled for a run it was asked to cancel, else
+// the outcome an `environment-outcome` file names (prepared unless it says otherwise), with the prepared environment
+// only when it is prepared, or whatever it is while an `environment-prepared-anyway` file exists. Its project
+// fingerprint hashes the project id it was handed with the secrets. runs.get says a preparation whose outcome isn't
+// prepared failed, unless an `environment-run-succeeds` file exists. task.preview records what it was asked
+// (`task-previews.log`), and echoes the environment it was given, with the brief's frozen files.
 // It takes secrets.update, and turns down at once any other method it doesn't stand in for, so no caller waits out its
 // time limit. The window's tests run it as the local engine with --nivra-test-engine=gated (unpackaged only).
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -48,6 +57,48 @@ const summary = (status, id = randomUUID(), workflowId = "explain") => {
   return { id, workflowId, title: workflowId === "chat" ? "Chat" : "Explain", status, input: {}, createdAt: now, startedAt: now, finishedAt: null, error: null, durationMs: null, usage: null, route: null };
 };
 const cancelled = new Set();
+const sha256 = (text) => createHash("sha256").update(text).digest("hex");
+/** The Nebius project id the host handed over with the secrets, as an engine keeps it in memory. */
+let nebiusProject = null;
+/** What a gated preview says the commit's manifests digest to. */
+const INPUTS_DIGEST = "b".repeat(64);
+/** A preparation's spec and its outcome, as the flags say. */
+const preparation = (runId) => logged("environments.log", runId);
+const environmentOutcome = () => (existsSync(join(home, "environment-outcome")) ? readFileSync(join(home, "environment-outcome"), "utf8").trim() : "prepared");
+/** A preparation's report, as an engine keeps one. */
+const environmentReport = (runId) => {
+  const run = preparation(runId);
+  if (!run) return null;
+  const now = new Date().toISOString();
+  const going = !cancelled.has(runId) && existsSync(join(home, "running"));
+  const outcome = cancelled.has(runId) ? "cancelled" : going ? "in-progress" : environmentOutcome();
+  const filters = run.context.spec.filters;
+  const prepared = {
+    image: `image-${runId.slice(0, 8)}`,
+    base: { tag: "node:22.23.4-alpine3.24", image: "img-imported", imported: true },
+    node: "v22.23.4",
+    pnpm: "11.5.3",
+    arch: "x86_64",
+    baseline: "a".repeat(40),
+    inputsDigest: INPUTS_DIGEST,
+    spec: run.context.spec,
+    installArgs: ["--frozen-lockfile", ...filters.flatMap((filter) => ["--filter", filter])],
+    projectFingerprint: nebiusProject ? sha256(`nivra.nebius-project.v1\0${nebiusProject}`) : "f".repeat(64),
+    preparedAt: now,
+  };
+  const stopped = outcome === "failed" ? { code: "install", step: "preparation", message: "The install in the sandbox didn't finish, so no environment was made." } : outcome === "cancelled" ? { code: "cancelled", step: "preparation", message: "Cancelled." } : null;
+  return {
+    outcome,
+    stopped,
+    prepared: outcome === "prepared" || existsSync(join(home, "environment-prepared-anyway")) ? prepared : null,
+    install: going ? null : { exitCode: outcome === "failed" ? 1 : 0, logTail: outcome === "failed" ? "ERR_PNPM_OUTDATED_LOCKFILE <b>Cannot install</b> with frozen-lockfile\n" : "installed\n" },
+    steps: [],
+    cleanup: null,
+    request: { runId, clientRequestId: run.clientRequestId },
+    updatedAt: now,
+    finishedAt: going ? null : now,
+  };
+};
 /** The change a gated task run proposes. */
 const TASK_HASH = "5".repeat(64);
 /** A line of a `<id> <json>` log, by its id. */
@@ -183,7 +234,8 @@ process.stdin.on("data", (chunk) => {
     buffer = buffer.slice(end + 1);
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
-      send({ id: request.id, result: { protocolVersion: 11, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      nebiusProject = request.params.secrets?.NEBIUS_PROJECT_ID ?? null;
+      send({ id: request.id, result: { protocolVersion: 12, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
@@ -191,6 +243,9 @@ process.stdin.on("data", (chunk) => {
       if (existsSync(join(home, "accept"))) appendFileSync(join(home, "accepted.log"), `${request.params.clientRequestId} ${runId}\n`);
       if (request.params.workflowId === "review") appendFileSync(join(home, "reviews.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
       if (request.params.workflowId === "task") appendFileSync(join(home, "tasks.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
+      if (request.params.workflowId === "environment") {
+        appendFileSync(join(home, "environments.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input, context: request.params.context })}\n`);
+      }
       if (request.params.workflowId === "research") {
         appendFileSync(join(home, "research.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input, packet: request.params.context.packet })}\n`);
       }
@@ -214,7 +269,8 @@ process.stdin.on("data", (chunk) => {
         }, 25);
       }
     } else if (request.method === "runs.get") {
-      const status = cancelled.has(request.params.runId) ? "cancelled" : existsSync(join(home, "running")) ? "running" : "succeeded";
+      const failedPreparation = preparation(request.params.runId) !== null && environmentOutcome() !== "prepared" && !existsSync(join(home, "environment-run-succeeds"));
+      const status = cancelled.has(request.params.runId) ? "cancelled" : existsSync(join(home, "running")) ? "running" : failedPreparation ? "failed" : "succeeded";
       if (existsSync(join(home, "fail-get"))) send({ id: request.id, error: { code: -32603, message: "the run couldn't be read" } });
       else send({ id: request.id, result: { ...summary(status), id: request.params.runId, finishedAt: status === "running" ? null : new Date().toISOString() } });
     } else if (request.method === "runs.reply") {
@@ -226,6 +282,34 @@ process.stdin.on("data", (chunk) => {
       send({ id: request.id, result: researchReport(request.params.runId) });
     } else if (request.method === "runs.sandbox") {
       send({ id: request.id, result: null });
+    } else if (request.method === "runs.environment") {
+      send({ id: request.id, result: environmentReport(request.params.runId) });
+    } else if (request.method === "environment.preview") {
+      appendFileSync(join(home, "env-previews.log"), `${JSON.stringify(request.params)}\n`);
+      const filters = request.params.spec.filters;
+      send({
+        id: request.id,
+        result: {
+          status: "ready",
+          baseline: "a".repeat(40),
+          packageManager: "pnpm@11.5.3",
+          nodeRequirement: ">=22",
+          packages: [
+            { name: "@mono/data", path: "packages/data" },
+            { name: "@mono/web", path: "packages/web" },
+          ],
+          inputs: ["package.json", "packages/data/package.json", "packages/web/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].map((path) => ({ path, bytes: 100, sha256: sha256(path) })),
+          inputsDigest: INPUTS_DIGEST,
+          sentBytes: 900,
+          leftOut: [".npmrc"],
+          base: { tag: "node:22.23.4-alpine3.24", registryUrl: "docker://docker.io/library/node:22.23.4-alpine3.24", node: "v22.23.4" },
+          installArgs: ["--frozen-lockfile", ...filters.flatMap((filter) => ["--filter", filter])],
+          network: "Networking is on for the preparation only.",
+          retention: "Images are retained for 180 days.",
+          limits: { importSeconds: 900, prepareSeconds: 600, operations: 1 },
+          fingerprint: sha256(JSON.stringify([request.params.spec, existsSync(join(home, "env-changed"))])),
+        },
+      });
     } else if (request.method === "runs.events") {
       send({ id: request.id, result: { events: [], next: request.params.after ?? 0, status: cancelled.has(request.params.runId) ? "cancelled" : "succeeded" } });
     } else if (request.method === "runs.result") {
@@ -277,7 +361,9 @@ process.stdin.on("data", (chunk) => {
         result: { hash: TASK_HASH, baseline: "a".repeat(40), prefix: "", paths: [{ path: "greet.sh", change: "changed", before: { mode: "100644", sha256: sha }, after: { mode: "100644", sha256: "9".repeat(64) } }], patch: "--- a/greet.sh\n+++ b/greet.sh\n", patchBytes: 30, truncated: false },
       });
     } else if (request.method === "task.preview") {
+      appendFileSync(join(home, "task-previews.log"), `${JSON.stringify(request.params)}\n`);
       const none = { count: 0, sample: [] };
+      const baselineChecks = request.params.brief.baseline?.length ?? 0;
       send({
         id: request.id,
         result: {
@@ -286,7 +372,9 @@ process.stdin.on("data", (chunk) => {
           programs: ["."],
           unprobed: 0,
           caseFiles: [],
-          limits: { modelRequests: 12, requestSeconds: 150, outputTokensPerRequest: 8000, estimatedInputTokens: 160000, toolCalls: 24, writes: 8, writeBytes: 32768, runs: 4, operations: 17, checkSeconds: 60, sessionMinutes: 20, runMinutes: 33 },
+          environment: request.params.environment ?? null,
+          frozen: (request.params.brief.frozen ?? []).map((path) => ({ path, sha256: sha256(path) })),
+          limits: { modelRequests: 12, requestSeconds: 150, outputTokensPerRequest: 8000, estimatedInputTokens: 160000, toolCalls: 24, writes: 8, writeBytes: 32768, runs: 4, baselineChecks, operations: 17 + baselineChecks, checkSeconds: 60, sessionMinutes: 20, runMinutes: 33 },
         },
       });
     } else if (request.method === "task.apply") {
@@ -330,6 +418,8 @@ process.stdin.on("data", (chunk) => {
         else send({ id: request.id, result: next });
       }
     } else if (request.method === "secrets.update") {
+      if (request.params.set?.NEBIUS_PROJECT_ID) nebiusProject = request.params.set.NEBIUS_PROJECT_ID;
+      if (request.params.remove?.includes("NEBIUS_PROJECT_ID")) nebiusProject = null;
       send({ id: request.id, result: { ok: true } });
     } else if (request.method === "shutdown") {
       send({ id: request.id, result: { ok: true } });

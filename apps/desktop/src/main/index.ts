@@ -208,6 +208,13 @@ function start(): void {
   handle(IPC.cancelSandboxCheck, project, (_event, id) => host.cancelSandboxCheck(id));
   handle(IPC.getSandboxCheck, project, (_event, id) => host.sandboxCheck(id));
   handle(IPC.getSandboxStatus, project, (_event, id) => host.sandboxStatus(id));
+  // A project's environment (D41): packages chosen as pnpm filters, which the host checks with the domain's own schema,
+  // saying in words what to change; a preparation bound to its preview's fingerprint (SHA-256 in hex).
+  const Spec = z.strictObject({ filters: z.array(z.string().max(1_000)).max(100) });
+  handle(IPC.getEnvironment, project, (_event, id) => host.environment(id));
+  handle(IPC.previewEnvironment, z.tuple([z.uuid(), Spec]), (_event, id, spec) => host.previewEnvironment(id, spec));
+  handle(IPC.prepareEnvironment, z.tuple([z.uuid(), Spec, z.string().regex(/^[0-9a-f]{64}$/)]), (_event, id, spec, expected) => host.prepareEnvironment(id, spec, expected));
+  handle(IPC.cancelPreparation, project, (_event, id) => host.cancelPreparation(id));
   // The choices are required, so a caller that drops them fails here rather than explaining without them. The host
   // checks them again, with messages a person can act on (D23).
   handle(IPC.startExplain, z.tuple([z.uuid(), z.string().max(2_000), z.array(z.string().max(2_000)).max(20)]), (_event, id, question, choices) =>
