@@ -2684,11 +2684,11 @@ tree (D34 saw it fail part way, an edited file deleted), so the engine writes th
   claim left before its intent is refused as interrupted. Nothing of the person's is written, and nothing is replayed.
 - **Settling:** `task.restore` takes a partial apply back to its originals, keeping what the apply knew of another
   program's saves; `task.dismiss` settles an apply as accepted (applied), dismissed (not applied, refused or unknown)
-  or kept (partial). Settling removes a name in the recovery folder only while it is a second name for the file now at
-  its path (Nivra's new file once in place, or an original restored), so removing it loses nothing. Every other copy
-  stays, whatever its bytes: the originals, versions taken back, new files never linked into place. A program that had
-  a file open before the apply saves into its original, and nothing can tell that none does, so the recovery folder
-  outlives settling and the person deletes it. A partial apply with a file moved aside can't be kept as it is, only
+  or kept (partial). Settling removes nothing from the recovery folder: every copy stays, whatever its bytes and
+  whatever is at its path now (the originals, Nivra's own files, versions taken back). A program that had a file open
+  before the apply saves into its original, and nothing can tell that none does. No look at the checkout can be made
+  one step with removing a name either: an editor's save can replace the file in between. So the recovery folder
+  outlives settling, and the person deletes it. A partial apply with a file moved aside can't be kept as it is, only
   restored. Asked again the same way, after an answer lost on the way back, each gives the apply as
   it is and writes nothing. A view keeps to the protocol's bounds.
 - **What leaves the engine (D29):** a refusal's words by its code, the proposal's own paths, the recovery folder named
@@ -2761,12 +2761,17 @@ tree (D34 saw it fail part way, an edited file deleted), so the engine writes th
      proposal outside and still read applied. Every folder is now held open from `/` down and written through, a moved
      one rolls the apply back, and rollback and restore report a path behind a link as unknown (`40df5f8`, `7c46ae7`);
   2. accepting removed a moved-aside original whose bytes still matched, so a program that had the file open saved
-     into a file with no name left. Only a second name for the file in place is removed now (`ea36e33`); the card says
-     the originals stay (`6736a9a`);
+     into a file with no name left. Only a second name for the file in place was removed then (`ea36e33`), and after
+     the follow-up review below nothing is; the card says the copies stay (`6736a9a`);
   3. accepting an older run's change completed a task whose brief had moved on. The brief and repository are held
      until the change is settled, and accepting completes the task only when neither changed (`85bd441`);
   4. a settle whose answer was lost was remembered only in memory, so a restart offered it again. Which way is saved
      before it is sent and read back when its engine comes online (`0c5e636`).
+- **Nate's follow-up review of PR 19 (27 October)** confirmed those fixes and found that removing a second name wasn't
+  safe either. An editor's atomic save can replace the checkout file between the check and the unlink, and the copy is
+  then the last name of a file a program still has open. He showed it after a rollback, then Dismiss: a later save
+  through the original's descriptor had no name left. Settling now removes nothing but the lock and an empty recovery
+  folder (`110d308`).
 
 **Consequences.**
 - **Limits:** no deletions, mode changes or links in a proposal; no undo after a successful apply; native Windows

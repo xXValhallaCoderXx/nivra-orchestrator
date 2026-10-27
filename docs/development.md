@@ -463,8 +463,8 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e task-apply.spec.ts
   (the protocol's four calls, one apply at a time, and reconciling at start).
 - **Recovery folder names** are positional: `new-<n>` (Nivra's bytes), `orig-<n>` (the original moved aside),
   `back-<n>-<m>` (a version taken back by rollback or restore). `nivra-apply/lock` names the engine and the apply that
-  hold the folder. Settling removes only a name that is a second name for the file at its path, so each apply's folder
-  stays, its originals in it, until the person deletes it.
+  hold the folder. Settling removes nothing from it, so each apply's folder stays, with every copy, until the person
+  deletes it.
 - **The writer's tests** fail every filesystem call in turn (`apply-writer.test.ts`), save a file at each gap through
   the writer's step hooks, and kill a child process at every call (`apply-kill.test.ts`, with `apply-kill-child.ts`);
   `apply-fixtures.ts` holds the plan helpers. Revalidation's tests use real proposals from `attempt()`.

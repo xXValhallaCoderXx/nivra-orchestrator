@@ -2224,6 +2224,37 @@ own, then reviewed and merged. PR 18's fix was merged in (`4fde8bd`).
   across relaunches, quitting leaving no engine, and `~/.nivra` unchanged. None of them drives an apply: that is
   checkpoint 3's. Targets, the supervisor and staging didn't change, so `verify:windows` wasn't called for.
 
+**Nate's follow-up review of PR 19 (27 October)** confirmed the anchoring and both host fixes, and that the reproduction
+of a save after acceptance keeps `orig-0`. It found one more: removing a second name from the recovery folder isn't
+safe. An editor's atomic save can replace the checkout file between the check and the unlink, and the copy is then the
+last name of a file a program still has open. Fixed in `110d308`: settling removes nothing but the lock and an
+empty recovery folder (D40).
+- **The regression** (`apply-service.test.ts`):
+  - a program opens `README.md` before the apply;
+  - the first link fails, so the apply rolls back, `README.md`'s original is in place again, and its copy in the
+    recovery folder is a second name for it;
+  - an editor renames a new file over `README.md` the moment dismissing looks at that copy, or right after;
+  - the program then saves through its descriptor.
+  The save is in `orig-0`, with one link left, and `README.md` holds the editor's save. Against the previous release
+  the test fails as the review showed: no link left, and `orig-0` gone.
+- The tests that expected Nivra's own copies removed at settlement now expect every copy kept: the service's, the
+  engine's over stdio, the host's on a real engine, and the apply journey in the built app.
+- **On a real engine through `rpc.ts`** at `110d308`: a shell held `greet.sh` open through apply and accept. Both
+  `new-0` and `orig-0` stayed after acceptance and the lock went, the shell's later save was in `orig-0`, and
+  `greet.sh` kept the change. Applying again was refused as a duplicate.
+- **Mutation checks:** the writer and service, 36 of 36, each failed a test. New among them: settling removing the
+  copies it kept (caught by the acceptance regression and by this one), and settling removing a missing file's
+  original.
+- `pnpm verify` at `110d308`: 993 tests (domain 66, desktop 288, engine 639), none skipped.
+- The built app (`test:e2e`): 67 passed and 1 skipped (the packaged-only test).
+- The packaged app (`test:packaged`, a runtime staged from this code): 27 passed and 41 skipped, the tests that need the
+  stand-in switches. The Windows turn wasn't repeated: settling and the card's wording changed, not targets, the
+  supervisor, staging, or main-process or preload behaviour.
+- The review's full run had one failure, `sandbox-checks.test.ts`, which passed alone. It is Track B's rehearsal of
+  `verify:windows`, unchanged here, and it races under load: it cancels once the stand-in has received the probe's
+  request, not once the engine has its answer, so a cancel in between rightly reads as uncertain. Its fix belongs to
+  that harness, with a Windows turn of its own.
+
 **Not shown yet:**
 - **A partial or unknown apply through the host on a real engine:** getting one takes a crash mid-write, so the host's
   partial, restore and keep tests run on the gated engine, and the writer's own tests and the kill tests show the real
