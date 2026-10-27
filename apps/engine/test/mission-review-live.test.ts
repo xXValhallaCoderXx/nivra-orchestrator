@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,8 @@ import { startStub, toolCall, type Reply, type Stub, type StubRequest } from "./
 /**
  * The mission review's live check (NIV-52), offline: its recipe and digest, a run against a loopback stub that ends
  * complete with the approved model held, and the refusals that keep a live run to the approved recipe: another digest,
- * and a listing without the approved model, which sends no inference request at all.
+ * an engine home it must never use, and a listing without the approved model, which sends no inference request at all.
+ * The model is held only when every answer named it.
  */
 
 const SCRIPT = fileURLToPath(new URL("../scripts/mission-review-live.ts", import.meta.url));
@@ -27,9 +28,9 @@ const folder = () => {
   return dir;
 };
 
-function run(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function run(args: string[], env: NodeJS.ProcessEnv = process.env): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [SCRIPT, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [SCRIPT, ...args], { stdio: ["ignore", "pipe", "pipe"], env });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
@@ -48,6 +49,11 @@ const COUNCIL: Record<Role, Reply> = {
 const LIVE_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 /** A reply as a provider serving `model` sends it back. */
 const servedBy = (reply: Reply, model: string): Reply => ({ ...reply, body: { ...(reply.body as Record<string, unknown>), model } });
+/** A reply that names no model at all. */
+const unnamed = (reply: Reply): Reply => {
+  const { model: _model, ...body } = reply.body as Record<string, unknown>;
+  return { ...reply, body };
+};
 
 describe("the mission review's live check (NIV-52)", () => {
   it("prints the recipe for approval, with its bounds, its one model and a digest, and sends nothing", async () => {
@@ -56,6 +62,7 @@ describe("the mission review's live check (NIV-52)", () => {
     assert.match(stdout, /Model: nvidia\/nemotron-3-super-120b-a12b only\. The engine refuses any other before the first inference request/);
     assert.match(stdout, /at most 3 requests \(two reviewers, then the chair\), 4,000 output tokens each, 150 s each and 330 s in all/);
     assert.match(stdout, /Product architect v1, instructions [0-9a-f]{12}\./);
+    assert.match(stdout, /The forms they hand in \(the tools' definitions\): [0-9a-f]{12}\./);
     assert.match(stdout, /Approval digest: [0-9a-f]{64}\n/);
     const again = await run(["--plan"]);
     assert.equal(/Approval digest: ([0-9a-f]{64})/.exec(again.stdout)?.[1], /Approval digest: ([0-9a-f]{64})/.exec(stdout)?.[1], "the same recipe gives the same digest");
@@ -92,6 +99,28 @@ describe("the mission review's live check (NIV-52)", () => {
     assert.match(stdout, /A request was served by a model other than nvidia\/nemotron-3-super-120b-a12b: this run isn't the approved check\./);
     const result = JSON.parse(readFileSync(join(dir, "out", "result.json"), "utf8")) as { outcome: string; modelHeld: boolean };
     assert.deepEqual([result.outcome, result.modelHeld], ["complete", false]);
+  });
+
+  it("doesn't call the model held when the answers didn't name the model that served them", async () => {
+    const stub = await startStub({ chat: (request) => unnamed(COUNCIL[roleOf(request) ?? "chair"]) });
+    stubs.push(stub);
+    const dir = folder();
+    const { code, stdout } = await run(["--token-factory-url", stub.url, "--out", join(dir, "out"), "--home", join(dir, "home")]);
+    assert.equal(code, 1);
+    assert.match(stdout, /3 of 3 answers didn't name the model that served them, so this run doesn't show nvidia\/nemotron-3-super-120b-a12b held\./);
+    const result = JSON.parse(readFileSync(join(dir, "out", "result.json"), "utf8")) as { outcome: string; modelHeld: boolean | null };
+    assert.deepEqual([result.outcome, result.modelHeld], ["complete", null]);
+  });
+
+  it("refuses an engine home inside one it must never use, before reading the key or starting an engine", async () => {
+    const home = folder();
+    for (const forbidden of [".nivra", ".nivra-dev"]) {
+      const inside = join(home, forbidden, "live");
+      const { code, stderr } = await run(["--token-factory-url", "http://127.0.0.1:9", "--out", join(home, "out"), "--home", inside], { ...process.env, HOME: home });
+      assert.equal(code, 2);
+      assert.match(stderr, /is in .+, an engine home this check must never use\. Nothing was sent\./);
+      assert.equal(existsSync(join(home, forbidden)), false, "nothing was made there");
+    }
   });
 
   it("sends no inference request when the listing lacks the approved model", async () => {

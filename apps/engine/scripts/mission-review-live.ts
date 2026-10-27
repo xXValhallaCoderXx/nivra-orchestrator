@@ -1,7 +1,7 @@
 // The mission review's live check (NIV-52): one council review of a public, synthetic mission and three of its tasks,
 // through a real engine and real Token Factory, with the one model the recipe names. Never part of `pnpm verify`. It
-// runs only with Nate's approval of the recipe's digest, which binds the revision, the fixture, the profiles and their
-// instructions, the model and the limits, and only from a clean checkout.
+// runs only with Nate's approval of the recipe's digest, which binds the revision, the fixture, the profiles, their
+// instructions and the forms they hand in, the model and the limits, and only from a clean checkout.
 //
 // Usage:
 //   node scripts/mission-review-live.ts --plan                                         # the recipe for approval; no network
@@ -16,12 +16,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { isTerminal, MISSION_COUNCIL, MissionReviewPacket, missionPacketDigest, preferencesDigest, renderMissionPacket, SPECIALISTS, type ReviewReport, type RunSummary } from "@nivra/domain";
 import { ANSWER_TOKENS } from "../src/providers/policy.ts";
 import { MISSION_INSTRUCTIONS } from "../src/review/mission-prompt.ts";
-import { REVIEW_LIMITS, REVIEW_REQUEST_MS } from "../src/review/run.ts";
+import { missionToolDefinitions, REVIEW_LIMITS, REVIEW_REQUEST_MS } from "../src/review/run.ts";
 import { startEngine } from "./council-eval/batch.ts";
 import { canonical, readCredentials, REPOSITORY } from "./council-eval/files.ts";
 
@@ -67,6 +67,8 @@ const recipe = {
   revision: commit,
   fixture: { path: relative(REPOSITORY, fixturePath), sha256: sha256(raw), packetDigest, chars: renderMissionPacket(packet).length, tasks: packet.tasks.length },
   profiles: MISSION_COUNCIL.map((id) => ({ id, version: SPECIALISTS[id].version, instructionsSha256: sha256(MISSION_INSTRUCTIONS[id]) })),
+  /** The forms the stages hand in: the tools' definitions as the model reads them. */
+  toolsSha256: sha256(missionToolDefinitions()),
   model: LIVE_MODEL,
   limits: {
     requests: REVIEW_LIMITS.council.requests,
@@ -86,6 +88,7 @@ if (values.plan) {
   console.log(`- Revision: ${commit ?? "unknown"}${dirty ? " (the checkout has changes: a live run is refused until it is clean)" : ""}.`);
   console.log(`- What is sent: ${recipe.fixture.path} (sha256 ${recipe.fixture.sha256.slice(0, 12)}), a public, synthetic mission and ${packet.tasks.length} tasks; ${recipe.fixture.chars.toLocaleString("en")} characters; packet ${packetDigest.slice(0, 12)}. No preferences, no repository.`);
   for (const profile of recipe.profiles) console.log(`- ${SPECIALISTS[profile.id].name} v${profile.version}, instructions ${profile.instructionsSha256.slice(0, 12)}.`);
+  console.log(`- The forms they hand in (the tools' definitions): ${recipe.toolsSha256.slice(0, 12)}.`);
   console.log(`- Model: ${LIVE_MODEL} only. The engine refuses any other before the first inference request; a served model that differs fails the evidence.`);
   console.log(
     `- Bounds: at most ${recipe.limits.requests} requests (two reviewers, then the chair), ${recipe.limits.outputTokensPerRequest.toLocaleString("en")} output tokens each, ${recipe.limits.requestMs / 1000} s each and ${recipe.limits.runMs / 1000} s in all; an estimated input budget of ${recipe.limits.estimatedInputTokens.toLocaleString("en")} tokens, which is no ceiling. Nothing is retried.`,
@@ -103,6 +106,17 @@ if (live) {
   if (values.approved !== digest) refuse(`This recipe's digest is ${digest}, not the one approved (${values.approved ?? "none given"}). Nothing was sent. Run --plan, and ask for approval of what it prints.`);
   if (dirty) refuse("The checkout has changes, so this isn't the approved revision's code. Nothing was sent. Commit or set them aside, then run --plan again.");
 }
+const stamp = new Date().toISOString().replace(/[:.]/g, "").replace(/-/g, "");
+const home = resolve(values.home ?? join(homedir(), ".nivra-dev-niv52", `live-${stamp}`));
+/** Whether `path` is `folder` or inside it, by `relative()`, never by its text. */
+const within = (path: string, folder: string) => {
+  const rest = relative(folder, path);
+  return rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest);
+};
+for (const forbidden of [join(homedir(), ".nivra"), join(homedir(), ".nivra-dev")]) {
+  if (within(home, forbidden)) refuse(`${home} is in ${forbidden}, an engine home this check must never use. Nothing was sent.`);
+}
+if (live && !within(home, join(homedir(), ".nivra-dev-niv52"))) refuse(`A live run's engine home is a folder under ~/.nivra-dev-niv52, and ${home} isn't one. Nothing was sent.`);
 const apiKey = live ? (() => {
   try {
     return readCredentials(values.credentials!);
@@ -111,11 +125,8 @@ const apiKey = live ? (() => {
   }
 })() : "stub-key-0123456789";
 
-const stamp = new Date().toISOString().replace(/[:.]/g, "").replace(/-/g, "");
 const out = resolve(values.out ?? join(homedir(), "nivra-acceptance", `mission-review-${stamp}-${(commit ?? "unknown").slice(0, 7)}`));
 mkdirSync(out, { recursive: true, mode: 0o700 });
-const home = resolve(values.home ?? join(homedir(), ".nivra-dev-niv52", `live-${stamp}`));
-for (const forbidden of [join(homedir(), ".nivra"), join(homedir(), ".nivra-dev")]) if (home === forbidden) refuse(`${home} is an engine home this check must never use. Nothing was sent.`);
 write(join(out, "recipe.json"), { ...recipe, digest, mode: live ? "live" : "stub" });
 
 const engine = await startEngine(home, { tokenFactoryUrl: live ? null : values["token-factory-url"]!, apiKey, logPath: join(out, "engine.log") });
@@ -147,6 +158,9 @@ try {
 
 const served = (report?.stages ?? []).filter((stage) => stage.requests > 0).map((stage) => ({ role: stage.role, servedModel: stage.servedModel }));
 const wrongModel = served.filter((stage) => stage.servedModel !== null && stage.servedModel !== LIVE_MODEL);
+const unnamed = served.filter((stage) => stage.servedModel === null);
+// Held only when every answer named the approved model: one that named none shows nothing either way (unknown, null).
+const modelHeld = wrongModel.length > 0 ? false : served.length > 0 && unnamed.length === 0 ? true : null;
 const result = {
   digest,
   mode: live ? "live" : "stub",
@@ -160,7 +174,7 @@ const result = {
   usage: report?.usage ?? null,
   route: report?.route ?? null,
   served,
-  modelHeld: served.length > 0 && wrongModel.length === 0,
+  modelHeld,
   elapsedMs: Math.round(performance.now() - started),
 };
 if (report) write(join(out, "report.json"), report);
@@ -169,5 +183,6 @@ console.log(
   `${result.mode === "live" ? "Live" : "Stub"} mission review ${result.runId ?? "(not started)"}: ${result.status ?? "unknown"}, outcome ${result.outcome ?? "none"}; ${served.length} requests answered by ${[...new Set(served.map((stage) => stage.servedModel ?? "unknown"))].join(", ") || "none"}.`,
 );
 if (wrongModel.length) console.log(`A request was served by a model other than ${LIVE_MODEL}: this run isn't the approved check.`);
+else if (unnamed.length) console.log(`${unnamed.length} of ${served.length} answers didn't name the model that served them, so this run doesn't show ${LIVE_MODEL} held.`);
 console.log(`Evidence: ${out}`);
-process.exit(result.status === "succeeded" && result.outcome === "complete" && result.modelHeld ? 0 : 1);
+process.exit(result.status === "succeeded" && result.outcome === "complete" && result.modelHeld === true ? 0 : 1);
