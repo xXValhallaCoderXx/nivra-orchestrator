@@ -62,14 +62,18 @@ function hostAt(root: string, url: string, testHooks?: { coachApplying?(coaching
     local: localTarget(join(root, "local home"), extraArgs, localEntry),
     discoverWsl: async () => ({ discovery: { status: "ready", wslExe: "wsl.exe", distros: [{ name: "Test", version: 2, isDefault: true, defaultUid: 1000, osVersion: null }], hidden: [] }, targets: [wsl] }),
   };
-  const keys: { current: Partial<Record<SecretName, string>> } = { current: { NEBIUS_API_KEY: KEY } };
+  // `hold`, when set, keeps the next key lookup waiting until it settles: a test lands a change during that wait.
+  const keys: { current: Partial<Record<SecretName, string>>; hold?: Promise<void> } = { current: { NEBIUS_API_KEY: KEY } };
   const host = new Host({
     targets,
     store: new HostStore(join(root, "nivra.json")),
     workspacePath: join(root, "workspace.db"),
     logsDir: join(root, "logs"),
     client: { name: "host-coach-test", version: "0" },
-    credentials: async () => keys.current,
+    credentials: async () => {
+      await keys.hold;
+      return keys.current;
+    },
     // As Windows, so a project on the WSL stand-in is one the host can reach (D17); a task with none runs on local.
     platform: "win32",
     realpath: (path) => path,
@@ -179,6 +183,25 @@ describe("Host: the task readiness coach (NIV-53)", () => {
     await host.reviseBrief(taskId, host.task(taskId).revision, { ...VAGUE, scope: "The records page" });
     await assert.rejects(host.startCoach(taskId, NONE, preview.expected), CHANGED);
     assert.deepEqual([stub.requests.length, host.coachings(taskId).length], [0, 0]);
+  });
+
+  it("refuses a start when the task is renamed while Start is still working out what it would send, and stores and sends nothing", async () => {
+    const stub = await stubFor();
+    const root = mkdtempSync(join(tmpdir(), "nivra coach ü%# "));
+    dirs.push(root);
+    const { host, keys } = hostAt(root, stub.url);
+    const task = await host.createTask({ title: "Personal records use one unit", fields: VAGUE, projectId: null, planId: null });
+    const taskId = task.summary.id;
+    const preview = await host.prepareCoach(taskId, NONE);
+    // Start reads the task, then waits for the keys; the rename lands during that wait, after the preview's checks.
+    let release!: () => void;
+    keys.hold = new Promise<void>((resolve) => (release = resolve));
+    const starting = host.startCoach(taskId, NONE, preview.expected);
+    delete keys.hold;
+    await host.renameTask(taskId, host.task(taskId).revision, "Records use one unit");
+    release();
+    await assert.rejects(starting, CHANGED);
+    assert.deepEqual([stub.requests.length, host.coachings(taskId).length, host.task(taskId).summary.title], [0, 0, "Records use one unit"]);
   });
 
   it("needs a project's sharing, refuses a removed project, and refuses a credential anywhere in what it would send", async () => {

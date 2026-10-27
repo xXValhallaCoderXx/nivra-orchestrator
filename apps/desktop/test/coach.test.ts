@@ -190,6 +190,13 @@ describe("a coaching's preview and what it is bound to (NIV-53)", () => {
     assert.notEqual(named.preview.expected, preview.expected);
   });
 
+  it("refuses a binding that couldn't be recorded as it is, such as a finding named twice, before anything is worked out from it", async () => {
+    const task = subject();
+    const given = state(task);
+    const ref = { reviewId: randomUUID(), findingId: "arch-1" };
+    await assert.rejects(coachRequest(task, { ...given, binding: { ...given.binding, findings: [ref, ref] } }), /^Error: What this coaching would be bound to can't be recorded as it is, so nothing was sent\./);
+  });
+
   it("blocks a busy task, a project that doesn't allow sharing and a packet too long for one request, naming the longest part", async () => {
     const task = subject();
     assert.equal((await coachRequest(task, state(task, { busy: "The coach is still reading this task." }))).preview.blocked, "The coach is still reading this task.");
