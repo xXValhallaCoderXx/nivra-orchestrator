@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { isTerminal, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskPreview, type TaskReport } from "@nivra/domain";
+import { isTerminal, projectFingerprint, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskReport } from "@nivra/domain";
 import { CHECK_IMAGE } from "../src/exec/check.ts";
 import { operationsFor } from "../src/task/limits.ts";
 import { TASK_STOP_MESSAGES } from "../src/task/report.ts";
@@ -79,12 +79,12 @@ const ready = (shown: TaskPreview) => {
   assert.equal(shown.status, "ready", JSON.stringify(shown).slice(0, 300));
   return shown as Extract<TaskPreview, { status: "ready" }>;
 };
-async function start(engine: EngineProcess, repo: string, fingerprint: string, options: { brief?: TaskBrief; sharing?: { modelContext: boolean; cloudExecution: boolean }; requestId?: string; briefDigest?: string } = {}): Promise<RunSummary> {
+async function start(engine: EngineProcess, repo: string, fingerprint: string, options: { brief?: TaskBrief; sharing?: { modelContext: boolean; cloudExecution: boolean }; requestId?: string; briefDigest?: string; environment?: TaskEnvironment } = {}): Promise<RunSummary> {
   const brief = options.brief ?? BRIEF;
   return engine.client.call("runs.start", {
     clientRequestId: options.requestId ?? randomUUID(),
     workflowId: "task",
-    input: { repoPath: repo, project: PROJECT, target: "local", preview: fingerprint, taskId: TASK_ID, briefVersion: 2, briefDigest: options.briefDigest ?? (await taskBriefDigest(brief)) },
+    input: { repoPath: repo, project: PROJECT, target: "local", preview: fingerprint, taskId: TASK_ID, briefVersion: 2, briefDigest: options.briefDigest ?? (await taskBriefDigest(brief)), ...(options.environment ? { environment: options.environment } : {}) },
     context: { sharing: options.sharing ?? { modelContext: true, cloudExecution: true }, brief },
   });
 }
@@ -251,7 +251,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual([readdirSync(join(home, "sandbox")).filter((name) => name.endsWith(".jsonl")).length, readdirSync(join(home, "sandbox", "settled")).length], [0, 1]);
   });
 
-  it("refuses without model sharing, without uploads, without the key and project id, for a brief that isn't the one named, and for a commit changed since its preview, sending nothing", async () => {
+  it("refuses without model sharing, without uploads, without the key and project id, for a brief that isn't the one named, for an environment prepared in another Nebius project, and for a commit changed since its preview, sending nothing", async () => {
     const { sandbox, model, engine, repo } = await setup();
     const fingerprint = ready(await preview(engine, repo)).snapshot.fingerprint;
     const stopped = async (run: RunSummary) => {
@@ -263,6 +263,9 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual(await stopped(await start(engine, repo, fingerprint, { sharing: { modelContext: false, cloudExecution: true } })), ["refused", "model-sharing", "check"]);
     assert.deepEqual(await stopped(await start(engine, repo, fingerprint, { sharing: { modelContext: true, cloudExecution: false } })), ["refused", "consent", "check"]);
     assert.deepEqual(await stopped(await start(engine, repo, fingerprint, { briefDigest: "d".repeat(64) })), ["refused", "brief", "check"]);
+    // An environment's image is reachable only from the project it was prepared in (D41): the saved key names another.
+    const elsewhere = { image: "img-prepared", inputsDigest: "a".repeat(64), projectFingerprint: await projectFingerprint("project-e00anotherproject000"), node: "v22.23.4", pnpm: "11.5.3", arch: "x86_64" };
+    assert.deepEqual(await stopped(await start(engine, repo, fingerprint, { environment: elsewhere })), ["refused", "environment", "check"]);
     assert.deepEqual([sandbox.requests.length, model.requests.length], [0, 0], "a refused run sends nothing anywhere");
     // A commit changed since it was previewed is refused once the snapshot is taken, before the upload: only the model
     // list was asked for, which sends the key and nothing of the repository.
