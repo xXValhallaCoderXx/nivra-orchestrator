@@ -136,9 +136,8 @@ export class ApplyService {
   }
 
   /**
-   * Settles an apply as the person decided. Its recovery folder keeps every copy that isn't a second name for the file
-   * now at its path, the originals among them (`release`). Its lock is let go, and the folder is free for the next
-   * apply.
+   * Settles an apply as the person decided. Its recovery folder keeps every copy, for the person to delete (`release`).
+   * Its lock is let go, and the folder is free for the next apply.
    */
   dismiss(applyId: string, as: ApplyResolution): Promise<ApplyView> {
     return this.#serialised(async () => {

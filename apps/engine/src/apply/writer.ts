@@ -330,45 +330,21 @@ function outcomeOf(io: ApplyIo, held: Held, intent: ApplyIntent, index: number, 
 }
 
 /**
- * Lets an apply go once the person has decided. A name in its recovery folder is removed only while it is a second
- * name for the file now at its path, so removing it loses nothing. Every other copy is kept, the originals among them:
- * a program that had a file open saves into the copy, and nothing can tell that none does. Then the recovery folder,
- * if that left it empty, and the lock, when it is this apply's.
+ * Lets an apply go once the person has decided: the lock, when it is this apply's, and the recovery folder only when it
+ * holds nothing. Every copy in it stays, whatever is at its path now: a program that had a file open saves into the
+ * copy, nothing can tell that none does, and no check of the checkout can be made one step with removing a name (an
+ * editor's save can replace the file in between). The person deletes the folder when they no longer need it.
  */
 export function release(intent: ApplyIntent, options: { engineId: string; io?: ApplyIo }): void {
   const io = options.io ?? nodeIo;
   const held = heldFor(io, intent);
   try {
-    let names: string[] = [];
     try {
-      names = io.readdir(held.git.dir(held.recovery));
+      // Fails on a folder holding anything, which then stays as it is.
+      io.rmdir(held.git.at(held.recovery));
+      held.git.forget(held.recovery);
     } catch {
-      // No recovery folder to read: nothing in it is removed.
-    }
-    for (const [index, one] of intent.paths.entries()) {
-      let here;
-      try {
-        here = io.lstat(held.tree.at(one.path));
-      } catch {
-        // Not reachable without following a link: nothing is a second name for it.
-      }
-      if (!here?.isFile()) continue;
-      for (const name of names.filter((name) => name === one.temp || name === one.aside || name.startsWith(`back-${index}-`))) {
-        try {
-          const copy = io.lstat(inRecovery(held, name));
-          if (copy?.isFile() && copy.dev === here.dev && copy.ino === here.ino && copy.nlink >= 2) io.unlink(inRecovery(held, name));
-        } catch {
-          // Kept: it can be removed by hand.
-        }
-      }
-    }
-    try {
-      if (io.readdir(held.git.dir(held.recovery)).length === 0) {
-        io.rmdir(held.git.at(held.recovery));
-        held.git.forget(held.recovery);
-      }
-    } catch {
-      // Kept.
+      // Kept, with every copy in it.
     }
     // The lock, when it is this apply's: a partial or unknown apply kept it until now.
     try {

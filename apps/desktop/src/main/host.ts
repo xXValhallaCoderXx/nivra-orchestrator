@@ -1129,9 +1129,8 @@ export class Host {
   /**
    * Settles an attempt's apply as the person decides (D40): accepts an applied change, which completes the task unless
    * it has moved on since the run; dismisses one that wasn't applied, so its change can be decided on again; or keeps a
-   * partial one as it is. Its engine keeps every copy that isn't a second name for the file in place, the originals
-   * among them. Which way is saved before it is sent, so an answer that doesn't come back is read back, after a restart
-   * too, never resent.
+   * partial one as it is. Its engine keeps every copy it made, for the person to delete. Which way is saved before it
+   * is sent, so an answer that doesn't come back is read back, after a restart too, never resent.
    */
   async settleTaskChange(taskId: string, attemptId: string, as: ApplyResolution): Promise<TaskAttemptView> {
     await this.#deciding(attemptId, async () => {

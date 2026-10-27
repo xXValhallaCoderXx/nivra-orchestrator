@@ -149,15 +149,15 @@ test("approves a verified change by its hash and applies it to the checkout, uns
   expect([greet(), git(["status", "--porcelain"]), git(["diff", "--cached", "--name-only"])]).toEqual([FIXED_GREET, " M greet.sh\n", ""]);
   expect(existsSync(join(repo, ".git", recovery))).toBe(true);
 
-  // Accepting it completes the task, and the change stays. greet.sh's original stays in the recovery folder, as the card
-  // says, in case a program that had it open saves into it; Nivra's own copy, a second name for the file in place, goes.
+  // Accepting it completes the task, and the change stays. Every copy Nivra kept stays in the recovery folder, as the card
+  // says, greet.sh's original among them, in case a program that had it open saves into it.
   await expect(apply.getByTestId("task-apply-dismiss")).toHaveCount(0);
   await apply.getByTestId("task-apply-accept").click();
   await expect(apply).toHaveAttribute("data-resolution", "accepted");
   await expect(apply.getByTestId("task-apply-resolution")).toHaveText("You accepted the change. The task is completed.");
   await expect(page.getByTestId("task-state")).toHaveText("Completed");
   await expect(apply.getByTestId("task-apply-recovery")).toContainText("Delete that folder when you no longer need them.");
-  expect([greet(), readdirSync(join(repo, ".git", recovery)), readFileSync(join(repo, ".git", recovery, "orig-0"), "utf8")]).toEqual([FIXED_GREET, ["orig-0"], ORIGINAL]);
+  expect([greet(), readdirSync(join(repo, ".git", recovery)).sort(), readFileSync(join(repo, ".git", recovery, "orig-0"), "utf8")]).toEqual([FIXED_GREET, ["new-0", "orig-0"], ORIGINAL]);
   await expect(page.getByTestId("task-attempt-error")).toHaveCount(0);
 });
 

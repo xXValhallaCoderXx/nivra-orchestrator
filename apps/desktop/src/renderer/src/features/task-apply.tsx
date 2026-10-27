@@ -66,10 +66,10 @@ function foundText(found: ApplyPath["found"]): string {
 
 /** What each way of settling an apply does, said beside its button. */
 const SETTLE: Record<"accept" | "dismiss" | "restore" | "keep", { label: string; says: string; testid: string }> = {
-  accept: { label: "Accept the change", says: "Completes the task, unless its brief or repository changed after this run. Your checkout stays as it is, and the originals Nivra moved aside stay in the recovery folder.", testid: "task-apply-accept" },
+  accept: { label: "Accept the change", says: "Completes the task, unless its brief or repository changed after this run. Your checkout stays as it is, and the copies Nivra kept stay in the recovery folder.", testid: "task-apply-accept" },
   dismiss: { label: "Dismiss", says: "Closes this result. The copies Nivra kept stay in the recovery folder.", testid: "task-apply-dismiss" },
   restore: { label: "Restore the originals", says: "Puts each original back where the change replaced it, and takes out the files and folders the change added, never over a version another program saved.", testid: "task-apply-restore" },
-  keep: { label: "Keep as is", says: "Leaves your checkout as it is now. The originals Nivra moved aside stay in the recovery folder.", testid: "task-apply-keep" },
+  keep: { label: "Keep as is", says: "Leaves your checkout as it is now. The copies Nivra kept stay in the recovery folder.", testid: "task-apply-keep" },
 };
 
 const RESOLVED: Record<ApplyResolution, string> = {
@@ -337,13 +337,13 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
       )}
       {apply.recovery && apply.resolution === null && (
         <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-recovery">
-          Nivra keeps the originals it moved aside in the repository's git folder, in <Code>{apply.recovery}</Code>. They stay there after you settle this change, in case a program that had
-          a file open saves into it.
+          Nivra keeps every copy it made in the repository's git folder, in <Code>{apply.recovery}</Code>: the originals it moved aside, and its own. They stay there after you settle this
+          change, in case a program that had one of these files open saves into it.
         </Text>
       )}
-      {apply.recovery && apply.resolution !== null && apply.paths.some((path) => path.change === "changed") && (
+      {apply.recovery && apply.resolution !== null && (
         <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-recovery">
-          Any originals Nivra moved aside stay in the repository's git folder, in <Code>{apply.recovery}</Code>. Delete that folder when you no longer need them.
+          The copies Nivra kept stay in the repository's git folder, in <Code>{apply.recovery}</Code>. Delete that folder when you no longer need them.
         </Text>
       )}
       {apply.resolution && (

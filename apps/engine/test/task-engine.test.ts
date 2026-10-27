@@ -123,11 +123,10 @@ describe("applying a task's proposal through a real engine (NIV-8, D40)", () => 
     const twice = await apply(engine, { ...params, requestId: randomUUID() });
     assert.deepEqual([twice.status, twice.refusal?.code, twice.refusal?.message.includes(repo)], ["refused", "duplicate", false]);
     assert.deepEqual(changedSince(before, repo), []);
-    // Accepted: the folder is free and the change stays. The original is kept, Nivra's copy (a second name for the file
-    // in place) goes.
+    // Accepted: the folder is free and the change stays. Every copy is kept, the original among them.
     const accepted = await engine.client.call("task.dismiss", { applyId: applied.applyId, as: "accepted" });
     const recovery = join(repo, ".git", "nivra-apply", applied.applyId);
-    assert.deepEqual([accepted.resolution, readdirSync(recovery), existsSync(join(repo, ".git", "nivra-apply", "lock")), readFileSync(join(repo, "greet.sh"), "utf8")], ["accepted", ["orig-0"], false, FIXED_GREET]);
+    assert.deepEqual([accepted.resolution, readdirSync(recovery), existsSync(join(repo, ".git", "nivra-apply", "lock")), readFileSync(join(repo, "greet.sh"), "utf8")], ["accepted", ["new-0", "orig-0"], false, FIXED_GREET]);
     assert.equal(readFileSync(join(recovery, "orig-0"), "utf8"), FILES["greet.sh"]);
   });
 
