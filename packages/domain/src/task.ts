@@ -100,9 +100,13 @@ export type BaselineSelection = z.infer<typeof BaselineSelection>;
 
 /**
  * A baseline selection's pattern as Nivra matches it: against the whole output, anchored at both ends, `.` matching a
- * line break too. `a|b` is the whole output being `a` or `b`, never one that merely holds either.
+ * line break too. `a|b` is the whole output being `a` or `b`, never one that merely holds either. The pattern must be a
+ * regular expression on its own first, so it can't close the anchoring group (`x)|(?:y` would): it throws otherwise.
  */
-export const baselinePattern = (pattern: string): RegExp => new RegExp(`^(?:${pattern})$`, "s");
+export const baselinePattern = (pattern: string): RegExp => {
+  new RegExp(pattern, "s");
+  return new RegExp(`^(?:${pattern})$`, "s");
+};
 
 /** A frozen file: a path in the commit, relative to the picked folder, as Git names it. */
 const FrozenPath = z

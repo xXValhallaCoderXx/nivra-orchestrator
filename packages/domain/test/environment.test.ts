@@ -88,6 +88,9 @@ describe("a brief's baseline selections and frozen files (D41)", () => {
     const pattern = baselinePattern("tests \\d+ passed \\d+ failed 0\\n|nothing");
     assert.deepEqual(["tests 4 passed 4 failed 0\n", "nothing", "x tests 4 passed 4 failed 0\n", "tests 4 passed 4 failed 0\nfailed\tone\n", "nothing more"].map((output) => pattern.test(output)), [true, true, false, false, false]);
     assert.equal(baselinePattern("a.b").test("a\nb"), true, "a dot matches a line break, so a pattern can span lines");
+    // A pattern that is a regular expression only once wrapped would close the anchoring group: refused.
+    assert.throws(() => baselinePattern("x)|(?:y"));
+    assert.equal(TaskBrief.safeParse({ ...BRIEF, baseline: [{ ...PATTERN, outputPattern: "x)|(?:y" }] }).success, false);
   });
 
   it("takes frozen files as paths inside the folder, each once", () => {
