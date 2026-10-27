@@ -2006,6 +2006,8 @@ worker in a Nebius sandbox, judged by acceptance cases it can't edit, its change
 | `5f0323d` | The independent review's findings in the engine: fixed words for refusals, cases naming the files they run, an uncertain final check ending the run, the report fitted to its store, the reserve counting start requests |
 | `5aa7e0e` | The review's findings in the host and the window: every stop tried, a turned-down stop sent again, the case-file warnings, the consent wording |
 | this record | D39, the development notes, and this section |
+| `e17960a`, `b3dc652` | Nate's review of PR 18: a script a case names in quotes is named, and a command whose files can't be read is said to be unclear, in the preview and on the run's card |
+| the review's record | D39's *Why*, and *Nate's review of PR 18* below |
 
 **NIV-7's criteria (scope of 20 October), shown:**
 
@@ -2061,6 +2063,27 @@ fixture's checkout was unchanged.
   passed 12 of 12 on that build: the window, both engines, the workspace kept across relaunches, quitting leaving no
   engine, and `~/.nivra` unchanged. None of them drives a task run: that is checkpoint 3's. Targets, the supervisor and
   staging didn't change, so `verify:windows` wasn't called for.
+
+**Nate's review of PR 18 (27 October)** found one more, reproduced there. A case that named its script in quotes
+(`/bin/sh 'check.sh'`) named no file. So a worker that rewrote `check.sh` to print the expected output passed, verified,
+with no warning. Fixed in `e17960a` and `b3dc652` (D39, *Why*):
+- `task-worker.test.ts`, the regression: the worker rewrites `check.sh` to `echo ok`, and the case `/bin/sh 'check.sh'`
+  comes back passed and verified, with `check.sh` named beside it. A case and a check whose command can't be read
+  (`/bin/sh -c "$(cat check.sh)"`) are marked unclear once the worker has changed a file, and not when it changed
+  nothing.
+- `task-engine.test.ts`: the preview over stdio names `check.sh` for the quoted case and marks the unreadable one
+  unclear. `host.test.ts` reads both fields through the host from a real engine. `task-scripts.test.ts` holds 30
+  commands: quoted, mixed, nested and unreadable.
+- The domain reads a preview or report saved before this as not unclear.
+- The fix was broken three ways on purpose, and a new test failed each time:
+  - quotes read as characters again;
+  - nothing ever unclear;
+  - unclear with nothing written.
+- `pnpm verify` at `b3dc652`: 929 tests (domain 66, desktop 276, engine 587), none skipped.
+- The built app: 63 passed, 1 skipped (the packaged-only test). The card's unclear wording has no window test of its
+  own.
+- The Windows turn and the packaged checks weren't repeated. Only the engine's reading of commands and the window's
+  wording changed: not targets, the supervisor, staging, or main-process or preload behaviour.
 
 **Not shown yet:**
 - **One live worker run,** and the packaged journey through the Windows app: checkpoint 3 (NIV-35), each with its own

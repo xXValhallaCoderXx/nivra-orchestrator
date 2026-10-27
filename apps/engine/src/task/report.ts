@@ -4,7 +4,7 @@ import { previewOf, safeUnresolved, stepOf } from "../exec/check.ts";
 import type { PrescribedResult } from "../exec/prescribed.ts";
 import type { Proposal } from "../exec/proposal.ts";
 import type { Snapshot } from "../exec/snapshot.ts";
-import { namedFiles, programsOf } from "./harness.ts";
+import { commandFiles, programsOf } from "./harness.ts";
 import { runLimitsFor } from "./limits.ts";
 import { firstWord } from "./scripts.ts";
 import type { TaskReportCore } from "./worker.ts";
@@ -198,7 +198,13 @@ export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "accept
   const paths = new Set(snapshot.files.map((file) => file.path));
   // A name past the protocol's bound is shortened, never left out: the warning is what matters.
   const named = (path: string) => (path.length > 1_024 ? `${path.slice(0, 1_023)}\u2026` : path);
-  const caseFiles = brief.acceptanceCases.map((given, index) => ({ number: index + 1, files: namedFiles(given.command, paths).slice(0, 20).map(named) })).filter((one) => one.files.length > 0);
+  // Each case that names a file of the commit, or whose command Nivra can't read for sure.
+  const caseFiles = brief.acceptanceCases
+    .map((given, index) => {
+      const said = commandFiles(given.command, paths);
+      return { number: index + 1, files: said.files.slice(0, 20).map(named), unclear: said.unclear };
+    })
+    .filter((one) => one.files.length > 0 || one.unclear);
   return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, caseFiles, limits: runLimitsFor(commands.length) };
 }
 

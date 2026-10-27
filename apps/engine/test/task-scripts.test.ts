@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
+import { commandFiles } from "../src/task/harness.ts";
 import { firstWord, MAX_WRITE_BYTES, TOOLCHAIN_SCRIPT, toolchainFindings, toolchainRequest, WRITE_SCRIPT, writeContentProblem, writeRequest } from "../src/task/scripts.ts";
 import { cleanUp, put, scratch } from "./workspace-fixtures.ts";
 
@@ -117,5 +118,49 @@ describe("the toolchain probe (NIV-7, D39)", () => {
       ["f () { echo hi; }; f", null],
     ];
     assert.deepEqual(cases.map(([line]) => firstWord(line)), cases.map(([, word]) => word));
+  });
+});
+
+describe("the repository files a case's or check's command runs (NIV-7, D39)", () => {
+  const FILES = new Set(["check.sh", "greet.sh", "scripts/run.sh", "my script.sh"]);
+
+  it("reads plain and quoted names as written, and calls a line it can't read unclear, never guessing", () => {
+    const cases: Array<[string, string[], boolean]> = [
+      ["/bin/sh check.sh", ["check.sh"], false],
+      [". ./greet.sh; greet Ada; greet", ["greet.sh"], false],
+      // Quoted literals, and a mix of quoted and plain, as the shell reads them.
+      ["/bin/sh 'check.sh'", ["check.sh"], false],
+      ['/bin/sh "check.sh"', ["check.sh"], false],
+      ["./'scripts/run.sh'", ["scripts/run.sh"], false],
+      ["sh 'my script.sh'", ["my script.sh"], false],
+      ["sh scripts/../check.sh", ["check.sh"], false],
+      // A command quoted as one word, an option's value, a redirection, a test's brackets, a group and comments.
+      ["sh -c 'sh check.sh'", ["check.sh"], false],
+      [`sh -c "sh 'check.sh'"`, ["check.sh"], false],
+      ["node --require=./check.sh x", ["check.sh"], false],
+      ["sh < check.sh 2>&1", ["check.sh"], false],
+      ["[ -f greet.sh ] && sh check.sh", ["check.sh", "greet.sh"], false],
+      ["{ sh check.sh; }", ["check.sh"], false],
+      ["sh check.sh # and greet.sh", ["check.sh"], false],
+      ["# first\nsh check.sh", ["check.sh"], false],
+      ["sh '~/x' '$X'", [], false],
+      // What can't be read for sure: an expansion, a substitution, a pattern, an escape, a quote left open, a
+      // here-document, a tilde, a command built to run, a change of folder.
+      ['sh "$X"', [], true],
+      ['sh -c "$(cat check.sh)"', [], true],
+      ["sh `echo check.sh`", [], true],
+      ['S=check.sh; /bin/sh "$S"', ["check.sh"], true],
+      ["sh *.sh", [], true],
+      ["sh check[0-9].sh", [], true],
+      ["sh {check,greet}.sh", [], true],
+      ["sh my\\ script.sh", [], true],
+      ['echo "open', [], true],
+      ["sh <<EOF\nsh check.sh\nEOF", ["check.sh"], true],
+      ["sh ~/check.sh", [], true],
+      ["eval sh check.sh", ["check.sh"], true],
+      ["ls | xargs sh", [], true],
+      ["cd scripts && sh run.sh", [], true],
+    ];
+    assert.deepEqual(cases.map(([line]) => commandFiles(line, FILES)), cases.map(([, files, unclear]) => ({ files, unclear })));
   });
 });

@@ -165,9 +165,12 @@ export const TaskPreview = z.discriminatedUnion("status", [
     unprobed: count,
     /**
      * The commit's files each acceptance case's command names: the worker can change them, and a case judges only what
-     * its command prints, so the person is told before the run.
+     * its command prints, so the person is told before the run. `unclear` when Nivra can't read for sure which files
+     * the command runs (an expansion, a substitution, a pattern, a quote it can't read).
      */
-    caseFiles: z.array(z.strictObject({ number: z.number().int().min(1).max(TASK_BRIEF_LIMITS.finalChecks), files: z.array(z.string().max(1_024)).max(20) })).max(TASK_BRIEF_LIMITS.finalChecks),
+    caseFiles: z
+      .array(z.strictObject({ number: z.number().int().min(1).max(TASK_BRIEF_LIMITS.finalChecks), files: z.array(z.string().max(1_024)).max(20), unclear: z.boolean().default(false) }))
+      .max(TASK_BRIEF_LIMITS.finalChecks),
     limits: TaskRunLimits,
   }),
   z.strictObject({ status: z.literal("refused"), code: z.string().max(64), message: z.string().max(2_000) }),
@@ -193,8 +196,10 @@ export const TaskCheck = z.strictObject({
   stderrTail: z.string().max(4_000),
   /** For a case that failed on its output: the first line that differs, both sides clipped. */
   difference: z.strictObject({ line: z.number().int().positive(), expected: z.string().max(200), got: z.string().max(200) }).nullable(),
-  /** For a repository check: the files its command names that the change adds or changes. */
+  /** The files its command names that the change adds or changes: a check's, and a case's, which judges only what it prints. */
   changedFiles: z.array(z.string().max(1_024)).max(20),
+  /** Nivra can't read for sure which files its command runs, and the change changes files: what it runs may be among them. */
+  unclear: z.boolean().default(false),
   durationMs: count.nullable(),
 });
 export type TaskCheck = z.infer<typeof TaskCheck>;

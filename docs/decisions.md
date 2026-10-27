@@ -2591,11 +2591,25 @@ checkpoint 2's (NIV-8, D40), and the window shows a run read-only.
     once and saw turned down wasn't sent again; and wording that claimed more than the run showed.
   - Turning the review's scripts into tests showed that a cancel during the final checks was stopped only by the
     patch build's own git calls, so the report named a stage the run never reached; it now stops where it lands.
+- **Nate's review of PR 18 (27 October)** found one more, reproduced there, then fixed (`e17960a`, `b3dc652`). A case
+  that named its script in quotes (`/bin/sh 'check.sh'`) named no file. So a worker that rewrote `check.sh` to print
+  the expected output passed, verified, with no warning in the preview or on the result.
+  - A command's plain words are now read as written: single-quoted text, double-quoted text with no `$`, backtick or
+    backslash, any mix of these, a command quoted as one word (`sh -c '...'`), and an option's value.
+  - A command Nivra can't read for sure is unclear: one with an expansion, a substitution, a pattern, an escape, a quote
+    left open, a here-document, a leading `~`, `eval`, `xargs`, `cd` or `pushd`.
+  - For an unclear case, the preview says Nivra can't tell which repository files it runs. A case's or check's result
+    says so once the worker has changed a file.
+  - This is a small reader, not a shell parser. A file a command uses without naming it still gets no warning
+    (`npm test` reading `package.json`, a script that sources another). Any `cd` makes a check unclear once the change
+    touches files.
 
 **Consequences.**
 - **Limits of this checkpoint:**
   - nothing is applied, and the card offers no approval: checkpoint 2 (NIV-8, NIV-13, D40);
   - a proposal holds additions and changes of text files only: no deletions, mode changes or links;
+  - a case or check is shown with the repository files its command names and the worker changed, and as unclear when
+    Nivra can't read which files it runs; a file it uses without naming it gets no warning;
   - one worker, editing an existing repository; no model-chosen command, no installs, no trackers;
   - with four cases and checks, the reserve leaves the worker about 5 minutes: a brief should use as few as show the
     change;

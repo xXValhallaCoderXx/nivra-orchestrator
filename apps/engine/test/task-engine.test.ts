@@ -171,12 +171,16 @@ describe("a task run through a real engine (NIV-7)", () => {
   it("previews what a run would send with no network, the programs it looks for and its bounds, and refuses a commit holding the vault's key", async () => {
     const { sandbox, model, engine, repo } = await setup();
     const shown = ready(await preview(engine, repo));
-    assert.deepEqual([shown.snapshot.files, shown.programs, shown.unprobed], [2, [".", "/bin/sh"], 0]);
+    assert.deepEqual([shown.snapshot.files, shown.programs, shown.unprobed, shown.caseFiles], [2, [".", "/bin/sh"], 0, [{ number: 1, files: ["greet.sh"], unclear: false }]]);
     assert.deepEqual([shown.limits.operations, shown.limits.sessionMinutes, shown.limits.runMinutes, shown.limits.writes, shown.limits.writeBytes], [operationsFor(2), 20, 33, 8, 32_768]);
     assert.match(shown.snapshot.retention, /^Images are retained for 180 days/);
     // A first word that isn't a plain program is never guessed: it runs, and isn't looked for.
     const quoted = ready(await preview(engine, repo, { ...BRIEF, checks: ['"./check.sh"'] }));
     assert.deepEqual([quoted.programs, quoted.unprobed], [["."], 1]);
+    // A case's script named in quotes is named as written; a case whose command can't be read is said to be unclear.
+    const cases = [{ ...BRIEF.acceptanceCases[0]!, command: "/bin/sh 'check.sh'" }, { ...BRIEF.acceptanceCases[0]!, name: "unclear", command: '/bin/sh -c "$(cat check.sh)"' }];
+    const warned = ready(await preview(engine, repo, { ...BRIEF, acceptanceCases: cases }));
+    assert.deepEqual(warned.caseFiles, [{ number: 1, files: ["check.sh"], unclear: false }, { number: 2, files: [], unclear: true }]);
     const leaky = repoWith({ ...FILES, "deploy/token.txt": `${KEY}\n` });
     const refused = await preview(engine, leaky);
     assert.deepEqual(refused.status === "refused" ? [refused.code, refused.message.includes(KEY)] : null, ["content", false]);

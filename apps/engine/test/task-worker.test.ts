@@ -56,6 +56,23 @@ describe("a task's worker (NIV-7, D39)", () => {
     assert.deepEqual([run.result.outcome, verdicts(run.core), run.core!.checks[0]!.changedFiles], ["proposed", ["case 1 passed"], ["check.sh"]]);
   });
 
+  it("names a script a case runs by its quoted name that the worker rewrote, so the warning isn't lost", async () => {
+    const brief = { ...BRIEF, checks: [], acceptanceCases: [{ name: "check passes", command: "/bin/sh 'check.sh'", expectedOutput: "ok\n", expectedExitCode: 0 }] };
+    const run = await attempt({ brief, calls: [["edit_file", { path: "check.sh", old_text: FIXTURE["check.sh"], new_text: "echo ok\n" }]] });
+    const check = run.core!.checks[0]!;
+    assert.deepEqual([run.result.outcome, run.core!.verified, verdicts(run.core), check.changedFiles, check.unclear], ["proposed", true, ["case 1 passed"], ["check.sh"], false]);
+  });
+
+  it("says a case or check whose command it can't read may run what the worker changed, and says it only once the worker changed something", async () => {
+    const unreadable = '/bin/sh -c "$(cat check.sh)"';
+    const brief = { ...BRIEF, checks: [unreadable], acceptanceCases: [{ name: "check passes", command: unreadable, expectedOutput: "ok\n", expectedExitCode: 0 }] };
+    const run = await attempt({ brief, calls: [["edit_file", { path: "check.sh", old_text: FIXTURE["check.sh"], new_text: "echo ok\n" }]] });
+    assert.deepEqual([run.result.outcome, verdicts(run.core)], ["proposed", ["case 1 passed", "check 1 passed"]]);
+    assert.deepEqual(run.core!.checks.map((check) => [check.changedFiles, check.unclear]), [[[], true], [[], true]]);
+    const idle = await attempt({ brief, calls: [["read_file", { path: "check.sh" }]] });
+    assert.deepEqual([idle.result.outcome, idle.core!.worker.written, idle.core!.checks.map((check) => check.unclear)], ["unchanged", [], [false, false]]);
+  });
+
   it("passes on no refusal's own words: a damaged journal's path never reaches the model, the run's events or its report", async () => {
     const journalDir = scratch("journal path");
     const time = clock();

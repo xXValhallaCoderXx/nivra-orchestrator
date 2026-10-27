@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import { ExecRefusedError, ExecUncertainError, type ExecRequest, type ExecResult } from "../exec/backend.ts";
 import { TASK_LIMITS } from "./limits.ts";
 import { firstWord } from "./scripts.ts";
@@ -39,6 +40,8 @@ export interface CheckResult {
   difference: { line: number; expected: string; got: string } | null;
   /** Files its command names that the change adds or changes: a check's, and a case's, which judges only what it prints. */
   changedFiles: string[];
+  /** Its command's files can't be told for sure, and the change changes files: what it runs may be among them. */
+  unclear: boolean;
   durationMs: number | null;
 }
 
@@ -72,7 +75,7 @@ export function firstDifference(expected: string, got: string): { line: number; 
   return { line: a.length, expected: clip(a.at(-1) ?? ""), got: clip(b.at(-1) ?? "") };
 }
 
-const base = (kind: CheckResult["kind"], number: number, name: string): CheckResult => ({ kind, number, name, verdict: "not-run", reason: null, exitCode: null, stdoutTail: "", stderrTail: "", difference: null, changedFiles: [], durationMs: null });
+const base = (kind: CheckResult["kind"], number: number, name: string): CheckResult => ({ kind, number, name, verdict: "not-run", reason: null, exitCode: null, stdoutTail: "", stderrTail: "", difference: null, changedFiles: [], unclear: false, durationMs: null });
 
 /** A case or check the run didn't reach, or couldn't send, and why. */
 export function notRun(kind: CheckResult["kind"], number: number, name: string, reason: string): CheckResult {
@@ -124,8 +127,8 @@ function ending(ran: ExecResult, timeoutMs: number): Pick<CheckResult, "verdict"
  * files its command names that the change adds or changes are named beside it: a case judges only what its command
  * prints, and a script it runs is the worker's to change.
  */
-export function judgeCase(number: number, given: AcceptanceCase, ran: ExecResult, changedFiles: string[] = [], timeoutMs: number = TASK_LIMITS.checks.timeoutMs): CheckResult {
-  const result: CheckResult = { ...base("case", number, given.name), exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), changedFiles, durationMs: ran.durationMs };
+export function judgeCase(number: number, given: AcceptanceCase, ran: ExecResult, named: NamedFiles = { files: [], unclear: false }, timeoutMs: number = TASK_LIMITS.checks.timeoutMs): CheckResult {
+  const result: CheckResult = { ...base("case", number, given.name), exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), changedFiles: named.files, unclear: named.unclear, durationMs: ran.durationMs };
   const ended = ending(ran, timeoutMs);
   if (ended) return { ...result, ...ended };
   // Output cut off is longer than any expected output may be: it can't be the one expected.
@@ -138,17 +141,115 @@ export function judgeCase(number: number, given: AcceptanceCase, ran: ExecResult
 }
 
 /** A repository check: exit 0 reads as passed. It decides nothing; its changed files are named beside it. */
-export function judgeCheck(number: number, command: string, ran: ExecResult, changedFiles: string[], timeoutMs: number = TASK_LIMITS.checks.timeoutMs): CheckResult {
-  const result: CheckResult = { ...base("check", number, clip(command, 80)), exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), changedFiles, durationMs: ran.durationMs };
+export function judgeCheck(number: number, command: string, ran: ExecResult, named: NamedFiles, timeoutMs: number = TASK_LIMITS.checks.timeoutMs): CheckResult {
+  const result: CheckResult = { ...base("check", number, clip(command, 80)), exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), changedFiles: named.files, unclear: named.unclear, durationMs: ran.durationMs };
   const ended = ending(ran, timeoutMs);
   if (ended) return { ...result, ...ended };
   return ran.exitCode === 0 ? { ...result, verdict: "passed" } : { ...result, verdict: "failed", reason: `it exited ${String(ran.exitCode)}` };
 }
 
-/** The repository files a command line names, as written or under `./`, that are among `files`. */
-export function namedFiles(command: string, files: ReadonlySet<string>): string[] {
-  const words = command.split(/[\s;&|()<>]+/).map((word) => word.replace(/^\.\//, "")).filter((word) => word.length > 0);
-  return [...new Set(words.filter((word) => files.has(word)))].sort();
+/** What a command line says of the repository files it runs (D39). */
+export interface NamedFiles {
+  /** The files among those given that it names, sorted. */
+  files: string[];
+  /** It holds something Nivra can't read for sure, so what it runs may be any file. */
+  unclear: boolean;
+}
+
+/** Words that are shell syntax when they stand alone: a test's brackets, a group's braces, a negation. */
+const SYNTAX = new Set(["[", "]", "[[", "]]", "{", "}", "!"]);
+/** Commands after which a line's names can't be read: ones that build a command to run, or move to another folder. */
+const UNREADABLE = new Set(["eval", "xargs", "cd", "pushd"]);
+
+/**
+ * The repository files a command line names, among `files`, read from its words, under `./` or not. A word counts only
+ * when it is plain: unquoted characters with no shell meaning, single-quoted text, and double-quoted text holding no
+ * `$`, backtick or backslash, in any mix, so `'check.sh'` and `./'bin/run.sh'` are read as written. A plain word that
+ * holds a command of its own (`sh -c 'sh check.sh'`) is read as one, and so is an option's value (`--file=check.sh`).
+ * Anything else (an expansion, a substitution, a pattern, an escape, a quote left open, a here-document, `eval`,
+ * `xargs`, a change of folder) makes the line unclear: Nivra can't tell which files it runs. This is no shell parser:
+ * it says what it can read, and that it couldn't read the rest.
+ */
+export function commandFiles(command: string, files: ReadonlySet<string>, depth = 0): NamedFiles {
+  const words: Array<{ text: string; bare: string; quotedStart: boolean }> = [];
+  let unclear = false;
+  let text = "";
+  let bare = "";
+  let open = false;
+  let plain = true;
+  let quotedStart = false;
+  const close = () => {
+    if (open) {
+      if (plain) words.push({ text, bare, quotedStart });
+      else unclear = true;
+    }
+    [text, bare, open, plain, quotedStart] = ["", "", false, true, false];
+  };
+  scan: for (let at = 0; at < command.length; at++) {
+    const char = command[at]!;
+    if (char === "'" || char === '"') {
+      const end = command.indexOf(char, at + 1);
+      if (end < 0) {
+        unclear = true;
+        break scan;
+      }
+      const inside = command.slice(at + 1, end);
+      if (char === '"' && /[$`\\]/.test(inside)) plain = false;
+      if (!open) quotedStart = true;
+      text += inside;
+      open = true;
+      at = end;
+      continue;
+    }
+    if (/\s/.test(char) || ";&|()".includes(char)) {
+      close();
+      continue;
+    }
+    if (char === "<" || char === ">") {
+      close();
+      // A here-document's body is any text at all.
+      if (char === "<" && command[at + 1] === "<") unclear = true;
+      continue;
+    }
+    // A comment: nothing more on its line runs.
+    if (char === "#" && !open) {
+      const end = command.indexOf("\n", at);
+      if (end < 0) break scan;
+      at = end;
+      continue;
+    }
+    if ("$`\\*?".includes(char)) plain = false;
+    text += char;
+    bare += char;
+    open = true;
+  }
+  close();
+  const named = new Set<string>();
+  const fileOf = (written: string) => {
+    const path = posix.normalize(written).replace(/^\.\//, "");
+    return files.has(path) ? path : null;
+  };
+  for (const word of words) {
+    const path = fileOf(word.text) ?? (word.text.includes("=") ? fileOf(word.text.slice(word.text.indexOf("=") + 1)) : null);
+    if (path !== null) {
+      named.add(path);
+      continue;
+    }
+    if (UNREADABLE.has(word.text)) unclear = true;
+    else if (word.text === word.bare && SYNTAX.has(word.text)) continue;
+    // A pattern or a brace expansion, or a tilde at its start, outside quotes.
+    else if (/[[\]{}]/.test(word.bare) || (!word.quotedStart && word.text.startsWith("~"))) unclear = true;
+    else if (/[\s;&|()<>]/.test(word.text)) {
+      // A command quoted as one word, as `sh -c` takes it.
+      if (depth >= 3) unclear = true;
+      else {
+        const inner = commandFiles(word.text, files, depth + 1);
+        for (const file of inner.files) named.add(file);
+        unclear ||= inner.unclear;
+      }
+    }
+  }
+  return { files: [...named].sort(), unclear };
 }
 
 /** The programs to look for before the model starts: each case's and check's first plain word, once each. */

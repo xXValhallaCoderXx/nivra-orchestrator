@@ -117,6 +117,10 @@ describe("what a task run gives back (NIV-7)", () => {
     const ready = { status: "ready", snapshot, programs: [".", "/bin/sh"], unprobed: 0, caseFiles: [{ number: 1, files: ["greet.sh"] }], limits };
     assert.equal(TaskPreview.safeParse(ready).success, true);
     assert.equal(TaskPreview.safeParse({ ...ready, caseFiles: [{ number: 5, files: ["greet.sh"] }] }).success, false, "a case is numbered one to four");
+    // A preview kept from before `unclear` reads as one Nivra could read; a case it can't read may name no file.
+    const kept = TaskPreview.parse(ready);
+    assert.deepEqual(kept.status === "ready" ? kept.caseFiles : null, [{ number: 1, files: ["greet.sh"], unclear: false }]);
+    assert.equal(TaskPreview.safeParse({ ...ready, caseFiles: [{ number: 2, files: [], unclear: true }] }).success, true);
     assert.equal(TaskPreview.safeParse({ status: "refused", code: "content", message: "src/a.ts in this commit holds what looks like a private key." }).success, true);
     assert.equal(TaskPreview.safeParse({ ...ready, status: "refused", code: "content", message: "x" }).success, false);
     assert.equal(TaskPreview.safeParse({ ...ready, programs: ["a", "b", "c", "d", "e"] }).success, false, "four cases and checks have four programs at most");
@@ -142,6 +146,7 @@ describe("what a task run gives back (NIV-7)", () => {
       finishedAt: new Date().toISOString(),
     };
     assert.equal(TaskReport.safeParse(report).success, true);
+    assert.equal(TaskReport.parse(report).checks[0]?.unclear, false, "a check kept from before `unclear` reads as one Nivra could read");
     assert.equal(TaskReport.safeParse({ ...report, outcome: "refused", stopped: { code: "model-sharing", step: "check", message: "x" }, worker: null, checks: [], verified: false, proposal: null, reportSha256: null }).success, true);
     assert.equal(TaskReport.safeParse({ ...report, stopped: { code: "something-else", step: null, message: "x" } }).success, false);
     assert.equal(TaskReport.safeParse({ ...report, checks: Array.from({ length: 5 }, () => report.checks[0]) }).success, false, "four cases and checks at most");

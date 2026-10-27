@@ -528,8 +528,11 @@ export interface TaskRunPreview {
   /** The programs the run looks for before the model starts, and how many commands start with something it can't read. */
   programs: string[];
   unprobed: number;
-  /** The commit's files each acceptance case runs: the worker can change them, and a case judges only what it prints. */
-  caseFiles: Array<{ number: number; files: string[] }>;
+  /**
+   * The commit's files each acceptance case runs: the worker can change them, and a case judges only what it prints.
+   * `unclear` when Nivra can't read for sure which files a case's command runs.
+   */
+  caseFiles: Array<{ number: number; files: string[]; unclear: boolean }>;
   /** The bounds the engine holds the run to; null when the preview stopped first. */
   limits: TaskRunLimits | null;
   /** The project's two consents, as they are now: both are needed. */
