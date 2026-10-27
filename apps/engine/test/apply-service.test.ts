@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, linkSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, linkSync, openSync, readdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ import { writeChange } from "../src/apply/writer.ts";
 import { nodeIo } from "../src/apply/io.ts";
 import { Database } from "../src/db/database.ts";
 import { createLocalBackend } from "../src/exec/local.ts";
-import { APPLY_FILES, copies, planFor } from "./apply-fixtures.ts";
+import { APPLY_CHANGE, APPLY_FILES, copies, planFor } from "./apply-fixtures.ts";
 import { attempt } from "./task-fixtures.ts";
 import { removeDir, tempDir } from "./helpers.ts";
 import { changedSince, cleanUp, folderState, git, GIT } from "./workspace-fixtures.ts";
@@ -74,8 +74,10 @@ describe("the apply service at start (NIV-8, D40)", () => {
     const unchanged = folderState(run.root);
     assert.equal((await service.restore(view.applyId)).status, "not-applied");
     assert.deepEqual(changedSince(unchanged, run.root), []);
+    // Dismissed: the folder is free. README.md's original, a second name for the file in place again, goes; Nivra's
+    // version taken back and the new files it never linked into place stay.
     const settled = await service.dismiss(view.applyId, "dismissed");
-    assert.deepEqual([settled.resolution, existsSync(run.recovery), existsSync(join(run.plan.gitDir, "nivra-apply", "lock"))], ["dismissed", false, false]);
+    assert.deepEqual([settled.resolution, readdirSync(run.recovery).sort(), existsSync(join(run.plan.gitDir, "nivra-apply", "lock"))], ["dismissed", ["back-0-0", "new-0", "new-1", "new-2"], false]);
   });
 
   it("never keeps a partial apply as it is while a file is moved aside, nor removes that file's original, and restores it instead", async () => {
@@ -148,16 +150,33 @@ describe("the apply service at start (NIV-8, D40)", () => {
     assert.deepEqual([refused.status, refused.refusal?.code, changedSince(before, run.root)], ["refused", "unverified", []]);
   });
 
-  it("keeps a copy that changed since when the change is accepted, and removes the ones still the original's or Nivra's", async () => {
-    const fresh = copies(dirs);
-    const run = await cut(fresh, null);
-    const service = serviceOn(run.job.database);
-    assert.equal(service.status(run.job.requestId)?.status, "applied");
-    // A program that had README.md open before the apply writes through it into the original kept aside.
-    writeFileSync(join(run.recovery, "orig-0"), "written through an open file\n");
-    const accepted = await service.dismiss(service.status(run.job.requestId)!.applyId, "accepted");
-    assert.deepEqual([accepted.resolution, readdirSync(run.recovery).sort()], ["accepted", ["orig-0"]]);
-    assert.equal(String(readFileSync(join(run.recovery, "orig-0"))), "written through an open file\n");
+  it("keeps every original when a change is accepted: a program that had a file open saves through it afterwards, and nothing is lost", async () => {
+    const root = copies(dirs)();
+    const work = tempDir();
+    dirs.push(work);
+    const database = new Database(join(work, "nivra.db"));
+    const journal = new ApplyJournal(database);
+    const applyId = randomUUID();
+    const plan = planFor(root);
+    journal.claim({ applyId, requestId: randomUUID(), runId: randomUUID(), proposalHash: "a".repeat(64), destination: plan.topLevel });
+    // An editor opened README.md before the apply, and keeps it open.
+    const editor = openSync(join(root, "README.md"), "r+");
+    try {
+      assert.equal((await writeChange({ applyId, plan, journal, engineId: ENGINE })).state, "applied");
+      const service = new ApplyService({ database, proposal: () => null, verified: () => true, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
+      const accepted = await service.dismiss(applyId, "accepted");
+      // Nivra's copies, second names for the files in place, go; both originals stay, whatever their bytes.
+      const recovery = join(plan.gitDir, "nivra-apply", applyId);
+      assert.deepEqual([accepted.resolution, readdirSync(recovery).sort()], ["accepted", ["orig-0", "orig-1"]]);
+      // It saves after the acceptance, through the file it had open: the save lands in the original kept aside.
+      const saved = Buffer.from("saved through the open file\n");
+      writeSync(editor, saved, 0, saved.byteLength, 0);
+      ftruncateSync(editor, saved.byteLength);
+      fsyncSync(editor);
+      assert.deepEqual([fstatSync(editor).nlink, readFileSync(join(recovery, "orig-0"), "utf8"), readFileSync(join(root, "README.md"), "utf8")], [1, "saved through the open file\n", APPLY_CHANGE["README.md"]!.text]);
+    } finally {
+      closeSync(editor);
+    }
   });
 
   it("claims an apply the moment it arrives: one waiting behind another reads as claimed, never as one the engine never got", async () => {

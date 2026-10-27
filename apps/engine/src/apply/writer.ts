@@ -329,6 +329,59 @@ function outcomeOf(io: ApplyIo, held: Held, intent: ApplyIntent, index: number, 
   return { path: one.path, place: "other", found, kept, changedSince: false };
 }
 
+/**
+ * Lets an apply go once the person has decided. A name in its recovery folder is removed only while it is a second
+ * name for the file now at its path, so removing it loses nothing. Every other copy is kept, the originals among them:
+ * a program that had a file open saves into the copy, and nothing can tell that none does. Then the recovery folder,
+ * if that left it empty, and the lock, when it is this apply's.
+ */
+export function release(intent: ApplyIntent, options: { engineId: string; io?: ApplyIo }): void {
+  const io = options.io ?? nodeIo;
+  const held = heldFor(io, intent);
+  try {
+    let names: string[] = [];
+    try {
+      names = io.readdir(held.git.dir(held.recovery));
+    } catch {
+      // No recovery folder to read: nothing in it is removed.
+    }
+    for (const [index, one] of intent.paths.entries()) {
+      let here;
+      try {
+        here = io.lstat(held.tree.at(one.path));
+      } catch {
+        // Not reachable without following a link: nothing is a second name for it.
+      }
+      if (!here?.isFile()) continue;
+      for (const name of names.filter((name) => name === one.temp || name === one.aside || name.startsWith(`back-${index}-`))) {
+        try {
+          const copy = io.lstat(inRecovery(held, name));
+          if (copy?.isFile() && copy.dev === here.dev && copy.ino === here.ino && copy.nlink >= 2) io.unlink(inRecovery(held, name));
+        } catch {
+          // Kept: it can be removed by hand.
+        }
+      }
+    }
+    try {
+      if (io.readdir(held.git.dir(held.recovery)).length === 0) {
+        io.rmdir(held.git.at(held.recovery));
+        held.git.forget(held.recovery);
+      }
+    } catch {
+      // Kept.
+    }
+    // The lock, when it is this apply's: a partial or unknown apply kept it until now.
+    try {
+      const holder = JSON.parse(new TextDecoder().decode(io.read(held.git.at("nivra-apply/lock")))) as { engine?: unknown; applyId?: unknown };
+      if (holder.engine === options.engineId && holder.applyId === intent.applyId) io.unlink(held.git.at("nivra-apply/lock"));
+    } catch {
+      // None, or another apply's.
+    }
+  } finally {
+    letGo(held);
+  }
+}
+
 /** Stops the write: a planned step found something it won't overwrite or take for the original. */
 class Stop extends Error {
   readonly step: string;

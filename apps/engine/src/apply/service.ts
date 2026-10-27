@@ -1,5 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ApplyParams, ApplyResolution, ApplyView } from "@nivra/domain";
 import type { Database } from "../db/database.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
@@ -9,7 +8,7 @@ import { type ApplyIo, nodeIo } from "./io.ts";
 import { ApplyJournal, type ApplyRecord } from "./journal.ts";
 import { ApplyRefusal, applyRefusalWords } from "./plan.ts";
 import { revalidate } from "./revalidate.ts";
-import { reconcile, restore, writeChange, type ApplyResult } from "./writer.ts";
+import { reconcile, release, restore, writeChange, type ApplyResult } from "./writer.ts";
 
 /**
  * Applying proposals on the engine that owns the checkout (D40): one at a time, each claimed, checked again and
@@ -39,8 +38,6 @@ export class ApplyRequestRefusal extends Error {
     this.name = "ApplyRequestRefusal";
   }
 }
-
-const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 export class ApplyService {
   readonly #deps: ApplyServiceDeps;
@@ -139,9 +136,9 @@ export class ApplyService {
   }
 
   /**
-   * Settles an apply as the person decided. The copies in its recovery folder still equal to the original or to
-   * Nivra's own bytes are removed; any other is kept (a program still writing through a file it had open writes into
-   * the copy). Its lock is let go, and the folder is free for the next apply.
+   * Settles an apply as the person decided. Its recovery folder keeps every copy that isn't a second name for the file
+   * now at its path, the originals among them (`release`). Its lock is let go, and the folder is free for the next
+   * apply.
    */
   dismiss(applyId: string, as: ApplyResolution): Promise<ApplyView> {
     return this.#serialised(async () => {
@@ -152,59 +149,10 @@ export class ApplyService {
       if (record.resolution !== null || !allowed[as].includes(record.state)) throw new ApplyRequestRefusal("This apply can't be settled that way now, so nothing changed.");
       // Keeping it as it is would leave a file the change replaces missing: its original is restored, not kept.
       if (as === "kept" && (record.result?.paths ?? []).some((one) => one.place === "aside")) throw new ApplyRequestRefusal("A file the change replaces is missing from your checkout, and its original is kept, so this can't be kept as it is. Restore the originals instead.");
-      if (record.intent) this.#release(record);
+      if (record.intent) release(record.intent, { engineId: this.#deps.homeId, io: this.#io });
       this.#journal.resolve(applyId, as);
       return this.view(this.#journal.get(applyId)!);
     });
-  }
-
-  #release(record: ApplyRecord): void {
-    const intent = record.intent!;
-    const io = this.#io;
-    const releasable = new Map<string, string>();
-    for (const [index, one] of intent.paths.entries()) {
-      releasable.set(one.temp, one.post.sha256);
-      // The original of a file missing from the checkout is the only copy of it here: it stays, whatever was decided.
-      let missing = true;
-      try {
-        missing = io.lstat(join(intent.folder, ...one.path.split("/"))) === null;
-      } catch {
-        // Can't be read: kept, as if missing.
-      }
-      if (one.aside && one.pre.sha256 && !missing) releasable.set(one.aside, one.pre.sha256);
-      // A version taken back is releasable only when it is Nivra's own.
-      for (const name of this.#names(intent.recovery).filter((name) => name.startsWith(`back-${index}-`))) releasable.set(name, one.post.sha256);
-    }
-    for (const [name, wanted] of releasable) {
-      const path = join(intent.recovery, name);
-      try {
-        const stats = io.lstat(path);
-        if (stats?.isFile() && sha256(io.read(path)) === wanted) io.unlink(path);
-      } catch {
-        // Kept: it can be removed by hand.
-      }
-    }
-    try {
-      if (this.#names(intent.recovery).length === 0) io.rmdir(intent.recovery);
-    } catch {
-      // Kept.
-    }
-    // The lock, when it is this apply's: a partial or unknown apply kept it until now.
-    const lock = join(intent.gitDir, "nivra-apply", "lock");
-    try {
-      const held = JSON.parse(new TextDecoder().decode(io.read(lock))) as { engine?: unknown; applyId?: unknown };
-      if (held.engine === this.#deps.homeId && held.applyId === record.id) io.unlink(lock);
-    } catch {
-      // None, or another apply's.
-    }
-  }
-
-  #names(folder: string): string[] {
-    try {
-      return this.#io.readdir(folder);
-    } catch {
-      return [];
-    }
   }
 
   #record(applyId: string): ApplyRecord {
