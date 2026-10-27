@@ -355,7 +355,7 @@ export function indexIsSplit(bytes: Uint8Array, hashBytes: number): boolean {
  *   required), and with fsmonitor and optional locks off (`GIT_PINS`, `GIT_ENV`), so it runs nothing the repository
  *   configures and writes nothing.
  */
-async function checkUncommitted(tool: GitTool, prefix: string, hashBytes: number): Promise<Counted> {
+export async function checkUncommitted(tool: GitTool, prefix: string, hashBytes: number): Promise<Counted> {
   const index = resolve(tool.cwd, oneLine((await runGitBytes(tool, ["rev-parse", "--git-path", "index"])).bytes, "The repository's git folder"));
   let names: string[] = [];
   try {

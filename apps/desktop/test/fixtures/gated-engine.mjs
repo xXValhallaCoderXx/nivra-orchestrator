@@ -20,6 +20,17 @@
 // runs.research answers with a report that repeats it: complete, or cancelled for a run it was asked to cancel. With a
 // `fail-cancel-once` file, the next runs.cancel it answers is turned down, and the file is removed; with a
 // `fail-cancel-for` file, runs.cancel for the run whose id it holds is turned down.
+// For task runs (D39, D40): task.preview answers that the checkout is ready to run, with a fixed snapshot, so the
+// window can start one. runs.start records each task run's request id and input (`tasks.log`). While a
+// `task-report` file exists, runs.task answers such a run with a finished report that proposes the change `TASK_HASH`
+// names, every acceptance case passed, and runs.proposal with that proposal. task.apply records each request id and
+// the applied change it answers with (`applies.log`), unless a `refuse-apply` file exists; its answer is held while a
+// `hold-apply` file exists, until a `release-apply` file appears, and is an internal error while an `error-apply` file
+// exists; with a `partial-apply` file, the change it records was applied in part, and with an `aside-apply` file as well,
+// one more file of it was moved aside with nothing in its place. task.applyStatus answers a recorded apply by its
+// request id, or null; task.restore takes one back to its originals and task.dismiss settles one, each kept in
+// `applies.log` so a later applyStatus reads it; with an `error-settle` file, either does its work, then answers with an
+// internal error, as an engine whose answer is lost, and with a `hold-settle` file, does its work and never answers.
 // It takes secrets.update, and turns down at once any other method it doesn't stand in for, so no caller waits out its
 // time limit. The window's tests run it as the local engine with --nivra-test-engine=gated (unpackaged only).
 import { randomUUID } from "node:crypto";
@@ -37,6 +48,57 @@ const summary = (status, id = randomUUID(), workflowId = "explain") => {
   return { id, workflowId, title: workflowId === "chat" ? "Chat" : "Explain", status, input: {}, createdAt: now, startedAt: now, finishedAt: null, error: null, durationMs: null, usage: null, route: null };
 };
 const cancelled = new Set();
+/** The change a gated task run proposes. */
+const TASK_HASH = "5".repeat(64);
+/** A line of a `<id> <json>` log, by its id. */
+const logged = (file, id) => {
+  const line = existsSync(join(home, file)) ? readFileSync(join(home, file), "utf8").split("\n").find((entry) => entry.startsWith(`${id} `)) : undefined;
+  return line ? JSON.parse(line.slice(id.length + 1)) : null;
+};
+/** A finished task run's report, as an engine keeps one: a verified change proposed. */
+const taskReport = (runId) => {
+  const run = logged("tasks.log", runId);
+  if (!run) return null;
+  const now = new Date().toISOString();
+  return {
+    outcome: "proposed",
+    stopped: null,
+    task: { taskId: run.input.taskId, attemptId: run.clientRequestId, briefVersion: run.input.briefVersion, briefDigest: run.input.briefDigest },
+    snapshot: null,
+    toolchain: [],
+    worker: null,
+    checks: [],
+    verified: true,
+    steps: [],
+    proposal: { hash: TASK_HASH, patchSha256: "6".repeat(64), patchBytes: 10, files: 1 },
+    reportSha256: "7".repeat(64),
+    cleanup: null,
+    route: null,
+    request: { runId, clientRequestId: run.clientRequestId },
+    updatedAt: now,
+    finishedAt: now,
+  };
+};
+/** An apply as an engine reports one: the change written in place, its original kept aside. */
+const appliedView = (requestId, runId) => {
+  const now = new Date().toISOString();
+  const applyId = randomUUID();
+  return {
+    applyId,
+    requestId,
+    runId,
+    proposalHash: TASK_HASH,
+    status: "applied",
+    refusal: null,
+    paths: [{ path: "greet.sh", change: "changed", place: "post", found: { kind: "file", mode: "100644", size: 10 }, kept: ["orig-0"], changedSince: false }],
+    folders: [],
+    recovery: `nivra-apply/${applyId}`,
+    failure: null,
+    resolution: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+};
 const accepted = (clientRequestId) => {
   if (!existsSync(join(home, "accepted.log"))) return null;
   const line = readFileSync(join(home, "accepted.log"), "utf8").split("\n").find((entry) => entry.startsWith(`${clientRequestId} `));
@@ -121,13 +183,14 @@ process.stdin.on("data", (chunk) => {
     buffer = buffer.slice(end + 1);
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
-      send({ id: request.id, result: { protocolVersion: 10, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 11, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
       const runId = randomUUID();
       if (existsSync(join(home, "accept"))) appendFileSync(join(home, "accepted.log"), `${request.params.clientRequestId} ${runId}\n`);
       if (request.params.workflowId === "review") appendFileSync(join(home, "reviews.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
+      if (request.params.workflowId === "task") appendFileSync(join(home, "tasks.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
       if (request.params.workflowId === "research") {
         appendFileSync(join(home, "research.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input, packet: request.params.context.packet })}\n`);
       }
@@ -205,6 +268,67 @@ process.stdin.on("data", (chunk) => {
       };
       if (!existsSync(join(home, "hold-cancel"))) answer();
       else heldCancels.push(answer);
+    } else if (request.method === "runs.task" && existsSync(join(home, "task-report"))) {
+      send({ id: request.id, result: taskReport(request.params.runId) });
+    } else if (request.method === "runs.proposal" && existsSync(join(home, "task-report"))) {
+      const sha = "8".repeat(64);
+      send({
+        id: request.id,
+        result: { hash: TASK_HASH, baseline: "a".repeat(40), prefix: "", paths: [{ path: "greet.sh", change: "changed", before: { mode: "100644", sha256: sha }, after: { mode: "100644", sha256: "9".repeat(64) } }], patch: "--- a/greet.sh\n+++ b/greet.sh\n", patchBytes: 30, truncated: false },
+      });
+    } else if (request.method === "task.preview") {
+      const none = { count: 0, sample: [] };
+      send({
+        id: request.id,
+        result: {
+          status: "ready",
+          snapshot: { baseline: "a".repeat(40), prefix: "", files: 2, bytes: 3072, leftOut: { secret: none, output: none, submodule: none, excluded: none }, untracked: none, lfsPointers: 0, fingerprint: "c".repeat(64), retention: "Images are retained for 180 days." },
+          programs: ["."],
+          unprobed: 0,
+          caseFiles: [],
+          limits: { modelRequests: 12, requestSeconds: 150, outputTokensPerRequest: 8000, estimatedInputTokens: 160000, toolCalls: 24, writes: 8, writeBytes: 32768, runs: 4, operations: 17, checkSeconds: 60, sessionMinutes: 20, runMinutes: 33 },
+        },
+      });
+    } else if (request.method === "task.apply") {
+      const { requestId, runId } = request.params;
+      const known = logged("applies.log", requestId);
+      const partial = existsSync(join(home, "partial-apply"));
+      const aside = { path: "README.md", change: "changed", place: "aside", found: { kind: "absent", mode: null, size: null }, kept: ["orig-1"], changedSince: false };
+      const fresh = appliedView(requestId, runId);
+      const view = known ?? { ...fresh, ...(partial ? { status: "partial" } : {}), ...(partial && existsSync(join(home, "aside-apply")) ? { paths: [...fresh.paths, aside] } : {}) };
+      if (!known && !existsSync(join(home, "refuse-apply"))) appendFileSync(join(home, "applies.log"), `${requestId} ${JSON.stringify(view)}\n`);
+      const answer = () => {
+        if (existsSync(join(home, "error-apply"))) send({ id: request.id, error: { code: -32603, message: "the engine failed while it applied the change" } });
+        else if (existsSync(join(home, "refuse-apply"))) send({ id: request.id, error: { code: -32602, message: "This engine has no proposal for that run, so nothing was written. Run the task again." } });
+        else send({ id: request.id, result: view });
+      };
+      if (!existsSync(join(home, "hold-apply"))) answer();
+      else {
+        const held = setInterval(() => {
+          if (!existsSync(join(home, "release-apply"))) return;
+          clearInterval(held);
+          answer();
+        }, 25);
+      }
+    } else if (request.method === "task.applyStatus") {
+      send({ id: request.id, result: logged("applies.log", request.params.requestId) });
+    } else if (request.method === "task.dismiss" || request.method === "task.restore") {
+      const file = join(home, "applies.log");
+      const lines = existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+      const at = lines.findIndex((entry) => JSON.parse(entry.slice(entry.indexOf(" ") + 1)).applyId === request.params.applyId);
+      const updatedAt = new Date().toISOString();
+      if (at < 0) send({ id: request.id, error: { code: -32602, message: "This engine has no apply by that id." } });
+      else {
+        const line = JSON.parse(lines[at].slice(lines[at].indexOf(" ") + 1));
+        const next = request.method === "task.restore" ? { ...line, status: "not-applied", paths: line.paths.map((path) => ({ ...path, place: "pre", found: { kind: "file", mode: "100644", size: 10 } })), updatedAt } : { ...line, resolution: request.params.as, updatedAt };
+        // Kept, as an engine keeps it: a later applyStatus reads it.
+        lines[at] = `${line.requestId} ${JSON.stringify(next)}`;
+        writeFileSync(file, `${lines.join("\n")}\n`);
+        if (existsSync(join(home, "hold-settle"))) {
+          // Done and kept, and the answer never comes: as an engine stopped before it could reply.
+        } else if (existsSync(join(home, "error-settle"))) send({ id: request.id, error: { code: -32603, message: "the engine failed after it settled the change" } });
+        else send({ id: request.id, result: next });
+      }
     } else if (request.method === "secrets.update") {
       send({ id: request.id, result: { ok: true } });
     } else if (request.method === "shutdown") {

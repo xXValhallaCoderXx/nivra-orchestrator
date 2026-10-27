@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { isTerminal, taskBriefDigest, type RunSummary, type SandboxStatus, type TaskBrief, type TaskPreview, type TaskReport } from "@nivra/domain";
+import { isTerminal, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskPreview, type TaskReport } from "@nivra/domain";
 import { CHECK_IMAGE } from "../src/exec/check.ts";
 import { operationsFor } from "../src/task/limits.ts";
 import { TASK_STOP_MESSAGES } from "../src/task/report.ts";
-import { TASK_BRIEF, TASK_FIX, TASK_FIXTURE } from "../scripts/task-fixture.ts";
+import { FIXED_GREET, TASK_BRIEF, TASK_FIX, TASK_FIXTURE } from "../scripts/task-fixture.ts";
 import { removeDir, startEngine, tempDir, waitFor, type EngineProcess } from "./helpers.ts";
 import { RealGuest } from "./real-guest.ts";
 import { startSandboxStub, type SandboxStub } from "./stub-sandboxes.ts";
 import { httpError, startStub, toolCall, type Reply, type Stub, type StubRequest } from "./stub-token-factory.ts";
-import { changedSince, cleanUp, folderState, repoWith } from "./workspace-fixtures.ts";
+import { changedSince, cleanUp, folderState, git, repoWith } from "./workspace-fixtures.ts";
 
 /**
  * A task run through a real engine over stdio (NIV-7, D39): the production adapter against a stand-in for Nebius
@@ -48,6 +48,7 @@ interface Setup {
   model: Stub;
   guest: RealGuest;
   engine: EngineProcess;
+  info: EngineInfo;
   home: string;
   repo: string;
 }
@@ -69,8 +70,8 @@ async function setup(options: { credentials?: boolean; calls?: Call[]; files?: R
   dirs.push(root);
   const home = join(root, "home");
   const engine = engineAt(home, sandbox, model);
-  await engine.initialize(options.credentials === false ? {} : CREDENTIALS);
-  return { sandbox, model, guest, engine, home, repo: repoWith(options.files ?? FILES) };
+  const info = await engine.initialize(options.credentials === false ? {} : CREDENTIALS);
+  return { sandbox, model, guest, engine, info, home, repo: repoWith(options.files ?? FILES) };
 }
 
 const preview = (engine: EngineProcess, repo: string, brief: TaskBrief = BRIEF): Promise<TaskPreview> => engine.client.call("task.preview", { repoPath: repo, brief });
@@ -92,6 +93,65 @@ const report = async (engine: EngineProcess, runId: string): Promise<TaskReport>
 const spawns = (stub: SandboxStub<RealGuest>) => stub.requests.filter((request) => request.method === "POST" && request.path === "/v1/instances");
 const spawned = (stub: SandboxStub<RealGuest>, name: string) => spawns(stub).filter((request) => request.body.includes(name)).length;
 const verdicts = (shown: TaskReport) => shown.checks.map((check) => `${check.kind} ${check.number} ${check.verdict}`);
+
+/** A finished run's proposal, and the approval of it the host would send: bound to the attempt, this engine and the brief. */
+async function proposedRun(setup: Setup): Promise<{ run: RunSummary; done: TaskReport; params: ApplyParams }> {
+  const shown = ready(await preview(setup.engine, setup.repo));
+  const run = await start(setup.engine, setup.repo, shown.snapshot.fingerprint);
+  await ended(setup.engine, run.id);
+  const done = await report(setup.engine, run.id);
+  assert.equal(done.outcome, "proposed", done.stopped?.message ?? "");
+  const task = { attempt: { taskId: TASK_ID, attemptId: done.request.clientRequestId, runId: run.id }, engine: { homeId: setup.info.homeId }, brief: { version: 2, sha256: await taskBriefDigest(BRIEF) } };
+  return { run, done, params: { requestId: randomUUID(), runId: run.id, approvedHash: done.proposal!.hash, repoPath: setup.repo, project: PROJECT, target: "local", task } };
+}
+const apply = (engine: EngineProcess, params: ApplyParams): Promise<ApplyView> => engine.client.call("task.apply", params);
+
+describe("applying a task's proposal through a real engine (NIV-8, D40)", () => {
+  it("applies the approved proposal on its own engine: checked again, written unstaged, kept by its request id, settled as accepted, never applied twice", async () => {
+    const setup_ = await setup();
+    const { engine, repo } = setup_;
+    const { params } = await proposedRun(setup_);
+    const applied = await apply(engine, params);
+    assert.deepEqual([applied.status, applied.paths.map((one) => `${one.path} ${one.change} ${one.place}`), applied.refusal, applied.recovery], ["applied", ["greet.sh changed post"], null, `nivra-apply/${applied.applyId}`]);
+    assert.deepEqual([readFileSync(join(repo, "greet.sh"), "utf8"), git(repo, ["diff", "--cached", "--name-only"]), git(repo, ["status", "--porcelain"])], [FIXED_GREET, "", " M greet.sh\n"]);
+    // The same request again: the same apply, and nothing written twice. Read back by its request id, as after a restart.
+    const before = folderState(repo);
+    assert.equal((await apply(engine, params)).applyId, applied.applyId);
+    assert.equal((await engine.client.call("task.applyStatus", { requestId: params.requestId }))?.status, "applied");
+    assert.equal(await engine.client.call("task.applyStatus", { requestId: randomUUID() }), null);
+    // Another approval of the same proposal is refused, in Nivra's words, and kept as such.
+    const twice = await apply(engine, { ...params, requestId: randomUUID() });
+    assert.deepEqual([twice.status, twice.refusal?.code, twice.refusal?.message.includes(repo)], ["refused", "duplicate", false]);
+    assert.deepEqual(changedSince(before, repo), []);
+    // Accepted: the folder is free and the change stays. Every copy is kept, the original among them.
+    const accepted = await engine.client.call("task.dismiss", { applyId: applied.applyId, as: "accepted" });
+    const recovery = join(repo, ".git", "nivra-apply", applied.applyId);
+    assert.deepEqual([accepted.resolution, readdirSync(recovery), existsSync(join(repo, ".git", "nivra-apply", "lock")), readFileSync(join(repo, "greet.sh"), "utf8")], ["accepted", ["new-0", "orig-0"], false, FIXED_GREET]);
+    assert.equal(readFileSync(join(recovery, "orig-0"), "utf8"), FILES["greet.sh"]);
+  });
+
+  it("refuses an apply that isn't the approved proposal, or whose checkout moved or was edited, writing nothing, in Nivra's words", async () => {
+    const setup_ = await setup();
+    const { engine, repo } = setup_;
+    const { params } = await proposedRun(setup_);
+    const before = folderState(repo);
+    const wrongHash = await apply(engine, { ...params, requestId: randomUUID(), approvedHash: "0".repeat(64) });
+    const otherEngine = await apply(engine, { ...params, requestId: randomUUID(), task: { ...params.task, engine: { homeId: randomUUID() } } });
+    assert.deepEqual([wrongHash.refusal?.code, otherEngine.refusal?.code], ["proposal", "proposal"]);
+    writeFileSync(join(repo, "greet.sh"), "edited\n");
+    const edited = await apply(engine, { ...params, requestId: randomUUID() });
+    assert.deepEqual([edited.status, edited.refusal?.code], ["refused", "uncommitted"]);
+    git(repo, ["checkout", "--", "greet.sh"]);
+    git(repo, ["commit", "-q", "--allow-empty", "-m", "moved"]);
+    const moved = await apply(engine, { ...params, requestId: randomUUID() });
+    assert.deepEqual([moved.status, moved.refusal?.code], ["refused", "baseline-moved"]);
+    for (const refused of [wrongHash, otherEngine, edited, moved]) assert.ok(!refused.refusal!.message.includes("/"), refused.refusal!.message);
+    // Only greet.sh's edit and its checkout, and the new commit, ever touched the repository: nothing of an apply did.
+    assert.equal(readFileSync(join(repo, "greet.sh"), "utf8"), FILES["greet.sh"]);
+    assert.ok(!existsSync(join(repo, ".git", "nivra-apply")), "an apply made something in the git folder");
+    assert.ok(changedSince(before, repo).every((name) => name === "." || name === "greet.sh" || name.startsWith(".git")), changedSince(before, repo).join(", "));
+  });
+});
 
 describe("a task run through a real engine (NIV-7)", () => {
   it("goes on to collect and judge when the provider fails partway, and never sends the failed request again", async () => {

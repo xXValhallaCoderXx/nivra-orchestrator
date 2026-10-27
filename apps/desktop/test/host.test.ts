@@ -2794,3 +2794,332 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     assert.deepEqual([host.projects().length, left.cancelRequested, readFileSync(join(home, "calls.log"), "utf8").includes("runs.cancel")], [0, true, false]);
   });
 });
+
+describe("Host: deciding on a task's change and applying it on its run's engine (D40)", () => {
+  const KEY = "test-key-0123456789";
+  const PROJECT_ID = "project-e00hostapply001";
+  const SECRETS = { NEBIUS_API_KEY: KEY, NEBIUS_PROJECT_ID: PROJECT_ID };
+  const FILES = Object.fromEntries(TASK_FIXTURE.map((file) => [file.path, String(file.bytes)]));
+  const CASE = { name: "greet with and without a name", command: ". ./greet.sh; greet Ada; greet", expectedOutput: "Hello, Ada\nHello, world\n", expectedExitCode: 0 };
+  const FIELDS = { goal: "greet with no name says Hello, world", acceptanceCriteria: ["check.sh passes"], scope: "", exclusions: "", context: "", assumptions: [], checks: ["/bin/sh check.sh"], acceptanceCases: [CASE] };
+  const WORK: Array<[string, Record<string, unknown>]> = [["edit_file", TASK_FIX], ["submit", { summary: "Defaulted the name to world." }]];
+  /** A change that runs but doesn't do what the case asks: not every case passes. */
+  const WRONG: Array<[string, Record<string, unknown>]> = [["edit_file", { path: "greet.sh", old_text: '"$1"', new_text: '"${1:-everyone}"' }], ["submit", { summary: "Defaulted the name." }]];
+  const DECIDE = "Decide on the last run's change first: approve it, reject it, or ask for a revision.";
+  const GATED_HASH = "5".repeat(64);
+  const local: Array<{ close(): Promise<void> }> = [];
+  after(async () => {
+    await Promise.all(local.map((stub) => stub.close()));
+  });
+  const git = (cwd: string, args: string[]) => spawnSync("git", args, { cwd, encoding: "utf8" }).stdout;
+  /** A host whose one project is a WSL repository holding the fixture, both consents given, the keys saved, its model doing `calls`. */
+  async function applyHost(calls = WORK) {
+    const guest = new RealGuest(CHECK_IMAGE.uuid);
+    guest.busybox = true;
+    const sandbox = await startSandboxStub({ guest });
+    // The script starts again with each run: its step is how many answers the request already holds.
+    const step = (request: StubRequest) => Math.min((request.body?.messages ?? []).filter((message) => (message as { role?: string }).role === "assistant").length, calls.length - 1);
+    const model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: (request, index) => toolCall(calls[step(request)]![0], calls[step(request)]![1], { id: `call_${index}` }) });
+    local.push(sandbox, model);
+    const parent = mkdtempSync(join(tmpdir(), "nivra apply repos "));
+    dirs.push(parent);
+    const repo = makeRepo(join(parent, "greet"), FILES);
+    const made = makeHost({ tokenFactoryUrl: model.url, sandboxesUrl: sandbox.url, projects: [{ targetId: "wsl:Test", path: repo }] });
+    made.keys.current = SECRETS;
+    await made.host.setSharing(made.ids[0]!, true);
+    await made.host.setCloudExecution(made.ids[0]!, true);
+    return { ...made, repo };
+  }
+  async function readyTask(host: Host, projectId: string, title = "Greet the world") {
+    const task = await host.createTask({ title, fields: FIELDS, projectId, planId: null });
+    return host.setTaskState(task.summary.id, task.revision, "ready");
+  }
+  const ended = (host: Host, taskId: string, attemptId: string, what = "the run to end") =>
+    waitFor(async () => {
+      const view = await host.taskAttempt(taskId, attemptId);
+      return view.status !== "submitting" && view.status !== "running" ? view : null;
+    }, what, 60_000);
+  /** A ready task's run to its end on the stand-ins. */
+  async function ranTask(host: Host, projectId: string, taskId?: string) {
+    const id = taskId ?? (await readyTask(host, projectId)).summary.id;
+    const preview = await host.previewTaskRun(id);
+    assert.equal(preview.blocked, null);
+    const started = await host.startTaskRun(id, preview.expected, preview.snapshotFingerprint!);
+    return { taskId: id, attemptId: started.id, done: await ended(host, id, started.id) };
+  }
+  /** A gated engine standing in for the project's: task runs proposing `GATED_HASH`, verified, and applies it records. */
+  async function gatedHost() {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    made.keys.current = SECRETS;
+    await made.host.setSharing(made.ids[0]!, true);
+    await made.host.setCloudExecution(made.ids[0]!, true);
+    const home = join(made.root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "release", "task-report"]) writeFileSync(join(home, flag), "");
+    const calls = () => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter(Boolean) : []);
+    return { ...made, home, calls };
+  }
+  /** A gated task run to its end: the start bound to a snapshot fingerprint the test gives, as the window would. */
+  async function gatedRun(host: Host, projectId: string, title = "Greet the world") {
+    const task = await readyTask(host, projectId, title);
+    const view = host.task(task.summary.id);
+    const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
+    const snapshot = "c".repeat(64);
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const started = await host.startTaskRun(task.summary.id, expected, snapshot);
+    return { taskId: task.summary.id, attemptId: started.id, done: await ended(host, task.summary.id, started.id) };
+  }
+
+  it("applies a verified change approved by its hash on its run's engine: written unstaged, accepted, the task completed and the original kept", async () => {
+    const { host, ids, repo } = await applyHost();
+    const { taskId, attemptId, done } = await ranTask(host, ids[0]!);
+    assert.deepEqual([done.status, done.report?.verified, done.actions, done.decision, done.apply], ["answered", true, ["approve", "reject", "revise"], null, null]);
+    const waiting = host.task(taskId);
+    assert.deepEqual([waiting.summary.state, waiting.runBlocked], ["review", DECIDE]);
+    // Another hash than the one shown is refused, and nothing is recorded.
+    await assert.rejects(host.approveTaskChange(taskId, attemptId, "0".repeat(64)), /^Error: This isn't the change you were shown/);
+    assert.equal((await host.taskAttempt(taskId, attemptId)).decision, null);
+    const approved = await host.approveTaskChange(taskId, attemptId, done.proposal!.hash);
+    assert.deepEqual([approved.decision, approved.apply?.status, approved.apply?.paths.map((one) => `${one.path} ${one.place}`), approved.apply?.unresolved, approved.actions], ["approved", "applied", ["greet.sh post"], null, ["accept"]]);
+    assert.match(readFileSync(join(repo, "greet.sh"), "utf8"), /\$\{1:-world\}/);
+    assert.deepEqual([git(repo, ["diff", "--cached", "--name-only"]), git(repo, ["status", "--porcelain"])], ["", " M greet.sh\n"]);
+    const recovery = join(repo, ".git", approved.apply!.recovery!);
+    assert.equal(existsSync(recovery), true);
+    assert.deepEqual([host.task(taskId).summary.state, host.task(taskId).runBlocked], ["review", "Settle the last run's change first: accept it, keep or restore what was applied, or dismiss it."]);
+    await assert.rejects(host.approveTaskChange(taskId, attemptId, done.proposal!.hash), /A decision on this change is already recorded/);
+    const accepted = await host.settleTaskChange(taskId, attemptId, "accepted");
+    assert.deepEqual([accepted.apply?.resolution, accepted.acceptedAt !== null, accepted.actions, host.task(taskId).summary.state], ["accepted", true, [], "completed"]);
+    // Every copy stays in the recovery folder, the original among them, in case a program that had it open saves into it.
+    assert.deepEqual([readdirSync(recovery).sort(), git(repo, ["status", "--porcelain"])], [["new-0", "orig-0"], " M greet.sh\n"]);
+  });
+
+  it("rejects a change without sending anything, and asks for a revision in a new brief version that the next run takes", async () => {
+    const { host, ids, repo } = await applyHost();
+    const first = await ranTask(host, ids[0]!);
+    const before = folderState(repo);
+    const rejected = await host.rejectTaskChange(first.taskId, first.attemptId);
+    assert.deepEqual([rejected.decision, rejected.apply, rejected.actions], ["rejected", null, []]);
+    assert.deepEqual([changedSince(before, repo), existsSync(join(repo, ".git", "nivra-apply"))], [[], false]);
+    assert.deepEqual([host.task(first.taskId).summary.state, host.task(first.taskId).runBlocked], ["ready", null]);
+    // The next run, the person's, and a revision asked of it: an empty note is refused, and a note goes into the brief.
+    const second = await ranTask(host, ids[0]!, first.taskId);
+    await assert.rejects(host.requestTaskRevision(first.taskId, second.attemptId, "   "), /^Error: Write what the next run should do differently/);
+    const revised = await host.requestTaskRevision(first.taskId, second.attemptId, "  Keep the greeting in one printf.  ");
+    assert.deepEqual([revised.decision, revised.revisionNote, revised.actions], ["revision", "Keep the greeting in one printf.", []]);
+    const task = host.task(first.taskId);
+    assert.deepEqual([task.brief.version, task.brief.content.context, task.runBlocked, task.summary.state], [2, "Keep the greeting in one printf.", null, "ready"]);
+    // A note holding a saved key is refused before anything is recorded.
+    const third = await ranTask(host, ids[0]!, first.taskId);
+    await assert.rejects(host.requestTaskRevision(first.taskId, third.attemptId, `Use ${KEY} there.`), /note/);
+    assert.equal((await host.taskAttempt(first.taskId, third.attemptId)).decision, null);
+    assert.deepEqual(changedSince(before, repo), []);
+  });
+
+  it("won't approve a change not every case passed; shows the engine's refusal of an apply whose checkout was edited, and lets it be decided on again once dismissed", async () => {
+    const wrong = await applyHost(WRONG);
+    const unverified = await ranTask(wrong.host, wrong.ids[0]!);
+    assert.deepEqual([unverified.done.report?.verified, unverified.done.actions], [false, ["reject", "revise"]]);
+    await assert.rejects(wrong.host.approveTaskChange(unverified.taskId, unverified.attemptId, unverified.done.proposal!.hash), /^Error: Not every acceptance case was shown to pass/);
+
+    const { host, ids, repo } = await applyHost();
+    const { taskId, attemptId, done } = await ranTask(host, ids[0]!);
+    writeFileSync(join(repo, "greet.sh"), "edited by hand\n");
+    const refused = await host.approveTaskChange(taskId, attemptId, done.proposal!.hash);
+    assert.deepEqual([refused.decision, refused.apply?.status, refused.apply?.refusal?.code, refused.actions], ["approved", "refused", "uncommitted", ["dismiss"]]);
+    assert.match(refused.apply!.refusal!.message, /^Your checkout has uncommitted changes/);
+    assert.deepEqual([readFileSync(join(repo, "greet.sh"), "utf8"), host.task(taskId).summary.state], ["edited by hand\n", "review"]);
+    git(repo, ["checkout", "--", "greet.sh"]);
+    const dismissed = await host.settleTaskChange(taskId, attemptId, "dismissed");
+    assert.deepEqual([dismissed.decision, dismissed.apply?.resolution, dismissed.actions], [null, "dismissed", ["approve", "reject", "revise"]]);
+    const again = await host.approveTaskChange(taskId, attemptId, done.proposal!.hash);
+    assert.deepEqual([again.apply?.status, again.actions], ["applied", ["accept"]]);
+    assert.match(readFileSync(join(repo, "greet.sh"), "utf8"), /\$\{1:-world\}/);
+  });
+
+  it("asks for an apply whose answer was lost by its request id, never sending it again; one its engine never recorded can be approved again", async () => {
+    const { host, ids, home, calls } = await gatedHost();
+    const { taskId, attemptId, done } = await gatedRun(host, ids[0]!);
+    assert.deepEqual([done.status, done.report?.verified, done.actions], ["answered", true, ["approve", "reject", "revise"]]);
+    // The engine applied it, and its answer was an error: found by the request id.
+    writeFileSync(join(home, "error-apply"), "");
+    await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    const found = await waitFor(async () => {
+      const view = await host.taskAttempt(taskId, attemptId);
+      return view.apply?.status === "applied" ? view : null;
+    }, "the apply to be found by its request id");
+    assert.deepEqual([found.actions, calls().filter((call) => call === "task.apply").length, calls().includes("task.applyStatus")], [["accept"], 1, true]);
+
+    // Another run whose approval the engine turned down before recording anything: its words are shown, and the change
+    // can be approved again.
+    await host.settleTaskChange(taskId, attemptId, "accepted");
+    rmSync(join(home, "error-apply"));
+    writeFileSync(join(home, "refuse-apply"), "");
+    const second = await gatedRun(host, ids[0]!, "Greet again");
+    await host.approveTaskChange(second.taskId, second.attemptId, GATED_HASH);
+    const withdrawn = await waitFor(async () => {
+      const view = await host.taskAttempt(second.taskId, second.attemptId);
+      return view.decision === null && view.apply?.unresolved ? view : null;
+    }, "the approval to be taken back");
+    assert.match(withdrawn.apply!.unresolved!, /^The engine didn't apply the change, so nothing was written: This engine has no proposal for that run/);
+    assert.deepEqual([withdrawn.apply?.status, withdrawn.actions, calls().filter((call) => call === "task.apply").length], [null, ["approve", "reject", "revise"], 2]);
+  });
+
+  it("reads an apply back after a restart by its request id, and never sends it again", async () => {
+    const { host, ids, home, root, calls } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    // The answer is held, and Nivra stops while the apply is out.
+    writeFileSync(join(home, "hold-apply"), "");
+    const out = host.approveTaskChange(taskId, attemptId, GATED_HASH).catch(() => null);
+    await waitFor(() => calls().includes("task.apply"), "the apply to reach the engine");
+    await host.shutdown();
+    await out;
+    rmSync(join(home, "hold-apply"));
+    const again = hostAt(root, { wslEntry: GATED });
+    again.keys.current = SECRETS;
+    const read = await waitFor(async () => {
+      const view = await again.host.taskAttempt(taskId, attemptId);
+      return view.apply?.status === "applied" ? view : null;
+    }, "the apply to be read back after the restart");
+    assert.deepEqual([read.decision, read.actions, calls().filter((call) => call === "task.apply").length], ["approved", ["accept"], 1]);
+  });
+
+  it("reads a settle back by its request id when its answer is lost, never leaving the run stuck: accepted once, the task completed", async () => {
+    const { host, ids, home, calls } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    const applied = await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    assert.deepEqual([applied.apply?.status, applied.actions], ["applied", ["accept"]]);
+    // The engine accepts it, then its answer is an error: nothing is offered while Nivra reads it back.
+    writeFileSync(join(home, "error-settle"), "");
+    const lost = await host.settleTaskChange(taskId, attemptId, "accepted");
+    assert.deepEqual([lost.actions, lost.apply?.unresolved], [[], "Nivra didn't hear back from the engine about settling this change, so it is asking how that went."]);
+    const settled = await waitFor(async () => {
+      const view = await host.taskAttempt(taskId, attemptId);
+      return view.apply?.resolution === "accepted" && view.apply.unresolved === null ? view : null;
+    }, "the settle to be read back");
+    assert.deepEqual([settled.actions, settled.acceptedAt !== null, host.task(taskId).summary.state, calls().filter((call) => call === "task.dismiss").length], [[], true, "completed", 1]);
+    rmSync(join(home, "error-settle"));
+    // Settled, the task can go.
+    host.deleteTask(taskId);
+  });
+
+  it("reads a settle back after a restart once its engine is online, and never sends it again: accepted, the task completed", async () => {
+    const { host, ids, home, root, calls } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    // The engine records the acceptance and holds its answer, and Nivra stops meanwhile.
+    writeFileSync(join(home, "hold-settle"), "");
+    const out = host.settleTaskChange(taskId, attemptId, "accepted").catch(() => null);
+    await waitFor(() => calls().includes("task.dismiss"), "the settle to reach the engine");
+    await host.shutdown();
+    await out;
+    rmSync(join(home, "hold-settle"));
+    const again = hostAt(root, { wslEntry: GATED });
+    again.keys.current = SECRETS;
+    // Before its engine is online, the saved settling holds the task, and nothing about the change is offered.
+    const waiting = again.host.task(taskId);
+    assert.deepEqual([waiting.summary.state, waiting.runBlocked], ["active", "The last run's change is being applied or settled. Wait for it to finish, then try again."]);
+    await assert.rejects(again.host.reviseBrief(taskId, waiting.revision, { ...FIELDS, context: "More." }), /^Error: This task's change is still being applied or settled, so its brief can't change/);
+    // Its engine coming online is enough: nothing asks for the run.
+    await again.host.open(ids[0]!);
+    await waitFor(() => again.host.task(taskId).summary.state === "completed", "the settle to be read back after the restart");
+    const read = await again.host.taskAttempt(taskId, attemptId);
+    assert.deepEqual(
+      [read.apply?.resolution, read.apply?.unresolved, read.acceptedAt !== null, read.acceptNote, read.actions, calls().filter((call) => call === "task.dismiss").length],
+      ["accepted", null, true, null, [], 1],
+    );
+  });
+
+  it("reads an unsettled apply again whenever its engine comes online, so one settled elsewhere meanwhile is followed", async () => {
+    const { host, ids, home, calls } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    const applied = await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    assert.deepEqual([applied.apply?.status, applied.actions], ["applied", ["accept"]]);
+    // The engine dismisses it without this Nivra hearing of it, as another tool could, and then restarts.
+    const log = join(home, "applies.log");
+    writeFileSync(log, readFileSync(log, "utf8").replace('"resolution":null', '"resolution":"dismissed"'));
+    await host.restart(ids[0]!);
+    await waitFor(() => host.task(taskId).attempts[0]?.apply?.resolution === "dismissed", "the apply to be read again");
+    const read = await host.taskAttempt(taskId, attemptId);
+    assert.deepEqual([read.decision, read.apply?.resolution, read.actions, calls().filter((call) => call === "task.dismiss").length], [null, "dismissed", ["approve", "reject", "revise"], 0]);
+  });
+
+  it("refuses changing a task's brief, or moving it to another repository, while its change isn't settled", async () => {
+    const { host, ids } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    const applied = await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    assert.deepEqual([applied.apply?.status, applied.actions], ["applied", ["accept"]]);
+    // Applied and not yet accepted: the brief it ran stays the task's, and so does its repository.
+    const task = host.task(taskId);
+    await assert.rejects(
+      host.reviseBrief(taskId, task.revision, { ...FIELDS, context: "More." }),
+      /^Error: This task's change needs settling first, so its brief can't change: accept it, keep or restore what was applied, or dismiss it\. Then try again\.$/,
+    );
+    assert.throws(() => host.setTaskProject(taskId, task.revision, null), /^Error: This task's change needs settling first, so it can't move to another repository: accept it/);
+    const accepted = await host.settleTaskChange(taskId, attemptId, "accepted");
+    const after = host.task(taskId);
+    assert.deepEqual([accepted.apply?.resolution, accepted.acceptNote, after.summary.state, after.brief.version, after.summary.projectId], ["accepted", null, "completed", 1, ids[0]]);
+  });
+
+  it("settles a change made for an older brief when it is accepted, but doesn't complete the task, and says why", async () => {
+    const { host, ids } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    // The brief moves on while the run waits on a decision; then the older run's change is approved and accepted.
+    await host.reviseBrief(taskId, host.task(taskId).revision, { ...FIELDS, context: "Greet in French too." });
+    assert.equal(host.task(taskId).brief.version, 2);
+    const applied = await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    assert.deepEqual([applied.apply?.status, applied.actions], ["applied", ["accept"]]);
+    const accepted = await host.settleTaskChange(taskId, attemptId, "accepted");
+    assert.deepEqual(
+      [accepted.apply?.resolution, accepted.acceptedAt !== null, accepted.actions, accepted.acceptNote],
+      ["accepted", true, [], "The task isn't completed: its brief changed after this run. Run it on the new brief, or complete the task yourself."],
+    );
+    const after = host.task(taskId);
+    assert.deepEqual([after.summary.state, after.runBlocked, after.attempts[0]?.acceptedAt !== null], ["ready", null, true]);
+  });
+
+  it("doesn't offer keeping a partial apply as it is while a file is moved aside, and refuses deleting a task whose applied change isn't settled", async () => {
+    const { host, ids, home } = await gatedHost();
+    writeFileSync(join(home, "partial-apply"), "");
+    writeFileSync(join(home, "aside-apply"), "");
+    const first = await gatedRun(host, ids[0]!);
+    const partial = await host.approveTaskChange(first.taskId, first.attemptId, GATED_HASH);
+    assert.deepEqual([partial.apply?.status, partial.apply?.paths.map((one) => `${one.path} ${one.place}`), partial.actions], ["partial", ["greet.sh post", "README.md aside"], ["restore"]]);
+    await assert.rejects(host.settleTaskChange(first.taskId, first.attemptId, "kept"), /^Error: A file the change replaces is missing from your checkout, its original kept aside/);
+    const restored = await host.restoreTaskChange(first.taskId, first.attemptId);
+    assert.deepEqual([restored.apply?.status, restored.actions], ["not-applied", ["dismiss"]]);
+    // Not applied, and not yet dismissed: the engine keeps a record of it, so the task stays until it is settled.
+    assert.throws(() => host.deleteTask(first.taskId), /^Error: Settle this task's change first/);
+    await host.settleTaskChange(first.taskId, first.attemptId, "dismissed");
+    host.deleteTask(first.taskId);
+
+    rmSync(join(home, "partial-apply"));
+    rmSync(join(home, "aside-apply"));
+    const second = await gatedRun(host, ids[0]!, "Greet again");
+    await host.approveTaskChange(second.taskId, second.attemptId, GATED_HASH);
+    assert.throws(() => host.deleteTask(second.taskId), /^Error: Settle this task's change first/);
+    await host.settleTaskChange(second.taskId, second.attemptId, "accepted");
+    host.deleteTask(second.taskId);
+  });
+
+  it("keeps a partial apply as it is, or restores its originals and then dismisses it, and refuses deleting or revising its task meanwhile", async () => {
+    const { host, ids, home } = await gatedHost();
+    writeFileSync(join(home, "partial-apply"), "");
+    const first = await gatedRun(host, ids[0]!);
+    const partial = await host.approveTaskChange(first.taskId, first.attemptId, GATED_HASH);
+    assert.deepEqual([partial.apply?.status, partial.actions, host.task(first.taskId).summary.state], ["partial", ["restore", "keep"], "review"]);
+    assert.throws(() => host.deleteTask(first.taskId), /^Error: This task's change is being applied, or what was applied needs settling/);
+    const task = host.task(first.taskId);
+    await assert.rejects(host.reviseBrief(first.taskId, task.revision, { ...FIELDS, context: "More." }), /needs settling/);
+    await assert.rejects(host.settleTaskChange(first.taskId, first.attemptId, "accepted"), /Only a change that was applied can be accepted/);
+    const kept = await host.settleTaskChange(first.taskId, first.attemptId, "kept");
+    assert.deepEqual([kept.apply?.resolution, kept.actions, host.task(first.taskId).summary.state, host.task(first.taskId).runBlocked], ["kept", [], "ready", null]);
+
+    const second = await gatedRun(host, ids[0]!, "Greet again");
+    await host.approveTaskChange(second.taskId, second.attemptId, GATED_HASH);
+    const restored = await host.restoreTaskChange(second.taskId, second.attemptId);
+    assert.deepEqual([restored.apply?.status, restored.apply?.paths.map((one) => one.place), restored.actions], ["not-applied", ["pre"], ["dismiss"]]);
+    const dismissed = await host.settleTaskChange(second.taskId, second.attemptId, "dismissed");
+    assert.deepEqual([dismissed.decision, dismissed.actions], [null, ["approve", "reject", "revise"]]);
+    host.deleteTask(second.taskId);
+  });
+});

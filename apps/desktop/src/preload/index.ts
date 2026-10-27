@@ -76,6 +76,11 @@ const api = {
   startTaskRun: (taskId, expected, snapshot) => ipcRenderer.invoke(IPC.startTaskRun, taskId, expected, snapshot),
   cancelTaskRun: (taskId, attemptId) => ipcRenderer.invoke(IPC.cancelTaskRun, taskId, attemptId),
   getTaskAttempt: (taskId, attemptId) => ipcRenderer.invoke(IPC.getTaskAttempt, taskId, attemptId),
+  approveTaskChange: (taskId, attemptId, approvedHash) => ipcRenderer.invoke(IPC.approveTaskChange, taskId, attemptId, approvedHash),
+  rejectTaskChange: (taskId, attemptId) => ipcRenderer.invoke(IPC.rejectTaskChange, taskId, attemptId),
+  requestTaskRevision: (taskId, attemptId, note) => ipcRenderer.invoke(IPC.requestTaskRevision, taskId, attemptId, note),
+  settleTaskChange: (taskId, attemptId, as) => ipcRenderer.invoke(IPC.settleTaskChange, taskId, attemptId, as),
+  restoreTaskChange: (taskId, attemptId) => ipcRenderer.invoke(IPC.restoreTaskChange, taskId, attemptId),
 } satisfies NivraApi;
 
 contextBridge.exposeInMainWorld("nivra", api);

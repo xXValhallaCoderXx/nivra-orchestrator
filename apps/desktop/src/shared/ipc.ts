@@ -1,4 +1,8 @@
 import type {
+  ApplyPath,
+  ApplyRefusalCode,
+  ApplyResolution,
+  ApplyStatus,
   ChatResult,
   DoctorReport,
   EngineInfo,
@@ -100,6 +104,11 @@ export const IPC = {
   startTaskRun: "tasks:start-run",
   cancelTaskRun: "tasks:cancel-run",
   getTaskAttempt: "tasks:attempt",
+  approveTaskChange: "tasks:approve",
+  rejectTaskChange: "tasks:reject",
+  requestTaskRevision: "tasks:request-revision",
+  settleTaskChange: "tasks:settle",
+  restoreTaskChange: "tasks:restore",
 } as const;
 
 /** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
@@ -481,7 +490,21 @@ export interface TaskView {
   /** Each plan the brief came from: the version it used, and the latest there is (its id to update from), or that it was deleted. */
   sourcePlans: Array<{ planLineage: string; usedVersion: number; latestVersion: number | null; latestPlanId: string | null; conversationId: string | null }>;
   /** Its runs, oldest first, each bound to the brief version it ran. */
-  attempts: Array<{ id: string; briefVersion: number; status: TurnStatus; note: string | null; createdAt: string; settledAt: string | null }>;
+  attempts: Array<{
+    id: string;
+    briefVersion: number;
+    status: TurnStatus;
+    note: string | null;
+    /** What became of it, as the workspace keeps it (D40): read without its engine. */
+    outcome: TaskReport["outcome"] | null;
+    verified: boolean;
+    decision: AttemptDecision | null;
+    /** Its apply's last known status, null while its engine hasn't said; and how the person settled it. */
+    apply: { status: ApplyStatus | null; resolution: ApplyResolution | null } | null;
+    acceptedAt: string | null;
+    createdAt: string;
+    settledAt: string | null;
+  }>;
   /** Why Run can't be pressed now, in plain words; null when it can (the preview then says what it would send). */
   runBlocked: string | null;
 }
@@ -525,6 +548,35 @@ export interface TaskRunPreview {
  * One run of a task (D39): how it went, and, read from its engine when it can be, the engine's report and its change.
  * `not-sent` and `unknown` mean what they mean for a turn. Nothing is ever resent: running again makes a new attempt.
  */
+/** How the person decided on an attempt's proposal (D40): approved (the apply request itself), rejected, or a revision asked. */
+export type AttemptDecision = "approved" | "rejected" | "revision";
+
+/** What the person may do with an attempt now; the window offers exactly these. */
+export type AttemptAction = "approve" | "reject" | "revise" | "accept" | "dismiss" | "restore" | "keep";
+
+/**
+ * An attempt's apply (D40), as the host keeps it and its engine reports it. The request id is saved before the apply
+ * is sent, so after a restart the host asks the engine for it and never sends it again.
+ */
+export interface TaskApplyView {
+  requestId: string;
+  /** Null until the engine has answered, or while it can't be read. */
+  status: ApplyStatus | null;
+  /** For a refused apply: its code, Nivra's words, and the proposal's path it names. */
+  refusal: { code: ApplyRefusalCode; message: string; path: string | null } | null;
+  /** Every path the change writes, and where it is now. */
+  paths: ApplyPath[];
+  /** Folders Nivra created that are still there. */
+  folders: string[];
+  /** Where Nivra keeps the originals it moved aside: a folder inside the repository's git folder. */
+  recovery: string | null;
+  /** What stopped the write, by its step and the error's code. */
+  failure: { step: string; code: string | null } | null;
+  resolution: ApplyResolution | null;
+  /** Why it can't be read now (its engine offline, or another engine's records), while that lasts. */
+  unresolved: string | null;
+}
+
 export interface TaskAttemptView {
   id: string;
   taskId: string;
@@ -542,6 +594,18 @@ export interface TaskAttemptView {
   progress: string[];
   /** Why its engine can't be read now, while that lasts. */
   unresolved: string | null;
+  /** The person's decision on its proposal, and when; a revision's note. */
+  decision: AttemptDecision | null;
+  decidedAt: string | null;
+  revisionNote: string | null;
+  /** Its apply, once approved. */
+  apply: TaskApplyView | null;
+  /** When the person accepted the applied change: only that completes the task, and only when it hasn't moved on. */
+  acceptedAt: string | null;
+  /** Why accepting didn't complete the task: its brief or its repository changed after this run. */
+  acceptNote: string | null;
+  /** What the person may do now. */
+  actions: AttemptAction[];
   createdAt: string;
   settledAt: string | null;
 }
@@ -695,4 +759,17 @@ export interface NivraApi {
   cancelTaskRun(taskId: string, attemptId: string): Promise<TaskAttemptView>;
   /** One run of a task as it is now, read from its engine when that is online. */
   getTaskAttempt(taskId: string, attemptId: string): Promise<TaskAttemptView>;
+  /**
+   * Approves the attempt's proposal by the hash the person saw and applies it on its engine (D40): offered only when
+   * every acceptance case passed. The request id is saved before it is sent.
+   */
+  approveTaskChange(taskId: string, attemptId: string, approvedHash: string): Promise<TaskAttemptView>;
+  /** Rejects the proposal: nothing is sent, and the checkout is untouched. */
+  rejectTaskChange(taskId: string, attemptId: string): Promise<TaskAttemptView>;
+  /** Asks for a revision: the note goes into a new brief version, and the next attempt starts when the person runs it. */
+  requestTaskRevision(taskId: string, attemptId: string, note: string): Promise<TaskAttemptView>;
+  /** Settles the apply: accepts an applied change (completing the task), dismisses one not applied, or keeps a partial one. */
+  settleTaskChange(taskId: string, attemptId: string, as: ApplyResolution): Promise<TaskAttemptView>;
+  /** Takes a partial apply back to the originals, never overwriting a version another program saved. */
+  restoreTaskChange(taskId: string, attemptId: string): Promise<TaskAttemptView>;
 }

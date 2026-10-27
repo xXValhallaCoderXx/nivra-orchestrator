@@ -176,7 +176,7 @@ describe("a task run's proposal, as the engine keeps it (D39)", () => {
     dirs.push(dir);
     const database = new Database(join(dir, "nivra.db"));
     const db = database.open();
-    assert.equal(Number(db.prepare("PRAGMA user_version").get()?.["user_version"]), 4);
+    assert.equal(Number(db.prepare("PRAGMA user_version").get()?.["user_version"]), MIGRATIONS.length);
     const store = new RunStore({ database, mask: (text) => text.replaceAll("greet", "[masked]") });
     const { id } = store.create({ workflowId: "task", title: "Task", input: {}, clientRequestId: randomUUID(), instanceId: randomUUID() });
     const kept = proposal();
@@ -197,7 +197,7 @@ describe("a task run's proposal, as the engine keeps it (D39)", () => {
     raw.close();
     const reopened = new Database(older);
     const migrated = reopened.open();
-    assert.deepEqual([Number(migrated.prepare("PRAGMA user_version").get()?.["user_version"]), Number(migrated.prepare("SELECT count(*) AS n FROM proposals").get()?.["n"]), migrated.prepare("SELECT id FROM runs").get()?.["id"]], [4, 0, "older-run"]);
+    assert.deepEqual([Number(migrated.prepare("PRAGMA user_version").get()?.["user_version"]), Number(migrated.prepare("SELECT count(*) AS n FROM proposals").get()?.["n"]), migrated.prepare("SELECT id FROM runs").get()?.["id"]], [MIGRATIONS.length, 0, "older-run"]);
     reopened.close();
   });
 
