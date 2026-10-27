@@ -103,7 +103,7 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   const preview = page.getByTestId("task-run-preview-body");
   await expect(preview.getByTestId("task-run-preview-snapshot")).toContainText("2 files");
   await expect(preview).toContainText("To Token Factory, as the project's sharing allows (off)");
-  await expect(preview.getByTestId("task-run-ask-uploads")).toContainText("it is for this project only: its sandbox checks and its task runs");
+  await expect(preview.getByTestId("task-run-ask-uploads")).toContainText("it is for this project only: its sandbox checks, its environment and its task runs");
   await expect(page.getByTestId("task-run-start")).toBeDisabled();
   await preview.getByTestId("task-run-allow-sharing").click();
   await expect(preview.getByTestId("task-run-ask-sharing")).toHaveCount(0);

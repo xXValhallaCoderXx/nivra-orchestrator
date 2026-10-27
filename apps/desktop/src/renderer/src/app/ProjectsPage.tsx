@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { EngineView, PreferencesView, ProjectView, WslView } from "../../../shared/ipc";
 import { Doctor } from "../features/doctor";
 import { EngineNotices } from "../features/engine";
+import { Environment } from "../features/environment";
 import { Explain } from "../features/explain";
 import { HelloRun, TERMINAL, type RunRef } from "../features/hello";
 import { Preferences } from "../features/preferences";
@@ -12,7 +13,8 @@ import { ResearchSettings, Settings } from "../features/settings";
 
 /**
  * Projects & settings: the repositories, each on the engine its folder belongs to (D17), the engineer's preferences
- * (D21), Explain, a sandbox check (D36), a hello run, Doctor, and the key and project id. There is no target to choose: adding a folder decides where its work
+ * (D21), Explain, a sandbox check (D36), the project's environment (D41), a hello run, Doctor, and the key and project
+ * id. There is no target to choose: adding a folder decides where its work
  * runs, and every engine a project uses keeps running, so a run is never cut off by looking at another project. The page
  * stays mounted while another place is shown, so a run and what was typed are still there on the way back.
  */
@@ -62,6 +64,7 @@ export function ProjectsPage({
         onPreferencesChanged={onPreferencesChanged}
       />
       <SandboxCheck key={`sandbox:${selected?.id ?? "none"}`} project={selected} online={online} credentialsSaved={credentialsSaved} onProjectChanged={onProjectsChanged} />
+      <Environment key={`environment:${selected?.id ?? "none"}`} project={selected} online={online} credentialsSaved={credentialsSaved} onProjectChanged={onProjectsChanged} />
       <Preferences key={`preferences:${selected?.id ?? "none"}`} project={selected} projects={projects} view={preferences} onChanged={onPreferencesChanged} />
       <HelloRun
         key={`hello:${selected?.id ?? "none"}`}

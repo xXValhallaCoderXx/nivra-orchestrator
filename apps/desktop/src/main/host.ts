@@ -1137,7 +1137,14 @@ export class Host {
       const engine = await this.#attemptEngine(attempt);
       const report = await this.#reportOf(engine, attempt);
       if (!report.proposal) throw new Error("This run proposed no change, so there is nothing to approve.");
-      if (!report.verified) throw new Error("Not every acceptance case was shown to pass, so this change can't be approved. Reject it, or ask for a revision.");
+      if (!report.verified) {
+        // A frozen file that isn't shown unchanged leaves a change unverified whatever its cases printed (D41).
+        throw new Error(
+          report.frozen.some((file) => file.unchanged !== true)
+            ? "A frozen file isn't shown to be unchanged, so this change can't be approved. Reject it, or ask for a revision."
+            : "Not every acceptance case was shown to pass, so this change can't be approved. Reject it, or ask for a revision.",
+        );
+      }
       if (report.proposal.hash !== approvedHash) throw new Error("This isn't the change you were shown: the run's proposal is another one. Open the run again, then decide.");
       const brief = getArtifact(workspace, attempt.briefId);
       const packet = brief ? taskBriefOf(BriefContentSchema.parse(brief.content)) : null;

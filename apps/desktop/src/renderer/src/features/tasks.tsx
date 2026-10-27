@@ -1,8 +1,9 @@
-import { Alert, Anchor, Badge, Button, Group, List, Modal, Select, Stack, Table, Text, Textarea, TextInput, Title } from "@mantine/core";
+import { Alert, Anchor, Badge, Button, Code, Group, List, Modal, Select, Stack, Table, Text, Textarea, TextInput, Title } from "@mantine/core";
 import { useState, type ChangeEvent, type ReactNode } from "react";
-import type { BriefContent, BriefFields, PlanView, ProjectView, TaskState, TaskSummary, TasksView, TaskView } from "../../../shared/ipc";
+import type { BriefContent, BriefFields, EngineView, PlanView, ProjectView, TaskState, TaskSummary, TasksView, TaskView } from "../../../shared/ipc";
 import { errorMessage, Section, usePoll } from "../shared/ui";
-import { caseDraftOf, caseOf, CasesInput, CasesRead, TaskRun, type CaseDraft } from "./task-run";
+import { EngineNotices } from "./engine";
+import { BaselineInput, BaselineRead, baselineDraftOf, baselineOf, caseDraftOf, caseOf, CasesInput, CasesRead, TaskRun, type BaselineDraft, type CaseDraft } from "./task-run";
 
 /**
  * Native tasks (D26, NIV-32): a brief written directly or made from a plan, the same form either way. Every change to a
@@ -36,9 +37,11 @@ interface Draft {
   assumptions: string;
   checks: string;
   cases: CaseDraft[];
+  baseline: BaselineDraft[];
+  frozen: string;
 }
 
-const EMPTY: Draft = { goal: "", criteria: "", scope: "", exclusions: "", context: "", assumptions: "", checks: "", cases: [] };
+const EMPTY: Draft = { goal: "", criteria: "", scope: "", exclusions: "", context: "", assumptions: "", checks: "", cases: [], baseline: [], frozen: "" };
 
 const draftOf = (content: BriefFields): Draft => ({
   goal: content.goal,
@@ -49,6 +52,8 @@ const draftOf = (content: BriefFields): Draft => ({
   assumptions: content.assumptions.join("\n"),
   checks: content.checks.join("\n"),
   cases: content.acceptanceCases.map(caseDraftOf),
+  baseline: (content.baseline ?? []).map(baselineDraftOf),
+  frozen: (content.frozen ?? []).join("\n"),
 });
 
 // Empty lines are dropped by main, which numbers an entry as it was written.
@@ -61,10 +66,12 @@ const fieldsOf = (draft: Draft): BriefFields => ({
   assumptions: draft.assumptions.split("\n"),
   checks: draft.checks.split("\n"),
   acceptanceCases: draft.cases.map(caseOf),
+  baseline: draft.baseline.map(baselineOf),
+  frozen: draft.frozen.split("\n"),
 });
 
 function BriefInputs({ draft, onChange }: { draft: Draft; onChange(next: Draft): void }) {
-  const bind = (key: Exclude<keyof Draft, "cases">) => ({ value: draft[key], onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...draft, [key]: event.currentTarget.value }) });
+  const bind = (key: Exclude<keyof Draft, "cases" | "baseline">) => ({ value: draft[key], onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...draft, [key]: event.currentTarget.value }) });
   return (
     <Stack gap="sm">
       <Textarea label="Goal" description="What the task is for." autosize minRows={2} maxRows={8} {...bind("goal")} data-testid="brief-goal" />
@@ -83,6 +90,17 @@ function BriefInputs({ draft, onChange }: { draft: Draft; onChange(next: Draft):
         data-testid="brief-checks"
       />
       <CasesInput cases={draft.cases} onChange={(cases) => onChange({ ...draft, cases })} />
+      <BaselineInput checks={draft.baseline} onChange={(baseline) => onChange({ ...draft, baseline })} />
+      <Textarea
+        label="Frozen files"
+        description="Files the worker can't change, such as the test this task must pass, each as Git names it from the repository's folder, one per line. A run's result counts only when every one is unchanged."
+        autosize
+        minRows={1}
+        maxRows={8}
+        styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+        {...bind("frozen")}
+        data-testid="brief-frozen"
+      />
     </Stack>
   );
 }
@@ -148,6 +166,24 @@ function BriefRead({ content }: { content: BriefContent }) {
       </Field>
       <Field label="Acceptance cases" testId="task-brief-cases">
         <CasesRead cases={content.acceptanceCases} />
+      </Field>
+      <Field label="Baseline checks, before the worker" testId="task-brief-baseline">
+        <BaselineRead checks={content.baseline} />
+      </Field>
+      <Field label="Frozen files, which the worker can't change" testId="task-brief-frozen">
+        {content.frozen.length ? (
+          <List size="sm">
+            {content.frozen.map((path) => (
+              <List.Item key={path}>
+                <Code>{path}</Code>
+              </List.Item>
+            ))}
+          </List>
+        ) : (
+          <Text size="sm" c="var(--nivra-text-3)">
+            None
+          </Text>
+        )}
       </Field>
       <Text size="xs" c="var(--nivra-text-3)">
         A run of this task goes alone, in a sandbox with networking off, and nothing it changes reaches your checkout unless you approve it.
@@ -313,11 +349,16 @@ export function NewTask({
 export function TaskDetail({
   taskId,
   projects,
+  engines,
+  onEngineRestarted,
   onDeleted,
   onOpenConversation,
 }: {
   taskId: string;
   projects: ProjectView[];
+  /** Every engine a project uses: the task's project's says when it isn't running, so it can be restarted here. */
+  engines: EngineView[];
+  onEngineRestarted(): void;
   onDeleted(): void;
   onOpenConversation(conversationId: string): void;
 }) {
@@ -370,6 +411,9 @@ export function TaskDetail({
 
   const chosen = repository === NONE ? null : repository;
   const clearsOnMove = brief.content.sources.some((source) => source.projectId !== null && source.projectId !== chosen);
+  // The engine the task's runs go to, so the person can recover it from here.
+  const project = summary.projectId ? (projects.find((p) => p.id === summary.projectId) ?? null) : null;
+  const engine = project ? (engines.find((e) => e.targetId === project.targetId) ?? null) : null;
   const rewrite = brief.content.revalidate.map((part) => (part === "context" ? "the context" : "the assumptions"));
 
   return (
@@ -431,6 +475,17 @@ export function TaskDetail({
           </Button>
         </Group>
       </Group>
+
+      {project && (
+        <EngineNotices
+          engine={engine}
+          onRestart={async () => {
+            await window.nivra.restartEngine(project.id);
+            onEngineRestarted();
+          }}
+          testId="task-engine"
+        />
+      )}
 
       {error && (
         <Alert color="red" variant="light" data-testid="task-error">

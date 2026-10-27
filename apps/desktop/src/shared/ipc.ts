@@ -729,7 +729,8 @@ export interface NivraApi {
   setSharing(projectId: string, modelContext: boolean): Promise<ProjectView>;
   /**
    * Allows or stops uploading the project's commit to Nebius Sandboxes (D36), on its own: model-context consent never
-   * stands in for it. Stopping cancels the project's sandbox check, and its notice says what Nebius keeps.
+   * stands in for it. Stopping cancels the project's sandbox check, its task run and its environment's preparation
+   * (D41), and its notice says what Nebius keeps.
    */
   setCloudExecution(projectId: string, cloudExecution: boolean): Promise<ProjectView>;
   /** What a sandbox check of the project would send, from its own engine with no network. Nothing is uploaded. */

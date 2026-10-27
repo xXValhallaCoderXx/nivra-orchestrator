@@ -21,9 +21,10 @@
 // `fail-cancel-once` file, the next runs.cancel it answers is turned down, and the file is removed; with a
 // `fail-cancel-for` file, runs.cancel for the run whose id it holds is turned down.
 // For task runs (D39, D40): task.preview answers that the checkout is ready to run, with a fixed snapshot, so the
-// window can start one. runs.start records each task run's request id and input (`tasks.log`). While a
+// window can start one. runs.start records each task run's request id, input and brief (`tasks.log`). While a
 // `task-report` file exists, runs.task answers such a run with a finished report that proposes the change `TASK_HASH`
-// names, every acceptance case passed, and runs.proposal with that proposal. task.apply records each request id and
+// names, every acceptance case passed, every baseline selection matched and every frozen file unchanged, from the
+// environment its input named (D41), and runs.proposal with that proposal. task.apply records each request id and
 // the applied change it answers with (`applies.log`), unless a `refuse-apply` file exists; its answer is held while a
 // `hold-apply` file exists, until a `release-apply` file appears, and is an internal error while an `error-apply` file
 // exists; with a `partial-apply` file, the change it records was applied in part, and with an `aside-apply` file as well,
@@ -117,6 +118,9 @@ const taskReport = (runId) => {
     task: { taskId: run.input.taskId, attemptId: run.clientRequestId, briefVersion: run.input.briefVersion, briefDigest: run.input.briefDigest },
     snapshot: null,
     toolchain: [],
+    environment: run.input.environment ?? null,
+    baseline: (run.brief?.baseline ?? []).map((given, index) => ({ number: index + 1, name: given.name, matched: true, reason: null, exitCode: given.expectedExitCode, stdoutTail: given.expectedOutput ?? "", stderrTail: "", durationMs: 120 })),
+    frozen: (run.brief?.frozen ?? []).map((path) => ({ path, unchanged: true })),
     worker: null,
     checks: [],
     verified: true,
@@ -242,7 +246,7 @@ process.stdin.on("data", (chunk) => {
       const runId = randomUUID();
       if (existsSync(join(home, "accept"))) appendFileSync(join(home, "accepted.log"), `${request.params.clientRequestId} ${runId}\n`);
       if (request.params.workflowId === "review") appendFileSync(join(home, "reviews.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
-      if (request.params.workflowId === "task") appendFileSync(join(home, "tasks.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
+      if (request.params.workflowId === "task") appendFileSync(join(home, "tasks.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input, brief: request.params.context.brief })}\n`);
       if (request.params.workflowId === "environment") {
         appendFileSync(join(home, "environments.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input, context: request.params.context })}\n`);
       }

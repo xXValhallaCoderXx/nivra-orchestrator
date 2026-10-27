@@ -1,5 +1,5 @@
-import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, NumberInput, Stack, Table, Text, TextInput, Textarea } from "@mantine/core";
-import type { TaskCheck, TaskReport } from "@nivra/domain";
+import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, NumberInput, SegmentedControl, Stack, Table, Text, TextInput, Textarea } from "@mantine/core";
+import type { BaselineSelection, TaskBaselineCheck, TaskCheck, TaskReport } from "@nivra/domain";
 import { useEffect, useRef, useState } from "react";
 import type { AcceptanceCaseView, TaskAttemptView, TaskRunPreview, TaskView, TurnStatus } from "../../../shared/ipc";
 import { CONSENT_COVERS } from "../shared/evidence";
@@ -78,6 +78,167 @@ export function CasesInput({ cases, onChange }: { cases: CaseDraft[]; onChange(n
   );
 }
 
+/**
+ * One baseline check as the form holds it (D41): its exact output without its last newline, and whether it has one, or a
+ * pattern, as `mode` says. The other's text is kept while the person switches, and only `mode`'s is saved.
+ */
+export interface BaselineDraft {
+  name: string;
+  command: string;
+  mode: "output" | "pattern";
+  output: string;
+  newline: boolean;
+  pattern: string;
+  exitCode: number;
+}
+
+export const baselineDraftOf = (given: BaselineSelection): BaselineDraft => {
+  const output = given.expectedOutput ?? "";
+  const newline = given.expectedOutput === undefined || output.endsWith("\n");
+  return {
+    name: given.name,
+    command: given.command,
+    mode: given.outputPattern !== undefined ? "pattern" : "output",
+    output: newline && output.endsWith("\n") ? output.slice(0, -1) : output,
+    newline,
+    pattern: given.outputPattern ?? "",
+    exitCode: given.expectedExitCode,
+  };
+};
+
+export const baselineOf = (draft: BaselineDraft): BaselineSelection => ({
+  name: draft.name,
+  command: draft.command,
+  expectedExitCode: draft.exitCode,
+  ...(draft.mode === "pattern" ? { outputPattern: draft.pattern } : { expectedOutput: `${draft.output}${draft.newline ? "\n" : ""}` }),
+});
+
+const EMPTY_BASELINE: BaselineDraft = { name: "", command: "", mode: "output", output: "", newline: true, pattern: "", exitCode: 0 };
+/** A brief's baseline checks at most (`TASK_BRIEF_LIMITS.baseline`). */
+const MAX_BASELINE = 3;
+
+/**
+ * The brief's baseline checks, as the person writes them (D41): commands run once before the worker, on the commit as it
+ * is, each with what it must give there, which can be a failure.
+ */
+export function BaselineInput({ checks, onChange }: { checks: BaselineDraft[]; onChange(next: BaselineDraft[]): void }) {
+  const set = (index: number, change: Partial<BaselineDraft>) => onChange(checks.map((draft, at) => (at === index ? { ...draft, ...change } : draft)));
+  return (
+    <Stack gap="xs" data-testid="brief-baseline">
+      <Text size="sm" fw={500}>
+        Baseline checks
+      </Text>
+      <Text size="xs" c="var(--nivra-text-3)">
+        Commands Nivra runs once before the worker starts, on the commit as it is, with networking off. Each must give what you write here, which can be a failure, such as a
+        test that fails for the bug this task fixes. If one doesn't, the run stops before the worker, and says which. At most three.
+      </Text>
+      {checks.map((draft, index) => (
+        <Stack key={index} gap={4} p="xs" style={{ border: "1px solid var(--nivra-border)", borderRadius: 6 }} data-testid="brief-baseline-check">
+          <Group justify="space-between" wrap="nowrap">
+            <TextInput label={`Baseline check ${index + 1}`} placeholder="What it shows" value={draft.name} onChange={(event) => set(index, { name: event.currentTarget.value })} style={{ flex: 1 }} data-testid="brief-baseline-name" />
+            <Button size="compact-xs" variant="subtle" color="red" onClick={() => onChange(checks.filter((_, at) => at !== index))} data-testid="brief-baseline-remove">
+              Remove
+            </Button>
+          </Group>
+          <TextInput
+            label="Command"
+            description="Run with /bin/sh in the repository's folder."
+            styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+            value={draft.command}
+            onChange={(event) => set(index, { command: event.currentTarget.value })}
+            data-testid="brief-baseline-command"
+          />
+          <SegmentedControl
+            size="xs"
+            value={draft.mode}
+            onChange={(value) => set(index, { mode: value === "pattern" ? "pattern" : "output" })}
+            data={[
+              { value: "output", label: "Exact output" },
+              { value: "pattern", label: "Pattern" },
+            ]}
+            data-testid="brief-baseline-mode"
+          />
+          {draft.mode === "output" ? (
+            <>
+              <Textarea
+                label="Expected output"
+                description="Exactly what the command prints, line for line."
+                autosize
+                minRows={2}
+                maxRows={10}
+                styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+                value={draft.output}
+                onChange={(event) => set(index, { output: event.currentTarget.value })}
+                data-testid="brief-baseline-output"
+              />
+              <Checkbox label="The output ends with a new line" checked={draft.newline} onChange={(event) => set(index, { newline: event.currentTarget.checked })} data-testid="brief-baseline-newline" />
+            </>
+          ) : (
+            <TextInput
+              label="Pattern"
+              description="A regular expression the command's whole output must match. A dot matches a line break too."
+              styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+              value={draft.pattern}
+              onChange={(event) => set(index, { pattern: event.currentTarget.value })}
+              data-testid="brief-baseline-pattern"
+            />
+          )}
+          <NumberInput label="Exit code" min={0} max={255} allowDecimal={false} w={110} value={draft.exitCode} onChange={(value) => set(index, { exitCode: typeof value === "number" ? value : Number(value) || 0 })} data-testid="brief-baseline-exit" />
+        </Stack>
+      ))}
+      <Group>
+        <Button size="xs" variant="default" onClick={() => onChange([...checks, { ...EMPTY_BASELINE }])} disabled={checks.length >= MAX_BASELINE} data-testid="brief-baseline-add">
+          Add a baseline check
+        </Button>
+      </Group>
+    </Stack>
+  );
+}
+
+/** The brief's baseline checks, as they read. */
+export function BaselineRead({ checks }: { checks: BaselineSelection[] }) {
+  if (!checks.length) {
+    return (
+      <Text size="sm" c="var(--nivra-text-3)">
+        None: a run starts the worker without checking the commit first.
+      </Text>
+    );
+  }
+  return (
+    <Stack gap="xs">
+      {checks.map((given, index) => (
+        <Stack key={index} gap={2} data-testid="task-brief-baseline-check">
+          <Text size="sm">
+            {index + 1}. {given.name}
+          </Text>
+          <Code block fz="xs">
+            $ {given.command}
+          </Code>
+          {given.outputPattern !== undefined ? (
+            <>
+              <Text size="xs" c="var(--nivra-text-3)">
+                Its whole output must match this pattern, and it must exit {given.expectedExitCode}:
+              </Text>
+              <Code block fz="xs">
+                {given.outputPattern}
+              </Code>
+            </>
+          ) : (
+            <>
+              <Text size="xs" c="var(--nivra-text-3)">
+                Must print{(given.expectedOutput ?? "").endsWith("\n") ? ", ending with a new line" : ", with no new line at the end"}, and exit {given.expectedExitCode}:
+              </Text>
+              <Code block fz="xs">
+                {given.expectedOutput || "(nothing)"}
+              </Code>
+            </>
+          )}
+        </Stack>
+      ))}
+    </Stack>
+  );
+}
+
 /** The brief's acceptance cases, as they read. */
 export function CasesRead({ cases }: { cases: AcceptanceCaseView[] }) {
   if (!cases.length) {
@@ -139,6 +300,15 @@ const VERDICT_LOOK: Record<TaskCheck["verdict"], { label: string; color: string 
   unknown: { label: "unknown", color: "yellow" },
   "not-run": { label: "not run", color: "gray" },
 };
+
+const MATCH_LOOK = {
+  matched: { label: "matched", color: "green" },
+  "not matched": { label: "not matched", color: "red" },
+  "not run": { label: "not run", color: "gray" },
+} as const;
+const matchOf = (check: TaskBaselineCheck) => (check.matched === null ? "not run" : check.matched ? "matched" : "not matched");
+const FROZEN_LOOK = { unchanged: "green", changed: "red", unknown: "yellow" } as const;
+const frozenOf = (unchanged: boolean | null) => (unchanged === null ? "unknown" : unchanged ? "unchanged" : "changed");
 
 /** Why the worker stopped, in plain words. */
 const ENDED: Record<NonNullable<TaskReport["worker"]>["ended"], string> = {
@@ -312,6 +482,13 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
           {snapshot.untracked.count ? ` ${plural(snapshot.untracked.count, "untracked file")} stay here.` : ""}
         </Text>
       )}
+      {snapshot && (
+        <Text size="sm" data-testid="task-run-preview-environment">
+          {preview.environment
+            ? `Starts from the prepared environment: Node ${preview.environment.node}, pnpm ${preview.environment.pnpm}, prepared ${new Date(preview.environment.preparedAt).toLocaleString()}. Nivra checked that this commit's manifests and lockfile are the ones it was prepared from.`
+            : "Starts from Nivra's own base image, with nothing installed."}
+        </Text>
+      )}
       <Stack gap={2}>
         <Text size="sm" fw={500}>
           To Token Factory, as the project's sharing allows ({preview.consents.modelContext ? "on" : "off"})
@@ -340,6 +517,41 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
           </Text>
         )}
       </Stack>
+      {preview.baseline.length > 0 && (
+        <Stack gap={2} data-testid="task-run-preview-baseline">
+          <Text size="sm" fw={500}>
+            Before the worker starts
+          </Text>
+          <Text size="sm">
+            {plural(preview.baseline.length, "baseline check")} {preview.baseline.length === 1 ? "runs" : "run"} once on the commit as it is, with networking off. If one doesn't
+            give what the brief expects, the run stops there, and the model is never asked anything.
+          </Text>
+          <List size="sm">
+            {preview.baseline.map((given) => (
+              <List.Item key={`baseline-${given.number}`}>
+                Baseline check {given.number}, {given.name}: <Code>{given.command}</Code>, exit {given.expectedExitCode},{" "}
+                {given.outputPattern !== undefined ? "its whole output matching a pattern" : "printing exactly what the brief says"}
+              </List.Item>
+            ))}
+          </List>
+        </Stack>
+      )}
+      {preview.frozen.length > 0 && (
+        <Stack gap={2} data-testid="task-run-preview-frozen">
+          <Text size="sm" fw={500}>
+            Frozen files
+          </Text>
+          <Text size="sm">The worker can't change them, and the result counts only when every one is unchanged.</Text>
+          <List size="sm">
+            {preview.frozen.map((file) => (
+              <List.Item key={file.path} data-testid="task-run-preview-frozen-file">
+                <Code>{file.path}</Code>
+                {file.sha256 ? `, ${file.sha256.slice(0, 12)} in this commit` : ""}
+              </List.Item>
+            ))}
+          </List>
+        </Stack>
+      )}
       <Stack gap={2} data-testid="task-run-preview-judged">
         <Text size="sm" fw={500}>
           How Nivra checks the result
@@ -377,9 +589,9 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
         <Text size="xs" c="var(--nivra-text-3)" data-testid="task-run-preview-limits">
           Bounds: at most {plural(limits.modelRequests, "model request")} of up to {limits.requestSeconds} s and {limits.outputTokensPerRequest.toLocaleString()} output tokens
           each, admitted against an estimated {limits.estimatedInputTokens.toLocaleString()} input tokens (an estimate, not a cap); {plural(limits.toolCalls, "tool call")}, of
-          which {plural(limits.writes, "write")} of up to {sizeText(limits.writeBytes)} and {plural(limits.runs, "run")} of a case or check; at most{" "}
-          {plural(limits.operations, "Nebius operation")}, each command up to {limits.checkSeconds} s; the sandbox for {limits.sessionMinutes} minutes, and the whole run for{" "}
-          {limits.runMinutes} minutes.
+          which {plural(limits.writes, "write")} of up to {sizeText(limits.writeBytes)} and {plural(limits.runs, "run")} of a case or check;{" "}
+          {limits.baselineChecks ? `${plural(limits.baselineChecks, "baseline check")} before the worker; ` : ""}at most {plural(limits.operations, "Nebius operation")}, each
+          command up to {limits.checkSeconds} s; the sandbox for {limits.sessionMinutes} minutes, and the whole run for {limits.runMinutes} minutes.
         </Text>
       )}
       {asking && !preview.consents.modelContext && (
@@ -411,8 +623,8 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
               for a project whose commits hold secrets you can't share.
             </Text>
             <Text size="sm">
-              This is separate from sending content to Token Factory, and it is for this project only: its sandbox checks and its task runs. You can turn it off at any time:
-              Nivra then stops a check or a run under way, and says so if it can't. What was already uploaded stays with Nebius.
+              This is separate from sending content to Token Factory, and it is for this project only: its sandbox checks, its environment and its task runs. You can turn it off at any time:
+              Nivra then stops a check, a preparation or a run under way, and says so if it can't. What was already uploaded stays with Nebius.
             </Text>
             <Group>
               <Button size="xs" onClick={() => onAllow("uploads")} disabled={busy} data-testid="task-run-allow-uploads">
@@ -562,12 +774,77 @@ function Found({ report, proposal }: { report: TaskReport; proposal: TaskAttempt
           {report.stopped.message}
         </Text>
       )}
+      <Text size="sm" c="var(--nivra-text-2)" data-testid="task-attempt-environment">
+        {report.environment
+          ? `Started from the prepared environment: Node ${report.environment.node}, pnpm ${report.environment.pnpm}, ${report.environment.arch}, image ${report.environment.image.slice(0, 12)}.`
+          : "Started from Nivra's own base image, with nothing installed."}
+      </Text>
+      {report.baseline.length > 0 && (
+        <Stack gap={2} data-testid="task-attempt-baseline">
+          <Text size="sm">Baseline checks, before the worker, on the commit as it was:</Text>
+          <Table>
+            <Table.Tbody>
+              {report.baseline.map((check) => (
+                <Table.Tr key={check.number} data-testid="task-attempt-baseline-check" data-match={matchOf(check)}>
+                  <Table.Td w={140}>
+                    <Text size="sm">Baseline {check.number}</Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <Stack gap={2}>
+                      <Group gap="xs">
+                        <Badge size="sm" variant="light" color={MATCH_LOOK[matchOf(check)].color}>
+                          {MATCH_LOOK[matchOf(check)].label}
+                        </Badge>
+                        <Text size="sm" style={{ overflowWrap: "anywhere" }}>
+                          {check.name}
+                        </Text>
+                      </Group>
+                      {(check.reason || check.exitCode !== null) && (
+                        <Text size="xs" c="var(--nivra-text-2)">
+                          {[check.reason, check.exitCode !== null ? `exited ${check.exitCode}` : null, check.durationMs !== null ? `${(check.durationMs / 1000).toFixed(1)} s` : null].filter(Boolean).join("; ")}
+                        </Text>
+                      )}
+                      {check.stdoutTail && (
+                        <Code block fz="xs" style={{ maxHeight: 200, overflow: "auto" }} data-testid="task-attempt-baseline-output">
+                          {check.stdoutTail}
+                        </Code>
+                      )}
+                      {check.stderrTail && (
+                        <Code block fz="xs" style={{ maxHeight: 200, overflow: "auto" }}>
+                          {check.stderrTail}
+                        </Code>
+                      )}
+                    </Stack>
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Stack>
+      )}
+      {report.frozen.length > 0 && (
+        <Stack gap={2} data-testid="task-attempt-frozen">
+          <Text size="sm">Frozen files, in the workspace the run collected:</Text>
+          <List size="sm">
+            {report.frozen.map((file) => (
+              <List.Item key={file.path} data-testid="task-attempt-frozen-file" data-state={frozenOf(file.unchanged)}>
+                <Code>{file.path}</Code>{" "}
+                <Badge size="sm" variant="light" color={FROZEN_LOOK[frozenOf(file.unchanged)]}>
+                  {frozenOf(file.unchanged)}
+                </Badge>
+              </List.Item>
+            ))}
+          </List>
+        </Stack>
+      )}
       {report.outcome === "proposed" && (
         <Alert color={report.verified ? "green" : "yellow"} variant="light" data-testid="task-attempt-verdict">
           <Text size="sm">
             {report.verified
-              ? "Every acceptance case passed: the change is verified. It's kept with the run until you decide, and your checkout hasn't been touched by the run."
-              : "Not every acceptance case was shown to pass, so the change isn't verified and can't be approved. It's kept with the run, and your checkout hasn't been touched."}
+              ? `Every acceptance case passed${report.frozen.length ? ", and every frozen file is unchanged" : ""}: the change is verified. It's kept with the run until you decide, and your checkout hasn't been touched by the run.`
+              : report.frozen.some((file) => file.unchanged !== true)
+                ? "A frozen file isn't shown to be unchanged, so the change isn't verified and can't be approved, whatever the cases printed. It's kept with the run, and your checkout hasn't been touched."
+                : "Not every acceptance case was shown to pass, so the change isn't verified and can't be approved. It's kept with the run, and your checkout hasn't been touched."}
           </Text>
         </Alert>
       )}
