@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { COACH_MIGRATION, coachingsOf, getCoaching, getCoachLink, insertCoaching, markCoachingApplied, openCoachings, settleCoaching, type CoachingRecord } from "../src/main/coach-store.ts";
+import { coachingsOf, getCoaching, getCoachLink, insertCoaching, markCoachingApplied, openCoachings, settleCoaching, type CoachingRecord } from "../src/main/coach-store.ts";
 import { deleteTask, insertArtifact, insertAttempt, insertTask, recordRun, versionsOf, type ArtifactRecord } from "../src/main/workspace.ts";
 import { openWorkspace, type WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 import { BRIEFS } from "./fixtures/briefs.ts";
@@ -16,7 +16,7 @@ after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A workspace at the current schema with the coach's table, which joins the migrations at integration (NIV-53). */
+/** A workspace at the current schema, which holds the coach's table (migration 7, NIV-53). */
 function workspace(): WorkspaceDb {
   const dir = mkdtempSync(join(tmpdir(), "nivra coach ü "));
   dirs.push(dir);
@@ -24,7 +24,6 @@ function workspace(): WorkspaceDb {
   assert.equal(opening.state, "ready", opening.state === "unavailable" ? opening.reason : "");
   const ready = opening as Extract<WorkspaceOpening, { state: "ready" }>;
   open.push(ready.db);
-  ready.db.db.exec(COACH_MIGRATION);
   return ready.db;
 }
 

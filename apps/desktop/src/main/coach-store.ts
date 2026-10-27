@@ -9,71 +9,10 @@ import type { CancelReason, TurnStatus } from "./workspace.ts";
  * engine's report, masked again, is kept once, when the run ends; and the brief version the person's ticked changes
  * made is kept once, after the report.
  *
- * Its table joins the workspace's migrations at integration, as v7, after Track B's v6: until then `COACH_MIGRATION` is
- * applied by the tests alone, on top of whatever version the workspace opens at.
+ * Its table is the workspace's migration 7 (workspace-db.ts), after Track B's missions (v6).
  */
 
 const OPEN = "('submitting', 'running')";
-
-/** The coachings table and the triggers that keep each row to what it was bound to. Append only, as every migration. */
-export const COACH_MIGRATION = `
-  -- A coaching of one task (NIV-53): a run link with workflow 'coach', owned by the task and bound to the brief version
-  -- the coach read, and what it was bound to when it was asked for. The packet isn't kept: its fingerprint is, with the
-  -- context binding's and the preferences'. The engine's report, masked again, is kept once, when the run ends; the
-  -- brief version the person's ticked changes made, and which fields, once, after the report.
-  CREATE TABLE coachings (
-    id TEXT PRIMARY KEY REFERENCES run_links(id) ON DELETE CASCADE,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    brief_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
-    brief_version INTEGER NOT NULL CHECK (brief_version >= 1),
-    brief_sha256 TEXT NOT NULL,
-    title TEXT NOT NULL,
-    project_id TEXT,
-    binding_json TEXT NOT NULL,
-    binding_digest TEXT NOT NULL,
-    packet_digest TEXT NOT NULL,
-    preferences_digest TEXT NOT NULL,
-    profile_id TEXT NOT NULL,
-    profile_version INTEGER NOT NULL CHECK (profile_version >= 1),
-    mission_json TEXT,
-    findings INTEGER NOT NULL CHECK (findings >= 0),
-    preferences INTEGER NOT NULL CHECK (preferences >= 0),
-    report_json TEXT,
-    reported_at TEXT,
-    applied_brief_id TEXT REFERENCES artifacts(id) ON DELETE CASCADE,
-    applied_fields_json TEXT,
-    applied_at TEXT,
-    created_at TEXT NOT NULL,
-    CHECK ((report_json IS NULL) = (reported_at IS NULL)),
-    CHECK ((applied_brief_id IS NULL) = (applied_at IS NULL)),
-    CHECK ((applied_brief_id IS NULL) = (applied_fields_json IS NULL)),
-    CHECK (applied_brief_id IS NULL OR report_json IS NOT NULL)
-  ) STRICT;
-  CREATE INDEX coachings_task ON coachings(task_id, created_at);
-  CREATE TRIGGER coachings_bound BEFORE INSERT ON coachings
-  WHEN NOT EXISTS (SELECT 1 FROM run_links WHERE id = NEW.id AND workflow_id = 'coach' AND task_id = NEW.task_id AND brief_id = NEW.brief_id)
-    OR NOT EXISTS (
-      SELECT 1 FROM artifacts
-      WHERE id = NEW.brief_id AND kind = 'brief' AND task_id = NEW.task_id AND lineage_id = NEW.task_id AND version = NEW.brief_version AND sha256 = NEW.brief_sha256
-    )
-    OR NEW.report_json IS NOT NULL OR NEW.applied_brief_id IS NOT NULL
-  BEGIN SELECT RAISE(ABORT, 'a coaching is bound to a coach run of its own task and to a version of that task''s brief'); END;
-  CREATE TRIGGER coachings_frozen BEFORE UPDATE ON coachings
-  WHEN NEW.id IS NOT OLD.id OR NEW.task_id IS NOT OLD.task_id OR NEW.brief_id IS NOT OLD.brief_id OR NEW.brief_version IS NOT OLD.brief_version
-    OR NEW.brief_sha256 IS NOT OLD.brief_sha256 OR NEW.title IS NOT OLD.title OR NEW.project_id IS NOT OLD.project_id
-    OR NEW.binding_json IS NOT OLD.binding_json OR NEW.binding_digest IS NOT OLD.binding_digest OR NEW.packet_digest IS NOT OLD.packet_digest
-    OR NEW.preferences_digest IS NOT OLD.preferences_digest OR NEW.profile_id IS NOT OLD.profile_id OR NEW.profile_version IS NOT OLD.profile_version
-    OR NEW.mission_json IS NOT OLD.mission_json OR NEW.findings IS NOT OLD.findings OR NEW.preferences IS NOT OLD.preferences
-    OR NEW.created_at IS NOT OLD.created_at
-    OR (OLD.report_json IS NOT NULL AND (NEW.report_json IS NOT OLD.report_json OR NEW.reported_at IS NOT OLD.reported_at))
-    OR (OLD.applied_brief_id IS NOT NULL AND (NEW.applied_brief_id IS NOT OLD.applied_brief_id OR NEW.applied_fields_json IS NOT OLD.applied_fields_json OR NEW.applied_at IS NOT OLD.applied_at))
-    -- Saved changes come from a report, as the next version of the same task's brief, made from the version the coach read.
-    OR (OLD.applied_brief_id IS NULL AND NEW.applied_brief_id IS NOT NULL AND (NEW.report_json IS NULL OR NOT EXISTS (
-      SELECT 1 FROM artifacts
-      WHERE id = NEW.applied_brief_id AND kind = 'brief' AND task_id = OLD.task_id AND version > OLD.brief_version AND derived_from = OLD.brief_id
-    )))
-  BEGIN SELECT RAISE(ABORT, 'a coaching never changes what it was bound to, keeps its first report, and records its saved changes once, after its report'); END;
-`;
 
 /** A coaching's run link, as the workspace keeps it: where it went, how it went, and whether a stop was asked for. */
 export interface CoachLink {

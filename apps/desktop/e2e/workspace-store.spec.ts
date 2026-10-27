@@ -32,7 +32,7 @@ test("the workspace opens in the app, keeps a conversation across a relaunch, an
 
   let { app, page } = await launch(testInfo, userData);
   const fresh = await page.evaluate(() => window.nivra.listConversations());
-  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 6, notice: null });
+  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 7, notice: null });
   const created = await page.evaluate(() => window.nivra.createConversation({ kind: "general" }));
   expect([created.kind, created.projectId, created.targetId]).toEqual(["general", null, "local"]);
   expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
