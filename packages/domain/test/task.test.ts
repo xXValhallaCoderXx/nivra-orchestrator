@@ -28,7 +28,7 @@ const request = async (overrides: { input?: Record<string, unknown>; context?: u
 describe("a task run's request (NIV-7)", () => {
   it("takes the checkout, its project and target, the preview's fingerprint, the task and its brief by version and digest, with both consents and the brief in its context", async () => {
     const parsed = StartRunParams.parse(await request());
-    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 11]);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 12]);
     assert.equal(StartRunParams.safeParse(await request({ input: { target: "local" } })).success, true);
     assert.deepEqual(
       ["runs.task", "runs.proposal", "task.preview"].map((name) => [Object.hasOwn(Methods, name), name.startsWith("runs.") ? Methods[name as "runs.task"].result.safeParse(null).success : null]),
@@ -110,11 +110,11 @@ describe("a task run's request (NIV-7)", () => {
 
 describe("what a task run gives back (NIV-7)", () => {
   const counted = { count: 0, sample: [] };
-  const limits = { modelRequests: 12, requestSeconds: 150, outputTokensPerRequest: 8_000, estimatedInputTokens: 160_000, toolCalls: 24, writes: 8, writeBytes: 32_768, runs: 4, operations: 17, checkSeconds: 60, sessionMinutes: 20, runMinutes: 33 };
+  const limits = { modelRequests: 12, requestSeconds: 150, outputTokensPerRequest: 8_000, estimatedInputTokens: 160_000, toolCalls: 24, writes: 8, writeBytes: 32_768, runs: 4, baselineChecks: 0, operations: 17, checkSeconds: 60, sessionMinutes: 20, runMinutes: 33 };
   const snapshot = { baseline: "b".repeat(40), prefix: "", files: 2, bytes: 3_072, leftOut: { secret: counted, output: counted, submodule: counted, excluded: counted }, untracked: counted, lfsPointers: 0, fingerprint: FINGERPRINT, retention: "Images are retained for 180 days." };
 
   it("previews what a run would send and what bounds it, or why it can't, never both", () => {
-    const ready = { status: "ready", snapshot, programs: [".", "/bin/sh"], unprobed: 0, caseFiles: [{ number: 1, files: ["greet.sh"] }], limits };
+    const ready = { status: "ready", snapshot, programs: [".", "/bin/sh"], unprobed: 0, caseFiles: [{ number: 1, files: ["greet.sh"] }], environment: null, frozen: [], limits };
     assert.equal(TaskPreview.safeParse(ready).success, true);
     assert.equal(TaskPreview.safeParse({ ...ready, caseFiles: [{ number: 5, files: ["greet.sh"] }] }).success, false, "a case is numbered one to four");
     // A preview kept from before `unclear` reads as one Nivra could read; a case it can't read may name no file.
@@ -151,6 +151,6 @@ describe("what a task run gives back (NIV-7)", () => {
     assert.equal(TaskReport.safeParse({ ...report, stopped: { code: "something-else", step: null, message: "x" } }).success, false);
     assert.equal(TaskReport.safeParse({ ...report, checks: Array.from({ length: 5 }, () => report.checks[0]) }).success, false, "four cases and checks at most");
     assert.equal(TaskReport.safeParse({ ...report, checks: [{ ...report.checks[0], verdict: "skipped" }] }).success, false);
-    assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 6, true]);
+    assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 9, true]);
   });
 });

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ApplyParams, ApplyResolution, ApplyView } from "./apply.ts";
 import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { RunContext } from "./context.ts";
+import { EnvironmentContext, EnvironmentInput, EnvironmentPreview, EnvironmentReport, EnvironmentSpec, TaskEnvironment } from "./environment.ts";
 import { ExplainResult } from "./explain.ts";
 import { ModelEndpoint, ModelFailureKind } from "./models.ts";
 import { ResearchContext, ResearchInput, ResearchReport } from "./research.ts";
@@ -93,6 +94,8 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   // A task run carries its frozen brief and both consents, model sharing and uploads, held in memory like the snapshot
   // (D39): neither consent stands in for the other.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: TaskContext, workflowId: z.literal("task"), input: TaskInput }),
+  // An environment's preparation carries its upload consent and the spec the person chose (D41): no model is involved.
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: EnvironmentContext, workflowId: z.literal("environment"), input: EnvironmentInput }),
 ]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
@@ -197,10 +200,20 @@ export const Methods = {
    * interrupted. Null until there is one.
    */
   "runs.task": { params: z.strictObject({ runId: RunId }), result: TaskReport.nullable() },
+  /**
+   * An environment's preparation report (D41), whatever the run's status. A report the engine saved before it stopped
+   * reads as interrupted. Null until there is one.
+   */
+  "runs.environment": { params: z.strictObject({ runId: RunId }), result: EnvironmentReport.nullable() },
   /** A task run's proposal, as the person reads it before deciding: null when the run proposed nothing (D39). */
   "runs.proposal": { params: z.strictObject({ runId: RunId }), result: TaskProposal.nullable() },
-  /** What a task run of this checkout would send to Nebius, with no network, and the bounds it runs under (D39). */
-  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief }), result: TaskPreview },
+  /**
+   * What a task run of this checkout would send to Nebius, with no network, and the bounds it runs under (D39). With an
+   * environment, the commit's manifests are checked against the one it was prepared from (D41).
+   */
+  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief, environment: TaskEnvironment.extend({ preparedAt: z.iso.datetime() }).optional() }), result: TaskPreview },
+  /** What preparing this checkout's environment would send and run, with no network (D41). */
+  "environment.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), spec: EnvironmentSpec }), result: EnvironmentPreview },
   /**
    * Applies a task's proposal (D40): the approval itself, bound to the hash and the attempt, checked again, then
    * written. Idempotent by its request id: a repeat gets the apply it started. A refusal is a result, not an error.

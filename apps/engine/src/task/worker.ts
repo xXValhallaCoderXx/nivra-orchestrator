@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createTool } from "@mastra/core/tools";
-import type { JsonObject, Mask } from "@nivra/domain";
+import type { JsonObject, Mask, TaskBaselineCheck, TaskEnvironment } from "@nivra/domain";
 import { z } from "zod";
 import { ExecRefusedError, ExecUncertainError, type ExecResult, type ExecutionBackend, type ExecutionSession } from "../exec/backend.ts";
 import { WorkspaceRefusal } from "../exec/git-tool.ts";
@@ -67,11 +67,17 @@ export interface WorkerSummary {
 
 /** What the report binds about the task, besides the change: built before the proposal, so its digest is bound. */
 export interface TaskReportCore {
-  version: 2;
+  version: 3;
   kind: "task";
   task: { taskId: string; attemptId: string; runId: string; briefVersion: number; briefSha256: string };
   baseline: string;
   prefix: string;
+  /** The prepared environment the run started from (D41); null on Nivra's own base image. */
+  environment: TaskEnvironment | null;
+  /** The brief's baseline selections, as they ran before the model (D41). */
+  baselineChecks: TaskBaselineCheck[];
+  /** The frozen files in the collected workspace, each compared with the commit's; null when it wasn't collected. */
+  frozen: Array<{ path: string; unchanged: boolean | null }>;
   toolchain: Array<{ program: string; finding: "present" | "missing" | "unknown" }>;
   worker: WorkerSummary;
   checks: CheckResult[];
@@ -102,6 +108,8 @@ export interface WorkerRun {
   workspace?: string;
   /** What runs the engine's scripts' tools in the sandbox: busybox unless given. */
   applets?: string;
+  /** The prepared environment the backend's sessions start from (D41), as the run is bound to it. */
+  environment?: TaskEnvironment | null;
   now?: () => number;
   /**
    * The run's one absolute deadline, on `now`'s clock (D39): from when the run started, which can be before the worker
@@ -209,6 +217,8 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   let copy: WorkspaceCopy | null = null;
   let findings = new Map<string, "present" | "missing" | "unknown">();
   const results: CheckResult[] = [];
+  const baselineChecks: TaskBaselineCheck[] = [];
+  const frozenFiles: Array<{ path: string; unchanged: boolean | null }> = [];
   const worker: WorkerSummary = {
     handedIn: false,
     summary: null,
@@ -236,11 +246,14 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   };
   const coreOf = (): TaskReportCore | null =>
     copy && {
-      version: 2,
+      version: 3,
       kind: "task",
       task: { taskId: run.binding.taskId, attemptId: run.binding.attemptId, runId: run.binding.runId, briefVersion: run.binding.briefVersion, briefSha256: run.binding.briefSha256 },
       baseline: copy.snapshot.baseline,
       prefix: copy.snapshot.prefix,
+      environment: run.environment ?? null,
+      baselineChecks: [...baselineChecks],
+      frozen: [...frozenFiles],
       toolchain: programs.map((program) => ({ program, finding: findings.get(program) ?? "unknown" })),
       worker: { ...worker, written: [...copy.written] },
       checks: results.map((result) => ({ ...result, name: mask(result.name), reason: result.reason === null ? null : mask(result.reason), stdoutTail: mask(result.stdoutTail), stderrTail: mask(result.stderrTail), difference: result.difference && { line: result.difference.line, expected: mask(result.difference.expected), got: mask(result.difference.got) } })),

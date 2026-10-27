@@ -4,6 +4,8 @@ import {
   ChatInput,
   ChatResult,
   combinedMask,
+  EnvironmentReport,
+  projectFingerprint,
   ReviewReport,
   ErrorCode,
   ExplainInput,
@@ -18,6 +20,8 @@ import {
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
+  type EnvironmentPreview,
+  type EnvironmentSpec,
   type JsonObject,
   type ResearchContext,
   type ReviewContext,
@@ -27,6 +31,7 @@ import {
   type SandboxStatus,
   type SecretName,
   type TaskContext,
+  type TaskEnvironment,
   type TaskPreview,
   type WorkflowId,
 } from "@nivra/domain";
@@ -55,6 +60,8 @@ import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
+import { EnvironmentRefusal, environmentInputs } from "./environment/inputs.ts";
+import { environmentPreviewOf } from "./environment/preview.ts";
 import { TASK_LIMITS } from "./task/limits.ts";
 import { proposalView, readTaskInput, taskPreviewOf } from "./task/report.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
@@ -411,16 +418,57 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     }
   };
 
+  /**
+   * Why a prepared environment can't be used with this commit and these credentials, in Nivra's words; null when it
+   * can (D41). The credentials are checked only when they are set: a run checks them again as it starts.
+   */
+  const environmentProblem = async (snapshot: Parameters<typeof environmentInputs>[0], environment: TaskEnvironment): Promise<string | null> => {
+    let digest: string;
+    try {
+      digest = environmentInputs(snapshot).digest;
+    } catch (error) {
+      if (error instanceof EnvironmentRefusal) return `This commit's manifests can't be prepared from any more: ${error.message}`;
+      throw error;
+    }
+    if (digest !== environment.inputsDigest) return "This commit's manifests, lockfile or workspace file aren't the ones the project's environment was prepared from. Prepare the environment again, then preview the run.";
+    const credentials = sandboxCredentials();
+    if (credentials && (await projectFingerprint(credentials.project)) !== environment.projectFingerprint) {
+      return "The project's environment was prepared in another Nebius project than the one in Settings, and an image can only be used in its own project. Prepare the environment again, then preview the run.";
+    }
+    return null;
+  };
   /** What a task run of this checkout would send to Nebius, with no network, and the bounds of a run of this brief. */
-  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks">): Promise<TaskPreview> => {
+  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | undefined): Promise<TaskPreview> => {
     const git = locateGit();
     if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
     const session = await backend.open({ workspace: repoPath });
     try {
-      return taskPreviewOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() }), brief);
+      const snapshot = await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() });
+      if (environment) {
+        const problem = await environmentProblem(snapshot, environment);
+        if (problem) return { status: "refused", code: "environment", message: problem };
+      }
+      return taskPreviewOf(snapshot, brief, environment ?? null);
     } catch (error) {
       // It names the file it is about: a preview is shown to the person, and never stored (D36).
       if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
+      throw error;
+    } finally {
+      await session.close();
+    }
+  };
+
+  /** What preparing this checkout's environment would send and run, with no network (D41); a layout it can't prepare says why. */
+  const environmentPreview = async (repoPath: string, spec: EnvironmentSpec): Promise<EnvironmentPreview> => {
+    const git = locateGit();
+    if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
+    const session = await backend.open({ workspace: repoPath });
+    try {
+      return environmentPreviewOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() }), spec);
+    } catch (error) {
+      // Both name the file they are about: a preview is shown to the person, and never stored.
+      if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
+      if (error instanceof EnvironmentRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
       throw error;
     } finally {
       await session.close();
@@ -694,7 +742,17 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         const proposal = store.proposal(runId);
         return proposal === null ? null : proposalView(proposal, mask);
       },
-      "task.preview": ({ repoPath, brief }) => taskPreview(repoPath, brief),
+      "task.preview": ({ repoPath, brief, environment }) => taskPreview(repoPath, brief, environment),
+      "environment.preview": ({ repoPath, spec }) => environmentPreview(repoPath, spec),
+      "runs.environment": ({ runId }) => {
+        const status = store.status(runId);
+        if (!status) notFound(runId);
+        const stored = store.artifact(runId, "environment");
+        if (stored === null) return null;
+        // A report saved mid-preparation, of a run that has ended, reads as interrupted (D41).
+        const report = EnvironmentReport.parse(JSON.parse(stored));
+        return status && isTerminal(status) && report.outcome === "in-progress" ? { ...report, outcome: "interrupted" as const, finishedAt: report.updatedAt } : report;
+      },
       "sandbox.preview": ({ repoPath }) => sandboxPreview(repoPath),
       "sandbox.status": () => {
         rescan();
