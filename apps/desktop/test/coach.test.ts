@@ -179,7 +179,7 @@ describe("a coaching's preview and what it is bound to (NIV-53)", () => {
     const [binding, packetDigest, prefs] = await Promise.all([bindingDigest(given.binding), coachPacketDigest(packet), preferencesDigest(PREFERENCES.records)]);
     assert.deepEqual(input, { taskId: task.taskId, briefId: task.brief.id, briefVersion: 3, bindingDigest: binding, packetDigest, preferencesDigest: prefs, profile: { id: COACH_PROFILE.id, version: COACH_PROFILE.version } });
     assert.deepEqual(context, { preferences: PREFERENCES, sharing: { modelContext: false }, packet });
-    assert.equal(preview.expected, coachPreviewFingerprint({ bindingDigest: binding, packetDigest, preferencesDigest: prefs, sharing: null, profileId: COACH_PROFILE.id, profileVersion: COACH_PROFILE.version, model: null }));
+    assert.equal(preview.expected, coachPreviewFingerprint({ bindingDigest: binding, packetDigest, preferencesDigest: prefs, sharing: null, projectId: null, targetId: "local", profileId: COACH_PROFILE.id, profileVersion: COACH_PROFILE.version, model: null }));
     assert.deepEqual(preview.limits, { requests: 1, totalSeconds: 180, requestSeconds: 150, outputTokens: 4_000, estimatedInputTokens: preview.limits.estimatedInputTokens, budgetTokens: COACH_RUN_LIMITS.estimatedInputTokens });
     assert.ok(preview.limits.estimatedInputTokens > 0 && preview.limits.estimatedInputTokens < COACH_RUN_LIMITS.estimatedInputTokens);
     assert.deepEqual([preview.sends, preview.notSent, preview.keeps, preview.blocked], [[...COACH_SENDS], [...COACH_NOT_SENT], TOKEN_FACTORY_KEEPS, null]);
@@ -200,11 +200,11 @@ describe("a coaching's preview and what it is bound to (NIV-53)", () => {
   it("blocks a busy task, a project that doesn't allow sharing and a packet too long for one request, naming the longest part", async () => {
     const task = subject();
     assert.equal((await coachRequest(task, state(task, { busy: "The coach is still reading this task." }))).preview.blocked, "The coach is still reading this task.");
-    const shared = subject({ project: { kind: "project", label: "shop", targetLabel: "Ubuntu", modelSharing: false } });
+    const shared = subject({ project: { kind: "project", projectId: "5a1f1c1e-0000-4000-8000-000000000001", targetId: "wsl:Ubuntu", label: "shop", targetLabel: "Ubuntu", modelSharing: false } });
     const blocked = await coachRequest(shared, state(shared));
     assert.equal(blocked.preview.blocked, "This task's project doesn't allow sending its content to Token Factory. Allow sharing for it, then ask the coach.");
     assert.deepEqual([blocked.context.sharing.modelContext, blocked.preview.scope], [false, { kind: "project", projectLabel: "shop", targetLabel: "Ubuntu", sharing: false }]);
-    const allowed = subject({ project: { kind: "project", label: "shop", targetLabel: "Ubuntu", modelSharing: true } });
+    const allowed = subject({ project: { kind: "project", projectId: "5a1f1c1e-0000-4000-8000-000000000001", targetId: "wsl:Ubuntu", label: "shop", targetLabel: "Ubuntu", modelSharing: true } });
     assert.equal((await coachRequest(allowed, state(allowed))).context.sharing.modelContext, true);
     // Every part at its limit, with fifty long preferences: over the estimated budget, the preferences the longest part.
     const huge: BriefContent = {
@@ -257,16 +257,30 @@ describe("a coaching's preview and what it is bound to (NIV-53)", () => {
   });
 
   it("pins the preview's fingerprint to its canonical form, and changes it with every part", () => {
-    const parts = { bindingDigest: "1".repeat(64), packetDigest: "2".repeat(64), preferencesDigest: "3".repeat(64), sharing: true as boolean | null, profileId: "task-readiness-coach", profileVersion: 1, model: null as string | null };
+    const parts = {
+      bindingDigest: "1".repeat(64),
+      packetDigest: "2".repeat(64),
+      preferencesDigest: "3".repeat(64),
+      sharing: true as boolean | null,
+      projectId: "5a1f1c1e-0000-4000-8000-000000000001" as string | null,
+      targetId: "wsl:Ubuntu",
+      profileId: "task-readiness-coach",
+      profileVersion: 1,
+      model: null as string | null,
+    };
     const fingerprint = coachPreviewFingerprint(parts);
-    assert.equal(fingerprint, createHash("sha256").update(JSON.stringify(["nivra.coach-preview.v1", "1".repeat(64), "2".repeat(64), "3".repeat(64), true, "task-readiness-coach", 1, null])).digest("hex"));
-    assert.equal(fingerprint, "03935fd738b137fc35165cb652e3ceb083c9bafa48eb5778047aa3b3f8b1a7e9");
+    assert.equal(fingerprint, createHash("sha256").update(JSON.stringify(["nivra.coach-preview.v2", "1".repeat(64), "2".repeat(64), "3".repeat(64), true, "5a1f1c1e-0000-4000-8000-000000000001", "wsl:Ubuntu", "task-readiness-coach", 1, null])).digest("hex"));
+    assert.equal(fingerprint, "e885bc671995a36b4998c704218ca9eec74b232ff3abadf304d1ed1614ef3ac5");
     const variants = [
       { ...parts, bindingDigest: "4".repeat(64) },
       { ...parts, packetDigest: "4".repeat(64) },
       { ...parts, preferencesDigest: "4".repeat(64) },
       { ...parts, sharing: false },
       { ...parts, sharing: null },
+      // The same packet and sharing from another project, from none, or on another engine target.
+      { ...parts, projectId: "5a1f1c1e-0000-4000-8000-000000000002" },
+      { ...parts, projectId: null, targetId: "local" },
+      { ...parts, targetId: "local" },
       { ...parts, profileId: "council-chair" },
       { ...parts, profileVersion: 2 },
       { ...parts, model: "nvidia/nemotron-3-super-120b-a12b" },

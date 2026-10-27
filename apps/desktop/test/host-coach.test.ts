@@ -52,12 +52,21 @@ async function waitFor<T>(check: () => T | null | false | Promise<T | null | fal
 
 const localTarget = (home: string, extraArgs: readonly string[], entry = ENGINE) => new LocalTarget({ platform: "linux", runtime: { node: process.execPath, entry, runtimeHash: null }, home, extraArgs });
 /** A target that says it is a WSL distribution, running its engine locally with its own home. */
-const standInWsl = (inner: ExecutionTarget): ExecutionTarget => ({ descriptor: { id: "wsl:Test", kind: "wsl", label: "Test · WSL", platform: "linux", distro: "Test" }, probe: () => inner.probe(), prepare: (request) => inner.prepare(request) });
+// `starts` counts the engines the host asks this target for: a coaching refused before any engine starts leaves it at 0.
+const standInWsl = (inner: ExecutionTarget, starts: { count: number }): ExecutionTarget => ({
+  descriptor: { id: "wsl:Test", kind: "wsl", label: "Test · WSL", platform: "linux", distro: "Test" },
+  probe: () => inner.probe(),
+  prepare: (request) => {
+    starts.count++;
+    return inner.prepare(request);
+  },
+});
 
 /** A host on the records under `root`, its engines reaching the stub: a second one is a restart. */
 function hostAt(root: string, url: string, testHooks?: { coachApplying?(coachingId: string): void }, localEntry = ENGINE) {
   const extraArgs = ["--token-factory-url", url];
-  const wsl = standInWsl(localTarget(join(root, "wsl home"), extraArgs));
+  const wslStarts = { count: 0 };
+  const wsl = standInWsl(localTarget(join(root, "wsl home"), extraArgs), wslStarts);
   const targets: TargetFactory = {
     local: localTarget(join(root, "local home"), extraArgs, localEntry),
     discoverWsl: async () => ({ discovery: { status: "ready", wslExe: "wsl.exe", distros: [{ name: "Test", version: 2, isDefault: true, defaultUid: 1000, osVersion: null }], hidden: [] }, targets: [wsl] }),
@@ -83,7 +92,17 @@ function hostAt(root: string, url: string, testHooks?: { coachApplying?(coaching
   });
   host.init();
   hosts.push(host);
-  return { host, keys };
+  return { host, keys, wslStarts };
+}
+
+/** A root with two projects that allow sharing: one on the local engine, one on the WSL stand-in. */
+function rootWithTwoProjects(): { root: string; onLocal: string; onWsl: string } {
+  const root = mkdtempSync(join(tmpdir(), "nivra coach ü%# "));
+  dirs.push(root);
+  const [onLocal, onWsl] = [randomUUID(), randomUUID()];
+  const project = (id: string, targetId: string, label: string) => ({ id, targetId, nativePath: join(root, label), label, addedAt: new Date().toISOString(), sharing: { ...NO_SHARING, modelContext: true } });
+  new HostStore(join(root, "nivra.json")).update((data) => ({ ...data, projects: [project(onLocal, "local", "repo-a"), project(onWsl, "wsl:Test", "repo-b")] }));
+  return { root, onLocal, onWsl };
 }
 
 /** A root with one project on the WSL stand-in, its sharing as given. */
@@ -202,6 +221,25 @@ describe("Host: the task readiness coach (NIV-53)", () => {
     release();
     await assert.rejects(starting, CHANGED);
     assert.deepEqual([stub.requests.length, host.coachings(taskId).length, host.task(taskId).summary.title], [0, 0, "Records use one unit"]);
+  });
+
+  it("refuses a preview made for one project and engine once the task moved to another, before any engine starts", async () => {
+    const stub = await stubFor();
+    const { root, onLocal, onWsl } = rootWithTwoProjects();
+    const { host, wslStarts } = hostAt(root, stub.url);
+    const task = await host.createTask({ title: "Personal records use one unit", fields: VAGUE, projectId: onLocal, planId: null });
+    const taskId = task.summary.id;
+    const before = await host.prepareCoach(taskId, NONE);
+    host.setTaskProject(taskId, host.task(taskId).revision, onWsl);
+    // The same brief version, title, packet, preferences and sharing: only the project and its engine target changed.
+    const after = await host.prepareCoach(taskId, NONE);
+    assert.deepEqual([host.task(taskId).versions.length, after.text === before.text, after.expected === before.expected], [1, true, false]);
+    await assert.rejects(host.startCoach(taskId, NONE, before.expected), CHANGED);
+    assert.deepEqual([wslStarts.count, stub.requests.length, host.coachings(taskId).length], [0, 0, 0]);
+    // A preview made where the task is now starts there, on the WSL engine.
+    await host.startCoach(taskId, NONE, after.expected);
+    assert.equal((await ended(host, taskId)).status, "answered");
+    assert.deepEqual([wslStarts.count > 0, coachRequests(stub).length], [true, 1]);
   });
 
   it("needs a project's sharing, refuses a removed project, and refuses a credential anywhere in what it would send", async () => {

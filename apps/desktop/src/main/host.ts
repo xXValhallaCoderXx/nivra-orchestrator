@@ -1177,7 +1177,7 @@ export class Host {
     const content = BriefContentSchema.parse(brief.content);
     const record = task.projectId ? this.#options.store.data.projects.find((p) => p.id === task.projectId) : undefined;
     const project: CoachProject =
-      task.projectId === null ? { kind: "none" } : !record || this.#removing.has(record.id) ? { kind: "removed" } : { kind: "project", label: record.label, targetLabel: this.#labelOf(record.targetId), modelSharing: record.sharing.modelContext };
+      task.projectId === null ? { kind: "none" } : !record || this.#removing.has(record.id) ? { kind: "removed" } : { kind: "project", projectId: record.id, targetId: record.targetId, label: record.label, targetLabel: this.#labelOf(record.targetId), modelSharing: record.sharing.modelContext };
     // The task's mission and the findings about it (Track B's records), for the person to tick: nothing goes unless ticked.
     const found = missionContextForTask(workspace, taskId);
     const options: CoachPreview["options"] = {

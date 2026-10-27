@@ -159,24 +159,27 @@ export function coachPacketFor(input: CoachPacketInput, known: KnownSecrets): Co
 /**
  * What a preview is bound by: the context binding's fingerprint (the task, its brief version and title, the mission and
  * findings ticked, and the coach's profile), the packet's and the preferences' fingerprints, the project's sharing, the
- * profile, and the model a live recipe allows. Starting works it out again from the records as they are then, and
- * refuses when it differs, so a coaching sends exactly what the person saw.
+ * project and the engine target it would run on, the profile, and the model a live recipe allows. Starting works it out
+ * again from the records as they are then, and refuses when it differs, so a coaching sends exactly what the person saw,
+ * from where they saw it: a task moved to another project, or the same packet on another target, needs a new preview.
  */
 export function coachPreviewFingerprint(parts: {
   bindingDigest: string;
   packetDigest: string;
   preferencesDigest: string;
   sharing: boolean | null;
+  projectId: string | null;
+  targetId: string;
   profileId: string;
   profileVersion: number;
   model: string | null;
 }): string {
-  const canonical = ["nivra.coach-preview.v1", parts.bindingDigest, parts.packetDigest, parts.preferencesDigest, parts.sharing, parts.profileId, parts.profileVersion, parts.model];
+  const canonical = ["nivra.coach-preview.v2", parts.bindingDigest, parts.packetDigest, parts.preferencesDigest, parts.sharing, parts.projectId, parts.targetId, parts.profileId, parts.profileVersion, parts.model];
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 /** The task's repository, as the host finds it now: none, removed (or being removed), or a project and its consent. */
-export type CoachProject = { kind: "none" } | { kind: "removed" } | { kind: "project"; label: string; targetLabel: string; modelSharing: boolean };
+export type CoachProject = { kind: "none" } | { kind: "removed" } | { kind: "project"; projectId: string; targetId: string; label: string; targetLabel: string; modelSharing: boolean };
 
 /** A task to coach: its id, title, the brief version the person sees, and its repository. */
 export interface CoachSubject {
@@ -345,7 +348,18 @@ export async function coachRequest(subject: CoachSubject, state: CoachState): Pr
     notSent: [...COACH_NOT_SENT],
     keeps: TOKEN_FACTORY_KEEPS,
     blocked,
-    expected: coachPreviewFingerprint({ bindingDigest: boundDigest, packetDigest, preferencesDigest: prefsDigest, sharing, profileId: profile.id, profileVersion: profile.version, model: state.model ?? null }),
+    expected: coachPreviewFingerprint({
+      bindingDigest: boundDigest,
+      packetDigest,
+      preferencesDigest: prefsDigest,
+      sharing,
+      // A task with no repository runs on the local engine; one with a project, on that project's target.
+      projectId: project.kind === "project" ? project.projectId : null,
+      targetId: project.kind === "project" ? project.targetId : "local",
+      profileId: profile.id,
+      profileVersion: profile.version,
+      model: state.model ?? null,
+    }),
   };
   const input: CoachInput = {
     taskId: subject.taskId,

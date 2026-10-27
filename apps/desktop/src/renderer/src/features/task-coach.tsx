@@ -120,7 +120,7 @@ export function TaskCoach({ task, coachings, editing, onPrepare, onStart, onCanc
           />
         ))
       )}
-      <CoachDialog opened={dialog} briefVersion={task.brief.version} editing={editing} onClose={() => setDialog(false)} onPrepare={onPrepare} onStart={onStart} />
+      <CoachDialog opened={dialog} briefVersion={task.brief.version} projectId={task.summary.projectId} editing={editing} onClose={() => setDialog(false)} onPrepare={onPrepare} onStart={onStart} />
     </Stack>
   );
 }
@@ -190,6 +190,7 @@ function GuidanceRow({ item }: { item: GuidanceItem }) {
 function CoachDialog({
   opened,
   briefVersion,
+  projectId,
   editing,
   onClose,
   onPrepare,
@@ -197,6 +198,8 @@ function CoachDialog({
 }: {
   opened: boolean;
   briefVersion: number;
+  /** The task's project: another one, or none, means another scope and engine, so the preview is made again. */
+  projectId: string | null;
   editing: boolean;
   onClose(): void;
   onPrepare(selection: CoachSelection): Promise<CoachPreview>;
@@ -230,7 +233,7 @@ function CoachDialog({
     setError(null);
     void prepare(guard.current.asked(), fresh);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, briefVersion]);
+  }, [opened, briefVersion, projectId]);
 
   /** Any change makes the preview stale: it is cleared, one still on its way is dropped, and a new one is asked for. */
   function choose(next: CoachSelection) {
