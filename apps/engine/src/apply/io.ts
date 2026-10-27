@@ -27,7 +27,10 @@ export interface ApplyIo {
   readdir(path: string): string[];
   /** Makes a folder's entries durable. */
   syncDir(path: string): void;
-  /** Opens a folder, failing when the last name is a link or isn't a folder: the anchors a change writes through. */
+  /**
+   * Opens a folder, failing when the last name is a link or isn't a folder: the anchors a change writes through. Only to
+   * name files through, so it needs no permission to read the folder (O_PATH), only to pass through it.
+   */
   openDir(path: string): number;
   closeDir(fd: number): void;
   /** What a descriptor holds open, by device and inode. */
@@ -35,6 +38,8 @@ export interface ApplyIo {
 }
 
 const absent = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
+/** Linux's own value: Node doesn't name it, and an apply runs only where `/proc` is (`anchors.ts`). */
+const O_PATH = 0o10000000;
 
 export const nodeIo: ApplyIo = {
   lstat: (path) => {
@@ -78,7 +83,7 @@ export const nodeIo: ApplyIo = {
   link: (existing, created) => fs.linkSync(existing, created),
   unlink: (path) => fs.unlinkSync(path),
   readdir: (path) => fs.readdirSync(path),
-  openDir: (path) => fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)),
+  openDir: (path) => fs.openSync(path, O_PATH | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)),
   closeDir: (fd) => fs.closeSync(fd),
   statFd: (fd) => fs.fstatSync(fd),
   syncDir: (path) => {

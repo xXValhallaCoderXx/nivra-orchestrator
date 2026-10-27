@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { type ApplyIo, nodeIo } from "../src/apply/io.ts";
 import { ApplyJournal } from "../src/apply/journal.ts";
@@ -10,7 +10,7 @@ import { type ApplyHook, type ApplyResult, reconcile, restore, stateOf, writeCha
 import { Database } from "../src/db/database.ts";
 import { byBytes } from "../src/exec/workspace-rules.ts";
 import { removeDir, tempDir } from "./helpers.ts";
-import { cleanUp, folderState, git, repoWith } from "./workspace-fixtures.ts";
+import { changedSince, cleanUp, folderState, git, repoWith } from "./workspace-fixtures.ts";
 
 /**
  * The apply writer (NIV-8, D40) on disposable repositories: a change applied with its originals kept aside, the claim
@@ -233,6 +233,20 @@ describe("the apply writer (NIV-8, D40)", () => {
     assert.deepEqual([...folderState(root)].filter(([key, value]) => all.get(key) !== value), []);
   });
 
+  it("applies under a folder it may pass through but not read: the folders it holds open need no permission to read them", async () => {
+    const root = copies()();
+    const plan = planFor(root, CHANGE);
+    chmodSync(dirname(root), 0o300);
+    let run;
+    try {
+      run = await apply(root, { plan });
+    } finally {
+      chmodSync(dirname(root), 0o700);
+    }
+    assert.ok(!(run.outcome instanceof ApplyRefusal), run.outcome instanceof ApplyRefusal ? run.outcome.code : "");
+    assert.deepEqual([run.outcome.state, String(files(root, "README.md"))], ["applied", CHANGE["README.md"].text]);
+  });
+
   it("refuses a changed file whose mode changed since it was checked, before anything of the person's is touched", async () => {
     const root = repoWith(FILES);
     const plan = planFor(root, CHANGE);
@@ -376,6 +390,38 @@ describe("the apply writer (NIV-8, D40)", () => {
     assert.deepEqual([run.outcome.state, run.outcome.paths.map((one) => one.place), run.outcome.failure, readdirSync(outside)], ["unknown", ["other"], { step: "check folders", code: "moved" }, []]);
     assert.deepEqual([String(readFileSync(join(root, "docs-moved", "old.md"))), String(readFileSync(join(run.recovery, "orig-0")))], ["old\n", "old\n"]);
     holds(run.outcome, run, "a folder swapped for a link just before the link");
+  });
+
+  it("never writes through a folder above the picked one swapped for a link: refused before the intent, rolled back after", async () => {
+    const fresh = copies();
+    // The folder holding the repository renamed, and a link to a copy of the repository elsewhere put in its place: a
+    // writer that followed names would apply the change to the copy.
+    const swapAbove = (root: string) => {
+      const parent = dirname(root);
+      const elsewhere = tempDir();
+      dirs.push(elsewhere, `${parent}-moved`);
+      const copy = join(elsewhere, basename(root));
+      cpSync(root, copy, { recursive: true, preserveTimestamps: true });
+      renameSync(parent, `${parent}-moved`);
+      symlinkSync(elsewhere, parent);
+      return { copy, before: folderState(copy), moved: join(`${parent}-moved`, basename(root)) };
+    };
+    const changes = { "README.md": { text: "new readme\n" }, "docs/old.md": { text: "new\n" } };
+    const early = fresh();
+    const plan = planFor(early, changes);
+    const first = swapAbove(early);
+    const refused = await apply(early, { plan });
+    assert.ok(refused.outcome instanceof ApplyRefusal);
+    assert.deepEqual([refused.outcome.code, changedSince(first.before, first.copy), existsSync(join(first.moved, ".git", "nivra-apply"))], ["filesystem", [], false]);
+    // Swapped just before the first link: the change goes into the folders held open, and is taken back there.
+    const root = fresh();
+    let second: ReturnType<typeof swapAbove> | null = null;
+    const run = await apply(root, { changes, before: (step) => void (step === "link 0" && (second = swapAbove(root))) });
+    assert.ok(!(run.outcome instanceof ApplyRefusal) && second);
+    const { copy, before, moved } = second as ReturnType<typeof swapAbove>;
+    assert.deepEqual([run.outcome.state, run.outcome.paths.map((one) => one.place), run.outcome.failure, changedSince(before, copy)], ["unknown", ["other", "other"], { step: "check folders", code: "moved" }, []]);
+    assert.deepEqual([String(readFileSync(join(moved, "README.md"))), String(readFileSync(join(moved, "docs", "old.md")))], [FILES["README.md"], "old\n"]);
+    holds(run.outcome, run, "a folder above the picked one swapped for a link just before the link");
   });
 
   it("takes a change back only in the folders it wrote in: one swapped for a link while rolling back, or before the person restores, is never written through", async () => {

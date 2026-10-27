@@ -32,8 +32,26 @@ export class Anchors {
   #fd(rel: string): number {
     const held = this.#fds.get(rel);
     if (held !== undefined) return held;
-    const fd = rel === "" ? this.#io.openDir(this.#root) : this.#io.openDir(`${this.dir(parentOf(rel))}/${baseOf(rel)}`);
+    const fd = rel === "" ? this.#openRoot() : this.#io.openDir(`${this.dir(parentOf(rel))}/${baseOf(rel)}`);
     this.#fds.set(rel, fd);
+    return fd;
+  }
+
+  /** The root, opened one name at a time from `/`, never through a link: its real path had none when it was checked. */
+  #openRoot(): number {
+    let fd = this.#io.openDir("/");
+    for (const name of this.#root.split("/").filter(Boolean)) {
+      const parent = fd;
+      try {
+        fd = this.#io.openDir(`/proc/self/fd/${parent}/${name}`);
+      } finally {
+        try {
+          this.#io.closeDir(parent);
+        } catch {
+          // Already closed.
+        }
+      }
+    }
     return fd;
   }
 
@@ -48,8 +66,8 @@ export class Anchors {
   }
 
   /**
-   * Whether any folder held open was moved or replaced since it was opened: the root no longer at its path, or a folder
-   * no longer the one at its name in the folder above. What was done through it is then somewhere else.
+   * Whether any folder held open was moved or replaced since it was opened: the root's path no longer leading to it, or
+   * a folder no longer the one at its name in the folder above. What was done through it is then somewhere else.
    */
   moved(): boolean {
     const root = this.#fds.get("");
