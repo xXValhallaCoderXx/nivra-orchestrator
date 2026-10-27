@@ -130,7 +130,8 @@ export function bindingDigest(binding: ContextBinding): Promise<string> {
 /**
  * What changed since a binding was made, as the host's validator reports it. Any of these makes a result stale: it
  * stays readable, and nothing made from it is applied. A preference changed since, or a newer profile version, doesn't
- * make a result stale: the window says so on its own line.
+ * make a result stale: the window says so on its own line. A finding bound with no mission still belongs to its review's
+ * mission: a task that has left that mission's backlog is reported as `membership-removed` for it.
  */
 export type ContextChange =
   | { kind: "task-deleted"; taskId: string; title: string }
@@ -139,7 +140,7 @@ export type ContextChange =
   | { kind: "mission-changed"; missionId: string; from: number; to: number }
   | { kind: "mission-deleted"; missionId: string }
   | { kind: "membership-removed"; taskId: string; title: string; missionId: string }
-  | { kind: "finding-gone"; reviewId: string; findingId: string };
+  | { kind: "finding-gone"; reviewId: string; findingId: string; reason?: "gone" | "not-about-task" };
 
 /** One task as a mission review sends it: its title, and these parts of its brief version, exactly as stored. */
 export const PacketTask = z.strictObject({
