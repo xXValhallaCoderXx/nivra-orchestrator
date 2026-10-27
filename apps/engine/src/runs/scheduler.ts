@@ -217,6 +217,8 @@ export class RunScheduler {
         existing &&
         ((request.workflowId === "review" && !sameReview(existing.input, request.input)) ||
           (request.workflowId === "sandbox" && !sameSandbox(existing.input, request.input)) ||
+          // A preparation is bound to the same checkout, project, target and preview as a check (D41).
+          (request.workflowId === "environment" && !sameSandbox(existing.input, request.input)) ||
           (request.workflowId === "research" && !sameResearch(existing.input, request.input)) ||
           (request.workflowId === "task" && !sameTask(existing.input, request.input)));
       if (existing && (existing.workflowId !== request.workflowId || other)) {

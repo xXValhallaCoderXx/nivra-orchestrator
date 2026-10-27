@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   ChatInput,
@@ -47,7 +47,8 @@ import { childEnv, insideWsl } from "./exec/child-env.ts";
 import { findGit } from "./exec/find-executable.ts";
 import { WorkspaceRefusal } from "./exec/git-tool.ts";
 import { createLocalBackend } from "./exec/local.ts";
-import { fetchTransport, SANDBOXES_BASE_URL, type Transport } from "./exec/nebius/api.ts";
+import { fetchTransport, SandboxApi, SANDBOXES_BASE_URL, type Transport } from "./exec/nebius/api.ts";
+import { Journal } from "./exec/nebius/sandbox.ts";
 import { createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals, type NebiusCredentials } from "./exec/nebius/session.ts";
 import { takeSnapshot } from "./exec/snapshot.ts";
 import { ChatUnreadable, readChatTask } from "./chat/task.ts";
@@ -61,7 +62,8 @@ import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/sc
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
 import { EnvironmentRefusal, environmentInputs } from "./environment/inputs.ts";
-import { environmentPreviewOf } from "./environment/preview.ts";
+import { environmentPreviewOf, PREPARE_LIMITS } from "./environment/preview.ts";
+import { readEnvironmentInput } from "./environment/report.ts";
 import { TASK_LIMITS } from "./task/limits.ts";
 import { proposalView, readTaskInput, taskPreviewOf } from "./task/report.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
@@ -162,6 +164,20 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
     },
   ],
   [
+    "environment",
+    {
+      id: "environment",
+      title: (input: unknown) => `Environment · ${basename(readEnvironmentInput(input)?.repoPath ?? "") || "repository"}`,
+      // Mastra gets the checkout's path alone (D22): the project, the target and the preview stay in the run store, and
+      // the spec in memory (D21, D41).
+      mastraInput: (input: unknown) => {
+        const task = readEnvironmentInput(input);
+        if (!task) throw new Refusal("input-unreadable", "This preparation's request can't be read back from the engine's store, so it wasn't started. Prepare the environment again.");
+        return { repoPath: task.repoPath };
+      },
+    },
+  ],
+  [
     "research",
     {
       id: "research",
@@ -217,6 +233,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/sandbox.ts"),
     typeof import("./workflows/research.ts"),
     typeof import("./workflows/task.ts"),
+    typeof import("./workflows/environment.ts"),
   ];
   try {
     mastraModules = await Promise.all([
@@ -229,6 +246,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       import("./workflows/sandbox.ts"),
       import("./workflows/research.ts"),
       import("./workflows/task.ts"),
+      import("./workflows/environment.ts"),
     ]);
   } catch (error) {
     database.close();
@@ -244,6 +262,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     { createSandboxWorkflow, SANDBOX_WORKFLOW_ID },
     { createResearchWorkflow, RESEARCH_WORKFLOW_ID },
     { createTaskWorkflow, TASK_WORKFLOW_ID },
+    { createEnvironmentWorkflow, ENVIRONMENT_WORKFLOW_ID },
   ] = mastraModules;
 
   const vault = new SecretVault();
@@ -351,11 +370,17 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // the journal of a session this engine has open; a journal a pass settles leaves it at once.
   let scanned = scanJournals(journals);
   const pass: SandboxStatus["pass"] = { state: scanned.open.length ? "waiting-for-credentials" : "idle", startedAt: null, finishedAt: null, stopped: 0, alreadyEnded: 0, unresolved: [] };
-  /** Whether a run that can hold a Nebius session is queued or running here: a check, or a task (D39). */
+  /** Whether a run that can hold Nebius operations is queued or running here: a check, a task (D39), or a preparation (D41). */
   const sessionsActive = () =>
     store.active().some((runId) => {
       const workflowId = store.summary(runId)?.workflowId;
-      return workflowId === "sandbox" || workflowId === "task";
+      return workflowId === "sandbox" || workflowId === "task" || workflowId === "environment";
+    });
+  /** Whether a preparation of this project is queued or running here: one at a time (D41). */
+  const environmentGoing = (project: string) =>
+    store.active().some((runId) => {
+      const summary = store.summary(runId);
+      return summary?.workflowId === "environment" && readEnvironmentInput(summary.input)?.project === project;
     });
   /** Whether a task is queued or running here: one at a time on an engine (D39). */
   const taskGoing = () => store.active().some((runId) => store.summary(runId)?.workflowId === "task");
@@ -544,6 +569,30 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         mask,
         saveResult: (runId, report) => store.saveArtifact(runId, "sandbox", JSON.stringify(report)),
       }),
+      [ENVIRONMENT_WORKFLOW_ID]: createEnvironmentWorkflow({
+        recorder,
+        context: (runId) => scheduler.contextOf(runId, "environment"),
+        task: (runId) => readEnvironmentInput(store.summary(runId)?.input),
+        requestId: (runId) => store.requestIdOf(runId),
+        credentials: sandboxCredentials,
+        client: (given, signal) => new SandboxApi(sandboxTransport(given), { requestTimeoutMs: NEBIUS_LIMITS.requestTimeoutMs, minWriteMs: NEBIUS_LIMITS.minWriteMs, signal }),
+        journalPath: (runId) => {
+          mkdirSync(journals, { recursive: true, mode: 0o700 });
+          return join(journals, `environment-${runId}.jsonl`);
+        },
+        settle: (path, given) => {
+          const open = new Journal(path).open();
+          return reconcileJournals([{ path, operations: open.operations, uncertain: open.uncertain, damaged: null }], { credentials: given, budgetMs: PREPARE_LIMITS.closeMs, signal: engineStop.signal, transport: sandboxTransport, limits: sandboxLimits });
+        },
+        local: backend,
+        findGit: locateGit,
+        platform: process.platform,
+        exclude: [home],
+        knownValues: taskKnownValues,
+        shutdown: engineStop.signal,
+        mask,
+        saveResult: (runId, report) => store.saveArtifact(runId, "environment", JSON.stringify(report)),
+      }),
       [RESEARCH_WORKFLOW_ID]: createResearchWorkflow({
         recorder,
         context: researchContext,
@@ -676,6 +725,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         if (params.workflowId === "task" && store.findByRequest(params.clientRequestId) === null) {
           if (process.platform === "win32") throw new RpcFailure(ErrorCode.InvalidParams, "Running tasks on Windows itself isn't available yet, so nothing was started. Add the repository from a WSL distribution, then run the task there.");
           if (taskGoing()) throw new RpcFailure(ErrorCode.InvalidParams, "A task is already running on this engine, so another wasn't started. Wait for it to end, or cancel it, then run this one again.");
+        }
+        // One preparation of a project at a time, and none on Windows itself (D41), for a new request.
+        if (params.workflowId === "environment" && store.findByRequest(params.clientRequestId) === null) {
+          if (process.platform === "win32") throw new RpcFailure(ErrorCode.InvalidParams, "Preparing an environment on Windows itself isn't available yet, so nothing was started. Add the repository from a WSL distribution, then prepare it there.");
+          if (environmentGoing(params.input.project)) throw new RpcFailure(ErrorCode.InvalidParams, "This project's environment is already being prepared on its engine, so another preparation wasn't started. Wait for it to end, then try again.");
         }
         try {
           return store.summary(scheduler.submit(params)) ?? notFound("just created");
@@ -834,6 +888,7 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
       import("./workflows/sandbox.ts"),
       import("./workflows/research.ts"),
       import("./workflows/task.ts"),
+      import("./workflows/environment.ts"),
     ]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {
