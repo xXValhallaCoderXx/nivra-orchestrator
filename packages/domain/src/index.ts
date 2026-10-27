@@ -14,3 +14,5 @@ export * from "./apply.ts";
 export * from "./methods.ts";
 export * from "./client.ts";
 export * from "./credentials.ts";
+export * from "./specialists.ts";
+export * from "./mission.ts";
