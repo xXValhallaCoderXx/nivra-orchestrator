@@ -65,12 +65,15 @@ describe("the live run's preview, before Start (NIV-35)", () => {
   /** The fingerprint the host works out, from what the app holds. */
   const hostExpected = (parts: { briefDigest?: string; snapshot?: string; environment?: typeof prepared | null }) =>
     taskRunFingerprint({ ...ids, briefDigest: parts.briefDigest ?? approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: parts.snapshot ?? approved.snapshotFingerprint, environment: parts.environment === undefined ? prepared : parts.environment });
-  const structured = (change: Partial<{ expected: string; snapshotFingerprint: string; baseline: string; frozen: Array<{ path: string; sha256: string | null }>; environment: { image: string; inputsDigest: string } | null }> = {}) => ({
+  /** What the app's preview says goes to each service: the build's own words, the model among them. */
+  const SENDS = { tokenFactory: ["The brief.", "All of it to one model, nvidia/nemotron-3-super-120b-a12b. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in."], nebius: ["The commit's files."] };
+  const structured = (change: Partial<{ expected: string; snapshotFingerprint: string; baseline: string; frozen: Array<{ path: string; sha256: string | null }>; environment: { image: string; inputsDigest: string } | null; sends: typeof SENDS }> = {}) => ({
     expected: change.expected ?? hostExpected({}),
     snapshotFingerprint: change.snapshotFingerprint ?? approved.snapshotFingerprint,
     snapshot: { baseline: change.baseline ?? approved.baseline } as never,
     frozen: change.frozen ?? approved.frozen,
     environment: (change.environment === undefined ? { ...prepared, node: "v22.23.4", pnpm: "11.5.3", arch: "x86_64", preparedAt: "2026-10-28T00:00:00.000Z" } : change.environment) as never,
+    sends: change.sends ?? SENDS,
   });
   const problems = (shownExpected: string, given: ReturnType<typeof structured>, environment: typeof prepared | null = prepared) => previewProblems({ approved, ids, prepared: environment, shownExpected, structured: given });
 
@@ -97,5 +100,9 @@ describe("the live run's preview, before Start (NIV-35)", () => {
     assert.deepEqual(problems(hostExpected({}), structured({ environment: { image: "image-2", inputsDigest: "e".repeat(64) } })), ["the run doesn't start from the environment just prepared"]);
     assert.deepEqual(problems(hostExpected({}), structured({ environment: { image: "image-1", inputsDigest: "2".repeat(64) } })), ["the environment's inputs aren't the approved ones"]);
     assert.deepEqual(problems("3".repeat(64), structured()), ["the window's preview isn't bound to the approved brief, commit and environment"]);
+  });
+
+  it("refuses a build whose own preview doesn't name the one model the recipe allows: a build from before that rule would take whichever model the listing offered", () => {
+    assert.deepEqual(problems(hostExpected({}), structured({ sends: { tokenFactory: ["The brief."], nebius: ["The commit's files."] } })), ["the app's preview doesn't name nvidia/nemotron-3-super-120b-a12b, the one model the recipe allows"]);
   });
 });

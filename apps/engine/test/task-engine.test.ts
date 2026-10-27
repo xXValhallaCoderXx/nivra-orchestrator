@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { isTerminal, projectFingerprint, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskReport } from "@nivra/domain";
+import { isTerminal, projectFingerprint, TASK_MODEL, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskReport } from "@nivra/domain";
 import { CHECK_IMAGE } from "../src/exec/check.ts";
 import { operationsFor } from "../src/task/limits.ts";
 import { TASK_STOP_MESSAGES } from "../src/task/report.ts";
@@ -233,6 +233,8 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual(done.toolchain, [{ program: ".", finding: "present" }, { program: "/bin/sh", finding: "present" }]);
     assert.deepEqual([done.task.taskId, done.task.attemptId, done.task.briefVersion, done.snapshot?.fingerprint], [TASK_ID, done.request.clientRequestId, 2, shown.snapshot.fingerprint]);
     assert.deepEqual([done.route?.endpoint, done.cleanup?.unresolved, done.cleanup?.retained?.uploads], ["loopback-test", [], 1]);
+    // The one model the preview names, as every request carried it and as the report names it (NIV-35).
+    assert.deepEqual([[...new Set(model.chats().map((chat) => chat.body?.model))], done.route?.model, done.worker?.model], [[TASK_MODEL], TASK_MODEL, TASK_MODEL]);
     // The proposal, as the person reads it, and as it was kept.
     const proposal = (await engine.client.call("runs.proposal", { runId: run.id }))!;
     assert.deepEqual([proposal.hash, proposal.paths.map((path) => `${path.change} ${path.path} ${path.after?.mode}`), proposal.truncated], [done.proposal?.hash, ["changed greet.sh 100644"], false]);
@@ -285,7 +287,8 @@ describe("a task run through a real engine (NIV-7)", () => {
   });
 
   it("uses only the model its preview names: a key offered other NVIDIA models but not that one stops at the model step, with no request to a model and nothing uploaded (NIV-35)", async () => {
-    const { sandbox, model, engine, repo } = await setup({ models: [{ id: "nvidia/Nemotron-3_5-Lightning" }, { id: "nvidia/Nemotron-3-Ultra-550b-a55b" }] });
+    // Other NVIDIA models, and one whose id only starts with the model's.
+    const { sandbox, model, engine, repo } = await setup({ models: [{ id: "nvidia/Nemotron-3_5-Lightning" }, { id: "nvidia/Nemotron-3-Ultra-550b-a55b" }, { id: `${TASK_MODEL}-fast` }] });
     const run = await start(engine, repo, ready(await preview(engine, repo)).snapshot.fingerprint);
     assert.equal((await ended(engine, run.id)).status, "failed");
     const shown = await report(engine, run.id);
@@ -293,6 +296,15 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.equal(shown.stopped?.message, "Token Factory couldn't be reached, or doesn't offer this key nvidia/nemotron-3-super-120b-a12b, the only model task runs use, so the run stopped before anything from your repository was sent. Check the key in Settings, then run the task again.");
     // The listing was the one request Token Factory received: no model was asked anything, and nothing reached Nebius.
     assert.deepEqual([model.requests.map((request) => `${request.method} ${request.path}`), model.chats().length, sandbox.requests.length], [["GET /v1/models"], 0, 0]);
+  });
+
+  it("takes the model as Token Factory lists it, whatever its case, and sends that id (NIV-35)", async () => {
+    const listed = "NVIDIA/Nemotron-3-Super-120B-A12B";
+    const { model, engine, repo } = await setup({ models: [{ id: "nvidia/Nemotron-3_5-Lightning" }, { id: listed }] });
+    const run = await start(engine, repo, ready(await preview(engine, repo)).snapshot.fingerprint);
+    assert.equal((await ended(engine, run.id)).status, "succeeded");
+    const done = await report(engine, run.id);
+    assert.deepEqual([done.outcome, done.route?.model, [...new Set(model.chats().map((chat) => chat.body?.model))]], ["proposed", listed, [listed]]);
   });
 
   it("runs one task at a time on its own slot: a second is refused and never recorded, a repeated request gets its run, and other runs still start", async () => {

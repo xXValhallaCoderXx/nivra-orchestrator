@@ -105,6 +105,16 @@ function checkBuild(frozen: Frozen): void {
 }
 
 /**
+ * This script, from the revision its build was frozen from, with no changes: what the recipe says of the build, the
+ * model's rule among it, is this source's, so it has to be the build's too.
+ */
+function checkSource(frozen: Frozen): void {
+  const head = git(repository, "rev-parse", "HEAD");
+  const changed = git(repository, "status", "--porcelain") !== "";
+  if (head !== frozen.revision || changed) throw new Error(`This script runs from the revision its build was frozen from, ${frozen.revision.slice(0, 12)}, with no changes; this checkout is at ${head.slice(0, 12)}${changed ? ", with changes" : ""}. Check that revision out here, or freeze again, then try again.`);
+}
+
+/**
  * Copies the release candidate's unpacked Linux build, made from this clean tree by `pnpm release:candidate`, to a
  * folder of its own, and records its hashes. The candidate's files are the ones a release publishes unchanged.
  */
@@ -252,7 +262,8 @@ const call = <T>(page: Page, expression: string) => page.evaluate(expression) as
 
 /**
  * The window as it stands, kept as privately as the rest of the evidence. One that fails is logged and the run goes on:
- * a picture is never a reason to stop a run whose approval is claimed. None is taken while Settings is open.
+ * a picture is never a reason to stop a run whose approval is claimed. Settings never shows a saved key or project id,
+ * so no picture can hold one.
  */
 async function shot(page: Page, folder: string, name: string, log: (line: string) => void): Promise<void> {
   try {
@@ -459,6 +470,7 @@ if (values.freeze) {
 } else {
   const frozen = readFrozen();
   checkBuild(frozen);
+  checkSource(frozen);
   if (values.plan) {
     const { recipe, digest } = await nextRecipe(frozen, task);
     const text = recipeText(recipe, digest);
