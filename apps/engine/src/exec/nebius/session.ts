@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join, posix } from "node:path";
 import { gzipSync } from "node:zlib";
+import { OUTPUT_DIRS } from "../../repo/deny.ts";
 import { BoundaryUnavailableError, checkRequirements, ExecRefusedError, ExecUncertainError, SessionOpenError, type CloseReport, type ExecRequest, type ExecResult, type ExecutionBackend, type ExecutionCapabilities, type ExecutionSession, type SessionSnapshot, type SessionSpec, type SessionStep } from "../backend.ts";
 import { fetchTransport, SandboxApi, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, SandboxTooLargeError, sleepFor, type Transport } from "./api.ts";
 import { Journal, RETENTION, Sandbox, SandboxLateSpawnError, SandboxRefusal, type JournalEntry, type Outcome, type SandboxOptions, type StepSpec } from "./sandbox.ts";
@@ -13,8 +14,9 @@ import { Journal, RETENTION, Sandbox, SandboxLateSpawnError, SandboxRefusal, typ
  *
  * - `open` refuses before anything is sent when it can't do what was asked: no key, the network not denied, no
  *   snapshot, or a snapshot over the upload limit once compressed. Otherwise it journals the session, uploads the
- *   snapshot once, compressed, and runs one prepare operation that extracts it and prints a digest of what it holds,
- *   checked against the snapshot's. Its image is the first state.
+ *   snapshot once, compressed, and runs one prepare operation that extracts it over what the base image's workspace
+ *   holds and prints a digest of what it then holds, dependency and build output left out, checked against the
+ *   snapshot's. Its image is the first state.
  * - One owned operation at a time. Each command's intent is journaled and flushed before it is sent; a lost answer is
  *   looked for by its correlation id and never sent again. Every request ends by the session's deadline (D33).
  * - The state moves on only when a persisted command ended on its own, with SUCCESS and an image it kept. A persisted
@@ -90,7 +92,12 @@ export interface NebiusCredentials {
 export interface NebiusBackendOptions {
   /** The key and project id, read from the engine's memory (D8); null when they haven't been given. */
   credentials: () => NebiusCredentials | null;
-  /** The public image every session starts from, by its id (chosen from stage 0's list). */
+  /**
+   * The image every session starts from, by its id: a public one (chosen from stage 0's list), or one prepared from
+   * it whose workspace already holds dependency or build output folders (`OUTPUT_DIRS`, such as `node_modules` at any
+   * depth). The snapshot is extracted over that workspace, never into an emptied one. The prepare step's listing leaves
+   * those folders out, as a snapshot does, so everything else there must be exactly the snapshot.
+   */
   baseImage: string;
   /** Where each session's journal goes: one file per session, 0600, in a 0700 folder. */
   journalDir: string;
@@ -143,15 +150,22 @@ export function compressSnapshot(archive: Uint8Array): Uint8Array {
   return compressed;
 }
 
+/**
+ * find's expression for the dependency and build output folders (`OUTPUT_DIRS`), at any depth: each one met is left
+ * out with all it holds. A snapshot never holds a file under one, so in the prepare step it leaves out only what the
+ * base image brings (a prepared image's `node_modules`), and the collect step never brings such a folder back.
+ */
+export const OUTPUT_PRUNE = OUTPUT_DIRS.map((name) => `-type d -name ${name} -prune -o`).join(" ");
+
 /** Where the snapshot and the listing go on the sandbox's machine: outside the workspace, so neither is in it. */
 const ARCHIVE = "/nivra/snapshot.tar";
 const LISTING = "/nivra/listing";
 
 /**
  * The prepare step: a fixed script, given everything as positional arguments, so nothing is interpolated into it. $1
- * the workspace, $2 the archive (compressed), $3 what runs the tools (busybox), $4 the listing. It extracts the
- * archive, removes it, and prints the listing's line count and digest. Paths with a newline in them are refused before
- * anything is sent.
+ * the workspace, $2 the archive (compressed), $3 what runs the tools (busybox), $4 the listing. It extracts the archive
+ * over what the workspace already holds, removes it, and prints the line count and digest of the workspace's listing,
+ * output folders left out. Paths with a newline in them are refused before anything is sent.
  */
 export const PREPARE_SCRIPT = [
   "set -e",
@@ -160,7 +174,7 @@ export const PREPARE_SCRIPT = [
   '$bb tar -x -z -f "$2" -C "$1"',
   '$bb rm -f "$2"',
   'cd "$1"',
-  '$bb find . -type f -o -type l > "$4.paths"',
+  `$bb find . ${OUTPUT_PRUNE} \\( -type f -o -type l \\) -print > "$4.paths"`,
   'LC_ALL=C $bb sort "$4.paths" > "$4.sorted"',
   ': > "$4"',
   "while IFS= read -r p; do",

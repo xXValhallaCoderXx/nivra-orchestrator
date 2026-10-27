@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { getEventListeners } from "node:events";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { gunzipSync } from "node:zlib";
 import { BoundaryUnavailableError, ExecRefusedError, ExecUncertainError, SessionOpenError, type ExecRequest, type ExecutionSession, type SessionSpec } from "../src/exec/backend.ts";
@@ -749,5 +749,40 @@ describe("Nebius session: the prepare step's listing, checked with this machine'
     const { digest, entries } = listingDigest(expected);
     assert.deepEqual([/^entries\s+(\d+)$/m.exec(ran.stdout)?.[1], /^digest ([0-9a-f]{64})$/m.exec(ran.stdout)?.[1]], [String(entries), digest], readFileSync(listing, "utf8"));
     assert.equal(existsSync(archive), false, "the archive is removed once extracted");
+  });
+
+  it("extracts over what the workspace already holds, and leaves out only the dependency and build folders in it, at any depth", { skip: process.platform === "win32" ? "needs a POSIX shell and tar" : false }, () => {
+    const root = tempDir("prepared listing");
+    const source = join(root, "source");
+    mkdirSync(join(source, "src"), { recursive: true });
+    writeFileSync(join(source, "src", "a.js"), "export const a = 1;\n");
+    // Named like output folders, but a file and a link: the commit's own, so listed.
+    writeFileSync(join(source, "out"), "a file named out\n");
+    symlinkSync("src", join(source, "dist"));
+    const plain = join(root, "plain.tar");
+    const tar = spawnSync("tar", ["-c", "-f", plain, "-C", source, "."], { encoding: "utf8" });
+    assert.equal(tar.status, 0, tar.stderr);
+    const { digest } = listingDigest([
+      { path: "src/a.js", kind: "file", executable: false, sha256: sha("export const a = 1;\n") },
+      { path: "out", kind: "file", executable: false, sha256: sha("a file named out\n") },
+      { path: "dist", kind: "link", target: "src" },
+    ]);
+    /** The digest the prepare step prints for the snapshot extracted over a workspace holding `held`. */
+    const printed = (held: Record<string, string>) => {
+      const guest = tempDir("prepared guest");
+      const workspace = join(guest, "workspace");
+      for (const [path, text] of Object.entries(held)) {
+        mkdirSync(dirname(join(workspace, path)), { recursive: true });
+        writeFileSync(join(workspace, path), text);
+      }
+      writeFileSync(join(guest, "snapshot.tar"), compressSnapshot(readFileSync(plain)));
+      const ran = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", workspace, join(guest, "snapshot.tar"), "", join(guest, "listing")], { encoding: "utf8" });
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.equal(readFileSync(join(workspace, "node_modules", "dep", "index.js"), "utf8"), "dep\n", "the workspace was emptied");
+      return /^digest ([0-9a-f]{64})$/m.exec(ran.stdout)?.[1];
+    };
+    const dependencies = { "node_modules/dep/index.js": "dep\n", "packages/a/node_modules/dep/index.js": "dep\n", "packages/a/.next/cache/x": "x\n", "coverage/lcov.info": "x\n", "crates/b/target/debug/b": "x\n" };
+    assert.equal(printed(dependencies), digest);
+    assert.notEqual(printed({ ...dependencies, "packages/a/index.js": "stray\n" }), digest, "a file outside the dependency folders was left out");
   });
 });
