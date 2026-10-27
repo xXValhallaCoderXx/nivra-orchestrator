@@ -104,6 +104,40 @@ describe("what the engine keeps of the coach's answer (NIV-53)", () => {
     assert.equal(kept.problems.some((problem) => /Records use one unit|sh check\.sh|whole new context|the scope field/.test(problem)), false);
   });
 
+  it("reads an item's letter as its list's: the other list's letter is set aside and counted, both ways, and a bare number or the list's own letter is kept", () => {
+    // A1 in a change to the criteria, and C1 in a change to the assumptions: neither becomes an edit to item 1 here.
+    const crossed = keep({
+      summary: "s",
+      changes: [
+        { field: "acceptanceCriteria", reword: [{ item: "A1", text: "A 5 km run shows its record in kilometres" }] },
+        { field: "assumptions", reword: [{ item: "C1", text: "Every run stores its unit in metres" }] },
+      ],
+    });
+    assert.deepEqual([crossed.changes.length, crossed.dropped.items, crossed.dropped.changes], [0, 2, 2]);
+    assert.deepEqual(
+      ["names A1, an assumption, in a change to the criteria", "names C1, a criterion, in a change to the assumptions"].map((rule) => crossed.problems.some((problem) => problem.endsWith(`.reword[0]: ${rule}`))),
+      [true, true],
+    );
+    // Beside a crossed letter, the list's own items are kept, and the change shows what was set aside.
+    const mixed = keep({ summary: "s", changes: [{ field: "acceptanceCriteria", reword: [{ item: "a2", text: "x" }, { item: "C2", text: "Records show in km" }] }] });
+    assert.deepEqual([mixed.changes[0]?.field === "acceptanceCriteria" ? mixed.changes[0].reword : null, mixed.dropped.items], [[{ item: 2, text: "Records show in km" }], 1]);
+    // A bare number, as a number or as text, and the list's own letter in either case, are each that list's item.
+    const own = keep({
+      summary: "s",
+      changes: [
+        { field: "acceptanceCriteria", reword: [{ item: "c1", text: "One" }, { item: 2, text: "Two" }] },
+        { field: "assumptions", reword: [{ item: "1", text: "Every run stores its unit" }] },
+      ],
+    });
+    assert.deepEqual(
+      own.changes.map((change) => (change.field === "acceptanceCriteria" || change.field === "assumptions" ? change.reword : null)),
+      [[{ item: 1, text: "One" }, { item: 2, text: "Two" }], [{ item: 1, text: "Every run stores its unit" }]],
+    );
+    assert.equal(own.dropped.items, 0);
+    const assumed = keep({ summary: "s", changes: [{ field: "assumptions", reword: [{ item: "A1", text: "Every run stores its unit" }] }] });
+    assert.deepEqual([assumed.changes.length, assumed.dropped.items], [1, 0]);
+  });
+
   it("sets aside a proposal over its limit rather than clip it, and clips only what is read, saying so", () => {
     const long = "x".repeat(COACH_REPORT_LIMITS.textChars + 1);
     const kept = keep({

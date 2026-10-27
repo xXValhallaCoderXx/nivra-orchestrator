@@ -235,8 +235,18 @@ export function normaliseCoaching(answer: CoachAnswer, packet: CoachPacket, mask
       add.push(given.text);
     });
     const reword: Array<{ item: number; text: string }> = [];
+    // An item is named by its number, bare or with this list's own letter: C for a criterion, A for an assumption. The
+    // other list's letter names an item of the other list, so it is set aside, never read as this list's.
+    const own = field === "acceptanceCriteria" ? "C" : "A";
     raw.reword.forEach((entry, itemIndex) => {
-      const number = typeof entry.item === "number" ? entry.item : Number(/^[CA]?(\d+)$/i.exec(String(entry.item).trim())?.[1] ?? Number.NaN);
+      const named = typeof entry.item === "number" ? null : /^([CA]?)(\d+)$/i.exec(String(entry.item).trim());
+      const letter = named?.[1]?.toUpperCase() ?? "";
+      const number = typeof entry.item === "number" ? entry.item : Number(named?.[2] ?? Number.NaN);
+      if (letter !== "" && letter !== own) {
+        dropped.items++;
+        problem(`${path}.reword[${itemIndex}]: names ${letter}${String(number)}, ${letter === "C" ? "a criterion" : "an assumption"}, in a change to the ${own === "C" ? "criteria" : "assumptions"}`);
+        return;
+      }
       const given = value(entry.text);
       const fault = !Number.isInteger(number) || number < 1 || number > count
         ? `names an item the packet doesn't have (it has ${count})`
