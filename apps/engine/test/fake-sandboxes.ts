@@ -83,6 +83,10 @@ export class FakeService {
   wrongUploadHash = false;
   /** The next spawn's operation is hidden from listing, as if beyond the search window. */
   hideNextSpawn = false;
+  /** The images `GET /v1/images` lists, narrowed by its tag prefix (NIV-49). */
+  publicImages: Array<{ uuid: string; tag: string }> = [];
+  /** How an import's operation behaves; its result image is the imported image. */
+  importBehaviour: Behaviour = { statuses: ["PENDING", "EXECUTING", "SUCCESS"], resultImage: "img-imported" };
   /** Every upload's bytes, as received, and by the id the service gave it. */
   readonly uploads: Uint8Array[] = [];
   readonly uploadsById = new Map<string, Uint8Array>();
@@ -107,6 +111,13 @@ export class FakeService {
       return encode({ uuid, sha256: this.wrongUploadHash ? "0".repeat(64) : createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength }, 201);
     }
     if (request.method === "POST" && path === "/v1/instances") return this.#spawn(JSON.parse(String(request.body)) as Record<string, unknown>);
+    if (request.method === "GET" && path === "/v1/images") return encode({ images: this.publicImages.filter((image) => image.tag.startsWith(request.query?.["tag"] ?? "")) });
+    if (request.method === "POST" && path === "/v1/images/import") {
+      // An import is an operation of its own: kept, with the imported image as its result.
+      const op: FakeOperation = { uuid: randomUUID(), body: { ...(JSON.parse(String(request.body)) as Record<string, unknown>), disposable: false }, env: {}, behaviour: this.importBehaviour, reads: 0, status: "PENDING", cancelled: false, finishedBySubprocess: false, subprocesses: new Map(), events: [] };
+      this.operations.push(op);
+      return encode({ uuid: op.uuid }, 201, { location: `/v1/operations/${op.uuid}` });
+    }
     const subprocess = /^\/v1\/operations\/([^/]+)\/subprocesses(?:\/(\d+))?$/.exec(path);
     if (subprocess) return this.#subprocess(request, subprocess[1]!, subprocess[2] ? Number(subprocess[2]) : null);
     const events = /^\/v1\/operations\/([^/]+)\/events$/.exec(path);

@@ -327,9 +327,36 @@ export class SandboxApi {
     return this.#json(await this.#read("Checking the account", { method: "GET", path: "/v1/whoami" }, [], options.until));
   }
 
-  /** The public images (read-only). */
-  async images(options: Until): Promise<unknown> {
-    return this.#json(await this.#read("Listing public images", { method: "GET", path: "/v1/images" }, [], options.until));
+  /** The public images (read-only): one page, narrowed to tags starting with `tag` when it is given. */
+  async images(options: Until & { tag?: string; limit?: number; offset?: number }): Promise<unknown> {
+    const query: Record<string, string> = {};
+    if (options.tag !== undefined) query["tag"] = options.tag;
+    if (options.limit !== undefined) query["limit"] = String(options.limit);
+    if (options.offset !== undefined) query["offset"] = String(options.offset);
+    return this.#json(await this.#read("Listing public images", { method: "GET", path: "/v1/images", ...(Object.keys(query).length ? { query } : {}) }, [], options.until));
+  }
+
+  /**
+   * Imports a container image from a public registry into the account, as a private image reached only by its id
+   * (NIV-49). It runs as an operation, read back like any other. Never retried, and answered as a spawn is: a lost, late
+   * or unreadable answer, a server error or a redirect may still have started it, so it is `uncertain`; a client error
+   * (4xx) started nothing and is thrown. No credentials are sent with it, so only a public image can be read.
+   */
+  async importImage(registryUrl: string, timeoutSeconds: number, options: Until): Promise<SpawnAnswer> {
+    const what = "Importing an image";
+    let sent: Sent;
+    try {
+      sent = await this.#send(what, { method: "POST", path: "/v1/images/import", headers: { "content-type": "application/json" }, body: JSON.stringify({ registry: { url: registryUrl }, timeout: timeoutSeconds }) }, { until: options.until, limit: this.#requestTimeoutMs, write: "import" });
+    } catch (error) {
+      if (error instanceof SandboxNotSentError) throw error;
+      return { status: "uncertain", cause: error instanceof Error ? error.message : "the request failed" };
+    }
+    const { response, late } = sent;
+    if (response.status >= 500 || (response.status >= 300 && response.status < 400)) return { status: "uncertain", cause: `the service answered HTTP ${response.status}` };
+    if (response.status < 200 || response.status > 299) throw this.#httpError(what, response);
+    const created = Created.safeParse(this.#jsonOrNull(response));
+    if (!created.success) return { status: "uncertain", cause: "its answer couldn't be read" };
+    return late ? { status: "created", id: created.data.uuid, late: true } : { status: "created", id: created.data.uuid };
   }
 
   /**
@@ -504,7 +531,7 @@ export class SandboxApi {
     const left = Math.floor(bounds.until - this.#now());
     if (left < Math.max(1, bounds.write ? this.minWriteMs : 1)) throw new SandboxNotSentError(what, "no-time");
     const maxBytes = bounds.maxBytes ?? this.#maxAnswerBytes;
-    if (bounds.write === "upload" || bounds.write === "spawn" || bounds.write === "subprocess") this.posts.push(bounds.write);
+    if (bounds.write === "upload" || bounds.write === "spawn" || bounds.write === "subprocess" || bounds.write === "import") this.posts.push(bounds.write);
     let response: TransportResponse;
     try {
       response = await this.#transport({ ...request, timeoutMs: Math.min(bounds.limit, left), maxBytes, ...(this.#signal ? { signal: this.#signal } : {}) });
