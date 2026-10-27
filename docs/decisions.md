@@ -2939,3 +2939,71 @@ alone are not proof of correct behaviour".
 - A preview's "to upload" figure is the tar's size.
 - `AGENTS.md`'s execution boundary rules say how an environment is prepared.
 - **Evidence:** `docs/acceptance.md`, *A project's environment (D41, NIV-49)*.
+
+## D42. Missions in the workspace, and one context check both planning tracks share: what a result was sent is bound by version and by title, and checked where it would be applied (2026-10-28)
+
+**Decision.** NIV-52's foundation, landed first so that NIV-53 (the task readiness coach) builds on the same seam. Nate
+set the scope on 27 October: a mission and a small backlog reviewed without a repository or a tracker, by the council's
+two reviewers and its chair, with no automatic change to any task. This entry covers the storage, the shared contract
+and the check; the review itself comes in its own entry.
+
+- **A mission** is what a piece of work is for: a name, the people it is for, its outcome, how success shows, what
+  bounds it and what it leaves out. Only the name and the outcome are needed.
+  - **Versions are immutable** (`mission_versions`, a trigger refuses changes). An edit adds the next version only
+    while the latest is the one the person read, as a brief's does.
+  - **A backlog** is the tasks a mission holds: a task is in one backlog at most, and a backlog holds at most 50.
+    Leaving a backlog, or the mission going, leaves the task as it was.
+  - **Workspace migration 6** (`WORKSPACE_MIGRATIONS[5]`) adds `missions`, `mission_versions` and `mission_tasks`.
+    No other table changes.
+- **Each mission owns one conversation record** (general, on this computer's engine, no project). It holds only the
+  mission's review plans and their reviews.
+  - **Why:** a plan and a review's run link belong to a conversation (D26's and D31's CHECKs, in hash-pinned
+    migrations). Rebuilding `run_links`, which messages, reviews, research and attempt records point at, was the
+    larger risk days before a release. A table of the review's own would have repeated the whole lifecycle that
+    `#submit`, `#follow` and `#finishReview` already give a review.
+  - **It is never one of the person's conversations:** it isn't listed; a trigger refuses a mission on a conversation
+    that has a project or messages; and every conversation and plan call refuses it and its review plans (send, open,
+    delete, save or revise a plan, plans, reviews, research, cancel, restart, a task from a plan, a refresh from a plan,
+    a generic review), so nothing can be said in it. A review plan is written by Nivra from a mission and its tasks, never
+    from an answer, and holds nothing the person didn't write.
+  - Deleting a mission deletes its conversation, which takes its versions, backlog, review plans and reviews with it.
+- **The shared contract** (`packages/domain`: `mission.ts`, `specialists.ts`).
+  - **What was sent is bound by reference** (`ContextBinding`): each task by its brief version (immutable) and by its
+    title as sent, since a rename makes no brief version; the mission by its version, and each bound task's membership
+    of it; findings by their review and id; profiles by version. `bindingDigest` (`nivra.context-binding.v1`) is the
+    selection's fingerprint, pinned by a test vector.
+  - **The specialists** are a static catalogue: the product architect, the risk and testability reviewer, the council
+    chair, and the task readiness coach (whose wording and version NIV-53 owns). Each is versioned, grants no tools,
+    memory, writes or permission, and makes one call per action. Its personality changes how it writes, never what it
+    may do.
+  - **The mission review's packet** (`MissionReviewPacket`): the mission, up to five tasks as T1 to T5 (each task's
+    title, goal, criteria, scope, exclusions, assumptions, checks, context and its acceptance cases' names), the count
+    of other tasks in the backlog, the council's profile versions, and the only model it may use or none. One renderer
+    makes the text both the preview shows and the reviewers read. It keeps D30's 20,000-character text limit, and over
+    it is refused, never shortened.
+- **One context check** (`validateBinding`, in the host's `mission-context.ts`), synchronous, so it runs inside the
+  transaction that would act on a result. It names each change: a task deleted, its brief at another version, its
+  title changed, the mission at a later version or deleted, a task no longer in the mission's backlog, a finding gone.
+  - **The coach runs it inside its acceptance transaction**, beside the brief's own version check, so an accepted
+    suggestion made from context that changed since is refused, with what changed. Ordinary editing never depends on
+    it, so editing a task from an old report works as before.
+  - **A review uses it for its stale lines.** A stale result stays readable and is never applied.
+  - A preference changed since, or a newer profile version, doesn't make a result stale; a window says so on its own
+    line.
+- **For the coach** (`missionContextForTask`): a task's mission at its latest version, and the findings of that
+  mission's reviews that name the task, each with what it reviewed and what has changed since. Nothing is sent by it:
+  the person picks what goes.
+
+**Why.** Nate's review of the first plan (27 October): a brief-version check can't see a changed mission or a removed
+membership, and a title goes to the model without a brief version, so binding by version alone would let stale context
+through. Two tracks accepting or showing model output about the same tasks need one check, run where the result would
+be applied. Landing it first gives the coach an integration window before the shared cut.
+
+**Consequences.**
+- Workspace v6: a profile this build opens is refused by older builds ("saved by a newer version of Nivra"). A v5
+  profile moves to v6 with every row as it was. No protocol change, and the engine's migrations are unchanged.
+- **This increment reviews only tasks that aren't linked to a repository.** A repository-linked task's brief is that
+  project's content, which needs its sharing consent and its stop paths in a review. Reviewing a repository's backlog
+  is follow-up work.
+- Seeds for checks that can't reach a model: `seedMission` and `seedMissionReview` (`e2e/seed-workspace.ts`).
+- **Evidence:** `docs/acceptance.md`, *Mission foundation (D42, NIV-52)*.
