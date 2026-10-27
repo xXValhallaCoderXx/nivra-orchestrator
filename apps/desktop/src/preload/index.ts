@@ -97,6 +97,11 @@ const api = {
   prepareMissionReview: (missionId, taskIds) => ipcRenderer.invoke(IPC.prepareMissionReview, missionId, taskIds),
   startMissionReview: (missionId, taskIds, expected) => ipcRenderer.invoke(IPC.startMissionReview, missionId, taskIds, expected),
   cancelMissionReview: (missionId, reviewId) => ipcRenderer.invoke(IPC.cancelMissionReview, missionId, reviewId),
+  prepareCoach: (taskId, selection) => ipcRenderer.invoke(IPC.prepareCoach, taskId, selection),
+  startCoach: (taskId, selection, expected) => ipcRenderer.invoke(IPC.startCoach, taskId, selection, expected),
+  listCoachings: (taskId) => ipcRenderer.invoke(IPC.listCoachings, taskId),
+  cancelCoach: (taskId, coachingId) => ipcRenderer.invoke(IPC.cancelCoach, taskId, coachingId),
+  acceptCoachChanges: (taskId, revision, coachingId, fields) => ipcRenderer.invoke(IPC.acceptCoachChanges, taskId, revision, coachingId, fields),
 } satisfies NivraApi;
 
 contextBridge.exposeInMainWorld("nivra", api);

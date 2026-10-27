@@ -3,6 +3,8 @@ import { realpathSync } from "node:fs";
 import {
   baselinePattern,
   CHAT_LIMITS,
+  COACH_PROFILE,
+  CoachReport,
   ENVIRONMENT_LIMITS,
   EnvironmentSpec,
   ErrorCode,
@@ -22,6 +24,9 @@ import {
   type BaselineSelection,
   type ChatContext,
   type ChatInput,
+  type CoachContext,
+  type CoachField,
+  type CoachInput,
   type DoctorReport,
   type EnvironmentContext,
   type EnvironmentInput,
@@ -87,6 +92,7 @@ import type {
   WorkspaceView,
   WslView,
 } from "../shared/ipc.ts";
+import type { CoachingView, CoachPreview, CoachSelection } from "../shared/coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView, StopCause } from "../shared/research.ts";
 import {
   environmentOf,
@@ -128,7 +134,9 @@ import {
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
 import { amendedContent, amendedPlanFields, researchNoteFor, researchReportMatches, researchRequest, researchStopFailedText, type ResearchSubject } from "./research.ts";
 import { getResearch, insertResearch, openResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
-import { changeText, compositionOf, missionPlanContent, validateBinding } from "./mission-context.ts";
+import { applySelected, coachBindingFor, coachChangeViews, coachFindingOf, coachMissionOf, coachReportMatches, coachRequest, staleLines, type CoachOwnChange, type CoachProject, type CoachSubject } from "./coach.ts";
+import { coachingsOf, getCoaching, getCoachLink, insertCoaching, markCoachingApplied, openCoachings, settleCoaching, type CoachingRecord, type CoachLink } from "./coach-store.ts";
+import { changeText, compositionOf, missionContextForTask, missionPlanContent, validateBinding } from "./mission-context.ts";
 import {
   addMissionTask as addToBacklog,
   getMission,
@@ -249,7 +257,11 @@ export interface HostOptions {
   supervisor?: Pick<SupervisorOptions, "heartbeatMs" | "shutdownGraceMs" | "eofGraceMs" | "startTimeoutMs">;
   log: (line: string) => void;
   /** Tests only: called between fetching a turn's reply and writing it, so a deletion can land there. */
-  testHooks?: { beforeProjection?(turnId: string): Promise<void> };
+  testHooks?: {
+    beforeProjection?(turnId: string): Promise<void>;
+    /** Inside the transaction that saves a coach's ticked changes, after the new version and before the applied mark: a throw here must leave neither (NIV-53). */
+    coachApplying?(coachingId: string): void;
+  };
 }
 
 /** Why a conversation can't continue once its project is gone. */
@@ -293,6 +305,11 @@ const RUN_UPLOADS_OFF = "This project doesn't allow uploading its commit to Nebi
 const RUN_KEYS_MISSING = "A task run needs your Nebius key and project id, and they aren't both set. Add them in Settings, then preview the run again.";
 /** What nothing sent means for a task run: neither service got anything. */
 const RUN_NOTHING = "nothing was uploaded and nothing reached the model";
+
+/** Why the coach can't be asked now, and what nothing sent means for a coaching (NIV-53), in the person's terms. */
+const COACH_OPEN = "The coach is still answering about this task. Wait for it, or cancel it, then ask again.";
+const COACH_NOTHING = "nothing reached the model";
+const COACH_CHANGED = "What the coach would read has changed since you opened it. Check the new preview, then ask the coach again.";
 
 /** Why a project's environment can't be prepared, and what stopped a preparation (D41), in the person's terms. */
 const PREPARE_NATIVE_WINDOWS = "Preparing an environment on Windows itself isn't available yet. Add the repository from a WSL distribution, then prepare it there.";
@@ -417,6 +434,12 @@ export class Host {
   readonly #followingAttempts = new Set<string>();
   /** The engine's own words for a run start it answered with an error, shown if its search then finds no run. */
   readonly #attemptAnswers = new Map<string, string>();
+  /** Each coaching started this session, by its id: its project (none for a task with no repository) and the sharing epoch it started under (NIV-53). */
+  readonly #coachRuns = new Map<string, { projectId: string | null; sharingEpoch: number }>();
+  /** Coachings being followed to their end. */
+  readonly #followingCoachings = new Set<string>();
+  /** The engine's own words for a coaching's start it answered with an error, shown if its search then finds no run. */
+  readonly #coachAnswers = new Map<string, string>();
   /** Attempts with a decision, or a call about their apply, out: they offer nothing until it is back (D40). */
   readonly #applyCalls = new Set<string>();
   /** Applies being followed by their request ids, never sent again (D40). */
@@ -966,19 +989,31 @@ export class Host {
    * brief no longer has a goal and a criterion goes back to draft. A completed task is reopened first.
    */
   async reviseBrief(taskId: string, revision: number, input: BriefFields): Promise<TaskView> {
+    // What needs waiting for comes first; then every check and the save, in one synchronous transaction (NIV-53).
+    const known = await this.#knownSecrets();
     const workspace = this.#workspaceDb();
-    const task = this.#taskAt(taskId, revision);
-    if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
-    this.#holdForSettling(taskId, "its brief can't change");
+    workspace.tx(() => {
+      const task = this.#taskAt(taskId, revision);
+      if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
+      this.#holdForSettling(taskId, "its brief can't change");
+      this.#reviseFrom(task, versionsOf(workspace, taskId).at(-1)!, input, known);
+    });
+    return this.task(taskId);
+  }
+
+  /**
+   * A brief's next version from the person's fields, made inside the caller's transaction (NIV-53): the fields' checks,
+   * the protection policy (D26), the parts a moved repository cleared kept marked until something is written there, and
+   * the new version with the task's change. Synchronous, so the transaction around it holds every check it makes.
+   */
+  #reviseFrom(task: TaskRecord, latest: ArtifactRecord, input: BriefFields, known: KnownSecrets): ArtifactRecord {
     const fields = this.#briefFields(input);
-    this.#refuseInBrief(task.title, fields, await this.#knownSecrets());
-    const latest = versionsOf(workspace, taskId).at(-1)!;
+    this.#refuseInBrief(task.title, fields, known);
     const before = BriefContentSchema.parse(latest.content);
     // A part marked to be written again for a new repository stays marked until something is written there.
     const revalidate = before.revalidate.filter((part) => (part === "context" ? fields.context === "" : fields.assumptions.length === 0));
     const content: BriefContent = { ...before, ...fields, revalidate };
-    this.#commitBrief(task, latest, content, { state: task.state === "ready" && !briefIsReady(content) ? "draft" : task.state });
-    return this.task(taskId);
+    return this.#commitBrief(task, latest, content, { state: task.state === "ready" && !briefIsReady(content) ? "draft" : task.state });
   }
 
   /** Takes a newer version of a plan the brief came from into its next version: the plan's text, assumptions and source. */
@@ -1007,6 +1042,8 @@ export class Host {
     const workspace = this.#workspaceDb();
     const task = this.#taskAt(taskId, revision);
     this.#holdForSettling(taskId, "it can't move to another repository");
+    // The coach reads a task as it is in its repository (NIV-53): it doesn't move while one is answering.
+    if (openCoachings(workspace, { taskId }).length) throw new Error("The coach is still answering about this task. Wait for it, or cancel it, then change its repository.");
     if (projectId !== null) this.#project(projectId);
     const latest = versionsOf(workspace, taskId).at(-1)!;
     const cleared = briefForRepository(BriefContentSchema.parse(latest.content), projectId);
@@ -1045,9 +1082,455 @@ export class Host {
       throw new Error("This task's run is still going. Cancel it, and wait for it to end, then delete the task.");
     }
     if (this.#applyOpen(taskId)) throw new Error(APPLY_OPEN);
+    if (openCoachings(workspace, { taskId }).length) throw new Error("The coach is still answering about this task. Cancel it, and wait for it to end, then delete the task.");
     // An apply its engine reported and the person hasn't settled still has an engine record and kept copies.
     if (attemptsOf(workspace, taskId).some((attempt) => this.#applyUnresolved(attemptRecord(workspace, attempt.id)))) throw new Error(SETTLE_BEFORE_DELETE);
     if (!deleteTask(workspace, taskId)) throw new Error("That task is no longer in the list.");
+  }
+
+  // The task readiness coach (NIV-53). One coaching at a time for a task, on the task's project's engine or `local`: a
+  // run link owned by the task, bound to the brief version, title, mission, findings and profile it was sent (Track B's
+  // context binding), and sent, followed and settled as a task's run is. It never changes the brief: only the person's
+  // ticked changes do, saved as a new version, from the version it read, in one synchronous transaction.
+
+  /**
+   * What a coaching of the task would send (NIV-53), worked out from its records as they are now: its latest brief and
+   * title, the gaps Nivra's own rules find, the preferences that apply, and the task's mission and findings the person
+   * ticked. Nothing is sent or stored, and no engine starts.
+   */
+  async prepareCoach(taskId: string, selection: CoachSelection): Promise<CoachPreview> {
+    return (await this.#coachRequest(taskId, selection)).preview;
+  }
+
+  /**
+   * Asks the coach about the task as the person previewed it (NIV-53). Everything is worked out again from the records
+   * as they are now and refused when its fingerprint isn't the one previewed, so a coaching sends exactly what was shown.
+   * A project's consent is checked now, again after that wait against the consent epoch, and once more when its request
+   * is out. The coaching is stored first, then sent in the background; its report is kept when it ends.
+   */
+  async startCoach(taskId: string, selection: CoachSelection, expected: string): Promise<CoachingView> {
+    const workspace = this.#workspaceDb();
+    const before = getTask(workspace, taskId);
+    const epoch = before?.projectId ? this.#epochOf(before.projectId) : 0;
+    const request = await this.#coachRequest(taskId, selection);
+    if (request.preview.blocked) throw new Error(request.preview.blocked);
+    if (request.preview.expected !== expected) throw new Error(COACH_CHANGED);
+    const { task, brief, binding, input, context, packet } = request;
+    const project = task.projectId ? this.#options.store.data.projects.find((p) => p.id === task.projectId) : undefined;
+    if (task.projectId) {
+      if (!project || this.#removing.has(project.id)) throw new Error("This task's repository was removed, so the coach wasn't asked. Choose another repository for it, or none, then ask again.");
+      if (!project.sharing.modelContext || this.#epochOf(project.id) !== epoch) throw new Error("Sharing for this task's project was turned off, so the coach wasn't asked. Allow sharing for it, then ask the coach again.");
+    }
+    // Read again just before it is stored, with no wait between: a move, a rename, a brief edit or a deletion during the
+    // waits above would otherwise go past the checks, or bind the coaching to a project the task has left.
+    const now = getTask(workspace, taskId);
+    if (!now) throw new Error("That task is no longer in the list.");
+    if (now.projectId !== task.projectId || now.title !== task.title || versionsOf(workspace, taskId).at(-1)?.id !== brief.id) throw new Error(COACH_CHANGED);
+    const id = randomUUID();
+    const coaching = {
+      id,
+      taskId,
+      briefId: brief.id,
+      briefVersion: brief.version,
+      briefSha256: brief.sha256,
+      title: task.title,
+      projectId: task.projectId,
+      binding,
+      bindingDigest: input.bindingDigest,
+      packetDigest: input.packetDigest,
+      preferencesDigest: input.preferencesDigest,
+      profile: input.profile,
+      mission: packet.mission ? { name: packet.mission.name, version: packet.mission.version } : null,
+      findings: packet.findings.length,
+      preferences: context.preferences.records.length,
+      createdAt: new Date().toISOString(),
+    };
+    const given = context.preferences.records.map(({ id: preferenceId, revision }) => ({ id: preferenceId, revision }));
+    const targetId = project?.targetId ?? "local";
+    if (!insertCoaching(workspace, coaching, { sessionId: this.#sessionId, targetId, preferences: given })) throw new Error(COACH_OPEN);
+    this.#coachRuns.set(id, { projectId: task.projectId, sharingEpoch: epoch });
+    this.#submissions.set(id, { cancel: null });
+    void this.#submitCoaching(id, targetId, input, context).catch((error: unknown) => this.#options.log(`A coaching couldn't be sent: ${errorText(error)}`));
+    return this.#coachingView(getCoaching(workspace, id)!);
+  }
+
+  /**
+   * A task's coachings, the newest first, read from the workspace. One left open by an earlier session, or with its
+   * answer lost, is followed on its own engine, which starts when needed; nothing is ever resent.
+   */
+  coachings(taskId: string): CoachingView[] {
+    const workspace = this.#workspaceDb();
+    if (!getTask(workspace, taskId)) throw new Error("That task is no longer in the list.");
+    const records = coachingsOf(workspace, taskId);
+    for (const record of records) {
+      if ((record.link.status === "submitting" || record.link.status === "running") && !this.#submissions.has(record.id)) {
+        void this.#ensure(record.link.targetId).catch(() => undefined);
+        this.#followCoaching(record.id);
+      }
+    }
+    return records.map((record) => this.#coachingView(record));
+  }
+
+  /** Stops a coaching the person no longer wants; its end is recorded as cancelled by the person. */
+  async cancelCoach(taskId: string, coachingId: string): Promise<void> {
+    const coaching = getCoaching(this.#workspaceDb(), coachingId);
+    if (!coaching || coaching.taskId !== taskId) throw new Error("That coaching is no longer here.");
+    await this.#cancelCoaching(coaching.link, "person");
+  }
+
+  /**
+   * Saves the changes the person ticked in a coaching's answer as the brief's next version (NIV-53), from the task's
+   * revision as it was read. What needs waiting for is read first; then, in one synchronous transaction, the task, the
+   * coaching and what it was bound to are read again and checked (Track B's validator, and the coach's own checks:
+   * the task's repository, the coach's profile, a save already made), the ticked changes are made to the version the
+   * coach read, all or nothing, and checked as any edit is, and the new version, the task's change and the record of
+   * what was saved are written. Anything stale refuses the save, says what changed, and changes nothing.
+   */
+  async acceptCoachChanges(taskId: string, revision: number, coachingId: string, fields: CoachField[]): Promise<TaskView> {
+    const known = await this.#knownSecrets();
+    const workspace = this.#workspaceDb();
+    workspace.tx(() => {
+      const task = this.#taskAt(taskId, revision);
+      if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
+      this.#holdForSettling(taskId, "its brief can't change");
+      const coaching = getCoaching(workspace, coachingId);
+      if (!coaching || coaching.taskId !== taskId) throw new Error("That coaching is no longer here.");
+      const blockers = this.#coachBlockers(coaching);
+      if (blockers.length) throw new Error(blockers.join(" "));
+      const latest = versionsOf(workspace, taskId).at(-1)!;
+      if (latest.id !== coaching.briefId || latest.sha256 !== coaching.briefSha256) throw new Error(staleLines([{ kind: "brief-changed", taskId, title: task.title, from: coaching.briefVersion, to: latest.version }], []).join(" "));
+      const report = CoachReport.parse(coaching.report);
+      const saved = this.#reviseFrom(task, latest, applySelected(BriefContentSchema.parse(latest.content), report, fields), known);
+      this.#options.testHooks?.coachApplying?.(coachingId);
+      if (!markCoachingApplied(workspace, coachingId, saved.id, fields, new Date().toISOString())) throw new Error("Changes from this coaching were saved already, so nothing new was saved.");
+    });
+    return this.task(taskId);
+  }
+
+  /**
+   * Everything a coaching of the task would be, worked out from the records as they are now: the context binding (the
+   * task's latest brief and title, the mission and findings the person ticked, the coach's profile), the preview, and
+   * the run's input and context. A finding or mission ticked that is no longer the task's is refused.
+   */
+  async #coachRequest(taskId: string, selection: CoachSelection) {
+    const workspace = this.#workspaceDb();
+    const task = getTask(workspace, taskId);
+    if (!task) throw new Error("That task is no longer in the list.");
+    const brief = versionsOf(workspace, taskId).at(-1)!;
+    const content = BriefContentSchema.parse(brief.content);
+    const record = task.projectId ? this.#options.store.data.projects.find((p) => p.id === task.projectId) : undefined;
+    const project: CoachProject =
+      task.projectId === null ? { kind: "none" } : !record || this.#removing.has(record.id) ? { kind: "removed" } : { kind: "project", projectId: record.id, targetId: record.targetId, label: record.label, targetLabel: this.#labelOf(record.targetId), modelSharing: record.sharing.modelContext };
+    // The task's mission and the findings about it (Track B's records), for the person to tick: nothing goes unless ticked.
+    const found = missionContextForTask(workspace, taskId);
+    const options: CoachPreview["options"] = {
+      mission: found.mission ? { name: found.mission.content.name, version: found.mission.ref.version } : null,
+      findings: found.findings.map((finding) => ({ reviewId: finding.ref.reviewId, findingId: finding.ref.findingId, title: finding.finding.title, reviewedBriefVersion: finding.reviewed.briefVersion })),
+    };
+    if (selection.findings.length > 3) throw new Error("Tick at most three findings, then ask the coach.");
+    if (new Set(selection.findings.map((ref) => `${ref.reviewId} ${ref.findingId}`)).size !== selection.findings.length) throw new Error("Tick each finding once, then ask the coach.");
+    const ticked = selection.findings.map((ref) => {
+      const finding = found.findings.find((one) => one.ref.reviewId === ref.reviewId && one.ref.findingId === ref.findingId);
+      if (!finding) throw new Error("A finding you ticked is no longer about this task. Check the new preview, then ask the coach again.");
+      return finding;
+    });
+    if (selection.mission && !found.mission) throw new Error("This task is no longer in a mission. Check the new preview, then ask the coach again.");
+    const mission = selection.mission ? found.mission : null;
+    const subject: CoachSubject = { taskId, title: task.title, brief: { id: brief.id, version: brief.version, sha256: brief.sha256, content }, project };
+    const binding = coachBindingFor(subject, mission?.ref ?? null, ticked.map((finding) => finding.ref), { version: COACH_PROFILE.version });
+    const busy = task.state === "completed" ? "This task is completed. Reopen it to ask the coach about it." : openCoachings(workspace, { taskId }).length ? COACH_OPEN : null;
+    const result = await coachRequest(subject, {
+      known: await this.#knownSecrets(),
+      preferences: snapshotFor(this.#options.store.data, project.kind === "project" ? task.projectId : null),
+      binding,
+      busy,
+      options,
+      selection,
+      mission: mission ? coachMissionOf(mission.ref, mission.content) : null,
+      findings: ticked.map(coachFindingOf),
+      profile: { id: COACH_PROFILE.id, version: COACH_PROFILE.version, name: SPECIALISTS["task-readiness-coach"].name },
+    });
+    return { ...result, task, brief, binding };
+  }
+
+  /**
+   * What stops a coaching's changes from being saved now, in the person's words; empty when nothing does. Track B's
+   * validator (the brief, the title, the mission, the task's membership and the findings, as sent), then the coach's own:
+   * the task's repository, the coach's profile, a save already made, an answer that wasn't usable. Synchronous, so the
+   * save's transaction runs it.
+   */
+  #coachBlockers(coaching: CoachingRecord): string[] {
+    const workspace = this.#workspaceDb();
+    const own: CoachOwnChange[] = [];
+    const task = getTask(workspace, coaching.taskId);
+    if (task && task.projectId !== coaching.projectId) own.push("project-changed");
+    if (coaching.profile.id !== COACH_PROFILE.id || coaching.profile.version !== COACH_PROFILE.version) own.push("profile-changed");
+    if (coaching.applied) own.push("applied");
+    const report = coaching.report ? CoachReport.safeParse(coaching.report) : null;
+    if (coaching.link.status !== "answered" || !report?.success || report.data.outcome !== "complete") own.push("not-complete");
+    if (!coaching.binding) return staleLines([], [...own, "unreadable"]);
+    return staleLines(validateBinding(workspace, coaching.binding), own);
+  }
+
+  /** A coaching as the window shows it: its record, its report, its changes before and after, and what stops a save. */
+  #coachingView(record: CoachingRecord): CoachingView {
+    const workspace = this.#workspaceDb();
+    const latest = versionsOf(workspace, record.taskId).at(-1);
+    const parsed = record.report ? CoachReport.safeParse(record.report) : null;
+    const report = parsed?.success ? parsed.data : null;
+    const answered = record.link.status === "answered" && report?.outcome === "complete";
+    // A save is offered only from an answer with changes, never once made; what stops it is said line by line.
+    const stale = answered && !record.applied && report.changes.length > 0 ? this.#coachBlockers(record) : [];
+    const blocked = record.applied ? "Changes from this answer were saved already." : stale.length ? "These suggestions are for a task that has changed since, so they can't be saved." : null;
+    const base = getArtifact(workspace, record.briefId);
+    const changes = report && base ? coachChangeViews(BriefContentSchema.parse(base.content), report, blocked) : [];
+    // A preference changed since doesn't stop a save: the answer was made with the ones it lists.
+    const now = snapshotFor(this.#options.store.data, record.projectId).records.map(({ id, revision }) => `${id}:${revision}`).sort();
+    const then = record.link.preferences.map(({ id, revision }) => `${id}:${revision}`).sort();
+    const notes = answered && JSON.stringify(now) !== JSON.stringify(then) ? ["Your preferences changed since the coach read them: its suggestions don't reflect the change."] : [];
+    const appliedBrief = record.applied ? getArtifact(workspace, record.applied.briefId) : null;
+    const engine = this.#engines.get(record.link.targetId);
+    const open = record.link.status === "submitting" || record.link.status === "running";
+    return {
+      id: record.id,
+      taskId: record.taskId,
+      briefVersion: record.briefVersion,
+      latestVersion: latest?.version ?? record.briefVersion,
+      status: record.link.status,
+      note: coachNote(record.link),
+      unresolved: open && engine?.supervisor.state.status !== "online" ? `The engine on ${this.#labelOf(record.link.targetId)} isn't running, so this coaching can't be checked now.` : null,
+      runId: record.link.runId,
+      cancelRequested: record.link.cancelRequested,
+      profile: record.profile,
+      sent: { mission: record.mission, findings: record.findings, preferences: record.preferences },
+      report,
+      changes,
+      stale,
+      notes,
+      applied: record.applied ? { briefVersion: appliedBrief?.version ?? 0, fields: record.applied.fields as CoachField[], at: record.applied.at } : null,
+      createdAt: record.createdAt,
+      settledAt: record.link.settledAt,
+    };
+  }
+
+  /** Why a coaching should stop: asked for meanwhile, or its project removed, or its sharing withdrawn since it started. */
+  #coachStopReason(coachingId: string): CancelReason | null {
+    const asked = this.#submissions.get(coachingId)?.cancel ?? null;
+    if (asked) return asked;
+    const run = this.#coachRuns.get(coachingId);
+    if (!run || run.projectId === null) return null;
+    const project = this.#options.store.data.projects.find((p) => p.id === run.projectId);
+    if (!project || this.#removing.has(project.id)) return "removal";
+    if (!project.sharing.modelContext || this.#epochOf(project.id) !== run.sharingEpoch) return "sharing";
+    return null;
+  }
+
+  /**
+   * Sends a stored coaching (NIV-53), as a task's run is sent: the request is written only after the engine's store is
+   * recorded with it, so one with none was never sent. A failure known to come before writing is "not sent"; anything
+   * after it leaves the coaching to be found by its request id, never sent again.
+   */
+  async #submitCoaching(id: string, targetId: string, input: CoachInput, context: CoachContext): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const label = this.#labelOf(targetId);
+    const settle = (outcome: Parameters<typeof settleCoaching>[2]) => {
+      if (this.#workspace.state === "ready") settleCoaching(this.#workspace.db, id, outcome, null, new Date().toISOString());
+    };
+    const stopped = (): boolean => {
+      const reason = this.#coachStopReason(id);
+      if (reason) requestCancel(workspace, id, reason);
+      return reason !== null;
+    };
+    const notSent = (why: string) => {
+      this.#submissions.delete(id);
+      settle({ status: "not-sent", errorMessage: why });
+    };
+    let engine: Engine;
+    try {
+      engine = await this.#ensure(targetId);
+      if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
+    } catch (error) {
+      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so the coach wasn't asked and ${COACH_NOTHING}.`);
+      return;
+    }
+    const state = engine.supervisor.state;
+    if (state.status !== "online") {
+      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so the coach wasn't asked and ${COACH_NOTHING}.`);
+      return;
+    }
+    if (stopped()) {
+      this.#submissions.delete(id);
+      settle({ status: "cancelled", errorMessage: `It was stopped before it was sent, so ${COACH_NOTHING}.` });
+      return;
+    }
+    // Deleted or ended meanwhile: nothing to send.
+    if (!setTurnHome(workspace, id, state.info.homeId)) {
+      this.#submissions.delete(id);
+      return;
+    }
+    let run: RunSummary;
+    try {
+      run = await engine.supervisor.call("runs.start", { clientRequestId: id, workflowId: "coach", input, context });
+    } catch (error) {
+      // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
+      if (error instanceof EngineOfflineError || error instanceof TypeError) {
+        notSent(`The engine on ${label} didn't take the coaching (${errorText(error)}), so ${COACH_NOTHING}.`);
+        return;
+      }
+      this.#options.log(`A coaching's request got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
+      // An error answer is the engine's own words: shown if the search then finds no run.
+      if (error instanceof RpcCallError) this.#coachAnswers.set(id, errorText(error));
+      this.#submissions.delete(id);
+      this.#followCoaching(id);
+      return;
+    }
+    this.#runs.set(run.id, targetId);
+    recordRun(workspace, id, run.id);
+    // Stopped while the request was out (a cancel, consent withdrawn, the project removed): the run stops now.
+    const late = stopped();
+    this.#submissions.delete(id);
+    if (late) await engine.supervisor.call("runs.cancel", { runId: run.id }).catch((error: unknown) => this.#options.log(`A coaching stopped while it was being sent couldn't be cancelled: ${errorText(error)}`));
+    this.#followCoaching(id);
+  }
+
+  /**
+   * Follows an open coaching to its end on its own engine, as a task's run is followed, however it was left. No store
+   * recorded: never sent. Another store: unknown. No run id: found by its request id, and absent from the same store,
+   * never sent. A run: followed until it ends, then its end and its report recorded.
+   */
+  #followCoaching(id: string): void {
+    if (this.#followingCoachings.has(id) || this.#submissions.has(id)) return;
+    this.#followingCoachings.add(id);
+    void (async () => {
+      let delay = 400;
+      let cancelSent = false;
+      try {
+        while (!this.#closing && this.#workspace.state === "ready") {
+          const workspace = this.#workspace.db;
+          const link = getCoachLink(workspace, id);
+          if (!link || (link.status !== "submitting" && link.status !== "running")) return;
+          const settle = (outcome: Parameters<typeof settleCoaching>[2]) => settleCoaching(workspace, id, outcome, null, new Date().toISOString());
+          if (link.homeId === null) {
+            settle({ status: "not-sent", errorMessage: `Nivra stopped before asking the coach, so ${COACH_NOTHING}.` });
+            return;
+          }
+          const engine = this.#engines.get(link.targetId);
+          const state = engine?.supervisor.state;
+          if (engine && state?.status === "online") {
+            if (state.info.homeId !== link.homeId) {
+              settle({ status: "unknown", errorMessage: `it went to an engine whose records aren't here (another engine home on ${this.#labelOf(link.targetId)})` });
+              return;
+            }
+            try {
+              let summary: RunSummary | null;
+              if (link.runId) summary = await engine.supervisor.call("runs.get", { runId: link.runId });
+              else {
+                summary = await engine.supervisor.call("runs.find", { clientRequestId: id });
+                if (!summary) {
+                  const answered = this.#coachAnswers.get(id);
+                  settle({ status: "not-sent", errorMessage: answered ? `The engine didn't start the coaching, so ${COACH_NOTHING}. ${answered}` : `Its engine has no record of the coaching, so it never ran: ${COACH_NOTHING}.` });
+                  return;
+                }
+                this.#runs.set(summary.id, link.targetId);
+                recordRun(workspace, id, summary.id);
+              }
+              if (isTerminal(summary.status)) {
+                await this.#finishCoaching(link, engine, summary);
+                return;
+              }
+              if (link.cancelRequested && !cancelSent) {
+                cancelSent = true;
+                // A cancel its engine turned down is tried again on the next look, never left for the run to outlast.
+                await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch((error: unknown) => {
+                  cancelSent = false;
+                  this.#options.log(`A coaching couldn't be cancelled yet, so Nivra tries again: ${errorText(error)}`);
+                });
+              }
+              delay = 400;
+            } catch (error) {
+              if (isRunNotFound(error)) {
+                settle({ status: "unknown", errorMessage: `the engine on ${this.#labelOf(link.targetId)} has no record of its run any more` });
+                return;
+              }
+              delay = Math.min(delay * 2, 5_000);
+            }
+          } else {
+            delay = Math.min(delay * 2, 5_000);
+          }
+          await pause(delay);
+        }
+      } catch (error) {
+        this.#options.log(`Following a coaching stopped: ${errorText(error)}`);
+      } finally {
+        this.#followingCoachings.delete(id);
+        this.#coachAnswers.delete(id);
+      }
+    })();
+  }
+
+  /**
+   * Records how a coaching's run ended, with the report its engine saved, masked again. A report that isn't the one this
+   * coaching asked for (another task, brief version, fingerprint, profile, request or run) is kept nowhere, and its end is
+   * unknown. One that ended short is kept with how it ended: a failed, cancelled or interrupted answer stays readable.
+   */
+  async #finishCoaching(link: CoachLink, engine: Engine, summary: RunSummary): Promise<void> {
+    const coaching = getCoaching(this.#workspaceDb(), link.id);
+    if (!coaching) return;
+    const known = await this.#knownSecrets();
+    const end = (outcome: Parameters<typeof settleCoaching>[2], report: CoachReport | null) => {
+      if (this.#workspace.state === "ready") settleCoaching(this.#workspace.db, link.id, outcome, report, new Date().toISOString());
+    };
+    const report = await engine.supervisor.call("runs.coach", { runId: summary.id });
+    if (report && !coachReportMatches(report, coaching, summary.id, coaching.id)) {
+      end({ status: "unknown", errorMessage: "its engine's report is about something other than what this coaching sent, so none of it was kept" }, null);
+      return;
+    }
+    const kept = report ? maskValue(report, known) : null;
+    if (summary.status === "succeeded") {
+      if (kept?.outcome === "complete") end({ status: "answered" }, kept);
+      else end({ status: "unknown", errorMessage: "its run finished, but its engine has no complete report stored for it" }, null);
+      return;
+    }
+    if (summary.status === "cancelled") {
+      end({ status: getCoachLink(this.#workspaceDb(), link.id)?.cancelReason ? "cancelled" : "interrupted" }, kept);
+      return;
+    }
+    const { interrupted, kind } = await this.#failureOf(engine, summary.id);
+    end(interrupted ? { status: "interrupted" } : { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The coaching failed.", known) }, kept);
+  }
+
+  /**
+   * Stops a coaching for `reason`. One being sent stops at its own check; one whose run isn't known yet once it is found.
+   * A stop its engine turns down is taken back and thrown, so the caller can say it couldn't stop it.
+   */
+  async #cancelCoaching(link: CoachLink, reason: CancelReason): Promise<void> {
+    if (link.status !== "submitting" && link.status !== "running") return;
+    const workspace = this.#workspaceDb();
+    requestCancel(workspace, link.id, reason);
+    const pending = this.#submissions.get(link.id);
+    if (pending) pending.cancel ??= reason;
+    if (link.runId) {
+      await this.cancelRun(link.runId).catch((error: unknown) => {
+        withdrawCancel(workspace, link.id, reason);
+        throw error;
+      });
+    } else if (!pending) this.#followCoaching(link.id);
+  }
+
+  /**
+   * Stops the coachings of a project's tasks for `reason`, from the workspace's records, whichever session started
+   * them; says through `refusal` when it couldn't. One whose engine isn't online, and isn't being sent, isn't going any
+   * more (D4): its stop is recorded, and nothing is sent.
+   */
+  async #stopProjectCoachings(projectId: string, reason: CancelReason, refusal: (why: string) => string): Promise<void> {
+    if (this.#workspace.state !== "ready") return;
+    const workspace = this.#workspace.db;
+    const open = openCoachings(workspace, { projectId }).map((coaching) => coaching.link);
+    const going = (link: CoachLink) => this.#submissions.has(link.id) || this.#engines.get(link.targetId)?.supervisor.state.status === "online";
+    for (const link of open.filter((one) => !going(one))) requestCancel(workspace, link.id, reason);
+    const results = await Promise.allSettled(open.filter(going).map((link) => this.#cancelCoaching(link, reason)));
+    const failed = results.flatMap((result) => (result.status === "rejected" ? [errorText(result.reason)] : []));
+    if (failed.length) throw new Error(refusal(failed[0]!));
   }
 
   /**
@@ -1667,12 +2150,13 @@ export class Host {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
       const withdraw = this.#markProjectTurns(projectId, "sharing");
       // Every stop is tried, whatever another's fate, and then any that failed is reported (D39).
-      const [runs, attempts] = await Promise.allSettled([
+      const [runs, attempts, coachings] = await Promise.allSettled([
         this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`),
         this.#stopProjectAttempts(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
+        this.#stopProjectCoachings(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop the coach answering about one of its tasks (${why}). Restart the project's engine to stop it.`),
       ]);
       if (runs.status === "rejected") withdraw();
-      const failed = [runs, attempts].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      const failed = [runs, attempts, coachings].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
     }
     return this.#view(this.#project(projectId));
@@ -1934,6 +2418,7 @@ export class Host {
         stopCheck(),
         this.#stopProjectAttempts(projectId, "removal", (why) => `Nivra couldn't stop the project's task run (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
         this.#stopProjectPreparations(projectId, "removal", (why) => `Nivra couldn't stop the preparation of the project's environment (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
+        this.#stopProjectCoachings(projectId, "removal", (why) => `Nivra couldn't stop the coach answering about one of the project's tasks (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
       ]);
       const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
@@ -4079,12 +4564,13 @@ export class Host {
   }
 
   /** A new brief version and the task's change, in one transaction, from the versions the person saw. */
-  #commitBrief(task: TaskRecord, latest: ArtifactRecord, content: BriefContent, change: Partial<Pick<TaskRecord, "projectId" | "state">>): void {
+  #commitBrief(task: TaskRecord, latest: ArtifactRecord, content: BriefContent, change: Partial<Pick<TaskRecord, "projectId" | "state">>): ArtifactRecord {
     const workspace = this.#workspaceDb();
     const now = new Date().toISOString();
-    workspace.tx(() => {
+    return workspace.tx(() => {
       const brief = insertArtifact(workspace, { id: randomUUID(), kind: "brief", lineageId: task.id, content: BriefContentSchema.parse(content), conversationId: null, taskId: task.id, messageId: null, runLinkId: null, derivedFrom: latest.id, createdAt: now }, latest.version);
       if (!brief || !updateTask(workspace, task.id, task.revision, change, now)) throw new Error("This task changed since you opened it. Open it again, then try again.");
+      return brief;
     });
   }
 
@@ -4369,6 +4855,30 @@ function applyUnsettled(record: AttemptDecisionRecord): boolean {
   const apply = record.apply;
   if (record.decision !== "approved" || !apply || apply.note !== null) return false;
   return !apply.view || apply.view.status === "claimed" || apply.view.status === "writing";
+}
+
+/** What happened to a coaching that ended without a complete answer, in Nivra's words; null while it goes, or once answered. */
+function coachNote(link: CoachLink): string | null {
+  switch (link.status) {
+    case "failed":
+      return `${link.errorMessage ?? "The coaching failed."} Nothing was resent, and your brief is unchanged.`;
+    case "cancelled":
+      return link.cancelReason === "sharing"
+        ? "Stopped: sharing for this task's project was turned off. Nothing was resent, and your brief is unchanged."
+        : link.cancelReason === "removal"
+          ? "Stopped: the task's project was removed. Nothing was resent, and your brief is unchanged."
+          : link.errorMessage
+            ? `Cancelled. ${link.errorMessage}`
+            : "Cancelled. Nothing was resent, and your brief is unchanged.";
+    case "interrupted":
+      return "Interrupted: Nivra or its engine stopped before the coach answered. Nothing was resent, and your brief is unchanged. Ask the coach again if you want an answer.";
+    case "not-sent":
+      return `Not sent: ${link.errorMessage ?? "nothing reached the model."} Ask the coach again when you're ready.`;
+    case "unknown":
+      return `Nivra can't tell how this coaching ended: ${link.errorMessage ?? "its engine can't say"}. Nothing was resent, and your brief is unchanged. Ask the coach again if you want an answer.`;
+    default:
+      return null;
+  }
 }
 
 function attemptNote(attempt: AttemptRecord): string | null {

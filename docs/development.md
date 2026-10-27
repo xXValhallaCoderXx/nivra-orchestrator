@@ -577,6 +577,43 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-reco
   `~/nivra-work/she65/task-live.json`), with any `review` points: what the person checks in the proposal that its
   tests can't show, which the recipe binds and lists. Nothing in the script names a repository.
 
+The task readiness coach (NIV-53, D43): what a brief is missing, worked out without a model; one bounded coach call
+when the person asks; and only the changes they tick, saved as the next brief version. The engine's half is checked in
+process and over stdio, the host's against real engines and a stub, and the window's in the built app against
+stand-ins. A packaged app ignores the stub switches, so there only the coach's checks that need no stand-in run: no
+key, no sharing, and nothing else reached.
+
+```bash
+(cd apps/engine && node --test test/coach.test.ts test/coach-units.test.ts test/coach-answers.test.ts)
+(cd apps/desktop && node --test test/host-coach.test.ts test/coach.test.ts test/coach-store.test.ts test/task-guidance.test.ts test/coach-shared.test.ts)
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-coach.spec.ts
+```
+
+- **`rpc.ts` fills in** a coaching's packet and preferences fingerprints, a task and a brief, a binding naming them, and
+  the coach's profile, when they are left out; after `--follow` it prints the report. Pass a home of its own, never
+  `~/.nivra-dev`, and a stand-in with a test key in `NEBIUS_API_KEY`:
+  `pnpm rpc runs.start '{"workflowId":"coach","context":{"packet":{…}}}' --follow --token-factory-url http://127.0.0.1:<port>/v1 --home ~/.nivra-dev-niv53/<check>`.
+- **Stand-ins.** `stub-token-factory.ts` plays the coach, told apart by `Nivra coach role: task-readiness-coach` on the
+  first line of its instructions. Its tool is `submit_coaching`. The gated engine (`test/fixtures/gated-engine.mjs`)
+  plays a coaching too: `runs.start` records it in `coaches.log`, and `runs.coach` answers with a report bound to it.
+- **The engine's parts** (`apps/engine/src/coach/`):
+  - `prompt.ts`: the instructions, whose hash a test pins to the profile's version;
+  - `answers.ts`: the lenient form and the strict pass that sets aside and counts what doesn't fit;
+  - `run.ts`: the one request;
+  - `task.ts`: the stored input, and `asEnded`;
+  - `workflows/coach.ts` holds the steps.
+- **The host's parts** (`apps/desktop/src/main/`):
+  - `coach.ts`: the packet, the preview's fingerprint, the report check, the change views, the ticked changes and the
+    stale words;
+  - `coach-store.ts`: the coachings table's functions (workspace migration 7);
+  - the coach's block in `host.ts`.
+  - In `src/shared/`: `task-guidance.ts` holds the rules without a model, and `coach.ts` the views and
+    `applyCoachChange`.
+- **A test hook,** `coachApplying`, runs inside the transaction that saves a coach's ticked changes, after the new
+  version and before the applied mark. The host's test throws there to show that both or neither are kept.
+- **Track B's seam** (D42): `validateBinding` runs inside that transaction; `missionContextForTask` lists a task's
+  mission and the findings about it for the person to tick.
+
 ## Where things will live
 
 | What | Where |

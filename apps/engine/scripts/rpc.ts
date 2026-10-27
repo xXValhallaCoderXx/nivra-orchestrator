@@ -47,6 +47,11 @@
 // run's checkout:
 //   pnpm rpc task.apply '{"runId":"<uuid>"}'
 //   pnpm rpc task.dismiss '{"applyId":"<uuid>","as":"accepted"}'
+// A coaching of one task (NIV-53) needs its packet; without the rest of its context it has no preferences and no
+// consent to share a project's material. Its fingerprints, a task and brief, a binding naming them, and the coach's
+// profile are filled in when they are left out; after --follow, its report is printed. Against a stand-in for Token
+// Factory, pass --token-factory-url, and always a home of its own:
+//   pnpm rpc runs.start '{"workflowId":"coach","context":{"packet":{"scope":{"kind":"general"},"task":{…},"gaps":[],"mission":null,"findings":[]}}}' --follow --token-factory-url http://127.0.0.1:<port>/v1 --home ~/.nivra-dev-niv53/<check>
 //
 // The home defaults to ~/.nivra-dev (D7), never the installed app's. NEBIUS_API_KEY, NEBIUS_PROJECT_ID and
 // TAVILY_API_KEY, when set, are passed to the engine in `initialize`, the way the app does it (D8).
@@ -57,6 +62,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
+  bindingDigest,
+  COACH_PROFILE,
+  coachPacketDigest,
   isMethodName,
   isTerminal,
   LineSplitter,
@@ -69,6 +77,7 @@ import {
   RpcCallError,
   RpcClient,
   taskBriefDigest,
+  type CoachPacket,
   type MethodName,
   type MissionReviewPacket,
   type TaskBrief,
@@ -117,6 +126,22 @@ if (task) {
   const context = { sharing: { modelContext: false, cloudExecution: false }, ...given };
   const input: Record<string, unknown> = { project: randomUUID(), target: "local", taskId: randomUUID(), briefVersion: 1, ...(params["input"] as Record<string, unknown>) };
   if (context.brief && input["briefDigest"] === undefined) input["briefDigest"] = await taskBriefDigest(context.brief);
+  params = { ...params, input, context };
+}
+// A coaching without the rest of its context: no preferences, and no consent to share a project's material (NIV-53).
+// A task, a brief and a binding naming them, the coach's profile, and the packet's and preferences' fingerprints are
+// filled in when the request leaves them out. The engine checks the packet's against the packet it carries.
+if (method === "runs.start" && params["workflowId"] === "coach") {
+  const given = (params["context"] ?? {}) as { preferences?: { revision: number; records: Parameters<typeof preferencesDigest>[0] }; sharing?: unknown; packet?: CoachPacket };
+  const context = { preferences: { revision: 0, records: [] }, sharing: { modelContext: false }, ...given };
+  const packet = context.packet;
+  const input: Record<string, unknown> = { taskId: randomUUID(), briefId: randomUUID(), briefVersion: packet?.task.briefVersion ?? 1, profile: { ...COACH_PROFILE }, ...(params["input"] as Record<string, unknown> | undefined) };
+  if (packet && input["packetDigest"] === undefined) input["packetDigest"] = await coachPacketDigest(packet);
+  if (input["preferencesDigest"] === undefined) input["preferencesDigest"] = await preferencesDigest(context.preferences.records);
+  if (input["bindingDigest"] === undefined) {
+    const brief = { taskId: String(input["taskId"]), briefId: String(input["briefId"]), briefVersion: Number(input["briefVersion"]), briefSha256: String(input["packetDigest"] ?? "0".repeat(64)), title: packet?.task.title ?? "A task" };
+    input["bindingDigest"] = await bindingDigest({ mission: null, tasks: [brief], findings: [], specialists: [{ id: COACH_PROFILE.id, version: COACH_PROFILE.version }] });
+  }
   params = { ...params, input, context };
 }
 const sandbox = method === "runs.start" && params["workflowId"] === "sandbox";
@@ -223,6 +248,7 @@ try {
         if ((result as { workflowId?: string }).workflowId === "sandbox") console.log(JSON.stringify(await client.call("runs.sandbox", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "research") console.log(JSON.stringify(await client.call("runs.research", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "environment") console.log(JSON.stringify(await client.call("runs.environment", { runId }), null, 2));
+        if ((result as { workflowId?: string }).workflowId === "coach") console.log(JSON.stringify(await client.call("runs.coach", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "task") {
           console.log(JSON.stringify(await client.call("runs.task", { runId }), null, 2));
           console.log(JSON.stringify(await client.call("runs.proposal", { runId }), null, 2));

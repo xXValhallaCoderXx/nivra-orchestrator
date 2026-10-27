@@ -13,10 +13,12 @@ import { _electron as electron, expect, test, type ElectronApplication, type Pag
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_API = [
+  "acceptCoachChanges",
   "addMissionTask",
   "addPreference",
   "addProject",
   "approveTaskChange",
+  "cancelCoach",
   "cancelMissionReview",
   "cancelPreparation",
   "cancelResearch",
@@ -49,6 +51,7 @@ const EXPECTED_API = [
   "getWsl",
   "importPreferences",
   "keepSuggestion",
+  "listCoachings",
   "listConversations",
   "listEngines",
   "listMissions",
@@ -61,6 +64,7 @@ const EXPECTED_API = [
   "openConversation",
   "openMission",
   "openProject",
+  "prepareCoach",
   "prepareEnvironment",
   "prepareMissionReview",
   "prepareResearch",
@@ -96,6 +100,7 @@ const EXPECTED_API = [
   "setTavilyKey",
   "setWebResearch",
   "settleTaskChange",
+  "startCoach",
   "startExplain",
   "startHello",
   "startMissionReview",
