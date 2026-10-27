@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ApplyParams, ApplyResolution, ApplyView } from "./apply.ts";
 import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
+import { CoachContext, CoachInput, CoachReport } from "./coach.ts";
 import { RunContext } from "./context.ts";
 import { EnvironmentContext, EnvironmentInput, EnvironmentPreview, EnvironmentReport, EnvironmentSpec, TaskEnvironment } from "./environment.ts";
 import { ExplainResult } from "./explain.ts";
@@ -96,6 +97,9 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: TaskContext, workflowId: z.literal("task"), input: TaskInput }),
   // An environment's preparation carries its upload consent and the spec the person chose (D41): no model is involved.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: EnvironmentContext, workflowId: z.literal("environment"), input: EnvironmentInput }),
+  // A coaching of one task carries its frozen packet, the preferences and the project's model sharing (NIV-53), held in
+  // memory like the snapshot: the run stores ids and fingerprints only.
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: CoachContext, workflowId: z.literal("coach"), input: CoachInput }),
 ]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
@@ -200,6 +204,11 @@ export const Methods = {
    * interrupted. Null until there is one.
    */
   "runs.task": { params: z.strictObject({ runId: RunId }), result: TaskReport.nullable() },
+  /**
+   * A coaching's report (NIV-53), whatever the run's status. A report the engine saved before it stopped reads as
+   * interrupted. Null until there is one.
+   */
+  "runs.coach": { params: z.strictObject({ runId: RunId }), result: CoachReport.nullable() },
   /**
    * An environment's preparation report (D41), whatever the run's status. A report the engine saved before it stopped
    * reads as interrupted. Null until there is one.

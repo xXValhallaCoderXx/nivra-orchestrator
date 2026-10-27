@@ -17,6 +17,9 @@ import {
   type CoachPacket as Packet,
 } from "../src/coach.ts";
 import * as domain from "../src/index.ts";
+import { Methods, StartRunParams } from "../src/methods.ts";
+import { PROTOCOL_VERSION } from "../src/protocol.ts";
+import { WorkflowId } from "../src/runs.ts";
 
 /** The task readiness coach's contract (NIV-53): what it reads, how that is fingerprinted, and what its report can hold. */
 const PACKET: Packet = {
@@ -234,6 +237,23 @@ describe("a coach run's input and report (NIV-53)", () => {
     assert.ok(coachEstimatedInputTokens(brief + context + 4_000, ["Prefer small PRs"]) <= COACH_RUN_LIMITS.estimatedInputTokens);
     // Past the budget the estimate says so, and the preview refuses it, naming what to shorten.
     assert.ok(coachEstimatedInputTokens(3 * COACH_RUN_LIMITS.estimatedInputTokens, []) > COACH_RUN_LIMITS.estimatedInputTokens);
+  });
+
+  it("starts as a run of its own, with its packet in the context and only ids and fingerprints in its input (protocol 13)", () => {
+    const params = { clientRequestId: randomUUID(), workflowId: "coach", input: input(), context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false }, packet: PACKET } };
+    const parsed = StartRunParams.parse(params);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("coach"), PROTOCOL_VERSION], ["coach", "coach", 13]);
+    const refused = [
+      { ...params, input: { ...params.input, packet: PACKET } },
+      { ...params, context: { ...params.context, packet: { ...PACKET, task: { ...PACKET.task, repoPath: "/repo" } } } },
+      { ...params, context: { ...params.context, sharing: { modelContext: true, cloudExecution: true } } },
+      { ...params, workflowId: "review" },
+    ];
+    assert.deepEqual(
+      refused.map((value) => StartRunParams.safeParse(value).success),
+      refused.map(() => false),
+    );
+    assert.equal(Methods["runs.coach"].result.safeParse(null).success, true);
   });
 
   it("is exported from the domain", () => {
