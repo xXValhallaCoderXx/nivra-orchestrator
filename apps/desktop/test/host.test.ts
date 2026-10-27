@@ -2870,7 +2870,7 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     return { taskId: task.summary.id, attemptId: started.id, done: await ended(host, task.summary.id, started.id) };
   }
 
-  it("applies a verified change approved by its hash on its run's engine: written unstaged, accepted, the task completed and the copies gone", async () => {
+  it("applies a verified change approved by its hash on its run's engine: written unstaged, accepted, the task completed and the original kept", async () => {
     const { host, ids, repo } = await applyHost();
     const { taskId, attemptId, done } = await ranTask(host, ids[0]!);
     assert.deepEqual([done.status, done.report?.verified, done.actions, done.decision, done.apply], ["answered", true, ["approve", "reject", "revise"], null, null]);
@@ -2889,7 +2889,9 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     await assert.rejects(host.approveTaskChange(taskId, attemptId, done.proposal!.hash), /A decision on this change is already recorded/);
     const accepted = await host.settleTaskChange(taskId, attemptId, "accepted");
     assert.deepEqual([accepted.apply?.resolution, accepted.acceptedAt !== null, accepted.actions, host.task(taskId).summary.state], ["accepted", true, [], "completed"]);
-    assert.deepEqual([existsSync(recovery), git(repo, ["status", "--porcelain"])], [false, " M greet.sh\n"]);
+    // The original stays in the recovery folder, in case a program that had it open saves into it; Nivra's own copy, a
+    // second name for the file in place, goes.
+    assert.deepEqual([readdirSync(recovery), git(repo, ["status", "--porcelain"])], [["orig-0"], " M greet.sh\n"]);
   });
 
   it("rejects a change without sending anything, and asks for a revision in a new brief version that the next run takes", async () => {
