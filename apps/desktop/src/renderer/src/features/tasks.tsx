@@ -666,7 +666,7 @@ export function TaskDetail({
           <Stack gap="sm">
             <BriefInputs draft={draft} onChange={setDraft} />
             <Group justify="flex-end" gap="sm">
-              <Button variant="default" onClick={stopEdit} disabled={busy}>
+              <Button variant="default" onClick={stopEdit} disabled={busy} data-testid="task-brief-cancel">
                 Cancel
               </Button>
               <Button onClick={() => void saveEdit((from) => window.nivra.reviseBrief(taskId, from, fieldsOf(draft)))} loading={busy} data-testid="task-brief-save">

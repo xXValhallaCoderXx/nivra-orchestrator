@@ -668,7 +668,8 @@ describe("a project's environment (D41)", () => {
     v5.close();
 
     const migrated = ready(path);
-    assert.equal(migrated.schemaVersion, 6);
+    // On to the latest: v6, then v7 (coachings, NIV-53), which changes none of these tables.
+    assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
     assert.deepEqual(dump(migrated.db.db), before);
     const count = (table: string) => Number(migrated.db.db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
     assert.deepEqual([count("missions"), count("mission_versions"), count("mission_tasks")], [0, 0, 0]);
