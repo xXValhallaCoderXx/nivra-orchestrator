@@ -9,7 +9,8 @@ import { after, describe, it } from "node:test";
 import { gunzipSync } from "node:zlib";
 import { BoundaryUnavailableError, ExecRefusedError, ExecUncertainError, SessionOpenError, type ExecRequest, type ExecutionSession, type SessionSpec } from "../src/exec/backend.ts";
 import type { Transport, TransportResponse } from "../src/exec/nebius/api.ts";
-import { RETENTION } from "../src/exec/nebius/sandbox.ts";
+import { Journal, RETENTION } from "../src/exec/nebius/sandbox.ts";
+import { safeUnresolved } from "../src/exec/check.ts";
 import { compressSnapshot, createNebiusBackend, listingDigest, NEBIUS_CAPABILITIES, NEBIUS_LIMITS, PREPARE_SCRIPT, reconcileJournals, SandboxOperationError, scanJournals, signalName, type ListingEntry, type NebiusBackendOptions } from "../src/exec/nebius/session.ts";
 import { writeTar } from "../src/exec/tar.ts";
 import { FakeGuest } from "./fake-guest.ts";
@@ -491,6 +492,24 @@ describe("Nebius session: recovery, a local scan and then one bounded pass (D33)
     const second = await reconcileJournals(scanJournals(journalDir).open, { ...options, budgetMs: 120_000 });
     assert.deepEqual(second.map((r) => [r.stopped.length, r.unresolved]), [[1, []], [1, []]]);
     assert.deepEqual(scanJournals(journalDir).open, []);
+  });
+
+  it("never searches for an image import whose answer was lost: it carries no correlation id, so it stays open and says where to look (NIV-49)", async () => {
+    const service = serviceFor();
+    const time = clock();
+    const journalDir = join(tempDir("import"), "sandbox");
+    mkdirSync(journalDir, { recursive: true });
+    const journal = new Journal(join(journalDir, "import.jsonl"));
+    const correlation = "0f1e2d3c-4b5a-4968-8776-655443322110";
+    journal.append({ kind: "intent", wall: new Date().toISOString(), correlation, label: "image import" });
+    journal.append({ kind: "uncertain", wall: new Date().toISOString(), correlation, cause: "the connection dropped" });
+    const started = time.now();
+    const pass = await reconcileJournals(scanJournals(journalDir).open, { credentials: { key: KEY, project: PROJECT }, transport: () => service.transport, now: time.now, sleep: time.sleep, budgetMs: 600_000 });
+    assert.equal(service.requests.filter((request) => request.path === "/v1/operations").length, 0, "the pass searched for the import");
+    assert.equal(time.now() - started, 0, "the pass spent time on the import");
+    assert.deepEqual(pass.map((r) => [r.stopped.length, r.unresolved]), [[0, ["It isn't known whether an image import started, and Nivra can't look for one: any image it made is in your Nebius project."]]]);
+    assert.equal(safeUnresolved(pass[0]!.unresolved[0]!), pass[0]!.unresolved[0], "its words don't leave the engine as written");
+    assert.equal(scanJournals(journalDir).open.length, 1, "the import was settled without being found");
   });
 
   it("stops a pass when the engine shuts down partway, keeping what it didn't settle for the next", async () => {

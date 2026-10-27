@@ -125,6 +125,7 @@ const UNRESOLVED_WORDS = [
   /^It isn't known whether "[a-z][a-z -]{0,63}" started \(correlation [0-9a-f-]{36}\); it may still be running\.$/,
   /^Operation [A-Za-z0-9._:-]{1,128} wasn't seen to end; it may still be running\.$/,
   /^Not looked at in this pass: it (ran out of time|was stopped)\. It stays for the next\.$/,
+  /^It isn't known whether an image import started, and Nivra can't look for one: any image it made is in your Nebius project\.$/,
 ];
 
 /**

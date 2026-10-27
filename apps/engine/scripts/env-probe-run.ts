@@ -1,3 +1,4 @@
+import { baselinePattern } from "@nivra/domain";
 import type { CloseReport, ExecutionBackend, ExecutionSession } from "../src/exec/backend.ts";
 import type { SandboxApi } from "../src/exec/nebius/api.ts";
 import { ENV_PATH, ENV_WORKSPACE, Sandbox, type Journal } from "../src/exec/nebius/sandbox.ts";
@@ -92,7 +93,7 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
 export function matches(expected: Pick<Selection, "exitCode" | "output" | "pattern">, ran: { exitCode: number | null; stdout: string }): boolean {
   if (ran.exitCode !== expected.exitCode) return false;
   if (expected.output !== undefined) return ran.stdout === expected.output;
-  return expected.pattern !== undefined && new RegExp(expected.pattern).test(ran.stdout);
+  return expected.pattern !== undefined && baselinePattern(expected.pattern).test(ran.stdout);
 }
 
 export async function runEnvProbe(input: EnvProbeInput): Promise<EnvProbeOutcome> {
