@@ -16,12 +16,12 @@
 // Nothing is sent before the approval is claimed, and then only by pressing Prepare and Start, once each.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { ENVIRONMENT_BASE, TaskBrief, taskBriefDigest, type EnvironmentSpec, type PreparedEnvironment } from "@nivra/domain";
+import { ENVIRONMENT_BASE, TASK_MODEL, TaskBrief, taskBriefDigest, type EnvironmentSpec, type PreparedEnvironment } from "@nivra/domain";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { claimApproval, claimOn, isDigest } from "../../engine/scripts/research-check/claim.ts";
 import { environmentPreviewOf, ENVIRONMENT_NETWORK, PREPARE_LIMITS } from "../../engine/src/environment/preview.ts";
@@ -40,7 +40,6 @@ const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = join(desktop, "..", "..");
 const STATE = join(homedir(), "nivra-acceptance", "task-live");
 const CLAIMS = join(homedir(), "nivra-acceptance", "claims", "task-live");
-const MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
 const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 const run = (exe: string, args: string[], cwd: string): string => {
@@ -168,7 +167,10 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
     environment: { spec: task.environment, base: ENVIRONMENT_BASE, ...shown.environment, network: ENVIRONMENT_NETWORK, limits: { importSeconds: PREPARE_LIMITS.importSeconds, prepareSeconds: PREPARE_LIMITS.prepareSeconds } },
     task: { title: task.task.title, briefDigest: await taskBriefDigest(brief), cases: brief.acceptanceCases.map((given) => given.name), checks: brief.checks, baseline: (brief.baseline ?? []).map((given) => given.name), frozen: shown.frozen },
     limits: runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0),
-    model: { expected: MODEL, rule: "The app uses the model its listing picks; a different one is recorded, never refused." },
+    model: {
+      required: TASK_MODEL,
+      rule: "The run uses this model and no other: the engine takes it from Token Factory's listing, or stops the run at its model step, before any request to a model and before the commit is uploaded. The preparation comes first, so it has run by then.",
+    },
     steps: [
       "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
       "the script adds the repository as a project, and allows its model sharing and its uploads, each through its own dialog",
@@ -214,7 +216,7 @@ function recipeText(recipe: Awaited<ReturnType<typeof recipeOf>>, digest: string
     ...recipe.task.baseline.map((name, index) => `  baseline ${index + 1}: ${name}`),
     ...recipe.task.frozen.map((file) => `  frozen: ${file.sha256}  ${file.path}`),
     `Limits: ${JSON.stringify(recipe.limits)}; preparation ${recipe.environment.limits.importSeconds} s to import, ${recipe.environment.limits.prepareSeconds} s to install`,
-    `Model: ${recipe.model.expected} expected. ${recipe.model.rule}`,
+    `Model: ${recipe.model.required} only. ${recipe.model.rule}`,
     "Steps:",
     ...recipe.steps.map((step) => `  - ${step}`),
     ...(recipe.review.length ? ["Before deciding, check in the proposal (what its tests can't show):", ...recipe.review.map((point) => `  - ${point}`)] : []),
@@ -247,6 +249,19 @@ async function openApp(frozen: Frozen, folder: string): Promise<{ app: ElectronA
 }
 
 const call = <T>(page: Page, expression: string) => page.evaluate(expression) as Promise<T>;
+
+/**
+ * The window as it stands, kept as privately as the rest of the evidence. One that fails is logged and the run goes on:
+ * a picture is never a reason to stop a run whose approval is claimed. None is taken while Settings is open.
+ */
+async function shot(page: Page, folder: string, name: string, log: (line: string) => void): Promise<void> {
+  try {
+    await page.screenshot({ path: join(folder, name), timeout: 15_000 });
+    chmodSync(join(folder, name), 0o600);
+  } catch (error) {
+    log(`The screenshot ${name} wasn't kept: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 /** Removes the Nebius key and project id, through the calls Settings' own buttons make, and checks they are gone. */
 async function removeKeys(page: Page): Promise<void> {
   await call(page, "window.nivra.setNebiusKey(null)");
@@ -290,6 +305,7 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
     const shown = await previewEnvironment(page, projectId, task.environment);
     if (shown.fingerprint !== recipe.environment.fingerprint) throw new Error(`The environment's preview is ${shown.fingerprint}, not the recipe's ${recipe.environment.fingerprint}.`);
     log(`Environment preview: ${shown.inputs.length} inputs, ${shown.sentBytes} bytes, pnpm install ${shown.installArgs.join(" ")}; the recipe's fingerprint.`);
+    await shot(page, folder, "1-environment-preview.png", log);
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
     log(`Run preview: ${run.baseline}; frozen ${run.frozen.length}; ${run.limits.slice(0, 160)}`);
@@ -297,6 +313,7 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
     const problems = await runPreviewProblems(page, recipe, { taskId, projectId }, null, run.expected);
     if (problems.length) throw new Error(`The rehearsal's run preview isn't the recipe's: ${problems.join("; ")}.`);
     log("Run preview: bound to the recipe's brief digest and snapshot, with its frozen files and their hashes.");
+    await shot(page, folder, "2-run-preview.png", log);
     const brief = (await taskOf(page, taskId)).brief;
     writeFileSync(join(folder, "rehearsal.json"), `${JSON.stringify({ recipe: digest, environment: shown, run, briefVersion: brief.version }, null, 2)}\n`, { mode: 0o600 });
     await removeKeys(page);
@@ -347,20 +364,26 @@ async function live(frozen: Frozen, task: LiveTask, approved: string): Promise<n
       return finish(1);
     }
     log(`Prepared: Node ${environment.prepared.node}, pnpm ${environment.prepared.pnpm}, ${environment.prepared.arch}, image ${environment.prepared.image}.`);
+    await shot(page, folder, "1-environment-prepared.png", log);
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
     save("run-preview.json", run);
     const problems = await runPreviewProblems(page, recipe, { taskId, projectId }, environment.prepared, run.expected);
     if (problems.length) throw new Error(`The run's preview isn't the approved one: ${problems.join("; ")}. Start wasn't pressed.`);
     log("The run's preview is the approved one: this brief, this commit's snapshot, the environment just prepared and the frozen files. Pressing Start, once.");
+    await shot(page, folder, "2-run-preview.png", log);
     const attemptId = await startOnce(page, taskId);
     const ended = await followRun(page, taskId, attemptId, 45 * 60_000, log);
     save("attempt.json", ended);
+    await shot(page, folder, "3-run-ended.png", log);
+    const used = ended.report?.route?.model ?? null;
+    log(used === null ? "The report names no model." : `The report names the model ${used}${used.toLowerCase() === TASK_MODEL.toLowerCase() ? ", the approved one" : `, not the approved ${TASK_MODEL}`}.`);
     log(`The run ended ${ended.status}${ended.report ? `: ${ended.report.outcome}${ended.report.verified ? ", verified" : ""}` : ""}. The decisions are yours, in the window: Approve and then Accept, Reject, or a revision. Create ${join(folder, "go-close")} when you're done.`);
     for (;;) {
       if (existsSync(join(folder, "go-close"))) break;
       await page.waitForTimeout(5_000);
     }
+    await shot(page, folder, "4-final.png", log);
     save("task.json", await taskOf(page, taskId));
     save("attempt-final.json", await attemptOf(page, taskId, attemptId));
     save("environment-final.json", await environmentOf(page, projectId));
