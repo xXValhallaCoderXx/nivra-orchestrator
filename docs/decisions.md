@@ -2965,7 +2965,8 @@ and the check; the review itself comes in its own entry.
     that has a project or messages; and every conversation and plan call refuses it and its review plans (send, open,
     delete, save or revise a plan, plans, reviews, research, cancel, restart, a task from a plan, a refresh from a plan,
     a generic review), so nothing can be said in it. A review plan is written by Nivra from a mission and its tasks, never
-    from an answer, and holds nothing the person didn't write.
+    from an answer, and holds nothing that isn't already in them (a brief's words may themselves have come from a saved
+    answer, as D26 allows).
   - Deleting a mission deletes its conversation, which takes its versions, backlog, review plans and reviews with it.
 - **The shared contract** (`packages/domain`: `mission.ts`, `specialists.ts`).
   - **What was sent is bound by reference** (`ContextBinding`): each task by its brief version (immutable) and by its
@@ -2982,8 +2983,10 @@ and the check; the review itself comes in its own entry.
     makes the text both the preview shows and the reviewers read. It keeps D30's 20,000-character text limit, and over
     it is refused, never shortened.
 - **One context check** (`validateBinding`, in the host's `mission-context.ts`), synchronous, so it runs inside the
-  transaction that would act on a result. It names each change: a task deleted, its brief at another version, its
-  title changed, the mission at a later version or deleted, a task no longer in the mission's backlog, a finding gone.
+  transaction that would act on a result. It checks the binding's shape first, then names each change: a task deleted,
+  its brief at another version, its title changed, the mission at another version or deleted, a task no longer in the
+  mission's backlog, and a finding gone or not about any bound task. A finding stays its review's mission's, so a task
+  that left that mission is reported even when the mission itself wasn't bound (the independent review's finding).
   - **The coach runs it inside its acceptance transaction**, beside the brief's own version check, so an accepted
     suggestion made from context that changed since is refused, with what changed. Ordinary editing never depends on
     it, so editing a task from an old report works as before.

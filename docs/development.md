@@ -86,7 +86,9 @@ A third switch, `--nivra-token-factory-url=<loopback url>`, points the local eng
   findings before a real mission review is possible.
 - **The context check** (D42). Code that applies a result made from a mission, its tasks or their findings calls
   `validateBinding(workspace, binding)` (`src/main/mission-context.ts`) inside the same `workspace.tx` as the save,
-  next to the brief's version check, and refuses when it names any change (`changeText` words each one).
+  next to the brief's version check, and refuses when it names any change (`changeText` words each one). It checks
+  the stored binding itself, field by field; `bindingDigest` is asynchronous (WebCrypto), so it belongs in a preview's
+  fingerprint, never inside the transaction.
   `missionContextForTask` gives a task's mission and the findings that name it, each with what changed since.
 
 Cross-platform checks (D14; there is no CI):
