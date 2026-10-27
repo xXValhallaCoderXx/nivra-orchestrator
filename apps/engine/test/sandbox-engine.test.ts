@@ -5,6 +5,7 @@ import { delimiter, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { isTerminal, type RunSummary, type SandboxPreview, type SandboxReport, type SandboxStatus } from "@nivra/domain";
 import { PROBE_SCRIPT, STOP_MESSAGES } from "../src/exec/check.ts";
+import { Journal } from "../src/exec/nebius/sandbox.ts";
 import { removeDir, startEngine, tempDir, waitFor, type EngineProcess } from "./helpers.ts";
 import { startSandboxStub, type SandboxStub } from "./stub-sandboxes.ts";
 import { cleanUp, git, GIT, put, repoWith } from "./workspace-fixtures.ts";
@@ -58,7 +59,14 @@ const ready = (shown: SandboxPreview) => {
 };
 const spawns = (stub: SandboxStub) => stub.requests.filter((request) => request.method === "POST" && request.path === "/v1/instances");
 const probeSpawned = (stub: SandboxStub) => spawns(stub).some((request) => request.body.includes("nivra-probe"));
-const probes = (stub: SandboxStub) => spawns(stub).filter((request) => request.body.includes("nivra-probe")).length;
+const probeOperations = (stub: SandboxStub) => stub.guest.service.operations.filter((operation) => (operation.body["args"] as string[])[1] === PROBE_SCRIPT);
+/**
+ * Whether the engine has read the nth probe's operation (the first unless given). It reads one only once the spawn's
+ * answer is in and journaled, so a cancel after that read can't race the answer, as one after the spawn alone can.
+ */
+const probeRead = (stub: SandboxStub, nth = 1) => (probeOperations(stub)[nth - 1]?.reads ?? 0) > 0;
+/** Every entry of the session journals open on `home`. */
+const journaled = (home: string) => readdirSync(join(home, "sandbox")).filter((name) => name.endsWith(".jsonl")).flatMap((name) => new Journal(join(home, "sandbox", name)).entries);
 
 /** A check whose probe's answer is lost, its operation hidden from the search for now: it ends with its journal open. */
 async function leaveUncertain(stub: SandboxStub, engine: EngineProcess, repo: string): Promise<RunSummary> {
@@ -156,13 +164,13 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     await assert.rejects(start(engine, repo, fingerprint, { requestId: second }), /A sandbox check of this project is already going on its engine, so another wasn't started\. Wait for it to end, then check again\./);
     assert.equal(await engine.client.call("runs.find", { clientRequestId: second }), null);
     assert.equal((await start(engine, repo, fingerprint, { requestId })).id, first.id, "a repeated request gets the run it started");
-    await waitFor(() => probeSpawned(stub), { timeoutMs: 20_000, what: "the probe's spawn" });
+    await waitFor(() => probeRead(stub), { timeoutMs: 20_000, what: "the engine's first read of the probe's operation" });
     await engine.client.call("runs.cancel", { runId: first.id });
     assert.equal((await ended(engine, first.id)).status, "cancelled");
     // Once it has ended, the project can be checked again; the first request, repeated while the next goes, still gets
     // its own run.
     const next = await start(engine, repo, fingerprint);
-    await waitFor(() => probes(stub) === 2, { timeoutMs: 20_000, what: "the next probe's spawn" });
+    await waitFor(() => probeRead(stub, 2), { timeoutMs: 20_000, what: "the engine's first read of the next probe's operation" });
     assert.equal((await start(engine, repo, fingerprint, { requestId })).id, first.id);
     await engine.client.call("runs.cancel", { runId: next.id });
     assert.deepEqual([(await ended(engine, next.id)).status, stub.requests.filter((request) => request.path === "/v1/files").length], ["cancelled", 2]);
@@ -212,7 +220,7 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     await waitFor(() => stub.requests.some((request) => request.method === "DELETE"), { timeoutMs: 20_000, what: "the pass's stop" });
     stub.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
     const going = await later.client.call("runs.start", { clientRequestId: randomUUID(), workflowId: "sandbox", input: { repoPath: repo, project: randomUUID(), target: "local", preview: ready(await preview(later, repo)).fingerprint }, context: { sharing: { cloudExecution: true } } });
-    await waitFor(() => probes(stub) === 2, { timeoutMs: 20_000, what: "the second probe's spawn" });
+    await waitFor(() => probeRead(stub, 2), { timeoutMs: 20_000, what: "the engine's first read of the second probe's operation" });
     stub.before = () => undefined;
     release();
     const status = (): Promise<SandboxStatus> => later.client.call("sandbox.status", {});
@@ -251,12 +259,34 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     const { stub, engine, repo } = await setup();
     stub.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
     const run = await start(engine, repo, ready(await preview(engine, repo)).fingerprint);
-    await waitFor(() => probeSpawned(stub), { timeoutMs: 20_000, what: "the probe's spawn" });
+    await waitFor(() => probeRead(stub), { timeoutMs: 20_000, what: "the engine's first read of the probe's operation" });
     await engine.client.call("runs.cancel", { runId: run.id });
     assert.equal((await ended(engine, run.id)).status, "cancelled");
     const checked = await report(engine, run.id);
     assert.deepEqual([checked.outcome, checked.cleanup?.stopped, checked.cleanup?.unresolved, spawns(stub).length], ["cancelled", 1, [], 2]);
     assert.ok(stub.requests.some((request) => request.method === "DELETE"), "the probe's operation was asked to stop");
+  });
+
+  it("reads a probe's operation only once its spawn's answer is in and journaled, so a cancel after that first read stops it", async () => {
+    const { stub, engine, home, repo } = await setup();
+    stub.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
+    // The probe's spawn is held as it arrives, before the service makes anything, so no answer can reach the engine.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    stub.before = (request) => (request.method === "POST" && request.path === "/v1/instances" && request.body.includes("nivra-probe") ? held : undefined);
+    const run = await start(engine, repo, ready(await preview(engine, repo)).fingerprint);
+    // A wait for the spawn alone ends here, with nothing the engine knows of yet for a cancel to stop.
+    await waitFor(() => probeSpawned(stub), { timeoutMs: 20_000, what: "the probe's spawn" });
+    assert.deepEqual([probeOperations(stub).length, probeRead(stub)], [0, false]);
+    stub.before = () => undefined;
+    release();
+    await waitFor(() => probeRead(stub), { timeoutMs: 20_000, what: "the engine's first read of the probe's operation" });
+    const probe = probeOperations(stub)[0]?.uuid;
+    assert.ok(journaled(home).some((entry) => entry.kind === "submitted" && entry.operationId === probe), "the engine read the probe's operation before journaling it as submitted");
+    await engine.client.call("runs.cancel", { runId: run.id });
+    assert.equal((await ended(engine, run.id)).status, "cancelled");
+    const checked = await report(engine, run.id);
+    assert.deepEqual([checked.outcome, checked.cleanup?.stopped, checked.cleanup?.unresolved, probeOperations(stub).map((operation) => operation.cancelled)], ["cancelled", 1, [], [true]]);
   });
 
   it("never sends an uncertain submission again: it is left open and visible, and a later engine's pass settles it once it has the credentials", async () => {
@@ -304,7 +334,7 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     const { stub, engine, home, repo } = await setup();
     stub.guest.override = ({ args }) => (args[1] === PROBE_SCRIPT ? { waits: true } : undefined);
     const run = await start(engine, repo, ready(await preview(engine, repo)).fingerprint);
-    await waitFor(() => probeSpawned(stub), { timeoutMs: 20_000, what: "the probe's spawn" });
+    await waitFor(() => probeRead(stub), { timeoutMs: 20_000, what: "the engine's first read of the probe's operation" });
     engine.kill();
     await engine.exited;
     const later = engineOn(stub, home);

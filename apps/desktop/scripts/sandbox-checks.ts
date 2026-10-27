@@ -92,7 +92,13 @@ export async function sandboxChecks(setup: SandboxSetup): Promise<void> {
       const view = await host.sandboxCheck(added());
       return view && ENDED.includes(view.status) ? view : null;
     }, 60_000, "the sandbox check to end");
-  const probeStarted = (before: Seen) => waitFor(async () => (await seen()).probes > before.probes, 30_000, "the probe's operation");
+  // A new probe whose operation the engine has read: it reads one only once the spawn's answer is in and journaled, so a
+  // stop after that read can't race the answer, as one after the spawn alone can.
+  const probeStarted = (before: Seen) =>
+    waitFor(async () => {
+      const reads = (await seen()).probeReads;
+      return reads.length > before.probeReads.length && (reads.at(-1) ?? 0) > 0;
+    }, 30_000, "the engine's first read of the probe's operation");
   const refusal = (id: string) => host.startSandboxCheck(id, "a".repeat(64)).then(() => null, (error: Error) => error.message);
 
   try {
