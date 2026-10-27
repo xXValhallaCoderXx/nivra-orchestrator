@@ -2379,6 +2379,51 @@ hello run, isn't retimed here.
 - The Windows turn: 12 of 12 on the Windows build of `3a56d75`, this branch before `main`'s test and docs changes
   were merged in.
 
+### Mission foundation (D42, NIV-52)
+
+Track B's first part, landed on its own so that Track C (NIV-53) builds on the same seam before the shared cut:
+missions in the workspace, the shared context contract, and the one context check. On `feature/niv-52-foundation`,
+from `main` at `c854b50`. Nothing in the window creates a mission yet; the mission review and its window follow in
+their own PR.
+
+| Commit | What |
+|---|---|
+| `4aa1aa6` | The domain contract: missions, bindings that carry titles, the mission review's packet, the specialist catalogue |
+| `6a09497` | Workspace migration 6, the mission store, the context check, the conversation guards, the seeds |
+| `ac01522` | The coach's catalogue entry in Track C's own words (NIV-53, comment `32ce2944`) |
+| `bca7110` | The packaged and Windows store specs expect v6; migration 5's text pinned now that 6 follows it |
+| this record | D42, the development notes and this section |
+
+**What it shows:**
+
+| Point | Where | What it shows |
+|---|---|---|
+| A mission's versions are immutable, and saved only from the version the person read | `missions.test.ts` | An edit made from v1 after v2 exists is refused; an UPDATE of a stored version is refused by a trigger; the latest reads back exactly as saved |
+| A task is in one backlog at most, within the limit, and leaving it changes nothing about the task | `missions.test.ts` | `already-here`, `in-another-mission`, `backlog-full` (at 50) and `gone` are told apart; a removed or deleted task's place goes; the task row is unchanged |
+| A mission's conversation is never the person's | `missions.test.ts`, `host.test.ts` | It isn't listed. A trigger refuses a mission on a project's conversation or on one with messages. Sixteen conversation and plan calls refuse it and its review plans; nothing is written and no engine starts |
+| Deleting a mission takes its versions, backlog, review plans and reviews, and leaves its tasks | `missions.test.ts` | Once its conversation goes, no mission row or seeded review is left; both tasks are still there, in no backlog |
+| What was sent is bound by version and by title | `mission.test.ts` (domain) | `bindingDigest` is pinned, and changes with a title, a version, the order, the mission, the findings or the profiles; duplicates, malformed or foreign references and a task without its title are refused |
+| The context check names a mission change and a membership removal while the brief stays as it was | `missions.test.ts` | `mission-changed` (v1 to v2) and `membership-removed` (taken out, or moved to another mission), the brief untouched each time |
+| A rename is caught, though it makes no brief version | `missions.test.ts` | `title-changed` with one brief version; a later brief version adds `brief-changed`, each in the person's words |
+| A stale suggestion saves nothing inside its transaction, while hand edits go on | `missions.test.ts` | The coach's pattern (check, then the next brief version, in one `workspace.tx`) is refused after a mission edit and writes nothing; a hand edit then saves v2 |
+| The coach's view of a task's mission names only findings about that task | `missions.test.ts` | Of three seeded findings, a task gets the two naming its reference, another task its one; a brief edit shows as a change; out of the backlog, a task gets no mission and no findings |
+| The mission review's packet keeps D30's text limit, and sends acceptance case names only | `mission.test.ts` (domain), `missions.test.ts` | A packet over 20,000 characters is refused, never shortened; a case's command and expected output never enter it |
+| Older profiles move to v6 with every row, and every earlier table, as they were | `workspace-store.test.ts` | v1, v2 and v4 files migrate with their rows and their tables' schemas unchanged; a newer schema is refused, naming v6 |
+
+**Checks:**
+- `pnpm verify` at `6a09497`: 1,103 (domain 87, engine 687, desktop 329), none skipped. The baseline at `c854b50` was
+  1,075 (75, 687, 313).
+- The built app (`test:e2e`) at `ac01522`: the app, workspace and review specs, 27 passed. A run started at 22:48 SGT
+  was killed by the machine's out-of-memory crash and isn't counted.
+- The packaged app (`test:packaged`, after `stage:runtime linux-x64` and `package:dir`) at `ac01522`: 26 passed and
+  49 skipped (they need the stub switch a packaged app ignores); `workspace-store.spec.ts` failed only on its schema
+  pin, fixed in `bca7110`, where that spec then passed against the same packaged build (1 passed).
+- `pnpm verify` at `bca7110`: 1,103 (domain 87, engine 687, desktop 329), none skipped.
+- **Not run: `test:windows`**, which AGENTS.md asks for when the main process changes (the guards). A Windows turn needs
+  Nate's approval and Track A's clearance, and Track A's candidate holds the Windows folders tonight. Track B proposes
+  to run it in its full PR's turn (Wed 12:00 to 14:00 SGT), which covers these changes too. Nothing here changes a
+  target, the supervisor, staging or the preload, so `verify:windows` isn't needed.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

@@ -80,6 +80,14 @@ A third switch, `--nivra-token-factory-url=<loopback url>`, points the local eng
   `workspace-windows.spec.ts` (`test:windows`) seed one into the profile before launch through
   `e2e/seed-workspace.ts`, which uses the workspace's own functions. On Windows the staged `node.exe` runs it, bundled,
   so the file is only ever opened on Windows (D7): run `pnpm stage:runtime all` first.
+- **A mission without a model** (D42). `seedMission` seeds a mission at v1 with its backlog of direct tasks, and
+  `seedMissionReview` a completed review of some of them, with the findings given and no run behind it, through the
+  workspace's own functions (`e2e/seed-workspace.ts`). Track C uses them to test the coach with a mission and
+  findings before a real mission review is possible.
+- **The context check** (D42). Code that applies a result made from a mission, its tasks or their findings calls
+  `validateBinding(workspace, binding)` (`src/main/mission-context.ts`) inside the same `workspace.tx` as the save,
+  next to the brief's version check, and refuses when it names any change (`changeText` words each one).
+  `missionContextForTask` gives a task's mission and the findings that name it, each with what changed since.
 
 Cross-platform checks (D14; there is no CI):
 
