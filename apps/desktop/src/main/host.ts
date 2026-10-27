@@ -13,7 +13,9 @@ import {
   preferencesDigest,
   projectFingerprint,
   RpcCallError,
+  SPECIALISTS,
   taskBriefDigest,
+  taskRef,
   type ApplyParams,
   type ApplyResolution,
   type ApplyView,
@@ -26,6 +28,7 @@ import {
   type EnvironmentPreview,
   type EnvironmentReport,
   type ExplainResult,
+  type MissionContent,
   type PreferenceIntent,
   type ProviderCheck,
   type ResearchContext,
@@ -41,6 +44,7 @@ import {
   type SandboxPreview,
   type SandboxStatus,
   type SecretName,
+  type SpecialistId,
   type TaskBrief,
   type TaskContext,
   type TaskEnvironment,
@@ -60,6 +64,10 @@ import type {
   BriefFields,
   ImportEntryView,
   ImportSourceView,
+  MissionReviewPreview,
+  MissionReviewView,
+  MissionsView,
+  MissionView,
   PlanView,
   PreferencesView,
   PreferenceView,
@@ -120,7 +128,32 @@ import {
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
 import { amendedContent, amendedPlanFields, researchNoteFor, researchReportMatches, researchRequest, researchStopFailedText, type ResearchSubject } from "./research.ts";
 import { getResearch, insertResearch, openResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
-import { missionOfConversation } from "./mission-store.ts";
+import { changeText, compositionOf, missionPlanContent, validateBinding } from "./mission-context.ts";
+import {
+  addMissionTask as addToBacklog,
+  getMission,
+  insertMission,
+  insertMissionVersion,
+  latestMissionVersion,
+  listMissions,
+  missionOfConversation,
+  missionOfTask,
+  missionTaskIds,
+  missionVersions,
+  removeMissionTask as removeFromBacklog,
+} from "./mission-store.ts";
+import {
+  addedText,
+  composeMissionReview,
+  MISSION_REPOSITORY_TASK,
+  MISSION_REVIEW_NOT_SENT,
+  MISSION_REVIEW_REQUESTS,
+  missionContentOf,
+  missionDigests,
+  missionPreviewFingerprint,
+  refuseMissionCredentials,
+  refusePacketCredentials,
+} from "./missions.ts";
 import { historicalReferences, packetFor, previewFingerprint, reportMatches, REVIEW_REQUESTS, reviewNoteFor } from "./reviews.ts";
 import {
   BriefContentSchema,
@@ -226,6 +259,12 @@ const REVIEW_CLOSED = "This plan's project was removed, so it can't be reviewed.
 /** Why a plan's assumptions can't be checked once its project is gone. */
 const RESEARCH_CLOSED = "This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.";
 /** Why research leads to one amended version at most (D37). */
+const MISSION_BUSY = "A review of this mission is still going. Wait for it, or cancel it, then start again.";
+/** A specialist as the window shows it: the catalogue's words, with the version a result names (NIV-52). */
+const specialistView = (id: SpecialistId, version: number) => {
+  const { name, personality, purpose } = SPECIALISTS[id];
+  return { id, version, name, personality, purpose };
+};
 const AMENDED_ALREADY = "A version amended from this research was saved already, so nothing new was saved. Open the plan to see it.";
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 /**
@@ -547,9 +586,15 @@ export class Host {
    * task's brief stays with the task, and each engine keeps its own record of the runs.
    */
   async deleteConversation(conversationId: string): Promise<void> {
-    const workspace = this.#workspaceDb();
     const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
+    await this.#deleteConversation(record, "conversation");
+  }
+
+  /** Deletes a conversation, or a mission's own (NIV-52), as `deleteConversation` says; `what` names it in a refusal. */
+  async #deleteConversation(record: ConversationRecord, what: "conversation" | "mission"): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const conversationId = record.id;
     const open = openTurns(workspace, { conversationId });
     // Research is stopped with a stop of its own (D37), which alone is taken back if the conversation stays.
     const researchStops: Array<{ id: string; token: string }> = [];
@@ -569,9 +614,9 @@ export class Host {
     const failedAt = results.findIndex((result) => result.status === "rejected");
     if (failedAt >= 0) {
       if (this.#workspace.state === "ready") for (const { id, token } of researchStops) withdrawStop(this.#workspace.db, id, token);
-      const what = running[failedAt]!.workflowId === "research" ? "research" : "answer";
+      const run = running[failedAt]!.workflowId === "research" ? "research" : what === "mission" ? "review" : "answer";
       const why = errorText((results[failedAt] as PromiseRejectedResult).reason);
-      throw new Error(`Nivra couldn't stop this conversation's ${what} on ${this.#labelOf(record.targetId)} (${why}), so the conversation is still here. Restart that engine, then delete it again.`);
+      throw new Error(`Nivra couldn't stop this ${what}'s ${run} on ${this.#labelOf(record.targetId)} (${why}), so the ${what} is still here. Restart that engine, then delete it again.`);
     }
     // Sent by this session to an engine still online, with no run known: its answer was lost. One still being sent is
     // stopped by its submission, when its engine answers.
@@ -1306,6 +1351,184 @@ export class Host {
   }
 
   /** What WSL offers on a Windows host, and what to do when it offers nothing; null elsewhere. */
+  /** Every mission, the most recently changed first (NIV-52). Asks no engine and starts nothing. */
+  missions(): MissionsView {
+    const workspace = this.#workspace;
+    if (workspace.state !== "ready") return { workspace: this.#workspaceView(), missions: [] };
+    return {
+      workspace: this.#workspaceView(),
+      missions: listMissions(workspace.db).map(({ mission, latest }) => ({
+        id: mission.id,
+        name: latest.content.name,
+        version: latest.version,
+        tasks: missionTaskIds(workspace.db, mission.id).length,
+        updatedAt: latest.createdAt,
+        reviewing: openTurns(workspace.db, { conversationId: mission.conversationId }).length > 0,
+      })),
+    };
+  }
+
+  /** One mission as it is now (NIV-52): its latest version, its backlog, the tasks it could take, and its reviews. */
+  mission(missionId: string): MissionView {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    const latest = mission ? latestMissionVersion(workspace, mission.id) : null;
+    if (!mission || !latest) throw new Error("That mission is no longer here.");
+    const engine = this.#engineView("local");
+    return {
+      id: mission.id,
+      latest: { id: latest.id, version: latest.version, content: latest.content, createdAt: latest.createdAt },
+      versions: missionVersions(workspace, mission.id).map(({ version, createdAt }) => ({ version, createdAt })),
+      backlog: missionTaskIds(workspace, mission.id).flatMap((taskId) => {
+        const task = getTask(workspace, taskId);
+        return task ? [{ task: this.#taskSummary(task), unreviewable: task.projectId === null ? null : MISSION_REPOSITORY_TASK }] : [];
+      }),
+      available: listTasks(workspace)
+        .filter((task) => missionOfTask(workspace, task.id) === null)
+        .map((task) => this.#taskSummary(task)),
+      reviews: reviewsOf(workspace, mission.conversationId)
+        .reverse()
+        .map((review) => this.#missionReviewView(review, engine)),
+      reviewing: openTurns(workspace, { conversationId: mission.conversationId }).length > 0,
+      engine,
+    };
+  }
+
+  /**
+   * Opens a mission (NIV-52). A review left open by an earlier session, or with its answer lost, is followed on its
+   * engine, as a conversation's turns are (D26). Nothing is ever resent.
+   */
+  async openMission(missionId: string): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    if (!mission) throw new Error("That mission is no longer here.");
+    const open = openTurns(workspace, { conversationId: mission.conversationId }).filter((turn) => !this.#submissions.has(turn.id));
+    if (open.length) {
+      if (!this.#unavailable.has("local")) await this.#ensure("local").catch(() => undefined);
+      for (const turn of open) this.#follow(turn.id);
+    }
+    return this.mission(missionId);
+  }
+
+  /** Saves a new mission as v1 (NIV-52). What the person wrote is checked as anything they type is. */
+  async createMission(input: MissionContent): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    const content = missionContentOf(input);
+    refuseMissionCredentials(content, await this.#knownSecrets());
+    const id = randomUUID();
+    insertMission(workspace, { id, conversationId: randomUUID(), createdAt: new Date().toISOString() }, { id: randomUUID(), content });
+    return this.mission(id);
+  }
+
+  /** Saves an edit of a mission as its next version, only from the version the person read (NIV-52). */
+  async reviseMission(missionId: string, version: number, input: MissionContent): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    if (!getMission(workspace, missionId)) throw new Error("That mission is no longer here.");
+    const content = missionContentOf(input);
+    refuseMissionCredentials(content, await this.#knownSecrets());
+    if (!insertMissionVersion(workspace, missionId, { id: randomUUID(), content, createdAt: new Date().toISOString() }, version)) {
+      throw new Error("This mission changed since you opened it. Open it again, then make your edit.");
+    }
+    return this.mission(missionId);
+  }
+
+  /**
+   * Deletes a mission (NIV-52): its review still going is stopped first, as a conversation's turn is, then its versions,
+   * backlog, review plans and reviews go. Its tasks stay, in no backlog. Each engine keeps its own record of the runs.
+   */
+  async deleteMission(missionId: string): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    const record = mission ? getConversation(workspace, mission.conversationId) : null;
+    if (!mission || !record) throw new Error("That mission is no longer here.");
+    await this.#deleteConversation(record, "mission");
+  }
+
+  /** Makes a direct task, with a title only, in a mission's backlog (NIV-52): its brief is written on the task's own page. */
+  async createMissionTask(missionId: string, title: string): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    if (!getMission(workspace, missionId)) throw new Error("That mission is no longer here.");
+    const name = this.#taskTitle(title);
+    const fields = this.#briefFields({ goal: "", acceptanceCriteria: [], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] });
+    this.#refuseInBrief(name, fields, await this.#knownSecrets());
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    workspace.tx(() => {
+      insertTask(workspace, { id, title: name, projectId: null, createdAt: now, updatedAt: now }, { id: randomUUID(), content: briefFrom(fields), derivedFrom: null });
+      const added = addToBacklog(workspace, missionId, id, now);
+      if (added !== "added" && added !== "already-here") throw new Error(addedText(added));
+    });
+    return this.mission(missionId);
+  }
+
+  /** Puts an existing task in a mission's backlog (NIV-52). The task itself doesn't change. */
+  addMissionTask(missionId: string, taskId: string): MissionView {
+    const added = addToBacklog(this.#workspaceDb(), missionId, taskId, new Date().toISOString());
+    if (added !== "added" && added !== "already-here") throw new Error(addedText(added));
+    return this.mission(missionId);
+  }
+
+  /** Takes a task out of a mission's backlog (NIV-52). The task itself doesn't change, and earlier reviews say so. */
+  removeMissionTask(missionId: string, taskId: string): MissionView {
+    if (!removeFromBacklog(this.#workspaceDb(), missionId, taskId)) throw new Error("That task isn't in this mission's backlog any more.");
+    return this.mission(missionId);
+  }
+
+  /**
+   * What a review of the mission's selected tasks would send (NIV-52), and the fingerprint that binds it. Reads only:
+   * nothing is stored or sent, and no engine starts.
+   */
+  async prepareMissionReview(missionId: string, taskIds: readonly string[]): Promise<MissionReviewPreview> {
+    return (await this.#missionReviewRequest(missionId, taskIds)).preview;
+  }
+
+  /**
+   * Starts the review the person previewed (NIV-52). Everything is worked out again from the records as they are now,
+   * and refused when its fingerprint isn't the one previewed. In one transaction, the context is checked once more, the
+   * review plan saved (an identical one reused) and the review stored; then it is sent in the background on this
+   * computer's engine, as a plan's review is (D31). A review writes no mission, task, brief or preference.
+   */
+  async startMissionReview(missionId: string, taskIds: readonly string[], expected: string): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    const request = await this.#missionReviewRequest(missionId, taskIds);
+    if (request.preview.blocked) throw new Error(request.preview.blocked);
+    if (request.preview.expected !== expected) throw new Error("What this review would send has changed since you opened it. Check the new preview, then start again.");
+    const { mission, conversation, composition, digests, preferences } = request;
+    const id = randomUUID();
+    const content = missionPlanContent(composition, conversation.id);
+    const plan = workspace.tx(() => {
+      const changes = validateBinding(workspace, composition.binding);
+      if (changes.length) throw new Error(`What this review would send has changed since you opened it: ${changes.map(changeText).join(" ")} Check the new preview, then start again.`);
+      // Linked to a repository meanwhile: this increment reviews only tasks with none (D42).
+      const linked = composition.binding.tasks.find((task) => getTask(workspace, task.taskId)?.projectId != null);
+      if (linked) throw new Error(`"${linked.title}" was linked to a repository meanwhile, and mission reviews take only tasks that aren't, for now. Leave it out, then preview again.`);
+      const latest = versionsOf(workspace, mission.id).at(-1);
+      const saved =
+        latest && JSON.stringify(latest.content) === JSON.stringify(content)
+          ? latest
+          : insertArtifact(workspace, { id: randomUUID(), kind: "plan", lineageId: mission.id, content, conversationId: conversation.id, taskId: null, messageId: null, runLinkId: null, derivedFrom: latest?.id ?? null, createdAt: new Date().toISOString() }, latest?.version ?? 0);
+      if (!saved) throw new Error("This mission's review plan changed meanwhile. Check the new preview, then start again.");
+      const review = { id, conversationId: conversation.id, planId: saved.id, planLineage: saved.lineageId, planVersion: saved.version, planSha256: saved.sha256, panel: "council" as const, packetDigest: digests.packet, preferencesDigest: digests.preferences, scope: { kind: "general" as const }, createdAt: new Date().toISOString() };
+      const given = preferences.records.map(({ id: preferenceId, revision }) => ({ id: preferenceId, revision }));
+      if (!insertReview(workspace, review, { sessionId: this.#sessionId, targetId: conversation.targetId, preferences: given })) throw new Error(MISSION_BUSY);
+      return saved;
+    });
+    this.#submissions.set(id, { cancel: null });
+    const input = { panel: "council" as const, planId: plan.id, planVersion: plan.version, packetDigest: digests.packet, preferencesDigest: digests.preferences };
+    void this.#submit(id, conversation, { workflowId: "review", input, context: { preferences, sharing: { modelContext: false }, packet: composition.packet } }, 0).catch((error: unknown) => this.#options.log(`A mission review couldn't be sent: ${errorText(error)}`));
+    return this.mission(missionId);
+  }
+
+  /** Stops a mission's review the person no longer wants; its end is recorded as cancelled by the person (NIV-52). */
+  async cancelMissionReview(missionId: string, reviewId: string): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    const review = getReview(workspace, reviewId);
+    if (!mission || !review || review.conversationId !== mission.conversationId) throw new Error("That review is no longer in this mission.");
+    await this.#cancelLink(review.link);
+    return this.mission(missionId);
+  }
+
   wsl(): WslView | null {
     if (this.#options.platform !== "win32") return null;
     if (!this.#wslChecked || !this.#wsl) return { status: "checking", message: null, code: null, distros: [] };
@@ -3083,6 +3306,58 @@ export class Host {
     }
     return () => {
       if (this.#workspace.state === "ready") for (const turn of marked) withdrawCancel(this.#workspace.db, turn.id, reason);
+    };
+  }
+
+  /**
+   * Everything a review of a mission's selected tasks would send, worked out from the records as they are now (NIV-52):
+   * the composition, the whole packet checked for credentials, the preference snapshot (personal preferences only, as a
+   * general plan's, D21 and D26), their fingerprints, and the preview that shows them.
+   */
+  async #missionReviewRequest(missionId: string, taskIds: readonly string[]) {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    const conversation = mission ? getConversation(workspace, mission.conversationId) : null;
+    if (!mission || !conversation) throw new Error("That mission is no longer here.");
+    const composition = composeMissionReview(workspace, mission, taskIds, null);
+    const preferences = snapshotFor(this.#options.store.data, null);
+    refusePacketCredentials(composition.packet, preferences, await this.#knownSecrets());
+    const digests = await missionDigests(composition, preferences);
+    const preview: MissionReviewPreview = {
+      missionId: mission.id,
+      missionVersion: composition.binding.mission!.version,
+      tasks: composition.binding.tasks.map((task, index) => ({ ref: taskRef(index), taskId: task.taskId, title: task.title, briefVersion: task.briefVersion, present: true })),
+      text: composition.text,
+      chars: composition.text.length,
+      othersInBacklog: composition.packet.othersInBacklog,
+      preferences: preferences.records.map(({ statement, scope, intent }) => ({ statement, scope, intent })),
+      specialists: composition.packet.specialists.map((ref) => specialistView(ref.id, ref.version)),
+      model: composition.packet.model,
+      requests: MISSION_REVIEW_REQUESTS,
+      notSent: MISSION_REVIEW_NOT_SENT,
+      blocked: openTurns(workspace, { conversationId: conversation.id }).length ? MISSION_BUSY : null,
+      expected: missionPreviewFingerprint(digests),
+    };
+    return { mission, conversation, composition, digests, preferences, preview };
+  }
+
+  /** A mission's review (NIV-52): its plan review's view, with what it was sent and what has changed since. */
+  #missionReviewView(review: ReviewRecord, engine: EngineView): MissionReviewView {
+    const workspace = this.#workspaceDb();
+    const base = this.#reviewView(review, engine);
+    const plan = getArtifact(workspace, review.planId);
+    const composition = plan ? compositionOf(plan) : null;
+    const now = snapshotFor(this.#options.store.data, null).records.map(({ id, revision }) => `${id} ${revision}`).sort();
+    const sent = review.link.preferences.map(({ id, revision }) => `${id} ${revision}`).sort();
+    return {
+      ...base,
+      missionVersion: composition?.binding.mission?.version ?? 0,
+      tasks: (composition?.binding.tasks ?? []).map((task, index) => ({ ref: taskRef(index), taskId: task.taskId, title: task.title, briefVersion: task.briefVersion, present: getTask(workspace, task.taskId) !== null })),
+      specialists: (composition?.packet.specialists ?? []).map((ref) => specialistView(ref.id, ref.version)),
+      model: composition?.packet.model ?? null,
+      text: composition?.text ?? "",
+      stale: composition ? validateBinding(workspace, composition.binding).map(changeText) : ["Nivra can't read what this review was sent."],
+      preferencesChanged: JSON.stringify(now) !== JSON.stringify(sent),
     };
   }
 

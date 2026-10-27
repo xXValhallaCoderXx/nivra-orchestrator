@@ -435,7 +435,7 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     const { host, ids, keys } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
     keys.current = { NEBIUS_API_KEY: "test-key-0123456789" };
     const leaky = host.addPreference({ statement: "Call the API with test-key-0123456789", scope: "personal", projectId: null });
-    await assert.rejects(host.exportPreferences({ personal: true, projectIds: [] }), /holds your saved Nebius key, so nothing was exported/);
+    await assert.rejects(host.exportPreferences({ personal: true, projectIds: [] }), /holds your saved Token Factory key, so nothing was exported/);
     host.deletePreference(leaky.id);
     host.addPreference({ statement: "Prefer named exports", scope: "personal", projectId: null });
     host.addPreference({ statement: "Replace Jest with Vitest", scope: "project", projectId: ids[0]!, intent: "override" });
@@ -3565,5 +3565,181 @@ describe("Host: a mission's own conversation and review plans stay out of the co
     // Nothing was written: the task still has one brief version, and no task was made from the review plan.
     assert.deepEqual([host.task(taskId).versions.length, host.tasks().tasks.length], [1, 1]);
     assert.deepEqual(host.engines().filter((engine) => engine.state.status !== "stopped").map((engine) => engine.targetId), [], "no engine started");
+  });
+});
+
+describe("Host: missions and their council reviews, with no repository (NIV-52)", () => {
+  const KEY = "test-key-0123456789";
+  const MISSION = { name: "Runner's log", intendedUsers: "Club runners.", outcome: "A runner sees this week's distance against their plan.", successCriteria: ["Shows within a second."], constraints: [], nonGoals: [] };
+  type Role = "architecture" | "risks" | "chair";
+  const roleOf = (request: StubRequest): Role | null => (/Nivra review role: (architecture|risks|chair)/.exec(JSON.stringify(request.body?.messages ?? []))?.[1] as Role | undefined) ?? null;
+  const review = (summary: string, findings: Array<{ title: string; refs: string[] }>) =>
+    toolCall("submit_review", { summary, findings: findings.map((f) => ({ ...f, detail: `${f.title}.`, recommendation: "Change it.", severity: "medium" })), assumptions: [], gaps: [] });
+  const COUNCIL: Record<Role, Reply> = {
+    architecture: review("The total comes before the runs it counts.", [{ title: "Weekly total needs stored runs first", refs: ["T2", "T1"] }]),
+    risks: review("No task covers sync.", [{ title: "Nothing covers sync", refs: ["backlog"] }]),
+    chair: toolCall("submit_synthesis", { summary: "Store runs first.", priorities: ["arch-1"], agreements: [], dissent: [], gaps: [] }),
+  };
+  async function stubFor(script: Partial<Record<Role, Reply>> = {}, models?: Array<{ id: string }>) {
+    const stub = await startStub({ ...(models ? { models } : {}), chat: (request) => ({ ...COUNCIL, ...script })[roleOf(request) ?? "chair"] });
+    stubs.push(stub);
+    return stub;
+  }
+  const done = (host: Host, missionId: string) =>
+    waitFor(() => {
+      const last = host.mission(missionId).reviews[0];
+      return last && last.status !== "submitting" && last.status !== "running" ? last : null;
+    }, "the mission review to end", 30_000);
+  const refusal = async (run: () => unknown) => {
+    try {
+      await run();
+      return "allowed";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+  async function missionWith(host: Host, titles: string[]) {
+    let view = await host.createMission(MISSION);
+    for (const title of titles) view = await host.createMissionTask(view.id, title);
+    return view;
+  }
+
+  it("saves a mission in versions, keeps it out of the conversations, and keeps a backlog without changing its tasks", async () => {
+    const { host, keys } = makeHost();
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const view = await missionWith(host, ["Store runs", "Weekly total"]);
+    assert.deepEqual([view.latest.version, view.backlog.map((entry) => [entry.task.title, entry.task.state, entry.unreviewable])], [
+      1,
+      [
+        ["Store runs", "draft", null],
+        ["Weekly total", "draft", null],
+      ],
+    ]);
+    assert.deepEqual(host.conversations().conversations, []);
+    const v2 = await host.reviseMission(view.id, 1, { ...MISSION, nonGoals: ["Social features"] });
+    assert.equal(v2.latest.version, 2);
+    assert.equal(await refusal(() => host.reviseMission(view.id, 1, MISSION)), "This mission changed since you opened it. Open it again, then make your edit.");
+    assert.match(await refusal(() => host.createMission({ ...MISSION, outcome: `Ship with ${KEY}` })), /^The mission's outcome holds your saved Token Factory key, so nothing was saved\./);
+    const other = await host.createMission({ ...MISSION, name: "Other" });
+    assert.equal(await refusal(() => host.addMissionTask(other.id, view.backlog[0]!.task.id)), "That task is in another mission's backlog. Take it out there first, then add it here.");
+    const removed = host.removeMissionTask(view.id, view.backlog[0]!.task.id);
+    assert.deepEqual([removed.backlog.length, removed.available.map((task) => task.title)], [1, ["Store runs"]]);
+    assert.deepEqual(host.missions().missions.map((mission) => [mission.name, mission.version, mission.tasks]).sort(), [
+      ["Other", 1, 0],
+      ["Runner's log", 2, 1],
+    ]);
+  });
+
+  it("previews exactly what a review sends, sending nothing, and refuses a repository-linked task", async () => {
+    const stub = await stubFor();
+    const { host, keys, ids } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: "/nowhere/linked" }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const view = await missionWith(host, ["Store runs", "Weekly total", "Sync"]);
+    const [store, total] = view.backlog.map((entry) => entry.task.id) as [string, string];
+    const preview = await host.prepareMissionReview(view.id, [total, store]);
+    assert.deepEqual(
+      [preview.missionVersion, preview.tasks.map((task) => [task.ref, task.title]), preview.othersInBacklog, preview.requests, preview.model, preview.blocked, preview.specialists.map((s) => `${s.name} v${s.version}`)],
+      [
+        1,
+        [
+          ["T1", "Weekly total"],
+          ["T2", "Store runs"],
+        ],
+        1,
+        3,
+        null,
+        null,
+        ["Product architect v1", "Risk and testability reviewer v1", "Council chair v1"],
+      ],
+    );
+    assert.match(preview.text, /The selected tasks: T1 to T2\. The backlog holds 1 other task, which wasn't sent\./);
+    assert.equal(preview.chars, preview.text.length);
+    assert.equal(stub.chats().length, 0, "a preview sends nothing");
+    const linked = await host.createTask({ title: "Import old runs", fields: { goal: "", acceptanceCriteria: [], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] }, projectId: ids[0]!, planId: null });
+    const withLinked = host.addMissionTask(view.id, linked.summary.id);
+    assert.equal(withLinked.backlog.find((entry) => entry.task.id === linked.summary.id)?.unreviewable, "Mission reviews take only tasks that aren't linked to a repository, for now, and this one is.");
+    assert.equal(
+      await refusal(() => host.prepareMissionReview(view.id, [linked.summary.id])),
+      `"Import old runs" is linked to a repository, and mission reviews take only tasks that aren't, for now. Leave it out, then preview again.`,
+    );
+  });
+
+  it("starts only as previewed, sends the council's three requests, keeps a report whose findings name the tasks, and says what changed since", async () => {
+    const stub = await stubFor();
+    const { host, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const view = await missionWith(host, ["Store runs", "Weekly total"]);
+    const [store, total] = view.backlog.map((entry) => entry.task.id) as [string, string];
+    const preview = await host.prepareMissionReview(view.id, [store, total]);
+    await host.renameTask(total, host.task(total).revision, "Weekly total on the home screen");
+    assert.equal(await refusal(() => host.startMissionReview(view.id, [store, total], preview.expected)), "What this review would send has changed since you opened it. Check the new preview, then start again.");
+    assert.equal(stub.chats().length, 0, "a refused start sends nothing");
+    const fresh = await host.prepareMissionReview(view.id, [store, total]);
+    const started = await host.startMissionReview(view.id, [store, total], fresh.expected);
+    assert.equal(started.reviewing, true);
+    assert.equal(await refusal(() => host.startMissionReview(view.id, [store, total], fresh.expected)), "A review of this mission is still going. Wait for it, or cancel it, then start again.");
+    const ended = await done(host, view.id);
+    assert.deepEqual([ended.status, ended.report?.outcome, ended.stale, ended.preferencesChanged], ["answered", "complete", [], false]);
+    assert.deepEqual(ended.tasks.map((task) => [task.ref, task.title, task.present]), [
+      ["T1", "Store runs", true],
+      ["T2", "Weekly total on the home screen", true],
+    ]);
+    assert.deepEqual(ended.report?.reviewers.map((reviewer) => reviewer.findings.map((finding) => finding.refs)), [[["T2", "T1"]], [["backlog"]]]);
+    assert.deepEqual(stub.chats().map(roleOf).sort(), ["architecture", "chair", "risks"]);
+    assert.ok(stub.chats().every((request) => !request.raw.includes(KEY)), "the key is never in a request body");
+    // A brief edit and a rename later, the report stays as it was, and says what changed.
+    await host.reviseBrief(store, host.task(store).revision, { goal: "Store each run.", acceptanceCriteria: ["It's there after a restart."], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] });
+    await host.renameTask(total, host.task(total).revision, "Weekly total");
+    const stale = host.mission(view.id).reviews[0]!;
+    assert.deepEqual(stale.stale, [`"Store runs" is now at brief v2; v1 was sent.`, `"Weekly total on the home screen" is now called "Weekly total".`]);
+    assert.deepEqual(stale.report?.reviewers.map((reviewer) => reviewer.findings.length), [1, 1]);
+    // Nothing about the tasks changed but what the person did: no state moved, no run started.
+    assert.deepEqual(host.tasks().tasks.map((task) => task.state), ["draft", "draft"]);
+  });
+
+  it("shows rejected output as an incomplete review with the count, never as nothing raised", async () => {
+    const stub = await stubFor({ architecture: review("Two problems.", [{ title: "About T7", refs: ["T7"] }, { title: "About E1", refs: ["E1", "plan"] }]) });
+    const { host, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const view = await missionWith(host, ["Store runs"]);
+    const ids = view.backlog.map((entry) => entry.task.id);
+    await host.startMissionReview(view.id, ids, (await host.prepareMissionReview(view.id, ids)).expected);
+    const ended = await done(host, view.id);
+    assert.deepEqual([ended.status, ended.report?.outcome], ["failed", "incomplete"]);
+    const architecture = ended.report?.stages.find((stage) => stage.role === "architecture");
+    assert.deepEqual([architecture?.status, architecture?.kind], ["failed", "malformed"]);
+    assert.match(architecture?.message ?? "", /2 findings named nothing in the selection/);
+    assert.doesNotMatch(JSON.stringify(ended.report?.stages ?? []), /T7|E1/, "the model's own refs are never repeated");
+    assert.deepEqual(ended.report?.reviewers.map((reviewer) => reviewer.role), ["risks"]);
+  });
+
+  it("sends nothing when the mission's text or a task's holds a saved key, and deletes a mission while leaving its tasks", async () => {
+    const stub = await stubFor();
+    const { host, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const view = await missionWith(host, ["Store runs"]);
+    const [store] = view.backlog.map((entry) => entry.task.id) as [string];
+    // A key saved after the brief was written: the brief then holds it, and the whole packet is checked at preview.
+    await host.reviseBrief(store, host.task(store).revision, { goal: "Store runs.", acceptanceCriteria: [], scope: "", exclusions: "", context: "old-key-0123456789-abcdef", assumptions: [], checks: [], acceptanceCases: [] });
+    keys.current = { NEBIUS_API_KEY: "old-key-0123456789-abcdef" };
+    assert.match(await refusal(() => host.prepareMissionReview(view.id, [store])), /^T1's context holds your saved Token Factory key, so nothing was sent\. Remove it, then preview again\.$/);
+    assert.equal(stub.chats().length, 0);
+    await host.deleteMission(view.id);
+    assert.deepEqual([host.missions().missions, host.tasks().tasks.map((task) => task.title)], [[], ["Store runs"]]);
+  });
+
+  it("keeps a mission's reviews across a restart, and reads them without sending anything again", async () => {
+    const stub = await stubFor();
+    const { host, root, keys } = makeHost({ tokenFactoryUrl: stub.url });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const view = await missionWith(host, ["Store runs"]);
+    const ids = view.backlog.map((entry) => entry.task.id);
+    await host.startMissionReview(view.id, ids, (await host.prepareMissionReview(view.id, ids)).expected);
+    await done(host, view.id);
+    await host.shutdown();
+    const again = hostAt(root, { tokenFactoryUrl: stub.url }).host;
+    const reopened = await again.openMission(view.id);
+    assert.deepEqual([reopened.reviews.length, reopened.reviews[0]?.status, reopened.reviews[0]?.report?.outcome], [1, "answered", "complete"]);
+    assert.equal(stub.chats().length, 3, "nothing was sent again");
   });
 });

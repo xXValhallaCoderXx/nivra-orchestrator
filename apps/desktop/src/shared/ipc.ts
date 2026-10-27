@@ -12,6 +12,7 @@ import type {
   EnvironmentSpec,
   ExplainResult,
   HistoryRecord,
+  MissionContent,
   PreferenceIntent,
   PreferenceScope,
   PreparedEnvironment,
@@ -25,6 +26,7 @@ import type {
   SandboxReport,
   SandboxStatus,
   SnapshotPreview,
+  SpecialistId,
   TaskEnvironment,
   TaskProposal,
   TaskReport,
@@ -119,6 +121,18 @@ export const IPC = {
   requestTaskRevision: "tasks:request-revision",
   settleTaskChange: "tasks:settle",
   restoreTaskChange: "tasks:restore",
+  listMissions: "missions:list",
+  getMission: "missions:get",
+  openMission: "missions:open",
+  createMission: "missions:create",
+  reviseMission: "missions:revise",
+  deleteMission: "missions:delete",
+  createMissionTask: "missions:create-task",
+  addMissionTask: "missions:add-task",
+  removeMissionTask: "missions:remove-task",
+  prepareMissionReview: "missions:prepare-review",
+  startMissionReview: "missions:start-review",
+  cancelMissionReview: "missions:cancel-review",
 } as const;
 
 /** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
@@ -683,6 +697,99 @@ export interface TasksView {
   tasks: TaskSummary[];
 }
 
+/** A mission in the list (NIV-52): its latest version's name, how many tasks its backlog holds, and whether a review of it is going. */
+export interface MissionSummary {
+  id: string;
+  name: string;
+  version: number;
+  tasks: number;
+  updatedAt: string;
+  reviewing: boolean;
+}
+
+export interface MissionsView {
+  workspace: WorkspaceView;
+  missions: MissionSummary[];
+}
+
+/** A task in a mission's backlog, as the mission's page and its board show it. */
+export interface MissionTaskView {
+  task: TaskSummary;
+  /** Why it can't be selected for a review, in plain words; null when it can. */
+  unreviewable: string | null;
+}
+
+/** A specialist as the window shows it: who it is, which version of its instructions, and what it looks at. */
+export interface SpecialistView {
+  id: SpecialistId;
+  version: number;
+  name: string;
+  personality: string;
+  purpose: string;
+}
+
+/** A mission's task as a review was sent it: its reference there, and whether it is still here to open. */
+export interface ReviewedTaskView {
+  ref: string;
+  taskId: string;
+  title: string;
+  briefVersion: number;
+  present: boolean;
+}
+
+/**
+ * A review of a mission's selected tasks (NIV-52): a review of the plan Nivra wrote from them (D31's lifecycle), with
+ * what it was sent, and what has changed since.
+ */
+export interface MissionReviewView extends ReviewView {
+  missionVersion: number;
+  tasks: ReviewedTaskView[];
+  specialists: SpecialistView[];
+  /** The only model it could use, or null for the listing's Nemotron pick (D22). */
+  model: string | null;
+  /** Exactly what the reviewers read about the mission and its tasks. */
+  text: string;
+  /** What changed since it was sent, one line each; empty when nothing has. A stale review stays as it was. */
+  stale: string[];
+  /** Whether the preferences it was sent have changed since: shown, never blocking. */
+  preferencesChanged: boolean;
+}
+
+/** One mission: its latest version, its backlog, the tasks it could take, and its reviews, newest first. */
+export interface MissionView {
+  id: string;
+  latest: { id: string; version: number; content: MissionContent; createdAt: string };
+  versions: Array<{ version: number; createdAt: string }>;
+  backlog: MissionTaskView[];
+  /** Tasks in no mission's backlog, which this one can take. */
+  available: TaskSummary[];
+  reviews: MissionReviewView[];
+  /** Whether a review of it is going. */
+  reviewing: boolean;
+  engine: EngineView;
+}
+
+/** What a review of a mission's selected tasks would send (NIV-52), worked out from the records as they are now. Nothing is sent. */
+export interface MissionReviewPreview {
+  missionId: string;
+  missionVersion: number;
+  tasks: ReviewedTaskView[];
+  /** Exactly what the reviewers read about the mission and its tasks, and its length. */
+  text: string;
+  chars: number;
+  othersInBacklog: number;
+  preferences: Array<{ statement: string; scope: PreferenceScope; intent: PreferenceIntent }>;
+  specialists: SpecialistView[];
+  model: string | null;
+  /** The most model calls it makes: two reviewers, then the chair. */
+  requests: number;
+  notSent: readonly string[];
+  /** Why it can't start now, in plain words; null when it can. */
+  blocked: string | null;
+  /** The fingerprint of what it would send: starting is refused when that changed since this preview. */
+  expected: string;
+}
+
 export interface NivraApi {
   getAppInfo(): Promise<AppInfo>;
   /** One view per engine a project uses or that is running; nothing is started by asking. */
@@ -851,4 +958,28 @@ export interface NivraApi {
   settleTaskChange(taskId: string, attemptId: string, as: ApplyResolution): Promise<TaskAttemptView>;
   /** Takes a partial apply back to the originals, never overwriting a version another program saved. */
   restoreTaskChange(taskId: string, attemptId: string): Promise<TaskAttemptView>;
+  /** Every mission, the most recently changed first (NIV-52). */
+  listMissions(): Promise<MissionsView>;
+  /** One mission as it is now: its latest version, backlog, the tasks it could take, and its reviews. */
+  getMission(missionId: string): Promise<MissionView>;
+  /** Opens a mission: a review left open by an earlier session is followed on its engine, never resent. */
+  openMission(missionId: string): Promise<MissionView>;
+  /** Saves a new mission as v1; needs a name and an outcome. */
+  createMission(content: MissionContent): Promise<MissionView>;
+  /** Saves an edit as the mission's next version, only from the version the person read. */
+  reviseMission(missionId: string, version: number, content: MissionContent): Promise<MissionView>;
+  /** Deletes a mission with its versions, backlog and reviews; its tasks stay, in no mission. */
+  deleteMission(missionId: string): Promise<void>;
+  /** Makes a direct task with a title only, in the mission's backlog. */
+  createMissionTask(missionId: string, title: string): Promise<MissionView>;
+  /** Puts an existing task in the mission's backlog; the task itself doesn't change. */
+  addMissionTask(missionId: string, taskId: string): Promise<MissionView>;
+  /** Takes a task out of the mission's backlog; the task itself doesn't change. */
+  removeMissionTask(missionId: string, taskId: string): Promise<MissionView>;
+  /** What a review of the selected tasks would send, exactly, with its fingerprint. Nothing is sent or stored. */
+  prepareMissionReview(missionId: string, taskIds: string[]): Promise<MissionReviewPreview>;
+  /** Starts the review previewed; refused when anything it would send changed since (`expected`). */
+  startMissionReview(missionId: string, taskIds: string[], expected: string): Promise<MissionView>;
+  /** Stops a mission's review the person no longer wants. */
+  cancelMissionReview(missionId: string, reviewId: string): Promise<MissionView>;
 }
