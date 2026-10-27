@@ -140,6 +140,19 @@ function sameTask(stored: unknown, input: unknown): boolean {
 }
 
 /**
+ * Whether a stored coaching's input names the same task, brief version, fingerprints, profile and allowed model as a
+ * new one (NIV-53): everything it is bound to, so the same request id with any other input is refused, never answered
+ * with the run it started.
+ */
+function sameCoach(stored: unknown, input: unknown): boolean {
+  const keys = ["taskId", "briefId", "briefVersion", "bindingDigest", "packetDigest", "preferencesDigest", "model"] as const;
+  const a = (stored ?? {}) as Record<string, unknown>;
+  const b = (input ?? {}) as Record<string, unknown>;
+  const profile = (value: Record<string, unknown>) => (value["profile"] ?? {}) as Record<string, unknown>;
+  return keys.every((key) => a[key] === b[key]) && profile(a)["id"] === profile(b)["id"] && profile(a)["version"] === profile(b)["version"];
+}
+
+/**
  * The context each kind of run carries (D21), as the protocol's start parameters define it, kept with the run's
  * workflow so each workflow reads only its own.
  */
@@ -215,7 +228,8 @@ export class RunScheduler {
     });
     // A repeated request returns the run it already created, which keeps the context it came with. The same id with
     // other work is refused: a review is bound to its plan version and fingerprints (D30), a check to its preview (D36),
-    // research to its plan version and packet (D37), a task run to its preview and brief (D39), and nothing is sent twice.
+    // research to its plan version and packet (D37), a task run to its preview and brief (D39), a coaching to everything it
+    // is bound to (NIV-53), and nothing is sent twice.
     if (!created) {
       const existing = this.#store.summary(id);
       const other =
@@ -225,7 +239,8 @@ export class RunScheduler {
           // A preparation is bound to the same checkout, project, target and preview as a check (D41).
           (request.workflowId === "environment" && !sameSandbox(existing.input, request.input)) ||
           (request.workflowId === "research" && !sameResearch(existing.input, request.input)) ||
-          (request.workflowId === "task" && !sameTask(existing.input, request.input)));
+          (request.workflowId === "task" && !sameTask(existing.input, request.input)) ||
+          (request.workflowId === "coach" && !sameCoach(existing.input, request.input)));
       if (existing && (existing.workflowId !== request.workflowId || other)) {
         throw new Refusal("request-conflict", "This request id already started another run, with other input. Send the new request with a new id.");
       }
