@@ -6,7 +6,7 @@ import { hiddenReason } from "../repo/deny.ts";
 import { isInside } from "../repo/paths.ts";
 import type { ExecutionSession, SessionSnapshot } from "./backend.ts";
 import { runGitBytes, WorkspaceRefusal, type GitTool, type PhaseDeadline } from "./git-tool.ts";
-import { listingDigest, type ListingEntry } from "./nebius/session.ts";
+import { compressSnapshot, listingDigest, NEBIUS_LIMITS, type ListingEntry } from "./nebius/session.ts";
 import { writeTar, type TarEntry } from "./tar.ts";
 import { byBytes, caseKey, snapshotPathProblem } from "./workspace-rules.ts";
 
@@ -38,7 +38,8 @@ import { byBytes, caseKey, snapshotPathProblem } from "./workspace-rules.ts";
  *     own values, in UTF-16 and inside base64 too (a vault value by its encodings, however the encoding was broken up).
  *     An unsafe snapshot is refused, never redacted. The refusal names the path and the kind of credential, never the
  *     value;
- *   - over the limits, a snapshot is refused, never truncated.
+ *   - over the limits, a snapshot is refused, never truncated. The archive is held to two: its own size, and its size
+ *     compressed as it is uploaded, against the sandbox session's upload limit.
  * - **What it gives:**
  *   - one tar of the files and links (`tar.ts`), its sha256, and the digest of the listing the sandbox's prepare step
  *     prints (`listingDigest`);
@@ -51,11 +52,13 @@ export interface SnapshotLimits {
   maxFileBytes: number;
   /** All the included files' content. */
   maxBytes: number;
-  /** The archive, headers included: no more than the sandbox session takes. */
+  /** The archive, headers included. */
   maxArchiveBytes: number;
+  /** The archive compressed, as it is uploaded (`compressSnapshot`): no more than the sandbox session takes. */
+  maxUploadBytes: number;
 }
 
-export const SNAPSHOT_LIMITS: Readonly<SnapshotLimits> = Object.freeze({ maxFiles: 4_000, maxFileBytes: 2 * 1024 * 1024, maxBytes: 6 * 1024 * 1024, maxArchiveBytes: 8 * 1024 * 1024 });
+export const SNAPSHOT_LIMITS: Readonly<SnapshotLimits> = Object.freeze({ maxFiles: 4_000, maxFileBytes: 2 * 1024 * 1024, maxBytes: 24 * 1024 * 1024, maxArchiveBytes: 32 * 1024 * 1024, maxUploadBytes: NEBIUS_LIMITS.maxUploadBytes });
 
 /** The oldest git with every command and flag snapshots and patches use (`status --no-renames` came last, in 2.18). */
 export const MIN_GIT: readonly [number, number] = [2, 18];
@@ -579,6 +582,8 @@ export async function takeSnapshot(options: SnapshotOptions): Promise<Snapshot> 
   }
   const archive = writeTar(entries);
   if (archive.byteLength > limits.maxArchiveBytes) throw new WorkspaceRefusal(`The folder's snapshot comes to ${archive.byteLength} bytes, over the ${limits.maxArchiveBytes} a sandbox run takes. Pick a smaller folder, then try again.`, "limit");
+  const uploaded = compressSnapshot(archive).byteLength;
+  if (uploaded > limits.maxUploadBytes) throw new WorkspaceRefusal(`The folder's snapshot comes to ${uploaded} bytes compressed, over the ${limits.maxUploadBytes} a sandbox run takes. Pick a smaller folder, then try again.`, "limit");
   const fingerprint = sha256(
     JSON.stringify({
       version: 1,

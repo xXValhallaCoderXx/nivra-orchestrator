@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
-import { hiddenReason, OUTPUT_DIRS } from "../repo/deny.ts";
+import { hiddenReason } from "../repo/deny.ts";
 import { ExecRefusedError, type ExecRequest, type ExecResult, type ExecutionSession } from "./backend.ts";
 import { runGitBytes, WorkspaceCancelled, WorkspaceRefusal, type GitTool, type PhaseDeadline, type RefusalCode } from "./git-tool.ts";
+import { OUTPUT_PRUNE } from "./nebius/session.ts";
 import { credentialKinds, isLfsPointer, type Counted, type Snapshot, type SnapshotFile } from "./snapshot.ts";
 import { readTar, TarRefusal, type TarLimits } from "./tar.ts";
 import { byBytes, caseKey, isGitControlFile, proposedPathProblem } from "./workspace-rules.ts";
@@ -50,20 +51,18 @@ import { byBytes, caseKey, isGitControlFile, proposedPathProblem } from "./works
 export const RESULT_ARCHIVE = "/nivra/result.tar";
 export const RESULT_LISTING = "/nivra/result-listing";
 
-/** Dependency and build output: never collected, as a snapshot never holds it. */
-const PRUNE = OUTPUT_DIRS.map((name) => `-type d -name ${name} -prune -o`).join(" ");
-
 /**
  * The collect step: a fixed script, given everything as positional arguments. $1 the workspace, $2 the archive, $3
  * what runs the tools (busybox), $4 the listing. It lists every file, link and anything else under the workspace,
- * output folders left out, sorted by bytes; archives exactly that list; and prints the listing's line count, the
- * listing's digest and the archive's digest.
+ * output folders left out (`OUTPUT_PRUNE`, as the prepare step's listing: dependency and build output is never
+ * collected, as a snapshot never holds it), sorted by bytes; archives exactly that list; and prints the listing's line
+ * count, the listing's digest and the archive's digest.
  */
 export const COLLECT_SCRIPT = [
   "set -e",
   'bb="$3"',
   'cd "$1"',
-  `$bb find . ${PRUNE} ! -type d -print > "$4.paths"`,
+  `$bb find . ${OUTPUT_PRUNE} ! -type d -print > "$4.paths"`,
   'LC_ALL=C $bb sort "$4.paths" > "$4.sorted"',
   ': > "$4"',
   "while IFS= read -r p; do",

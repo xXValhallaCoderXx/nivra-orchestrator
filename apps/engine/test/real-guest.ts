@@ -21,7 +21,10 @@ export class RealGuest {
   readonly baseImage: string;
   readonly service: FakeService;
   readonly root = scratch("real guest");
-  /** Each image's folder, by the image's id. */
+  /**
+   * Each image's folder, by the image's id. The base image has none unless a test gives it one: a prepared image, whose
+   * workspace already holds what its preparation left (dependencies), and which every session then starts from.
+   */
   readonly images = new Map<string, string>();
   /** Each command as the guest ran it, by label, in order. */
   readonly ran: Array<{ label: string; disposable: boolean; script: string | null; args: string[] }> = [];
@@ -61,7 +64,7 @@ export class RealGuest {
     const from = String(body["image"]);
     const label = labelOf(args);
     this.ran.push({ label, disposable: body["disposable"] !== false, script: args[0] === "-c" ? (args[1] ?? null) : null, args });
-    const parent = from === this.baseImage ? null : this.images.get(from);
+    const parent = this.images.get(from) ?? null;
     if (from !== this.baseImage && !parent) return { statuses: ["PENDING", "FAILED"] };
     const folder = mkdtempSync(join(this.root, "image-"));
     if (parent) cpSync(parent, folder, { recursive: true, verbatimSymlinks: true });

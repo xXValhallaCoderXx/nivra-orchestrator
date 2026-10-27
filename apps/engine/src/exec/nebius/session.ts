@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join, posix } from "node:path";
+import { gzipSync } from "node:zlib";
+import { OUTPUT_DIRS } from "../../repo/deny.ts";
 import { BoundaryUnavailableError, checkRequirements, ExecRefusedError, ExecUncertainError, SessionOpenError, type CloseReport, type ExecRequest, type ExecResult, type ExecutionBackend, type ExecutionCapabilities, type ExecutionSession, type SessionSnapshot, type SessionSpec, type SessionStep } from "../backend.ts";
 import { fetchTransport, SandboxApi, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, SandboxTooLargeError, sleepFor, type Transport } from "./api.ts";
 import { Journal, RETENTION, Sandbox, SandboxLateSpawnError, SandboxRefusal, type JournalEntry, type Outcome, type SandboxOptions, type StepSpec } from "./sandbox.ts";
@@ -11,8 +13,10 @@ import { Journal, RETENTION, Sandbox, SandboxLateSpawnError, SandboxRefusal, typ
  * command; files carry on through images only.
  *
  * - `open` refuses before anything is sent when it can't do what was asked: no key, the network not denied, no
- *   snapshot. Otherwise it journals the session, uploads the snapshot once, and runs one prepare operation that
- *   extracts it and prints a digest of what it holds, checked against the snapshot's. Its image is the first state.
+ *   snapshot, or a snapshot over the upload limit once compressed. Otherwise it journals the session, uploads the
+ *   snapshot once, compressed, and runs one prepare operation that extracts it over what the base image's workspace
+ *   holds and prints a digest of what it then holds, dependency and build output left out, checked against the
+ *   snapshot's. Its image is the first state.
  * - One owned operation at a time. Each command's intent is journaled and flushed before it is sent; a lost answer is
  *   looked for by its correlation id and never sent again. Every request ends by the session's deadline (D33).
  * - The state moves on only when a persisted command ended on its own, with SUCCESS and an image it kept. A persisted
@@ -41,6 +45,7 @@ export interface NebiusLimits {
   maxOperations: number;
   /** The longest a command may run (the account allows up to 3,600 s). */
   maxTimeoutSeconds: number;
+  /** The snapshot as it is uploaded, compressed. */
   maxUploadBytes: number;
   maxDownloadBytes: number;
   /** Where the service cuts each stream off. */
@@ -87,7 +92,12 @@ export interface NebiusCredentials {
 export interface NebiusBackendOptions {
   /** The key and project id, read from the engine's memory (D8); null when they haven't been given. */
   credentials: () => NebiusCredentials | null;
-  /** The public image every session starts from, by its id (chosen from stage 0's list). */
+  /**
+   * The image every session starts from, by its id: a public one (chosen from stage 0's list), or one prepared from
+   * it whose workspace already holds dependency or build output folders (`OUTPUT_DIRS`, such as `node_modules` at any
+   * depth). The snapshot is extracted over that workspace, never into an emptied one. The prepare step's listing leaves
+   * those folders out, as a snapshot does, so everything else there must be exactly the snapshot.
+   */
   baseImage: string;
   /** Where each session's journal goes: one file per session, 0600, in a 0700 folder. */
   journalDir: string;
@@ -127,23 +137,44 @@ export function listingDigest(entries: readonly ListingEntry[]): { digest: strin
   return { digest: sha256(sorted.map(listingLine).join("")), entries: sorted.length };
 }
 
+/**
+ * The snapshot as it is uploaded: its tar, gzip-compressed at level 9, with no time and no system in the header, so
+ * the bytes hold nothing of when or where they were made. The prepare step extracts it with `tar -z`. The tar's own
+ * sha256 stays the snapshot's identity; the upload limit applies to these bytes.
+ */
+export function compressSnapshot(archive: Uint8Array): Uint8Array {
+  const compressed = gzipSync(archive, { level: 9 });
+  // RFC 1952's header: bytes 4 to 7 are the time it was made, and byte 9 the system (255, unknown).
+  compressed.fill(0, 4, 8);
+  compressed[9] = 255;
+  return compressed;
+}
+
+/**
+ * find's expression for the dependency and build output folders (`OUTPUT_DIRS`), at any depth: each one met is left
+ * out with all it holds. A snapshot never holds a file under one, so in the prepare step it leaves out only what the
+ * base image brings (a prepared image's `node_modules`), and the collect step never brings such a folder back.
+ */
+export const OUTPUT_PRUNE = OUTPUT_DIRS.map((name) => `-type d -name ${name} -prune -o`).join(" ");
+
 /** Where the snapshot and the listing go on the sandbox's machine: outside the workspace, so neither is in it. */
 const ARCHIVE = "/nivra/snapshot.tar";
 const LISTING = "/nivra/listing";
 
 /**
  * The prepare step: a fixed script, given everything as positional arguments, so nothing is interpolated into it. $1
- * the workspace, $2 the archive, $3 what runs the tools (busybox), $4 the listing. It extracts the archive, removes it,
- * and prints the listing's line count and digest. Paths with a newline in them are refused before anything is sent.
+ * the workspace, $2 the archive (compressed), $3 what runs the tools (busybox), $4 the listing. It extracts the archive
+ * over what the workspace already holds, removes it, and prints the line count and digest of the workspace's listing,
+ * output folders left out. Paths with a newline in them are refused before anything is sent.
  */
 export const PREPARE_SCRIPT = [
   "set -e",
   'bb="$3"',
   '$bb mkdir -p "$1"',
-  '$bb tar -x -f "$2" -C "$1"',
+  '$bb tar -x -z -f "$2" -C "$1"',
   '$bb rm -f "$2"',
   'cd "$1"',
-  '$bb find . -type f -o -type l > "$4.paths"',
+  `$bb find . ${OUTPUT_PRUNE} \\( -type f -o -type l \\) -print > "$4.paths"`,
   'LC_ALL=C $bb sort "$4.paths" > "$4.sorted"',
   ': > "$4"',
   "while IFS= read -r p; do",
@@ -272,12 +303,13 @@ export function createNebiusBackend(options: NebiusBackendOptions): ExecutionBac
       if (!credentials) throw new BoundaryUnavailableError("Nebius Sandboxes needs your Token Factory key and a Nebius project id, and they haven't been given. Add them in Settings, then try again.");
       const snapshot = spec.snapshot;
       if (!snapshot) throw new ExecRefusedError("A Nebius session starts from a snapshot of the workspace, and none was given, so nothing was sent.");
-      if (snapshot.archive.byteLength > limits.maxUploadBytes) throw new ExecRefusedError(`The workspace's snapshot is ${snapshot.archive.byteLength} bytes, over the ${limits.maxUploadBytes} Nivra sends to a sandbox, so nothing was sent.`);
+      const sent = compressSnapshot(snapshot.archive);
+      if (sent.byteLength > limits.maxUploadBytes) throw new ExecRefusedError(`The workspace's snapshot is ${sent.byteLength} bytes compressed, over the ${limits.maxUploadBytes} Nivra sends to a sandbox, so nothing was sent.`);
       if (sha256(snapshot.archive) !== snapshot.sha256) throw new ExecRefusedError("The snapshot's bytes don't match its sha256, so nothing was sent.");
       if (!guestPath(spec.workspace) || spec.workspace === "/") throw new ExecRefusedError(`The workspace must be a folder like /workspace on the sandbox's machine; "${spec.workspace}" isn't one, so nothing was sent.`);
       if (spec.signal?.aborted) throw new ExecRefusedError("This run was cancelled before anything was sent to the sandbox.");
       const session = new NebiusSession(options, limits, credentials, spec);
-      await session.start(snapshot);
+      await session.start(snapshot, sent);
       return session;
     },
   };
@@ -365,22 +397,27 @@ class NebiusSession implements ExecutionSession {
     return new Sandbox(api, options);
   }
 
-  /** Uploads the snapshot and prepares the workspace from it. Once anything has been sent, a failure closes the session. */
-  async start(snapshot: SessionSnapshot): Promise<void> {
+  /**
+   * Uploads the snapshot, as `sent` (compressed), and prepares the workspace from it. The journal keeps the tar's
+   * sha256 as the session's snapshot and the compressed bytes' digest and size as the upload. Once anything has been
+   * sent, a failure closes the session.
+   */
+  async start(snapshot: SessionSnapshot, sent: Uint8Array): Promise<void> {
     const wall = () => this.#wallNow().toISOString();
     this.#journal.append({ kind: "session", wall: wall(), sessionId: this.#sessionId, baseImage: this.#options.baseImage, snapshotSha256: snapshot.sha256, workspace: this.#workspace });
     if (this.#deadline - this.#now() < this.#limits.minWriteMs) throw new ExecRefusedError("There wasn't time left in this run to send the workspace, so nothing was sent.");
     const api = this.#client(this.#work.signal);
-    this.#journal.append({ kind: "upload", wall: wall(), sha256: snapshot.sha256, bytes: snapshot.archive.byteLength });
+    const sentSha256 = sha256(sent);
+    this.#journal.append({ kind: "upload", wall: wall(), sha256: sentSha256, bytes: sent.byteLength });
     let uploaded: { uuid: string; sha256: string | null };
     try {
-      uploaded = await api.upload(snapshot.archive, { until: this.#deadline });
+      uploaded = await api.upload(sent, { until: this.#deadline });
     } catch (error) {
       if (error instanceof SandboxNotSentError) throw new ExecRefusedError(error.reason === "cancelled" ? "This run was cancelled before anything was sent to the sandbox." : "There wasn't time left in this run to send the workspace, so nothing was sent.");
       throw await this.#failOpen(`Sending the workspace failed (${error instanceof Error ? error.message : String(error)}), and the service may have stored it anyway.`);
     }
     this.#journal.append({ kind: "uploaded", wall: wall(), uuid: uploaded.uuid });
-    if (uploaded.sha256 !== null && uploaded.sha256 !== snapshot.sha256) throw await this.#failOpen("The sandbox stored different bytes from the ones Nivra sent, so the session was stopped.");
+    if (uploaded.sha256 !== null && uploaded.sha256 !== sentSha256) throw await this.#failOpen("The sandbox stored different bytes from the ones Nivra sent, so the session was stopped.");
     const step: StepSpec = {
       label: "prepare",
       command: "/bin/sh",

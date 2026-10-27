@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { WorkspaceRefusal } from "../src/exec/git-tool.ts";
-import { PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
-import { credentialKinds, withoutBreaks } from "../src/exec/snapshot.ts";
+import { compressSnapshot, PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
+import { credentialKinds, SNAPSHOT_LIMITS, withoutBreaks } from "../src/exec/snapshot.ts";
 import { readTar } from "../src/exec/tar.ts";
 import { tempDir } from "./helpers.ts";
 import { changedSince, cleanUp, folderState, GIT, git, put, refusal, repoWith, scratch, snap, track } from "./workspace-fixtures.ts";
@@ -79,7 +79,7 @@ describe("commit snapshots", () => {
     }
     const guest = scratch("snapshot guest");
     const archive = join(guest, "snapshot.tar");
-    writeFileSync(archive, snapshot.archive.archive);
+    writeFileSync(archive, compressSnapshot(snapshot.archive.archive));
     const ran = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", join(guest, "workspace"), archive, "", join(guest, "listing")], { encoding: "utf8" });
     assert.equal(ran.status, 0, ran.stderr);
     assert.equal(ran.stdout, `entries ${snapshot.files.length}\ndigest ${snapshot.archive.listingDigest}\n`);
@@ -301,6 +301,24 @@ describe("commit snapshots", () => {
     await assert.rejects(snap(root, { limits: { maxFileBytes: 5 } }), refusal(/^a\.txt is 6 bytes, over the 5 Nivra sends for one file\. /));
     await assert.rejects(snap(root, { limits: { maxBytes: 9 } }), refusal(/^The folder's files come to 10 bytes, over the 9 a sandbox run takes\. /));
     await assert.rejects(snap(root, { limits: { maxArchiveBytes: 2_048 } }), refusal(/^The folder's snapshot comes to \d+ bytes, over the 2048 a sandbox run takes\. /));
+    await assert.rejects(snap(root, { limits: { maxUploadBytes: 64 } }), refusal(/^The folder's snapshot comes to \d+ bytes compressed, over the 64 a sandbox run takes\. Pick a smaller folder, then try again\.$/, "limit"));
+  });
+
+  it("takes a folder over the old limits (6 MiB of content, an 8 MiB tar) when its archive, compressed as it is uploaded, fits (NIV-49)", async () => {
+    assert.deepEqual(SNAPSHOT_LIMITS, { maxFiles: 4_000, maxFileBytes: 2 * 1024 * 1024, maxBytes: 24 * 1024 * 1024, maxArchiveBytes: 32 * 1024 * 1024, maxUploadBytes: 8 * 1024 * 1024 });
+    // Five files of source, each under the 2 MiB one file may be: about 9.5 MiB in all, as a real repository's can be.
+    const line = "export const line = 'source repeats itself, and so it compresses well';\n";
+    const root = repoWith(Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`src/part-${index}.ts`, line.repeat(Math.floor((1.9 * 1024 * 1024) / line.length))])));
+    const snapshot = await snap(root);
+    const content = snapshot.files.reduce((sum, file) => sum + file.size, 0);
+    const uploaded = compressSnapshot(snapshot.archive.archive);
+    assert.deepEqual([snapshot.files.length, content > 6 * 1024 * 1024, snapshot.archive.archive.byteLength > 8 * 1024 * 1024, uploaded.byteLength < SNAPSHOT_LIMITS.maxUploadBytes], [5, true, true, true], `${content} bytes, a ${snapshot.archive.archive.byteLength}-byte tar, ${uploaded.byteLength} compressed`);
+    // As the session uploads it, it extracts to the snapshot's listing.
+    const guest = scratch("large snapshot guest");
+    writeFileSync(join(guest, "snapshot.tar"), uploaded);
+    const ran = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", join(guest, "workspace"), join(guest, "snapshot.tar"), "", join(guest, "listing")], { encoding: "utf8" });
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.equal(ran.stdout, `entries 5\ndigest ${snapshot.archive.listingDigest}\n`);
   });
 
   it("refuses crafted paths a commit can hold: a .git short name and a newline", async () => {

@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { getEventListeners } from "node:events";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
+import { gunzipSync } from "node:zlib";
 import { BoundaryUnavailableError, ExecRefusedError, ExecUncertainError, SessionOpenError, type ExecRequest, type ExecutionSession, type SessionSpec } from "../src/exec/backend.ts";
 import type { Transport, TransportResponse } from "../src/exec/nebius/api.ts";
 import { RETENTION } from "../src/exec/nebius/sandbox.ts";
-import { createNebiusBackend, listingDigest, NEBIUS_CAPABILITIES, PREPARE_SCRIPT, reconcileJournals, SandboxOperationError, scanJournals, signalName, type ListingEntry, type NebiusBackendOptions } from "../src/exec/nebius/session.ts";
+import { compressSnapshot, createNebiusBackend, listingDigest, NEBIUS_CAPABILITIES, NEBIUS_LIMITS, PREPARE_SCRIPT, reconcileJournals, SandboxOperationError, scanJournals, signalName, type ListingEntry, type NebiusBackendOptions } from "../src/exec/nebius/session.ts";
+import { writeTar } from "../src/exec/tar.ts";
+import { FakeGuest } from "./fake-guest.ts";
 import { clock, FakeService, holding, settles, sha, succeed, type Behaviour } from "./fake-sandboxes.ts";
 import { sessionContract } from "./session-contract.ts";
 
@@ -113,7 +117,7 @@ describe("Nebius session: what it claims, and what it never sends (D9, D33)", ()
     assert.deepEqual(Object.keys((bodies[0]?.["files"] as Record<string, unknown>) ?? {}), ["/nivra/snapshot.tar"], "the prepare step carries the snapshot, and nothing else");
     assert.deepEqual([bodies[1]?.["files"], bodies[2]?.["files"]], [undefined, undefined]);
     assert.deepEqual(bodies.map((b) => Object.keys(b["env"] as Record<string, string>).sort()), [["NIVRA_CORRELATION"], ["FOO", "NIVRA_CORRELATION"], ["NIVRA_CORRELATION"]]);
-    assert.deepEqual([...(service.uploads[0] ?? [])], [...ARCHIVE], "the upload is the snapshot's bytes exactly");
+    assert.deepEqual([...gunzipSync(service.uploads[0] ?? new Uint8Array())], [...ARCHIVE], "the upload is the snapshot's bytes exactly, compressed");
     const sent = service.requests.map((r) => `${r.path} ${JSON.stringify(r.query ?? {})} ${typeof r.body === "string" ? r.body : ""}`).join("\n");
     for (const forbidden of [KEY, PROJECT, homedir(), tmpdir(), journalDir]) assert.equal(sent.includes(forbidden), false, `nothing sent holds ${forbidden === KEY ? "the key" : forbidden === PROJECT ? "the project id" : "a host path"}`);
   });
@@ -134,7 +138,7 @@ describe("Nebius session: what it claims, and what it never sends (D9, D33)", ()
       [spec({ signal: stopped.signal }), /^ExecRefusedError: This run was cancelled before anything was sent to the sandbox\.$/],
     ];
     for (const [given, pattern] of cases) await assert.rejects(backend.open(given), pattern);
-    await assert.rejects(backendOn(service, { limits: { maxUploadBytes: 10 } }).backend.open(spec()), /^ExecRefusedError: The workspace's snapshot is \d+ bytes, over the 10 Nivra sends to a sandbox, so nothing was sent\.$/);
+    await assert.rejects(backendOn(service, { limits: { maxUploadBytes: 10 } }).backend.open(spec()), /^ExecRefusedError: The workspace's snapshot is \d+ bytes compressed, over the 10 Nivra sends to a sandbox, so nothing was sent\.$/);
     await assert.rejects(backendOn(service, { credentials: () => null }).backend.open(spec()), (error: Error) => error instanceof BoundaryUnavailableError && /needs your Token Factory key and a Nebius project id/.test(error.message));
     assert.equal(service.requests.length, 0);
   });
@@ -354,6 +358,63 @@ describe("Nebius session: closing, and what it settles (D33)", () => {
     broken = true;
     const report = await session.close({ budgetMs: 20_000 });
     assert.equal(report.unresolved.length, 1);
+  });
+});
+
+describe("Nebius session: the snapshot is uploaded compressed (NIV-49)", () => {
+  const hex = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  /** Every entry of every journal in `journalDir`, settled ones included. */
+  const journalEntries = (journalDir: string) =>
+    [journalDir, join(journalDir, "settled")]
+      .filter((dir) => existsSync(dir))
+      .flatMap((dir) => readdirSync(dir).filter((name) => name.endsWith(".jsonl")).flatMap((name) => readFileSync(join(dir, name), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)));
+
+  it("uploads the tar gzip-compressed, the same bytes every time, and journals the tar's sha256 as the session's snapshot and the compressed bytes as the upload", async () => {
+    const service = serviceFor();
+    const { backend, journalDir } = backendOn(service);
+    for (let i = 0; i < 2; i++) await (await backend.open(spec())).close();
+    assert.equal(service.uploads.length, 2);
+    const [first, second] = service.uploads.map((bytes) => Buffer.from(bytes));
+    assert.ok(first!.equals(second!), "the same tar was compressed to different bytes");
+    assert.deepEqual([...first!.subarray(0, 10)], [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 255], "gzip at level 9, with no time and no system in its header");
+    assert.ok(first!.equals(Buffer.from(compressSnapshot(ARCHIVE))));
+    assert.ok(Buffer.from(gunzipSync(first!)).equals(Buffer.from(ARCHIVE)), "the upload isn't the snapshot's tar, compressed");
+    const entries = journalEntries(journalDir);
+    assert.deepEqual(
+      entries.filter((entry) => entry["kind"] === "session").map((entry) => entry["snapshotSha256"]),
+      [SNAPSHOT.sha256, SNAPSHOT.sha256],
+    );
+    assert.deepEqual(
+      entries.filter((entry) => entry["kind"] === "upload").map((entry) => [entry["sha256"], entry["bytes"]]),
+      [
+        [hex(first!), first!.byteLength],
+        [hex(first!), first!.byteLength],
+      ],
+    );
+  });
+
+  it("opens a snapshot whose tar is over the upload limit when it compresses under it, and refuses one that doesn't, with nothing sent", async () => {
+    const text = new TextEncoder().encode("export const line = 'a line of source, repeated as source repeats itself';\n".repeat(130_000));
+    const big = writeTar([{ path: "src/big.ts", kind: "file", executable: false, bytes: text }]);
+    assert.ok(big.byteLength > NEBIUS_LIMITS.maxUploadBytes, `the tar is only ${big.byteLength} bytes`);
+    const listing = listingDigest([{ path: "src/big.ts", kind: "file", executable: false, sha256: hex(text) }]).digest;
+    const guest = new FakeGuest();
+    guest.quick = true;
+    const session = await backendOn(guest.service).backend.open(spec({ snapshot: { archive: big, sha256: hex(big), listingDigest: listing } }));
+    await session.close();
+    const sent = guest.service.uploads[0]?.byteLength ?? Number.POSITIVE_INFINITY;
+    assert.ok(sent < NEBIUS_LIMITS.maxUploadBytes, `${sent} bytes were sent`);
+    // The guest decompressed and extracted it, and its listing had the snapshot's digest: the session opened.
+    const extracted = guest.workspaces.get("img-guest-1")?.get("src/big.ts");
+    assert.deepEqual([extracted?.kind, extracted?.kind === "file" ? extracted.bytes.byteLength : null], ["file", text.byteLength]);
+
+    const noise = writeTar([{ path: "noise.bin", kind: "file", executable: false, bytes: randomBytes(NEBIUS_LIMITS.maxUploadBytes) }]);
+    const refused = serviceFor();
+    await assert.rejects(
+      backendOn(refused).backend.open(spec({ snapshot: { archive: noise, sha256: hex(noise), listingDigest: DIGEST } })),
+      /^ExecRefusedError: The workspace's snapshot is \d+ bytes compressed, over the 8388608 Nivra sends to a sandbox, so nothing was sent\.$/,
+    );
+    assert.equal(refused.requests.length, 0);
   });
 });
 
@@ -665,9 +726,12 @@ describe("Nebius session: the prepare step's listing, checked with this machine'
     writeFileSync(join(source, "B.txt"), "upper\n");
     writeFileSync(join(source, "a-b"), "dash\n");
     writeFileSync(join(source, "a_b"), "underscore\n");
-    const archive = join(root, "snapshot.tar");
-    const tar = spawnSync("tar", ["-c", "-f", archive, "-C", source, "."], { encoding: "utf8" });
+    const plain = join(root, "plain.tar");
+    const tar = spawnSync("tar", ["-c", "-f", plain, "-C", source, "."], { encoding: "utf8" });
     assert.equal(tar.status, 0, tar.stderr);
+    // As the session uploads it: compressed. The digest is the listing's, whatever carried the files.
+    const archive = join(root, "snapshot.tar");
+    writeFileSync(archive, compressSnapshot(readFileSync(plain)));
     const workspace = join(root, "workspace");
     const listing = join(root, "listing");
     const ran = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", workspace, archive, "", listing], { encoding: "utf8" });
@@ -685,5 +749,40 @@ describe("Nebius session: the prepare step's listing, checked with this machine'
     const { digest, entries } = listingDigest(expected);
     assert.deepEqual([/^entries\s+(\d+)$/m.exec(ran.stdout)?.[1], /^digest ([0-9a-f]{64})$/m.exec(ran.stdout)?.[1]], [String(entries), digest], readFileSync(listing, "utf8"));
     assert.equal(existsSync(archive), false, "the archive is removed once extracted");
+  });
+
+  it("extracts over what the workspace already holds, and leaves out only the dependency and build folders in it, at any depth", { skip: process.platform === "win32" ? "needs a POSIX shell and tar" : false }, () => {
+    const root = tempDir("prepared listing");
+    const source = join(root, "source");
+    mkdirSync(join(source, "src"), { recursive: true });
+    writeFileSync(join(source, "src", "a.js"), "export const a = 1;\n");
+    // Named like output folders, but a file and a link: the commit's own, so listed.
+    writeFileSync(join(source, "out"), "a file named out\n");
+    symlinkSync("src", join(source, "dist"));
+    const plain = join(root, "plain.tar");
+    const tar = spawnSync("tar", ["-c", "-f", plain, "-C", source, "."], { encoding: "utf8" });
+    assert.equal(tar.status, 0, tar.stderr);
+    const { digest } = listingDigest([
+      { path: "src/a.js", kind: "file", executable: false, sha256: sha("export const a = 1;\n") },
+      { path: "out", kind: "file", executable: false, sha256: sha("a file named out\n") },
+      { path: "dist", kind: "link", target: "src" },
+    ]);
+    /** The digest the prepare step prints for the snapshot extracted over a workspace holding `held`. */
+    const printed = (held: Record<string, string>) => {
+      const guest = tempDir("prepared guest");
+      const workspace = join(guest, "workspace");
+      for (const [path, text] of Object.entries(held)) {
+        mkdirSync(dirname(join(workspace, path)), { recursive: true });
+        writeFileSync(join(workspace, path), text);
+      }
+      writeFileSync(join(guest, "snapshot.tar"), compressSnapshot(readFileSync(plain)));
+      const ran = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", workspace, join(guest, "snapshot.tar"), "", join(guest, "listing")], { encoding: "utf8" });
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.equal(readFileSync(join(workspace, "node_modules", "dep", "index.js"), "utf8"), "dep\n", "the workspace was emptied");
+      return /^digest ([0-9a-f]{64})$/m.exec(ran.stdout)?.[1];
+    };
+    const dependencies = { "node_modules/dep/index.js": "dep\n", "packages/a/node_modules/dep/index.js": "dep\n", "packages/a/.next/cache/x": "x\n", "coverage/lcov.info": "x\n", "crates/b/target/debug/b": "x\n" };
+    assert.equal(printed(dependencies), digest);
+    assert.notEqual(printed({ ...dependencies, "packages/a/index.js": "stray\n" }), digest, "a file outside the dependency folders was left out");
   });
 });

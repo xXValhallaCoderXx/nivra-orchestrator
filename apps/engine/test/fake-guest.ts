@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { PROBE_SCRIPT } from "../src/exec/check.ts";
 import { listingDigest, PREPARE_SCRIPT, type ListingEntry } from "../src/exec/nebius/session.ts";
 import { COLLECT_SCRIPT, RESULT_ARCHIVE, RESULT_LISTING } from "../src/exec/patch.ts";
@@ -69,11 +70,17 @@ export class FakeGuest {
     return { statuses: ["PENDING", "FAILED"] };
   }
 
-  /** The prepare step: the uploaded archive, extracted, and its listing's digest printed. */
+  /** The prepare step: the uploaded archive, decompressed and extracted, and its listing's digest printed. */
   #prepare(args: readonly string[], workspace: Workspace, body: Record<string, unknown>): Behaviour {
     const reference = (body["files"] as Record<string, { uuid: string }> | undefined)?.[args[4] ?? ""];
-    const archive = reference ? this.service.uploadsById.get(reference.uuid) : undefined;
-    if (!archive) return succeed({ exitCode: 1, stderr: "tar: can't open the archive\n" });
+    const uploaded = reference ? this.service.uploadsById.get(reference.uuid) : undefined;
+    if (!uploaded) return succeed({ exitCode: 1, stderr: "tar: can't open the archive\n" });
+    let archive: Uint8Array;
+    try {
+      archive = gunzipSync(uploaded);
+    } catch {
+      return succeed({ exitCode: 1, stderr: "tar: invalid gzip magic\n" });
+    }
     const listing: ListingEntry[] = [];
     for (const entry of readTar(archive, { maxEntries: 100_000, maxBytes: 64 * 1024 * 1024, maxEntryBytes: 16 * 1024 * 1024, maxPathBytes: 4_096 })) {
       if (entry.kind === "file") {
