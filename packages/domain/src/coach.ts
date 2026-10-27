@@ -2,6 +2,7 @@ import { z } from "zod";
 import { PreferencesReceived } from "./chat.ts";
 import { PreferenceSnapshot } from "./context.ts";
 import { ModelFailureKind, RunBudgetRecord, RunRoute, RunUsage } from "./models.ts";
+import { SPECIALISTS } from "./specialists.ts";
 import { TASK_BRIEF_LIMITS } from "./task.ts";
 
 /**
@@ -15,8 +16,8 @@ import { TASK_BRIEF_LIMITS } from "./task.ts";
  * what was sent. A report never says the brief is ready or correct: its outcome is about the answer only.
  */
 
-/** The coach's specialist profile: Track B's catalogue holds its entry, and its wording and version are the coach's. */
-export const COACH_PROFILE = { id: "task-readiness-coach", version: 1 } as const;
+/** The coach's specialist profile, as the one catalogue holds it (Track B's), whose entry's wording and version are the coach's. */
+export const COACH_PROFILE = { id: "task-readiness-coach" as const, version: SPECIALISTS["task-readiness-coach"].version };
 
 /** The tool the coach hands its answer in with, which stubs script against. */
 export const COACH_TOOL = "submit_coaching";
