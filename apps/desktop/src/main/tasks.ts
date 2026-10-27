@@ -211,7 +211,7 @@ export function taskRunFingerprint(parts: {
 export const TASK_SENDS = {
   tokenFactory: [
     "The brief: its goal, acceptance criteria, scope, exclusions and context, with its acceptance cases and checks, and any baseline checks and frozen files.",
-    "The names of the commit's files, the files the worker reads, and what the cases and checks it runs print.",
+    "The names of the commit's files, the files the worker reads, the lines its searches find, and what the cases and checks it runs print.",
     "Nivra's instructions to the worker, and the tools it may use.",
     `All of it to one model, ${TASK_MODEL}. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in.`,
   ],

@@ -115,6 +115,9 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Case 1, greet with and without a name");
   await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Check 1:");
   await expect(preview.getByTestId("task-run-preview-limits")).toContainText("(an estimate, not a cap)");
+  // The allowances a real repository needs room for (NIV-35), shown before Start.
+  await expect(preview.getByTestId("task-run-preview-limits")).toContainText("Bounds: at most 24 model requests of up to 150 s and 8,000 output tokens each, admitted against an estimated 480,000 input tokens (an estimate, not a cap); 48 tool calls, of which 8 writes");
+  await expect(preview).toContainText("the lines its searches find");
   // The case sources greet.sh, which the worker may change: the preview says the case judges only what it prints.
   await expect(preview.getByTestId("task-run-preview-case-files")).toContainText("Case 1 runs greet.sh, from the repository, which the worker can change. Nivra judges only what a case prints");
   await expect(preview.getByTestId("task-run-preview-blocked")).toHaveCount(0);
