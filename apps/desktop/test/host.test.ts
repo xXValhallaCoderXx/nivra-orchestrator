@@ -3364,6 +3364,22 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     assert.deepEqual([host.projects().length, lines(home, "cancelled.log")], [0, [first.runId, second.runId, third.runId]]);
   });
 
+  it("stops a preparation whose uploads were turned off while its start was out, as soon as its engine answers", async () => {
+    const { host, ids, home } = await gatedHost(["accept"]);
+    const id = ids[0]!;
+    const fingerprint = await fingerprintOf(host, id);
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await waitFor(() => calls(home, "runs.start") === 1, "the preparation's request to reach the engine");
+    await host.setCloudExecution(id, false);
+    writeFileSync(join(home, "release"), "");
+    const runId = lines(home, "accepted.log")[0]?.split(" ")[1];
+    const stopped = await ended(host, id, "the preparation to stop");
+    assert.deepEqual(
+      [stopped.preparation?.runId === runId, stopped.preparation?.status, stopped.preparation?.note, lines(home, "cancelled.log"), stopped.prepared],
+      [true, "cancelled", "Stopped: uploads for this project were turned off. What it had sent stays with Nebius; its report says what that was.", [runId], null],
+    );
+  });
+
   it("binds a task run to the prepared environment: its preview carries it to the engine, its start sends it, and its fingerprint is v1 without one and v2 with one", async () => {
     const { host, ids, home } = await gatedHost(["accept", "release", "task-report"]);
     const id = ids[0]!;

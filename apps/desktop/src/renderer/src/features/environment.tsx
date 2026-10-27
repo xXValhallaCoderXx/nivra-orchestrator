@@ -388,7 +388,7 @@ function Preparation({ preparation }: { preparation: PreparationView }) {
           <Text size="sm" fw={500}>
             {OUTCOME[report.outcome]}
           </Text>
-          {report.stopped && (
+          {report.stopped && report.stopped.code !== "cancelled" && (
             <Text size="sm" data-testid="environment-stopped">
               {report.stopped.message}
             </Text>
