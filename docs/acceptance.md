@@ -16,8 +16,9 @@ run; a skipped check is reported as skipped.
    B.
 5. Edit the preference, then delete it; each later request uses the fresh context.
 
-The whole sequence is read-only: no scaffold, no repository writes, no code execution. New-app creation is deferred
-(D20).
+The whole sequence was read-only by design: no scaffold, no repository writes, no code execution. That was this
+milestone's scope. Coding work came later, behind its own boundary, each with its record below: task runs (D39),
+applying an approved change (D40) and a project's environment (D41). New-app creation is still deferred (D20).
 
 **Fixtures: user-supplied repositories A and B**, recorded 17 October 2026 (NIV-2). Both are real projects of Nate's,
 used where they are and never copied into this repository.
@@ -57,7 +58,7 @@ Run on Windows with a WSL engine and on Linux. Native Windows results are report
 | Explicit override | A task-specific choice wins without changing the stored profile. | Passing: offline, through the UI (the D20 scenario), over stdio and in the host, with `nivra.json` byte-identical across the run; live on B on 18 October, where the choice governed while "Currently" still named B's test runner (D23). See below. |
 | Context isolation | Project A's project-only records and files never reach project B's requests. | Passing for the run's context (D21) and for model requests, files included (D22), and for a suggestion kept in A (D23); offline, and in the D20 scenario. See below. |
 | Changed or deleted preference | The next request uses the edited preference, or none after deletion. | Passing for the run's context, including after an app restart (D21), and for model requests (D22), offline; a replaced preference too, offline and live on A on 18 October (D23). See below. |
-| Consent | No repository-derived material leaves the machine without that project's `modelContext` consent. `cloudExecution` stays off and unused. | Passing offline, including consent withdrawn while a run starts, waits or runs (D22; see below). |
+| Consent | No repository-derived material leaves the machine without that project's `modelContext` consent. In this milestone `cloudExecution` stayed off and unused; it now gates uploads to Nebius Sandboxes, asked for on its own (D36, D39, D41). | Passing offline, including consent withdrawn while a run starts, waits or runs (D22; see below). |
 | Cancellation and restart | The app reports the true state. An interrupted run ends as `run.interrupted` and is never replayed. | Passing at the engine level and for explain runs (`pnpm verify`). |
 | Failure reporting | Each of these is reported clearly, with no silent retry: invalid key, unavailable model, rate limiting, timeout, malformed tool results, network failure, sharing refusal. | Passing offline against a stub, except timeouts, which are tested in-process with short deadlines (D22; see below). |
 
@@ -2260,6 +2261,72 @@ empty recovery folder (D40).
   partial, restore and keep tests run on the gated engine, and the writer's own tests and the kill tests show the real
   thing.
 - **One live worker run, and the packaged journey through the Windows app:** checkpoint 3 (NIV-35).
+
+### A project's environment (D41, NIV-49)
+
+The 48-hour delivery's first step: one pinned Node and pnpm environment, prepared inside Nebius from a commit's
+manifests, and task runs that start from it, with baseline checks before the model and frozen files. On
+`feature/niv-49-host`, from `main` at `8ae8779`. Built in parallel: the session's compressed snapshot and its listing
+(a helper, `fix/niv-49-session`), the host and the window (a helper, against protocol 12's contract committed first),
+and the engine here; then an independent review.
+
+| Commit | What |
+|---|---|
+| `6bd38d1` | The preparation and an image import, each journaled as one operation |
+| `8560a82`, `c9c214b` | The snapshot uploaded gzip-compressed with limits a real repository fits; a prepared image's `node_modules` left out of the session's listing |
+| `af22748`, `9fb57a2` | The feasibility probe, its recipe and an offline rehearsal; the install log's end only, and long operations read every 5 s |
+| `c49713b`, `5c8ca8c` | Protocol 12's contract: the environment, its preview, a brief's baseline selections and frozen files |
+| `f18d52a` | The preparation as a run of its own, journaled, bound to its project |
+| `ed210d6` | A task run from a prepared environment, its baseline before the model, its frozen files |
+| `898fdfd`, `7b05299` | Patterns matched against the whole output, and compiled on their own first; `rpc.ts` prepares; a second layout through a real engine |
+| `20b1c7a` | A task run's report keeps the bounds it ran under |
+| `5c4fd21`, `bd36983` | The apply hold, for recovery checks through the real engine (unpackaged only) |
+| `a465d7d`, `88b066c`, `68e7693` | The host: workspace migration 5, the brief's new parts and the run fingerprint's v2, the four calls |
+| `26bcbb2`, `41fa8bc` | The window: the Environment section, the brief's form, the run preview and card |
+| `c5529ba` | The independent review's nine findings |
+| `c491eed`, `80608bc` | Tests the criteria and mutation checks asked for: the baseline's time, and an environment from another project |
+| this record | D41, `AGENTS.md`'s boundary rule, the development notes, this section, and the stale lines in this file and `system-architecture.md` |
+
+**NIV-49's criteria, shown:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| The account's image and preparation path, by an approved, bounded recipe | The feasibility run, 27 October 15:00 SGT (recipe `5c937f1d…`) | 15 of 15 checks in 85 s. Nebius had no public Node 22 image, so `node:22.23.4-alpine3.24` was imported (12 s) into the project, untagged; the preparation installed SHE-65's filtered workspace with pnpm 11.5.3 (125 packages, 7.7 s). Evidence: `~/nivra-acceptance/env-probe-2026-10-27T070042901Z/` |
+| Dependencies prepared inside the boundary from pinned versions and frozen inputs; network declared; no host `node_modules` or credentials in the image | `environment-inputs.test.ts`, `environment-engine.test.ts`, `nebius-sandbox.test.ts` | The inputs are the commit's manifests, lockfile and workspace file, read from Nivra's own snapshot: `.npmrc` stays here, and output folders never leave. The stand-in received exactly those. The preparation is the one operation with networking on, and the preview says so; a layout that needs its sources to install is refused, naming the file |
+| Reuse through Nivra's own session and overlay: dependencies survive, the source is the commit's, a fresh run inherits nothing | The feasibility run; `task-environment.test.ts` | Live, the session started from the prepared image matched the commit's listing with `node_modules` left out, ran the toolchain and the baseline, and collect gave exactly the commit. Offline, a run starts from the prepared image itself, every time; nothing a run leaves becomes the environment |
+| The image's identity, platform and inputs bound into the preview, run and proposal; tags aren't identity | `task-environment.test.ts`, `host.test.ts`, the real engine through `rpc.ts` | The image's id, the inputs' digest, the Nebius project's hash, Node, pnpm and arch travel in the run's input and its report, and the run preview's fingerprint v2 binds them. A commit whose manifests changed, or credentials for another project, are refused before anything is sent. Nivra never tags an import |
+| Worker and checks offline; exclusions can't hide a source change; worker writes can't alter dependencies | `task-engine.test.ts`, `task-worker.test.ts`, `task-environment.test.ts`, `nebius-session.test.ts` | Every task operation runs with networking off. Output folders are left out of the listing and collect at any depth, and any other difference refuses the session or the result. Writes into `node_modules`, to a frozen file or to a manifest the environment was prepared from are refused before anything is sent |
+| The real baseline checks before inference; a missing tool stops clearly; a reproduced bug told apart from inability to run | The feasibility run; `task-environment.test.ts` | Live: SHE-65's regression failed with five AssertionError lines, as its brief expects, and the data (227 passed, 4 skipped) and domain (1,122) suites passed. Offline: a selection that doesn't give what the brief expects stops the run with no model request, naming it and why; the toolchain probe still stops a run whose program is missing |
+| Baseline operations in the limits and reservations; final verification and cleanup keep their allowance | `task-environment.test.ts`, `task-engine.test.ts` | The baseline joins the operation count and the preview's bounds. After 300 s of baseline the worker's window shrinks by that much and the reserve stays whole, so collect and both final checks run; with no room left, the next selection isn't started and the run stops for time before the model |
+| A second, small pnpm layout works offline with no change to Nivra | `environment-engine.test.ts`, `environment-inputs.test.ts` | A single-package repository with no workspace file is prepared the same way, through a real engine, as the workspace is |
+
+**Checks:**
+- `pnpm verify` at `7237e04`: 1,064 tests (domain 75, desktop 307, engine 682), none skipped; at `f3fa984`, the code as
+  reviewed here, 1,066 (domain 75, desktop 307, engine 684), none skipped.
+- The built app (`test:e2e`) at `7237e04`: 69 passed and 1 skipped (`explain.spec.ts`'s packaged-only test), among
+  them `environment.spec.ts`: the Environment section, the brief's form, the preview and the card.
+- The packaged app (`test:packaged`, a runtime staged from this code) at `7237e04`: 27 passed and 43 skipped, the tests
+  that need the stand-in switches a packaged app ignores.
+- The real engine through `rpc.ts`, against the stand-in: an environment prepared; a task preview bound to it; an
+  environment with another inputs digest, or from another Nebius project, refused at the task preview.
+- **Mutation checks:** 20 of D41's rules broken on purpose, one at a time; 19 each failed a test:
+  - the preparation's networking, the steps' networking (with the guard that refuses it removed, and with it kept),
+    the manifests' digest checked in the worker, the project's binding, the environment's inputs held from the
+    worker, output folders left out of the listing;
+  - the baseline: a mismatch ignored, its output or its exit code not compared, its time guard, the reserve;
+  - the review's: the preparation's slot, `pnpm:devPreinstall`, the upload's hash, a lost import searched for, the
+    journal read after settling, a missing journal moved, a changed frozen file verified (`verifiedWith`).
+  The twentieth, the frozen files' comparison after collect, stands behind integrity, which refuses any change Nivra
+  didn't write first: no run reaches it with integrity whole, so breaking it alone fails no test. `verifiedWith`'s
+  unit test shows a changed frozen file is never verified. The project's binding and the baseline's time had no test
+  until these checks (`80608bc`, `c491eed`).
+- **The independent review** (27 October) found nine problems; each is fixed with a test that fails with its fix
+  undone (D41).
+
+**Not shown here:**
+- The Windows turn (`pnpm dev:win --no-launch`, then `test:windows`). Targets, the supervisor and staging didn't
+  change, so `verify:windows` isn't needed.
+- A task run from the environment with the real model: that is NIV-35's live run, with its own recipe.
 
 ### Deferred to a later milestone (kept, not dropped)
 

@@ -475,6 +475,43 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e task-apply.spec.ts
 - **The window's journey** (`e2e/task-apply.spec.ts`) approves, applies and accepts one run, rejects another, and asks
   for a revision of a third, on the built app against the stand-ins.
 
+A project's environment (NIV-49, D41): one pinned Node and pnpm setup, prepared inside Nebius from the commit's
+manifests, lockfile and workspace file (never `.npmrc`), and kept as an image its task runs start from. The preparation
+is a run of its own; it needs upload consent, the key and the project id, and it is the one operation with networking
+on. A task run bound to the environment starts from its image, runs the brief's baseline selections before the model,
+and refuses changes to the brief's frozen files. Against the stand-in:
+
+```bash
+pnpm rpc environment.preview '{"repoPath":"/path/to/repo","spec":{"filters":["@scope/package..."]}}'
+pnpm rpc runs.start '{"workflowId":"environment","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"cloudExecution":true},"spec":{"filters":[]}}}' --follow --sandboxes-url http://127.0.0.1:<port>
+pnpm rpc runs.start '{"workflowId":"task","input":{"repoPath":"/path/to/repo","environment":{"image":"…","inputsDigest":"…","projectFingerprint":"…","node":"v22.23.4","pnpm":"11.5.3","arch":"x86_64"}},"context":{…}}' --follow --sandboxes-url … --token-factory-url …
+cd apps/engine && node --test test/environment-*.test.ts test/task-environment.test.ts
+cd apps/desktop && xvfb-run -a pnpm -s test:e2e environment.spec.ts
+```
+
+- **`rpc.ts` fills in** a preparation's preview fingerprint (from `environment.preview`), a project id and the local
+  target, and prints
+  `runs.environment` after `--follow`. A task run's `environment` is the prepared one's report, `prepared` field by
+  field; `rpc.ts` binds the task preview to it.
+- **The engine's parts** (`apps/engine/src/environment/`): `inputs.ts` (the inputs from the snapshot, the refusals,
+  the digest and the install's arguments), `preview.ts` (what the preview shows and the bounds), `prepare.ts` (the
+  image listed or imported, the upload, the preparation and its checks) and `report.ts`. The workflow is
+  `workflows/environment.ts`; a task run's baseline and frozen files are in `task/harness.ts` and `task/worker.ts`.
+- **Stand-ins.** The stand-in's `RealGuest` extracts the inputs a preparation was sent and adds the dependency folders
+  an install would leave, so nothing is installed on this machine; `environment-engine.test.ts` prepares a workspace
+  and a single-package repository through a real engine, with no change to Nivra between them.
+- **What the host keeps** (workspace migration 5): per project, the spec and the prepared environment, and each
+  preparation with its request id, saved before it is sent. The gated engine stands in for preparations in the host's
+  tests (`environment-store.test.ts`, `host.test.ts`).
+- **The live feasibility probe** (`apps/engine/scripts/env-probe.ts`): one preparation, then Nivra's own session
+  started from its image, running a config's baseline selections with networking off. No model. `--plan` prints the
+  recipe with no network; `--run --approved <digest>` needs an approval of that recipe; `--recover <folder>` settles
+  what a cut-short cleanup left. Evidence goes to `~/nivra-acceptance/env-probe-<UTC>/`. It passed 15 of 15 on
+  27 October (D41).
+- **A test switch** holds the apply writer before a named step, for recovery checks through the real engine:
+  `--apply-hold <file>` on the engine, `--nivra-test-apply-hold <file>` on an unpackaged app (an absolute path). The
+  engine writes `<file>.held` when it holds.
+
 ## Where things will live
 
 | What | Where |
