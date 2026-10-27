@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { ConversationsView, ConversationSummary, EngineView, PreferencesView, ProjectView, WslView } from "../../../shared/ipc";
 import { Conversation } from "../features/conversation";
 import { EngineBadge } from "../features/engine";
+import { MissionDetail, MissionsPage } from "../features/missions";
 import { Navigation, PlanningHome, type View } from "../features/navigation";
 import { NewTask, TaskDetail, TasksPage } from "../features/tasks";
 import { usePoll } from "../shared/ui";
@@ -114,6 +115,8 @@ export function App() {
                 onCreateTask={(plan, title) => setView({ kind: "new-task", plan, title })}
               />
             )}
+            {view.kind === "missions" && <MissionsPage onOpen={(id) => setView({ kind: "mission", id })} />}
+            {view.kind === "mission" && <MissionDetail key={view.id} missionId={view.id} onOpenTask={(id) => setView({ kind: "task", id })} onDeleted={() => setView({ kind: "missions" })} />}
             {view.kind === "tasks" && <TasksPage onOpen={(id) => setView({ kind: "task", id })} onNew={() => setView({ kind: "new-task", plan: null, title: "" })} />}
             {view.kind === "new-task" && (
               <NewTask
