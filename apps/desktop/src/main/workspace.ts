@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ChatResult, HistoryRecord, ReviewPanel, ReviewReport } from "@nivra/domain";
+import type { ApplyView, ChatResult, HistoryRecord, ReviewPanel, ReviewReport } from "@nivra/domain";
 import { str, strOrNull, type Row, type WorkspaceDb } from "./workspace-db.ts";
 
 /**
@@ -493,6 +493,132 @@ export function settleAttempt(
         .run(outcome.status, outcome.errorKind ?? null, outcome.errorMessage ?? null, at, attemptId).changes,
     ) === 1
   );
+}
+
+/** How an attempt's run ended, kept when it ended (D40), so its history shows without its engine. */
+export interface AttemptOutcome {
+  outcome: string;
+  verified: boolean;
+  proposalHash: string | null;
+  baseline: string | null;
+  at: string;
+}
+
+/** A settling of an apply: accepted, dismissed or kept as is (`task.dismiss`), or a restore (`task.restore`). */
+export type SettleIntent = "accepted" | "dismissed" | "kept" | "restore";
+
+/**
+ * What became of an attempt (D40), recorded apart: its run's outcome, the person's decision on its proposal, its apply
+ * (the request id saved before it was sent, the engine's last answer about it, or the host's own note when the engine
+ * couldn't say), a settling of it saved before it was sent and not yet answered, and the person's acceptance of an
+ * applied change, with why it didn't complete the task when the task had moved on since the run.
+ */
+export interface AttemptDecisionRecord {
+  attemptId: string;
+  outcome: AttemptOutcome | null;
+  decision: "approved" | "rejected" | "revision" | null;
+  decidedAt: string | null;
+  revisionNote: string | null;
+  apply: { requestId: string; projectId: string; view: ApplyView | null; readAt: string | null; note: string | null } | null;
+  settle: { intent: SettleIntent; at: string } | null;
+  acceptedAt: string | null;
+  acceptNote: string | null;
+}
+
+/** An attempt's record, or an empty one: nothing decided, nothing applied. */
+export function attemptRecord(workspace: WorkspaceDb, attemptId: string): AttemptDecisionRecord {
+  const row = workspace.db.prepare("SELECT * FROM attempt_records WHERE attempt_id = ?").get(attemptId);
+  if (!row) return { attemptId, outcome: null, decision: null, decidedAt: null, revisionNote: null, apply: null, settle: null, acceptedAt: null, acceptNote: null };
+  const requestId = strOrNull(row["apply_request_id"]);
+  return {
+    attemptId,
+    outcome: row["outcome"] === null ? null : { outcome: str(row["outcome"]), verified: Number(row["verified"]) === 1, proposalHash: strOrNull(row["proposal_hash"]), baseline: strOrNull(row["baseline"]), at: str(row["outcome_at"]) },
+    decision: strOrNull(row["decision"]) as AttemptDecisionRecord["decision"],
+    decidedAt: strOrNull(row["decided_at"]),
+    revisionNote: strOrNull(row["revision_note"]),
+    apply: requestId === null ? null : { requestId, projectId: str(row["apply_project_id"]), view: row["apply_json"] ? (JSON.parse(str(row["apply_json"])) as ApplyView) : null, readAt: strOrNull(row["apply_read_at"]), note: strOrNull(row["apply_note"]) },
+    settle: row["settle_intent"] === null ? null : { intent: str(row["settle_intent"]) as SettleIntent, at: str(row["settle_requested_at"]) },
+    acceptedAt: strOrNull(row["accepted_at"]),
+    acceptNote: strOrNull(row["accept_note"]),
+  };
+}
+
+/**
+ * Saves a settling of the apply sent as `requestId` before it is sent, so a restart reads its end back by the request id
+ * rather than sending it again. False when that isn't the attempt's approved apply, or another settling of it is saved
+ * and not answered.
+ */
+export function requestSettle(workspace: WorkspaceDb, attemptId: string, requestId: string, intent: SettleIntent, at: string): boolean {
+  return Number(workspace.db.prepare("UPDATE attempt_records SET settle_intent = ?, settle_requested_at = ? WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND settle_intent IS NULL").run(intent, at, attemptId, requestId).changes) === 1;
+}
+
+/** A settling that has been answered, or read back: nothing of it is pending any more. */
+export function clearSettle(workspace: WorkspaceDb, attemptId: string, requestId: string): void {
+  workspace.db.prepare("UPDATE attempt_records SET settle_intent = NULL, settle_requested_at = NULL WHERE attempt_id = ? AND apply_request_id = ?").run(attemptId, requestId);
+}
+
+/** Every attempt whose approval stands and whose change isn't accepted: what the host reads back from its engine. */
+export function approvedApplies(workspace: WorkspaceDb): string[] {
+  return workspace.db.prepare("SELECT attempt_id FROM attempt_records WHERE decision = 'approved' AND apply_request_id IS NOT NULL AND accepted_at IS NULL ORDER BY rowid").all().map((row) => str(row["attempt_id"]));
+}
+
+/** Keeps how an attempt's run ended, once: a later read never changes it. */
+export function recordOutcome(workspace: WorkspaceDb, attemptId: string, outcome: Omit<AttemptOutcome, "at">, at: string): void {
+  workspace.db
+    .prepare(
+      "INSERT INTO attempt_records (attempt_id, outcome, verified, proposal_hash, baseline, outcome_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (attempt_id) DO UPDATE SET outcome = excluded.outcome, verified = excluded.verified, proposal_hash = excluded.proposal_hash, baseline = excluded.baseline, outcome_at = excluded.outcome_at WHERE attempt_records.outcome IS NULL",
+    )
+    .run(attemptId, outcome.outcome, outcome.verified ? 1 : 0, outcome.proposalHash, outcome.baseline, at);
+}
+
+/**
+ * Records the person's decision on an attempt's proposal, once: false when one is recorded already. An approval saves
+ * its apply's request id and the repository it is sent for with it, before anything is sent, and starts a new apply
+ * record.
+ */
+export function decide(workspace: WorkspaceDb, attemptId: string, decision: { kind: "approved"; requestId: string; projectId: string } | { kind: "rejected" } | { kind: "revision"; note: string }, at: string): boolean {
+  return workspace.tx((db) => {
+    db.prepare("INSERT INTO attempt_records (attempt_id) VALUES (?) ON CONFLICT (attempt_id) DO NOTHING").run(attemptId);
+    const approved = decision.kind === "approved";
+    const changed = db
+      .prepare(
+        `UPDATE attempt_records SET decision = ?, decided_at = ?, revision_note = ?${approved ? ", apply_request_id = ?, apply_project_id = ?, apply_json = NULL, apply_read_at = NULL, apply_note = NULL" : ""} WHERE attempt_id = ? AND decision IS NULL AND accepted_at IS NULL`,
+      )
+      .run(...([decision.kind, at, decision.kind === "revision" ? decision.note : null, ...(approved ? [decision.requestId, decision.projectId] : []), attemptId] as string[]));
+    return Number(changed.changes) === 1;
+  });
+}
+
+/** The engine's answer about the apply sent as `requestId`, kept while that is still the attempt's apply. */
+export function recordApply(workspace: WorkspaceDb, attemptId: string, requestId: string, view: ApplyView, at: string): boolean {
+  return Number(workspace.db.prepare("UPDATE attempt_records SET apply_json = ?, apply_read_at = ?, apply_note = NULL WHERE attempt_id = ? AND apply_request_id = ?").run(JSON.stringify(view), at, attemptId, requestId).changes) === 1;
+}
+
+/** The host's own words about an apply its engine couldn't say anything about. */
+export function noteApply(workspace: WorkspaceDb, attemptId: string, requestId: string, note: string): boolean {
+  return Number(workspace.db.prepare("UPDATE attempt_records SET apply_note = ? WHERE attempt_id = ? AND apply_request_id = ?").run(note, attemptId, requestId).changes) === 1;
+}
+
+/**
+ * Takes back an approval whose apply didn't change the checkout: one that never reached its engine, or whose result
+ * the person dismissed. The apply stays on record; the person may decide again.
+ */
+export function withdrawDecision(workspace: WorkspaceDb, attemptId: string, requestId: string, note: string | null): boolean {
+  return (
+    Number(
+      workspace.db
+        .prepare("UPDATE attempt_records SET decision = NULL, decided_at = NULL, settle_intent = NULL, settle_requested_at = NULL, apply_note = COALESCE(?, apply_note) WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND accepted_at IS NULL")
+        .run(note, attemptId, requestId).changes,
+    ) === 1
+  );
+}
+
+/**
+ * The person accepted the change its apply wrote; `note` says why that didn't complete the task (its brief or its
+ * repository changed since the run), when it didn't.
+ */
+export function acceptChange(workspace: WorkspaceDb, attemptId: string, requestId: string, at: string, note: string | null = null): boolean {
+  return Number(workspace.db.prepare("UPDATE attempt_records SET accepted_at = ?, accept_note = ? WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND accepted_at IS NULL").run(at, note, attemptId, requestId).changes) === 1;
 }
 
 /** A review of one saved plan version (D31): what it was bound to, the report its engine saved, and its run link. */

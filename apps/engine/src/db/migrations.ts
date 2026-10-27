@@ -59,4 +59,26 @@ export const MIGRATIONS: readonly string[] = [
      created_at TEXT NOT NULL
    );
    CREATE TRIGGER proposals_kept BEFORE UPDATE ON proposals BEGIN SELECT RAISE(ABORT, 'a proposal is kept as it was bound'); END;`,
+  // v5 (D40): applying a proposal. A claim comes first, by the host's request id, so a repeated request finds its
+  // apply, a refused one included; then the intent, written before anything of the person's is touched; then the
+  // result, and how the person settled it. One apply is open for a folder at a time, a partial or unknown one included
+  // until the person settles it, and a proposal is applied once. Rows are never removed: they are how a crash is
+  // reconciled.
+  `CREATE TABLE applies (
+     id TEXT PRIMARY KEY,
+     request_id TEXT NOT NULL UNIQUE,
+     run_id TEXT NOT NULL,
+     proposal_hash TEXT NOT NULL,
+     destination TEXT NOT NULL,
+     state TEXT NOT NULL CHECK (state IN ('claimed', 'refused', 'writing', 'applied', 'not-applied', 'partial', 'unknown')),
+     refusal TEXT,
+     intent TEXT,
+     created_folders TEXT NOT NULL DEFAULT '[]',
+     result TEXT,
+     resolution TEXT CHECK (resolution IN ('accepted', 'dismissed', 'kept')),
+     created_at TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   );
+   CREATE UNIQUE INDEX applies_open ON applies (destination) WHERE state IN ('claimed', 'writing') OR (state IN ('partial', 'unknown') AND resolution IS NULL);
+   CREATE UNIQUE INDEX applies_applied ON applies (run_id) WHERE state = 'applied';`,
 ];

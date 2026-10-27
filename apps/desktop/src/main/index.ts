@@ -277,6 +277,12 @@ function start(): void {
   handle(IPC.startTaskRun, z.tuple([Id, Fingerprint, Fingerprint]), (_event, id, expected, snapshot) => host.startTaskRun(id, expected, snapshot));
   handle(IPC.cancelTaskRun, z.tuple([Id, Id]), (_event, id, attemptId) => host.cancelTaskRun(id, attemptId));
   handle(IPC.getTaskAttempt, z.tuple([Id, Id]), (_event, id, attemptId) => host.taskAttempt(id, attemptId));
+  // A run's change (D40): approved by the hash the person saw, rejected, revised, settled or restored.
+  handle(IPC.approveTaskChange, z.tuple([Id, Id, Fingerprint]), (_event, id, attemptId, approvedHash) => host.approveTaskChange(id, attemptId, approvedHash));
+  handle(IPC.rejectTaskChange, z.tuple([Id, Id]), (_event, id, attemptId) => host.rejectTaskChange(id, attemptId));
+  handle(IPC.requestTaskRevision, z.tuple([Id, Id, z.string().max(4_000)]), (_event, id, attemptId, note) => host.requestTaskRevision(id, attemptId, note));
+  handle(IPC.settleTaskChange, z.tuple([Id, Id, z.enum(["accepted", "dismissed", "kept"])]), (_event, id, attemptId, as) => host.settleTaskChange(id, attemptId, as));
+  handle(IPC.restoreTaskChange, z.tuple([Id, Id]), (_event, id, attemptId) => host.restoreTaskChange(id, attemptId));
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {

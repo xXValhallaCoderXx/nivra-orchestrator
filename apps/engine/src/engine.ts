@@ -31,6 +31,7 @@ import {
   type WorkflowId,
 } from "@nivra/domain";
 import { installGitAdvice } from "./advice.ts";
+import { ApplyRequestRefusal, ApplyService } from "./apply/service.ts";
 import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
 import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, type Diagnostic } from "./diagnostics.ts";
 import { Database, EngineLockedError } from "./db/database.ts";
@@ -249,6 +250,29 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const backend = createLocalBackend({ baseEnv: env });
   const toolEnv = childEnv(env, {}, { stripWindowsPaths: process.platform === "linux" && insideWsl(env) });
   const locateGit = () => findGit({ env: toolEnv });
+  // Applying proposals to the person's checkout (D40). An apply an earlier engine left writing is reconciled here,
+  // before any apply call is answered, writing nothing of the person's.
+  const applies = new ApplyService({
+    database,
+    proposal: (runId) => store.proposal(runId),
+    verified: (runId) => {
+      const stored = store.artifact(runId, "task");
+      return stored !== null && TaskReport.parse(JSON.parse(stored)).verified;
+    },
+    homeId,
+    backend,
+    findGit: locateGit,
+    platform: process.platform,
+  });
+  /** A request the apply service refused before claiming anything, in Nivra's words. */
+  const applyCall = async <T>(work: () => Promise<T>): Promise<T> => {
+    try {
+      return await work();
+    } catch (error) {
+      if (error instanceof ApplyRequestRefusal) throw new RpcFailure(ErrorCode.InvalidParams, error.message);
+      throw error;
+    }
+  };
   const runtimeHash = readRuntimeHash(options.moduleUrl);
   // Token Factory, or a test stub on this machine when the loopback-only argument names one (D22).
   const endpoint = options.tokenFactoryUrl ? { url: options.tokenFactoryUrl, kind: "loopback-test" as const } : { url: TOKEN_FACTORY_BASE_URL, kind: "token-factory" as const };
@@ -676,6 +700,10 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         rescan();
         return sandboxStatus();
       },
+      "task.apply": (params) => applyCall(() => applies.apply(params)),
+      "task.applyStatus": ({ requestId }) => applies.status(requestId),
+      "task.restore": ({ applyId }) => applyCall(() => applies.restore(applyId)),
+      "task.dismiss": ({ applyId, as }) => applyCall(() => applies.dismiss(applyId, as)),
       "sandbox.recover": () => {
         if (sessionsActive()) throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check or a task is going on this engine. Let it end, then try again.");
         rescan();

@@ -113,12 +113,16 @@ list.
 - Snapshots sent into a boundary never include the engine home, the preferences store or files on the secrets deny
   list. An allowed endpoint can still carry data out, so send the minimum context.
 
-## Agent write rules (D15)
+## Agent write rules (D15, D40)
 
 - A coding agent writes only into a workspace the engine made for its run (a copy of one commit), never into the
   person's checkout or a git worktree.
-- Its changes reach the checkout only as a patch that the engine has checked, the person has approved by hash, and the
-  engine applies with git after recording the intent.
+- Its changes reach the checkout only as a proposal that the engine has checked and the person has approved by hash.
+  The engine applies it itself, never with git apply in the working tree (D40): it records the intent first, moves
+  each file it replaces aside into a recovery folder in the repository's git folder and checks it, and links each new
+  file into place without replacing anything, working only through folders it opened without following a link.
+  Changes are left unstaged, nothing is replayed after a crash, a version of a file Nivra didn't write is never
+  overwritten, and every copy it kept stays after the change is settled, for the person to delete.
 - Checks and dependency installs run inside an execution boundary, against the workspace. Never run them unconfined
   as a fallback.
 - The engine on the OS that owns a checkout's filesystem is the only thing that writes it; the host and the renderer
