@@ -256,5 +256,13 @@ export const MissionReviewComposition = z
     (composition) =>
       composition.binding.tasks.length === composition.packet.tasks.length && composition.binding.tasks.every((task, index) => task.title === composition.packet.tasks[index]!.title),
     "A mission review's binding names the tasks it sent, in the order sent, with their titles as sent.",
-  );
+  )
+  .refine((composition) => JSON.stringify(composition.binding.specialists) === JSON.stringify(composition.packet.specialists), "A mission review's binding names the profiles its packet was sent to.");
 export type MissionReviewComposition = z.infer<typeof MissionReviewComposition>;
+
+/**
+ * A stored composition as it is read back (NIV-52): the shape it was kept in, without the checks made when it was
+ * composed (the rendered length, the profiles' order, the binding's agreement with the packet). Those held then; a
+ * later version that renders or checks differently must still read an old report.
+ */
+export const StoredMissionReviewComposition = z.object({ binding: ContextBinding, packet: PacketShape, text: z.string() });

@@ -9,6 +9,7 @@ import {
   MissionContent,
   MissionReviewComposition,
   MissionReviewPacket,
+  StoredMissionReviewComposition,
   missionPacketDigest,
   renderMissionPacket,
   taskRef,
@@ -250,11 +251,21 @@ describe("a mission review's packet (NIV-52)", () => {
       { ...composition, binding: { ...binding, tasks: [binding.tasks[1]!, binding.tasks[0]!] } },
       { ...composition, binding: { ...binding, tasks: [binding.tasks[0]!] } },
       { ...composition, text: "" },
+      { ...composition, binding: { ...binding, specialists: [specialistRef("council-chair"), specialistRef("product-architect"), specialistRef("risk-testability")] } },
     ];
     assert.deepEqual(
       refused.map((value) => MissionReviewComposition.safeParse(value).success),
       refused.map(() => false),
     );
+  });
+
+  it("is read back as it was stored, even when a later version would render or check it differently", () => {
+    const binding = { ...BINDING, findings: [], specialists: PACKET.specialists };
+    // A packet that renders past today's limit, as one kept under a shorter renderer would after a change.
+    const long = { ...PACKET, tasks: [task("A", { context: "c".repeat(MISSION_REVIEW_LIMITS.contextChars) }), task("B", { context: "c".repeat(MISSION_REVIEW_LIMITS.contextChars) })] };
+    const stored = { binding: { ...binding, tasks: binding.tasks.map((bound, index) => ({ ...bound, title: long.tasks[index]!.title })) }, packet: long, text: "the text as it was rendered then" };
+    assert.equal(MissionReviewComposition.safeParse(stored).success, false, "today's checks refuse composing it");
+    assert.equal(StoredMissionReviewComposition.safeParse(stored).success, true, "but a stored one still reads");
   });
 });
 
