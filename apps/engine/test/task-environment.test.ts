@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { projectFingerprint, type TaskEnvironment } from "@nivra/domain";
 import { environmentInputs } from "../src/environment/inputs.ts";
+import type { ExecResult } from "../src/exec/backend.ts";
+import { judgeBaseline } from "../src/task/harness.ts";
 import { attempt, BRIEF, FIX, FIXTURE, PROJECT, verdicts } from "./task-fixtures.ts";
 import { cleanUp, repoWith, scratch, snap } from "./workspace-fixtures.ts";
 
@@ -38,6 +40,23 @@ function prepared(guest: { baseImage: string; images: Map<string, string> }): vo
   writeFileSync(join(folder, "workspace", "pnpm-lock.yaml"), FILES["pnpm-lock.yaml"]);
   guest.images.set(guest.baseImage, folder);
 }
+
+describe("a baseline selection's judgement (D41)", () => {
+  const ran = (stdout: string, exitCode: number | null = 0, extra: Partial<ExecResult> = {}) => ({ exitCode, stdout, stderr: "", stdoutExact: true, timedOut: false, cancelled: false, truncated: false, signal: null, durationMs: 5, persisted: false, ...extra }) as unknown as ExecResult;
+  it("matches the exit code and the exact output, or the pattern over the whole output, and says why when it doesn't", () => {
+    const pattern = { name: "p", command: "x", expectedExitCode: 1, outputPattern: "got: .*" };
+    assert.deepEqual([judgeBaseline(1, REPRODUCED, ran("Hello, Ada\nHello, \n")).matched, judgeBaseline(1, pattern, ran("got: Hello\nHello, \n", 1)).matched], [true, true]);
+    const cases: Array<[Parameters<typeof judgeBaseline>[1], ExecResult, string]> = [
+      [REPRODUCED, ran("Hello, Ada\nHello, world\n"), "its output differs from the expected output at line 2"],
+      [REPRODUCED, ran("Hello, Ada\nHello, \n", 2), "it exited 2, not 0"],
+      [{ ...pattern, outputPattern: "got" }, ran("got: Hello\n", 1), "its output doesn't match the pattern"],
+      [pattern, ran("x".repeat(20_000), 1), "its output is longer than Nivra matches a pattern against"],
+      [REPRODUCED, ran("", null, { timedOut: true }), "it ran out of its 60 s"],
+    ];
+    for (const [given, result, reason] of cases) assert.deepEqual([judgeBaseline(1, given, result).matched, judgeBaseline(1, given, result).reason], [false, reason]);
+    assert.equal(judgeBaseline(1, REPRODUCED, ran("", null, { cancelled: true })).matched, null, "a cancelled one didn't run to its end");
+  });
+});
 
 describe("a task run from a prepared environment (NIV-49, D41)", () => {
   it("starts from the prepared image, reproduces the bug as the baseline says before the model, and proposes a verified change with the frozen file unchanged", async () => {

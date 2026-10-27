@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
 import { ENVIRONMENT_BASE, EnvironmentPreview, EnvironmentReport, EnvironmentSpec, PreparedEnvironment, projectFingerprint } from "../src/environment.ts";
 import { StartRunParams } from "../src/methods.ts";
-import { TaskBrief, taskBriefDigest, TaskInput, TaskReport, type TaskBrief as Brief } from "../src/task.ts";
+import { baselinePattern, TaskBrief, taskBriefDigest, TaskInput, TaskReport, type TaskBrief as Brief } from "../src/task.ts";
 
 /**
  * A project's environment and what a brief gains with it (NIV-49, D41): which packages to install and nothing that is a
@@ -82,6 +82,12 @@ describe("a brief's baseline selections and frozen files (D41)", () => {
       assert.equal(TaskBrief.safeParse({ ...BRIEF, baseline: [wrong] }).success, false, JSON.stringify(wrong).slice(0, 80));
     }
     assert.equal(TaskBrief.safeParse({ ...BRIEF, baseline: [SELECTION, PATTERN, SELECTION, PATTERN] }).success, false, "three selections at most");
+  });
+
+  it("matches a pattern against the whole output, never a part of it", () => {
+    const pattern = baselinePattern("tests \\d+ passed \\d+ failed 0\\n|nothing");
+    assert.deepEqual(["tests 4 passed 4 failed 0\n", "nothing", "x tests 4 passed 4 failed 0\n", "tests 4 passed 4 failed 0\nfailed\tone\n", "nothing more"].map((output) => pattern.test(output)), [true, true, false, false, false]);
+    assert.equal(baselinePattern("a.b").test("a\nb"), true, "a dot matches a line break, so a pattern can span lines");
   });
 
   it("takes frozen files as paths inside the folder, each once", () => {

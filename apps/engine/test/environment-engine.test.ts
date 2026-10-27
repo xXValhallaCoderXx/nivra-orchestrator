@@ -109,6 +109,17 @@ describe("an environment's preparation through a real engine (NIV-49, D41)", () 
     assert.ok(!JSON.stringify(stub.requests.map((request) => request.body)).includes(PROJECT_ID), "the project id went in a body");
   });
 
+  it("prepares a single-package repository with no workspace file the same way, with no change to Nivra", async () => {
+    const { engine, received } = await setup();
+    const single = repoWith({ "package.json": json({ name: "tool", version: "1.0.0", packageManager: "pnpm@11.5.3", engines: { node: "^22.10.0" } }), "pnpm-lock.yaml": "lockfileVersion: '9.0'\n", "src/index.mjs": "export const tool = 1;\n" });
+    const shown = ready(await preview(engine, single, { filters: [] }));
+    assert.deepEqual([shown.installArgs, shown.packages, shown.leftOut], [["--frozen-lockfile"], [], []]);
+    const run = await start(engine, single, shown.fingerprint, { spec: { filters: [] } });
+    assert.equal((await ended(engine, run.id)).status, "succeeded");
+    const done = await report(engine, run.id);
+    assert.deepEqual([done.outcome, received.inputs, done.prepared?.inputsDigest], ["prepared", ["package.json", "pnpm-lock.yaml"], shown.inputsDigest]);
+  });
+
   it("sends nothing without upload consent, or when what it would send changed since the preview", async () => {
     const { stub, engine, repo } = await setup();
     const shown = ready(await preview(engine, repo));
