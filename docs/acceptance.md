@@ -2554,7 +2554,7 @@ except where the list above says so):
 - **Not run: a live coaching.** A recipe is prepared, and not approved. The stand-ins prove the contract, not the coach's
   quality.
 
-### Mission reviews (D43, NIV-52)
+### Mission reviews (D44, NIV-52)
 
 Track B's mission review, on D42's foundation: a mission written with no repository, a backlog and its board, a review
 of up to five selected tasks by the council's specialists, findings that open the task, and stale reports. On
@@ -2576,7 +2576,7 @@ of up to five selected tasks by the council's specialists, findings that open th
 | `a46fe7c` | Nate's review of #25: the live check's approval is used once, claimed atomically and kept, whatever `--out` or `--home` says |
 | `ca44e48` | The claim's place said as it is: before the checkout is checked, the key is read or anything is sent |
 | `65094d7`, `1be62b3`, `9427884` | Merges of the foundation, bringing its review fixes (`2b61660`, `1c27882`) and its record |
-| this record | D43, the development notes and this section |
+| this record | D44, the development notes and this section |
 
 **NIV-52's flow, shown:**
 

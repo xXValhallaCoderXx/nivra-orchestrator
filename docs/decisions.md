@@ -3087,7 +3087,7 @@ a questionnaire.
 - Stand-ins prove the contract, not the coach's quality. No live coaching has run; one needs its own approved recipe.
 - **Evidence:** `docs/acceptance.md`, *Task readiness coach (D43, NIV-53)*.
 
-## D43. Mission reviews: the council reads a mission and up to five of its tasks, as the product architect, the risk and testability reviewer and the chair; findings name the tasks they are about, and a task is changed only by the person (2026-10-28)
+## D44. Mission reviews: the council reads a mission and up to five of its tasks, as the product architect, the risk and testability reviewer and the chair; findings name the tasks they are about, and a task is changed only by the person (2026-10-28)
 
 **Decision.** NIV-52's mission review, on D42's foundation. Nate set the scope on 27 October, and his review of the plan
 added five requirements, all met here: an early foundation (D42), full-context stale checks, rejected output told apart
@@ -3111,7 +3111,7 @@ from a clean review, credential checks over the whole outgoing packet, and a liv
 - **The review plan.** Starting saves the composition as a directly authored plan version in the mission's own
   conversation (D42): the binding, the packet and the text, read back for the report even after a task changes or goes.
   An identical composition reuses its version. The review is then a plan review's, with D31's lifecycle unchanged.
-- **The engine's mission mode** (protocol 13): `ReviewContext.packet` is the plan packet or a mission packet; nothing
+- **The engine's mission mode** (protocol 14): `ReviewContext.packet` is the plan packet or a mission packet; nothing
   else in the protocol changed. One seam in `review/run.ts` chooses the mode by the packet's kind; the plan mode wraps
   today's functions exactly, and its tests and the council-eval approval digest (`c3b9225a…`) are unchanged.
   - **The profiles** (D42's catalogue, v1): the product architect (architecture's role), the risk and testability
@@ -3148,8 +3148,8 @@ credential typed into any task must never leave, and a recorded substitute model
 of the plan, 27 October).
 
 **Consequences.**
-- Protocol 13 (provisional: renumbered if Track C merges first): the runtime is re-staged. No engine migration; the
-  workspace stays at D42's v6.
+- Protocol 14, after the coach's 13 (D43), which merged first: the runtime is re-staged. No migration of its own: the
+  workspace is at v7, D42's missions and then D43's coachings.
 - **Sizes, estimated at characters ÷ 3 with the instructions and the tools:** the largest packet (20,000 characters)
   comes to about 8,000 tokens per reviewer and 21,500 reserved for the chair, about 37,600 of the run's 120,000; with
   50 preferences of 500 characters, about 17,400, 30,900 and 65,600. Three short tasks come to about 1,750 per reviewer.
@@ -3167,4 +3167,4 @@ of the plan, 27 October).
   was sent, and findings with no title or detail read as a clean review. The plan review has the same unknown-basis
   wording (a label it doesn't know, on a finding that names the plan, is kept as "plan" and marked relabelled); it is
   left as it is here, since the plan mode doesn't change, and is follow-up work.
-- **Evidence:** `docs/acceptance.md`, *Mission reviews (D43, NIV-52)*.
+- **Evidence:** `docs/acceptance.md`, *Mission reviews (D44, NIV-52)*.
