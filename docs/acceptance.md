@@ -2464,6 +2464,10 @@ No tracker, repository or mission is needed.
 | `7f0755c` | The independent review's fixes, and the tests it asked for |
 | `d6ab221` | A question's Update waits while the title is being edited, in the end-to-end spec |
 | `95f5f99` | A rename while Start is still working out what to send refuses it; a binding naming a finding twice is refused (the review's race, tested) |
+| `d2f76be` | Nate's review of PR 27, finding 1: a preview is bound to the task's project and the engine target it would run on |
+| `3e303c8` | Nate's review of PR 27, finding 2: a rewording names its own list's item (C for a criterion, A for an assumption) |
+| `8f72b01` | Nate's review of PR 27, the window: the choices stay when a preview is refused, at most three findings, and a completed task offers no editor or save |
+| `2322853` | AGENTS.md: the narrow suggestion rule (D43) |
 | this record | D43, the development notes and this section |
 
 **What it shows:**
@@ -2472,7 +2476,8 @@ No tracker, repository or mission is needed.
 |---|---|---|
 | What is missing, without a model, proportionately | `task-guidance.test.ts`, `task-coach.spec.ts` | A vague task gets its specific gaps; an empty one its goal and criterion; a clear small one "No basic gaps detected." with its caveat; at most three that could help, the rest counted; nothing asks for a repository |
 | The preview is exactly what is sent, and sends nothing | `coach.test.ts` (domain), `host-coach.test.ts`, `task-coach.spec.ts` | One renderer makes the text; a preview makes no request, not even a model listing; case commands and outputs never appear |
-| Start is bound to the preview | `host-coach.test.ts`, `coach.test.ts` | A rename, a new preference or a brief edit between preview and Start refuses it, with nothing sent, and so does a rename that lands while Start is still working out what to send; a finding ticked twice is refused before anything is stored |
+| Start is bound to the preview | `host-coach.test.ts`, `coach.test.ts` | A rename, a new preference or a brief edit between preview and Start refuses it, with nothing sent, and so does a rename that lands while Start is still working out what to send; a finding ticked twice is refused before anything is stored; a task moved from a project on the local engine to one on WSL, with the same brief and packet, has its old preview refused before any engine starts, and a new one starts on WSL; the pinned fingerprint changes with the project and the target |
+| A rewording names its own list's item | `coach-answers.test.ts` | A1 in a change to the criteria, and C1 in a change to the assumptions, are set aside and counted, both ways; a mixed change keeps its own items; bare numbers and the list's own letter are kept |
 | One listing and one request, never more | `coach.test.ts` (engine), `coach-units.test.ts`, `task-coach.spec.ts` | Each Start makes one model listing and one forced request; a malformed, cut-off, refused, 429, 500 or timed-out answer makes exactly one; saving makes none |
 | Consent, credentials and model are checked before anything goes | `host-coach.test.ts`, `coach.test.ts` (engine) | A project without sharing is blocked; a removed project is refused; a value that is now a key, already in the brief, is refused by naming the part; a model the policy can't force, or another than the one named, gets no inference request |
 | The packet stays in memory | `coach.test.ts` (engine) | A private canary in the brief is in neither the stored input, the events, `mastra.db` nor the engine's log; the run's title names the brief version only |
@@ -2486,10 +2491,32 @@ No tracker, repository or mission is needed.
 | Restart | `host-coach.test.ts`, `task-coach.spec.ts`, `coach.test.ts` (engine) | A report stays readable and savable after a restart, and its applied mark after another; a coaching left open by a quit reads back as interrupted; a start whose answer was lost is found by its request id and sent once; an engine killed mid-request reads back as interrupted, with nothing resent |
 | The editor keeps its base | `task-coach.spec.ts` | An edit started before another save, then refreshed, is refused with its text kept and the conflict shown; Update FIELD keeps an open draft and focuses the field, and waits, saying why, while the title is being edited |
 | Suggested checks are text | `task-coach.spec.ts` | The check copies with the keyboard (read back from the clipboard) and never joins the brief |
+| The window offers only what can work | `task-coach.spec.ts`, `coach-shared.test.ts` | With three of four seeded findings ticked, the fourth can't be ticked, and a note says why; a finding that can't be sent (it holds the saved key) is refused with the choices still there to untick; a completed task's coaching offers neither Update FIELD nor Save, with the editor's reason; the window's findings limit is the domain's |
 | The coach reaches nothing else | `task-coach.spec.ts` | No sandbox request, no web search, no task run; the checkout's `git status` is empty |
 | Migration 7 | `workspace-store.test.ts`, `coach-store.test.ts` | A v6 file moves to v7 with every row as it was; every trigger refuses what it should; a stored binding that can't be read back still lists, cancels and settles, and blocks only the save |
 
-**Checks:**
+**Checks on the updated code** (after Nate's review of PR 27, at `2322853`; the code as at `8f72b01`):
+- `pnpm verify` at `2322853`: 1,198 (domain 98, engine 717, desktop 383), none skipped.
+- The built app (`test:e2e`, the whole suite) at `2322853`: 86 passed, 1 skipped (`explain.spec.ts`, packaged only).
+  The coach's spec passed 11 of 11, and also on its own at `8f72b01`.
+- The packaged app (`stage:runtime linux-x64`, `package:dir`, `test:packaged`) at `2322853`: 28 passed, 59 skipped (the
+  stand-in switches a packaged app ignores).
+- `test:windows` at `2322853`, in a Windows recheck coordinated with Track A (28 Oct, 03:24 to 03:27 SGT). It ran under
+  the shared lock, after `stage:runtime all` and `pnpm dev:win --no-launch`, once no Nivra or Electron was found running
+  on Windows. 12 passed (`windows.spec.ts` 8, `workspace-windows.spec.ts` 4), none failed or skipped, and `~/.nivra`
+  was as it was. This covers Track C's branch alone: candidate 3's combined build of Tracks B and C still needs its own
+  Windows validation, in Track A's candidate step.
+- A real engine through `apps/engine/scripts/rpc.ts` at `2322853`, against a loopback stub: the same four coachings as
+  before, each with the expected listings and inference requests (1 and 1, 1 and 1, 0 and 0, 1 and none).
+- Mutations at `2322853`: 21 of 22 caught, the two new guards included (the preview's project and target, and the item
+  letter). The miss is the same backstop as before.
+- Nate's review of `e69137c` ran `pnpm verify` there (1,196 passed, none skipped). Its two P2 findings and two UI
+  follow-ups are fixed in `d2f76be`, `3e303c8` and `8f72b01`; each finding's test fails with its guard removed.
+- **Not run: a live coaching.** Its helper now uses an approval once, claimed before the first request, and its tests
+  cover repeated, simultaneous and interrupted launches. The recipe and its digest go to Nate for approval separately.
+
+**Checks on the code before Nate's review of PR 27** (up to `e69137c`; earlier evidence, not rerun on the updated code
+except where the list above says so):
 - `pnpm verify` at `95f5f99`: 1,196 (domain 98, engine 716, desktop 382), none skipped. At `4e78000`, before the last
   two test commits: 1,194 (98, 716, 380). The baseline at `c854b50` was 1,075 (75, 687, 313), and Track B's foundation
   at `1c27882` 1,107 (88, 687, 332).

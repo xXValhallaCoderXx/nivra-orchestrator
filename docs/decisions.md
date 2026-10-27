@@ -3018,7 +3018,8 @@ tracker, repository or mission required. Nate's choices on 27 October: the coach
 NIV-52; a suggested check is plain text to copy with the keyboard; a question points to the field that answers it, in
 the existing editor, with no answer boxes. His review of the plan added these rules: an edit keeps the revision it
 started from; the accepting transaction is synchronous; wording claims no more than was shown; and a reused request id
-compares the whole request.
+compares the whole request. His review of PR 27 (28 October) added two more: a preview is bound to the task's project
+and engine target too, and a rewording names its own list's item. It also put the narrow rule in AGENTS.md.
 
 - **What a brief is missing, without a model** (`shared/task-guidance.ts`). Fixed rules over the brief's own fields:
   a blank goal; no criterion; a short, vague criterion; a fix that doesn't say what happens now; a large brief with no
@@ -3029,7 +3030,8 @@ compares the whole request.
   and concise. It asks at most three questions, each naming a field the person updates, and proposes at most one
   change per field among six (the goal, criteria, scope, exclusions, context and assumptions), each with its reason.
   Nothing is deleted: a goal, scope or exclusions is replaced; context is added to; criteria and assumptions are added
-  and reworded by number. Suggested checks and expected results are text, labelled as not run. A test pins the
+  and reworded by number, bare or with the list's own letter (C for a criterion, A for an assumption). The other list's
+  letter is set aside and counted, never read as this list's item. Suggested checks and expected results are text, labelled as not run. A test pins the
   instructions' hash to the version.
 - **What it reads** (`renderCoachPacket`): exactly what a mission review sends for a task (D42's `packetTaskOf`), plus
   the brief's version, how many baseline checks and frozen files it has, the gaps the rules found, and the mission and
@@ -3041,8 +3043,10 @@ compares the whole request.
   an estimated 60,000 input tokens for admission (an estimate, not a cap), no retries and no repair asks. A model whose
   answer the policy can't force, or another than the one a live recipe names, is refused before any inference.
 - **Bound to what was sent.** The preview's fingerprint covers D42's context binding (the task's brief version and title,
-  the ticked mission and findings, the coach's version), the packet, the preferences, the sharing and an allowed model;
-  a start that differs is refused, with nothing sent. Start reads the task again just before it stores the coaching, so
+  the ticked mission and findings, the coach's version), the packet, the preferences, the sharing, the task's project
+  and the engine target it would run on, and an allowed model. A start that differs is refused, with nothing sent and no
+  engine started: a task moved to another project keeps its brief and packet, so its old preview would otherwise start
+  on the new project's engine. Start reads the task again just before it stores the coaching, so
   a move, a rename, a brief edit or a deletion during its checks refuses it too, and a finding ticked twice is refused.
   The packet and preferences stay in the scheduler's memory (D21): the run stores ids and fingerprints, Mastra gets
   nothing, and the run's title names only the brief version. Credentials are checked over the whole packet, preferences
@@ -3061,6 +3065,9 @@ compares the whole request.
   stands in for one.
 - **An edit keeps its base.** The task page saves an edit from the revision it started from, never the one a refresh
   shows; a refused save keeps the editor open with the text and says what changed.
+- **The window offers only what can work.** The mission and findings to tick stay when a preview is refused, so a choice
+  that can't be sent can be unticked, and at most three findings can be ticked. A completed task's coaching offers no
+  editor and no save, with the brief editor's own reason.
 
 **Why.** A filled field isn't a testable brief, and a person often can't see what is missing. A model can ask the few
 questions that matter and propose wording, but it can't know the task, so its output is a suggestion the person picks
@@ -3073,6 +3080,9 @@ a questionnaire.
   B's mission review merges after this and takes the next numbers (protocol 14, D44).
 - The coach is advisory: its answers are kept with their binding and stay readable after a restart, labelled when stale.
   A preference changed since an answer is a note, not a block.
+- AGENTS.md's suggestion rules (D43): a specialist's suggestion changes a brief only through the person's selection,
+  saved as a new brief version based on the version the specialist read, and never changes a task's state, adds an
+  acceptance case, waives a run prerequisite or grants consent.
 - Deferred by Nate's choice: a Copy button with a clipboard bridge, and answer boxes with a conversation history.
 - Stand-ins prove the contract, not the coach's quality. No live coaching has run; one needs its own approved recipe.
 - **Evidence:** `docs/acceptance.md`, *Task readiness coach (D43, NIV-53)*.
