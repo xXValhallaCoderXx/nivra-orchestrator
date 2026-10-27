@@ -2443,7 +2443,7 @@ their own PR.
 
 Track C: what a task's brief is missing, worked out without a model; the task readiness coach, one bounded call when
 the person asks; and only the changes the person ticks, saved as the next brief version from the version the coach read.
-On `feature/niv-53`, from `main` at `c854b50`, carrying Track B's foundation (D42, up to `8d14d80`) until it is on main.
+On `feature/niv-53`, from `main` at `c854b50`, carrying Track B's foundation (D42, up to `23dd16b`) until it is on main.
 No tracker, repository or mission is needed.
 
 | Commit | What |
