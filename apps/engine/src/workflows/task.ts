@@ -9,7 +9,7 @@ import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClie
 import { policyFor } from "../providers/policy.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoError } from "../repo/paths.ts";
-import { TASK_LIMITS } from "../task/limits.ts";
+import { runLimitsFor, TASK_LIMITS } from "../task/limits.ts";
 import { earlyTaskReport, holdsValue, taskReport, taskStopWords, type TaskBound } from "../task/report.ts";
 import { operationsForBrief, runWorker } from "../task/worker.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -75,8 +75,13 @@ export function createTaskWorkflow(deps: TaskDeps) {
   const routes = new Map<string, RunRoute>();
   const requestOf = (runId: string) => ({ runId, clientRequestId: deps.requestId(runId) ?? runId });
   const boundOf = (runId: string, task: StoredTaskInput): TaskBound => ({ taskId: task.taskId, attemptId: requestOf(runId).clientRequestId, briefVersion: task.briefVersion, briefDigest: task.briefDigest });
+  /** The bounds a run of its brief runs under, as its preview showed them; null when its context is gone. */
+  const limitsOf = (runId: string) => {
+    const brief = deps.context(runId)?.brief;
+    return brief ? runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0) : null;
+  };
   const early = (runId: string, task: StoredTaskInput, outcome: TaskReport["outcome"], code: TaskStopCode | null, step: string | null, finished: boolean) =>
-    deps.saveReport(runId, earlyTaskReport({ outcome, code, step, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, now: now(), finished }));
+    deps.saveReport(runId, earlyTaskReport({ outcome, code, step, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, limits: limitsOf(runId), now: now(), finished }));
   const forget = (runId: string) => {
     startedAt.delete(runId);
     routes.delete(runId);
@@ -254,7 +259,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
           if (outcome.core) deps.setMeta(runId, { usage: outcome.core.worker.usage });
           // The report first: a proposal is kept only once the report that describes it is, so neither says what the
           // other doesn't.
-          deps.saveReport(runId, taskReport({ result, core: outcome.core, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, now: now(), mask: deps.mask }));
+          deps.saveReport(runId, taskReport({ result, core: outcome.core, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, limits: limitsOf(runId), now: now(), mask: deps.mask }));
           reported = true;
           if (result.proposal) {
             try {

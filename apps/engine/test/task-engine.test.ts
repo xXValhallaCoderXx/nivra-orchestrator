@@ -164,6 +164,8 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual([page.status, done.outcome, done.worker?.ended, done.worker?.handedIn, done.worker?.failure, done.worker?.written], ["succeeded", "proposed", "model-failed", false, "provider", ["greet.sh"]]);
     // Nivra's own checks of the change, apart from the worker's failure.
     assert.deepEqual([verdicts(done), done.verified, spawned(sandbox, "nivra-collect")], [["case 1 passed", "check 1 passed"], true, 1]);
+    // The bounds it ran under, beside what it used: a brief of one case, one check and no baseline (D41).
+    assert.deepEqual([done.limits?.operations, done.limits?.baselineChecks, done.environment, done.baseline], [17, 0, null, []]);
     assert.equal(model.chats().length, 3, "the request that failed was sent again");
   });
 

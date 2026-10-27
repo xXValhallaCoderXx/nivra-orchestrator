@@ -341,6 +341,8 @@ export const TaskReport = z.strictObject({
   environment: TaskEnvironment.nullable().default(null),
   /** The brief's baseline selections, as they ran before the model (D41). */
   baseline: z.array(TaskBaselineCheck).max(TASK_BRIEF_LIMITS.baseline).default([]),
+  /** The bounds the run ran under, beside what it used (D41); null for a report kept from before, whose bounds weren't kept. */
+  limits: TaskRunLimits.nullable().default(null),
   /** The frozen files in the collected workspace, each compared with the commit's: any difference and the change isn't verified. */
   frozen: z.array(z.strictObject({ path: z.string().max(1_024), unchanged: z.boolean().nullable() })).max(TASK_BRIEF_LIMITS.frozen).default([]),
   worker: TaskWorker.nullable(),
