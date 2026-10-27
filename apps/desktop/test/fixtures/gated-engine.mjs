@@ -30,7 +30,7 @@
 // one more file of it was moved aside with nothing in its place. task.applyStatus answers a recorded apply by its
 // request id, or null; task.restore takes one back to its originals and task.dismiss settles one, each kept in
 // `applies.log` so a later applyStatus reads it; with an `error-settle` file, either does its work, then answers with an
-// internal error, as an engine whose answer is lost.
+// internal error, as an engine whose answer is lost, and with a `hold-settle` file, does its work and never answers.
 // It takes secrets.update, and turns down at once any other method it doesn't stand in for, so no caller waits out its
 // time limit. The window's tests run it as the local engine with --nivra-test-engine=gated (unpackaged only).
 import { randomUUID } from "node:crypto";
@@ -324,7 +324,9 @@ process.stdin.on("data", (chunk) => {
         // Kept, as an engine keeps it: a later applyStatus reads it.
         lines[at] = `${line.requestId} ${JSON.stringify(next)}`;
         writeFileSync(file, `${lines.join("\n")}\n`);
-        if (existsSync(join(home, "error-settle"))) send({ id: request.id, error: { code: -32603, message: "the engine failed after it settled the change" } });
+        if (existsSync(join(home, "hold-settle"))) {
+          // Done and kept, and the answer never comes: as an engine stopped before it could reply.
+        } else if (existsSync(join(home, "error-settle"))) send({ id: request.id, error: { code: -32603, message: "the engine failed after it settled the change" } });
         else send({ id: request.id, result: next });
       }
     } else if (request.method === "secrets.update") {

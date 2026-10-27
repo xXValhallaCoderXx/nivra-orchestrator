@@ -2998,6 +2998,48 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     host.deleteTask(taskId);
   });
 
+  it("reads a settle back after a restart once its engine is online, and never sends it again: accepted, the task completed", async () => {
+    const { host, ids, home, root, calls } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    // The engine records the acceptance and holds its answer, and Nivra stops meanwhile.
+    writeFileSync(join(home, "hold-settle"), "");
+    const out = host.settleTaskChange(taskId, attemptId, "accepted").catch(() => null);
+    await waitFor(() => calls().includes("task.dismiss"), "the settle to reach the engine");
+    await host.shutdown();
+    await out;
+    rmSync(join(home, "hold-settle"));
+    const again = hostAt(root, { wslEntry: GATED });
+    again.keys.current = SECRETS;
+    // Before its engine is online, the saved settling holds the task, and nothing about the change is offered.
+    const waiting = again.host.task(taskId);
+    assert.deepEqual([waiting.summary.state, waiting.runBlocked], ["active", "The last run's change is being applied or settled. Wait for it to finish, then try again."]);
+    await assert.rejects(again.host.reviseBrief(taskId, waiting.revision, { ...FIELDS, context: "More." }), /^Error: This task's change is being applied, or what was applied needs settling/);
+    // Its engine coming online is enough: nothing asks for the run.
+    await again.host.open(ids[0]!);
+    await waitFor(() => again.host.task(taskId).summary.state === "completed", "the settle to be read back after the restart");
+    const read = await again.host.taskAttempt(taskId, attemptId);
+    assert.deepEqual(
+      [read.apply?.resolution, read.apply?.unresolved, read.acceptedAt !== null, read.actions, calls().filter((call) => call === "task.dismiss").length],
+      ["accepted", null, true, [], 1],
+    );
+  });
+
+  it("reads an unsettled apply again whenever its engine comes online, so one settled elsewhere meanwhile is followed", async () => {
+    const { host, ids, home, calls } = await gatedHost();
+    const { taskId, attemptId } = await gatedRun(host, ids[0]!);
+    const applied = await host.approveTaskChange(taskId, attemptId, GATED_HASH);
+    assert.deepEqual([applied.apply?.status, applied.actions], ["applied", ["accept"]]);
+    // The engine dismisses it without this Nivra hearing of it, as another tool could, and then restarts.
+    const log = join(home, "applies.log");
+    writeFileSync(log, readFileSync(log, "utf8").replace('"resolution":null', '"resolution":"dismissed"'));
+    await host.restart(ids[0]!);
+    await waitFor(() => host.task(taskId).attempts[0]?.apply?.resolution === "dismissed", "the apply to be read again");
+    const read = await host.taskAttempt(taskId, attemptId);
+    assert.deepEqual([read.decision, read.apply?.resolution, read.actions, calls().filter((call) => call === "task.dismiss").length], [null, "dismissed", ["approve", "reject", "revise"], 0]);
+  });
+
+
   it("doesn't offer keeping a partial apply as it is while a file is moved aside, and refuses deleting a task whose applied change isn't settled", async () => {
     const { host, ids, home } = await gatedHost();
     writeFileSync(join(home, "partial-apply"), "");

@@ -116,8 +116,10 @@ import { labelFor, type ExecutionTarget } from "./targets/types.ts";
 import { isHiddenDistro, wslGuidance } from "./targets/wsl-discovery.ts";
 import {
   acceptChange,
+  approvedApplies,
   attemptRecord,
   attemptsOf,
+  clearSettle,
   decide,
   deleteConversation,
   getAttempt,
@@ -144,6 +146,7 @@ import {
   recordOutcome,
   recordRun,
   requestCancel,
+  requestSettle,
   reviewsOf,
   setTurnHome,
   settleAttempt,
@@ -228,11 +231,12 @@ const APPLY_MS = 120_000;
 const REVISION_NOTE_CHARS = 2_000;
 const DECIDED = "A decision on this change is already recorded.";
 const DECIDE_FIRST = "Decide on the last run's change first: approve it, reject it, or ask for a revision.";
-const APPLY_GOING = "The last run's change is being applied. Wait for it to finish, then try again.";
+const APPLY_GOING = "The last run's change is being applied or settled. Wait for it to finish, then try again.";
 const SETTLE_FIRST = "Settle the last run's change first: accept it, keep or restore what was applied, or dismiss it.";
 const APPLY_OPEN = "This task's change is being applied, or what was applied needs settling. Settle it first, then try again.";
 const APPLY_NEVER_SENT = "The approval never reached the engine, so nothing was written. Approve the change again when you're ready.";
 const SETTLE_LOST = "Nivra didn't hear back from the engine about settling this change, so it is asking how that went.";
+const SETTLE_ASKING = "Nivra is still asking the engine how settling this change went. Wait for it, then try again.";
 const KEEP_ASIDE = "A file the change replaces is missing from your checkout, its original kept aside, so this can't be kept as it is. Restore the originals instead.";
 const SETTLE_BEFORE_DELETE = "Settle this task's change first: accept it, keep or restore what was applied, or dismiss it. Then delete the task.";
 const DECIDING = "A decision on this run is being sent. Wait for it, then try again.";
@@ -327,11 +331,8 @@ export class Host {
   readonly #followingApplies = new Set<string>();
   /** The engine's own words for an apply it answered with an error, shown if it then has no record of it. */
   readonly #applyAnswers = new Map<string, string>();
-  /**
-   * Attempts whose settle or restore went to their engine and got no usable answer: the engine may have done it. Their
-   * apply is read again by its request id, and offers nothing, until that is back (D40).
-   */
-  readonly #lostSettles = new Set<string>();
+  /** Applies being read once more because their engine came online (D40). */
+  readonly #rereading = new Set<string>();
   /** This host session, recorded with each turn: only this session's own submissions can still be in flight. */
   readonly #sessionId = randomUUID();
   /** Turns whose `runs.start` this session hasn't finished with, and who asked them to stop meanwhile. */
@@ -1030,9 +1031,10 @@ export class Host {
       void this.#ensure(attempt.targetId).catch(() => undefined);
       this.#followAttempt(attemptId);
     }
-    // An apply whose engine hasn't said how it went (an answer lost, or Nivra restarted), or a settle of it whose answer
-    // was lost: asked by its request id.
-    if ((applyUnsettled(attemptRecord(this.#workspaceDb(), attemptId)) || this.#lostSettles.has(attemptId)) && !this.#applyCalls.has(attemptId)) {
+    // An apply whose engine hasn't said how it went (an answer lost, or Nivra restarted), or a settling of it saved and
+    // not answered: asked by its request id.
+    const record = attemptRecord(this.#workspaceDb(), attemptId);
+    if ((applyUnsettled(record) || record.settle) && !this.#applyCalls.has(attemptId)) {
       void this.#ensure(attempt.targetId).catch(() => undefined);
       this.#followApply(attemptId);
     }
@@ -1123,8 +1125,8 @@ export class Host {
 
   /**
    * Settles an attempt's apply as the person decides (D40): accepts an applied change, which completes the task;
-   * dismisses one that wasn't applied, so its change can be decided on again; or keeps a partial one as it is. Its engine
-   * removes the copies it kept that still match the original or its own bytes.
+   * dismisses one that wasn't applied, so its change can be decided on again; or keeps a partial one as it is. Its engine removes the copies it kept that still match the original or its own bytes. Which
+   * way is saved before it is sent, so an answer that doesn't come back is read back, after a restart too, never resent.
    */
   async settleTaskChange(taskId: string, attemptId: string, as: ApplyResolution): Promise<TaskAttemptView> {
     await this.#deciding(attemptId, async () => {
@@ -1135,6 +1137,7 @@ export class Host {
       }
       if (as === "kept" && view.paths.some((one) => one.place === "aside")) throw new Error(KEEP_ASIDE);
       const engine = await this.#attemptEngine(attempt);
+      if (!requestSettle(this.#workspaceDb(), attempt.id, apply.requestId, as, new Date().toISOString())) throw new Error(SETTLE_ASKING);
       let settled: ApplyView;
       try {
         settled = await engine.supervisor.call("task.dismiss", { applyId: view.applyId, as }, { timeoutMs: APPLY_MS });
@@ -1147,12 +1150,16 @@ export class Host {
     return this.taskAttempt(taskId, attemptId);
   }
 
-  /** Takes a partial apply back to the originals (D40), never overwriting a version another program saved since. */
+  /**
+   * Takes a partial apply back to the originals (D40), never overwriting a version another program saved since. Saved
+   * before it is sent, as a settle is.
+   */
   async restoreTaskChange(taskId: string, attemptId: string): Promise<TaskAttemptView> {
     await this.#deciding(attemptId, async () => {
       const { attempt, apply, view } = this.#settleable(taskId, attemptId);
       if (view.status !== "partial") throw new Error("Only a change that was applied in part can be restored this way.");
       const engine = await this.#attemptEngine(attempt);
+      if (!requestSettle(this.#workspaceDb(), attempt.id, apply.requestId, "restore", new Date().toISOString())) throw new Error(SETTLE_ASKING);
       let restored: ApplyView;
       try {
         restored = await engine.supervisor.call("task.restore", { applyId: view.applyId }, { timeoutMs: APPLY_MS });
@@ -1167,30 +1174,36 @@ export class Host {
 
   /**
    * A settle or restore that went to the engine with no usable answer back (an error answer, a timeout, the engine
-   * gone): the engine may have done it, and a repeat may be refused, so the apply is read again by its request id
-   * before anything more is offered. Nothing is sent again meanwhile.
+   * gone): the engine may have done it, and a repeat may be refused. Which way was saved before it was sent, so the
+   * apply is read again by its request id, now or after a restart, before anything more is offered. Nothing is sent
+   * again meanwhile.
    */
   #settleLost(attemptId: string, error: unknown): void {
     this.#options.log(`A settle of an apply got no usable answer (${error instanceof Error ? error.name : "unknown"}); its apply is read again by its request id.`);
-    this.#lostSettles.add(attemptId);
     this.#followApply(attemptId);
   }
 
   /**
-   * Records what an apply's engine says after a settle or a restore, and what follows from it: a dismissed result
-   * takes the approval back, so the change can be decided on again; an accepted change completes its task, which only the
-   * person's acceptance does.
+   * Records what an apply's engine says after a settle or a restore, and what follows from it, in one write: the
+   * settling saved before it was sent is answered; a dismissed result takes the approval back, so the change can be
+   * decided on again; an accepted change completes its task, which only the person's acceptance does.
    */
   async #recordSettled(attempt: AttemptRecord, requestId: string, view: ApplyView): Promise<void> {
+    this.#keepSettled(attempt, requestId, maskValue(view, await this.#knownSecrets()));
+  }
+
+  #keepSettled(attempt: AttemptRecord, requestId: string, view: ApplyView): void {
     const workspace = this.#workspaceDb();
     const at = new Date().toISOString();
-    recordApply(workspace, attempt.id, requestId, maskValue(view, await this.#knownSecrets()), at);
-    if (view.resolution === "dismissed") withdrawDecision(workspace, attempt.id, requestId, null);
-    if (view.resolution === "accepted") {
-      acceptChange(workspace, attempt.id, requestId, at);
+    workspace.tx(() => {
+      if (!recordApply(workspace, attempt.id, requestId, view, at)) return;
+      clearSettle(workspace, attempt.id, requestId);
+      if (view.resolution === "dismissed") withdrawDecision(workspace, attempt.id, requestId, null);
+      if (view.resolution !== "accepted") return;
+      if (!acceptChange(workspace, attempt.id, requestId, at)) return;
       const task = getTask(workspace, attempt.taskId);
       if (task && task.state !== "completed") updateTask(workspace, attempt.taskId, task.revision, { state: "completed" }, at);
-    }
+    });
   }
 
   /** What WSL offers on a Windows host, and what to do when it offers nothing; null elsewhere. */
@@ -2076,6 +2089,7 @@ export class Host {
     const record = attemptRecord(workspace, attemptId);
     const apply = record.apply;
     if (record.decision !== "approved" || !apply?.view) throw new Error("Nothing has been applied for this run, so there is nothing to settle.");
+    if (record.settle) throw new Error(SETTLE_ASKING);
     if (apply.view.resolution !== null) throw new Error("This change is settled already.");
     return { attempt, apply, view: apply.view };
   }
@@ -2114,9 +2128,9 @@ export class Host {
   }
 
   /**
-   * Follows an apply its engine hasn't said the end of (D40), by its request id, never sending it again. Its own
-   * engine having no record of it means the approval never reached it: the decision is taken back, so the person can
-   * approve again. Another engine's records can't say, and that is noted.
+   * Follows an apply its engine hasn't said the end of (D40), or a settling of it saved and not answered, by its request
+   * id, never sending either again. Its own engine having no record of an apply means the approval never reached it: the
+   * decision is taken back, so the person can approve again. Another engine's records can't say, and that is noted.
    */
   #followApply(attemptId: string): void {
     if (this.#followingApplies.has(attemptId)) return;
@@ -2129,23 +2143,31 @@ export class Host {
           const attempt = getAttempt(workspace, attemptId);
           const record = attemptRecord(workspace, attemptId);
           const apply = record.apply;
-          const settling = this.#lostSettles.has(attemptId);
+          const settling = record.settle !== null;
           if (!attempt || !apply || !(applyUnsettled(record) || settling)) return;
+          // A call about it is still out in this session: its own answer comes first.
+          if (this.#applyCalls.has(attemptId)) {
+            await pause(delay);
+            continue;
+          }
           const engine = this.#engines.get(attempt.targetId);
           const state = engine?.supervisor.state;
           if (engine && state?.status === "online") {
             if (state.info.homeId !== attempt.homeId) {
               noteApply(workspace, attemptId, apply.requestId, `The apply went to an engine whose records aren't here (another engine home on ${this.#labelOf(attempt.targetId)}), so how it went can't be known from this one.`);
-              this.#lostSettles.delete(attemptId);
+              clearSettle(workspace, attemptId, apply.requestId);
               return;
             }
             try {
               const view = await engine.supervisor.call("task.applyStatus", { requestId: apply.requestId });
               if (settling) {
-                // A settle whose answer was lost: what the engine says now is recorded, and the actions follow it.
+                // A settling saved and not answered: what the engine says of the apply now is how it went, and what
+                // follows from it follows. One that never reached the engine leaves the apply as it was, to settle again.
                 if (view) await this.#recordSettled(attempt, apply.requestId, view);
-                else noteApply(workspace, attemptId, apply.requestId, "Its engine has no record of this apply any more, so how settling it went can't be known.");
-                this.#lostSettles.delete(attemptId);
+                else {
+                  noteApply(workspace, attemptId, apply.requestId, "Its engine has no record of this apply any more, so how settling it went can't be known.");
+                  clearSettle(workspace, attemptId, apply.requestId);
+                }
                 return;
               }
               if (!view) {
@@ -2172,6 +2194,56 @@ export class Host {
     })();
   }
 
+  /**
+   * What an engine that came online can say of the applies sent to its target (D40), asked by their request ids and
+   * never sent again: an apply, or a settling of it saved before it was sent, whose end Nivra didn't hear (an answer
+   * lost, or Nivra restarted) is followed until it is known; one its engine reported and the person hasn't settled is
+   * read once more, since its engine may have settled it meanwhile.
+   */
+  #reconcileApplies(targetId: string): void {
+    if (this.#workspace.state !== "ready") return;
+    const workspace = this.#workspace.db;
+    for (const attemptId of approvedApplies(workspace)) {
+      const attempt = getAttempt(workspace, attemptId);
+      if (!attempt || attempt.targetId !== targetId || this.#applyCalls.has(attemptId)) continue;
+      const record = attemptRecord(workspace, attemptId);
+      if (applyUnsettled(record) || record.settle) this.#followApply(attemptId);
+      else if (this.#applyUnresolved(record)) this.#rereadApply(attemptId);
+    }
+  }
+
+  /**
+   * Reads once more an apply its engine reported and the person hasn't settled (D40): what its engine says now is kept
+   * as a settle's answer would be, so a change settled meanwhile is followed by its task. A read that something newer
+   * overtook (a settle sent or answered meanwhile) is dropped.
+   */
+  #rereadApply(attemptId: string): void {
+    if (this.#rereading.has(attemptId)) return;
+    this.#rereading.add(attemptId);
+    void (async () => {
+      try {
+        const workspace = this.#workspaceDb();
+        const attempt = getAttempt(workspace, attemptId);
+        const record = attemptRecord(workspace, attemptId);
+        const apply = record.apply;
+        const engine = attempt ? this.#engines.get(attempt.targetId) : undefined;
+        const state = engine?.supervisor.state;
+        if (!attempt || !apply || !engine || state?.status !== "online" || state.info.homeId !== attempt.homeId) return;
+        if (!this.#applyUnresolved(record) || applyUnsettled(record) || record.settle) return;
+        const view = await engine.supervisor.call("task.applyStatus", { requestId: apply.requestId });
+        if (!view) return;
+        const masked = maskValue(view, await this.#knownSecrets());
+        const now = attemptRecord(this.#workspaceDb(), attemptId);
+        if (this.#applyCalls.has(attemptId) || now.settle || now.apply?.requestId !== apply.requestId || now.apply.readAt !== apply.readAt) return;
+        this.#keepSettled(attempt, apply.requestId, masked);
+      } catch (error) {
+        this.#options.log(`Reading an apply again stopped: ${errorText(error)}`);
+      } finally {
+        this.#rereading.delete(attemptId);
+      }
+    })();
+  }
+
   /** An attempt's apply as the window shows it, or null before one was asked for. */
   #applyView(attempt: AttemptRecord, record: AttemptDecisionRecord): TaskApplyView | null {
     const apply = record.apply;
@@ -2184,7 +2256,7 @@ export class Host {
         ? online || this.#applyCalls.has(attempt.id)
           ? "Nivra is asking the engine how the apply went."
           : `The engine on ${this.#labelOf(attempt.targetId)} isn't running, so how the apply went can't be read now.`
-        : this.#lostSettles.has(attempt.id)
+        : record.settle && !this.#applyCalls.has(attempt.id)
           ? online
             ? SETTLE_LOST
             : `The engine on ${this.#labelOf(attempt.targetId)} isn't running, so how settling this change went can't be read now.`
@@ -2207,7 +2279,7 @@ export class Host {
    * every acceptance case passed), then settle its apply as its engine reports it. Nothing while a call is out.
    */
   #actionsOf(attempt: AttemptRecord, record: AttemptDecisionRecord, verified: boolean, proposed: boolean): AttemptAction[] {
-    if (attempt.status !== "answered" || this.#applyCalls.has(attempt.id) || this.#lostSettles.has(attempt.id)) return [];
+    if (attempt.status !== "answered" || this.#applyCalls.has(attempt.id) || record.settle) return [];
     if (record.decision === null) return proposed ? [...(verified ? (["approve"] as const) : []), "reject", "revise"] : [];
     const view = record.apply?.view;
     if (record.decision !== "approved" || !view || view.resolution !== null || applyUnsettled(record)) return [];
@@ -2229,7 +2301,7 @@ export class Host {
     if (record.acceptedAt) return null;
     if (record.decision === null) return record.outcome?.proposalHash ? "decision" : null;
     if (record.decision !== "approved" || !record.apply) return null;
-    if (applyUnsettled(record) || this.#applyCalls.has(latest.id)) return "applying";
+    if (applyUnsettled(record) || record.settle || this.#applyCalls.has(latest.id)) return "applying";
     const view = record.apply.view;
     return view && view.resolution === null ? "settle" : null;
   }
@@ -2241,7 +2313,7 @@ export class Host {
     return attemptsOf(workspace, taskId).some((attempt) => {
       const record = attemptRecord(workspace, attempt.id);
       const view = record.apply?.view;
-      return this.#applyCalls.has(attempt.id) || this.#lostSettles.has(attempt.id) || applyUnsettled(record) || (view !== undefined && view !== null && view.resolution === null && (view.status === "partial" || view.status === "unknown"));
+      return this.#applyCalls.has(attempt.id) || record.settle !== null || applyUnsettled(record) || (view !== undefined && view !== null && view.resolution === null && (view.status === "partial" || view.status === "unknown"));
     });
   }
 
@@ -3241,6 +3313,10 @@ export class Host {
       };
       this.#engines.set(targetId, engine);
       this.#unavailable.delete(targetId);
+      // Each time it comes online, at start or after a restart, what it can say of open applies is read back (D40).
+      engine.supervisor.onChange((state) => {
+        if (state.status === "online") this.#reconcileApplies(targetId);
+      });
       void this.#startEngine(engine);
       return engine;
     } catch (error) {

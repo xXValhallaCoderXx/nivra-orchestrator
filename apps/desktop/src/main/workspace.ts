@@ -504,10 +504,14 @@ export interface AttemptOutcome {
   at: string;
 }
 
+/** A settling of an apply: accepted, dismissed or kept as is (`task.dismiss`), or a restore (`task.restore`). */
+export type SettleIntent = "accepted" | "dismissed" | "kept" | "restore";
+
 /**
  * What became of an attempt (D40), recorded apart: its run's outcome, the person's decision on its proposal, its apply
  * (the request id saved before it was sent, the engine's last answer about it, or the host's own note when the engine
- * couldn't say), and the person's acceptance of an applied change.
+ * couldn't say), a settling of it saved before it was sent and not yet answered, and the person's acceptance of an
+ * applied change.
  */
 export interface AttemptDecisionRecord {
   attemptId: string;
@@ -516,13 +520,14 @@ export interface AttemptDecisionRecord {
   decidedAt: string | null;
   revisionNote: string | null;
   apply: { requestId: string; view: ApplyView | null; readAt: string | null; note: string | null } | null;
+  settle: { intent: SettleIntent; at: string } | null;
   acceptedAt: string | null;
 }
 
 /** An attempt's record, or an empty one: nothing decided, nothing applied. */
 export function attemptRecord(workspace: WorkspaceDb, attemptId: string): AttemptDecisionRecord {
   const row = workspace.db.prepare("SELECT * FROM attempt_records WHERE attempt_id = ?").get(attemptId);
-  if (!row) return { attemptId, outcome: null, decision: null, decidedAt: null, revisionNote: null, apply: null, acceptedAt: null };
+  if (!row) return { attemptId, outcome: null, decision: null, decidedAt: null, revisionNote: null, apply: null, settle: null, acceptedAt: null };
   const requestId = strOrNull(row["apply_request_id"]);
   return {
     attemptId,
@@ -531,8 +536,28 @@ export function attemptRecord(workspace: WorkspaceDb, attemptId: string): Attemp
     decidedAt: strOrNull(row["decided_at"]),
     revisionNote: strOrNull(row["revision_note"]),
     apply: requestId === null ? null : { requestId, view: row["apply_json"] ? (JSON.parse(str(row["apply_json"])) as ApplyView) : null, readAt: strOrNull(row["apply_read_at"]), note: strOrNull(row["apply_note"]) },
+    settle: row["settle_intent"] === null ? null : { intent: str(row["settle_intent"]) as SettleIntent, at: str(row["settle_requested_at"]) },
     acceptedAt: strOrNull(row["accepted_at"]),
   };
+}
+
+/**
+ * Saves a settling of the apply sent as `requestId` before it is sent, so a restart reads its end back by the request id
+ * rather than sending it again. False when that isn't the attempt's approved apply, or another settling of it is saved
+ * and not answered.
+ */
+export function requestSettle(workspace: WorkspaceDb, attemptId: string, requestId: string, intent: SettleIntent, at: string): boolean {
+  return Number(workspace.db.prepare("UPDATE attempt_records SET settle_intent = ?, settle_requested_at = ? WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND settle_intent IS NULL").run(intent, at, attemptId, requestId).changes) === 1;
+}
+
+/** A settling that has been answered, or read back: nothing of it is pending any more. */
+export function clearSettle(workspace: WorkspaceDb, attemptId: string, requestId: string): void {
+  workspace.db.prepare("UPDATE attempt_records SET settle_intent = NULL, settle_requested_at = NULL WHERE attempt_id = ? AND apply_request_id = ?").run(attemptId, requestId);
+}
+
+/** Every attempt whose approval stands and whose change isn't accepted: what the host reads back from its engine. */
+export function approvedApplies(workspace: WorkspaceDb): string[] {
+  return workspace.db.prepare("SELECT attempt_id FROM attempt_records WHERE decision = 'approved' AND apply_request_id IS NOT NULL AND accepted_at IS NULL ORDER BY rowid").all().map((row) => str(row["attempt_id"]));
 }
 
 /** Keeps how an attempt's run ended, once: a later read never changes it. */
@@ -579,7 +604,7 @@ export function withdrawDecision(workspace: WorkspaceDb, attemptId: string, requ
   return (
     Number(
       workspace.db
-        .prepare("UPDATE attempt_records SET decision = NULL, decided_at = NULL, apply_note = COALESCE(?, apply_note) WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND accepted_at IS NULL")
+        .prepare("UPDATE attempt_records SET decision = NULL, decided_at = NULL, settle_intent = NULL, settle_requested_at = NULL, apply_note = COALESCE(?, apply_note) WHERE attempt_id = ? AND decision = 'approved' AND apply_request_id = ? AND accepted_at IS NULL")
         .run(note, attemptId, requestId).changes,
     ) === 1
   );
