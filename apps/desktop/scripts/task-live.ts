@@ -21,7 +21,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { ENVIRONMENT_BASE, TaskBrief, taskBriefDigest, type EnvironmentSpec } from "@nivra/domain";
+import { ENVIRONMENT_BASE, TaskBrief, taskBriefDigest, type EnvironmentSpec, type PreparedEnvironment } from "@nivra/domain";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { claimApproval, claimOn, isDigest } from "../../engine/scripts/research-check/claim.ts";
 import { environmentPreviewOf, ENVIRONMENT_NETWORK, PREPARE_LIMITS } from "../../engine/src/environment/preview.ts";
@@ -31,8 +31,9 @@ import { compressSnapshot } from "../../engine/src/exec/nebius/session.ts";
 import { findGit } from "../../engine/src/exec/find-executable.ts";
 import { takeSnapshot } from "../../engine/src/exec/snapshot.ts";
 import { runLimitsFor } from "../../engine/src/task/limits.ts";
-import type { BriefFields, SettingsView } from "../src/shared/ipc.ts";
+import type { BriefFields, ProjectView, SettingsView, TaskRunPreview } from "../src/shared/ipc.ts";
 import { addProject, attemptOf, createTask, environmentOf, followRun, keysSaved, prepareOnce, previewEnvironment, previewRun, startOnce, taskOf } from "./task-journey.ts";
+import { buildChanges, buildHashes, previewProblems, type BuildHashes } from "./task-live-checks.ts";
 import { RELEASE_HOME_STATE, releaseHomeChange } from "./test-homes.ts";
 
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -78,15 +79,12 @@ function checkCheckout(task: LiveTask): void {
 
 // ---- the frozen build ---------------------------------------------------------------------------------------------
 
-export interface Frozen {
+export interface Frozen extends BuildHashes {
   stamp: string;
   revision: string;
   version: string;
   /** The unpacked Linux build, copied here from the release candidate. */
   folder: string;
-  nivraSha256: string;
-  appAsarSha256: string;
-  runtimeContentHash: string;
   debName: string;
   debSha256: string;
   buildInfoSha256: string;
@@ -98,16 +96,10 @@ function readFrozen(): Frozen {
   return JSON.parse(readFileSync(frozenPath, "utf8")) as Frozen;
 }
 
-/** The build's identity: its executable, its app.asar and its runtime's content hash, each read again. */
-function buildHashes(folder: string): Pick<Frozen, "nivraSha256" | "appAsarSha256" | "runtimeContentHash"> {
-  const runtime = JSON.parse(readFileSync(join(folder, "resources", "runtime", "linux-x64", "engine", "manifest.json"), "utf8")) as { contentHash: string };
-  return { nivraSha256: sha256(join(folder, "nivra")), appAsarSha256: sha256(join(folder, "resources", "app.asar")), runtimeContentHash: runtime.contentHash };
-}
+/** The frozen build, every file hashed again (`buildHashes`), as it was frozen. */
 function checkBuild(frozen: Frozen): void {
-  const now = buildHashes(frozen.folder);
-  if (now.nivraSha256 !== frozen.nivraSha256 || now.appAsarSha256 !== frozen.appAsarSha256 || now.runtimeContentHash !== frozen.runtimeContentHash) {
-    throw new Error("The frozen build changed since it was frozen. Freeze it again, and ask for a new approval.");
-  }
+  const changed = buildChanges(frozen, buildHashes(frozen.folder));
+  if (changed.length) throw new Error(`The frozen build changed since it was frozen (${changed.join(", ")}). Freeze it again, and ask for a new approval.`);
 }
 
 /**
@@ -168,7 +160,7 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
     run,
     route: "the frozen Linux build, unpacked, with a profile and an engine home of its own",
     revision: frozen.revision,
-    build: { version: frozen.version, nivraSha256: frozen.nivraSha256, appAsarSha256: frozen.appAsarSha256, runtimeContentHash: frozen.runtimeContentHash, debSha256: frozen.debSha256 },
+    build: { version: frozen.version, nivraSha256: frozen.nivraSha256, appAsarSha256: frozen.appAsarSha256, runtimeContentHash: frozen.runtimeContentHash, runtimeSha256: frozen.runtimeSha256, treeSha256: frozen.treeSha256, treeFiles: frozen.treeFiles, debSha256: frozen.debSha256 },
     repository: { path: task.repository, baseline: task.baseline, ...shown.snapshot },
     environment: { spec: task.environment, base: ENVIRONMENT_BASE, ...shown.environment, network: ENVIRONMENT_NETWORK, limits: { importSeconds: PREPARE_LIMITS.importSeconds, prepareSeconds: PREPARE_LIMITS.prepareSeconds } },
     task: { title: task.task.title, briefDigest: await taskBriefDigest(brief), cases: brief.acceptanceCases.map((given) => given.name), checks: brief.checks, baseline: (brief.baseline ?? []).map((given) => given.name), frozen: shown.frozen },
@@ -178,7 +170,7 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
       "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
       "the script adds the repository as a project, and allows its model sharing and its uploads, each through its own dialog",
       "the script previews the environment and checks its fingerprint is the one above, claims the approval, and presses Prepare once",
-      "once it is prepared, the script creates the task with the brief above, marks it ready, previews the run, checks the preview shows this brief, this commit, the environment just prepared and the frozen files above, and presses Start once",
+      "once it is prepared, the script creates the task with the brief above, marks it ready, and previews the run. It checks the preview is bound to this brief's digest, this commit's snapshot and the environment just prepared (the fingerprint Start sends, which the app checks again), and shows the frozen files above with their hashes, then presses Start once",
       "Nate reads the proposal and its checks, and decides: Approve and then Accept, Reject, or a revision (which this approval doesn't run)",
       "on Nate's go-ahead, the app is closed and relaunched, the keys are removed, and ~/.nivra is checked unchanged",
     ],
@@ -207,7 +199,7 @@ function recipeText(recipe: Awaited<ReturnType<typeof recipeOf>>, digest: string
   return [
     `NIV-35's live run on Linux, run ${recipe.run} of this recipe.`,
     "",
-    `Revision ${recipe.revision}; Nivra ${recipe.build.version}: nivra ${recipe.build.nivraSha256}, app.asar ${recipe.build.appAsarSha256}, runtime ${recipe.build.runtimeContentHash}, deb ${recipe.build.debSha256}`,
+    `Revision ${recipe.revision}; Nivra ${recipe.build.version}: nivra ${recipe.build.nivraSha256}, app.asar ${recipe.build.appAsarSha256}, runtime ${recipe.build.runtimeContentHash} (files ${recipe.build.runtimeSha256}), every file of the build ${recipe.build.treeSha256} (${recipe.build.treeFiles}), deb ${recipe.build.debSha256}`,
     `Route: ${recipe.route}`,
     `Repository: ${recipe.repository.path} at ${recipe.repository.baseline}; ${recipe.repository.files} files, ${recipe.repository.sentBytes} bytes compressed; left out: ${recipe.repository.leftOut.join(", ") || "none"}; snapshot ${recipe.repository.fingerprint}`,
     `Environment: ${recipe.environment.base.tag}, ${recipe.environment.packageManager}, pnpm install ${recipe.environment.installArgs.join(" ")}; ${recipe.environment.inputs} inputs, ${recipe.environment.sentBytes} bytes; preview ${recipe.environment.fingerprint}`,
@@ -260,6 +252,21 @@ async function removeKeys(page: Page): Promise<void> {
 
 const fieldsOf = (task: LiveTask): BriefFields => ({ ...task.brief, assumptions: [] });
 
+/** Why the run the window would start isn't the recipe's (`previewProblems`), read from the app as it stands. */
+async function runPreviewProblems(page: Page, recipe: Awaited<ReturnType<typeof recipeOf>>, ids: { taskId: string; projectId: string }, prepared: PreparedEnvironment | null, shownExpected: string): Promise<string[]> {
+  const view = await taskOf(page, ids.taskId);
+  const project = (await call<ProjectView[]>(page, "window.nivra.listProjects()")).find((one) => one.id === ids.projectId);
+  if (!project) return ["the project isn't in the app"];
+  const structured = await call<TaskRunPreview>(page, `window.nivra.previewTaskRun(${JSON.stringify(ids.taskId)})`);
+  return previewProblems({
+    approved: { baseline: recipe.repository.baseline, snapshotFingerprint: recipe.repository.fingerprint, briefDigest: recipe.task.briefDigest, frozen: recipe.task.frozen, inputsDigest: recipe.environment.inputsDigest },
+    ids: { taskId: ids.taskId, briefId: view.brief.id, briefVersion: view.brief.version, projectId: project.id, targetId: project.targetId },
+    prepared,
+    shownExpected,
+    structured,
+  });
+}
+
 /**
  * The journey on the frozen build with fake keys, to each preview and no further: the environment's preview (no
  * Prepare) and the task's (no Start). Nothing is sent: a preview reaches no service, and the keys are fake.
@@ -281,6 +288,10 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
     log(`Run preview: ${run.baseline}; frozen ${run.frozen.length}; ${run.limits.slice(0, 160)}`);
+    // The live run's check, with no environment prepared: the fingerprints worked out here must be the app's.
+    const problems = await runPreviewProblems(page, recipe, { taskId, projectId }, null, run.expected);
+    if (problems.length) throw new Error(`The rehearsal's run preview isn't the recipe's: ${problems.join("; ")}.`);
+    log("Run preview: bound to the recipe's brief digest and snapshot, with its frozen files and their hashes.");
     const brief = (await taskOf(page, taskId)).brief;
     writeFileSync(join(folder, "rehearsal.json"), `${JSON.stringify({ recipe: digest, environment: shown, run, briefVersion: brief.version }, null, 2)}\n`, { mode: 0o600 });
     await removeKeys(page);
@@ -334,11 +345,9 @@ async function live(frozen: Frozen, task: LiveTask, approved: string): Promise<n
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
     save("run-preview.json", run);
-    const frozenShown = run.frozen.map((line) => line.split(",")[0]);
-    if (JSON.stringify(frozenShown) !== JSON.stringify(recipe.task.frozen.map((file) => file.path)) || !run.environment.includes(environment.prepared.node)) {
-      throw new Error(`The run's preview isn't the approved one (frozen ${frozenShown.join(", ")}; ${run.environment}). Start wasn't pressed.`);
-    }
-    log("The run's preview is the approved one. Pressing Start, once.");
+    const problems = await runPreviewProblems(page, recipe, { taskId, projectId }, environment.prepared, run.expected);
+    if (problems.length) throw new Error(`The run's preview isn't the approved one: ${problems.join("; ")}. Start wasn't pressed.`);
+    log("The run's preview is the approved one: this brief, this commit's snapshot, the environment just prepared and the frozen files. Pressing Start, once.");
     const attemptId = await startOnce(page, taskId);
     const ended = await followRun(page, taskId, attemptId, 45 * 60_000, log);
     save("attempt.json", ended);
@@ -408,6 +417,13 @@ if (modes.length !== 1) {
   process.exit(2);
 }
 mkdirSync(STATE, { recursive: true, mode: 0o700 });
+if (values.cleanup) {
+  // Apart from the task's checkout, which an approved apply leaves changed: removing the keys never waits on it. The
+  // build that opens the profile must still be the one frozen.
+  const frozen = readFrozen();
+  checkBuild(frozen);
+  process.exit(await cleanup(frozen));
+}
 const task = readTask(values.task!);
 checkCheckout(task);
 if (values.freeze) {
@@ -428,7 +444,5 @@ if (values.freeze) {
       process.exit(2);
     }
     process.exit(await live(frozen, task, values.approved!));
-  } else {
-    process.exit(await cleanup(frozen));
   }
 }

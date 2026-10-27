@@ -92,8 +92,13 @@ export async function openTask(page: Page, taskId: string): Promise<void> {
   await expect(page.getByTestId("task-title")).toBeVisible();
 }
 
-/** What the run's preview shows, read before Start: the environment, the baseline checks, the frozen files and the limits. */
+/**
+ * What the run's preview shows, read before Start: the environment, the baseline checks, the frozen files and the
+ * limits, and the fingerprints Start sends (the run's and its snapshot's).
+ */
 export interface RunShown {
+  expected: string;
+  snapshot: string;
   environment: string;
   baseline: string;
   frozen: string[];
@@ -114,6 +119,8 @@ export async function previewRun(page: Page): Promise<RunShown> {
   await expect(page.getByTestId("task-run-start")).toBeEnabled({ timeout: 60_000 });
   const text = async (id: string) => (await preview.getByTestId(id).count() ? ((await preview.getByTestId(id).first().textContent()) ?? "") : "");
   return {
+    expected: (await preview.getAttribute("data-expected")) ?? "",
+    snapshot: (await preview.getAttribute("data-snapshot")) ?? "",
     environment: await text("task-run-preview-environment"),
     baseline: await text("task-run-preview-baseline"),
     frozen: await preview.getByTestId("task-run-preview-frozen-file").allTextContents(),

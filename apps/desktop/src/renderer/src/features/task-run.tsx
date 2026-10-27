@@ -460,7 +460,7 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
   const leftOut = snapshot ? Object.values(snapshot.leftOut).reduce((sum, counted) => sum + counted.count, 0) : 0;
   const asking = snapshot !== null && (!preview.consents.modelContext || !preview.consents.cloudExecution);
   return (
-    <Stack gap="sm" data-testid="task-run-preview-body">
+    <Stack gap="sm" data-testid="task-run-preview-body" data-expected={preview.expected} data-snapshot={preview.snapshotFingerprint ?? ""}>
       <Text size="sm">
         Brief v{preview.briefVersion}, on {preview.project.label}
         {preview.project.targetLabel ? ` · ${preview.project.targetLabel}` : ""}. A worker changes a copy of the commit in a Nebius sandbox, with networking off. It can read and
