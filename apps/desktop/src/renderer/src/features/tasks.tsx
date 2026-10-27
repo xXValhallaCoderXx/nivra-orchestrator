@@ -344,7 +344,9 @@ export function NewTask({
 
 /**
  * One task: its brief and versions, the plan it came from, and what can be done with it now. Every change sends the
- * revision the task was read at; one that changed meanwhile is refused, and the view reads it again.
+ * revision the task was read at; one that changed meanwhile is refused, and the view reads it again. An edit keeps the
+ * revision it started from (NIV-53): a refresh never moves it, so a draft begun before another save can't land on top
+ * of it, and a refused save keeps the editor open with the person's text and says what changed.
  */
 export function TaskDetail({
   taskId,
@@ -365,6 +367,9 @@ export function TaskDetail({
   const [readCount, setReadCount] = useState(0);
   const task = usePoll<TaskView>(() => window.nivra.getTask(taskId), () => null, [taskId, readCount]);
   const [editing, setEditing] = useState<"brief" | "title" | "repository" | null>(null);
+  // The revision and brief version an edit started from, and a save refused because the task changed since.
+  const [base, setBase] = useState<{ revision: number; version: number } | null>(null);
+  const [conflict, setConflict] = useState(false);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [title, setTitle] = useState("");
   const [repository, setRepository] = useState<string>(NONE);
@@ -394,16 +399,49 @@ export function TaskDetail({
     setError(null);
     try {
       await change();
-      setEditing(null);
       reread();
     } catch (reason) {
       const message = errorMessage(reason);
       setError(message);
-      // Changed meanwhile: what is shown is read again, and the change can be made from it.
+      // Changed meanwhile: what is shown is read again, and the change can be made from it. An open edit stays open.
+      if (message.includes("changed since you opened it")) reread();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Starts an edit from the task as it is shown now: its save is made from this revision, whatever is read later. */
+  function startEdit(kind: "brief" | "title" | "repository") {
+    setBase({ revision, version: brief.version });
+    setConflict(false);
+    setError(null);
+    setEditing(kind);
+  }
+
+  function stopEdit() {
+    setEditing(null);
+    setBase(null);
+    setConflict(false);
+  }
+
+  /**
+   * Saves an edit from the revision it started from. A task that changed since refuses it: the editor stays open with
+   * the person's text, the conflict is shown, and the task is read again, so nothing newer is overwritten or lost.
+   */
+  async function saveEdit(change: (from: number) => Promise<unknown>) {
+    if (!base) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await change(base.revision);
+      stopEdit();
+      reread();
+    } catch (reason) {
+      const message = errorMessage(reason);
       if (message.includes("changed since you opened it")) {
-        setEditing(null);
+        setConflict(true);
         reread();
-      }
+      } else setError(message);
     } finally {
       setBusy(false);
     }
@@ -423,10 +461,10 @@ export function TaskDetail({
           {editing === "title" ? (
             <Group gap="xs" wrap="nowrap">
               <TextInput value={title} onChange={(event) => setTitle(event.currentTarget.value)} aria-label="Title" style={{ flex: 1 }} data-testid="task-title-input" />
-              <Button size="xs" onClick={() => void act(() => window.nivra.renameTask(taskId, revision, title))} loading={busy} data-testid="task-title-save">
+              <Button size="xs" onClick={() => void saveEdit((from) => window.nivra.renameTask(taskId, from, title))} loading={busy} data-testid="task-title-save">
                 Save
               </Button>
-              <Button size="xs" variant="subtle" onClick={() => setEditing(null)} disabled={busy}>
+              <Button size="xs" variant="subtle" onClick={stopEdit} disabled={busy}>
                 Cancel
               </Button>
             </Group>
@@ -453,7 +491,7 @@ export function TaskDetail({
             variant="subtle"
             onClick={() => {
               setTitle(summary.title);
-              setEditing("title");
+              startEdit("title");
             }}
             data-testid="task-rename"
           >
@@ -464,7 +502,7 @@ export function TaskDetail({
             variant="subtle"
             onClick={() => {
               setRepository(summary.projectId ?? NONE);
-              setEditing("repository");
+              startEdit("repository");
             }}
             data-testid="task-move"
           >
@@ -493,6 +531,22 @@ export function TaskDetail({
         </Alert>
       )}
 
+      {conflict && editing && base && (
+        <Alert color="yellow" variant="light" data-testid="task-edit-conflict">
+          <Stack gap={6}>
+            <Text size="sm">
+              This task changed since you started editing{brief.version > base.version ? `: brief v${brief.version} is saved now` : ""}, so your edit wasn't saved. Your text is still here. Copy
+              what you need, then discard your edit and start again from what is saved.
+            </Text>
+            <Group>
+              <Button size="xs" variant="default" onClick={stopEdit} data-testid="task-edit-discard">
+                Discard my edit
+              </Button>
+            </Group>
+          </Stack>
+        </Alert>
+      )}
+
       {editing === "repository" && (
         <Section title="Change repository">
           <Select data={repositoryChoices(projects)} value={repository} onChange={(value) => setRepository(value ?? NONE)} allowDeselect={false} aria-label="Repository" data-testid="task-move-repository" />
@@ -502,10 +556,10 @@ export function TaskDetail({
             </Text>
           )}
           <Group justify="flex-end" gap="sm">
-            <Button variant="default" onClick={() => setEditing(null)} disabled={busy}>
+            <Button variant="default" onClick={stopEdit} disabled={busy}>
               Cancel
             </Button>
-            <Button onClick={() => void act(() => window.nivra.setTaskProject(taskId, revision, chosen))} loading={busy} data-testid="task-move-save">
+            <Button onClick={() => void saveEdit((from) => window.nivra.setTaskProject(taskId, from, chosen))} loading={busy} data-testid="task-move-save">
               Save
             </Button>
           </Group>
@@ -564,7 +618,7 @@ export function TaskDetail({
               variant="default"
               onClick={() => {
                 setDraft(draftOf(brief.content));
-                setEditing("brief");
+                startEdit("brief");
               }}
               disabled={completed}
               data-testid="task-edit-brief"
@@ -578,11 +632,11 @@ export function TaskDetail({
           <Stack gap="sm">
             <BriefInputs draft={draft} onChange={setDraft} />
             <Group justify="flex-end" gap="sm">
-              <Button variant="default" onClick={() => setEditing(null)} disabled={busy}>
+              <Button variant="default" onClick={stopEdit} disabled={busy}>
                 Cancel
               </Button>
-              <Button onClick={() => void act(() => window.nivra.reviseBrief(taskId, revision, fieldsOf(draft)))} loading={busy} data-testid="task-brief-save">
-                Save as v{brief.version + 1}
+              <Button onClick={() => void saveEdit((from) => window.nivra.reviseBrief(taskId, from, fieldsOf(draft)))} loading={busy} data-testid="task-brief-save">
+                Save as v{(base?.version ?? brief.version) + 1}
               </Button>
             </Group>
           </Stack>
