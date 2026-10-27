@@ -190,6 +190,8 @@ From recorded runs; Nate edits before submitting.
 - **Nothing can be deleted:** uploads, operation records and logs stay, and an operation's record keeps the content a
   command wrote. That shaped what Nivra sends and what its preview says.
 - **The `cost` field has no documented unit,** so Nivra shows it raw and never turns it into money.
-- **No public Node 22 image:** importing a pinned one from Docker Hub worked (27 October). Nivra leaves the import
-  untagged (PENDING-H1-SOURCE: why a tag would make it public).
+- **No public Node 22 image:** importing a pinned one from Docker Hub worked (27 October). Nebius's API reference
+  describes an import's tag as what identifies the image "when listing publicly available images". Without one, the
+  image is "private and only accessible by ID", and a tag that already exists in the public images is replaced by the
+  import. So Nivra leaves its imports untagged. Whether a tagged import is visible to other accounts wasn't tested.
 - **One upload was answered with HTTP 500** on a first attempt (21 October). The approved rerun passed.
