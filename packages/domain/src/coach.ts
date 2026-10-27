@@ -37,6 +37,24 @@ export const COACH_RUN_LIMITS = {
   estimatedInputTokens: 60_000,
 } as const;
 
+/**
+ * The most characters the coach's instructions, its tool's definition and the message's framing take beyond the packet
+ * and the preferences. The engine's tests hold its own to it, so the estimate the preview shows is never below the one
+ * the engine admits the request by.
+ */
+export const COACH_FIXED_CHARS = 12_000;
+/** What each preference adds besides its statement: its label and framing in the message. */
+export const COACH_PREFERENCE_CHARS = 120;
+
+/**
+ * A coach request's estimated input tokens, as the preview counts them: characters divided by 3, plus 64 for the
+ * message template (D30). An estimate for admission against `COACH_RUN_LIMITS.estimatedInputTokens`, never a count.
+ */
+export function coachEstimatedInputTokens(packetChars: number, preferenceStatements: readonly string[]): number {
+  const preferences = preferenceStatements.reduce((sum, statement) => sum + statement.length + COACH_PREFERENCE_CHARS, 0);
+  return Math.ceil((packetChars + preferences + COACH_FIXED_CHARS) / 3) + 64;
+}
+
 /** What one packet may hold: a saved brief's own limits, the counts of what isn't sent, and the optional context. */
 export const COACH_PACKET_LIMITS = {
   titleChars: 200,

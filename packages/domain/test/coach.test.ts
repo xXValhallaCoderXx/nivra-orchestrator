@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
 import {
+  COACH_FIXED_CHARS,
   COACH_PACKET_LIMITS,
+  COACH_RUN_LIMITS,
+  coachEstimatedInputTokens,
   COACH_PROFILE,
   COACH_REPORT_LIMITS,
   CoachInput,
@@ -219,6 +222,18 @@ describe("a coach run's input and report (NIV-53)", () => {
       refused.map((value) => CoachReport.safeParse(value).success),
       refused.map(() => false),
     );
+  });
+
+  it("estimates a request's input as characters over three, with the coach's fixed part, and lets a maximal brief through", () => {
+    assert.equal(coachEstimatedInputTokens(3_000, []), Math.ceil((3_000 + COACH_FIXED_CHARS) / 3) + 64);
+    assert.equal(coachEstimatedInputTokens(0, ["Prefer small PRs"]), Math.ceil((16 + 120 + COACH_FIXED_CHARS) / 3) + 64);
+    // A saved brief at every limit, with a mission and three findings, fits the run's budget, labels included.
+    const L = COACH_PACKET_LIMITS;
+    const brief = L.titleChars + L.goalChars + 2 * L.scopeChars + L.contextChars + 3 * L.items * L.itemChars + L.cases * L.caseNameChars + L.gaps * L.gapChars;
+    const context = L.missionParts * L.missionTextChars + L.findings * (L.findingTitleChars + L.findingDetailChars + L.findingRecommendationChars);
+    assert.ok(coachEstimatedInputTokens(brief + context + 4_000, ["Prefer small PRs"]) <= COACH_RUN_LIMITS.estimatedInputTokens);
+    // Past the budget the estimate says so, and the preview refuses it, naming what to shorten.
+    assert.ok(coachEstimatedInputTokens(3 * COACH_RUN_LIMITS.estimatedInputTokens, []) > COACH_RUN_LIMITS.estimatedInputTokens);
   });
 
   it("is exported from the domain", () => {
