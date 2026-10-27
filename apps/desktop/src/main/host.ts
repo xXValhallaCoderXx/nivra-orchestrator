@@ -3,10 +3,12 @@ import { realpathSync } from "node:fs";
 import {
   CHAT_LIMITS,
   ErrorCode,
+  TASK_BRIEF_LIMITS,
   isTerminal,
   packetDigest,
   preferencesDigest,
   RpcCallError,
+  taskBriefDigest,
   type ChatContext,
   type ChatInput,
   type DoctorReport,
@@ -26,6 +28,10 @@ import {
   type SandboxPreview,
   type SandboxStatus,
   type SecretName,
+  type TaskBrief,
+  type TaskContext,
+  type TaskInput,
+  type TaskReport,
 } from "@nivra/domain";
 import type {
   AddProjectResult,
@@ -45,6 +51,8 @@ import type {
   ReviewPreview,
   ReviewView,
   SandboxCheckView,
+  TaskAttemptView,
+  TaskRunPreview,
   TasksView,
   TaskState,
   TaskSummary,
@@ -80,7 +88,23 @@ import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from 
 import { amendedContent, amendedPlanFields, researchNoteFor, researchReportMatches, researchRequest, researchStopFailedText, type ResearchSubject } from "./research.ts";
 import { getResearch, insertResearch, openResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
 import { historicalReferences, packetFor, previewFingerprint, reportMatches, REVIEW_REQUESTS, reviewNoteFor } from "./reviews.ts";
-import { BriefContentSchema, BriefFieldsSchema, briefForRepository, briefFrom, briefIsReady, nextState, planFromAnswer, RUN_UNAVAILABLE, sourceFrom, TASK_LIMITS, type PlanContent } from "./tasks.ts";
+import {
+  BriefContentSchema,
+  BriefFieldsSchema,
+  briefForRepository,
+  briefFrom,
+  briefIsReady,
+  nebiusKeeps,
+  nextState,
+  planFromAnswer,
+  sourceFrom,
+  TASK_LIMITS,
+  TASK_SENDS,
+  taskBriefOf,
+  taskRunFingerprint,
+  TOKEN_FACTORY_KEEPS,
+  type PlanContent,
+} from "./tasks.ts";
 import { EngineOfflineError, EngineSupervisor, type SupervisorOptions } from "./supervisor.ts";
 import type { TargetFactory, WslTargets } from "./targets/registry.ts";
 import { labelFor, type ExecutionTarget } from "./targets/types.ts";
@@ -88,6 +112,7 @@ import { isHiddenDistro, wslGuidance } from "./targets/wsl-discovery.ts";
 import {
   attemptsOf,
   deleteConversation,
+  getAttempt,
   deleteTask,
   getArtifact,
   getConversation,
@@ -95,6 +120,7 @@ import {
   getTask,
   getTurn,
   insertArtifact,
+  insertAttempt,
   insertConversation,
   insertReview,
   insertTask,
@@ -102,12 +128,14 @@ import {
   listConversations,
   listTasks,
   messagesOf,
+  openAttempts,
   openTurns,
   projectAnswer,
   recordRun,
   requestCancel,
   reviewsOf,
   setTurnHome,
+  settleAttempt,
   settleReview,
   settleTurn,
   turnByRun,
@@ -115,6 +143,7 @@ import {
   updateTask,
   versionsOf,
   withdrawCancel,
+  type AttemptRecord,
   type ArtifactRecord,
   type CancelReason,
   type ConversationRecord,
@@ -171,6 +200,15 @@ const UPLOADS_STOPPED =
 const UPLOADS_STOPPED_STARTING = "Uploads for this project were turned off while its sandbox check was starting, so the check is being stopped.";
 /** A preview snapshots the whole commit on the project's engine, which takes a while for a large repository. */
 const SANDBOX_PREVIEW_MS = 180_000;
+
+/** Why a task can't run, and what stopped one (D39), in the person's terms. */
+const NATIVE_WINDOWS = "Running tasks on Windows itself isn't available yet. Add the repository from a WSL distribution, then run the task there.";
+const TASK_RUNNING = "A task is already running. Wait for it to end, or cancel it, then run this one.";
+const RUN_SHARING_OFF = "This project doesn't allow sending its content to Token Factory, where the worker reads its files, so the run can't start. Allow it for this project, then preview the run again.";
+const RUN_UPLOADS_OFF = "This project doesn't allow uploading its commit to Nebius Sandboxes, where the worker runs, so the run can't start. Allow uploads for this project, then preview the run again.";
+const RUN_KEYS_MISSING = "A task run needs your Nebius key and project id, and they aren't both set. Add them in Settings, then preview the run again.";
+/** What nothing sent means for a task run: neither service got anything. */
+const RUN_NOTHING = "nothing was uploaded and nothing reached the model";
 
 /**
  * A project's sandbox check this session (D36): the request id it was sent with, its run once known, and the engine
@@ -248,6 +286,14 @@ export class Host {
   readonly #sandboxChecks = new Map<string, SandboxCheck>();
   /** Projects whose check is being started: one at a time, from before its first wait. */
   readonly #sandboxStarting = new Set<string>();
+  /** Each task run started this session, by its attempt: its project and the consent epochs it started under (D39). */
+  readonly #taskRuns = new Map<string, { projectId: string; sharingEpoch: number; cloudEpoch: number }>();
+  /** A task run being started: one at a time, claimed before its first wait (D39). */
+  #taskStarting = false;
+  /** Task runs being followed to their end. */
+  readonly #followingAttempts = new Set<string>();
+  /** The engine's own words for a run start it answered with an error, shown if its search then finds no run. */
+  readonly #attemptAnswers = new Map<string, string>();
   /** This host session, recorded with each turn: only this session's own submissions can still be in flight. */
   readonly #sessionId = randomUUID();
   /** Turns whose `runs.start` this session hasn't finished with, and who asked them to stop meanwhile. */
@@ -729,8 +775,15 @@ export class Host {
         const latest = versionsOf(workspace, source.planLineage).at(-1);
         return { planLineage: source.planLineage, usedVersion: source.planVersion, latestVersion: latest?.version ?? null, latestPlanId: latest?.id ?? null, conversationId: source.conversationId };
       }),
-      attempts: attemptsOf(workspace, taskId).map((attempt) => ({ id: attempt.id, briefVersion: byId.get(attempt.briefId) ?? getArtifact(workspace, attempt.briefId)?.version ?? 0, status: attempt.status, createdAt: attempt.createdAt })),
-      runUnavailable: RUN_UNAVAILABLE,
+      attempts: attemptsOf(workspace, taskId).map((attempt) => ({
+        id: attempt.id,
+        briefVersion: byId.get(attempt.briefId) ?? getArtifact(workspace, attempt.briefId)?.version ?? 0,
+        status: attempt.status,
+        note: attemptNote(attempt),
+        createdAt: attempt.createdAt,
+        settledAt: attempt.settledAt,
+      })),
+      runBlocked: this.#runBlocked(task, content),
     };
   }
 
@@ -830,9 +883,98 @@ export class Host {
     return this.task(taskId);
   }
 
-  /** Deletes a task with its brief versions. */
+  /** Deletes a task with its brief versions and runs; refused while a run of it is being sent or going (D39). */
   deleteTask(taskId: string): void {
-    if (!deleteTask(this.#workspaceDb(), taskId)) throw new Error("That task is no longer in the list.");
+    const workspace = this.#workspaceDb();
+    if (attemptsOf(workspace, taskId).some((attempt) => attempt.status === "submitting" || attempt.status === "running")) {
+      throw new Error("This task's run is still going. Cancel it, and wait for it to end, then delete the task.");
+    }
+    if (!deleteTask(workspace, taskId)) throw new Error("That task is no longer in the list.");
+  }
+
+  /**
+   * What a run of the task would send, and where (D39), from its latest brief and its repository's commit as they are
+   * now: the commit's snapshot comes from the project's own engine, with no network. Nothing is sent or stored. A run
+   * that can't start now is still previewed as far as it can be, and says why.
+   */
+  async previewTaskRun(taskId: string): Promise<TaskRunPreview> {
+    const workspace = this.#workspaceDb();
+    const task = getTask(workspace, taskId);
+    if (!task) throw new Error("That task is no longer in the list.");
+    const brief = versionsOf(workspace, taskId).at(-1)!;
+    const content = BriefContentSchema.parse(brief.content);
+    const project = task.projectId ? (this.#options.store.data.projects.find((p) => p.id === task.projectId) ?? null) : null;
+    const consents = { modelContext: project?.sharing.modelContext ?? false, cloudExecution: project?.sharing.cloudExecution ?? false };
+    const base = {
+      taskId,
+      briefVersion: brief.version,
+      project: project ? { label: project.label, targetLabel: this.#labelOf(project.targetId) } : { label: "No repository yet", targetLabel: "" },
+      sends: { tokenFactory: [...TASK_SENDS.tokenFactory], nebius: [...TASK_SENDS.nebius] },
+      cases: content.acceptanceCases.map((given, index) => ({ number: index + 1, ...given })),
+      checks: content.checks.map((command, index) => ({ number: index + 1, command })),
+      consents,
+    };
+    const stopped = (blocked: string): TaskRunPreview => ({ ...base, keeps: { tokenFactory: TOKEN_FACTORY_KEEPS, nebius: null }, snapshot: null, programs: [], unprobed: 0, caseFiles: [], limits: null, blocked, expected: "", snapshotFingerprint: null });
+    const early = this.#runBlocked(task, content);
+    if (early || !project) return stopped(early ?? "Choose the repository this task runs on first.");
+    const packet = (taskBriefOf(content) as { brief: TaskBrief }).brief;
+    const engine = await this.#started(project.targetId);
+    const shown = await engine.supervisor.call("task.preview", { repoPath: project.nativePath, brief: packet }, { timeoutMs: SANDBOX_PREVIEW_MS });
+    if (shown.status === "refused") return stopped(shown.message);
+    const keys = await this.#options.credentials();
+    const blocked = !consents.modelContext ? RUN_SHARING_OFF : !consents.cloudExecution ? RUN_UPLOADS_OFF : !(keys.NEBIUS_API_KEY && keys.NEBIUS_PROJECT_ID) ? RUN_KEYS_MISSING : null;
+    const expected = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest: await taskBriefDigest(packet), projectId: project.id, targetId: project.targetId, sharing: consents, snapshot: shown.snapshot.fingerprint });
+    return {
+      ...base,
+      keeps: { tokenFactory: TOKEN_FACTORY_KEEPS, nebius: nebiusKeeps(shown.snapshot.retention) },
+      snapshot: shown.snapshot,
+      programs: shown.programs,
+      unprobed: shown.unprobed,
+      caseFiles: shown.caseFiles,
+      limits: shown.limits,
+      blocked,
+      expected,
+      snapshotFingerprint: shown.snapshot.fingerprint,
+    };
+  }
+
+  /**
+   * Starts the run previewed (D39). Its fingerprint is worked out again from the records as they are now and the
+   * snapshot's, and refused when it isn't the one previewed; the engine checks the snapshot itself before uploading.
+   * Both consents are checked now, again before sending against their epochs, and once more when the request is out:
+   * a run started while either was being turned off is cancelled at once. One task runs at a time. The attempt is
+   * stored first, then sent in the background on its project's engine, and found by its request id if the answer is lost.
+   */
+  async startTaskRun(taskId: string, expected: string, snapshot: string): Promise<TaskAttemptView> {
+    if (this.#taskStarting) throw new Error("A task run is already being started. Wait for it, then try again.");
+    this.#taskStarting = true;
+    try {
+      return await this.#startTask(taskId, expected, snapshot);
+    } finally {
+      this.#taskStarting = false;
+    }
+  }
+
+  /** Stops a run being sent or going; its end is recorded as cancelled by the person. */
+  async cancelTaskRun(taskId: string, attemptId: string): Promise<TaskAttemptView> {
+    const attempt = getAttempt(this.#workspaceDb(), attemptId);
+    if (!attempt || attempt.taskId !== taskId) throw new Error("That run is no longer here.");
+    await this.#cancelAttempt(attempt, "person");
+    return this.taskAttempt(taskId, attemptId);
+  }
+
+  /**
+   * One run of a task as it is now (D39): read from its engine when that is online and holds the same store, which a
+   * run left open is followed on, starting it if needed. Nothing is resent.
+   */
+  async taskAttempt(taskId: string, attemptId: string): Promise<TaskAttemptView> {
+    const attempt = getAttempt(this.#workspaceDb(), attemptId);
+    if (!attempt || attempt.taskId !== taskId) throw new Error("That run is no longer here.");
+    if ((attempt.status === "submitting" || attempt.status === "running") && !this.#submissions.has(attemptId)) {
+      void this.#ensure(attempt.targetId).catch(() => undefined);
+      this.#followAttempt(attemptId);
+    }
+    return this.#attemptView(attempt);
   }
 
   /** What WSL offers on a Windows host, and what to do when it offers nothing; null elsewhere. */
@@ -973,10 +1115,14 @@ export class Host {
     if (!modelContext) {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
       const withdraw = this.#markProjectTurns(projectId, "sharing");
-      await this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`).catch((error: unknown) => {
-        withdraw();
-        throw error;
-      });
+      // Every stop is tried, whatever another's fate, and then any that failed is reported (D39).
+      const [runs, attempts] = await Promise.allSettled([
+        this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`),
+        this.#stopProjectAttempts(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
+      ]);
+      if (runs.status === "rejected") withdraw();
+      const failed = [runs, attempts].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      if (failed.length) throw new Error(failed.join(" "));
     }
     return this.#view(this.#project(projectId));
   }
@@ -992,12 +1138,21 @@ export class Host {
     this.#options.store.update((data) => ({ ...data, projects: data.projects.map((p) => (p.id === projectId ? { ...p, sharing: { ...p.sharing, cloudExecution } } : p)) }));
     if (!cloudExecution) {
       this.#cloudEpochs.set(projectId, this.#cloudEpochOf(projectId) + 1);
-      const check = this.#sandboxChecks.get(projectId);
-      // A check whose state can't be read is treated as going: stopping one that had ended does no harm.
-      if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
-        await this.#stopForUploads(projectId, check, UPLOADS_STOPPED);
-        this.#notices.set(projectId, UPLOADS_STOPPED);
-      }
+      const stopCheck = async () => {
+        const check = this.#sandboxChecks.get(projectId);
+        // A check whose state can't be read is treated as going: stopping one that had ended does no harm.
+        if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
+          await this.#stopForUploads(projectId, check, UPLOADS_STOPPED);
+          this.#notices.set(projectId, UPLOADS_STOPPED);
+        }
+      };
+      // Every stop is tried, whatever another's fate, and then any that failed is reported (D39).
+      const stops = await Promise.allSettled([
+        stopCheck(),
+        this.#stopProjectAttempts(projectId, "sharing", (why) => `Uploads for this project are off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
+      ]);
+      const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      if (failed.length) throw new Error(failed.join(" "));
     }
     return this.#view(this.#project(projectId));
   }
@@ -1151,11 +1306,20 @@ export class Host {
     this.#cloudEpochs.set(projectId, this.#cloudEpochOf(projectId) + 1);
     const withdraw = this.#markProjectTurns(projectId, "removal");
     try {
-      await this.#stopProjectRuns(projectId, "removal", (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
-      const check = this.#sandboxChecks.get(projectId);
-      if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
-        await this.#cancelSandboxRun(projectId, check, null, (why) => `Nivra couldn't stop the project's sandbox check (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
-      }
+      const stopCheck = async () => {
+        const check = this.#sandboxChecks.get(projectId);
+        if (check && !(await this.#sandboxEnded(check).catch(() => false))) {
+          await this.#cancelSandboxRun(projectId, check, null, (why) => `Nivra couldn't stop the project's sandbox check (${why}), so the project is still in the list. Restart its engine, then remove it again.`);
+        }
+      };
+      // Every stop is tried, whatever another's fate; any that failed keeps the project in the list, and says why.
+      const stops = await Promise.allSettled([
+        this.#stopProjectRuns(projectId, "removal", (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
+        stopCheck(),
+        this.#stopProjectAttempts(projectId, "removal", (why) => `Nivra couldn't stop the project's task run (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
+      ]);
+      const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      if (failed.length) throw new Error(failed.join(" "));
     } catch (error) {
       withdraw();
       this.#removing.delete(projectId);
@@ -1331,6 +1495,313 @@ export class Host {
   }
 
   // ---- internals ------------------------------------------------------------------------------------------------
+
+  /**
+   * Why a task can't run now, in plain words, or null (D39): its state, its repository and where that lives, its
+   * brief's acceptance cases, and another run still going. Consents and keys are the preview's to say.
+   */
+  #runBlocked(task: TaskRecord, content: BriefContent): string | null {
+    if (task.state === "completed") return "This task is completed. Reopen it to run it again.";
+    if (task.state !== "ready") return "Mark the task ready first: a run needs a goal and at least one acceptance criterion.";
+    if (task.projectId === null) return "Choose the repository this task runs on first.";
+    const project = this.#options.store.data.projects.find((p) => p.id === task.projectId);
+    if (!project || this.#removing.has(project.id)) return "This task's repository is no longer in the list. Choose another, then run it.";
+    if (this.#options.platform === "win32" && project.targetId === "local") return NATIVE_WINDOWS;
+    const brief = taskBriefOf(content);
+    if ("blocked" in brief) return brief.blocked;
+    if (this.#workspace.state === "ready" && openAttempts(this.#workspace.db).length) return TASK_RUNNING;
+    return null;
+  }
+
+  async #startTask(taskId: string, expected: string, snapshot: string): Promise<TaskAttemptView> {
+    const workspace = this.#workspaceDb();
+    const task = getTask(workspace, taskId);
+    if (!task) throw new Error("That task is no longer in the list.");
+    const brief = versionsOf(workspace, taskId).at(-1)!;
+    const content = BriefContentSchema.parse(brief.content);
+    const blocked = this.#runBlocked(task, content);
+    if (blocked) throw new Error(blocked);
+    const project = this.#project(task.projectId!);
+    const epochs = { sharingEpoch: this.#epochOf(project.id), cloudEpoch: this.#cloudEpochOf(project.id) };
+    if (!project.sharing.modelContext) throw new Error(RUN_SHARING_OFF);
+    if (!project.sharing.cloudExecution) throw new Error(RUN_UPLOADS_OFF);
+    const known = await this.#knownSecrets();
+    if (!known.some(([name]) => name === "NEBIUS_API_KEY") || !known.some(([name]) => name === "NEBIUS_PROJECT_ID")) throw new Error(RUN_KEYS_MISSING);
+    const packet = (taskBriefOf(content) as { brief: TaskBrief }).brief;
+    // The brief goes to Token Factory: a key saved since it was written is refused here, and nothing is sent.
+    for (const [field, text] of briefTexts(packet)) refuseCredentials(field, text, known, "send");
+    const briefDigest = await taskBriefDigest(packet);
+    const current = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    if (current !== expected) throw new Error("What this run would send has changed since you previewed it. Preview it again, then start.");
+    // Checked again after the waits: consent, and the project itself, can change while the keys are read.
+    const now = this.#options.store.data.projects.find((p) => p.id === project.id);
+    if (!now || this.#removing.has(project.id) || !now.sharing.modelContext || !now.sharing.cloudExecution || this.#epochOf(project.id) !== epochs.sharingEpoch || this.#cloudEpochOf(project.id) !== epochs.cloudEpoch) {
+      throw new Error("This project's sharing or uploads changed while the run was starting, so it wasn't started. Preview it again.");
+    }
+    const id = randomUUID();
+    if (!insertAttempt(workspace, { id, taskId, briefId: brief.id, sessionId: this.#sessionId, targetId: project.targetId, createdAt: new Date().toISOString() })) throw new Error(TASK_RUNNING);
+    this.#taskRuns.set(id, { projectId: project.id, ...epochs });
+    this.#submissions.set(id, { cancel: null });
+    const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest };
+    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: packet };
+    void this.#submitAttempt(id, project, input, context).catch((error: unknown) => this.#options.log(`A task run couldn't be sent: ${errorText(error)}`));
+    return this.#attemptView(getAttempt(workspace, id)!);
+  }
+
+  /** Why a task run should stop: asked for meanwhile, or its project removed, or a consent withdrawn since it started. */
+  #attemptStopReason(attemptId: string): CancelReason | null {
+    const asked = this.#submissions.get(attemptId)?.cancel ?? null;
+    if (asked) return asked;
+    const run = this.#taskRuns.get(attemptId);
+    if (!run) return null;
+    const project = this.#options.store.data.projects.find((p) => p.id === run.projectId);
+    if (!project || this.#removing.has(project.id)) return "removal";
+    if (!project.sharing.modelContext || !project.sharing.cloudExecution || this.#epochOf(project.id) !== run.sharingEpoch || this.#cloudEpochOf(project.id) !== run.cloudEpoch) return "sharing";
+    return null;
+  }
+
+  /**
+   * Sends a stored task run (D39), as a turn is sent: the request is written only after the engine's store is recorded
+   * with it, so one with none was never sent. A failure known to come before writing is "not sent"; anything after it
+   * leaves the run to be found by its request id, never sent again.
+   */
+  async #submitAttempt(attemptId: string, project: ProjectRecord, input: TaskInput, context: TaskContext): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const label = this.#labelOf(project.targetId);
+    const settle = (outcome: Parameters<typeof settleAttempt>[2]) => {
+      if (this.#workspace.state === "ready") settleAttempt(this.#workspace.db, attemptId, outcome, new Date().toISOString());
+    };
+    const stopped = (): boolean => {
+      const reason = this.#attemptStopReason(attemptId);
+      if (reason) requestCancel(workspace, attemptId, reason);
+      return reason !== null;
+    };
+    const notSent = (why: string) => {
+      this.#submissions.delete(attemptId);
+      settle({ status: "not-sent", errorMessage: why });
+    };
+    let engine: Engine;
+    try {
+      engine = await this.#ensure(project.targetId);
+      if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
+    } catch (error) {
+      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so the run wasn't sent: ${RUN_NOTHING}.`);
+      return;
+    }
+    const state = engine.supervisor.state;
+    if (state.status !== "online") {
+      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so the run wasn't sent: ${RUN_NOTHING}.`);
+      return;
+    }
+    if (stopped()) {
+      this.#submissions.delete(attemptId);
+      settle({ status: "cancelled", errorMessage: `It was stopped before it was sent, so ${RUN_NOTHING}.` });
+      return;
+    }
+    // Deleted or ended meanwhile: nothing to send.
+    if (!setTurnHome(workspace, attemptId, state.info.homeId)) {
+      this.#submissions.delete(attemptId);
+      return;
+    }
+    let run: RunSummary;
+    try {
+      run = await engine.supervisor.call("runs.start", { clientRequestId: attemptId, workflowId: "task", input, context });
+    } catch (error) {
+      // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
+      if (error instanceof EngineOfflineError || error instanceof TypeError) {
+        notSent(`The engine on ${label} didn't take the run (${errorText(error)}), so ${RUN_NOTHING}.`);
+        return;
+      }
+      this.#options.log(`A task run's request got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
+      // An error answer is the engine's own words: shown if the search then finds no run.
+      if (error instanceof RpcCallError) this.#attemptAnswers.set(attemptId, errorText(error));
+      this.#submissions.delete(attemptId);
+      this.#followAttempt(attemptId);
+      return;
+    }
+    this.#runs.set(run.id, project.targetId);
+    recordRun(workspace, attemptId, run.id);
+    // Stopped while the request was out (a cancel, consent withdrawn, the project removed): the run stops now.
+    const late = stopped();
+    this.#submissions.delete(attemptId);
+    if (late) await engine.supervisor.call("runs.cancel", { runId: run.id }).catch((error: unknown) => this.#options.log(`A task run stopped while it was being sent couldn't be cancelled: ${errorText(error)}`));
+    this.#followAttempt(attemptId);
+  }
+
+  /**
+   * Follows an open task run to its end on its own engine (D39), as a turn is followed, however it was left. No store
+   * recorded: never sent. Another store: unknown. No run id: found by its request id, and absent from the same store,
+   * never sent. A run: followed until it ends, then its end recorded; its report stays with its engine.
+   */
+  #followAttempt(attemptId: string): void {
+    if (this.#followingAttempts.has(attemptId) || this.#submissions.has(attemptId)) return;
+    this.#followingAttempts.add(attemptId);
+    void (async () => {
+      let delay = 400;
+      let cancelSent = false;
+      try {
+        while (!this.#closing && this.#workspace.state === "ready") {
+          const workspace = this.#workspace.db;
+          const attempt = getAttempt(workspace, attemptId);
+          if (!attempt || (attempt.status !== "submitting" && attempt.status !== "running")) return;
+          const settle = (outcome: Parameters<typeof settleAttempt>[2]) => settleAttempt(workspace, attemptId, outcome, new Date().toISOString());
+          if (attempt.homeId === null) {
+            settle({ status: "not-sent", errorMessage: `Nivra stopped before sending the run, so ${RUN_NOTHING}.` });
+            return;
+          }
+          const engine = this.#engines.get(attempt.targetId);
+          const state = engine?.supervisor.state;
+          if (engine && state?.status === "online") {
+            if (state.info.homeId !== attempt.homeId) {
+              settle({ status: "unknown", errorMessage: `it went to an engine whose records aren't here (another engine home on ${this.#labelOf(attempt.targetId)})` });
+              return;
+            }
+            try {
+              let summary: RunSummary | null;
+              if (attempt.runId) summary = await engine.supervisor.call("runs.get", { runId: attempt.runId });
+              else {
+                summary = await engine.supervisor.call("runs.find", { clientRequestId: attemptId });
+                if (!summary) {
+                  const answered = this.#attemptAnswers.get(attemptId);
+                  settle({ status: "not-sent", errorMessage: answered ? `The engine didn't start the run, so ${RUN_NOTHING}. ${answered}` : `Its engine has no record of the run, so it never ran: ${RUN_NOTHING}.` });
+                  return;
+                }
+                this.#runs.set(summary.id, attempt.targetId);
+                recordRun(workspace, attemptId, summary.id);
+              }
+              if (isTerminal(summary.status)) {
+                await this.#finishAttempt(attempt, engine, summary);
+                return;
+              }
+              if (attempt.cancelRequested && !cancelSent) {
+                cancelSent = true;
+                // A cancel its engine turned down is tried again on the next look, never left for the run to outlast.
+                await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch((error: unknown) => {
+                  cancelSent = false;
+                  this.#options.log(`A task run couldn't be cancelled yet, so Nivra tries again: ${errorText(error)}`);
+                });
+              }
+              delay = 400;
+            } catch (error) {
+              if (isRunNotFound(error)) {
+                settle({ status: "unknown", errorMessage: `the engine on ${this.#labelOf(attempt.targetId)} has no record of its run any more` });
+                return;
+              }
+              delay = Math.min(delay * 2, 5_000);
+            }
+          } else {
+            delay = Math.min(delay * 2, 5_000);
+          }
+          await pause(delay);
+        }
+      } catch (error) {
+        this.#options.log(`Following a task run stopped: ${errorText(error)}`);
+      } finally {
+        this.#followingAttempts.delete(attemptId);
+        this.#attemptAnswers.delete(attemptId);
+      }
+    })();
+  }
+
+  /**
+   * Records how a task run ended (D39). Its report stays with its engine: one that ran to its end is `answered`, whatever
+   * it found. A cancel Nivra asked for keeps its reason; any other cancel, or a `run.interrupted` event, means Nivra or
+   * its engine stopped first.
+   */
+  async #finishAttempt(attempt: AttemptRecord, engine: Engine, summary: RunSummary): Promise<void> {
+    const settle = (outcome: Parameters<typeof settleAttempt>[2]) => {
+      if (this.#workspace.state === "ready") settleAttempt(this.#workspace.db, attempt.id, outcome, new Date().toISOString());
+    };
+    if (summary.status === "succeeded") return settle({ status: "answered" });
+    if (summary.status === "cancelled") {
+      const now = this.#workspace.state === "ready" ? getAttempt(this.#workspace.db, attempt.id) : null;
+      return settle({ status: now?.cancelReason ? "cancelled" : "interrupted" });
+    }
+    const known = await this.#knownSecrets();
+    const { interrupted, kind } = await this.#failureOf(engine, summary.id);
+    settle(interrupted ? { status: "interrupted" } : { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The run failed.", known) });
+  }
+
+  /**
+   * Stops a task run for `reason`. One being sent stops at its own check; one whose run isn't known yet once it is found.
+   * A stop its engine turns down is taken back and thrown, so the caller can say it couldn't stop it.
+   */
+  async #cancelAttempt(attempt: AttemptRecord, reason: CancelReason): Promise<void> {
+    if (attempt.status !== "submitting" && attempt.status !== "running") return;
+    const workspace = this.#workspaceDb();
+    requestCancel(workspace, attempt.id, reason);
+    const pending = this.#submissions.get(attempt.id);
+    if (pending) pending.cancel ??= reason;
+    if (attempt.runId) {
+      await this.cancelRun(attempt.runId).catch((error: unknown) => {
+        withdrawCancel(workspace, attempt.id, reason);
+        throw error;
+      });
+    } else if (!pending) this.#followAttempt(attempt.id);
+  }
+
+  /**
+   * Stops the project's task run started this session, for `reason`; says through `refusal` when it couldn't. A run
+   * whose engine isn't online, and isn't being sent, isn't going any more (D4): its stop is recorded, and nothing is sent.
+   */
+  async #stopProjectAttempts(projectId: string, reason: CancelReason, refusal: (why: string) => string): Promise<void> {
+    if (this.#workspace.state !== "ready") return;
+    const workspace = this.#workspace.db;
+    const attempts = openAttempts(workspace).filter((attempt) => this.#taskRuns.get(attempt.id)?.projectId === projectId);
+    const going = (attempt: AttemptRecord) => this.#submissions.has(attempt.id) || this.#engines.get(attempt.targetId)?.supervisor.state.status === "online";
+    for (const attempt of attempts.filter((one) => !going(one))) requestCancel(workspace, attempt.id, reason);
+    const results = await Promise.allSettled(attempts.filter(going).map((attempt) => this.#cancelAttempt(attempt, reason)));
+    const failed = results.flatMap((result) => (result.status === "rejected" ? [errorText(result.reason)] : []));
+    if (failed.length) throw new Error(refusal(failed[0]!));
+  }
+
+  /** A task run as the window shows it: its record, and its engine's report, change and progress when they can be read. */
+  async #attemptView(attempt: AttemptRecord): Promise<TaskAttemptView> {
+    const workspace = this.#workspaceDb();
+    const base: TaskAttemptView = {
+      id: attempt.id,
+      taskId: attempt.taskId,
+      briefVersion: getArtifact(workspace, attempt.briefId)?.version ?? 0,
+      status: attempt.status,
+      note: attemptNote(attempt),
+      runId: attempt.runId,
+      cancelRequested: attempt.cancelRequested,
+      report: null,
+      proposal: null,
+      progress: [],
+      unresolved: null,
+      createdAt: attempt.createdAt,
+      settledAt: attempt.settledAt,
+    };
+    if (!attempt.runId) return base;
+    const engine = this.#engines.get(attempt.targetId);
+    const state = engine?.supervisor.state;
+    if (!engine || state?.status !== "online") return { ...base, unresolved: `The engine on ${this.#labelOf(attempt.targetId)} isn't running, so this run can't be read now.` };
+    if (state.info.homeId !== attempt.homeId) return { ...base, unresolved: "This run went to an engine whose records aren't here, so it can't be read." };
+    try {
+      const known = await this.#knownSecrets();
+      const report: TaskReport | null = await engine.supervisor.call("runs.task", { runId: attempt.runId });
+      // A report about another request or run is shown nowhere.
+      if (report && (report.request.clientRequestId !== attempt.id || report.request.runId !== attempt.runId)) return { ...base, unresolved: "Its engine's report is about another run, so none of it is shown." };
+      const proposal = report?.proposal ? await engine.supervisor.call("runs.proposal", { runId: attempt.runId }) : null;
+      return { ...base, report: report && maskValue(report, known), proposal: proposal && maskValue(proposal, known), progress: maskValue(await this.#progressOf(engine, attempt.runId), known) };
+    } catch (error) {
+      if (isRunNotFound(error)) return { ...base, unresolved: "Its engine has no record of this run any more." };
+      return { ...base, unresolved: `Nivra can't read this run from its engine now (${errorText(error)}).` };
+    }
+  }
+
+  /** A run's latest progress, oldest first: what its steps said, and its model's calls. */
+  async #progressOf(engine: Engine, runId: string): Promise<string[]> {
+    const messages: string[] = [];
+    for (let after = 0, pages = 0; pages < 4; pages++) {
+      const page = await engine.supervisor.call("runs.events", { runId, after, limit: 500 });
+      for (const event of page.events) if (event.type === "step.output" || event.type === "model.call" || event.type === "step.failed") messages.push(event.message);
+      if (page.events.length < 500) break;
+      after = page.next;
+    }
+    return messages.slice(-20);
+  }
 
   #epochOf(projectId: string): number {
     return this.#sharingEpochs.get(projectId) ?? 0;
@@ -2134,6 +2605,22 @@ export class Host {
       if (kept.length > TASK_LIMITS.items) throw new Error(`There are ${kept.length} ${many}, and a brief can hold ${TASK_LIMITS.items}. Remove some, then save it again.`);
       return kept;
     };
+    // An acceptance case's command and expected output are kept as written (D39): what a case must print is exact.
+    const cases = input.acceptanceCases.map((given, index) => {
+      const label = `Acceptance case ${index + 1}`;
+      const name = given.name.trim();
+      const command = given.command.trim();
+      if (!name) throw new Error(`${label} needs a name. Add one, then save it again.`);
+      if (name.length > TASK_BRIEF_LIMITS.caseNameChars) throw new Error(`${label}'s name is ${name.length} characters long, and it can hold ${TASK_BRIEF_LIMITS.caseNameChars}. Shorten it, then save it again.`);
+      if (!command) throw new Error(`${label} needs a command to run. Add one, then save it again.`);
+      if (command.length > TASK_BRIEF_LIMITS.commandChars) throw new Error(`${label}'s command is ${command.length} characters long, and it can hold ${TASK_BRIEF_LIMITS.commandChars}. Shorten it, then save it again.`);
+      if (command.includes("\0") || given.expectedOutput.includes("\0")) throw new Error(`${label} holds a NUL character, which a command can't carry. Remove it, then save it again.`);
+      const bytes = Buffer.byteLength(given.expectedOutput);
+      if (bytes > TASK_BRIEF_LIMITS.expectedOutputBytes) throw new Error(`${label}'s expected output is ${bytes} bytes, and it can hold ${TASK_BRIEF_LIMITS.expectedOutputBytes}. Shorten it, then save it again.`);
+      if (!Number.isInteger(given.expectedExitCode) || given.expectedExitCode < 0 || given.expectedExitCode > 255) throw new Error(`${label}'s exit code must be a whole number from 0 to 255. Change it, then save it again.`);
+      return { name, command, expectedOutput: given.expectedOutput, expectedExitCode: given.expectedExitCode };
+    });
+    if (cases.length > TASK_BRIEF_LIMITS.finalChecks) throw new Error(`There are ${cases.length} acceptance cases, and a brief can hold ${TASK_BRIEF_LIMITS.finalChecks}. Remove some, then save it again.`);
     return BriefFieldsSchema.parse({
       goal: text("The goal", input.goal, TASK_LIMITS.textChars),
       acceptanceCriteria: rows("Acceptance criterion", "acceptance criteria", input.acceptanceCriteria),
@@ -2142,6 +2629,7 @@ export class Host {
       context: text("The context", input.context, TASK_LIMITS.contextChars),
       assumptions: rows("Assumption", "assumptions", input.assumptions),
       checks: rows("Check", "checks", input.checks),
+      acceptanceCases: cases,
     });
   }
 
@@ -2155,6 +2643,11 @@ export class Host {
     for (const criterion of fields.acceptanceCriteria) refuseCredentials("An acceptance criterion", criterion, known);
     for (const assumption of fields.assumptions) refuseCredentials("An assumption", assumption, known);
     for (const check of fields.checks) refuseCredentials("A check", check, known);
+    for (const given of fields.acceptanceCases) {
+      refuseCredentials("An acceptance case's name", given.name, known);
+      refuseCredentials("An acceptance case's command", given.command, known);
+      refuseCredentials("An acceptance case's expected output", given.expectedOutput, known);
+    }
   }
 
   /** The task, refused when it changed since the person read it (its revision moved) or is gone. */
@@ -2438,4 +2931,45 @@ function noteFor(turn: TurnRecord): string | null {
     default:
       return null;
   }
+}
+
+/** A task run's end in Nivra's words, when it ended without its run's own report to read; null while it goes. */
+function attemptNote(attempt: AttemptRecord): string | null {
+  switch (attempt.status) {
+    case "failed":
+      return `${attempt.errorMessage ?? "The run failed."} Nothing was resent.`;
+    case "cancelled":
+      return attempt.cancelReason === "sharing"
+        ? "Stopped: this project's sharing or uploads were turned off. What it had sent stays where it went; its report says what that was."
+        : attempt.cancelReason === "removal"
+          ? "Stopped: the project was removed. What it had sent stays where it went."
+          : attempt.errorMessage
+            ? `Cancelled. ${attempt.errorMessage}`
+            : "Cancelled. What it had sent stays where it went; its report says what that was.";
+    case "interrupted":
+      return "Interrupted: Nivra or its engine stopped while the run was going. It wasn't started again.";
+    case "not-sent":
+      return attempt.errorMessage ?? `Not sent: ${RUN_NOTHING}.`;
+    case "unknown":
+      return `Nivra can't tell how this run ended: ${attempt.errorMessage ?? "its engine can't say"}. Nothing was resent.`;
+    default:
+      return null;
+  }
+}
+
+/** Every text of a run's brief, by the field a refusal names. */
+function briefTexts(brief: TaskBrief): Array<[string, string]> {
+  return [
+    ["The goal", brief.goal],
+    ["The scope", brief.scope],
+    ["The exclusions", brief.exclusions],
+    ["The context", brief.context],
+    ...brief.acceptanceCriteria.map((text): [string, string] => ["An acceptance criterion", text]),
+    ...brief.checks.map((text): [string, string] => ["A check", text]),
+    ...brief.acceptanceCases.flatMap((given): Array<[string, string]> => [
+      ["An acceptance case's name", given.name],
+      ["An acceptance case's command", given.command],
+      ["An acceptance case's expected output", given.expectedOutput],
+    ]),
+  ];
 }

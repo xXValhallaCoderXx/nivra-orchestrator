@@ -19,6 +19,7 @@ const EXPECTED_API = [
   "cancelReview",
   "cancelRun",
   "cancelSandboxCheck",
+  "cancelTaskRun",
   "cancelTurn",
   "checkTokenFactory",
   "checkWsl",
@@ -35,6 +36,7 @@ const EXPECTED_API = [
   "getSandboxStatus",
   "getSettings",
   "getTask",
+  "getTaskAttempt",
   "getWsl",
   "importPreferences",
   "keepSuggestion",
@@ -52,6 +54,7 @@ const EXPECTED_API = [
   "prepareReview",
   "previewImport",
   "previewSandboxCheck",
+  "previewTaskRun",
   "refreshBriefFromPlan",
   "removeProject",
   "renameTask",
@@ -78,6 +81,7 @@ const EXPECTED_API = [
   "startResearch",
   "startReview",
   "startSandboxCheck",
+  "startTaskRun",
   "supersedePreference",
 ];
 

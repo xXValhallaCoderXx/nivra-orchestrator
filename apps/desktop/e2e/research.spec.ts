@@ -495,7 +495,7 @@ test("a query edited while a project's sharing is being allowed for research cle
     "To check the assumptions of plans from conversations about alpha, Nivra sends Nebius Token Factory:",
     "the plan version's text and the assumptions you pick;",
     "passages read from public web pages, each with its page's title, host and address, and the assumption it was found for.",
-    "This is for the whole project: its explanations, its conversations, and the reviews and research of its plans. You can turn it off at any time, which stops them all.",
+    "This is for the whole project: its explanations, its conversations, the reviews and research of its plans, and its task runs. You can turn it off at any time: Nivra then stops them all, and says so if one can't be stopped.",
   ]) {
     await expect(consent).toContainText(words);
   }

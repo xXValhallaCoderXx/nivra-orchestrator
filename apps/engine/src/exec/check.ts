@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { PREVIEW_SAMPLE, StoredSandboxInput, type SandboxPreview, type SandboxReport, type SandboxStep, type SandboxStopCode } from "@nivra/domain";
 import { RETENTION } from "./nebius/sandbox.ts";
-import type { PrescribedResult, PrescribedStep } from "./prescribed.ts";
+import type { PrescribedResult, PrescribedStep, PrescribedStopCode } from "./prescribed.ts";
 import type { Counted, Snapshot } from "./snapshot.ts";
 
 /**
@@ -135,8 +135,11 @@ export function safeUnresolved(item: string): string {
   return UNRESOLVED_WORDS.some((words) => words.test(item)) ? item : "Something Nivra started in a sandbox couldn't be settled, and may still be running. It stays journaled, for the next recovery pass.";
 }
 
-/** A step's record as the report gives it: what it did, its provider's status and usage, and the end of its output. */
-function stepOf(step: PrescribedResult["steps"][number]): SandboxStep {
+/** A stop's code as a check reports it: a code only a task's run gives can't happen here, and reads as a fault. */
+export const sandboxCode = (code: PrescribedStopCode): SandboxStopCode => (code === "toolchain" || code === "time" ? "fault" : code);
+
+/** A step's record as a report gives it: what it did, its provider's status and usage, and the end of its output. */
+export function stepOf(step: PrescribedResult["steps"][number]): SandboxStep {
   return {
     label: clip(step.label, 64),
     exitCode: step.exitCode,
@@ -162,7 +165,7 @@ export function checkReport(input: { result: PrescribedResult; request: SandboxR
   const { cleanup } = result;
   return {
     outcome: result.outcome,
-    stopped: result.stopped ? { code: result.stopped.code, step: result.stopped.step === null ? null : clip(result.stopped.step, 64), message: stopWords(result.stopped.code, result.stopped.step) } : null,
+    stopped: result.stopped ? { code: sandboxCode(result.stopped.code), step: result.stopped.step === null ? null : clip(result.stopped.step, 64), message: stopWords(sandboxCode(result.stopped.code), result.stopped.step) } : null,
     snapshot: result.snapshot,
     steps: result.steps.slice(0, 16).map(stepOf),
     reportSha256: result.report ? sha256(result.report) : null,

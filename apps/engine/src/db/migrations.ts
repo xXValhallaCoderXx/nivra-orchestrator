@@ -46,4 +46,17 @@ export const MIGRATIONS: readonly string[] = [
      key TEXT PRIMARY KEY,
      value TEXT NOT NULL
    );`,
+  // v4 (D39): a task run's proposal, exactly as it was bound: the binding, and the patch, report and post-image bytes,
+  // never masked, since their digests are what the person approves. A change holding a value the vault keeps is refused
+  // before it is kept. A proposal is written once and never changed.
+  `CREATE TABLE proposals (
+     run_id TEXT PRIMARY KEY REFERENCES runs (id) ON DELETE CASCADE,
+     hash TEXT NOT NULL,
+     binding TEXT NOT NULL,
+     patch BLOB NOT NULL,
+     report BLOB NOT NULL,
+     post_image BLOB NOT NULL,
+     created_at TEXT NOT NULL
+   );
+   CREATE TRIGGER proposals_kept BEFORE UPDATE ON proposals BEGIN SELECT RAISE(ABORT, 'a proposal is kept as it was bound'); END;`,
 ];

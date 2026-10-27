@@ -405,22 +405,94 @@ export function deleteTask(workspace: WorkspaceDb, taskId: string): boolean {
   return deleted;
 }
 
+/** One run of a task (D26, D39): a run link bound to one brief version, and how its run went. */
+export interface AttemptRecord {
+  /** The run link's id, sent as the request id. */
+  id: string;
+  taskId: string;
+  briefId: string;
+  sessionId: string;
+  /** The engine it runs on, fixed when it starts: its project's (D17). */
+  targetId: string;
+  homeId: string | null;
+  runId: string | null;
+  status: TurnStatus;
+  cancelRequested: boolean;
+  cancelReason: CancelReason | null;
+  errorKind: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+const attemptOf = (row: Row): AttemptRecord => ({
+  id: str(row["id"]),
+  taskId: str(row["task_id"]),
+  briefId: str(row["brief_id"]),
+  sessionId: str(row["session_id"]),
+  targetId: str(row["target_id"]),
+  homeId: strOrNull(row["home_id"]),
+  runId: strOrNull(row["run_id"]),
+  status: str(row["status"]) as TurnStatus,
+  cancelRequested: Number(row["cancel_requested"]) === 1,
+  cancelReason: strOrNull(row["cancel_reason"]) as CancelReason | null,
+  errorKind: strOrNull(row["error_kind"]),
+  errorMessage: strOrNull(row["error_message"]),
+  createdAt: str(row["created_at"]),
+  settledAt: strOrNull(row["settled_at"]),
+});
+
 /**
  * Records an attempt at a task (D26): a run link bound to one brief version, which stays that version however the brief
- * is edited later. Nothing creates one yet: running tasks isn't available. Its run would be the one to start.
+ * is edited later. Its id is the request id, saved before the request is sent. Refused (false) while any task's attempt
+ * is still open: one task runs at a time (D39), however quickly two arrive.
  */
-export function insertAttempt(workspace: WorkspaceDb, attempt: { id: string; taskId: string; briefId: string; sessionId: string; targetId: string; status: TurnStatus; createdAt: string }): void {
-  workspace.db
-    .prepare("INSERT INTO run_links (id, task_id, brief_id, session_id, workflow_id, target_id, status, preferences_json, created_at) VALUES (?, ?, ?, ?, 'task', ?, ?, '[]', ?)")
-    .run(attempt.id, attempt.taskId, attempt.briefId, attempt.sessionId, attempt.targetId, attempt.status, attempt.createdAt);
+export function insertAttempt(workspace: WorkspaceDb, attempt: { id: string; taskId: string; briefId: string; sessionId: string; targetId: string; status?: TurnStatus; createdAt: string }): boolean {
+  const status = attempt.status ?? "submitting";
+  return workspace.tx((db) => {
+    if ((status === "submitting" || status === "running") && db.prepare(`SELECT 1 FROM run_links WHERE workflow_id = 'task' AND status IN ${OPEN}`).get()) return false;
+    db.prepare("INSERT INTO run_links (id, task_id, brief_id, session_id, workflow_id, target_id, status, preferences_json, created_at) VALUES (?, ?, ?, ?, 'task', ?, ?, '[]', ?)").run(
+      attempt.id,
+      attempt.taskId,
+      attempt.briefId,
+      attempt.sessionId,
+      attempt.targetId,
+      status,
+      attempt.createdAt,
+    );
+    return true;
+  });
+}
+
+export function getAttempt(workspace: WorkspaceDb, attemptId: string): AttemptRecord | null {
+  const row = workspace.db.prepare("SELECT * FROM run_links WHERE id = ? AND workflow_id = 'task'").get(attemptId);
+  return row ? attemptOf(row) : null;
 }
 
 /** A task's attempts, oldest first, each with the brief version it is bound to. */
-export function attemptsOf(workspace: WorkspaceDb, taskId: string): Array<{ id: string; briefId: string; status: TurnStatus; createdAt: string }> {
-  return workspace.db
-    .prepare("SELECT id, brief_id, status, created_at FROM run_links WHERE task_id = ? ORDER BY created_at, rowid")
-    .all(taskId)
-    .map((row) => ({ id: str(row["id"]), briefId: str(row["brief_id"]), status: str(row["status"]) as TurnStatus, createdAt: str(row["created_at"]) }));
+export function attemptsOf(workspace: WorkspaceDb, taskId: string): AttemptRecord[] {
+  return workspace.db.prepare("SELECT * FROM run_links WHERE task_id = ? ORDER BY created_at, rowid").all(taskId).map(attemptOf);
+}
+
+/** Every task's attempt still being sent or going: at most one, while one task runs at a time (D39). */
+export function openAttempts(workspace: WorkspaceDb): AttemptRecord[] {
+  return workspace.db.prepare(`SELECT * FROM run_links WHERE workflow_id = 'task' AND status IN ${OPEN} ORDER BY rowid`).all().map(attemptOf);
+}
+
+/** Ends an open attempt, with its run's report kept by its engine (`answered`) or without; a first outcome is kept. */
+export function settleAttempt(
+  workspace: WorkspaceDb,
+  attemptId: string,
+  outcome: { status: Exclude<TurnStatus, "submitting" | "running">; errorKind?: string | null; errorMessage?: string | null },
+  at: string,
+): boolean {
+  return (
+    Number(
+      workspace.db
+        .prepare(`UPDATE run_links SET status = ?, error_kind = ?, error_message = ?, settled_at = ? WHERE id = ? AND workflow_id = 'task' AND status IN ${OPEN}`)
+        .run(outcome.status, outcome.errorKind ?? null, outcome.errorMessage ?? null, at, attemptId).changes,
+    ) === 1
+  );
 }
 
 /** A review of one saved plan version (D31): what it was bound to, the report its engine saved, and its run link. */

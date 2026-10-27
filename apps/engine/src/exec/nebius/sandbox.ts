@@ -105,7 +105,8 @@ export class Journal {
         try {
           return JSON.parse(line) as JournalEntry;
         } catch {
-          throw new SandboxRefusal(`The journal at ${this.#path} is damaged at line ${index + 1}, so what it records can't be trusted. Check the operations it names before starting more.`);
+          // Nivra's own words, with no path: a refusal can reach a run's report, its events and the model (D29).
+          throw new SandboxRefusal(`A session's journal is damaged at line ${index + 1}, so what it records can't be trusted. Check the operations it names before starting more.`);
         }
       });
   }
@@ -166,6 +167,8 @@ export interface Outcome {
   imageReported: string | null;
   stdout: string;
   stdoutTruncated: boolean;
+  /** Whether standard output was reported, as text that reads back exactly: a missing stream reads as "" otherwise. */
+  stdoutExact: boolean;
   stderr: string;
   stderrTruncated: boolean;
   /** As the service reported it, raw: never converted to money. */
@@ -175,6 +178,18 @@ export interface Outcome {
 
 const text = (stream: { value?: string | undefined; encoding?: string | undefined } | null | undefined): string =>
   !stream?.value ? "" : stream.encoding === "base64" ? Buffer.from(stream.value, "base64").toString("utf8") : stream.value;
+
+/** Whether a stream was reported at all, and as text that decodes exactly: base64 that isn't UTF-8 doesn't. */
+function exact(stream: { value?: string | undefined; encoding?: string | undefined } | null | undefined): boolean {
+  if (stream === null || stream === undefined) return false;
+  if (stream.encoding !== "base64") return true;
+  try {
+    new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.from(stream.value ?? "", "base64"));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Whether a reported signal means one ended the command. The service reports -1 when none did, and the signal's
@@ -219,6 +234,7 @@ export function classify(operation: Operation): Outcome {
     imageReported: operation.result_image_uuid ?? operation.result?.image ?? null,
     stdout: text(result?.stdout),
     stdoutTruncated: result?.stdout?.truncated === true,
+    stdoutExact: exact(result?.stdout),
     stderr: text(result?.stderr),
     stderrTruncated: result?.stderr?.truncated === true,
     usage: { durationSeconds: operation.duration ?? null, consumedCpu: operation.consumed_cpu ?? null, consumedMemory: operation.consumed_memory ?? null, imageSize: operation.image_size ?? null, resources: result?.resources ?? null },

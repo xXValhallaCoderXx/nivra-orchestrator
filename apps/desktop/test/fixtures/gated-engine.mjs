@@ -18,7 +18,8 @@
 // that can't read a run would.
 // For research (D37): runs.start records each research request and what it was bound to (`research.log`), and
 // runs.research answers with a report that repeats it: complete, or cancelled for a run it was asked to cancel. With a
-// `fail-cancel-once` file, the next runs.cancel it answers is turned down, and the file is removed.
+// `fail-cancel-once` file, the next runs.cancel it answers is turned down, and the file is removed; with a
+// `fail-cancel-for` file, runs.cancel for the run whose id it holds is turned down.
 // It takes secrets.update, and turns down at once any other method it doesn't stand in for, so no caller waits out its
 // time limit. The window's tests run it as the local engine with --nivra-test-engine=gated (unpackaged only).
 import { randomUUID } from "node:crypto";
@@ -120,7 +121,7 @@ process.stdin.on("data", (chunk) => {
     buffer = buffer.slice(end + 1);
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
-      send({ id: request.id, result: { protocolVersion: 9, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 10, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
@@ -194,7 +195,8 @@ process.stdin.on("data", (chunk) => {
       const answer = () => {
         const once = existsSync(join(home, "fail-cancel-once"));
         if (once) rmSync(join(home, "fail-cancel-once"));
-        if (once || existsSync(join(home, "fail-cancel"))) send({ id: request.id, error: { code: -32000, message: "the run couldn't be stopped" } });
+        const named = existsSync(join(home, "fail-cancel-for")) && readFileSync(join(home, "fail-cancel-for"), "utf8") === request.params.runId;
+        if (once || named || existsSync(join(home, "fail-cancel"))) send({ id: request.id, error: { code: -32000, message: "the run couldn't be stopped" } });
         else {
           cancelled.add(request.params.runId);
           appendFileSync(join(home, "cancelled.log"), `${request.params.runId}\n`);

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { ChatResult } from "@nivra/domain";
-import { briefForRepository, briefFrom, nextState, planFromAnswer, RUN_UNAVAILABLE } from "../src/main/tasks.ts";
+import { taskBriefDigest, type ChatResult } from "@nivra/domain";
+import { BriefContentSchema, briefForRepository, briefFrom, nextState, NO_CASE, planFromAnswer, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
 
-const fields = { goal: "Add a CSV export", acceptanceCriteria: ["The list exports as CSV"], scope: "", exclusions: "", context: "", assumptions: [], checks: [] };
+const fields = { goal: "Add a CSV export", acceptanceCriteria: ["The list exports as CSV"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] };
+const CASE = { name: "Exports one row", command: "sh export.sh", expectedOutput: "id,name\n1,Ada\n", expectedExitCode: 0 };
 const source = (projectId: string | null) => ({ kind: "plan" as const, planId: "p", planLineage: "l", planVersion: 1, conversationId: "c", messageId: "m", projectId, headAtStart: null, citations: [] });
 
 describe("native tasks and plans (D26, NIV-32)", () => {
@@ -13,9 +14,38 @@ describe("native tasks and plans (D26, NIV-32)", () => {
     assert.throws(() => nextState("draft", "ready", briefFrom({ ...fields, acceptanceCriteria: [] })), /^Error: A task is ready once its brief has a goal and at least one acceptance criterion\. Add them, then mark it ready\.$/);
     assert.throws(() => nextState("draft", "completed", ready), /Mark the task ready before you complete it/);
     assert.deepEqual([nextState("ready", "completed", ready), nextState("completed", "draft", ready), nextState("ready", "draft", ready)], ["completed", "draft", "draft"]);
-    assert.throws(() => nextState("ready", "active", ready), (error: Error) => error.message === "Running tasks isn't available yet, so a task can't be active." && !/NIV-/.test(error.message));
-    assert.throws(() => nextState("ready", "review", ready), /so a task can't be in review/);
-    assert.ok(!/NIV-\d/.test(RUN_UNAVAILABLE), "no ticket numbers in what the person reads");
+    assert.throws(() => nextState("ready", "active", ready), (error: Error) => error.message === "A task can't be marked active by hand.");
+    assert.throws(() => nextState("ready", "review", ready), /^Error: A task can't be marked in review by hand\.$/);
+  });
+
+  it("reads a brief saved before acceptance cases as having none, and runs a brief only with one, four cases and checks at most", async () => {
+    const { acceptanceCases: _none, ...older } = briefFrom(fields);
+    assert.deepEqual(BriefContentSchema.parse(older).acceptanceCases, []);
+    assert.deepEqual(taskBriefOf(briefFrom(fields)), { blocked: NO_CASE });
+    assert.ok(!/NIV-\d/.test(NO_CASE), "no ticket numbers in what the person reads");
+    const runnable = briefFrom({ ...fields, assumptions: ["Rows are small"], checks: ["sh test.sh"], acceptanceCases: [CASE] });
+    const sent = taskBriefOf(runnable);
+    assert.ok("brief" in sent);
+    // What a run is sent: the brief's own words, its checks and its cases; never its assumptions or sources.
+    assert.deepEqual(Object.keys(sent.brief).sort(), ["acceptanceCases", "acceptanceCriteria", "checks", "context", "exclusions", "goal", "scope"]);
+    assert.deepEqual(taskBriefOf(briefFrom({ ...fields, checks: ["a", "b", "c", "d"], acceptanceCases: [CASE] })), { blocked: "A run takes at most 4 acceptance cases and checks in all, and this brief has 5. Remove some, then run it." });
+    assert.deepEqual(taskBriefOf(briefFrom({ ...fields, checks: ["sh test.sh\0"], acceptanceCases: [CASE] })), { blocked: "This brief can't be run as it is: a check or a case holds something a command can't carry. Edit the brief, then run it." });
+    assert.match(await taskBriefDigest(sent.brief), /^[0-9a-f]{64}$/);
+  });
+
+  it("fingerprints a run's preview by everything it would be bound to, both consents and the snapshot included", () => {
+    const parts = { taskId: "t", briefId: "b", briefVersion: 2, briefDigest: "d".repeat(64), projectId: "p", targetId: "wsl:Ubuntu", sharing: { modelContext: true, cloudExecution: true }, snapshot: "f".repeat(64) };
+    const one = taskRunFingerprint(parts);
+    const others = [
+      { ...parts, briefVersion: 3 },
+      { ...parts, briefDigest: "e".repeat(64) },
+      { ...parts, targetId: "local" },
+      { ...parts, sharing: { modelContext: true, cloudExecution: false } },
+      { ...parts, sharing: { modelContext: false, cloudExecution: true } },
+      { ...parts, snapshot: "a".repeat(64) },
+    ].map(taskRunFingerprint);
+    assert.equal(new Set([one, ...others]).size, 7);
+    assert.equal(taskRunFingerprint({ ...parts }), one);
   });
 
   it("gives a direct brief and one from a plan the same shape and the fixed policy", () => {

@@ -359,9 +359,9 @@ test("a task written directly has the same brief; its states follow the rules, a
   await expect(page.getByTestId("task-edit-brief")).toBeDisabled();
   await page.getByTestId("task-reopen").click();
   await expect(page.getByTestId("task-state")).toHaveText("Draft");
-  await expect(page.getByTestId("task-attempts")).toHaveText("Attempts: none");
+  await expect(page.getByTestId("task-attempt")).toHaveCount(0);
   await expect(page.getByTestId("task-run")).toBeDisabled();
-  await expect(page.getByTestId("task-run-note")).toHaveText(/^Running tasks isn't available yet\. .+ Until then, nothing runs\.$/);
+  await expect(page.getByTestId("task-run-blocked")).toHaveText("Mark the task ready first: a run needs a goal and at least one acceptance criterion.");
   await page.getByTestId("nav-tasks").click();
   await expect(page.getByTestId("task-row").filter({ hasText: "Tidy the README files" })).toContainText("No repository yet");
 });

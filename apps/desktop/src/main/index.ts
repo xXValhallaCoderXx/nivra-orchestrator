@@ -228,7 +228,9 @@ function start(): void {
   const Revision = z.number().int().positive();
   const LongText = z.string().max(100_000);
   const Rows = z.array(z.string().max(10_000)).max(200);
-  const Fields = z.strictObject({ goal: LongText, acceptanceCriteria: Rows, scope: LongText, exclusions: LongText, context: LongText, assumptions: Rows, checks: Rows });
+  const Case = z.strictObject({ name: z.string().max(10_000), command: z.string().max(10_000), expectedOutput: z.string().max(100_000), expectedExitCode: z.number() });
+  const Fields = z.strictObject({ goal: LongText, acceptanceCriteria: Rows, scope: LongText, exclusions: LongText, context: LongText, assumptions: Rows, checks: Rows, acceptanceCases: z.array(Case).max(20) });
+  const Fingerprint = z.string().regex(/^[0-9a-f]{64}$/);
   handle(IPC.getConversation, z.tuple([Id]), (_event, id) => host.conversation(id));
   handle(IPC.openConversation, z.tuple([Id]), (_event, id) => host.openConversation(id));
   handle(IPC.sendMessage, z.tuple([Id, LongText]), (_event, id, text) => host.sendMessage(id, text));
@@ -271,6 +273,10 @@ function start(): void {
   handle(IPC.setTaskState, z.tuple([Id, Revision, z.enum(TASK_STATES)]), (_event, id, revision, state) => host.setTaskState(id, revision, state));
   handle(IPC.renameTask, z.tuple([Id, Revision, LongText]), (_event, id, revision, title) => host.renameTask(id, revision, title));
   handle(IPC.deleteTask, z.tuple([Id]), (_event, id) => host.deleteTask(id));
+  handle(IPC.previewTaskRun, z.tuple([Id]), (_event, id) => host.previewTaskRun(id));
+  handle(IPC.startTaskRun, z.tuple([Id, Fingerprint, Fingerprint]), (_event, id, expected, snapshot) => host.startTaskRun(id, expected, snapshot));
+  handle(IPC.cancelTaskRun, z.tuple([Id, Id]), (_event, id, attemptId) => host.cancelTaskRun(id, attemptId));
+  handle(IPC.getTaskAttempt, z.tuple([Id, Id]), (_event, id, attemptId) => host.taskAttempt(id, attemptId));
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {

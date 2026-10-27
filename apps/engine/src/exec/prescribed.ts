@@ -2,23 +2,25 @@ import { BoundaryUnavailableError, ExecRefusedError, ExecUncertainError, Session
 import { WorkspaceCancelled, WorkspaceRefusal, type RefusalCode } from "./git-tool.ts";
 import { SandboxHttpError, SandboxNetworkError, SandboxTooLargeError } from "./nebius/api.ts";
 import { SandboxOperationError } from "./nebius/session.ts";
-import { buildPatch, collectResult, type PatchPolicy } from "./patch.ts";
+import { buildPatch, collectResult, type Collected, type PatchPolicy, type PatchResult } from "./patch.ts";
 import { buildReport, makeProposal, stepRecord, stoppedStepRecord, type Proposal, type StepRecord } from "./proposal.ts";
 import { takeSnapshot, type Snapshot } from "./snapshot.ts";
 
 /**
- * The prescribed path (NIV-43, D35): one commit's snapshot, fixed steps in a sandbox, and a checked patch proposed
- * from what they changed. The tests, the live check and the engine (B4) all run this one composition, in order:
+ * The prescribed path (NIV-43, D35): one commit's snapshot, work in a sandbox, and a checked patch proposed from what
+ * it changed. The tests, the live check, the sandbox check (B4) and a task's worker (D39) all run this one
+ * composition, in order:
  * 1. the snapshot, made by the engine that owns the checkout, through its own `Local` session. A run bound to a
  *    preview (D36) goes no further unless the snapshot's fingerprint is the preview's;
  * 2. a session on a backend that isolates files, opened with the snapshot. `Local` is refused before anything is sent;
- * 3. the steps, one operation each. An edit keeps its changes for the next step and for the result; a check throws
- *    its changes away;
- * 4. the collect step;
- * 5. the patch, validated and checked;
- * 6. the report, made before the session closes: each step's outcome, and every operation's status and usage;
- * 7. the proposal, bound by one hash, unless nothing changed;
- * 8. close, on a budget of its own, whatever happened before;
+ * 3. the work: fixed steps, one operation each (an edit keeps its changes for the next step and for the result; a
+ *    check throws its changes away), or the run's own `work`, a worker's;
+ * 4. the collect step, its two reads each with a deadline of their own;
+ * 5. the run's own `verify`, when it has one: checks run from collect's image, before the session closes;
+ * 6. close, on a budget of its own, whatever happened before: nothing after it needs the session's time;
+ * 7. the patch, validated and checked, its git commands under one deadline;
+ * 8. the report (each step's outcome, and every operation's status and usage) and the proposal, bound by one hash,
+ *    unless nothing changed;
  * 9. cleanup's own record: what was stopped, what stays unresolved and what the provider keeps.
  *
  * Nothing writes the checkout. A step that can't be settled stops the run, and nothing is ever sent twice. Once a
@@ -71,7 +73,11 @@ export type PrescribedStopCode =
   /** Anything else: a fault, reported with its words. */
   | "fault"
   /** The snapshot isn't the one the person was shown (D36): nothing was sent. */
-  | "preview";
+  | "preview"
+  /** A task's: a program its checks need isn't in the sandbox image (D39). Nothing was installed. */
+  | "toolchain"
+  /** A task's: its run's deadline left no time for a session (D39). Nothing was sent. */
+  | "time";
 
 export interface PrescribedResult {
   outcome: PrescribedOutcome;
@@ -91,6 +97,20 @@ export interface PrescribedResult {
   cleanup: CloseReport | null;
 }
 
+/** Whether the run goes on to collect, or how its work stopped it. */
+export type WorkResult = { going: true } | { going: false; outcome: PrescribedOutcome; stopped: NonNullable<PrescribedResult["stopped"]> };
+
+/**
+ * What the run's own hooks are given: the snapshot, the workspace, and the steps recorded so far, to add theirs to.
+ * `stage` is where the run is, for a stop's record: a hook sets it as it goes.
+ */
+export interface WorkContext {
+  snapshot: Snapshot;
+  workspace: string;
+  steps: StepRecord[];
+  stage: string | null;
+}
+
 export interface PrescribedRun {
   project: string;
   target: string;
@@ -101,6 +121,15 @@ export interface PrescribedRun {
   /** When given, the snapshot's fingerprint must be this one: what the person was shown before any upload (D36). */
   expectedFingerprint?: string;
   steps: readonly PrescribedStep[];
+  /**
+   * The work, in place of `steps`: given the open session, it runs its own operations. It throws what the steps would
+   * (an uncertain command, a refusal, a cancel), or says how it stopped.
+   */
+  work?: (session: ExecutionSession, context: WorkContext) => Promise<WorkResult>;
+  /** After collect, before close: checks from collect's image. What they find is the hook's own to record. */
+  verify?: (session: ExecutionSession, context: WorkContext & { collected: Collected }) => Promise<void>;
+  /** The report and the proposal, in place of the prescribed path's own: a task's, which binds more. */
+  finish?: (input: { snapshot: Snapshot; patch: PatchResult; steps: readonly StepRecord[]; operations: readonly SessionStep[] }) => { report: Uint8Array; proposal: Proposal | null };
   /** A backend that isolates files (Nebius). */
   backend: ExecutionBackend;
   /** A session on the target that owns the checkout, for the engine's own git. */
@@ -111,6 +140,21 @@ export interface PrescribedRun {
   /** What runs the collect step's tools, busybox unless given. */
   applets?: string;
   collectTimeoutMs?: number;
+  /** Each of collect's two reads, on its own. */
+  downloadTimeoutMs?: number;
+  /** One deadline for the snapshot's git commands, and one for the patch's, from when each begins. */
+  snapshotMs?: number;
+  patchMs?: number;
+  /**
+   * The run's one absolute deadline, on `now`'s clock (D39). The snapshot and the session each get their cap or the time
+   * left before `afterSessionMs`, whichever is less, so what comes after the session keeps its time; close and the
+   * patch then each get their cap or the time left, whichever is less. With no deadline, each phase has its cap.
+   */
+  deadline?: number;
+  /** What the session leaves before `deadline`: close's, the patch's and the report's time. */
+  afterSessionMs?: number;
+  /** The monotonic clock those deadlines are read on: tests give theirs. */
+  now?: () => number;
   /** Folders never sent (the engine home). */
   exclude?: readonly string[];
   /** The vault's own values: a file holding one refuses the snapshot, and so does a change that adds one. */
@@ -132,6 +176,8 @@ export interface PrescribedRun {
 }
 
 const WORKSPACE = "/workspace";
+/** The least time a session is opened with under a run's deadline: an upload, a prepare and a collect, at the least. */
+const MIN_SESSION_MS = 3 * 60_000;
 const realTimer = (ms: number, fire: () => void) => {
   const handle = setTimeout(fire, ms);
   return () => clearTimeout(handle);
@@ -169,10 +215,20 @@ export async function runPrescribed(run: PrescribedRun): Promise<PrescribedResul
   const ended = (outcome: PrescribedOutcome, rest: Partial<PrescribedResult>): PrescribedResult => ({ outcome, stopped: null, snapshot: null, steps, report: null, proposal: null, cleanup: null, ...rest });
   const closing = { ...(run.closeBudgetMs ? { budgetMs: run.closeBudgetMs } : {}), ...(run.closeSignal ? { signal: run.closeSignal } : {}) };
 
+  const now = run.now ?? (() => performance.now());
+  const within = (ms: number | undefined, what: string) => (ms === undefined ? {} : { deadline: { at: now() + ms, what, now } });
+  // A phase's cap, or the time left before the run's deadline less `keep`, whichever is less (D39).
+  const capped = (cap: number | undefined, keep = 0): number | undefined => {
+    if (run.deadline === undefined) return cap;
+    const left = Math.max(0, Math.floor(run.deadline - now() - keep));
+    return cap === undefined ? left : Math.min(cap, left);
+  };
+  const afterSession = run.afterSessionMs ?? 0;
+
   // 1. The snapshot: nothing is sent unless it is taken. A fault here is thrown: nothing was sent, nothing needs cleaning.
   let snapshot: Snapshot;
   try {
-    snapshot = await takeSnapshot({ folder: run.folder, session: run.local, git: run.git, ...(run.baseline ? { baseline: run.baseline } : {}), ...(run.exclude ? { exclude: run.exclude } : {}), ...(run.knownValues ? { knownValues: run.knownValues } : {}), ...(run.signal ? { signal: run.signal } : {}) });
+    snapshot = await takeSnapshot({ folder: run.folder, session: run.local, git: run.git, ...(run.baseline ? { baseline: run.baseline } : {}), ...(run.exclude ? { exclude: run.exclude } : {}), ...(run.knownValues ? { knownValues: run.knownValues } : {}), ...(run.signal ? { signal: run.signal } : {}), ...within(capped(run.snapshotMs, afterSession), "Taking the snapshot") });
   } catch (error) {
     if (!(error instanceof WorkspaceRefusal || error instanceof WorkspaceCancelled)) throw error;
     const stop = stopOf(error, cancelled());
@@ -184,66 +240,104 @@ export async function runPrescribed(run: PrescribedRun): Promise<PrescribedResul
     return ended("refused", { snapshot: summary, stopped: { code: "preview", message: "snapshot: what would be sent changed since it was previewed, so nothing was sent.", step: "snapshot", detail: null } });
   }
 
-  // 2. The session. A backend that can't keep commands away from this computer's files is refused here.
+  // 2. The session. A backend that can't keep commands away from this computer's files is refused here, and so is a
+  // session the run's deadline leaves too little time to settle.
+  const sessionMs = capped(run.budgetMs, afterSession);
+  if (run.deadline !== undefined && sessionMs !== undefined && sessionMs < MIN_SESSION_MS) {
+    return ended("failed", { snapshot: summary, stopped: { code: "time", message: "open: the run's time ran out before a session could be opened, so nothing was sent.", step: "open", detail: null } });
+  }
   let session: ExecutionSession;
   try {
-    session = await run.backend.open({ workspace, network: "deny", requires: { isolatesFilesystem: true }, snapshot: snapshot.archive, closing, ...(run.budgetMs ? { budgetMs: run.budgetMs } : {}), ...(run.signal ? { signal: run.signal } : {}) });
+    session = await run.backend.open({ workspace, network: "deny", requires: { isolatesFilesystem: true }, snapshot: snapshot.archive, closing, ...(sessionMs ? { budgetMs: sessionMs } : {}), ...(run.signal ? { signal: run.signal } : {}) });
   } catch (error) {
     // Before anything was sent, a refusal is the backend's; once something was, the open's own cleanup has its record.
     const stop = error instanceof ExecRefusedError ? (cancelled() ? { outcome: "cancelled" as const, code: "cancelled" as const } : { outcome: "refused" as const, code: "sandbox-refused" as const }) : stopOf(error, cancelled());
     return ended(stop.outcome, { snapshot: summary, stopped: stoppedBy(error, stop.code, "open"), cleanup: error instanceof SessionOpenError ? error.report : null });
   }
 
-  // 3–7. The steps, the collect step, the patch, the report and the proposal.
+  // 3–5. The work, the collect step and the checks after it.
   let outcome: PrescribedOutcome = "failed";
   let stopped: PrescribedResult["stopped"] = null;
   let report: Uint8Array | null = null;
   let proposal: Proposal | null = null;
-  let stage: string | null = null;
+  let collected: Collected | null = null;
+  const context: WorkContext = { snapshot, workspace, steps, stage: null };
   try {
-    let going = true;
-    for (const step of run.steps) {
-      stage = step.label;
-      const ran = await runStep(session, step, workspace, run, steps);
-      if (ran.result.cancelled && !ran.stoppedAsPrescribed) {
-        outcome = "cancelled";
-        stopped = { code: "cancelled", message: `${step.label}: the run was cancelled while it ran.`, step: step.label, detail: null };
-      } else if (step.keeps && (!ran.result.persisted || ran.result.exitCode !== 0)) {
-        // An edit that failed, or whose changes weren't kept, is never proposed, nor run on.
-        outcome = "failed";
-        const why = ran.result.persisted ? `it exited ${String(ran.result.exitCode)}, so what it changed isn't proposed.` : "the sandbox didn't keep what it changed, so the run stopped: the next step would have run on an older copy of the workspace.";
-        stopped = { code: "edit-failed", message: `${step.label}: ${why}`, step: step.label, detail: null };
-      } else continue;
-      going = false;
-      break;
-    }
-    if (going) {
-      stage = "collect";
+    const worked = await (run.work ?? prescribedWork(run))(session, context);
+    if (!worked.going) {
+      outcome = worked.outcome;
+      stopped = worked.stopped;
+    } else {
+      context.stage = "collect";
       const before = session.steps?.().length ?? 0;
       let collecting;
       try {
-        collecting = await collectResult(session, { workspace, ...(run.applets ? { applets: run.applets } : {}), timeoutMs: run.collectTimeoutMs ?? 60_000, ...(run.signal ? { signal: run.signal } : {}) });
+        collecting = await collectResult(session, { workspace, ...(run.applets !== undefined ? { applets: run.applets } : {}), timeoutMs: run.collectTimeoutMs ?? 60_000, ...(run.downloadTimeoutMs ? { downloadTimeoutMs: run.downloadTimeoutMs } : {}), ...(run.signal ? { signal: run.signal } : {}) });
       } catch (error) {
         steps.push(stoppedStepRecord("collect", session.steps?.().slice(before).at(-1)));
         throw error;
       }
       steps.push(stepRecord("collect", collecting.ran, session.steps?.().slice(before).at(-1)));
       run.onStep?.(steps.at(-1)!);
-      stage = "patch";
-      const patch = await buildPatch({ snapshot, collected: collecting.collected, session: run.local, git: run.git, ...(run.knownValues ? { knownValues: run.knownValues } : {}), ...(run.policy ? { policy: run.policy } : {}), ...(run.scratch ? { scratch: run.scratch } : {}), ...(run.signal ? { signal: run.signal } : {}) });
-      stage = "report";
-      report = buildReport({ snapshot, patch, steps, operations: session.steps?.() ?? [] });
-      proposal = patch.bytes.byteLength ? makeProposal({ project: run.project, target: run.target, snapshot, patch, report }) : null;
-      outcome = proposal ? "proposed" : "unchanged";
+      if (run.verify) {
+        context.stage = "verify";
+        await run.verify(session, { ...context, collected: collecting.collected });
+      }
+      // The person's cancel ends the run where it lands, during the checks after collect as well as before: no patch is
+      // begun after it, and the report names the stage it stopped in.
+      if (cancelled()) throw new WorkspaceCancelled();
+      collected = collecting.collected;
     }
   } catch (error) {
     const stop = stopOf(error, cancelled());
     outcome = stop.outcome;
-    stopped = stoppedBy(error, stop.code, stage);
+    stopped = stoppedBy(error, stop.code, context.stage);
   }
-  // 8–9. Close, whatever happened: its record is cleanup's own, outside what is approved.
-  const cleanup = await session.close(closing);
+  // 6. Close, whatever happened: its record is cleanup's own, outside what is approved. Nothing after it needs the session.
+  const closeMs = capped(run.closeBudgetMs);
+  const cleanup = await session.close({ ...closing, ...(closeMs !== undefined ? { budgetMs: closeMs } : {}) });
+  // 7–8. The patch, the report and the proposal, from what was collected.
+  if (collected && !stopped) {
+    try {
+      context.stage = "patch";
+      const patch = await buildPatch({ snapshot, collected, session: run.local, git: run.git, ...(run.knownValues ? { knownValues: run.knownValues } : {}), ...(run.policy ? { policy: run.policy } : {}), ...(run.scratch ? { scratch: run.scratch } : {}), ...(run.signal ? { signal: run.signal } : {}), ...within(capped(run.patchMs), "Building the patch") });
+      context.stage = "report";
+      const operations = session.steps?.() ?? [];
+      if (run.finish) ({ report, proposal } = run.finish({ snapshot, patch, steps, operations }));
+      else {
+        report = buildReport({ snapshot, patch, steps, operations });
+        proposal = patch.bytes.byteLength ? makeProposal({ project: run.project, target: run.target, snapshot, patch, report }) : null;
+      }
+      outcome = proposal ? "proposed" : "unchanged";
+    } catch (error) {
+      const stop = stopOf(error, cancelled());
+      outcome = stop.outcome;
+      stopped = stoppedBy(error, stop.code, context.stage);
+      report = null;
+      proposal = null;
+    }
+  }
   return { outcome, stopped, snapshot: summary, steps, report, proposal, cleanup };
+}
+
+/** The prescribed steps as a run's work: each one operation, an edit's changes kept, a check's thrown away. */
+function prescribedWork(run: PrescribedRun): NonNullable<PrescribedRun["work"]> {
+  return async (session, context) => {
+    const { workspace, steps } = context;
+    for (const step of run.steps) {
+      context.stage = step.label;
+      const ran = await runStep(session, step, workspace, run, steps);
+      if (ran.result.cancelled && !ran.stoppedAsPrescribed) {
+        return { going: false, outcome: "cancelled", stopped: { code: "cancelled", message: `${step.label}: the run was cancelled while it ran.`, step: step.label, detail: null } };
+      }
+      if (step.keeps && (!ran.result.persisted || ran.result.exitCode !== 0)) {
+        // An edit that failed, or whose changes weren't kept, is never proposed, nor run on.
+        const why = ran.result.persisted ? `it exited ${String(ran.result.exitCode)}, so what it changed isn't proposed.` : "the sandbox didn't keep what it changed, so the run stopped: the next step would have run on an older copy of the workspace.";
+        return { going: false, outcome: "failed", stopped: { code: "edit-failed", message: `${step.label}: ${why}`, step: step.label, detail: null } };
+      }
+    }
+    return { going: true };
+  };
 }
 
 /**

@@ -14,6 +14,7 @@ import {
   PROTOCOL_VERSION,
   ResearchReport,
   SandboxReport,
+  TaskReport,
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
@@ -25,6 +26,8 @@ import {
   type SandboxPreview,
   type SandboxStatus,
   type SecretName,
+  type TaskContext,
+  type TaskPreview,
   type WorkflowId,
 } from "@nivra/domain";
 import { installGitAdvice } from "./advice.ts";
@@ -51,6 +54,8 @@ import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
+import { TASK_LIMITS } from "./task/limits.ts";
+import { proposalView, readTaskInput, taskPreviewOf } from "./task/report.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
 
 /** What the engine says when it stops because something inside it failed (NIV-27): Nivra's own words only. */
@@ -136,6 +141,19 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
     },
   ],
   [
+    "task",
+    {
+      id: "task",
+      title: (input: unknown) => `Task · ${basename(readTaskInput(input)?.repoPath ?? "") || "repository"}`,
+      // Mastra gets nothing of a task run: the brief stays in memory (D21), and the checkout, the project, the target, the
+      // preview and the brief's version and digest in the run store (D39).
+      mastraInput: (input: unknown) => {
+        if (!readTaskInput(input)) throw new Refusal("input-unreadable", "This run's request can't be read back from the engine's store, so it wasn't started. Run the task again.");
+        return {};
+      },
+    },
+  ],
+  [
     "research",
     {
       id: "research",
@@ -190,6 +208,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/review.ts"),
     typeof import("./workflows/sandbox.ts"),
     typeof import("./workflows/research.ts"),
+    typeof import("./workflows/task.ts"),
   ];
   try {
     mastraModules = await Promise.all([
@@ -201,6 +220,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       import("./workflows/review.ts"),
       import("./workflows/sandbox.ts"),
       import("./workflows/research.ts"),
+      import("./workflows/task.ts"),
     ]);
   } catch (error) {
     database.close();
@@ -215,6 +235,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     { createReviewWorkflow, REVIEW_WORKFLOW_ID },
     { createSandboxWorkflow, SANDBOX_WORKFLOW_ID },
     { createResearchWorkflow, RESEARCH_WORKFLOW_ID },
+    { createTaskWorkflow, TASK_WORKFLOW_ID },
   ] = mastraModules;
 
   const vault = new SecretVault();
@@ -252,6 +273,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const reviewContext = (runId: string): ReviewContext | null => scheduler.contextOf(runId, "review");
   const chatContext = (runId: string): ChatContext | null => scheduler.contextOf(runId, "chat");
   const researchContext = (runId: string): ResearchContext | null => scheduler.contextOf(runId, "research");
+  const taskContext = (runId: string): TaskContext | null => scheduler.contextOf(runId, "task");
   const recorder = {
     output: (runId: string, stepId: string, message: string, data?: JsonObject) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
     event: (runId: string, type: "model.call" | "tool.called", stepId: string, message: string, data: JsonObject) => void store.append(runId, { type, stepId, message, data }),
@@ -278,6 +300,18 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   };
   const sandboxTransport = (given: NebiusCredentials): Transport => fetchTransport(given, options.sandboxesUrl ?? SANDBOXES_BASE_URL);
   const sandboxBackend = () => createNebiusBackend({ credentials: sandboxCredentials, baseImage: CHECK_IMAGE.uuid, journalDir: journals, limits: sandboxLimits, transport: sandboxTransport });
+  // A task run's backend (D39): its operations limited to what its brief needs, its commands to the longest it runs.
+  const taskBackend = (operations: number) =>
+    createNebiusBackend({
+      credentials: sandboxCredentials,
+      baseImage: CHECK_IMAGE.uuid,
+      journalDir: journals,
+      limits: { ...NEBIUS_LIMITS, maxOperations: operations, maxTimeoutSeconds: TASK_LIMITS.checks.timeoutMs / 1000, prepareTimeoutSeconds: TASK_LIMITS.prepareTimeoutSeconds, sessionBudgetMs: TASK_LIMITS.sessionMs, cleanupBudgetMs: TASK_LIMITS.closeMs },
+      transport: sandboxTransport,
+    });
+  // A task's commit and changes are refused if they hold a key the vault keeps; the project id names the account, as
+  // for a check (D36). Its proposal, kept unmasked, is refused if it holds any value the vault keeps (D39).
+  const taskKnownValues = () => (["NEBIUS_API_KEY", "TAVILY_API_KEY"] as const).flatMap((name) => vault.get(name) ?? []);
   // Stops the engine's background work, and a check's cleanup, when the engine shuts down (D4).
   const engineStop = new AbortController();
 
@@ -286,7 +320,14 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // the journal of a session this engine has open; a journal a pass settles leaves it at once.
   let scanned = scanJournals(journals);
   const pass: SandboxStatus["pass"] = { state: scanned.open.length ? "waiting-for-credentials" : "idle", startedAt: null, finishedAt: null, stopped: 0, alreadyEnded: 0, unresolved: [] };
-  const checksActive = () => store.active().some((runId) => store.summary(runId)?.workflowId === "sandbox");
+  /** Whether a run that can hold a Nebius session is queued or running here: a check, or a task (D39). */
+  const sessionsActive = () =>
+    store.active().some((runId) => {
+      const workflowId = store.summary(runId)?.workflowId;
+      return workflowId === "sandbox" || workflowId === "task";
+    });
+  /** Whether a task is queued or running here: one at a time on an engine (D39). */
+  const taskGoing = () => store.active().some((runId) => store.summary(runId)?.workflowId === "task");
   /** Whether a check of this project is queued or running here (D36). */
   const checkGoing = (project: string) =>
     store.active().some((runId) => {
@@ -294,7 +335,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       return summary?.workflowId === "sandbox" && readSandboxTask(summary.input)?.project === project;
     });
   const rescan = () => {
-    if (!checksActive()) scanned = scanJournals(journals);
+    if (!sessionsActive()) scanned = scanJournals(journals);
     // With nothing left open, there is nothing to wait for the credentials for.
     if (scanned.open.length === 0 && pass.state === "waiting-for-credentials") pass.state = "idle";
   };
@@ -337,6 +378,22 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     const session = await backend.open({ workspace: repoPath });
     try {
       return previewOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: knownValues() }));
+    } catch (error) {
+      // It names the file it is about: a preview is shown to the person, and never stored (D36).
+      if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
+      throw error;
+    } finally {
+      await session.close();
+    }
+  };
+
+  /** What a task run of this checkout would send to Nebius, with no network, and the bounds of a run of this brief. */
+  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks">): Promise<TaskPreview> => {
+    const git = locateGit();
+    if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
+    const session = await backend.open({ workspace: repoPath });
+    try {
+      return taskPreviewOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() }), brief);
     } catch (error) {
       // It names the file it is about: a preview is shown to the person, and never stored (D36).
       if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
@@ -431,6 +488,27 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         // Tavily, or a stub on this machine when the loopback-only argument names one (D37).
         ...(options.tavilyUrl ? { tavilyUrl: options.tavilyUrl } : {}),
       }),
+      [TASK_WORKFLOW_ID]: createTaskWorkflow({
+        recorder,
+        context: taskContext,
+        task: (runId) => readTaskInput(store.summary(runId)?.input),
+        requestId: (runId) => store.requestIdOf(runId),
+        homeId,
+        credentials: sandboxCredentials,
+        sandbox: taskBackend,
+        local: backend,
+        findGit: locateGit,
+        platform: process.platform,
+        exclude: [home],
+        knownValues: taskKnownValues,
+        vaultValues: () => vault.values(),
+        shutdown: engineStop.signal,
+        endpoint,
+        mask,
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        saveReport: (runId, report) => store.saveArtifact(runId, "task", JSON.stringify(report)),
+        saveProposal: (runId, proposal) => store.saveProposal(runId, proposal),
+      }),
     },
     storage: new LibSQLStore({ id: "nivra-engine", url: libsqlFileUrl(join(home, "mastra.db")) }),
     logger: false,
@@ -521,6 +599,12 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         if (params.workflowId === "sandbox" && store.findByRequest(params.clientRequestId) === null && checkGoing(params.input.project)) {
           throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check of this project is already going on its engine, so another wasn't started. Wait for it to end, then check again.");
         }
+        // A task never runs on Windows itself in this version, and one task runs at a time on an engine (D39), for a new
+        // request: a repeated one still gets the run it started. The host refuses both as well.
+        if (params.workflowId === "task" && store.findByRequest(params.clientRequestId) === null) {
+          if (process.platform === "win32") throw new RpcFailure(ErrorCode.InvalidParams, "Running tasks on Windows itself isn't available yet, so nothing was started. Add the repository from a WSL distribution, then run the task there.");
+          if (taskGoing()) throw new RpcFailure(ErrorCode.InvalidParams, "A task is already running on this engine, so another wasn't started. Wait for it to end, or cancel it, then run this one again.");
+        }
         try {
           return store.summary(scheduler.submit(params)) ?? notFound("just created");
         } catch (error) {
@@ -572,13 +656,28 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         const report = ResearchReport.parse(JSON.parse(stored));
         return status && isTerminal(status) ? asInterrupted(report) : report;
       },
+      "runs.task": ({ runId }) => {
+        const status = store.status(runId);
+        if (!status) notFound(runId);
+        const stored = store.artifact(runId, "task");
+        if (stored === null) return null;
+        // A report saved mid-run, of a run that has ended, reads as interrupted (D39).
+        const report = TaskReport.parse(JSON.parse(stored));
+        return status && isTerminal(status) && report.outcome === "in-progress" ? { ...report, outcome: "interrupted" as const, finishedAt: report.updatedAt } : report;
+      },
+      "runs.proposal": ({ runId }) => {
+        if (!store.status(runId)) notFound(runId);
+        const proposal = store.proposal(runId);
+        return proposal === null ? null : proposalView(proposal, mask);
+      },
+      "task.preview": ({ repoPath, brief }) => taskPreview(repoPath, brief),
       "sandbox.preview": ({ repoPath }) => sandboxPreview(repoPath),
       "sandbox.status": () => {
         rescan();
         return sandboxStatus();
       },
       "sandbox.recover": () => {
-        if (checksActive()) throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check is going on this engine. Let it end, then try again.");
+        if (sessionsActive()) throw new RpcFailure(ErrorCode.InvalidParams, "A sandbox check or a task is going on this engine. Let it end, then try again.");
         rescan();
         recover();
         return sandboxStatus();
@@ -648,6 +747,7 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
       import("./workflows/review.ts"),
       import("./workflows/sandbox.ts"),
       import("./workflows/research.ts"),
+      import("./workflows/task.ts"),
     ]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {

@@ -14,7 +14,7 @@ import { z } from "zod";
 const Sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 const count = z.number().int().nonnegative();
 /** Where a project lives: this computer, or one WSL distribution (D17). */
-const TargetName = z.string().regex(/^(local|wsl:[^\s/\\]{1,64})$/);
+export const TargetName = z.string().regex(/^(local|wsl:[^\s/\\]{1,64})$/);
 
 /** What a sandbox check gets besides its input (D21): held in the engine's memory for the run, never stored. */
 export const SandboxContext = z.strictObject({ sharing: z.strictObject({ cloudExecution: z.boolean() }) });
@@ -47,26 +47,31 @@ export const PREVIEW_SAMPLE = 5;
 const Counted = z.strictObject({ count, sample: z.array(z.string().max(1_024)).max(PREVIEW_SAMPLE) });
 
 /**
- * What a check would send, worked out on the engine that owns the checkout with no network, for the person to see
- * before anything is uploaded. A commit that would be refused says why, naming the file: a preview is a result shown
- * to the person and never stored. The fingerprint covers the commit, the folder and every file sent and left out.
+ * What one commit's snapshot would send, worked out on the engine that owns the checkout with no network. The
+ * fingerprint covers the commit, the folder and every file sent and left out. A task run's preview (D39) holds one too.
+ */
+export const SnapshotPreview = z.strictObject({
+  baseline: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/),
+  /** The picked folder inside the repository, "" for its top level. */
+  prefix: z.string().max(4_096),
+  files: count,
+  /** The archive's size, as uploaded. */
+  bytes: count,
+  leftOut: z.strictObject({ secret: Counted, output: Counted, submodule: Counted, excluded: Counted }),
+  untracked: Counted,
+  lfsPointers: count,
+  fingerprint: Sha256Hex,
+  /** What Nebius keeps, in its own terms. */
+  retention: z.string().max(1_000),
+});
+export type SnapshotPreview = z.infer<typeof SnapshotPreview>;
+
+/**
+ * What a check would send, for the person to see before anything is uploaded. A commit that would be refused says why,
+ * naming the file: a preview is a result shown to the person and never stored.
  */
 export const SandboxPreview = z.discriminatedUnion("status", [
-  z.strictObject({
-    status: z.literal("ready"),
-    baseline: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/),
-    /** The picked folder inside the repository, "" for its top level. */
-    prefix: z.string().max(4_096),
-    files: count,
-    /** The archive's size, as uploaded. */
-    bytes: count,
-    leftOut: z.strictObject({ secret: Counted, output: Counted, submodule: Counted, excluded: Counted }),
-    untracked: Counted,
-    lfsPointers: count,
-    fingerprint: Sha256Hex,
-    /** What Nebius keeps, in its own terms. */
-    retention: z.string().max(1_000),
-  }),
+  z.strictObject({ status: z.literal("ready"), ...SnapshotPreview.shape }),
   z.strictObject({ status: z.literal("refused"), code: z.string().max(64), message: z.string().max(2_000) }),
 ]);
 export type SandboxPreview = z.infer<typeof SandboxPreview>;
@@ -133,6 +138,16 @@ export const SandboxStep = z.strictObject({
 });
 export type SandboxStep = z.infer<typeof SandboxStep>;
 
+/** Cleanup's own record of a session: what was stopped, what stays unresolved, and what Nebius keeps. */
+export const SandboxCleanup = z.strictObject({
+  stopped: count,
+  alreadyEnded: count,
+  unresolved: z.array(z.string().max(400)).max(50),
+  /** What Nebius keeps, counted from the journal; null when nothing left the target. */
+  retained: z.strictObject({ uploads: count, images: count, operations: count, note: z.string().max(1_000) }).nullable(),
+});
+export type SandboxCleanup = z.infer<typeof SandboxCleanup>;
+
 /**
  * A check's report, saved by the engine (masked) as the check goes and when it ends, and read back with
  * `runs.sandbox`. Cleanup's record is its own: what was stopped, what stays unresolved, and what Nebius keeps.
@@ -148,15 +163,7 @@ export const SandboxReport = z.strictObject({
   reportSha256: Sha256Hex.nullable(),
   /** A check's probe keeps nothing, so a proposal means something changed that shouldn't have. It is never applied. */
   proposal: z.strictObject({ hash: Sha256Hex, patchSha256: Sha256Hex, patchBytes: count }).nullable(),
-  cleanup: z
-    .strictObject({
-      stopped: count,
-      alreadyEnded: count,
-      unresolved: z.array(z.string().max(400)).max(50),
-      /** What Nebius keeps, counted from the journal; null when nothing left the target. */
-      retained: z.strictObject({ uploads: count, images: count, operations: count, note: z.string().max(1_000) }).nullable(),
-    })
-    .nullable(),
+  cleanup: SandboxCleanup.nullable(),
   request: z.strictObject({ runId: z.uuid(), clientRequestId: z.uuid() }),
   updatedAt: z.iso.datetime(),
   finishedAt: z.iso.datetime().nullable(),

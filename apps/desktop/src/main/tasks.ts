@@ -1,4 +1,5 @@
-import type { ChatResult } from "@nivra/domain";
+import { createHash } from "node:crypto";
+import { AcceptanceCase, TASK_BRIEF_LIMITS, TaskBrief, type ChatResult } from "@nivra/domain";
 import { z } from "zod";
 import { TASK_LIMITS, type BriefContent, type BriefFields, type BriefSource, type TaskState } from "../shared/ipc.ts";
 import { planText } from "../shared/plans.ts";
@@ -6,11 +7,8 @@ import { planText } from "../shared/plans.ts";
 /**
  * Native tasks and plans (D26, NIV-32), as plain functions: what a brief and a plan hold, how a plan is made from an
  * answer, how a brief is made directly or from a plan (the same shape either way), and which state changes are allowed.
- * Running a task isn't available yet, so no state here comes from a run.
+ * A run of a task (D39) is sent the brief's own words and its acceptance cases; its state never comes from a run yet.
  */
-
-export const RUN_UNAVAILABLE =
-  "Running tasks isn't available yet. Nivra first needs a sandbox that isolates the code it runs, an agent that makes the change inside it, and a review step where you approve the change before it reaches your files. Until then, nothing runs.";
 
 export const EXECUTION_POLICY = { concurrency: 1, network: "off", approval: "required" } as const;
 
@@ -40,6 +38,8 @@ export const BriefContentSchema: z.ZodType<BriefContent> = z.strictObject({
   context: Text(TASK_LIMITS.contextChars),
   assumptions: Items,
   checks: Items,
+  // A brief saved before acceptance cases existed has none (D39).
+  acceptanceCases: z.array(AcceptanceCase).max(TASK_BRIEF_LIMITS.finalChecks).default([]),
   executionPolicy: z.strictObject({ concurrency: z.literal(1), network: z.literal("off"), approval: z.literal("required") }),
   sources: z.array(BriefSourceSchema).max(10),
   revalidate: z.array(z.enum(["context", "assumptions"])),
@@ -54,6 +54,7 @@ export const BriefFieldsSchema: z.ZodType<BriefFields> = z.strictObject({
   context: Text(TASK_LIMITS.contextChars).transform((text) => text.trim()),
   assumptions: Items,
   checks: Items,
+  acceptanceCases: z.array(AcceptanceCase).max(TASK_BRIEF_LIMITS.finalChecks),
 });
 
 /** A plan as one immutable version: its text, and where it came from. */
@@ -116,11 +117,11 @@ export const briefIsReady = (brief: BriefContent): boolean => brief.goal.trim().
 
 /**
  * The state a task moves to when the person asks for `requested`, or why it can't. Ready needs a goal and a criterion;
- * completed is the person's acceptance of a ready task; reopening goes back to draft. Active and review come only from
- * attempts, which can't start yet.
+ * completed is the person's acceptance of a ready task; reopening goes back to draft. Active and review can't be set
+ * by hand.
  */
 export function nextState(current: TaskState, requested: TaskState, brief: BriefContent): TaskState {
-  if (requested === "active" || requested === "review") throw new Error(`${RUN_UNAVAILABLE.split(".")[0]}, so a task can't be ${requested === "active" ? "active" : "in review"}.`);
+  if (requested === "active" || requested === "review") throw new Error(`A task can't be marked ${requested === "active" ? "active" : "in review"} by hand.`);
   if (requested === current) return current;
   if (requested === "ready") {
     if (current !== "draft") throw new Error("Only a draft can be marked ready.");
@@ -134,3 +135,55 @@ export function nextState(current: TaskState, requested: TaskState, brief: Brief
   // Back to draft: a ready task to change it, or a completed one reopened.
   return "draft";
 }
+
+/** Why a brief can't be run without an acceptance case: Nivra judges a run by its cases alone (D39). */
+export const NO_CASE = "Add an acceptance case, so Nivra can check the result itself: a command, and exactly what it must print and the exit code it must give.";
+
+/**
+ * What a run of this brief is sent (D39): its own words, its checks as the repository's commands, and its acceptance
+ * cases; or why it can't run as it is, in plain words. Assumptions and sources stay with the task.
+ */
+export function taskBriefOf(content: BriefContent): { brief: TaskBrief } | { blocked: string } {
+  if (content.acceptanceCases.length === 0) return { blocked: NO_CASE };
+  const total = content.acceptanceCases.length + content.checks.length;
+  if (total > TASK_BRIEF_LIMITS.finalChecks) {
+    return { blocked: `A run takes at most ${TASK_BRIEF_LIMITS.finalChecks} acceptance cases and checks in all, and this brief has ${total}. Remove some, then run it.` };
+  }
+  const parsed = TaskBrief.safeParse({
+    goal: content.goal,
+    acceptanceCriteria: content.acceptanceCriteria,
+    scope: content.scope,
+    exclusions: content.exclusions,
+    context: content.context,
+    checks: content.checks,
+    acceptanceCases: content.acceptanceCases.map(({ name, command, expectedOutput, expectedExitCode }) => ({ name, command, expectedOutput, expectedExitCode })),
+  });
+  return parsed.success ? { brief: parsed.data } : { blocked: "This brief can't be run as it is: a check or a case holds something a command can't carry. Edit the brief, then run it." };
+}
+
+/**
+ * A run preview's fingerprint (D39): SHA-256 of a fixed-order, versioned JSON array of what the run would be bound to.
+ * The host works it out from its records as they are and the snapshot's own fingerprint, which the engine checks again.
+ */
+export function taskRunFingerprint(parts: { taskId: string; briefId: string; briefVersion: number; briefDigest: string; projectId: string; targetId: string; sharing: { modelContext: boolean; cloudExecution: boolean }; snapshot: string }): string {
+  const canonical = ["nivra.task-run-preview.v1", parts.taskId, parts.briefId, parts.briefVersion, parts.briefDigest, parts.projectId, parts.targetId, parts.sharing.modelContext, parts.sharing.cloudExecution, parts.snapshot];
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+/** What a run sends to each service, in plain words (D39). */
+export const TASK_SENDS = {
+  tokenFactory: [
+    "The brief: its goal, acceptance criteria, scope, exclusions and context, with its acceptance cases and checks.",
+    "The names of the commit's files, the files the worker reads, and what the cases and checks it runs print.",
+    "Nivra's instructions to the worker, and the tools it may use.",
+  ],
+  nebius: [
+    "The commit's files, as counted above: never your uncommitted work, nor the files left out.",
+    "Everything the worker writes, as the arguments of the commands that write it.",
+    "The cases' and checks' commands, and Nivra's own commands that prepare, write, look for programs and collect.",
+  ],
+} as const;
+
+/** What each service keeps of a run, in plain words: Nebius in its own terms, and its operation records as the probe showed. */
+export const TOKEN_FACTORY_KEEPS = "Token Factory keeps what it receives, under its own terms. What was sent can't be withdrawn.";
+export const nebiusKeeps = (retention: string): string => `${retention} Nebius keeps each operation's arguments in its records, so what the worker writes stays there too.`;

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import { Refusal } from "../diagnostics.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
-import { CHECK_LIMITS, checkRecipe, checkReport, earlyReport, stopWords } from "../exec/check.ts";
+import { CHECK_LIMITS, checkRecipe, checkReport, earlyReport, sandboxCode, stopWords } from "../exec/check.ts";
 import { runPrescribed, type PrescribedResult } from "../exec/prescribed.ts";
 import { RepoError } from "../repo/paths.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -128,7 +128,7 @@ export function createSandboxWorkflow(deps: SandboxDeps) {
         const unresolved = result.cleanup?.unresolved.length ?? 0;
         deps.recorder.output(runId, "run", `Check ${result.outcome}${unresolved ? `; ${unresolved} left open` : ""}.`, { outcome: result.outcome, unresolved });
         if (result.outcome === "unchanged" || result.outcome === "proposed") return { outcome: result.outcome };
-        throw stop(result.stopped?.code ?? (result.outcome === "cancelled" ? "cancelled" : "fault"), result.stopped?.step ?? null);
+        throw stop(result.stopped ? sandboxCode(result.stopped.code) : result.outcome === "cancelled" ? "cancelled" : "fault", result.stopped?.step ?? null);
       } catch (error) {
         // Until runPrescribed returns, nothing was sent: once a session opens, its failures are outcomes. A report that
         // can't be saved after it leaves the fault's words, which claim nothing about what was sent.

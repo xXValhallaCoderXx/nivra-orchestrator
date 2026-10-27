@@ -3,6 +3,8 @@ import type { ExecResult, SessionStep } from "./backend.ts";
 import { WorkspaceRefusal } from "./git-tool.ts";
 import { PATCH_POLICY, type PatchPolicy, type PatchResult } from "./patch.ts";
 import type { Snapshot } from "./snapshot.ts";
+import { writeTar } from "./tar.ts";
+import { byBytes } from "./workspace-rules.ts";
 
 /**
  * A proposal binds a patch to where it may go (NIV-42, D34, D15). The binding holds:
@@ -11,14 +13,32 @@ import type { Snapshot } from "./snapshot.ts";
  * - the object format and the baseline commit;
  * - the trees B and R the patch was checked between, and the snapshot's fingerprint;
  * - the policy the patch was made under, its version and its limits, taken from the patch itself;
- * - the digests of the patch and of the report made before the session closed.
+ * - the digests of the patch and of the report;
+ * - since version 2 (D39): every changed path's state before and after (its mode and digest), and the digest of the
+ *   post-image, a canonical archive of the new files' bytes that applying writes from; and, for a task, the attempt it
+ *   came from, the engine's home that holds it, and the brief it was made for, by version and digest.
  *
  * Its hash is the sha256 of the binding's canonical JSON, and that is what the person approves. Applying it (NIV-8)
  * first checks it again here: a wrong baseline, destination or hash is refused. Cleanup is a record of its own, so it
  * can't change what was approved.
  */
 
-export const PROPOSAL_VERSION = 1;
+export const PROPOSAL_VERSION = 2;
+
+/** A changed path as the binding holds it: its state before and after, null where it didn't exist. */
+export interface BoundPath {
+  path: string;
+  change: "added" | "changed" | "deleted";
+  before: { mode: string; sha256: string } | null;
+  after: { mode: string; sha256: string } | null;
+}
+
+/** For a task's proposal: where it came from, which engine holds it, and the brief it was made for (D39). */
+export interface TaskBinding {
+  attempt: { taskId: string; attemptId: string; runId: string };
+  engine: { homeId: string };
+  brief: { version: number; sha256: string };
+}
 
 export interface ProposalBinding {
   version: number;
@@ -33,6 +53,10 @@ export interface ProposalBinding {
   policy: PatchPolicy;
   patchSha256: string;
   reportSha256: string;
+  paths: BoundPath[];
+  postImageSha256: string;
+  /** Null for a proposal no task made: a sandbox check's, which is never applied. */
+  task: TaskBinding | null;
 }
 
 export interface Proposal {
@@ -40,6 +64,8 @@ export interface Proposal {
   hash: string;
   patch: Uint8Array;
   report: Uint8Array;
+  /** The new files' bytes, as a canonical archive: what applying writes. */
+  postImage: Uint8Array;
 }
 
 const sha256 = (data: Uint8Array | string) => createHash("sha256").update(data).digest("hex");
@@ -64,8 +90,35 @@ export function canonicalJson(value: unknown): string {
 
 export const proposalHash = (binding: ProposalBinding) => sha256(canonicalJson(binding));
 
-export function makeProposal(input: { project: string; target: string; snapshot: Snapshot; patch: PatchResult; report: Uint8Array }): Proposal {
+/**
+ * The new files of a change as one archive, in one canonical form: added and changed files, sorted by their path's
+ * bytes, with their mode. The same change always gives the same bytes.
+ */
+export function postImageOf(patch: PatchResult): Uint8Array {
+  const files = [...patch.changes.added, ...patch.changes.changed].sort((a, b) => byBytes(a.path, b.path));
+  return writeTar(files.map((change) => ({ path: change.path, kind: "file", executable: change.mode === "100755", bytes: change.bytes })));
+}
+
+/** Every changed path, deletions included, with its state before and after. */
+export function boundPaths(patch: PatchResult): BoundPath[] {
+  const { changes } = patch;
+  const before = (change: { before?: { mode: string; sha256: string } | undefined }) => (change.before ? { mode: change.before.mode, sha256: change.before.sha256 } : null);
+  return [
+    ...changes.added.map((change): BoundPath => ({ path: change.path, change: "added", before: null, after: { mode: change.mode, sha256: change.sha256 } })),
+    ...changes.changed.map((change): BoundPath => ({ path: change.path, change: "changed", before: before(change), after: { mode: change.mode, sha256: change.sha256 } })),
+    ...changes.deleted.map((path): BoundPath => ({ path, change: "deleted", before: null, after: null })),
+  ].sort((a, b) => byBytes(a.path, b.path));
+}
+
+export function makeProposal(input: { project: string; target: string; snapshot: Snapshot; patch: PatchResult; report: Uint8Array; task?: TaskBinding }): Proposal {
   const { snapshot, patch } = input;
+  const postImage = postImageOf(patch);
+  const deletedBefore = new Map(snapshot.files.map((file) => [file.path, file]));
+  const paths = boundPaths(patch).map((bound) => {
+    if (bound.change !== "deleted") return bound;
+    const file = deletedBefore.get(bound.path);
+    return { ...bound, before: file ? { mode: file.mode, sha256: sha256(file.bytes) } : null };
+  });
   const binding: ProposalBinding = {
     version: PROPOSAL_VERSION,
     project: input.project,
@@ -79,8 +132,11 @@ export function makeProposal(input: { project: string; target: string; snapshot:
     policy: { ...patch.policy },
     patchSha256: patch.sha256,
     reportSha256: sha256(input.report),
+    paths,
+    postImageSha256: sha256(postImage),
+    task: input.task ?? null,
   };
-  return { binding, hash: proposalHash(binding), patch: patch.bytes, report: input.report };
+  return { binding, hash: proposalHash(binding), patch: patch.bytes, report: input.report, postImage };
 }
 
 export interface ProposalExpectation {
@@ -93,6 +149,8 @@ export interface ProposalExpectation {
   approvedHash: string;
   /** The rules a proposal must have been made under: Nivra's own unless a check says otherwise. */
   policy?: PatchPolicy;
+  /** For a task's proposal: the attempt, the engine's home and the brief it must have been made for (D39). */
+  task?: TaskBinding;
 }
 
 /** Refuses a proposal that isn't intact, isn't the one approved, or isn't for these rules, this destination and commit. */
@@ -100,7 +158,7 @@ export function verifyProposal(proposal: Proposal, expected: ProposalExpectation
   const { binding } = proposal;
   const refuse = (message: string) => new WorkspaceRefusal(message, "proposal");
   if (binding.version !== PROPOSAL_VERSION) throw refuse("This proposal was made under another version of Nivra's rules, so it can't be applied. Run the task again.");
-  if (sha256(proposal.patch) !== binding.patchSha256 || sha256(proposal.report) !== binding.reportSha256 || proposalHash(binding) !== proposal.hash) {
+  if (sha256(proposal.patch) !== binding.patchSha256 || sha256(proposal.report) !== binding.reportSha256 || sha256(proposal.postImage) !== binding.postImageSha256 || proposalHash(binding) !== proposal.hash) {
     throw refuse("This proposal isn't intact: its patch, its report or what it binds no longer matches its hash, so it can't be applied. Run the task again.");
   }
   if (proposal.hash !== expected.approvedHash) throw refuse(`This isn't the proposal you approved (its hash is ${short(proposal.hash)}, not ${short(expected.approvedHash)}), so it wasn't applied.`);
@@ -108,6 +166,9 @@ export function verifyProposal(proposal: Proposal, expected: ProposalExpectation
   if (binding.project !== expected.project || binding.target !== expected.target) throw refuse("This proposal was made for another project, or on another target, so it can't be applied here.");
   if (binding.destination.root !== expected.destination.root || binding.destination.prefix !== expected.destination.prefix) throw refuse("This proposal was made for another folder, so it can't be applied here.");
   if (binding.baseline !== expected.head) throw refuse(`Your checkout has moved to another commit (HEAD is ${short(expected.head)}, and the proposal was made from ${short(binding.baseline)}). Run the task again from the commit it is on now.`);
+  if (expected.task !== undefined && canonicalJson(binding.task) !== canonicalJson(expected.task)) {
+    throw refuse("This proposal was made by another run, on another engine's records, or from another version of the brief, so it can't be applied here.");
+  }
 }
 
 /** One step the run took, as its report shows it. */

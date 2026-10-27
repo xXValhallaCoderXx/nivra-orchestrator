@@ -1990,6 +1990,105 @@ rehearsal from the same frozen build. The approval is claimed, run 1.
 - **The flow:** Nate's own note on readability: "we can improve this flow later after we lay groundwork". The broader
   research and memory work stays with NIV-33.
 
+### Task run, checkpoint 1 (D39, NIV-7)
+
+The execution milestone's first checkpoint, offline but for one approved live probe: one ready task's brief run by one
+worker in a Nebius sandbox, judged by acceptance cases it can't edit, its change proposed and kept exactly. On
+`feature/niv-7-worker`, from `main` at `3440f93`:
+
+| Commit | What |
+|---|---|
+| `b49720e` | Explicit deadlines after the work, hooks on the prescribed path (work, verify, finish), close before the patch, proposal binding v2 |
+| `60a7a81` | The worker, the acceptance harness, the toolchain probe, the workspace copy and their time, against a guest that really runs commands |
+| `867497b` | The live toolchain probe's recipe and script, rehearsed offline |
+| `0245fac` | Protocol 10, the `task` workflow, engine migration 4, a slot of its own, the run's one deadline, the recovery guard over tasks |
+| `b8ad942` | The host and the window: acceptance cases in briefs, the bound Run preview, consents asked in place, attempts, the run's card |
+| `5f0323d` | The independent review's findings in the engine: fixed words for refusals, cases naming the files they run, an uncertain final check ending the run, the report fitted to its store, the reserve counting start requests |
+| `5aa7e0e` | The review's findings in the host and the window: every stop tried, a turned-down stop sent again, the case-file warnings, the consent wording |
+| this record | D39, the development notes, and this section |
+| `e17960a`, `b3dc652` | Nate's review of PR 18: a script a case names in quotes is named, and a command whose files can't be read is said to be unclear, in the preview and on the run's card |
+| the review's record | D39's *Why*, and *Nate's review of PR 18* below |
+
+**NIV-7's criteria (scope of 20 October), shown:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| An immutable native brief with its project, baseline and scoped context; no tracker | `packages/domain/test/task.test.ts`; `task-engine.test.ts`, "refuses without model sharing…"; `host.test.ts`, "previews what keeps a run from starting…" | A run carries the brief in memory and its version and digest in its input; a brief that isn't the one named is refused before anything is sent. The snapshot's fingerprint binds the commit the preview showed; a commit that moved since is refused before the upload. A start whose preview changed (a brief edit, a consent) is refused by the host |
+| One worker and one task at a time; tools only in the sandbox workspace, never the checkout or `Local` | `task-engine.test.ts`, "runs one task at a time on its own slot…"; `host.test.ts`, "runs one task at a time…"; `task-worker.test.ts` | A second task is refused on the engine and in the host, and recorded nowhere; a repeated request gets its run. The worker's reads are the engine's copy, and its writes and runs are Nebius operations; the checkout is unchanged, every name, mode, size, time and byte, `.git` included |
+| Bounded steps, output and time, with usage; credentials in engine memory, outside model inputs and guests | `task-run.test.ts` (the deadline), `task-timing.test.ts`, `task-worker.test.ts` (each budget), `task-engine.test.ts` | Each budget used up is refused and the run goes on to collect. The deadline cuts the session and close, and a patch left no time fails after close. Every Nebius request carries the key and project id in headers only, and no body holds either; the model's requests never hold the key; a write naming the project id is never sent |
+| Real progress, verification results and the validated patch; worker success isn't acceptance | `task-engine.test.ts`, "runs the worker on the production adapter…"; `task-run.spec.ts` | Progress events, each case's and check's verdict, the worker's account kept apart, the proposal bound and kept exactly, read back as text. A change is verified only when every case passed, and a run that changed nothing never is |
+| Denied actions, failing checks, cancellation, provider failure and lost observation, with no duplicate submission | `task-worker.test.ts`, `task-timing.test.ts`, `task-engine.test.ts`, `host.test.ts` | Writes outside the rules, input that doesn't match a tool's schema, and calls past a budget are refused before anything is sent, and the run goes on; a write naming the project id never leaves. A replaced repository check, an exit before the assertions, and a case exiting 127 on purpose all fail the case; a missing program stops the run before the model. The person's cancel stops the operation under way, during the work or the final checks, and nothing is proposed; turning a consent off stops the run, even when another of the project's runs can't be stopped, and a stop the engine turns down is said and sent again. Token Factory failing partway leaves the worker stopped, the change collected and judged, and the failed request not sent again. A write or a final check whose start's answer was lost is never sent again, and the run ends uncertain; a lost run start is found by its request id; a repeated request gets its run; a restart replays nothing |
+| Linux and Windows-to-WSL first; native Windows proven before it is claimed; no commit, push, PR or deployment | `task-engine.test.ts` and `task-run.spec.ts` (Linux); `host.test.ts`, "Host: task runs…" (a Windows host on a stand-in WSL target) | Shown on Linux through a real engine and the built window. Windows-to-WSL is shown by the host's tests, which run as a Windows host on a stand-in WSL target; through the real Windows app it waits for the Windows turn below. Windows itself is refused by the host and the engine, and recorded nowhere. Nothing commits, pushes or applies: the change is kept with the run |
+
+**The live toolchain probe (26 October, 13:00 UTC, approved by Nate),** at `867497b`: 10 of 10 checks passed, in five
+operations with no model (prepare, the applet list, one write, the case, collect), each sent once and every one with
+networking off. Busybox listed 304 applets, `sh`, `printf`, `sha256sum`, `tar`, `sed`, `awk` and `diff` among them, and
+not `git`, `node` or `python3`. The 32,768-byte write came back byte for byte (`c1d588a0…`), the case saw it in the next
+operation, and collect gave exactly the fixture plus the write. The fixture's checkout and `~/.nivra` were unchanged,
+and cleanup left nothing unresolved. Nebius keeps the write's content in its operation record (`metadata.args[7]`).
+Evidence: `~/nivra-acceptance/task-probe-2026-10-26T130001539Z/`.
+
+**Through `rpc.ts`,** after the review's fixes, on `~/.nivra-dev-track-b`, against the stand-ins on 127.0.0.1:
+`task.preview` of the fixture gave 2 files, 3,072 bytes from `0af8b007…`, the programs `.` and `/bin/sh`, and
+`greet.sh` as the file case 1 runs. A whole run succeeded with a 622 s work window and 578 s kept: proposed, every
+acceptance case passed, case 1 naming `greet.sh` beside its pass, the change exactly the fix (`greet.sh`, 256 bytes),
+nothing left unresolved, and a 4,296-byte report. Nebius kept 1 upload, 3 images and 7 operation records, and the
+fixture's checkout was unchanged.
+
+**Checks:**
+- `pnpm verify`: 926 tests (domain 66, desktop 276, engine 584) at `5aa7e0e`, none skipped.
+- The built app (`test:e2e`, under `xvfb-run`): 63 passed, 1 skipped, `explain.spec.ts`'s test that only a packaged app
+  can run. `task-run.spec.ts` writes an acceptance case into a brief, gives both consents in the Run preview, which
+  names the file case 1 runs, runs the task to its end, and reads what Nivra found: every case and check passed,
+  `greet.sh` named beside case 1, the change as text, cleanup's record, and the checkout untouched.
+- The packaged app (`test:packaged`, on the `--dir` build with a runtime staged from this code): 27 passed, as for
+  R3, and 37 skipped: the tests that need the stand-in switches a packaged app ignores, `task-run.spec.ts` among them.
+- **Mutation checks:** each rule below was broken on purpose, and its test failed every time (34 of 34):
+  - the run: native Windows not refused, model sharing or the brief's digest not checked, a second task accepted on
+    one engine, tasks sharing the shared slots, a reused request id with another task's input accepted, the recovery
+    guard over checks only;
+  - time: the session, close or the patch not cut by the run's deadline, the reserve without start requests;
+  - the verdict: a task's change verified without a change, a case's changed files not named, a missing output stream
+    read as empty, a workspace path or a function probed as a program;
+  - stops: a final check sent after a cancel, a cancel during the final checks stopping only at the patch, an
+    unsettled final check still proposing, a refused write recorded as a step;
+  - what is kept and said: a proposal holding a vault value kept, a proposal kept masked, another attempt's proposal
+    accepted, a report not fitted to the store or not masked, a cut leaving half a character, a proposal that wasn't
+    kept still reported, a stop after the upload saying nothing was sent, the worker's own runs counted before the
+    upload, a refusal's own words reaching the model;
+  - the host: a task run's stop skipped when the check's or an explanation's stop failed, an offline engine's run
+    blocking removal, a turned-down stop never sent again.
+
+- **The Windows turn** (approved by Nate, 26 October): `pnpm dev:win --no-launch` built `b994bea`, and `test:windows`
+  passed 12 of 12 on that build: the window, both engines, the workspace kept across relaunches, quitting leaving no
+  engine, and `~/.nivra` unchanged. None of them drives a task run: that is checkpoint 3's. Targets, the supervisor and
+  staging didn't change, so `verify:windows` wasn't called for.
+
+**Nate's review of PR 18 (27 October)** found one more, reproduced there. A case that named its script in quotes
+(`/bin/sh 'check.sh'`) named no file. So a worker that rewrote `check.sh` to print the expected output passed, verified,
+with no warning. Fixed in `e17960a` and `b3dc652` (D39, *Why*):
+- `task-worker.test.ts`, the regression: the worker rewrites `check.sh` to `echo ok`, and the case `/bin/sh 'check.sh'`
+  comes back passed and verified, with `check.sh` named beside it. A case and a check whose command can't be read
+  (`/bin/sh -c "$(cat check.sh)"`) are marked unclear once the worker has changed a file, and not when it changed
+  nothing.
+- `task-engine.test.ts`: the preview over stdio names `check.sh` for the quoted case and marks the unreadable one
+  unclear. `host.test.ts` reads both fields through the host from a real engine. `task-scripts.test.ts` holds 30
+  commands: quoted, mixed, nested and unreadable.
+- The domain reads a preview or report saved before this as not unclear.
+- The fix was broken three ways on purpose, and a new test failed each time:
+  - quotes read as characters again;
+  - nothing ever unclear;
+  - unclear with nothing written.
+- `pnpm verify` at `b3dc652`: 929 tests (domain 66, desktop 276, engine 587), none skipped.
+- The built app: 63 passed, 1 skipped (the packaged-only test). The card's unclear wording has no window test of its
+  own.
+- The Windows turn and the packaged checks weren't repeated. Only the engine's reading of commands and the window's
+  wording changed: not targets, the supervisor, staging, or main-process or preload behaviour.
+
+**Not shown yet:**
+- **One live worker run,** and the packaged journey through the Windows app: checkpoint 3 (NIV-35), each with its own
+  approval.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

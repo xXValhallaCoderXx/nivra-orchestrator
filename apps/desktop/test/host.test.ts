@@ -7,12 +7,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import { isTerminal, type RunEventsPage, type SecretName } from "@nivra/domain";
+import { isTerminal, taskBriefDigest, type RunEventsPage, type SecretName, type TaskBrief } from "@nivra/domain";
 import { Host } from "../src/main/host.ts";
 import { HostStore, NO_SHARING } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
 import { previewFingerprint } from "../src/main/reviews.ts";
-import { RUN_UNAVAILABLE } from "../src/main/tasks.ts";
 import type { TargetFactory } from "../src/main/targets/registry.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
 import type { WslDiscovery } from "../src/main/targets/wsl-discovery.ts";
@@ -21,7 +20,12 @@ import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandb
 import { extractAnswer, searchAnswer, startTavilyStub, type TavilyStub } from "../../engine/test/stub-tavily.ts";
 import { researchFingerprint } from "../src/main/research.ts";
 import type { ResearchSelection, ResearchView } from "../src/shared/research.ts";
-import { PROBE_SCRIPT } from "../../engine/src/exec/check.ts";
+import { CHECK_IMAGE, PROBE_SCRIPT } from "../../engine/src/exec/check.ts";
+import { RealGuest } from "../../engine/test/real-guest.ts";
+import { changedSince, folderState } from "../../engine/test/workspace-fixtures.ts";
+import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
+import { NO_CASE, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
+import type { TaskAttemptView } from "../src/shared/ipc.ts";
 
 /**
  * The host's engine pool (D17) against real engines run from source. A "WSL" target here is a stand-in: a target that
@@ -97,6 +101,8 @@ const BROKEN: WslDiscovery = { status: "broken", code: "WSL_E_TEST", message: "W
  */
 type HostOptions = {
   localEntry?: string;
+  /** The WSL stand-in's engine: the real one unless given (a fixture, say). */
+  wslEntry?: string;
   wsl?: "ready" | "broken";
   tokenFactoryUrl?: string;
   sandboxesUrl?: string;
@@ -125,7 +131,7 @@ function hostAt(root: string, options: HostOptions = {}) {
     ...(options.sandboxesUrl ? ["--sandboxes-url", options.sandboxesUrl] : []),
     ...(options.tavilyUrl ? ["--tavily-url", options.tavilyUrl] : []),
   ];
-  const wslTarget = standInWsl("Test", localTarget(join(root, "wsl home"), ENGINE, extraArgs), options.beforeWslPrepare);
+  const wslTarget = standInWsl("Test", localTarget(join(root, "wsl home"), options.wslEntry ?? ENGINE, extraArgs), options.beforeWslPrepare);
   const discovery: WslDiscovery =
     options.wsl === "broken" ? BROKEN : { status: "ready", wslExe: "wsl.exe", distros: [{ name: "Test", version: 2, isDefault: true, defaultUid: 1000, osVersion: null }], hidden: [] };
   const targets: TargetFactory = { local: localTarget(join(root, "local home"), options.localEntry, extraArgs), discoverWsl: async () => ({ discovery, targets: discovery.status === "ready" ? [wslTarget] : [] }) };
@@ -1202,7 +1208,7 @@ describe("Host: conversations follow each turn to its end, and never resend one 
 
 describe("Host: native tasks, made directly or from a plan, with versioned briefs (D26, NIV-32)", () => {
   const KEY = "test-key-0123456789";
-  const empty = { goal: "", acceptanceCriteria: [] as string[], scope: "", exclusions: "", context: "", assumptions: [] as string[], checks: [] as string[] };
+  const empty = { goal: "", acceptanceCriteria: [] as string[], scope: "", exclusions: "", context: "", assumptions: [] as string[], checks: [] as string[], acceptanceCases: [] as Array<{ name: string; command: string; expectedOutput: string; expectedExitCode: number }> };
   async function stubWith(chat: (request: StubRequest, index: number) => Reply) {
     const stub = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat });
     stubs.push(stub);
@@ -1231,7 +1237,7 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
       [direct.summary.state, direct.brief.version, direct.brief.content.sources, planned.brief.content.sources.map((source) => [source.planVersion, source.conversationId, source.projectId])],
       ["draft", 1, [], [[1, conversation.id, null]]],
     );
-    assert.deepEqual([direct.runUnavailable, direct.attempts], [RUN_UNAVAILABLE, []]);
+    assert.deepEqual([direct.runBlocked, direct.attempts], ["Mark the task ready first: a run needs a goal and at least one acceptance criterion.", []]);
     const v2 = await host.revisePlan(plan.id, "Stage it: the cache first, then the parser.");
     assert.deepEqual([v2.version, v2.latest, host.plans(conversation.id).map((p) => p.version)], [2, 2, [1, 2]]);
     const marked = host.task(planned.summary.id);
@@ -1260,7 +1266,7 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
     assert.equal(written.brief.version, 2);
     assert.throws(() => host.setTaskState(task.summary.id, task.revision, "ready"), /changed since you opened it/);
     const ready = host.setTaskState(task.summary.id, written.revision, "ready");
-    assert.throws(() => host.setTaskState(task.summary.id, ready.revision, "active"), /^Error: Running tasks isn't available yet, so a task can't be active\.$/);
+    assert.throws(() => host.setTaskState(task.summary.id, ready.revision, "active"), /^Error: A task can't be marked active by hand\.$/);
     const emptied = await host.reviseBrief(task.summary.id, ready.revision, { ...empty, goal: "Tidy it" });
     assert.equal(emptied.summary.state, "draft", "a ready task whose brief lost its criteria is a draft again");
     const again = await host.reviseBrief(task.summary.id, emptied.revision, { ...empty, goal: "Tidy it", acceptanceCriteria: ["Every heading is sentence case"] });
@@ -1438,7 +1444,7 @@ describe("Host: reviews of saved plan versions, bound to what their preview show
     // A review writes nothing else: not the store, not the plan; a task made from the plan is ready without one.
     assert.equal(readFileSync(join(root, "nivra.json"), "utf8"), store);
     assert.deepEqual(host.plans(conversation.id).map((p) => [p.version, p.text]), [[1, PLAN]]);
-    const fields = { goal: "Rename the column", acceptanceCriteria: ["Old servers keep working"], scope: "", exclusions: "", context: "", assumptions: [], checks: [] };
+    const fields = { goal: "Rename the column", acceptanceCriteria: ["Old servers keep working"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] };
     const task = await host.createTask({ title: "Rename", fields, projectId: null, planId: plan.id });
     assert.equal(host.setTaskState(task.summary.id, task.revision, "ready").summary.state, "ready");
     // The plan moves on: v1's review stays as it was, and says so; reviewing v2 makes a new review.
@@ -2488,5 +2494,303 @@ describe("Host: research of saved plan versions' assumptions, bound to what its 
     assert.deepEqual([research.status, research.report?.stop?.code, researchRequests(model).length], ["failed", "tavily-unavailable", 0], research.note ?? "");
     await host.sendMessage(conversation.id, "And without research?");
     await answered(host, conversation.id);
+  });
+});
+
+describe("Host: task runs, on a project's engine, bound to the preview the person saw (D39)", () => {
+  const KEY = "test-key-0123456789";
+  const PROJECT_ID = "project-e00hosttask0001";
+  const SECRETS = { NEBIUS_API_KEY: KEY, NEBIUS_PROJECT_ID: PROJECT_ID };
+  const FILES = Object.fromEntries(TASK_FIXTURE.map((file) => [file.path, String(file.bytes)]));
+  const CASE = { name: "greet with and without a name", command: ". ./greet.sh; greet Ada; greet", expectedOutput: "Hello, Ada\nHello, world\n", expectedExitCode: 0 };
+  const FIELDS = { goal: "greet with no name says Hello, world", acceptanceCriteria: ["check.sh passes"], scope: "", exclusions: "", context: "", assumptions: [], checks: ["/bin/sh check.sh"], acceptanceCases: [CASE] };
+  const WORK: Array<[string, Record<string, unknown>]> = [["read_file", { path: "greet.sh" }], ["edit_file", TASK_FIX], ["run_case", { number: 1 }], ["submit", { summary: "Defaulted the name to world." }]];
+  const RUNNING = "A task is already running. Wait for it to end, or cancel it, then run this one.";
+  const local: Array<{ close(): Promise<void> }> = [];
+  after(async () => {
+    await Promise.all(local.map((stub) => stub.close()));
+  });
+  const reposRoot = () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra task repos "));
+    dirs.push(root);
+    return root;
+  };
+  /** Stand-ins for Nebius, its guest running each command with this machine's tools, and for Token Factory, its model doing `calls`. */
+  async function standIns(calls = WORK) {
+    const guest = new RealGuest(CHECK_IMAGE.uuid);
+    guest.busybox = true;
+    const sandbox = await startSandboxStub({ guest });
+    const model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: (_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }) });
+    local.push(sandbox, model);
+    return { sandbox, model, guest };
+  }
+  /** A host whose one project is a WSL repository holding the fixture, both consents given, the keys saved. */
+  async function taskHost(options: { calls?: Array<[string, Record<string, unknown>]>; consents?: boolean } = {}) {
+    const { sandbox, model, guest } = await standIns(options.calls);
+    const repo = makeRepo(join(reposRoot(), "greet"), FILES);
+    const made = makeHost({ tokenFactoryUrl: model.url, sandboxesUrl: sandbox.url, projects: [{ targetId: "wsl:Test", path: repo }] });
+    made.keys.current = SECRETS;
+    if (options.consents !== false) {
+      await made.host.setSharing(made.ids[0]!, true);
+      await made.host.setCloudExecution(made.ids[0]!, true);
+    }
+    return { ...made, sandbox, model, guest, repo };
+  }
+  async function readyTask(host: Host, projectId: string, fields = FIELDS, title = "Greet the world") {
+    const task = await host.createTask({ title, fields, projectId, planId: null });
+    return host.setTaskState(task.summary.id, task.revision, "ready");
+  }
+  const ended = (host: Host, taskId: string, attemptId: string, what = "the run to end") =>
+    waitFor(async () => {
+      const view = await host.taskAttempt(taskId, attemptId);
+      return view.status !== "submitting" && view.status !== "running" ? view : null;
+    }, what, 60_000);
+  const uploads = (stub: SandboxStub<RealGuest>) => stub.requests.filter((request) => request.path === "/v1/files").length;
+  const spawnedWith = (stub: SandboxStub<RealGuest>, name: string) => stub.requests.filter((request) => request.method === "POST" && request.path === "/v1/instances" && request.body.includes(name)).length;
+
+  it("runs a ready task's brief on its project's engine, previewed and bound, and reads back its report and change, the checkout untouched", async () => {
+    const { host, ids, sandbox, model, repo } = await taskHost();
+    const task = await readyTask(host, ids[0]!);
+    assert.equal(task.runBlocked, null);
+    const before = folderState(repo);
+    const preview = await host.previewTaskRun(task.summary.id);
+    assert.deepEqual([preview.blocked, preview.snapshot?.files, preview.programs, preview.unprobed, preview.cases.map((c) => [c.number, c.name]), preview.checks, preview.caseFiles, preview.consents, preview.project.targetLabel], [
+      null,
+      2,
+      [".", "/bin/sh"],
+      0,
+      [[1, CASE.name]],
+      [{ number: 1, command: "/bin/sh check.sh" }],
+      [{ number: 1, files: ["greet.sh"], unclear: false }],
+      { modelContext: true, cloudExecution: true },
+      "Test · WSL",
+    ]);
+    assert.match(preview.keeps.nebius ?? "", /^Images are retained for 180 days.* Nebius keeps each operation's arguments in its records, so what the worker writes stays there too\.$/);
+    assert.deepEqual([sandbox.requests.length, model.chats().length], [0, 0], "a preview sends nothing");
+    const started = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
+    assert.ok(["submitting", "running"].includes(started.status));
+    const done = await ended(host, task.summary.id, started.id);
+    assert.equal(done.status, "answered", done.note ?? done.unresolved ?? "");
+    assert.deepEqual([done.report?.outcome, done.report?.verified, done.report?.checks.map((check) => check.verdict), done.proposal?.paths.map((path) => path.path), done.note], ["proposed", true, ["passed", "passed"], ["greet.sh"], null]);
+    // The case sources greet.sh, which the change changes; the check runs check.sh, which it doesn't.
+    assert.deepEqual(done.report?.checks.map((check) => [check.changedFiles, check.unclear]), [[["greet.sh"], false], [[], false]]);
+    assert.match(done.proposal?.patch ?? "", /^\+ {2}printf 'Hello, %s\\n' "\$\{1:-world\}"$/m);
+    assert.ok(done.progress.some((line) => line === "Final checks: case 1 passed, check 1 passed"), done.progress.join(" | "));
+    assert.deepEqual(changedSince(before, repo), []);
+    assert.deepEqual([uploads(sandbox), model.chats().length], [1, 4]);
+    assert.deepEqual(host.task(task.summary.id).attempts.map((attempt) => [attempt.status, attempt.briefVersion, attempt.note]), [["answered", 1, null]]);
+  });
+
+  it("previews what keeps a run from starting, refuses a start whose preview changed, and starts nothing on Windows itself", async () => {
+    const { host, ids, sandbox, model, keys } = await taskHost({ consents: false });
+    // No acceptance case: nothing to judge the run by, so it isn't previewed past that, and no engine starts.
+    const caseless = await readyTask(host, ids[0]!, { ...FIELDS, acceptanceCases: [] }, "No case yet");
+    assert.equal(caseless.runBlocked, NO_CASE);
+    const early = await host.previewTaskRun(caseless.summary.id);
+    assert.deepEqual([early.blocked, early.snapshot, early.expected, stateOf(host, "wsl:Test")?.status ?? "stopped"], [NO_CASE, null, "", "stopped"]);
+    // Both consents off, then each alone, then the keys: the snapshot is previewed, and the start refused.
+    const task = await readyTask(host, ids[0]!);
+    const blocked = async () => (await host.previewTaskRun(task.summary.id)).blocked;
+    assert.match((await blocked()) ?? "", /^This project doesn't allow sending its content to Token Factory/);
+    await host.setSharing(ids[0]!, true);
+    assert.match((await blocked()) ?? "", /^This project doesn't allow uploading its commit to Nebius Sandboxes/);
+    await host.setCloudExecution(ids[0]!, true);
+    keys.current = { NEBIUS_API_KEY: KEY };
+    assert.match((await blocked()) ?? "", /^A task run needs your Nebius key and project id/);
+    keys.current = SECRETS;
+    const preview = await host.previewTaskRun(task.summary.id);
+    assert.equal(preview.blocked, null);
+    // The brief changed after the preview: what the run would send isn't what was shown.
+    const revised = await host.reviseBrief(task.summary.id, host.task(task.summary.id).revision, { ...FIELDS, context: "Keep it in POSIX sh." });
+    await assert.rejects(host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!), /^Error: What this run would send has changed since you previewed it\. Preview it again, then start\.$/);
+    assert.equal(revised.brief.version, 2);
+    // A preview made while a consent was off doesn't start a run once it is on.
+    await host.setCloudExecution(ids[0]!, false);
+    const offPreview = await host.previewTaskRun(task.summary.id);
+    await host.setCloudExecution(ids[0]!, true);
+    await assert.rejects(host.startTaskRun(task.summary.id, offPreview.expected || "a".repeat(64), offPreview.snapshotFingerprint ?? "b".repeat(64)), /changed since you previewed it/);
+    assert.deepEqual([uploads(sandbox), model.chats().length, host.task(task.summary.id).attempts], [0, 0, []]);
+    // A repository on Windows itself: no run, whatever else holds.
+    const windows = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(reposRoot(), "native"), FILES) }] });
+    windows.keys.current = SECRETS;
+    await windows.host.setSharing(windows.ids[0]!, true);
+    await windows.host.setCloudExecution(windows.ids[0]!, true);
+    const native = await readyTask(windows.host, windows.ids[0]!);
+    assert.equal(native.runBlocked, "Running tasks on Windows itself isn't available yet. Add the repository from a WSL distribution, then run the task there.");
+    await assert.rejects(windows.host.startTaskRun(native.summary.id, "a".repeat(64), "b".repeat(64)), /Running tasks on Windows itself isn't available yet/);
+  });
+
+  it("runs one task at a time, won't delete a task while its run goes, and stops a run when uploads are turned off or its project is removed", async () => {
+    const { host, ids, guest, sandbox } = await taskHost();
+    guest.override = ({ label }) => (label === "nivra-toolchain" ? { waits: true } : undefined);
+    const first = await readyTask(host, ids[0]!, FIELDS, "First");
+    const second = await readyTask(host, ids[0]!, FIELDS, "Second");
+    const start = async (taskId: string) => {
+      const preview = await host.previewTaskRun(taskId);
+      return host.startTaskRun(taskId, preview.expected, preview.snapshotFingerprint!);
+    };
+    const run = await start(first.summary.id);
+    await waitFor(() => spawnedWith(sandbox, "nivra-toolchain") === 1, "the run's toolchain probe", 30_000);
+    assert.equal(host.task(second.summary.id).runBlocked, RUNNING);
+    await assert.rejects(host.startTaskRun(second.summary.id, "a".repeat(64), "b".repeat(64)), new RegExp(RUNNING.replace(/[.]/g, "\\.")));
+    assert.throws(() => host.deleteTask(first.summary.id), /^Error: This task's run is still going\. Cancel it, and wait for it to end, then delete the task\.$/);
+    // Uploads turned off: the run stops, and says why.
+    await host.setCloudExecution(ids[0]!, false);
+    const stopped = await ended(host, first.summary.id, run.id);
+    assert.deepEqual([stopped.status, stopped.note, stopped.report?.outcome], ["cancelled", "Stopped: this project's sharing or uploads were turned off. What it had sent stays where it went; its report says what that was.", "cancelled"]);
+    // The next run starts once that one has ended, and removing the project stops it.
+    await host.setCloudExecution(ids[0]!, true);
+    const next = await start(second.summary.id);
+    await waitFor(() => spawnedWith(sandbox, "nivra-toolchain") === 2, "the next run's toolchain probe", 30_000);
+    await host.removeProject(ids[0]!);
+    const removed = await ended(host, second.summary.id, next.id);
+    assert.deepEqual([removed.status, removed.note], ["cancelled", "Stopped: the project was removed. What it had sent stays where it went."]);
+    host.deleteTask(first.summary.id);
+    assert.deepEqual(host.tasks().tasks.map((t) => t.title), ["Second"]);
+  });
+
+  it("finds a run whose start's answer was lost by its request id and never sends it again, and stops one whose consent went while its start was out", async () => {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    const { host, ids, keys, root } = made;
+    keys.current = SECRETS;
+    await host.setSharing(ids[0]!, true);
+    await host.setCloudExecution(ids[0]!, true);
+    const home = join(root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    const calls = () => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter(Boolean) : []);
+    const logged = (file: string) => (existsSync(join(home, file)) ? readFileSync(join(home, file), "utf8").split("\n").filter(Boolean) : []);
+    // The gated engine takes no preview: the start is bound to a snapshot fingerprint the test gives, as the window would.
+    const task = await readyTask(host, ids[0]!);
+    const view = host.task(task.summary.id);
+    const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
+    const expected = async (snapshot: string) =>
+      taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const snapshot = "c".repeat(64);
+    // Accepted, then answered with an error: the run is found by its request id, and recorded as it ended.
+    writeFileSync(join(home, "accept"), "");
+    writeFileSync(join(home, "error-start"), "");
+    writeFileSync(join(home, "release"), "");
+    const lost = await host.startTaskRun(task.summary.id, await expected(snapshot), snapshot);
+    const found = await ended(host, task.summary.id, lost.id, "the lost run to be found");
+    assert.deepEqual([found.status, found.runId === logged("accepted.log")[0]?.split(" ")[1], calls().filter((call) => call === "runs.start").length], ["answered", true, 1]);
+    // Refused with an error and never recorded: not sent, in the engine's own words.
+    rmSync(join(home, "accept"));
+    const refused = await host.startTaskRun(task.summary.id, await expected(snapshot), snapshot);
+    const notSent = await ended(host, task.summary.id, refused.id, "the refused run to settle");
+    assert.deepEqual([notSent.status, notSent.note], ["not-sent", "The engine didn't start the run, so nothing was uploaded and nothing reached the model. The engine refused the run."]);
+    // Model sharing turned off while the start is out: the run the engine made is stopped as soon as it answers, and a
+    // stop its engine turns down is sent again until it is taken.
+    rmSync(join(home, "error-start"));
+    rmSync(join(home, "release"));
+    writeFileSync(join(home, "accept"), "");
+    const before = calls().filter((call) => call === "runs.start").length;
+    const late = await host.startTaskRun(task.summary.id, await expected(snapshot), snapshot);
+    await waitFor(() => calls().filter((call) => call === "runs.start").length === before + 1, "the run's request to reach the engine");
+    await host.setSharing(ids[0]!, false);
+    // Running until it is stopped, and every stop turned down for now.
+    writeFileSync(join(home, "running"), "");
+    writeFileSync(join(home, "fail-cancel"), "");
+    const cancels = calls().filter((call) => call === "runs.cancel").length;
+    writeFileSync(join(home, "release"), "");
+    await waitFor(() => calls().filter((call) => call === "runs.cancel").length >= cancels + 3, "the stop to be turned down and sent again");
+    rmSync(join(home, "fail-cancel"));
+    const withdrawn: TaskAttemptView = await ended(host, task.summary.id, late.id, "the withdrawn run to stop");
+    assert.deepEqual([withdrawn.status, logged("cancelled.log").includes(withdrawn.runId ?? "none")], ["cancelled", true]);
+    assert.match(withdrawn.note ?? "", /^Stopped: this project's sharing or uploads were turned off/);
+  });
+
+  it("stops a task run when uploads are turned off though the project's check couldn't be stopped, and the check though the run couldn't", async () => {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    const { host, ids, keys, root } = made;
+    keys.current = SECRETS;
+    await host.setSharing(ids[0]!, true);
+    await host.setCloudExecution(ids[0]!, true);
+    const home = join(root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    const cancelled = () => (existsSync(join(home, "cancelled.log")) ? readFileSync(join(home, "cancelled.log"), "utf8").split("\n").filter(Boolean) : []);
+    for (const flag of ["accept", "release", "running"]) writeFileSync(join(home, flag), "");
+    const task = await readyTask(host, ids[0]!);
+    const view = host.task(task.summary.id);
+    const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
+    const snapshot = "c".repeat(64);
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const going = async () => {
+      const started = await host.startTaskRun(task.summary.id, expected, snapshot);
+      const running = await waitFor(async () => {
+        const seen = await host.taskAttempt(task.summary.id, started.id);
+        return seen.status === "running" && seen.runId ? seen : null;
+      }, "the task's run to be going");
+      return { id: started.id, runId: running.runId! };
+    };
+    // The project's sandbox check and a task's run, both going; the engine turns the check's stop down.
+    const check = await host.startSandboxCheck(ids[0]!, "a".repeat(64));
+    const first = await going();
+    writeFileSync(join(home, "fail-cancel-for"), check.runId!);
+    await assert.rejects(host.setCloudExecution(ids[0]!, false), /^Error: Nivra couldn't stop the sandbox check \(the run couldn't be stopped\)\./);
+    assert.equal(host.projects()[0]?.sharing.cloudExecution, false);
+    const stopped = await ended(host, task.summary.id, first.id, "the task's run to stop");
+    assert.deepEqual([stopped.status, cancelled()], ["cancelled", [first.runId]]);
+    // The other way round: the run's stop is turned down, the check is stopped, and the run isn't said to be stopping.
+    await host.setCloudExecution(ids[0]!, true);
+    const second = await going();
+    writeFileSync(join(home, "fail-cancel-for"), second.runId);
+    await assert.rejects(host.setCloudExecution(ids[0]!, false), /^Error: Uploads for this project are off, but Nivra couldn't stop its task run \(the run couldn't be stopped\)\. Restart the project's engine to stop it\.$/);
+    const left = await host.taskAttempt(task.summary.id, second.id);
+    assert.deepEqual([left.status, left.cancelRequested, cancelled()], ["running", false, [first.runId, check.runId]]);
+    rmSync(join(home, "fail-cancel-for"));
+    await host.cancelTaskRun(task.summary.id, second.id);
+    assert.equal((await ended(host, task.summary.id, second.id, "the second run to stop")).status, "cancelled");
+  });
+
+  it("stops a task run when sharing is turned off though the project's explanation couldn't be stopped, and says so", async () => {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    const { host, ids, keys, root } = made;
+    keys.current = SECRETS;
+    await host.setSharing(ids[0]!, true);
+    await host.setCloudExecution(ids[0]!, true);
+    const home = join(root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    const cancelled = () => (existsSync(join(home, "cancelled.log")) ? readFileSync(join(home, "cancelled.log"), "utf8").split("\n").filter(Boolean) : []);
+    for (const flag of ["accept", "release", "running"]) writeFileSync(join(home, flag), "");
+    const explain = await host.startExplain(ids[0]!, "", []);
+    const task = await readyTask(host, ids[0]!);
+    const view = host.task(task.summary.id);
+    const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
+    const snapshot = "c".repeat(64);
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const started = await host.startTaskRun(task.summary.id, expected, snapshot);
+    const running = await waitFor(async () => {
+      const seen = await host.taskAttempt(task.summary.id, started.id);
+      return seen.status === "running" && seen.runId ? seen : null;
+    }, "the task's run to be going");
+    writeFileSync(join(home, "fail-cancel-for"), explain.id);
+    await assert.rejects(host.setSharing(ids[0]!, false), /^Error: Sharing for this project is off, but Nivra couldn't stop an explain run \(the run couldn't be stopped\)\./);
+    const stopped = await ended(host, task.summary.id, started.id, "the task's run to stop");
+    assert.deepEqual([stopped.status, cancelled()], ["cancelled", [running.runId]]);
+    assert.match(stopped.note ?? "", /^Stopped: this project's sharing or uploads were turned off/);
+  });
+
+  it("removes a project whose task run's engine has stopped: the run's stop is recorded, and nothing is sent", async () => {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    const { host, ids, keys, root } = made;
+    keys.current = SECRETS;
+    await host.setSharing(ids[0]!, true);
+    await host.setCloudExecution(ids[0]!, true);
+    const home = join(root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "release", "running"]) writeFileSync(join(home, flag), "");
+    const task = await readyTask(host, ids[0]!);
+    const view = host.task(task.summary.id);
+    const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
+    const snapshot = "c".repeat(64);
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const started = await host.startTaskRun(task.summary.id, expected, snapshot);
+    await waitFor(async () => (await host.taskAttempt(task.summary.id, started.id)).runId, "the task's run to be going");
+    const { pid } = await online(host, "wsl:Test");
+    process.kill(pid, "SIGKILL");
+    await waitFor(() => !isAlive(pid) && stateOf(host, "wsl:Test")?.status !== "online", "the engine to stop");
+    await host.removeProject(ids[0]!);
+    const left = await host.taskAttempt(task.summary.id, started.id);
+    assert.deepEqual([host.projects().length, left.cancelRequested, readFileSync(join(home, "calls.log"), "utf8").includes("runs.cancel")], [0, true, false]);
   });
 });

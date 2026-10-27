@@ -75,7 +75,7 @@ describe("what a stopped check says, and what of cleanup leaves the engine (NIV-
       snapshot: { baseline: "b".repeat(40), prefix: "", fingerprint: "f".repeat(64), files: 2, archiveSha256: "a".repeat(64) },
       steps: [{ label: "probe", exitCode: null, signal: null, timedOut: false, cancelled: false, truncated: false, persisted: false, durationMs: null, status: null, usage: null, stdoutTail: "x".repeat(5_000), stderrTail: "" }],
       report: new TextEncoder().encode("{}"),
-      proposal: { binding: {} as never, hash: "c".repeat(64), patch: new TextEncoder().encode("diff"), report: new TextEncoder().encode("{}") },
+      proposal: { binding: {} as never, hash: "c".repeat(64), patch: new TextEncoder().encode("diff"), report: new TextEncoder().encode("{}"), postImage: new Uint8Array(1024) },
       cleanup: { steps: [], stopped: [], alreadyEnded: [], unresolved: ["Closing the session failed (private-plain-text)."], retained: { uploads: 1, images: 1, operations: 2, note: "Images are retained for 180 days." } },
     };
     const report = checkReport({ result, request: { runId: randomUUID(), clientRequestId: randomUUID() }, now: new Date("2026-10-21T08:00:00Z") });

@@ -5,7 +5,7 @@ import { KEY_HEADER, secretShapes } from "@nivra/domain";
 import { hiddenReason } from "../repo/deny.ts";
 import { isInside } from "../repo/paths.ts";
 import type { ExecutionSession, SessionSnapshot } from "./backend.ts";
-import { runGitBytes, WorkspaceRefusal, type GitTool } from "./git-tool.ts";
+import { runGitBytes, WorkspaceRefusal, type GitTool, type PhaseDeadline } from "./git-tool.ts";
 import { listingDigest, type ListingEntry } from "./nebius/session.ts";
 import { writeTar, type TarEntry } from "./tar.ts";
 import { byBytes, caseKey, snapshotPathProblem } from "./workspace-rules.ts";
@@ -117,6 +117,8 @@ export interface SnapshotOptions {
   knownValues?: readonly string[];
   limits?: Partial<SnapshotLimits>;
   signal?: AbortSignal;
+  /** One deadline for all of the snapshot's git commands. */
+  deadline?: PhaseDeadline;
 }
 
 const sha256 = (data: Uint8Array | string) => createHash("sha256").update(data).digest("hex");
@@ -160,6 +162,7 @@ const SHAPE_WORDS: Readonly<Record<string, string>> = {
   "api-key": "an API key",
   "slack-token": "a Slack token",
   "linear-token": "a Linear token",
+  "tavily-key": "a Tavily API key",
 };
 /** A private key's first line is enough before an upload: a key cut short, or its last line missing, still counts. */
 const KEY_START = new RegExp(KEY_HEADER);
@@ -474,7 +477,7 @@ function placeOf(topLevel: string, path: string): string | null {
 export async function takeSnapshot(options: SnapshotOptions): Promise<Snapshot> {
   const limits: SnapshotLimits = { ...SNAPSHOT_LIMITS, ...options.limits };
   const folder = realpathSync.native(options.folder);
-  const tool: GitTool = { session: options.session, git: options.git, cwd: folder, signal: options.signal };
+  const tool: GitTool = { session: options.session, git: options.git, cwd: folder, signal: options.signal, deadline: options.deadline };
   await checkGitVersion(tool);
   // One line each, its last newline taken off: a folder's name may hold a newline itself.
   const topLevel = realpathSync.native(oneLine((await runGitBytes(tool, ["rev-parse", "--show-toplevel"])).bytes, "The repository's folder name"));

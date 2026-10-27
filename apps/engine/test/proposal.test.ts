@@ -6,6 +6,7 @@ import { after, describe, it } from "node:test";
 import { buildPatch, PATCH_POLICY } from "../src/exec/patch.ts";
 import { buildReport, canonicalJson, makeProposal, proposalHash, verifyProposal, type Proposal, type ProposalExpectation, type StepRecord } from "../src/exec/proposal.ts";
 import { cleanUp, collect, GIT, git, guestRun, localSession, put, refusal, repoWith, scratch, snap } from "./workspace-fixtures.ts";
+import { readTar } from "../src/exec/tar.ts";
 
 /**
  * Proposals (NIV-42, D34, D15): a patch bound to its project, target, destination, baseline and report by one hash,
@@ -43,10 +44,11 @@ describe("proposals", () => {
     assert.throws(() => canonicalJson({ f: () => 1 }), TypeError);
   });
 
-  it("binds the patch to its project, target, destination, baseline, trees, fingerprint, policy and report, and hashes the binding", async () => {
+  it("binds the patch to its project, target, destination, baseline, trees, fingerprint, policy, report, paths and post-image, and hashes the binding", async () => {
     const { snapshot, patch, report, proposal } = await realProposal();
+    const before = (path: string) => snapshot.files.find((file) => file.path === path)!;
     assert.deepEqual(proposal.binding, {
-      version: 1,
+      version: 2,
       project: "project-1",
       target: "local",
       destination: { root: snapshot.topLevel, prefix: "" },
@@ -58,11 +60,23 @@ describe("proposals", () => {
       policy: { ...PATCH_POLICY },
       patchSha256: sha(patch.bytes),
       reportSha256: sha(report),
+      paths: [
+        { path: "old.txt", change: "deleted", before: { mode: "100644", sha256: sha(before("old.txt").bytes) }, after: null },
+        { path: "src/a.ts", change: "changed", before: { mode: "100644", sha256: sha(before("src/a.ts").bytes) }, after: { mode: "100644", sha256: sha("export const a = 2;\n") } },
+        { path: "src/b.ts", change: "added", before: null, after: { mode: "100644", sha256: sha("export const b = 1;\n") } },
+      ],
+      postImageSha256: sha(proposal.postImage),
+      task: null,
     });
     assert.equal(proposal.hash, sha(canonicalJson(proposal.binding)));
+    // The post-image holds the new files' bytes, sorted by path, and nothing else.
+    assert.deepEqual(readTar(proposal.postImage, { maxEntries: 10, maxBytes: 1 << 20, maxEntryBytes: 1 << 20, maxPathBytes: 1024 }).filter((entry) => entry.kind === "file").map((entry) => [entry.path, entry.kind === "file" ? new TextDecoder().decode(entry.bytes) : null]), [
+      ["src/a.ts", "export const a = 2;\n"],
+      ["src/b.ts", "export const b = 1;\n"],
+    ]);
     // Every field counts: changing any one gives another hash.
     const fields: Array<Partial<Proposal["binding"]>> = [
-      { version: 2 },
+      { version: 3 },
       { project: "project-2" },
       { target: "wsl:Ubuntu" },
       { destination: { root: snapshot.topLevel, prefix: "src" } },
@@ -76,6 +90,9 @@ describe("proposals", () => {
       { policy: { ...PATCH_POLICY, maxChangedFiles: 501 } },
       { patchSha256: "0".repeat(64) },
       { reportSha256: "0".repeat(64) },
+      { paths: [] },
+      { postImageSha256: "0".repeat(64) },
+      { task: { attempt: { taskId: "t", attemptId: "a", runId: "r" }, engine: { homeId: "h" }, brief: { version: 1, sha256: "0".repeat(64) } } },
     ];
     const hashes = new Set([proposal.hash, ...fields.map((field) => proposalHash({ ...proposal.binding, ...field }))]);
     assert.equal(hashes.size, fields.length + 1);
@@ -153,10 +170,11 @@ describe("proposals", () => {
     const INTACT = /^This proposal isn't intact: its patch, its report or what it binds no longer matches its hash, so it can't be applied\. Run the task again\.$/;
     assert.throws(() => verifyProposal({ ...proposal, patch: flipped(proposal.patch) }, expected), refusal(INTACT));
     assert.throws(() => verifyProposal({ ...proposal, report: flipped(proposal.report) }, expected), refusal(INTACT));
+    assert.throws(() => verifyProposal({ ...proposal, postImage: flipped(proposal.postImage) }, expected), refusal(INTACT));
     assert.throws(() => verifyProposal({ ...proposal, binding: { ...proposal.binding, baseline: "0".repeat(40) } }, expected), refusal(INTACT));
     // A binding changed and hashed again is intact, but it isn't what was approved.
     const rebound = { ...proposal.binding, destination: { ...proposal.binding.destination, prefix: "src" } };
     assert.throws(() => verifyProposal({ ...proposal, binding: rebound, hash: proposalHash(rebound) }, expected), refusal(/^This isn't the proposal you approved/));
-    assert.throws(() => verifyProposal({ ...proposal, binding: { ...proposal.binding, version: 2 }, hash: proposalHash({ ...proposal.binding, version: 2 }) }, expected), refusal(/another version of Nivra's rules/));
+    assert.throws(() => verifyProposal({ ...proposal, binding: { ...proposal.binding, version: 3 }, hash: proposalHash({ ...proposal.binding, version: 3 }) }, expected), refusal(/another version of Nivra's rules/));
   });
 });

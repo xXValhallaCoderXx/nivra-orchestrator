@@ -16,6 +16,7 @@ import {
 } from "@nivra/domain";
 import { Database, num, str, strOrNull, type Row } from "../db/database.ts";
 import { Refusal } from "../diagnostics.ts";
+import type { Proposal, ProposalBinding } from "../exec/proposal.ts";
 
 /**
  * The engine's record of runs: status and an append-only timeline. Clients read these, never Mastra's tables.
@@ -184,6 +185,25 @@ export class RunStore {
       .run(runId, kind, masked, this.#iso());
   }
 
+  /**
+   * Keeps a task run's proposal exactly as it was bound (D39), once: its bytes are never masked, so a change holding
+   * a vault value must be refused before this. A second proposal for the same run is refused.
+   */
+  saveProposal(runId: string, proposal: Proposal): void {
+    this.#database
+      .open()
+      .prepare("INSERT INTO proposals (run_id, hash, binding, patch, report, post_image, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(runId, proposal.hash, JSON.stringify(proposal.binding), proposal.patch, proposal.report, proposal.postImage, this.#iso());
+  }
+
+  /** A run's proposal as it was kept, or null. Its integrity is the reader's to check (`verifyProposal`). */
+  proposal(runId: string): Proposal | null {
+    const row = this.#database.open().prepare("SELECT * FROM proposals WHERE run_id = ?").get(runId);
+    if (!row) return null;
+    const bytes = (value: Row[string]) => (value instanceof Uint8Array ? new Uint8Array(value) : new Uint8Array());
+    return { binding: JSON.parse(str(row["binding"])) as ProposalBinding, hash: str(row["hash"]), patch: bytes(row["patch"]), report: bytes(row["report"]), postImage: bytes(row["post_image"]) };
+  }
+
   artifact(runId: string, kind: string): string | null {
     const row = this.#database.open().prepare("SELECT content FROM artifacts WHERE run_id = ? AND kind = ?").get(runId, kind);
     return row ? str(row["content"]) : null;
@@ -232,10 +252,13 @@ export class RunStore {
     return RunEventsPage.parse({ events, next: events.at(-1)?.seq ?? after, status });
   }
 
-  /** The oldest queued run, or null. */
-  nextQueued(): string | null {
-    const row = this.#database.open().prepare("SELECT id FROM runs WHERE status = 'queued' ORDER BY rowid LIMIT 1").get();
-    return row ? str(row["id"]) : null;
+  /** Every queued run, oldest first, with its workflow: which slot it waits for (D39). */
+  queued(): Array<{ id: string; workflowId: WorkflowId }> {
+    return this.#database
+      .open()
+      .prepare("SELECT id, workflow_id FROM runs WHERE status = 'queued' ORDER BY rowid")
+      .all()
+      .map((row) => ({ id: str(row["id"]), workflowId: str(row["workflow_id"]) as WorkflowId }));
   }
 
   /** Runs that are queued or going. */
