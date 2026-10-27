@@ -4103,14 +4103,11 @@ function preparationNote(preparation: PreparationRecord): string | null {
   switch (preparation.status) {
     case "failed":
       return `${preparation.errorMessage ?? "The preparation failed."} Nothing was resent.`;
-    case "cancelled":
-      return preparation.cancelReason === "uploads"
-        ? "Stopped: uploads for this project were turned off. What it had sent stays with Nebius; its report says what that was."
-        : preparation.cancelReason === "removal"
-          ? "Stopped: the project was removed. What it had sent stays with Nebius."
-          : preparation.errorMessage
-            ? `Cancelled. ${preparation.errorMessage}`
-            : "Cancelled. What it had sent stays with Nebius; its report says what that was.";
+    case "cancelled": {
+      const why = preparation.cancelReason === "uploads" ? "Stopped: uploads for this project were turned off." : preparation.cancelReason === "removal" ? "Stopped: the project was removed." : "Cancelled.";
+      // One stopped before it was sent says so; one stopped after may have left something with Nebius.
+      return `${why} ${preparation.errorMessage ?? "What it had sent stays with Nebius; its report says what that was."}`;
+    }
     case "interrupted":
       return "Interrupted: Nivra or its engine stopped while the preparation was going. It wasn't started again.";
     case "not-sent":
