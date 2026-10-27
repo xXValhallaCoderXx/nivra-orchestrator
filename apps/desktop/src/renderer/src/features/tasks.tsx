@@ -500,7 +500,7 @@ export function TaskDetail({
               <Button size="xs" onClick={() => void saveEdit((from) => window.nivra.renameTask(taskId, from, title))} loading={busy} data-testid="task-title-save">
                 Save
               </Button>
-              <Button size="xs" variant="subtle" onClick={stopEdit} disabled={busy}>
+              <Button size="xs" variant="subtle" onClick={stopEdit} disabled={busy} data-testid="task-title-cancel">
                 Cancel
               </Button>
             </Group>

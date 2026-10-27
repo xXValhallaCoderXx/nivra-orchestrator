@@ -156,6 +156,15 @@ test("a vague task: its gaps, the exact preview, one request, and only the ticke
   await expect(latestCoaching()).toHaveAttribute("data-status", "answered", { timeout: 30_000 });
   expect([listings() - sent[0]!, coachRequests() - sent[1]!]).toEqual([1, 1]);
 
+  // With the title being edited, a question's Update waits and says why, and the title's edit is left as it is.
+  await page.getByTestId("task-rename").click();
+  await page.getByTestId("task-title-input").fill("A title being edited");
+  await expect(page.locator('[data-testid="coach-update-field"][data-field="acceptanceCriteria"]')).toBeDisabled();
+  await expect(page.getByTestId("coach-update-blocked").first()).toHaveText("Save or cancel your other edit first.");
+  await expect(page.getByTestId("task-title-input")).toHaveValue("A title being edited");
+  await page.getByTestId("task-title-cancel").click();
+  await expect(page.locator('[data-testid="coach-update-field"][data-field="acceptanceCriteria"]')).toBeEnabled();
+
   // A question opens the editor at its field, and an edit already open keeps what the person typed.
   await page.getByTestId("task-edit-brief").click();
   await page.getByTestId("brief-goal").fill("My own goal, not saved yet");
