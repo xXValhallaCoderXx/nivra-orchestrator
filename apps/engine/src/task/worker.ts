@@ -54,7 +54,7 @@ export interface TaskBrief {
 }
 
 /** Why the worker's loop ended. */
-export type WorkerEnd = "submitted" | "time" | "requests" | "input" | "tool-calls" | "model-failed" | "no-time" | "not-started";
+export type WorkerEnd = "submitted" | "time" | "requests" | "input" | "tool-calls" | "model-failed" | "output-cap" | "no-time" | "not-started";
 
 export interface WorkerSummary {
   handedIn: boolean;
@@ -145,11 +145,18 @@ const MODEL_TAIL = 4_000;
 const tail = (text: string, max = MODEL_TAIL) => (max <= 0 ? "" : text.length > max ? text.slice(-max) : text);
 /**
  * When the end note starts: this few model requests left after the one under way, this few tool calls, this few
- * seconds left for tools, or room in the input budget for this few more requests before the hand-in's.
+ * seconds left for requests with tools (one request's time), or room in the input budget for this few more requests
+ * before the hand-in's.
  */
-const ENDING = { requests: 4, toolCalls: 6, seconds: 90, inputRequests: 3 } as const;
-/** Below this much of the work window, only handing in is left: room for a run's operation, and the hand-in. */
-const handInMs = () => runNeedsMs() + TASK_LIMITS.model.stepMs / 5;
+const ENDING = { requests: 4, toolCalls: 6, seconds: TASK_LIMITS.model.stepMs / 1000, inputRequests: 3 } as const;
+/**
+ * A request is sent with its whole time or not at all, so only its own deadline can cut it off (NIV-35), and the
+ * hand-in's whole time, for its own smaller answer, is kept from the work window's start, so the last request can
+ * always be sent: no operation takes it. A request with tools needs its own time and the hand-in's; below that, only
+ * handing in is left.
+ */
+const HAND_IN_KEPT_MS = TASK_LIMITS.model.handIn.stepMs;
+const WITH_TOOLS_MS = TASK_LIMITS.model.stepMs + HAND_IN_KEPT_MS;
 /** What an answer keeps free of the request's room for its own envelope, its allowance and the end note. */
 const ANSWER_ROOM = 1_500;
 
@@ -180,7 +187,7 @@ export function workerPrompt(brief: TaskBrief, paths: readonly string[]): string
     `Acceptance cases (run_case by number; judged by Nivra):\n${brief.acceptanceCases.map((given, index) => `${index + 1}. ${given.name}\n   command: ${given.command}\n   expected exit code: ${given.expectedExitCode}\n   expected output: ${JSON.stringify(given.expectedOutput)}`).join("\n") || "(none)"}`,
     `Repository checks (run_check by number; reported, never deciding):\n${brief.checks.map((check, index) => `${index + 1}. ${check}`).join("\n") || "(none)"}`,
     brief.frozen?.length ? `Frozen files (the task is judged by them, so edit_file and create_file refuse them):\n${list(brief.frozen)}` : "",
-    `This attempt may make ${TASK_LIMITS.model.requests} model requests, the last of which can only hand in, and ${TASK_LIMITS.tools.calls} tool calls, of which ${TASK_LIMITS.tools.writes} writes and ${TASK_LIMITS.tools.runs} runs of cases and checks.`,
+    `This attempt may make ${TASK_LIMITS.model.requests} model requests, the last of which can only hand in, and ${TASK_LIMITS.tools.calls} tool calls, of which ${TASK_LIMITS.tools.writes} writes and ${TASK_LIMITS.tools.runs} runs of cases and checks. An answer may be at most ${TASK_LIMITS.model.outputTokensPerRequest.toLocaleString("en-US")} tokens long, and the hand-in's ${TASK_LIMITS.model.handIn.outputTokens.toLocaleString("en-US")}: a longer one is cut off before its tool call is made, and the attempt ends there, so make a large change as several smaller edit_file calls.`,
     `Files (${paths.length}${paths.length > shown.length ? `, the first ${shown.length} shown; list_files shows more and search_files finds them` : ""}):\n${shown.join("\n")}`,
   ]
     .filter(Boolean)
@@ -363,9 +370,10 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     const windowEnd = sessionDeadline - reserveMs(finalChecks);
     const windowLeft = () => windowEnd - now();
     const windowMs = Math.floor(windowLeft());
-    if (windowMs < TASK_LIMITS.model.stepMs / 5) {
+    // Too short for one request with tools and then the hand-in, each of its whole time: nothing could be done.
+    if (windowMs < WITH_TOOLS_MS) {
       worker.ended = "no-time";
-      progress("No time was left in the session for the worker, so it didn't start.", { windowMs });
+      progress("Too little time was left in the session for a request with tools and then the hand-in, so the worker didn't start.", { windowMs });
       return { going: true };
     }
     progress(`Work window: ${Math.round(windowMs / 1000)} s for the model and its operations; ${Math.round(reserveMs(finalChecks) / 1000)} s kept for collect and the final checks.`, { windowMs, reserveMs: reserveMs(finalChecks) });
@@ -392,15 +400,15 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     };
     /**
      * What the attempt has left once the request under way is answered (NIV-35), given with every tool's answer: its
-     * model requests (the last of them only for handing in), tool calls, writes, runs, the seconds left for tools before
-     * only handing in is, and the run's estimated input.
+     * model requests (the last of them only for handing in), tool calls, writes, runs, the seconds in which a request
+     * with tools can still start before only handing in is, and the run's estimated input.
      */
     const left = () => ({
       modelRequests: Math.max(0, TASK_LIMITS.model.requests - requestsDone - 1),
       toolCalls: Math.max(0, TASK_LIMITS.tools.calls - worker.tools.calls - worker.tools.rejected),
       writes: Math.max(0, TASK_LIMITS.tools.writes - worker.tools.writes),
       runs: Math.max(0, TASK_LIMITS.tools.runs - worker.tools.runs),
-      seconds: Math.max(0, Math.floor((windowLeft() - handInMs()) / 1000)),
+      seconds: Math.max(0, Math.floor((windowLeft() - WITH_TOOLS_MS) / 1000)),
       estimatedInputTokens: runBudget.remainingInput(),
     });
     /** Requests of the size the next one will be that the input budget still holds, besides the hand-in's room. */
@@ -470,7 +478,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       const problem = held.get(path) ?? writeContentProblem(content, run.knownValues) ?? copy.writeProblem(path, bytes, run.knownValues);
       if (problem) return refuse(tool, problem);
       if (worker.tools.writes >= TASK_LIMITS.tools.writes) return refuse(tool, `this attempt has made its ${TASK_LIMITS.tools.writes} writes; call submit now`);
-      if (windowLeft() < writeNeedsMs()) return refuse(tool, "there isn't time left in this attempt for another write; call submit now");
+      if (windowLeft() - HAND_IN_KEPT_MS < writeNeedsMs()) return refuse(tool, "there isn't time left in this attempt for another write; call submit now");
       const previous = copy.text(path);
       const before = "text" in previous ? encoder.encode(previous.text) : null;
       worker.tools.writes++;
@@ -519,7 +527,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       const missing = missingFor(command);
       if (missing) return { number, ...publicResult(couldntRun(kind, number, name, missing)) };
       if (worker.tools.runs >= TASK_LIMITS.tools.runs) return refuse(tool, `this attempt has made its ${TASK_LIMITS.tools.runs} runs of cases and checks`);
-      if (windowLeft() < runNeedsMs()) return refuse(tool, "there isn't time left in this attempt for another run; call submit now");
+      if (windowLeft() - HAND_IN_KEPT_MS < runNeedsMs()) return refuse(tool, "there isn't time left in this attempt for another run; call submit now");
       worker.tools.runs++;
       context.stage = "run";
       let ran: ExecResult;
@@ -653,7 +661,14 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       const input = budget.used();
       // Whether the run's input budget still holds a full request after this one, the hand-in's room (D30, as explain).
       flight.low = runBudget.fits(input, Math.max(0, budget.tokens)) !== null;
-      const held = runBudget.hold({ inputTokens: input, ms: TASK_LIMITS.model.stepMs }, { upTo: true });
+      // Its whole time in the work window, or the request isn't sent (NIV-35): the window's end never cuts one off. With
+      // less than a request with tools and the hand-in need, the next request can only hand in, in the hand-in's time.
+      const ms = windowLeft() < WITH_TOOLS_MS ? HAND_IN_KEPT_MS : TASK_LIMITS.model.stepMs;
+      if (windowLeft() < ms) {
+        flight.refused = { reason: "time", needed: ms, available: Math.max(0, Math.floor(windowLeft())) };
+        return flight.refused;
+      }
+      const held = runBudget.hold({ inputTokens: input, ms }, { upTo: true });
       if ("admit" in held) {
         flight.next = held;
         return null;
@@ -686,16 +701,16 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
             }
             flight.inFlight = held;
             // The last request, or the last one the run's input budget or this request's context has room for; the tool
-            // calls used up; or no time for another operation: only handing in is left. A hand-in for room reads as its
-            // last request, which it is, and the progress line says why.
+            // calls used up; or no time for this request and then the hand-in, each of its whole time: only handing in is
+            // left. A hand-in for room reads as its last request, which it is, and the progress line says why.
             const roomOnly = flight.low || budget.exhausted();
-            const due = stepNumber >= TASK_LIMITS.model.requests - 1 || roomOnly ? "last-request" : worker.tools.calls + worker.tools.rejected >= TASK_LIMITS.tools.calls ? "tool-calls" : windowLeft() < handInMs() ? "time" : null;
+            const due = stepNumber >= TASK_LIMITS.model.requests - 1 || roomOnly ? "last-request" : worker.tools.calls + worker.tools.rejected >= TASK_LIMITS.tools.calls ? "tool-calls" : windowLeft() < WITH_TOOLS_MS ? "time" : null;
             if (!due) return { toolChoice: run.policy.explore };
             if (worker.handInDue === null && roomOnly && stepNumber < TASK_LIMITS.model.requests - 1) {
               progress("Only handing in is left: the run's input budget, or this request's context, has room for the hand-in and no more.", { estimatedInputLeft: runBudget.remainingInput(), requestTokens: budget.used() });
             }
             worker.handInDue ??= due;
-            return { activeTools: ["submit"], toolChoice: run.policy.forceAnswer ? { type: "tool", toolName: "submit" } : "auto" };
+            return { activeTools: ["submit"], toolChoice: run.policy.forceAnswer ? { type: "tool", toolName: "submit" } : "auto", maxOutputTokens: TASK_LIMITS.model.handIn.outputTokens, stepMs: HAND_IN_KEPT_MS };
           },
           internal,
           ...(run.signal ? { signal: run.signal } : {}),
@@ -742,9 +757,12 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
           ? "time"
           : failure
             ? "model-failed"
-            : worker.tools.calls + worker.tools.rejected >= TASK_LIMITS.tools.calls
-              ? "tool-calls"
-              : "requests";
+            : // An answer cut off at its cap ends Mastra's loop with nothing more to run (NIV-35): said as that.
+              steps.at(-1)?.finishReason === "length"
+              ? "output-cap"
+              : worker.tools.calls + worker.tools.rejected >= TASK_LIMITS.tools.calls
+                ? "tool-calls"
+                : "requests";
     worker.failure = failure && worker.ended === "model-failed" ? failure.kind : null;
     progress(`The worker ${worker.handedIn ? "handed in" : `stopped without handing in (${worker.ended})`}: ${copy.written.length} ${copy.written.length === 1 ? "file" : "files"} written.`, { ended: worker.ended, written: copy.written.length, requests: usage.calls });
     return { going: true };

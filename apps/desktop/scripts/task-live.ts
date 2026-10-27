@@ -384,7 +384,8 @@ async function live(frozen: Frozen, task: LiveTask, approved: string): Promise<n
     log("The run's preview is the approved one: this brief, this commit's snapshot, the environment just prepared and the frozen files. Pressing Start, once.");
     await shot(page, folder, "2-run-preview.png", log);
     const attemptId = await startOnce(page, taskId);
-    const ended = await followRun(page, taskId, attemptId, 45 * 60_000, log);
+    // Followed past the run's own deadline, so only the engine's limits end it, never this wait.
+    const ended = await followRun(page, taskId, attemptId, (recipe.limits.runMinutes + 10) * 60_000, log);
     save("attempt.json", ended);
     await shot(page, folder, "3-run-ended.png", log);
     const used = ended.report?.route?.model ?? null;

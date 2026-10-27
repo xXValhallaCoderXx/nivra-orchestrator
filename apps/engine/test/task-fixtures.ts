@@ -3,7 +3,7 @@ import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
 import type { ExecutionSession } from "../src/exec/backend.ts";
 import type { Transport } from "../src/exec/nebius/api.ts";
 import { createNebiusBackend } from "../src/exec/nebius/session.ts";
-import { createModelClient } from "../src/providers/model.ts";
+import { createModelClient, type CallOptions } from "../src/providers/model.ts";
 import { policyFor } from "../src/providers/policy.ts";
 import { operationsForBrief, runWorker, type TaskBrief, type WorkerRun } from "../src/task/worker.ts";
 import { TASK_BRIEF, TASK_FIX, TASK_FIXTURE } from "../scripts/task-fixture.ts";
@@ -30,7 +30,11 @@ export type Call = [tool: string, input: Record<string, unknown>];
 /** One model response: one tool call, or several in one step. */
 export type Step = Call | Call[];
 type Generated = { content: unknown[]; finishReason: string; usage: Record<string, number>; warnings: unknown[] };
-const calling = (step: Step, index: number): Generated => ({
+/** An answer cut off at its output cap: the start of some text, and no tool call made (NIV-35). */
+export const CUT_OFF: Call = ["(cut off)", {}];
+const calling = (step: Step, index: number): Generated =>
+  step[0] === CUT_OFF[0] ? { content: [{ type: "text", text: "Here is the whole file, rewritten:\n#!/bin/sh\n" }], finishReason: "length", usage: { inputTokens: 3_000, outputTokens: 2_500, totalTokens: 5_500 }, warnings: [] } : answering(step, index);
+const answering = (step: Step, index: number): Generated => ({
   content: (typeof step[0] === "string" ? [step as Call] : (step as Call[])).map(([tool, input], at) => ({ type: "tool-call", toolCallId: `call-${index}-${at}`, toolName: tool, input: JSON.stringify(input) })),
   finishReason: "tool-calls",
   usage: { inputTokens: 3_000, outputTokens: 200, totalTokens: 3_200 },
@@ -68,15 +72,19 @@ export async function attempt(options: Attempt = {}) {
   const backend = createNebiusBackend({ credentials: () => ({ key: KEY, project: PROJECT }), baseImage: guest.baseImage, journalDir: scratch("journals"), transport: () => (options.wrap ? options.wrap(guest.service.transport, guest) : guest.service.transport), applets: "", limits: { maxOperations: operationsForBrief(brief), maxTimeoutSeconds: 60, prepareTimeoutSeconds: 60, pollMs: 10 }, now: time.now, sleep: time.sleep });
   const script = [...(options.calls ?? [["read_file", { path: "greet.sh" }], ["edit_file", FIX], ["run_case", { number: 1 }]]), ["submit", { summary: "Defaulted the name to world." }]] as Step[];
   let requests = 0;
-  // What each request carried, and the tools it offered: what the worker was told, as the model would read it.
+  // What each request carried, the tools it offered and its output cap: what the worker was told, as the model would
+  // read it; and the deadlines each call to the model was given.
   const prompts: string[] = [];
   const offered: string[][] = [];
+  const outputCaps: Array<number | undefined> = [];
+  const deadlines: CallOptions["deadlines"][] = [];
   const model = new MastraLanguageModelV2Mock({
-    doGenerate: (async (call: { prompt: unknown; tools?: Array<{ name: string }> }) => {
+    doGenerate: (async (call: { prompt: unknown; tools?: Array<{ name: string }>; maxOutputTokens?: number }) => {
       const index = requests++;
       const sent = JSON.stringify(call.prompt);
       prompts.push(sent);
       offered.push((call.tools ?? []).map((tool) => tool.name).sort());
+      outputCaps.push(call.maxOutputTokens);
       options.beforeRequest?.(index);
       const onlySubmit = offered.at(-1)!.length === 1 && offered.at(-1)![0] === "submit";
       const answer = calling(options.handInWhenAsked && onlySubmit ? ["submit", { summary: "Nothing I can justify changing yet." }] : script[Math.min(index, script.length - 1)]!, index);
@@ -88,6 +96,7 @@ export async function attempt(options: Attempt = {}) {
   const opened = await localSession(root);
   const local = options.wrapLocal ? options.wrapLocal(opened) : opened;
   const preview = await previewOf(root);
+  const client = createModelClient({ apiKey: "test-key-0123456789", model: () => model });
   try {
     const outcome = await runWorker({
       binding: { project: randomUUID(), target: "local", taskId: randomUUID(), attemptId: randomUUID(), runId: randomUUID(), briefVersion: 1, briefSha256: "b".repeat(64), homeId: randomUUID() },
@@ -97,7 +106,7 @@ export async function attempt(options: Attempt = {}) {
       backend,
       local,
       git: GIT,
-      client: createModelClient({ apiKey: "test-key-0123456789", model: () => model }),
+      client: { ...client, call: (agent, prompt, call) => (deadlines.push(call.deadlines), client.call(agent, prompt, call)) },
       model: MODEL,
       policy: policyFor(MODEL),
       contextLength: null,
@@ -109,7 +118,7 @@ export async function attempt(options: Attempt = {}) {
       ...(options.signal ? { signal: options.signal } : {}),
       ...options.extra,
     });
-    return { ...outcome, guest, model, root, changed: changedSince(before, root), requests: () => requests, prompts: () => prompts, offered: () => offered };
+    return { ...outcome, guest, model, root, changed: changedSince(before, root), requests: () => requests, prompts: () => prompts, offered: () => offered, outputCaps: () => outputCaps, deadlines: () => deadlines };
   } finally {
     await opened.close();
   }

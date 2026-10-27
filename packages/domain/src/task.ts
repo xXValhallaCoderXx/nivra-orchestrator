@@ -298,7 +298,8 @@ export const TaskWorker = z.strictObject({
   handedIn: z.boolean(),
   /** The worker's own words, masked. */
   summary: z.string().max(2_000).nullable(),
-  ended: z.enum(["submitted", "time", "requests", "input", "tool-calls", "model-failed", "no-time", "not-started"]),
+  /** `output-cap`: an answer reached the output cap before its tool call was made, which ends the loop (NIV-35). */
+  ended: z.enum(["submitted", "time", "requests", "input", "tool-calls", "model-failed", "output-cap", "no-time", "not-started"]),
   /** Why it was first left only handing in: its last request, its tool calls used, or no time for another operation. */
   handInDue: z.enum(["last-request", "tool-calls", "time"]).nullable(),
   failure: ModelFailureKind.nullable(),

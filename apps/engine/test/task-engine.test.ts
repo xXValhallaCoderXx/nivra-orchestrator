@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { isTerminal, projectFingerprint, TASK_MODEL, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskReport } from "@nivra/domain";
 import { CHECK_IMAGE } from "../src/exec/check.ts";
-import { operationsFor } from "../src/task/limits.ts";
+import { operationsFor, TASK_LIMITS } from "../src/task/limits.ts";
 import { TASK_STOP_MESSAGES } from "../src/task/report.ts";
 import { FIXED_GREET, TASK_BRIEF, TASK_FIX, TASK_FIXTURE } from "../scripts/task-fixture.ts";
 import { removeDir, startEngine, tempDir, waitFor, type EngineProcess } from "./helpers.ts";
@@ -205,7 +205,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     const { sandbox, model, engine, repo } = await setup();
     const shown = ready(await preview(engine, repo));
     assert.deepEqual([shown.snapshot.files, shown.programs, shown.unprobed, shown.caseFiles], [2, [".", "/bin/sh"], 0, [{ number: 1, files: ["greet.sh"], unclear: false }]]);
-    assert.deepEqual([shown.limits.operations, shown.limits.sessionMinutes, shown.limits.runMinutes, shown.limits.writes, shown.limits.writeBytes], [operationsFor(2), 20, 33, 8, 32_768]);
+    assert.deepEqual([shown.limits.operations, shown.limits.requestSeconds, shown.limits.outputTokensPerRequest, shown.limits.sessionMinutes, shown.limits.runMinutes, shown.limits.writes, shown.limits.writeBytes], [operationsFor(2), 280, 2_500, 35, 48, 8, 32_768]);
     assert.match(shown.snapshot.retention, /^Images are retained for 180 days/);
     // A first word that isn't a plain program is never guessed: it runs, and isn't looked for.
     const quoted = ready(await preview(engine, repo, { ...BRIEF, checks: ['"./check.sh"'] }));
@@ -235,6 +235,8 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual([done.route?.endpoint, done.cleanup?.unresolved, done.cleanup?.retained?.uploads], ["loopback-test", [], 1]);
     // The one model the preview names, as every request carried it and as the report names it (NIV-35).
     assert.deepEqual([[...new Set(model.chats().map((chat) => chat.body?.model))], done.route?.model, done.worker?.model], [[TASK_MODEL], TASK_MODEL, TASK_MODEL]);
+    // Every request's output cap, as Token Factory received it: the one its time is sized for (NIV-35).
+    assert.deepEqual([...new Set(model.chats().map((chat) => chat.body?.max_tokens))], [TASK_LIMITS.model.outputTokensPerRequest]);
     // The proposal, as the person reads it, and as it was kept.
     const proposal = (await engine.client.call("runs.proposal", { runId: run.id }))!;
     assert.deepEqual([proposal.hash, proposal.paths.map((path) => `${path.change} ${path.path} ${path.after?.mode}`), proposal.truncated], [done.proposal?.hash, ["changed greet.sh 100644"], false]);

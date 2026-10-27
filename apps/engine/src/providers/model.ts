@@ -22,6 +22,13 @@ export interface Endpoint {
 
 export const TOKEN_FACTORY: Endpoint = { url: TOKEN_FACTORY_BASE_URL, kind: "token-factory" };
 
+/**
+ * How long Node's fetch waits for a reply's headers before it fails the request (undici's `headersTimeout`). Mastra's
+ * `generate` doesn't stream, so a model's reply has its headers only once its whole answer is ready: a request's
+ * deadline must stay under this, or fetch cuts the request off first (NIV-35).
+ */
+export const FETCH_HEADERS_MS = 300_000;
+
 /** A model call failed. `kind` lets the app say what to do without reading the message. */
 export class ModelFailure extends Error {
   readonly kind: ModelFailureKind;
@@ -143,8 +150,11 @@ export interface CallOptions {
   maxOutputTokens: number;
   toolChoice?: ToolChoice;
   stopWhen?: () => boolean;
-  /** Before each request. A failure it records through `internal` ends the call there, and the request is never sent. */
-  prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice } | undefined;
+  /**
+   * Before each request. A failure it records through `internal` ends the call there, and the request is never sent.
+   * A request may have an output cap and a deadline of its own, in place of the call's (NIV-35).
+   */
+  prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice; maxOutputTokens?: number; stepMs?: number } | undefined;
   /** The person's cancel. */
   signal?: AbortSignal;
   internal?: InternalFailure;
@@ -285,7 +295,10 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
                   const prepared = call.prepareStep!({ stepNumber });
                   // Mastra's tripwire ends the loop before the request, quietly: a throw here would be logged with its stack.
                   if (internal.failure) abort("stopped before its request");
-                  return prepared;
+                  if (!prepared || (prepared.maxOutputTokens === undefined && prepared.stepMs === undefined)) return prepared;
+                  // Mastra takes a step's settings whole, so the call's are given again beside its own, retries off.
+                  const { maxOutputTokens = call.maxOutputTokens, stepMs = call.deadlines.stepMs, ...rest } = prepared;
+                  return { ...rest, modelSettings: { maxOutputTokens, maxRetries: 0, timeout: { stepMs: Math.max(1, Math.floor(stepMs)), totalMs: Math.max(1, Math.floor(call.deadlines.totalMs)) } } };
                 },
               }
             : {}),

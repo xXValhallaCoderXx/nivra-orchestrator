@@ -104,6 +104,28 @@ describe("ModelClient (D22)", () => {
     assert.match(failure.message, /one model call took longer/);
   });
 
+  it("gives a request its own output cap and deadline when the call's step asks, and the call's to the others, never retrying (NIV-35)", async () => {
+    const tools = { probe: createTool({ id: "probe", description: "Probe", inputSchema: z.object({}), execute: async () => ({ ok: true }) }) };
+    let n = 0;
+    const { model, call } = harness(async () => {
+      if (n++ === 0) return useTool("probe", {});
+      // The second request takes longer than its own deadline, though well inside the call's.
+      await sleep(400);
+      return answer("late");
+    }, tools);
+    const failure = await call({ deadlines: { stepMs: 5_000, totalMs: 10_000 }, prepareStep: ({ stepNumber }) => (stepNumber === 1 ? { maxOutputTokens: 50, stepMs: 100 } : undefined) }).catch((error: unknown) => error);
+    assert.ok(failure instanceof ModelFailure);
+    assert.deepEqual([failure.kind, model.doGenerateCalls.length, model.doGenerateCalls.map((options) => (options as { maxOutputTokens?: number }).maxOutputTokens)], ["timeout", 2, [200, 50]]);
+    // A provider's failure of such a request is never retried either.
+    let m = 0;
+    const failing = harness(async () => {
+      if (m++ === 0) return useTool("probe", {});
+      throw apiError(503, { isRetryable: true });
+    }, tools);
+    await assert.rejects(failing.call({ prepareStep: ({ stepNumber }) => (stepNumber === 1 ? { maxOutputTokens: 50, stepMs: 1_000 } : undefined) }), ModelFailure);
+    assert.equal(failing.model.doGenerateCalls.length, 2, "the failed request was sent again");
+  });
+
   it("fails a run that outlasts its whole budget as a timeout, even when each call is quick", async () => {
     let n = 0;
     const slowTool = createTool({ id: "slow", description: "Slow", inputSchema: z.object({}), execute: async () => (await sleep(400), { ok: true }) });
