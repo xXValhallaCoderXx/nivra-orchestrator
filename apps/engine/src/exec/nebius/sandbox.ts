@@ -581,6 +581,13 @@ export class Sandbox {
    */
   async reconcile(correlation: string): Promise<{ operationId: string } | { unknown: string }> {
     const intent = this.#journal.entries.find((e) => e.kind === "intent" && e.correlation === correlation);
+    // An import carries no correlation id (NIV-49), so one whose answer was lost can't be looked for: it stays unknown,
+    // and no recovery pass spends its time searching for it.
+    if (intent?.kind === "intent" && intent.label === "image import") {
+      const reason = "an import carries no correlation id, so it can't be looked for";
+      this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation, operationId: null, reason });
+      return { unknown: reason };
+    }
     const wall = intent && "wall" in intent ? Date.parse(intent.wall) : this.#wallNow().getTime();
     const since = new Date(wall - this.#search.sinceMarginMs).toISOString();
     const end = this.#now() + this.#search.withinMs;

@@ -266,8 +266,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       toolchain: programs.map((program) => ({ program, finding: findings.get(program) ?? "unknown" })),
       worker: { ...worker, written: [...copy.written] },
       checks: results.map((result) => ({ ...result, name: mask(result.name), reason: result.reason === null ? null : mask(result.reason), stdoutTail: mask(result.stdoutTail), stderrTail: mask(result.stderrTail), difference: result.difference && { line: result.difference.line, expected: mask(result.difference.expected), got: mask(result.difference.got) } })),
-      // Every acceptance case passed, and every frozen file came back as the commit holds it.
-      verified: verified(results) && frozenFiles.every((file) => file.unchanged === true),
+      verified: verifiedWith(results, frozenFiles),
     };
 
   /** One operation, its record kept whatever happens. A command refused before it was sent never ran: it is no step. */
@@ -746,6 +745,9 @@ function changedNamed(command: string, copy: WorkspaceCopy): NamedFiles {
   const named = commandFiles(command, new Set(copy.written));
   return { files: named.files, unclear: named.unclear && copy.written.length > 0 };
 }
+
+/** A change is verified only when every acceptance case passed and every frozen file came back as the commit holds it (D41). */
+export const verifiedWith = (results: readonly CheckResult[], frozen: ReadonlyArray<{ unchanged: boolean | null }>): boolean => verified(results) && frozen.every((file) => file.unchanged === true);
 
 /** The operations a run's backend allows, for its brief: its baseline selections among them (D41). */
 export const operationsForBrief = (brief: Pick<TaskBrief, "acceptanceCases" | "checks" | "baseline">): number => operationsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0);

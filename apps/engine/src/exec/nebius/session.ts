@@ -274,9 +274,10 @@ export function settleJournal(path: string): void {
   renameSync(path, join(folder, basename(path)));
 }
 
-/** Cleanup's unresolved items, in words a person can check. */
+/** Cleanup's unresolved items, in words a person can check. An import carries no correlation id to name (NIV-49). */
 function describeUnresolved(item: string): string {
   const spawn = /^spawn (.*) \(([^)]+)\)$/.exec(item);
+  if (spawn?.[1] === "image import") return "It isn't known whether an image import started, and Nivra can't look for one: any image it made is in your Nebius project.";
   return spawn ? `It isn't known whether "${spawn[1]}" started (correlation ${spawn[2]}); it may still be running.` : `Operation ${item} wasn't seen to end; it may still be running.`;
 }
 
