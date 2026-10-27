@@ -2219,10 +2219,12 @@ own, then reviewed and merged. PR 18's fix was merged in (`4fde8bd`).
 - The built app (`test:e2e`): 67 passed and 1 skipped (the packaged-only test), the apply journeys among them.
 - The packaged app (`test:packaged`, a runtime staged from this code): 27 passed and 41 skipped, the tests that need the
   stand-in switches.
+- **The Windows turn** (approved by Nate, 27 October): `pnpm dev:win --no-launch` built `7567415`, and `test:windows`
+  passed 12 of 12 on that build. It covered the window, both engines, the workspace (its migration 4 among them) kept
+  across relaunches, quitting leaving no engine, and `~/.nivra` unchanged. None of them drives an apply: that is
+  checkpoint 3's. Targets, the supervisor and staging didn't change, so `verify:windows` wasn't called for.
 
 **Not shown yet:**
-- **The Windows turn** for this checkpoint (`pnpm dev:win --no-launch`, then `test:windows`): main-process and preload
-  behaviour changed, and Nate's review of PR 19 says it is needed before merging. It needs his approval.
 - **A partial or unknown apply through the host on a real engine:** getting one takes a crash mid-write, so the host's
   partial, restore and keep tests run on the gated engine, and the writer's own tests and the kill tests show the real
   thing.
