@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AcceptanceCase, TASK_BRIEF_LIMITS, TaskBrief, type ChatResult } from "@nivra/domain";
+import { AcceptanceCase, TASK_BRIEF_LIMITS, TaskBrief, type ChatResult, type TaskEnvironment } from "@nivra/domain";
 import { z } from "zod";
 import { TASK_LIMITS, type BriefContent, type BriefFields, type BriefSource, type TaskState } from "../shared/ipc.ts";
 import { planText } from "../shared/plans.ts";
@@ -7,7 +7,8 @@ import { planText } from "../shared/plans.ts";
 /**
  * Native tasks and plans (D26, NIV-32), as plain functions: what a brief and a plan hold, how a plan is made from an
  * answer, how a brief is made directly or from a plan (the same shape either way), and which state changes are allowed.
- * A run of a task (D39) is sent the brief's own words and its acceptance cases; its state never comes from a run yet.
+ * A run of a task (D39) is sent the brief's own words and its acceptance cases, and its baseline checks and frozen files
+ * when it has them (D41); its state never comes from a run yet.
  */
 
 export const EXECUTION_POLICY = { concurrency: 1, network: "off", approval: "required" } as const;
@@ -17,6 +18,9 @@ export { TASK_LIMITS };
 const Text = (max: number) => z.string().max(max);
 const Items = z.array(z.string().trim().min(1).max(TASK_LIMITS.itemChars)).max(TASK_LIMITS.items);
 const Line = z.strictObject({ path: z.string(), startLine: z.number().int().positive(), endLine: z.number().int().positive() });
+/** A brief's baseline selections and frozen files, exactly as a run's brief takes them (D41). */
+const Baseline = TaskBrief.shape.baseline.unwrap();
+const Frozen = TaskBrief.shape.frozen.unwrap();
 
 export const BriefSourceSchema: z.ZodType<BriefSource> = z.strictObject({
   kind: z.literal("plan"),
@@ -40,12 +44,15 @@ export const BriefContentSchema: z.ZodType<BriefContent> = z.strictObject({
   checks: Items,
   // A brief saved before acceptance cases existed has none (D39).
   acceptanceCases: z.array(AcceptanceCase).max(TASK_BRIEF_LIMITS.finalChecks).default([]),
+  // A brief saved before baseline checks and frozen files has neither (D41).
+  baseline: Baseline.default([]),
+  frozen: Frozen.default([]),
   executionPolicy: z.strictObject({ concurrency: z.literal(1), network: z.literal("off"), approval: z.literal("required") }),
   sources: z.array(BriefSourceSchema).max(10),
   revalidate: z.array(z.enum(["context", "assumptions"])),
 });
 
-/** What the person writes in a brief, checked for size; the rest is Nivra's. */
+/** What the person writes in a brief, checked for size; the rest is Nivra's. Baseline checks and frozen files left out are none. */
 export const BriefFieldsSchema: z.ZodType<BriefFields> = z.strictObject({
   goal: Text(TASK_LIMITS.textChars).transform((text) => text.trim()),
   acceptanceCriteria: Items,
@@ -55,6 +62,8 @@ export const BriefFieldsSchema: z.ZodType<BriefFields> = z.strictObject({
   assumptions: Items,
   checks: Items,
   acceptanceCases: z.array(AcceptanceCase).max(TASK_BRIEF_LIMITS.finalChecks),
+  baseline: Baseline.default([]),
+  frozen: Frozen.default([]),
 });
 
 /** A plan as one immutable version: its text, and where it came from. */
@@ -83,7 +92,7 @@ export function planFromAnswer(reply: ChatResult, at: { conversationId: string; 
 
 /** A brief from what the person wrote, with Nivra's fixed policy. A direct task has no sources. */
 export function briefFrom(fields: BriefFields, sources: BriefSource[] = []): BriefContent {
-  return { ...fields, executionPolicy: { ...EXECUTION_POLICY }, sources, revalidate: [] };
+  return { ...fields, baseline: fields.baseline ?? [], frozen: fields.frozen ?? [], executionPolicy: { ...EXECUTION_POLICY }, sources, revalidate: [] };
 }
 
 /** The source a brief made from a plan version records. */
@@ -141,7 +150,8 @@ export const NO_CASE = "Add an acceptance case, so Nivra can check the result it
 
 /**
  * What a run of this brief is sent (D39): its own words, its checks as the repository's commands, and its acceptance
- * cases; or why it can't run as it is, in plain words. Assumptions and sources stay with the task.
+ * cases, with its baseline checks and frozen files only when it has them, so a brief without them digests as it did
+ * before (D41); or why it can't run as it is, in plain words. Assumptions and sources stay with the task.
  */
 export function taskBriefOf(content: BriefContent): { brief: TaskBrief } | { blocked: string } {
   if (content.acceptanceCases.length === 0) return { blocked: NO_CASE };
@@ -157,6 +167,19 @@ export function taskBriefOf(content: BriefContent): { brief: TaskBrief } | { blo
     context: content.context,
     checks: content.checks,
     acceptanceCases: content.acceptanceCases.map(({ name, command, expectedOutput, expectedExitCode }) => ({ name, command, expectedOutput, expectedExitCode })),
+    ...(content.baseline.length
+      ? {
+          // Each as written, so one with both its output and a pattern, or neither, is refused rather than repaired.
+          baseline: content.baseline.map(({ name, command, expectedExitCode, expectedOutput, outputPattern }) => ({
+            name,
+            command,
+            expectedExitCode,
+            ...(expectedOutput !== undefined ? { expectedOutput } : {}),
+            ...(outputPattern !== undefined ? { outputPattern } : {}),
+          })),
+        }
+      : {}),
+    ...(content.frozen.length ? { frozen: content.frozen } : {}),
   });
   return parsed.success ? { brief: parsed.data } : { blocked: "This brief can't be run as it is: a check or a case holds something a command can't carry. Edit the brief, then run it." };
 }
@@ -164,23 +187,37 @@ export function taskBriefOf(content: BriefContent): { brief: TaskBrief } | { blo
 /**
  * A run preview's fingerprint (D39): SHA-256 of a fixed-order, versioned JSON array of what the run would be bound to.
  * The host works it out from its records as they are and the snapshot's own fingerprint, which the engine checks again.
+ * A run from a prepared environment is bound to it too, by its image and what binds that (D41): the v2 form. A run with
+ * none keeps the v1 form exactly.
  */
-export function taskRunFingerprint(parts: { taskId: string; briefId: string; briefVersion: number; briefDigest: string; projectId: string; targetId: string; sharing: { modelContext: boolean; cloudExecution: boolean }; snapshot: string }): string {
-  const canonical = ["nivra.task-run-preview.v1", parts.taskId, parts.briefId, parts.briefVersion, parts.briefDigest, parts.projectId, parts.targetId, parts.sharing.modelContext, parts.sharing.cloudExecution, parts.snapshot];
+export function taskRunFingerprint(parts: {
+  taskId: string;
+  briefId: string;
+  briefVersion: number;
+  briefDigest: string;
+  projectId: string;
+  targetId: string;
+  sharing: { modelContext: boolean; cloudExecution: boolean };
+  snapshot: string;
+  environment?: Pick<TaskEnvironment, "image" | "inputsDigest" | "projectFingerprint"> | null;
+}): string {
+  const bound = [parts.taskId, parts.briefId, parts.briefVersion, parts.briefDigest, parts.projectId, parts.targetId, parts.sharing.modelContext, parts.sharing.cloudExecution, parts.snapshot];
+  const { environment } = parts;
+  const canonical = environment ? ["nivra.task-run-preview.v2", ...bound, environment.image, environment.inputsDigest, environment.projectFingerprint] : ["nivra.task-run-preview.v1", ...bound];
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 /** What a run sends to each service, in plain words (D39). */
 export const TASK_SENDS = {
   tokenFactory: [
-    "The brief: its goal, acceptance criteria, scope, exclusions and context, with its acceptance cases and checks.",
+    "The brief: its goal, acceptance criteria, scope, exclusions and context, with its acceptance cases and checks, and any baseline checks and frozen files.",
     "The names of the commit's files, the files the worker reads, and what the cases and checks it runs print.",
     "Nivra's instructions to the worker, and the tools it may use.",
   ],
   nebius: [
     "The commit's files, as counted above: never your uncommitted work, nor the files left out.",
     "Everything the worker writes, as the arguments of the commands that write it.",
-    "The cases' and checks' commands, and Nivra's own commands that prepare, write, look for programs and collect.",
+    "The commands of the cases, the checks and any baseline checks, and Nivra's own commands that prepare, write, look for programs and collect.",
   ],
 } as const;
 

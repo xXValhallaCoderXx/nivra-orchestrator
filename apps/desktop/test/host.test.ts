@@ -24,8 +24,10 @@ import { CHECK_IMAGE, PROBE_SCRIPT } from "../../engine/src/exec/check.ts";
 import { RealGuest } from "../../engine/test/real-guest.ts";
 import { changedSince, folderState } from "../../engine/test/workspace-fixtures.ts";
 import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
-import { NO_CASE, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
-import type { TaskAttemptView } from "../src/shared/ipc.ts";
+import { briefFrom, NO_CASE, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
+import { insertTask } from "../src/main/workspace.ts";
+import { openWorkspace } from "../src/main/workspace-db.ts";
+import type { BriefFields, TaskAttemptView } from "../src/shared/ipc.ts";
 
 /**
  * The host's engine pool (D17) against real engines run from source. A "WSL" target here is a stand-in: a target that
@@ -1349,6 +1351,57 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
       await assert.rejects(host.createTask({ title, fields, projectId: null, planId: null }), new RegExp(`^Error: ${field} (holds your saved Token Factory key|looks like it holds)`));
     }
     assert.equal(host.tasks().tasks.length, 0);
+  });
+
+  it("keeps a brief's baseline checks and frozen files across versions, reads one saved before them as having neither, and refuses what a run couldn't take, in plain words (D41)", async () => {
+    const { host, keys } = makeHost({});
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const CASE = { name: "Exports the header", command: "sh export.sh", expectedOutput: "id,name\n1,Ada\n", expectedExitCode: 0 };
+    const REPRODUCED = { name: "The header is missing", command: "sh export.sh", expectedExitCode: 0, expectedOutput: "1,Ada\n" };
+    const FAILS = { name: "The export test fails for it", command: "sh test.sh", expectedExitCode: 1, outputPattern: "FAIL export" };
+    const fields = { ...empty, goal: "Export the header", acceptanceCriteria: ["The header comes first"], acceptanceCases: [CASE], baseline: [REPRODUCED, FAILS], frozen: [" tests/export.test.sh ", "", "tests/support/stub.sh"] };
+    const task = await host.createTask({ title: "Header", fields, projectId: null, planId: null });
+    assert.deepEqual([task.brief.content.baseline, task.brief.content.frozen], [[REPRODUCED, FAILS], ["tests/export.test.sh", "tests/support/stub.sh"]]);
+    // An edit keeps them as the window sends them; a brief saved without them has none.
+    const edited = await host.reviseBrief(task.summary.id, task.revision, { ...fields, context: "Seen in production." });
+    assert.deepEqual([edited.brief.version, edited.brief.content.baseline, edited.brief.content.frozen.length], [2, [REPRODUCED, FAILS], 2]);
+    const cleared = await host.reviseBrief(task.summary.id, edited.revision, { ...empty, goal: "Export the header", acceptanceCases: [CASE] });
+    assert.deepEqual([cleared.brief.version, cleared.brief.content.baseline, cleared.brief.content.frozen], [3, [], []]);
+    // What a run couldn't take is refused in words that say what to change, and nothing is saved.
+    const refusals: Array<[Partial<BriefFields>, string | RegExp]> = [
+      [{ baseline: [{ ...FAILS, expectedOutput: "FAIL export\n" }] }, "Baseline check 1 gives both its exact output and a pattern. Keep one of them, then save it again."],
+      [{ baseline: [{ name: "Runs", command: "sh test.sh", expectedExitCode: 0 }] }, "Baseline check 1 needs the exact output it must print, or a pattern for it. Add one, then save it again."],
+      [{ baseline: [REPRODUCED, { ...FAILS, outputPattern: "(unclosed" }] }, /^Error: Baseline check 2's pattern isn't a regular expression Nivra can read \(.+\)\. Correct it, then save it again\.$/],
+      [{ baseline: [REPRODUCED, { ...FAILS, outputPattern: "" }] }, "Baseline check 2 needs a pattern for what it prints. Write one, or give its exact output instead, then save it again."],
+      [{ baseline: [{ ...REPRODUCED, expectedExitCode: 256 }] }, "Baseline check 1's exit code must be a whole number from 0 to 255. Change it, then save it again."],
+      [{ baseline: [{ ...REPRODUCED, command: "  " }] }, "Baseline check 1 needs a command to run. Add one, then save it again."],
+      [{ baseline: [REPRODUCED, FAILS, REPRODUCED, FAILS] }, "There are 4 baseline checks, and a brief can hold 3. Remove some, then save it again."],
+      [{ frozen: ["../outside.sh"] }, "Frozen file 1, ../outside.sh, isn't a path inside the folder. Write it as Git names it from the folder, such as tests/regression.test.ts, then save it again."],
+      [{ frozen: ["tests/a.sh", "/etc/hosts"] }, "Frozen file 2, /etc/hosts, isn't a path inside the folder. Write it as Git names it from the folder, such as tests/regression.test.ts, then save it again."],
+      [{ frozen: ["a.sh", "", "a.sh"] }, "Frozen file 3, a.sh, is in the list already. Remove one of them, then save it again."],
+      [{ frozen: Array.from({ length: 21 }, (_, index) => `tests/${index}.sh`) }, "There are 21 frozen files, and a brief can hold 20. Remove some, then save it again."],
+    ];
+    for (const [change, message] of refusals) {
+      await assert.rejects(host.createTask({ title: "Refused", fields: { ...fields, ...change }, projectId: null, planId: null }), typeof message === "string" ? { message } : message);
+    }
+    // A credential in a baseline check or a frozen file's name is refused as in any field.
+    await assert.rejects(host.createTask({ title: "Key", fields: { ...fields, baseline: [{ ...REPRODUCED, command: `NEBIUS=${KEY} sh export.sh` }] }, projectId: null, planId: null }), /^Error: A baseline check's command (holds your saved Token Factory key|looks like it holds)/);
+    await assert.rejects(host.createTask({ title: "Key", fields: { ...fields, frozen: [`tests/${KEY}.sh`] }, projectId: null, planId: null }), /^Error: A frozen file (holds your saved Token Factory key|looks like it holds)/);
+    assert.deepEqual(host.tasks().tasks.map((one) => one.title), ["Header"]);
+
+    // A brief an older Nivra saved, before baseline checks and frozen files, reads as having neither.
+    const root = mkdtempSync(join(tmpdir(), "nivra host ü%# "));
+    dirs.push(root);
+    const opening = openWorkspace(join(root, "workspace.db"));
+    assert.equal(opening.state, "ready");
+    const { baseline: _baseline, frozen: _frozen, ...older } = briefFrom({ ...empty, goal: "Older", acceptanceCriteria: ["Done"], acceptanceCases: [CASE] });
+    const olderId = randomUUID();
+    if (opening.state === "ready") {
+      insertTask(opening.db, { id: olderId, title: "Older", projectId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, { id: randomUUID(), content: older, derivedFrom: null });
+      opening.db.close();
+    }
+    const reopened = hostAt(root).host.task(olderId);
+    assert.deepEqual([reopened.brief.content.goal, reopened.brief.content.baseline, reopened.brief.content.frozen], ["Older", [], []]);
   });
 });
 

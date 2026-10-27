@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { taskBriefDigest, type ChatResult } from "@nivra/domain";
 import { BriefContentSchema, briefForRepository, briefFrom, nextState, NO_CASE, planFromAnswer, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
@@ -46,6 +47,36 @@ describe("native tasks and plans (D26, NIV-32)", () => {
     ].map(taskRunFingerprint);
     assert.equal(new Set([one, ...others]).size, 7);
     assert.equal(taskRunFingerprint({ ...parts }), one);
+  });
+
+  it("reads a brief saved before baseline checks and frozen files as having neither, and sends a run them only when it has them (D41)", async () => {
+    const { baseline: _baseline, frozen: _frozen, ...older } = briefFrom({ ...fields, acceptanceCases: [CASE] });
+    const read = BriefContentSchema.parse(older);
+    assert.deepEqual([read.baseline, read.frozen], [[], []]);
+    const plain = taskBriefOf(read);
+    assert.ok("brief" in plain);
+    const REPRODUCED = { name: "The export drops the header", command: "sh export.sh", expectedExitCode: 0, expectedOutput: "1,Ada\n" };
+    const FAILS = { name: "The test fails for the bug", command: "sh test.sh", expectedExitCode: 1, outputPattern: "^FAIL export" };
+    const extended = taskBriefOf(briefFrom({ ...fields, acceptanceCases: [CASE], baseline: [REPRODUCED, FAILS], frozen: ["tests/export.test.sh"] }));
+    assert.ok("brief" in extended);
+    assert.deepEqual([extended.brief.baseline, extended.brief.frozen], [[REPRODUCED, FAILS], ["tests/export.test.sh"]]);
+    // Without them, the brief a run is sent digests as it did before them; with them, the digest binds them.
+    assert.equal(await taskBriefDigest(plain.brief), await taskBriefDigest({ ...plain.brief, baseline: [], frozen: [] }));
+    assert.notEqual(await taskBriefDigest(extended.brief), await taskBriefDigest(plain.brief));
+    // One the domain would refuse is never sent: a selection with both its output and a pattern.
+    assert.deepEqual(taskBriefOf(briefFrom({ ...fields, acceptanceCases: [CASE], baseline: [{ ...FAILS, expectedOutput: "x" }] })), { blocked: "This brief can't be run as it is: a check or a case holds something a command can't carry. Edit the brief, then run it." });
+  });
+
+  it("fingerprints a run from a prepared environment in the v2 form, binding its image and what binds that, and one without exactly as v1 did (D41)", () => {
+    const parts = { taskId: "t", briefId: "b", briefVersion: 2, briefDigest: "d".repeat(64), projectId: "p", targetId: "wsl:Ubuntu", sharing: { modelContext: true, cloudExecution: true }, snapshot: "f".repeat(64) };
+    // v1's form, worked out here as D39 defines it, independently of the host's code.
+    const v1 = createHash("sha256").update(JSON.stringify(["nivra.task-run-preview.v1", "t", "b", 2, "d".repeat(64), "p", "wsl:Ubuntu", true, true, "f".repeat(64)])).digest("hex");
+    assert.deepEqual([taskRunFingerprint(parts), taskRunFingerprint({ ...parts, environment: null })], [v1, v1]);
+    const environment = { image: "image-1", inputsDigest: "a".repeat(64), projectFingerprint: "c".repeat(64) };
+    const v2 = createHash("sha256").update(JSON.stringify(["nivra.task-run-preview.v2", "t", "b", 2, "d".repeat(64), "p", "wsl:Ubuntu", true, true, "f".repeat(64), "image-1", "a".repeat(64), "c".repeat(64)])).digest("hex");
+    assert.equal(taskRunFingerprint({ ...parts, environment }), v2);
+    const others = [{ ...environment, image: "image-2" }, { ...environment, inputsDigest: "b".repeat(64) }, { ...environment, projectFingerprint: "e".repeat(64) }].map((changed) => taskRunFingerprint({ ...parts, environment: changed }));
+    assert.equal(new Set([v1, v2, ...others]).size, 5);
   });
 
   it("gives a direct brief and one from a plan the same shape and the fixed policy", () => {

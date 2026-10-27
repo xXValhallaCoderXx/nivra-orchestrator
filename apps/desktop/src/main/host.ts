@@ -12,6 +12,7 @@ import {
   type ApplyParams,
   type ApplyResolution,
   type ApplyView,
+  type BaselineSelection,
   type ChatContext,
   type ChatInput,
   type DoctorReport,
@@ -3188,6 +3189,49 @@ export class Host {
       return { name, command, expectedOutput: given.expectedOutput, expectedExitCode: given.expectedExitCode };
     });
     if (cases.length > TASK_BRIEF_LIMITS.finalChecks) throw new Error(`There are ${cases.length} acceptance cases, and a brief can hold ${TASK_BRIEF_LIMITS.finalChecks}. Remove some, then save it again.`);
+    // A baseline check's command, output and pattern are kept as written, as a case's are (D41).
+    const baseline = (input.baseline ?? []).map((given, index) => {
+      const label = `Baseline check ${index + 1}`;
+      const name = given.name.trim();
+      const command = given.command.trim();
+      if (!name) throw new Error(`${label} needs a name. Add one, then save it again.`);
+      if (name.length > TASK_BRIEF_LIMITS.caseNameChars) throw new Error(`${label}'s name is ${name.length} characters long, and it can hold ${TASK_BRIEF_LIMITS.caseNameChars}. Shorten it, then save it again.`);
+      if (!command) throw new Error(`${label} needs a command to run. Add one, then save it again.`);
+      if (command.length > TASK_BRIEF_LIMITS.commandChars) throw new Error(`${label}'s command is ${command.length} characters long, and it can hold ${TASK_BRIEF_LIMITS.commandChars}. Shorten it, then save it again.`);
+      if (command.includes("\0")) throw new Error(`${label} holds a NUL character, which a command can't carry. Remove it, then save it again.`);
+      if (!Number.isInteger(given.expectedExitCode) || given.expectedExitCode < 0 || given.expectedExitCode > 255) throw new Error(`${label}'s exit code must be a whole number from 0 to 255. Change it, then save it again.`);
+      const { expectedOutput, outputPattern } = given;
+      if (expectedOutput !== undefined && outputPattern !== undefined) throw new Error(`${label} gives both its exact output and a pattern. Keep one of them, then save it again.`);
+      if (outputPattern !== undefined) {
+        if (!outputPattern) throw new Error(`${label} needs a pattern for what it prints. Write one, or give its exact output instead, then save it again.`);
+        if (outputPattern.length > TASK_BRIEF_LIMITS.patternChars) throw new Error(`${label}'s pattern is ${outputPattern.length} characters long, and it can hold ${TASK_BRIEF_LIMITS.patternChars}. Shorten it, then save it again.`);
+        try {
+          new RegExp(outputPattern);
+        } catch (error) {
+          throw new Error(`${label}'s pattern isn't a regular expression Nivra can read (${errorText(error)}). Correct it, then save it again.`);
+        }
+        return { name, command, expectedExitCode: given.expectedExitCode, outputPattern };
+      }
+      if (expectedOutput === undefined) throw new Error(`${label} needs the exact output it must print, or a pattern for it. Add one, then save it again.`);
+      if (expectedOutput.includes("\0")) throw new Error(`${label}'s expected output holds a NUL character, which a command can't print. Remove it, then save it again.`);
+      const bytes = Buffer.byteLength(expectedOutput);
+      if (bytes > TASK_BRIEF_LIMITS.expectedOutputBytes) throw new Error(`${label}'s expected output is ${bytes} bytes, and it can hold ${TASK_BRIEF_LIMITS.expectedOutputBytes}. Shorten it, then save it again.`);
+      return { name, command, expectedExitCode: given.expectedExitCode, expectedOutput };
+    });
+    if (baseline.length > TASK_BRIEF_LIMITS.baseline) throw new Error(`There are ${baseline.length} baseline checks, and a brief can hold ${TASK_BRIEF_LIMITS.baseline}. Remove some, then save it again.`);
+    // A frozen file is named as Git names it, from the task's folder. A row is numbered as the person wrote the list.
+    const frozen: string[] = [];
+    (input.frozen ?? []).forEach((value, index) => {
+      const path = value.trim();
+      if (!path) return;
+      const label = `Frozen file ${index + 1}`;
+      if (path.length > 1_024) throw new Error(`${label} is ${path.length} characters long, and each can hold 1,024. Shorten it, then save it again.`);
+      if (path.includes("\0") || path.startsWith("/") || path.split("/").some((part) => part === "" || part === "." || part === ".."))
+        throw new Error(`${label}, ${path}, isn't a path inside the folder. Write it as Git names it from the folder, such as tests/regression.test.ts, then save it again.`);
+      if (frozen.includes(path)) throw new Error(`${label}, ${path}, is in the list already. Remove one of them, then save it again.`);
+      frozen.push(path);
+    });
+    if (frozen.length > TASK_BRIEF_LIMITS.frozen) throw new Error(`There are ${frozen.length} frozen files, and a brief can hold ${TASK_BRIEF_LIMITS.frozen}. Remove some, then save it again.`);
     return BriefFieldsSchema.parse({
       goal: text("The goal", input.goal, TASK_LIMITS.textChars),
       acceptanceCriteria: rows("Acceptance criterion", "acceptance criteria", input.acceptanceCriteria),
@@ -3197,6 +3241,8 @@ export class Host {
       assumptions: rows("Assumption", "assumptions", input.assumptions),
       checks: rows("Check", "checks", input.checks),
       acceptanceCases: cases,
+      baseline,
+      frozen,
     });
   }
 
@@ -3215,6 +3261,7 @@ export class Host {
       refuseCredentials("An acceptance case's command", given.command, known);
       refuseCredentials("An acceptance case's expected output", given.expectedOutput, known);
     }
+    for (const [field, text] of baselineTexts(fields.baseline ?? [], fields.frozen ?? [])) refuseCredentials(field, text, known);
   }
 
   /** The task, refused when it changed since the person read it (its revision moved) or is gone. */
@@ -3552,5 +3599,19 @@ function briefTexts(brief: TaskBrief): Array<[string, string]> {
       ["An acceptance case's command", given.command],
       ["An acceptance case's expected output", given.expectedOutput],
     ]),
+    ...baselineTexts(brief.baseline ?? [], brief.frozen ?? []),
+  ];
+}
+
+/** Every text of a brief's baseline checks and frozen files (D41), by the field a refusal names. */
+function baselineTexts(baseline: readonly BaselineSelection[], frozen: readonly string[]): Array<[string, string]> {
+  return [
+    ...baseline.flatMap((given): Array<[string, string]> => [
+      ["A baseline check's name", given.name],
+      ["A baseline check's command", given.command],
+      ...(given.expectedOutput !== undefined ? [["A baseline check's expected output", given.expectedOutput] as [string, string]] : []),
+      ...(given.outputPattern !== undefined ? [["A baseline check's pattern", given.outputPattern] as [string, string]] : []),
+    ]),
+    ...frozen.map((path): [string, string] => ["A frozen file", path]),
   ];
 }

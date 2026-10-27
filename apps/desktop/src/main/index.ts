@@ -229,7 +229,20 @@ function start(): void {
   const LongText = z.string().max(100_000);
   const Rows = z.array(z.string().max(10_000)).max(200);
   const Case = z.strictObject({ name: z.string().max(10_000), command: z.string().max(10_000), expectedOutput: z.string().max(100_000), expectedExitCode: z.number() });
-  const Fields = z.strictObject({ goal: LongText, acceptanceCriteria: Rows, scope: LongText, exclusions: LongText, context: LongText, assumptions: Rows, checks: Rows, acceptanceCases: z.array(Case).max(20) });
+  // A baseline check gives its exact output or a pattern (D41): which one, and whether it is valid, the host says in words.
+  const Baseline = z.strictObject({ name: z.string().max(10_000), command: z.string().max(10_000), expectedExitCode: z.number(), expectedOutput: z.string().max(100_000).optional(), outputPattern: z.string().max(10_000).optional() });
+  const Fields = z.strictObject({
+    goal: LongText,
+    acceptanceCriteria: Rows,
+    scope: LongText,
+    exclusions: LongText,
+    context: LongText,
+    assumptions: Rows,
+    checks: Rows,
+    acceptanceCases: z.array(Case).max(20),
+    baseline: z.array(Baseline).max(20).optional(),
+    frozen: Rows.optional(),
+  });
   const Fingerprint = z.string().regex(/^[0-9a-f]{64}$/);
   handle(IPC.getConversation, z.tuple([Id]), (_event, id) => host.conversation(id));
   handle(IPC.openConversation, z.tuple([Id]), (_event, id) => host.openConversation(id));

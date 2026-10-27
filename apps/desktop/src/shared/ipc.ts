@@ -3,6 +3,7 @@ import type {
   ApplyRefusalCode,
   ApplyResolution,
   ApplyStatus,
+  BaselineSelection,
   ChatResult,
   DoctorReport,
   EngineInfo,
@@ -389,14 +390,22 @@ export interface BriefContent {
   checks: string[];
   /** What a run is judged by (D39). A brief saved before them has none. */
   acceptanceCases: AcceptanceCaseView[];
+  /**
+   * Commands run once before the worker, on the commit as it is, with networking off, and what each must give there
+   * (D41): its exit code, and its exact output or a pattern. A brief saved before them has none.
+   */
+  baseline: BaselineSelection[];
+  /** Files the worker can't change: a run's result counts only when they are unchanged (D41). A brief saved before them has none. */
+  frozen: string[];
   executionPolicy: { concurrency: 1; network: "off"; approval: "required" };
   sources: BriefSource[];
   /** Parts cleared because the task's repository changed: to write again for the new one. */
   revalidate: Array<"context" | "assumptions">;
 }
 
-/** The parts of a brief the person writes. */
-export type BriefFields = Pick<BriefContent, "goal" | "acceptanceCriteria" | "scope" | "exclusions" | "context" | "assumptions" | "checks" | "acceptanceCases">;
+/** The parts of a brief the person writes. Baseline checks and frozen files left out are none. */
+export type BriefFields = Pick<BriefContent, "goal" | "acceptanceCriteria" | "scope" | "exclusions" | "context" | "assumptions" | "checks" | "acceptanceCases"> &
+  Partial<Pick<BriefContent, "baseline" | "frozen">>;
 
 export interface PlanView {
   id: string;
