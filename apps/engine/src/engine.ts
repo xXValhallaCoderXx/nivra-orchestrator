@@ -1,9 +1,11 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   ChatInput,
   ChatResult,
   combinedMask,
+  EnvironmentReport,
+  projectFingerprint,
   ReviewReport,
   ErrorCode,
   ExplainInput,
@@ -18,6 +20,8 @@ import {
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
+  type EnvironmentPreview,
+  type EnvironmentSpec,
   type JsonObject,
   type ResearchContext,
   type ReviewContext,
@@ -27,11 +31,13 @@ import {
   type SandboxStatus,
   type SecretName,
   type TaskContext,
+  type TaskEnvironment,
   type TaskPreview,
   type WorkflowId,
 } from "@nivra/domain";
 import { installGitAdvice } from "./advice.ts";
 import { ApplyRequestRefusal, ApplyService } from "./apply/service.ts";
+import type { ApplyHook } from "./apply/writer.ts";
 import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
 import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, type Diagnostic } from "./diagnostics.ts";
 import { Database, EngineLockedError } from "./db/database.ts";
@@ -42,7 +48,8 @@ import { childEnv, insideWsl } from "./exec/child-env.ts";
 import { findGit } from "./exec/find-executable.ts";
 import { WorkspaceRefusal } from "./exec/git-tool.ts";
 import { createLocalBackend } from "./exec/local.ts";
-import { fetchTransport, SANDBOXES_BASE_URL, type Transport } from "./exec/nebius/api.ts";
+import { fetchTransport, SandboxApi, SANDBOXES_BASE_URL, type Transport } from "./exec/nebius/api.ts";
+import { ENV_COMMAND_ENV, Journal } from "./exec/nebius/sandbox.ts";
 import { createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals, type NebiusCredentials } from "./exec/nebius/session.ts";
 import { takeSnapshot } from "./exec/snapshot.ts";
 import { ChatUnreadable, readChatTask } from "./chat/task.ts";
@@ -55,6 +62,9 @@ import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
+import { EnvironmentRefusal, environmentInputs } from "./environment/inputs.ts";
+import { environmentPreviewOf, PREPARE_LIMITS } from "./environment/preview.ts";
+import { readEnvironmentInput } from "./environment/report.ts";
 import { TASK_LIMITS } from "./task/limits.ts";
 import { proposalView, readTaskInput, taskPreviewOf } from "./task/report.ts";
 import { ENGINE_VERSION, readRuntimeHash } from "./version.ts";
@@ -155,6 +165,20 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
     },
   ],
   [
+    "environment",
+    {
+      id: "environment",
+      title: (input: unknown) => `Environment · ${basename(readEnvironmentInput(input)?.repoPath ?? "") || "repository"}`,
+      // Mastra gets the checkout's path alone (D22): the project, the target and the preview stay in the run store, and
+      // the spec in memory (D21, D41).
+      mastraInput: (input: unknown) => {
+        const task = readEnvironmentInput(input);
+        if (!task) throw new Refusal("input-unreadable", "This preparation's request can't be read back from the engine's store, so it wasn't started. Prepare the environment again.");
+        return { repoPath: task.repoPath };
+      },
+    },
+  ],
+  [
     "research",
     {
       id: "research",
@@ -190,6 +214,25 @@ export interface Engine {
 }
 
 /**
+ * A test's hold on the apply writer (NIV-35): before the step its file names, the writer writes `<file>.held` and
+ * waits forever, so the test stops the engine with the apply part way and sees it reconciled after a restart. The
+ * engine answers everything else meanwhile. With no file, or another step named, it holds nothing.
+ */
+function applyHold(file: string): ApplyHook {
+  return async (step) => {
+    let wanted: string;
+    try {
+      wanted = readFileSync(file, "utf8").trim();
+    } catch {
+      return;
+    }
+    if (step !== wanted) return;
+    writeFileSync(`${file}.held`, `${step}\n`, { mode: 0o600 });
+    await new Promise<never>(() => undefined);
+  };
+}
+
+/**
  * Builds the engine for one home: takes the home's lock (D7), recovers interrupted runs, and answers the host over
  * `output`. Mastra and its storage driver are imported here rather than at the top, so a damaged runtime is reported
  * as such instead of crashing the import.
@@ -210,6 +253,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/sandbox.ts"),
     typeof import("./workflows/research.ts"),
     typeof import("./workflows/task.ts"),
+    typeof import("./workflows/environment.ts"),
   ];
   try {
     mastraModules = await Promise.all([
@@ -222,6 +266,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       import("./workflows/sandbox.ts"),
       import("./workflows/research.ts"),
       import("./workflows/task.ts"),
+      import("./workflows/environment.ts"),
     ]);
   } catch (error) {
     database.close();
@@ -237,6 +282,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     { createSandboxWorkflow, SANDBOX_WORKFLOW_ID },
     { createResearchWorkflow, RESEARCH_WORKFLOW_ID },
     { createTaskWorkflow, TASK_WORKFLOW_ID },
+    { createEnvironmentWorkflow, ENVIRONMENT_WORKFLOW_ID },
   ] = mastraModules;
 
   const vault = new SecretVault();
@@ -253,6 +299,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // Applying proposals to the person's checkout (D40). An apply an earlier engine left writing is reconciled here,
   // before any apply call is answered, writing nothing of the person's.
   const applies = new ApplyService({
+    ...(options.applyHold ? { before: applyHold(options.applyHold) } : {}),
     database,
     proposal: (runId) => store.proposal(runId),
     verified: (runId) => {
@@ -325,10 +372,12 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const sandboxTransport = (given: NebiusCredentials): Transport => fetchTransport(given, options.sandboxesUrl ?? SANDBOXES_BASE_URL);
   const sandboxBackend = () => createNebiusBackend({ credentials: sandboxCredentials, baseImage: CHECK_IMAGE.uuid, journalDir: journals, limits: sandboxLimits, transport: sandboxTransport });
   // A task run's backend (D39): its operations limited to what its brief needs, its commands to the longest it runs.
-  const taskBackend = (operations: number) =>
+  // Bound to a prepared environment (D41), its sessions start from that image, every command with the image's path.
+  const taskBackend = (operations: number, environment: TaskEnvironment | null) =>
     createNebiusBackend({
       credentials: sandboxCredentials,
-      baseImage: CHECK_IMAGE.uuid,
+      baseImage: environment?.image ?? CHECK_IMAGE.uuid,
+      ...(environment ? { env: ENV_COMMAND_ENV } : {}),
       journalDir: journals,
       limits: { ...NEBIUS_LIMITS, maxOperations: operations, maxTimeoutSeconds: TASK_LIMITS.checks.timeoutMs / 1000, prepareTimeoutSeconds: TASK_LIMITS.prepareTimeoutSeconds, sessionBudgetMs: TASK_LIMITS.sessionMs, cleanupBudgetMs: TASK_LIMITS.closeMs },
       transport: sandboxTransport,
@@ -344,11 +393,17 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // the journal of a session this engine has open; a journal a pass settles leaves it at once.
   let scanned = scanJournals(journals);
   const pass: SandboxStatus["pass"] = { state: scanned.open.length ? "waiting-for-credentials" : "idle", startedAt: null, finishedAt: null, stopped: 0, alreadyEnded: 0, unresolved: [] };
-  /** Whether a run that can hold a Nebius session is queued or running here: a check, or a task (D39). */
+  /** Whether a run that can hold Nebius operations is queued or running here: a check, a task (D39), or a preparation (D41). */
   const sessionsActive = () =>
     store.active().some((runId) => {
       const workflowId = store.summary(runId)?.workflowId;
-      return workflowId === "sandbox" || workflowId === "task";
+      return workflowId === "sandbox" || workflowId === "task" || workflowId === "environment";
+    });
+  /** Whether a preparation of this project is queued or running here: one at a time (D41). */
+  const environmentGoing = (project: string) =>
+    store.active().some((runId) => {
+      const summary = store.summary(runId);
+      return summary?.workflowId === "environment" && readEnvironmentInput(summary.input)?.project === project;
     });
   /** Whether a task is queued or running here: one at a time on an engine (D39). */
   const taskGoing = () => store.active().some((runId) => store.summary(runId)?.workflowId === "task");
@@ -411,16 +466,57 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     }
   };
 
+  /**
+   * Why a prepared environment can't be used with this commit and these credentials, in Nivra's words; null when it
+   * can (D41). The credentials are checked only when they are set: a run checks them again as it starts.
+   */
+  const environmentProblem = async (snapshot: Parameters<typeof environmentInputs>[0], environment: TaskEnvironment): Promise<string | null> => {
+    let digest: string;
+    try {
+      digest = environmentInputs(snapshot).digest;
+    } catch (error) {
+      if (error instanceof EnvironmentRefusal) return `This commit's manifests can't be prepared from any more: ${error.message}`;
+      throw error;
+    }
+    if (digest !== environment.inputsDigest) return "This commit's manifests, lockfile or workspace file aren't the ones the project's environment was prepared from. Prepare the environment again, then preview the run.";
+    const credentials = sandboxCredentials();
+    if (credentials && (await projectFingerprint(credentials.project)) !== environment.projectFingerprint) {
+      return "The project's environment was prepared in another Nebius project than the one in Settings, and an image can only be used in its own project. Prepare the environment again, then preview the run.";
+    }
+    return null;
+  };
   /** What a task run of this checkout would send to Nebius, with no network, and the bounds of a run of this brief. */
-  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks">): Promise<TaskPreview> => {
+  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | undefined): Promise<TaskPreview> => {
     const git = locateGit();
     if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
     const session = await backend.open({ workspace: repoPath });
     try {
-      return taskPreviewOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() }), brief);
+      const snapshot = await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() });
+      if (environment) {
+        const problem = await environmentProblem(snapshot, environment);
+        if (problem) return { status: "refused", code: "environment", message: problem };
+      }
+      return taskPreviewOf(snapshot, brief, environment ?? null);
     } catch (error) {
       // It names the file it is about: a preview is shown to the person, and never stored (D36).
       if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
+      throw error;
+    } finally {
+      await session.close();
+    }
+  };
+
+  /** What preparing this checkout's environment would send and run, with no network (D41); a layout it can't prepare says why. */
+  const environmentPreview = async (repoPath: string, spec: EnvironmentSpec): Promise<EnvironmentPreview> => {
+    const git = locateGit();
+    if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
+    const session = await backend.open({ workspace: repoPath });
+    try {
+      return environmentPreviewOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() }), spec);
+    } catch (error) {
+      // Both name the file they are about: a preview is shown to the person, and never stored.
+      if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
+      if (error instanceof EnvironmentRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
       throw error;
     } finally {
       await session.close();
@@ -495,6 +591,30 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         shutdown: engineStop.signal,
         mask,
         saveResult: (runId, report) => store.saveArtifact(runId, "sandbox", JSON.stringify(report)),
+      }),
+      [ENVIRONMENT_WORKFLOW_ID]: createEnvironmentWorkflow({
+        recorder,
+        context: (runId) => scheduler.contextOf(runId, "environment"),
+        task: (runId) => readEnvironmentInput(store.summary(runId)?.input),
+        requestId: (runId) => store.requestIdOf(runId),
+        credentials: sandboxCredentials,
+        client: (given, signal) => new SandboxApi(sandboxTransport(given), { requestTimeoutMs: NEBIUS_LIMITS.requestTimeoutMs, minWriteMs: NEBIUS_LIMITS.minWriteMs, signal }),
+        journalPath: (runId) => {
+          mkdirSync(journals, { recursive: true, mode: 0o700 });
+          return join(journals, `environment-${runId}.jsonl`);
+        },
+        settle: (path, given) => {
+          const open = new Journal(path).open();
+          return reconcileJournals([{ path, operations: open.operations, uncertain: open.uncertain, damaged: null }], { credentials: given, budgetMs: PREPARE_LIMITS.closeMs, signal: engineStop.signal, transport: sandboxTransport, limits: sandboxLimits });
+        },
+        local: backend,
+        findGit: locateGit,
+        platform: process.platform,
+        exclude: [home],
+        knownValues: taskKnownValues,
+        shutdown: engineStop.signal,
+        mask,
+        saveResult: (runId, report) => store.saveArtifact(runId, "environment", JSON.stringify(report)),
       }),
       [RESEARCH_WORKFLOW_ID]: createResearchWorkflow({
         recorder,
@@ -629,6 +749,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
           if (process.platform === "win32") throw new RpcFailure(ErrorCode.InvalidParams, "Running tasks on Windows itself isn't available yet, so nothing was started. Add the repository from a WSL distribution, then run the task there.");
           if (taskGoing()) throw new RpcFailure(ErrorCode.InvalidParams, "A task is already running on this engine, so another wasn't started. Wait for it to end, or cancel it, then run this one again.");
         }
+        // One preparation of a project at a time, and none on Windows itself (D41), for a new request.
+        if (params.workflowId === "environment" && store.findByRequest(params.clientRequestId) === null) {
+          if (process.platform === "win32") throw new RpcFailure(ErrorCode.InvalidParams, "Preparing an environment on Windows itself isn't available yet, so nothing was started. Add the repository from a WSL distribution, then prepare it there.");
+          if (environmentGoing(params.input.project)) throw new RpcFailure(ErrorCode.InvalidParams, "This project's environment is already being prepared on its engine, so another preparation wasn't started. Wait for it to end, then try again.");
+        }
         try {
           return store.summary(scheduler.submit(params)) ?? notFound("just created");
         } catch (error) {
@@ -694,7 +819,17 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         const proposal = store.proposal(runId);
         return proposal === null ? null : proposalView(proposal, mask);
       },
-      "task.preview": ({ repoPath, brief }) => taskPreview(repoPath, brief),
+      "task.preview": ({ repoPath, brief, environment }) => taskPreview(repoPath, brief, environment),
+      "environment.preview": ({ repoPath, spec }) => environmentPreview(repoPath, spec),
+      "runs.environment": ({ runId }) => {
+        const status = store.status(runId);
+        if (!status) notFound(runId);
+        const stored = store.artifact(runId, "environment");
+        if (stored === null) return null;
+        // A report saved mid-preparation, of a run that has ended, reads as interrupted (D41).
+        const report = EnvironmentReport.parse(JSON.parse(stored));
+        return status && isTerminal(status) && report.outcome === "in-progress" ? { ...report, outcome: "interrupted" as const, finishedAt: report.updatedAt } : report;
+      },
       "sandbox.preview": ({ repoPath }) => sandboxPreview(repoPath),
       "sandbox.status": () => {
         rescan();
@@ -776,6 +911,7 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
       import("./workflows/sandbox.ts"),
       import("./workflows/research.ts"),
       import("./workflows/task.ts"),
+      import("./workflows/environment.ts"),
     ]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {

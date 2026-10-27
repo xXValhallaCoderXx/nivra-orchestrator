@@ -24,6 +24,7 @@ import {
   messagesOf,
   openTurns,
   projectAnswer,
+  recordOutcome,
   recordRun,
   reviewsOf,
   settleReview,
@@ -33,6 +34,7 @@ import {
   type ConversationRecord,
 } from "../src/main/workspace.ts";
 import { classifyWorkspaceError, openWorkspace, WORKSPACE_MIGRATIONS, WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
+import { environmentOf, insertPreparation, latestPreparation } from "../src/main/environment-store.ts";
 
 const dirs: string[] = [];
 const open: WorkspaceOpening[] = [];
@@ -110,7 +112,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v4\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v5\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -544,5 +546,50 @@ describe("reviews of plan versions (D31)", () => {
     assert.deepEqual([count("reviews"), count("run_links"), count("artifacts")], [0, 0, 0]);
     const files = readdirSync(dirname(path)).filter((name) => name.startsWith("workspace.db"));
     assert.deepEqual(files.filter((name) => readFileSync(join(dirname(path), name)).includes(canary)), []);
+  });
+});
+
+describe("a project's environment (D41)", () => {
+  it("keeps the released v3 and v4 schemas as they were, and moves a v4 file to v5 with every row as it was and no environment yet", () => {
+    // v3's and v4's text are pinned too, now that v5 follows them.
+    assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[2]!).digest("hex"), "2e78a5cf059685f43088c3972680a1d7cfd4fc91eb3e5e057d1d261eef172dca");
+    assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[3]!).digest("hex"), "1a730d45a78676e8ea59b7719ace1854ea48bb6fb580b7edf78eae2cd906633e");
+    const path = join(folder(), "workspace.db");
+    // A v4 file, written as v4 wrote one: its schema alone, then rows through the same functions.
+    const raw = new DatabaseSync(path);
+    raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+    raw.exec("BEGIN IMMEDIATE");
+    for (const migration of WORKSPACE_MIGRATIONS.slice(0, 4)) raw.exec(migration);
+    raw.exec("PRAGMA user_version = 4; COMMIT;");
+    const v4 = new WorkspaceDb(path, raw);
+    const chat = general();
+    insertConversation(v4, chat);
+    insertTurn(v4, { id: randomUUID(), conversationId: chat.id, sessionId: "s", targetId: "local", preferences: [], history: null, createdAt: AT }, { id: randomUUID(), text: "How do I stage this?" });
+    const taskId = randomUUID();
+    const brief = randomUUID();
+    insertTask(v4, { id: taskId, title: "Stage", projectId: randomUUID(), createdAt: AT, updatedAt: AT }, { id: brief, content: { goal: "Stage" }, derivedFrom: null });
+    const attempt = randomUUID();
+    insertAttempt(v4, { id: attempt, taskId, briefId: brief, sessionId: "s", targetId: "wsl:Ubuntu", status: "answered", createdAt: AT });
+    recordOutcome(v4, attempt, { outcome: "proposed", verified: true, proposalHash: "5".repeat(64), baseline: "a".repeat(40) }, AT);
+    const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages", "reviews", "research", "attempt_records"];
+    const dump = (db: DatabaseSync) => ({
+      rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
+      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
+    });
+    const before = dump(raw);
+    assert.deepEqual(before.rows.map((rows) => rows.length), [1, 1, 1, 2, 1, 0, 0, 1]);
+    v4.close();
+
+    const migrated = ready(path);
+    assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
+    assert.deepEqual(dump(migrated.db.db), before);
+    const count = (table: string) => Number(migrated.db.db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
+    assert.deepEqual([count("environments"), count("preparations")], [0, 0]);
+    // A project from before has no environment, and takes its first preparation.
+    const projectId = randomUUID();
+    assert.deepEqual([environmentOf(migrated.db, projectId), latestPreparation(migrated.db, projectId)], [null, null]);
+    const id = randomUUID();
+    assert.equal(insertPreparation(migrated.db, { id, projectId, sessionId: "s", targetId: "wsl:Ubuntu", spec: { filters: [] }, preview: "e".repeat(64), createdAt: AT }), true);
+    assert.deepEqual([environmentOf(migrated.db, projectId)?.spec, environmentOf(migrated.db, projectId)?.prepared, latestPreparation(migrated.db, projectId)?.id], [{ filters: [] }, null, id]);
   });
 });

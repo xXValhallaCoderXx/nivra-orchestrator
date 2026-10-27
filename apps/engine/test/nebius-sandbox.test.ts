@@ -93,6 +93,49 @@ describe("Nebius Sandboxes, offline: spawning, one at a time, networking off (NI
     const [body] = spawned(service) as unknown as Array<{ networking: { enabled: boolean }; disposable: boolean; command: string; args: string[]; files?: unknown }>;
     assert.deepEqual([body?.networking.enabled, body?.disposable, body?.command, body?.args.at(-1), body?.files], [true, true, "/bin/busybox", url, undefined]);
   });
+
+  it("runs an environment's preparation with networking on, kept, only from a pinned pnpm and a frozen install (NIV-49)", async () => {
+    const service = new FakeService(() => succeed());
+    const { sandbox, journal } = sandboxOn(service);
+    const given = { image: "img-node", inputs: { uuid: "inputs" }, packageManager: "pnpm@11.5.3", installArgs: ["--frozen-lockfile", "--filter", "@scope/data..."], timeoutSeconds: 120 };
+    const refusals: Array<[Partial<typeof given>, RegExp]> = [
+      [{ packageManager: "pnpm@11" }, /exact pnpm version/],
+      [{ packageManager: "npm@10.0.0" }, /exact pnpm version/],
+      [{ installArgs: ["--filter", "a"] }, /frozen lockfile/],
+      [{ installArgs: ["--frozen-lockfile", "a; curl x"] }, /plain arguments/],
+      [{ installArgs: ["--frozen-lockfile", "@scope/data..."] }, /plain arguments/],
+      [{ installArgs: ["--frozen-lockfile", "--filter"] }, /plain arguments/],
+      [{ installArgs: ["--frozen-lockfile", "--filter", "--prod"] }, /plain arguments/],
+      [{ installArgs: ["--frozen-lockfile", "--prod"] }, /plain arguments/],
+      [{ timeoutSeconds: 500 }, /timeout must be between 1 and 180 s/],
+    ];
+    for (const [change, pattern] of refusals) await assert.rejects(sandbox.prepareEnvironment({ ...given, ...change }), pattern);
+    assert.equal(service.spawns, 0);
+    // Every filter the domain's spec takes is one the preparation sends, pnpm's exclusions among them.
+    const other = new FakeService(() => succeed());
+    await sandboxOn(other).sandbox.prepareEnvironment({ ...given, installArgs: ["--frozen-lockfile", "--filter", "@scope/data...", "--filter", "!@scope/web"] });
+    assert.deepEqual((spawned(other)[0] as unknown as { args: string[] }).args.slice(-4), ["--filter", "@scope/data...", "--filter", "!@scope/web"]);
+    await sandbox.prepareEnvironment(given);
+    const [body] = spawned(service) as unknown as Array<{ networking: { enabled: boolean }; disposable: boolean; image: string; args: string[]; files: Record<string, { uuid: string }> }>;
+    assert.deepEqual([body?.networking.enabled, body?.disposable, body?.image, body?.args.slice(2), Object.keys(body?.files ?? {})], [true, false, "img-node", ["nivra-env-prepare", "/workspace", "/nivra/env-inputs.tar.gz", "11.5.3", "--frozen-lockfile", "--filter", "@scope/data..."], ["/nivra/env-inputs.tar.gz"]]);
+    assert.equal(journal.spawnsOf("environment preparation"), 1);
+  });
+
+  it("imports an image only by a registry address with an exact tag, journaled as an operation cleanup can settle (NIV-49)", async () => {
+    const service = new FakeService(() => succeed());
+    const { sandbox, journal } = sandboxOn(service);
+    for (const url of ["docker://docker.io/library/node", "https://docker.io/library/node:22", "docker://docker.io/library/node:22 --x"]) await assert.rejects(sandbox.importImage({ registryUrl: url, timeoutSeconds: 900 }), /registry address and an exact tag/);
+    await assert.rejects(sandbox.importImage({ registryUrl: "docker://docker.io/library/node:22.23.4-alpine3.24", timeoutSeconds: 4_000 }), /between 1 and 3,600 s/);
+    assert.equal(service.requests.length, 0, "a refused import sent something");
+    const started = await sandbox.importImage({ registryUrl: "docker://docker.io/library/node:22.23.4-alpine3.24", timeoutSeconds: 900 });
+    assert.ok("operationId" in started);
+    const sent = service.requests.filter((request) => request.path === "/v1/images/import").map((request) => JSON.parse(String(request.body)) as unknown);
+    assert.deepEqual(sent, [{ registry: { url: "docker://docker.io/library/node:22.23.4-alpine3.24" }, timeout: 900 }]);
+    assert.deepEqual(journal.open().operations, [started.operationId], "the import isn't open in the journal for cleanup");
+    await assert.rejects(sandbox.submit(step("meanwhile")), /One operation at a time/);
+    const ended = await sandbox.observe(started.operationId, 900);
+    assert.deepEqual([ended.status, ended.resultImage, journal.open().operations.length], ["SUCCESS", "img-imported", 0]);
+  });
 });
 
 describe("Nebius Sandboxes, offline: lost answers, reconnects and cancels (NIV-29)", () => {

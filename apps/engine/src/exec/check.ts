@@ -125,6 +125,7 @@ const UNRESOLVED_WORDS = [
   /^It isn't known whether "[a-z][a-z -]{0,63}" started \(correlation [0-9a-f-]{36}\); it may still be running\.$/,
   /^Operation [A-Za-z0-9._:-]{1,128} wasn't seen to end; it may still be running\.$/,
   /^Not looked at in this pass: it (ran out of time|was stopped)\. It stays for the next\.$/,
+  /^It isn't known whether an image import started, and Nivra can't look for one: any image it made is in your Nebius project\.$/,
 ];
 
 /**
@@ -136,7 +137,7 @@ export function safeUnresolved(item: string): string {
 }
 
 /** A stop's code as a check reports it: a code only a task's run gives can't happen here, and reads as a fault. */
-export const sandboxCode = (code: PrescribedStopCode): SandboxStopCode => (code === "toolchain" || code === "time" ? "fault" : code);
+export const sandboxCode = (code: PrescribedStopCode): SandboxStopCode => (code === "toolchain" || code === "time" || code === "baseline" || code === "environment" || code === "frozen" ? "fault" : code);
 
 /** A step's record as a report gives it: what it did, its provider's status and usage, and the end of its output. */
 export function stepOf(step: PrescribedResult["steps"][number]): SandboxStep {

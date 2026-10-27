@@ -49,7 +49,7 @@ describe("engine over stdio", () => {
   it("answers initialize with where it runs, and keeps stdout to JSON-RPC alone", async () => {
     const { home, engine } = setup();
     const info = await engine.initialize();
-    assert.equal(info.protocolVersion, 11);
+    assert.equal(info.protocolVersion, 12);
     assert.equal(info.protocolVersion, PROTOCOL_VERSION);
     assert.equal(info.home, home);
     assert.match(info.homeId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);

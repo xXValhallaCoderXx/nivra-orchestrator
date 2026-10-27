@@ -1,4 +1,6 @@
 import { posix } from "node:path";
+import { runInNewContext } from "node:vm";
+import { baselinePattern, TASK_BRIEF_LIMITS, type BaselineSelection, type TaskBaselineCheck } from "@nivra/domain";
 import { ExecRefusedError, ExecUncertainError, type ExecRequest, type ExecResult } from "../exec/backend.ts";
 import { TASK_LIMITS } from "./limits.ts";
 import { firstWord } from "./scripts.ts";
@@ -120,6 +122,44 @@ function ending(ran: ExecResult, timeoutMs: number): Pick<CheckResult, "verdict"
   // Output the sandbox didn't report as text is never taken for what was printed: an empty string would match "".
   if (ran.stdoutExact === false) return { verdict: "unknown", reason: "the sandbox didn't report what it printed as text, so it couldn't be compared" };
   return null;
+}
+
+/** How long a baseline pattern may take against one output: one that backtracks without end is stopped there. */
+export const PATTERN_MS = 1_000;
+
+/** Whether the whole output matches the pattern; null when matching took longer than `PATTERN_MS` and was stopped. */
+function patternMatches(pattern: string, output: string): boolean | null {
+  try {
+    return runInNewContext("pattern.test(output)", { pattern: baselinePattern(pattern), output }, { timeout: PATTERN_MS }) === true;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") return null;
+    throw error;
+  }
+}
+
+/**
+ * A baseline selection, judged by the engine before the model (D41): its exit code, and its exact output or a pattern
+ * its whole output must match (`baselinePattern`). A selection that fails for the bug the task fixes matches when it fails as the brief says:
+ * that is told apart from one that can't run. A pattern is matched against at most `patternInputBytes` of output.
+ */
+export function judgeBaseline(number: number, given: BaselineSelection, ran: ExecResult, timeoutMs: number = TASK_LIMITS.checks.timeoutMs): TaskBaselineCheck {
+  const result: TaskBaselineCheck = { number, name: given.name, matched: false, reason: null, exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), durationMs: ran.durationMs };
+  const ended = ending(ran, timeoutMs);
+  if (ended) return { ...result, matched: ran.cancelled ? null : false, reason: ended.reason };
+  if (ran.truncated) return { ...result, reason: "it printed more than Nivra compares" };
+  let why: string | null = null;
+  if (given.expectedOutput !== undefined) {
+    const difference = firstDifference(given.expectedOutput, ran.stdout);
+    if (difference) why = `its output differs from the expected output at line ${difference.line}`;
+  } else if (Buffer.byteLength(ran.stdout) > TASK_BRIEF_LIMITS.patternInputBytes) why = "its output is longer than Nivra matches a pattern against";
+  else {
+    const matched = given.outputPattern === undefined ? false : patternMatches(given.outputPattern, ran.stdout);
+    if (matched === null) why = `matching its pattern took longer than ${PATTERN_MS / 1000} s, so it was stopped`;
+    else if (!matched) why = "its output doesn't match the pattern";
+  }
+  const exit = ran.exitCode === given.expectedExitCode ? null : `it exited ${String(ran.exitCode)}, not ${given.expectedExitCode}`;
+  if (!why && !exit) return { ...result, matched: true };
+  return { ...result, reason: [why, exit].filter(Boolean).join(", and ") };
 }
 
 /**

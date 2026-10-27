@@ -3,11 +3,12 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { after, describe, it } from "node:test";
-import { isTerminal, taskBriefDigest, type RunEventsPage, type SecretName, type TaskBrief } from "@nivra/domain";
+import { isTerminal, projectFingerprint, taskBriefDigest, type RunEventsPage, type SecretName, type TaskBrief } from "@nivra/domain";
 import { Host } from "../src/main/host.ts";
 import { HostStore, NO_SHARING } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
@@ -22,10 +23,15 @@ import { researchFingerprint } from "../src/main/research.ts";
 import type { ResearchSelection, ResearchView } from "../src/shared/research.ts";
 import { CHECK_IMAGE, PROBE_SCRIPT } from "../../engine/src/exec/check.ts";
 import { RealGuest } from "../../engine/test/real-guest.ts";
+import { succeed } from "../../engine/test/fake-sandboxes.ts";
+import { ENV_PREPARE_SCRIPT } from "../../engine/src/exec/nebius/sandbox.ts";
+import { readTar } from "../../engine/src/exec/tar.ts";
 import { changedSince, folderState } from "../../engine/test/workspace-fixtures.ts";
 import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
-import { NO_CASE, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
-import type { TaskAttemptView } from "../src/shared/ipc.ts";
+import { briefFrom, NO_CASE, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
+import { insertTask } from "../src/main/workspace.ts";
+import { openWorkspace } from "../src/main/workspace-db.ts";
+import type { BriefFields, TaskAttemptView } from "../src/shared/ipc.ts";
 
 /**
  * The host's engine pool (D17) against real engines run from source. A "WSL" target here is a stand-in: a target that
@@ -1357,6 +1363,57 @@ describe("Host: native tasks, made directly or from a plan, with versioned brief
       await assert.rejects(host.createTask({ title, fields, projectId: null, planId: null }), new RegExp(`^Error: ${field} (holds your saved Token Factory key|looks like it holds)`));
     }
     assert.equal(host.tasks().tasks.length, 0);
+  });
+
+  it("keeps a brief's baseline checks and frozen files across versions, reads one saved before them as having neither, and refuses what a run couldn't take, in plain words (D41)", async () => {
+    const { host, keys } = makeHost({});
+    keys.current = { NEBIUS_API_KEY: KEY };
+    const CASE = { name: "Exports the header", command: "sh export.sh", expectedOutput: "id,name\n1,Ada\n", expectedExitCode: 0 };
+    const REPRODUCED = { name: "The header is missing", command: "sh export.sh", expectedExitCode: 0, expectedOutput: "1,Ada\n" };
+    const FAILS = { name: "The export test fails for it", command: "sh test.sh", expectedExitCode: 1, outputPattern: "FAIL export" };
+    const fields = { ...empty, goal: "Export the header", acceptanceCriteria: ["The header comes first"], acceptanceCases: [CASE], baseline: [REPRODUCED, FAILS], frozen: [" tests/export.test.sh ", "", "tests/support/stub.sh"] };
+    const task = await host.createTask({ title: "Header", fields, projectId: null, planId: null });
+    assert.deepEqual([task.brief.content.baseline, task.brief.content.frozen], [[REPRODUCED, FAILS], ["tests/export.test.sh", "tests/support/stub.sh"]]);
+    // An edit keeps them as the window sends them; a brief saved without them has none.
+    const edited = await host.reviseBrief(task.summary.id, task.revision, { ...fields, context: "Seen in production." });
+    assert.deepEqual([edited.brief.version, edited.brief.content.baseline, edited.brief.content.frozen.length], [2, [REPRODUCED, FAILS], 2]);
+    const cleared = await host.reviseBrief(task.summary.id, edited.revision, { ...empty, goal: "Export the header", acceptanceCases: [CASE] });
+    assert.deepEqual([cleared.brief.version, cleared.brief.content.baseline, cleared.brief.content.frozen], [3, [], []]);
+    // What a run couldn't take is refused in words that say what to change, and nothing is saved.
+    const refusals: Array<[Partial<BriefFields>, string | RegExp]> = [
+      [{ baseline: [{ ...FAILS, expectedOutput: "FAIL export\n" }] }, "Baseline check 1 gives both its exact output and a pattern. Keep one of them, then save it again."],
+      [{ baseline: [{ name: "Runs", command: "sh test.sh", expectedExitCode: 0 }] }, "Baseline check 1 needs the exact output it must print, or a pattern for it. Add one, then save it again."],
+      [{ baseline: [REPRODUCED, { ...FAILS, outputPattern: "(unclosed" }] }, /^Error: Baseline check 2's pattern isn't a regular expression Nivra can read \(.+\)\. Correct it, then save it again\.$/],
+      [{ baseline: [REPRODUCED, { ...FAILS, outputPattern: "" }] }, "Baseline check 2 needs a pattern for what it prints. Write one, or give its exact output instead, then save it again."],
+      [{ baseline: [{ ...REPRODUCED, expectedExitCode: 256 }] }, "Baseline check 1's exit code must be a whole number from 0 to 255. Change it, then save it again."],
+      [{ baseline: [{ ...REPRODUCED, command: "  " }] }, "Baseline check 1 needs a command to run. Add one, then save it again."],
+      [{ baseline: [REPRODUCED, FAILS, REPRODUCED, FAILS] }, "There are 4 baseline checks, and a brief can hold 3. Remove some, then save it again."],
+      [{ frozen: ["../outside.sh"] }, "Frozen file 1, ../outside.sh, isn't a path inside the folder. Write it as Git names it from the folder, such as tests/regression.test.ts, then save it again."],
+      [{ frozen: ["tests/a.sh", "/etc/hosts"] }, "Frozen file 2, /etc/hosts, isn't a path inside the folder. Write it as Git names it from the folder, such as tests/regression.test.ts, then save it again."],
+      [{ frozen: ["a.sh", "", "a.sh"] }, "Frozen file 3, a.sh, is in the list already. Remove one of them, then save it again."],
+      [{ frozen: Array.from({ length: 21 }, (_, index) => `tests/${index}.sh`) }, "There are 21 frozen files, and a brief can hold 20. Remove some, then save it again."],
+    ];
+    for (const [change, message] of refusals) {
+      await assert.rejects(host.createTask({ title: "Refused", fields: { ...fields, ...change }, projectId: null, planId: null }), typeof message === "string" ? { message } : message);
+    }
+    // A credential in a baseline check or a frozen file's name is refused as in any field.
+    await assert.rejects(host.createTask({ title: "Key", fields: { ...fields, baseline: [{ ...REPRODUCED, command: `NEBIUS=${KEY} sh export.sh` }] }, projectId: null, planId: null }), /^Error: A baseline check's command (holds your saved Token Factory key|looks like it holds)/);
+    await assert.rejects(host.createTask({ title: "Key", fields: { ...fields, frozen: [`tests/${KEY}.sh`] }, projectId: null, planId: null }), /^Error: A frozen file (holds your saved Token Factory key|looks like it holds)/);
+    assert.deepEqual(host.tasks().tasks.map((one) => one.title), ["Header"]);
+
+    // A brief an older Nivra saved, before baseline checks and frozen files, reads as having neither.
+    const root = mkdtempSync(join(tmpdir(), "nivra host ü%# "));
+    dirs.push(root);
+    const opening = openWorkspace(join(root, "workspace.db"));
+    assert.equal(opening.state, "ready");
+    const { baseline: _baseline, frozen: _frozen, ...older } = briefFrom({ ...empty, goal: "Older", acceptanceCriteria: ["Done"], acceptanceCases: [CASE] });
+    const olderId = randomUUID();
+    if (opening.state === "ready") {
+      insertTask(opening.db, { id: olderId, title: "Older", projectId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, { id: randomUUID(), content: older, derivedFrom: null });
+      opening.db.close();
+    }
+    const reopened = hostAt(root).host.task(olderId);
+    assert.deepEqual([reopened.brief.content.goal, reopened.brief.content.baseline, reopened.brief.content.frozen], ["Older", [], []]);
   });
 });
 
@@ -3128,5 +3185,319 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     const dismissed = await host.settleTaskChange(second.taskId, second.attemptId, "dismissed");
     assert.deepEqual([dismissed.decision, dismissed.actions], [null, ["approve", "reject", "revise"]]);
     host.deleteTask(second.taskId);
+  });
+});
+
+describe("Host: a project's environment, prepared in Nebius and bound to its task runs (D41)", () => {
+  const KEY = "test-key-0123456789";
+  const PROJECT_ID = "project-e00hostenviron01";
+  const SECRETS = { NEBIUS_API_KEY: KEY, NEBIUS_PROJECT_ID: PROJECT_ID };
+  const SPEC = { filters: ["@mono/data..."] };
+  const UPLOADS_OFF = "This project doesn't allow uploading to Nebius Sandboxes, where its environment is prepared. Allow uploads for it, then prepare the environment again.";
+  const KEYS_MISSING = "Preparing an environment needs your Nebius key and project id, and they aren't both set. Add them in Settings, then prepare it again.";
+  const NATIVE = "Preparing an environment on Windows itself isn't available yet. Add the repository from a WSL distribution, then prepare it there.";
+  const CHANGED = "What preparing this environment would send has changed since you previewed it. Check the new preview, then prepare it again.";
+  const GOING = "This project's environment is being prepared. Wait for it to end, or cancel it, then prepare it again.";
+  const lines = (home: string, file: string) => (existsSync(join(home, file)) ? readFileSync(join(home, file), "utf8").split("\n").filter(Boolean) : []);
+  const calls = (home: string, method: string) => lines(home, "calls.log").filter((call) => call === method).length;
+  /** A `<id> <json>` log line's JSON. */
+  const after_ = (line: string) => JSON.parse(line.slice(line.indexOf(" ") + 1));
+  const closing: Array<{ close(): Promise<void> }> = [];
+  after(async () => {
+    await Promise.all(closing.map((stub) => stub.close()));
+  });
+
+  /** A host whose one project is a WSL repository on the gated engine, uploads allowed and the keys saved, with its flags. */
+  async function gatedHost(flags: string[] = ["accept", "release"]) {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }] });
+    made.keys.current = SECRETS;
+    await made.host.setCloudExecution(made.ids[0]!, true);
+    const home = join(made.root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of flags) writeFileSync(join(home, flag), "");
+    return { ...made, home };
+  }
+  const fingerprintOf = async (host: Host, projectId: string, spec = SPEC) => {
+    const preview = await host.previewEnvironment(projectId, spec);
+    assert.equal(preview.status, "ready", JSON.stringify(preview).slice(0, 300));
+    return preview.status === "ready" ? preview.fingerprint : "";
+  };
+  const ended = (host: Host, projectId: string, what = "the preparation to end") =>
+    waitFor(
+      async () => {
+        const view = await host.environment(projectId);
+        const status = view.preparation?.status;
+        return status && status !== "submitting" && status !== "running" ? view : null;
+      },
+      what,
+      30_000,
+    );
+  const going = (host: Host, projectId: string) =>
+    waitFor(async () => {
+      const view = await host.environment(projectId);
+      return view.preparation?.status === "running" && view.preparation.runId ? view : null;
+    }, "the preparation to be going");
+
+  it("refuses a preparation while uploads are off, without both keys, or on Windows itself, before any engine starts, and the view says why", async () => {
+    const { host, ids, keys } = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }, { targetId: "local", path: "/nowhere/native" }] });
+    const [linux, native] = [ids[0]!, ids[1]!];
+    const fingerprint = "e".repeat(64);
+    await assert.rejects(host.prepareEnvironment(linux, SPEC, fingerprint), { message: UPLOADS_OFF });
+    await host.setCloudExecution(linux, true);
+    await assert.rejects(host.prepareEnvironment(linux, SPEC, fingerprint), { message: KEYS_MISSING });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    await assert.rejects(host.prepareEnvironment(linux, SPEC, fingerprint), { message: KEYS_MISSING });
+    const waiting = await host.environment(linux);
+    assert.deepEqual([waiting.spec, waiting.prepared, waiting.preparation, waiting.blocked, waiting.notice], [null, null, null, KEYS_MISSING, null]);
+    keys.current = SECRETS;
+    assert.equal((await host.environment(linux)).blocked, null);
+    // A folder on Windows itself: refused whatever else holds.
+    await host.setCloudExecution(native, true);
+    await assert.rejects(host.prepareEnvironment(native, SPEC, fingerprint), { message: NATIVE });
+    assert.equal((await host.environment(native)).blocked, NATIVE);
+    // Packages the domain wouldn't take are refused in words, before any engine starts.
+    await assert.rejects(host.prepareEnvironment(linux, { filters: ["@mono/data...; rm -rf /"] }, fingerprint), /^Error: "@mono\/data\.\.\.; rm -rf \/" isn't a pnpm workspace selector Nivra can send, such as @scope\/data\.\.\. Choose the packages again, then preview again\.$/);
+    await assert.rejects(host.previewEnvironment(linux, { filters: Array.from({ length: 9 }, (_, index) => `@mono/p${index}...`) }), /^Error: 9 packages are chosen, and a preparation takes at most 8\. Choose fewer, or the whole workspace, then preview again\.$/);
+    assert.deepEqual([stateOf(host, "wsl:Test")?.status, stateOf(host, "local")?.status], ["stopped", "stopped"]);
+  });
+
+  it("prepares on the project's own engine exactly what its preview showed, refuses a start whose preview changed, and keeps the environment only when it ends prepared", async () => {
+    const { host, ids, home, keys } = await gatedHost();
+    const id = ids[0]!;
+    const fingerprint = await fingerprintOf(host, id);
+    assert.deepEqual(JSON.parse(lines(home, "env-previews.log")[0]!), { repoPath: "/nowhere/gated", spec: SPEC }, "the preview was worked out on the project's own engine");
+    // The commit changed after the preview, or other packages were chosen: what it would send isn't what was shown.
+    writeFileSync(join(home, "env-changed"), "");
+    await assert.rejects(host.prepareEnvironment(id, SPEC, fingerprint), { message: CHANGED });
+    rmSync(join(home, "env-changed"));
+    await assert.rejects(host.prepareEnvironment(id, { filters: [] }, fingerprint), { message: CHANGED });
+    assert.deepEqual([calls(home, "runs.start"), (await host.environment(id)).spec], [0, null], "nothing was sent, and no spec was kept");
+    // An install that fails keeps no environment, even one its report holds.
+    writeFileSync(join(home, "environment-outcome"), "failed");
+    writeFileSync(join(home, "environment-prepared-anyway"), "");
+    const started = await host.prepareEnvironment(id, SPEC, fingerprint);
+    assert.deepEqual([started.spec, started.preparation?.spec, started.blocked], [SPEC, SPEC, GOING]);
+    const failed = await ended(host, id);
+    assert.deepEqual([failed.preparation?.status, failed.preparation?.report?.outcome, failed.preparation?.report?.stopped?.code, failed.prepared, failed.blocked], ["failed", "failed", "install", null, null]);
+    assert.match(failed.preparation?.report?.install?.logTail ?? "", /ERR_PNPM_OUTDATED_LOCKFILE/);
+    // A run that succeeded with a report that isn't prepared keeps none either.
+    writeFileSync(join(home, "environment-run-succeeds"), "");
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    const unprepared = await ended(host, id);
+    assert.deepEqual([unprepared.preparation?.status, unprepared.preparation?.report?.outcome, unprepared.prepared], ["answered", "failed", null]);
+    // Prepared: kept, bound to what was sent.
+    rmSync(join(home, "environment-outcome"));
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    const prepared = await ended(host, id);
+    const runId = prepared.preparation!.runId!;
+    assert.deepEqual([prepared.preparation?.status, prepared.prepared?.image, prepared.prepared?.spec, prepared.blocked, prepared.notice], ["answered", `image-${runId.slice(0, 8)}`, SPEC, null, null]);
+    const sent = after_(lines(home, "environments.log").at(-1)!);
+    assert.deepEqual([sent.clientRequestId, sent.input, sent.context], [prepared.preparation?.id, { repoPath: "/nowhere/gated", project: id, target: "wsl:Test", preview: fingerprint }, { sharing: { cloudExecution: true }, spec: SPEC }]);
+    // Made in one Nebius project, it can't be used from another: the view says so.
+    keys.current = { ...SECRETS, NEBIUS_PROJECT_ID: "project-e00another00001" };
+    assert.match((await host.environment(id)).notice ?? "", /^This environment was prepared in another Nebius project than the one in Settings/);
+    keys.current = SECRETS;
+    // A later preparation that fails leaves the prepared one as it was.
+    writeFileSync(join(home, "environment-outcome"), "failed");
+    rmSync(join(home, "environment-run-succeeds"));
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    const kept = await ended(host, id);
+    assert.deepEqual([kept.preparation?.status, kept.prepared?.image, calls(home, "runs.start")], ["failed", `image-${runId.slice(0, 8)}`, 4]);
+  });
+
+  it("reads a preparation back after a restart by its request and run ids, keeps what it prepared, and sends nothing again", async () => {
+    const { host, ids, home, root } = await gatedHost(["accept", "release", "running"]);
+    const id = ids[0]!;
+    await host.prepareEnvironment(id, SPEC, await fingerprintOf(host, id));
+    const before = await going(host, id);
+    assert.deepEqual([before.preparation?.report?.outcome, before.blocked, before.prepared], ["in-progress", GOING, null]);
+    // Nivra quits while it goes; its engine goes with it, and its records stay.
+    await host.shutdown();
+    rmSync(join(home, "running"));
+    const again = hostAt(root, { wslEntry: GATED });
+    again.keys.current = SECRETS;
+    const read = await ended(again.host, id, "the preparation to be read back");
+    const runId = before.preparation!.runId!;
+    assert.deepEqual([read.spec, read.preparation?.id, read.preparation?.runId, read.preparation?.status, read.prepared?.image], [SPEC, before.preparation?.id, runId, "answered", `image-${runId.slice(0, 8)}`]);
+    assert.equal(calls(home, "runs.start"), 1);
+  });
+
+  it("finds a preparation whose start's answer was lost by its request id and sends it once; one its engine never recorded wasn't sent, in its own words", async () => {
+    const { host, ids, home } = await gatedHost(["accept", "release", "error-start"]);
+    const id = ids[0]!;
+    const fingerprint = await fingerprintOf(host, id);
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    const found = await ended(host, id, "the lost preparation to be found");
+    assert.deepEqual([found.preparation?.status, found.preparation?.runId === lines(home, "accepted.log")[0]?.split(" ")[1], found.prepared?.spec, calls(home, "runs.start")], ["answered", true, SPEC, 1]);
+    rmSync(join(home, "accept"));
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    const notSent = await ended(host, id, "the refused preparation to settle");
+    assert.deepEqual([notSent.preparation?.status, notSent.preparation?.note, notSent.prepared?.image], ["not-sent", "The engine didn't start the preparation, so nothing was uploaded. The engine refused the run.", found.prepared?.image]);
+  });
+
+  it("stops a preparation under way when uploads are turned off and says so, says when it couldn't, and stops one when its project is removed", async () => {
+    const { host, ids, home } = await gatedHost(["accept", "release", "running"]);
+    const id = ids[0]!;
+    const fingerprint = await fingerprintOf(host, id);
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    const first = (await going(host, id)).preparation!;
+    await host.setCloudExecution(id, false);
+    const stopped = await ended(host, id, "the preparation to stop");
+    assert.deepEqual(
+      [stopped.preparation?.status, stopped.preparation?.note, stopped.preparation?.report?.outcome, lines(home, "cancelled.log")],
+      ["cancelled", "Stopped: uploads for this project were turned off. What it had sent stays with Nebius; its report says what that was.", "cancelled", [first.runId]],
+    );
+    // A stop its engine turns down is reported, never passed over, and a later cancel reaches it.
+    await host.setCloudExecution(id, true);
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    const second = (await going(host, id)).preparation!;
+    writeFileSync(join(home, "fail-cancel"), "");
+    await assert.rejects(host.setCloudExecution(id, false), {
+      message: "Uploads for this project are off, but Nivra couldn't stop the preparation of its environment (the run couldn't be stopped). Restart the project's engine to stop it.",
+    });
+    const left = await host.environment(id);
+    assert.deepEqual([left.preparation?.status, left.preparation?.cancelRequested, host.projects()[0]?.sharing.cloudExecution], ["running", false, false]);
+    await assert.rejects(host.cancelPreparation(id), { message: "Nivra couldn't stop the preparation (the run couldn't be stopped). Restart the project's engine to stop it." });
+    rmSync(join(home, "fail-cancel"));
+    await host.cancelPreparation(id);
+    const cancelled = await ended(host, id, "the second preparation to stop");
+    assert.deepEqual([cancelled.preparation?.status, cancelled.preparation?.note], ["cancelled", "Cancelled. What it had sent stays with Nebius; its report says what that was."]);
+    await assert.rejects(host.cancelPreparation(id), { message: "No preparation of this project's environment is going." });
+    // Removing the project stops its preparation too.
+    await host.setCloudExecution(id, true);
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    const third = (await going(host, id)).preparation!;
+    await host.removeProject(id);
+    assert.deepEqual([host.projects().length, lines(home, "cancelled.log")], [0, [first.runId, second.runId, third.runId]]);
+  });
+
+  it("stops a preparation whose uploads were turned off while its start was out, as soon as its engine answers", async () => {
+    const { host, ids, home } = await gatedHost(["accept"]);
+    const id = ids[0]!;
+    const fingerprint = await fingerprintOf(host, id);
+    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await waitFor(() => calls(home, "runs.start") === 1, "the preparation's request to reach the engine");
+    await host.setCloudExecution(id, false);
+    writeFileSync(join(home, "release"), "");
+    const runId = lines(home, "accepted.log")[0]?.split(" ")[1];
+    const stopped = await ended(host, id, "the preparation to stop");
+    assert.deepEqual(
+      [stopped.preparation?.runId === runId, stopped.preparation?.status, stopped.preparation?.note, lines(home, "cancelled.log"), stopped.prepared],
+      [true, "cancelled", "Stopped: uploads for this project were turned off. What it had sent stays with Nebius; its report says what that was.", [runId], null],
+    );
+  });
+
+  it("binds a task run to the prepared environment: its preview carries it to the engine, its start sends it, and its fingerprint is v1 without one and v2 with one", async () => {
+    const { host, ids, home } = await gatedHost(["accept", "release", "task-report"]);
+    const id = ids[0]!;
+    await host.setSharing(id, true);
+    const CASE = { name: "greet with and without a name", command: ". ./greet.sh; greet Ada; greet", expectedOutput: "Hello, Ada\nHello, world\n", expectedExitCode: 0 };
+    const REPRODUCED = { name: "greet with no name says Hello, and nothing more", command: ". ./greet.sh; greet Ada; greet", expectedExitCode: 0, expectedOutput: "Hello, Ada\nHello, \n" };
+    const fields = { goal: "greet with no name says Hello, world", acceptanceCriteria: ["check.sh passes"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [CASE], baseline: [REPRODUCED], frozen: ["check.sh"] };
+    const created = await host.createTask({ title: "Greet the world", fields, projectId: id, planId: null });
+    const task = host.setTaskState(created.summary.id, created.revision, "ready");
+    const packet = (taskBriefOf(task.brief.content) as { brief: TaskBrief }).brief;
+    const parts = { taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64) };
+    const asked = () => JSON.parse(lines(home, "task-previews.log").at(-1)!) as { environment?: unknown; brief: TaskBrief };
+    // No environment yet: the run would start from Nivra's own image, bound as before.
+    const plain = await host.previewTaskRun(task.summary.id);
+    assert.deepEqual([plain.blocked, plain.environment, plain.expected, "environment" in asked()], [null, null, taskRunFingerprint(parts), false]);
+    assert.deepEqual(
+      [plain.baseline, plain.frozen, plain.limits?.baselineChecks, asked().brief.baseline, asked().brief.frozen],
+      [[{ number: 1, ...REPRODUCED }], [{ path: "check.sh", sha256: createHash("sha256").update("check.sh").digest("hex") }], 1, [REPRODUCED], ["check.sh"]],
+    );
+    // Prepared: the preview carries it to the engine, which checks it, and the run is bound to it.
+    await host.prepareEnvironment(id, SPEC, await fingerprintOf(host, id));
+    const prepared = (await ended(host, id)).prepared!;
+    const bound = { image: prepared.image, inputsDigest: prepared.inputsDigest, projectFingerprint: prepared.projectFingerprint, node: prepared.node, pnpm: prepared.pnpm, arch: prepared.arch };
+    const withIt = await host.previewTaskRun(task.summary.id);
+    assert.deepEqual([withIt.blocked, asked().environment, withIt.environment, withIt.expected], [null, { ...bound, preparedAt: prepared.preparedAt }, { ...bound, preparedAt: prepared.preparedAt }, taskRunFingerprint({ ...parts, environment: bound })]);
+    assert.notEqual(withIt.expected, plain.expected);
+    // A preview made before it was prepared no longer starts a run; this one does, and sends it.
+    await assert.rejects(host.startTaskRun(task.summary.id, plain.expected, plain.snapshotFingerprint!), /^Error: What this run would send has changed since you previewed it\. Preview it again, then start\.$/);
+    const started = await host.startTaskRun(task.summary.id, withIt.expected, withIt.snapshotFingerprint!);
+    await waitFor(() => lines(home, "tasks.log").length === 1, "the run to reach the engine");
+    const sent = after_(lines(home, "tasks.log")[0]!);
+    assert.deepEqual([sent.clientRequestId, sent.input.environment], [started.id, bound]);
+  });
+
+  it("prepares through a real engine against the stand-in for Nebius: .npmrc stays here, the environment is kept, and task previews are bound to it until the manifests change", async () => {
+    // The stand-in's guest takes the uploaded inputs for the preparation and adds what an install leaves: nothing is
+    // installed on this machine (the engine's own environment test does the same).
+    const guest = new RealGuest();
+    const imported = mkdtempSync(join(tmpdir(), "nivra imported image "));
+    dirs.push(imported);
+    guest.images.set("img-imported", imported);
+    const received: string[][] = [];
+    guest.intercept = ({ args, body }, folder) => {
+      if (args[1] !== ENV_PREPARE_SCRIPT) return undefined;
+      const reference = (body["files"] as Record<string, { uuid: string }>)["/nivra/env-inputs.tar.gz"]!;
+      const entries = readTar(new Uint8Array(gunzipSync(guest.service.uploadsById.get(reference.uuid)!)), { maxEntries: 100, maxBytes: 1 << 22, maxEntryBytes: 1 << 22, maxPathBytes: 1024 });
+      received.push(entries.flatMap((entry) => (entry.kind === "file" ? [entry.path] : [])).sort());
+      for (const entry of entries) {
+        if (entry.kind !== "file") continue;
+        mkdirSync(dirname(join(folder, "workspace", entry.path)), { recursive: true });
+        writeFileSync(join(folder, "workspace", entry.path), entry.bytes);
+      }
+      mkdirSync(join(folder, "workspace", "node_modules", "dep"), { recursive: true });
+      writeFileSync(join(folder, "workspace", "node_modules", "dep", "index.js"), "module.exports = 1;\n");
+      return succeed({ stdout: "node v22.23.4\npnpm 11.5.3\narch x86_64\nDone in 7.7s using pnpm v11.5.3\ninstalled\n" });
+    };
+    const sandbox = await startSandboxStub({ guest });
+    closing.push(sandbox);
+    const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+    const parent = mkdtempSync(join(tmpdir(), "nivra environment repos "));
+    dirs.push(parent);
+    const repo = join(parent, "mono");
+    for (const [path, content] of Object.entries({
+      "package.json": json({ name: "mono", private: true, packageManager: "pnpm@11.5.3", engines: { node: ">=22" } }),
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
+      ".npmrc": "node-linker=hoisted\n",
+      "packages/data/package.json": json({ name: "@mono/data", private: true }),
+      "packages/data/src/index.ts": "export const data = 1;\n",
+    })) {
+      mkdirSync(dirname(join(repo, path)), { recursive: true });
+      writeFileSync(join(repo, path), content);
+    }
+    makeRepo(repo);
+    const { host, ids, keys } = makeHost({ sandboxesUrl: sandbox.url, projects: [{ targetId: "wsl:Test", path: repo }] });
+    keys.current = SECRETS;
+    const id = ids[0]!;
+    await host.setSharing(id, true);
+    await host.setCloudExecution(id, true);
+    const shown = await host.previewEnvironment(id, SPEC);
+    assert.equal(shown.status, "ready", JSON.stringify(shown).slice(0, 300));
+    if (shown.status !== "ready") return;
+    assert.deepEqual(
+      [shown.packageManager, shown.nodeRequirement, shown.packages, shown.leftOut, shown.installArgs],
+      ["pnpm@11.5.3", ">=22", [{ name: "@mono/data", path: "packages/data" }], [".npmrc"], ["--frozen-lockfile", "--filter", "@mono/data..."]],
+    );
+    await host.prepareEnvironment(id, SPEC, shown.fingerprint);
+    const done = await waitFor(
+      async () => {
+        const view = await host.environment(id);
+        const status = view.preparation?.status;
+        return status && status !== "submitting" && status !== "running" ? view : null;
+      },
+      "the real preparation to end",
+      90_000,
+    );
+    assert.deepEqual([done.preparation?.status, done.preparation?.report?.outcome, done.preparation?.note], ["answered", "prepared", null], JSON.stringify(done.preparation?.report?.stopped));
+    assert.deepEqual(received, [["package.json", "packages/data/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]], "the preparation was sent something besides the manifests");
+    const prepared = done.prepared!;
+    assert.deepEqual([prepared.node, prepared.pnpm, prepared.inputsDigest, prepared.spec, prepared.projectFingerprint], ["v22.23.4", "11.5.3", shown.inputsDigest, SPEC, await projectFingerprint(PROJECT_ID)]);
+    // A task run of this commit is previewed from the prepared environment, which its engine checked.
+    const CASE = { name: "the package is private", command: "grep -c private package.json", expectedOutput: "1\n", expectedExitCode: 0 };
+    const created = await host.createTask({ title: "Mono", fields: { goal: "Keep it private", acceptanceCriteria: ["It stays private"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [CASE] }, projectId: id, planId: null });
+    const task = host.setTaskState(created.summary.id, created.revision, "ready");
+    const bound = await host.previewTaskRun(task.summary.id);
+    assert.deepEqual([bound.blocked, bound.environment?.image, bound.environment?.preparedAt], [null, prepared.image, prepared.preparedAt]);
+    // A manifest committed since: the engine refuses the environment, in its own words, and nothing is sent.
+    writeFileSync(join(repo, "package.json"), json({ name: "mono", private: true, packageManager: "pnpm@11.5.3", engines: { node: ">=22" }, description: "changed" }));
+    spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "commit", "-qam", "change a manifest"], { cwd: repo });
+    const refused = await host.previewTaskRun(task.summary.id);
+    assert.deepEqual([refused.environment, refused.expected], [null, ""]);
+    assert.match(refused.blocked ?? "", /aren't the ones the project's environment was prepared from\. Prepare the environment again, then preview the run\.$/);
   });
 });

@@ -1,3 +1,4 @@
+import { ENVIRONMENT_FILTER } from "@nivra/domain";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, sleepFor, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
@@ -282,6 +283,53 @@ export interface SandboxOptions {
 const CORRELATION = "NIVRA_CORRELATION";
 const MAX_OUTPUT_BYTES = 65_536;
 
+/** Where an environment's dependencies are installed: the workspace every session uses, so they are found there. */
+export const ENV_WORKSPACE = "/workspace";
+/** Where the preparation inputs go on the sandbox's machine: outside the workspace. */
+const ENV_INPUTS = "/nivra/env-inputs.tar.gz";
+/** The path an environment's commands run with: a Node image's own, which isn't applied without a shell. */
+export const ENV_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/**
+ * What every command in a session from a prepared environment gets beneath its own (D41): the image's path, the home
+ * corepack keeps pnpm in, and the switches that keep pnpm and corepack from asking anything. Nothing here is secret.
+ */
+export const ENV_COMMAND_ENV: Readonly<Record<string, string>> = Object.freeze({ PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
+
+/**
+ * Whether a preparation's install arguments are the only shape Nivra sends: `--frozen-lockfile`, then each filter as
+ * `--filter <filter>`, every filter one the domain's spec takes (`ENVIRONMENT_FILTER`), so a preview and its preparation
+ * agree on what runs.
+ */
+export function isInstallArgs(args: readonly string[]): boolean {
+  if (args[0] !== "--frozen-lockfile" || (args.length - 1) % 2 !== 0) return false;
+  for (let index = 1; index < args.length; index += 2) {
+    if (args[index] !== "--filter" || !ENVIRONMENT_FILTER.test(args[index + 1]!)) return false;
+  }
+  return true;
+}
+
+/**
+ * An environment's preparation: a fixed script, given everything as positional arguments, so nothing is interpolated
+ * into it. $1 the workspace, $2 the inputs archive, $3 pnpm's exact version, then pnpm install's own arguments
+ * (--frozen-lockfile first). It prints the versions and the machine it prepared, for the environment's binding. The
+ * install's own log goes to a file outside the workspace, and only its end is printed, so the service's output cap
+ * can't cut off the last line, which says whether the install finished.
+ */
+export const ENV_PREPARE_SCRIPT = [
+  "set -e",
+  'ws="$1"; inputs="$2"; pm="$3"; shift 3',
+  'mkdir -p "$ws"',
+  'tar -x -z -f "$inputs" -C "$ws"',
+  'rm -f "$inputs"',
+  'cd "$ws"',
+  "corepack enable",
+  'corepack prepare "pnpm@$pm" --activate',
+  'echo "node $(node --version)"',
+  'echo "pnpm $(pnpm --version)"',
+  'echo "arch $(uname -m)"',
+  'if pnpm install "$@" > /nivra/install.log 2>&1; then tail -c 8000 /nivra/install.log; echo "installed"; else status=$?; tail -c 16000 /nivra/install.log; exit "$status"; fi',
+].join("\n");
+
 export class Sandbox {
   readonly #api: SandboxApi;
   readonly #journal: Journal;
@@ -395,9 +443,54 @@ export class Sandbox {
     });
   }
 
+  /**
+   * An environment's preparation (NIV-49), the one other operation that runs with networking on, declared beforehand:
+   * on the base image the environment pins, with only its preparation inputs (manifests, the lockfile, the workspace
+   * file and non-secret install settings, as one archive) and the fixed preparation script, which installs from the
+   * frozen lockfile with the pinned package manager. It is kept, so its result image is the environment; the worker's
+   * work and every check then run on that image with networking off.
+   */
+  async prepareEnvironment(input: { image: string; inputs: FileRef; packageManager: string; installArgs: string[]; timeoutSeconds: number }): Promise<{ operationId: string } | { uncertain: string }> {
+    if (!/^pnpm@\d+\.\d+\.\d+$/.test(input.packageManager)) throw new SandboxRefusal("An environment pins its package manager to an exact pnpm version, such as pnpm@11.5.3.");
+    if (!isInstallArgs(input.installArgs)) throw new SandboxRefusal("An environment installs only from its frozen lockfile, with plain arguments.");
+    if (!(input.timeoutSeconds > 0 && input.timeoutSeconds <= this.#maxTimeoutSeconds)) throw new SandboxRefusal(`A step's timeout must be between 1 and ${this.#maxTimeoutSeconds} s.`);
+    return this.#spawn("environment preparation", {
+      command: "/bin/sh",
+      args: ["-c", ENV_PREPARE_SCRIPT, "nivra-env-prepare", ENV_WORKSPACE, ENV_INPUTS, input.packageManager.slice("pnpm@".length), ...input.installArgs],
+      image: input.image,
+      shell: false,
+      // The image's own environment isn't applied without a shell, so its path is given; nothing here is secret.
+      env: { PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", npm_config_update_notifier: "false" },
+      disposable: false,
+      networking: { enabled: true },
+      timeout: input.timeoutSeconds,
+      truncate_output_at: MAX_OUTPUT_BYTES,
+      files: { [ENV_INPUTS]: input.inputs },
+    });
+  }
+
+  /**
+   * An image imported from a public registry (NIV-49): the service's own operation, journaled as a spawn is, so that
+   * cleanup can settle it. It carries no files, no command and no credentials. A lost answer leaves it uncertain, and
+   * since an import carries no correlation, a search can't find it: cleanup then says it is unresolved.
+   */
+  async importImage(input: { registryUrl: string; timeoutSeconds: number }): Promise<{ operationId: string } | { uncertain: string }> {
+    if (!/^docker:\/\/[a-z0-9.-]+(\/[a-z0-9._-]+)+:[A-Za-z0-9._-]{1,128}$/.test(input.registryUrl)) throw new SandboxRefusal("An image is imported by its registry address and an exact tag, such as docker://docker.io/library/node:22.23.4-alpine3.24.");
+    if (!(input.timeoutSeconds > 0 && input.timeoutSeconds <= 3_600)) throw new SandboxRefusal("An import's timeout must be between 1 and 3,600 s.");
+    return this.#journaled("image import", (_correlation, until) => this.#api.importImage(input.registryUrl, input.timeoutSeconds, { until }));
+  }
+
   async #spawn(label: string, body: SpawnBody, options: { discardAnswer?: boolean } = {}): Promise<{ operationId: string } | { uncertain: string }> {
-    if (body.networking.enabled && label !== "network control") throw new SandboxRefusal("Networking stays off for every operation but the approved network control.");
+    if (body.networking.enabled && label !== "network control" && label !== "environment preparation") throw new SandboxRefusal("Networking stays off for every operation but the approved network control and an environment's declared preparation.");
     if (typeof body.disposable !== "boolean") throw new SandboxRefusal("Every spawn says whether it is disposable.");
+    return this.#journaled(label, (correlation, until) => this.#api.spawn({ ...body, env: { ...body.env, [CORRELATION]: correlation } }, { ...options, until }));
+  }
+
+  /**
+   * Starts one operation, journaled: refused while another is open, its intent flushed before the request, then its
+   * answer, or that the service turned it down, or that it was never sent.
+   */
+  async #journaled(label: string, send: (correlation: string, until: number) => Promise<SpawnAnswer>): Promise<{ operationId: string } | { uncertain: string }> {
     this.#refuseAfterCap(`the ${label} operation`);
     const open = this.#journal.open();
     if (open.operations.length || open.uncertain.length) throw new SandboxRefusal("One operation at a time: an earlier one hasn't ended, or a spawn whose answer was lost hasn't been settled.");
@@ -405,7 +498,7 @@ export class Sandbox {
     this.#journal.append({ kind: "intent", wall: this.#wallNow().toISOString(), correlation, label });
     let answer: SpawnAnswer;
     try {
-      answer = await this.#api.spawn({ ...body, env: { ...body.env, [CORRELATION]: correlation } }, { ...options, until: this.#until(Number.POSITIVE_INFINITY) });
+      answer = await send(correlation, this.#until(Number.POSITIVE_INFINITY));
     } catch (error) {
       // Turned down, or never sent, so nothing was created. Any other failure leaves the intent open, for cleanup to
       // look for.
@@ -502,6 +595,13 @@ export class Sandbox {
    */
   async reconcile(correlation: string): Promise<{ operationId: string } | { unknown: string }> {
     const intent = this.#journal.entries.find((e) => e.kind === "intent" && e.correlation === correlation);
+    // An import carries no correlation id (NIV-49), so one whose answer was lost can't be looked for: it stays unknown,
+    // and no recovery pass spends its time searching for it.
+    if (intent?.kind === "intent" && intent.label === "image import") {
+      const reason = "an import carries no correlation id, so it can't be looked for";
+      this.#journal.append({ kind: "unresolved", wall: this.#wallNow().toISOString(), correlation, operationId: null, reason });
+      return { unknown: reason };
+    }
     const wall = intent && "wall" in intent ? Date.parse(intent.wall) : this.#wallNow().getTime();
     const since = new Date(wall - this.#search.sinceMarginMs).toISOString();
     const end = this.#now() + this.#search.withinMs;

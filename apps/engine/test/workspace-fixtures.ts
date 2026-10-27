@@ -7,7 +7,7 @@ import { dirname, join, relative } from "node:path";
 import { findGit } from "../src/exec/find-executable.ts";
 import { WorkspaceRefusal, type RefusalCode } from "../src/exec/git-tool.ts";
 import { createLocalBackend } from "../src/exec/local.ts";
-import { PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
+import { compressSnapshot, PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
 import { checkCollected, COLLECT_SCRIPT, type Collected } from "../src/exec/patch.ts";
 import { takeSnapshot, type Snapshot, type SnapshotOptions } from "../src/exec/snapshot.ts";
 import { removeDir, tempDir } from "./helpers.ts";
@@ -109,11 +109,14 @@ export interface GuestFiles {
   workspace: string;
 }
 
-/** The guest, simulated: the prepare step extracts the snapshot, `edit` changes the workspace, the collect step runs. */
+/**
+ * The guest, simulated: the prepare step extracts the snapshot as the session uploads it (compressed), `edit` changes
+ * the workspace, the collect step runs.
+ */
 export function guestRun(snapshot: Snapshot, edit: (workspace: string) => void = () => {}): GuestFiles {
   const guest = scratch("guest");
   const workspace = join(guest, "workspace");
-  writeFileSync(join(guest, "snapshot.tar"), snapshot.archive.archive);
+  writeFileSync(join(guest, "snapshot.tar"), compressSnapshot(snapshot.archive.archive));
   const prepared = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", workspace, join(guest, "snapshot.tar"), "", join(guest, "listing")], { encoding: "utf8" });
   assert.equal(prepared.status, 0, prepared.stderr);
   assert.equal(prepared.stdout.split("\n")[1], `digest ${snapshot.archive.listingDigest}`);

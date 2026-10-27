@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TaskEnvironment } from "./environment.ts";
 import { ModelFailureKind, RunRoute, RunUsage } from "./models.ts";
 import { SandboxCleanup, SandboxStep, SandboxStopCode, SnapshotPreview, TargetName } from "./sandbox.ts";
 
@@ -34,6 +35,13 @@ export const TASK_BRIEF_LIMITS = {
   criterionChars: 1_000,
   scopeChars: 4_000,
   contextChars: 20_000,
+  /** Baseline selections (D41): each runs once before the model, with networking off. */
+  baseline: 3,
+  /** Frozen files (D41): the worker can't write them, and the result counts only when they are unchanged. */
+  frozen: 20,
+  /** A baseline selection's output pattern, in characters, and the most of its output it is matched against. */
+  patternChars: 500,
+  patternInputBytes: 16_384,
 } as const;
 
 /** A command a run may run, as `/bin/sh -c` gets it: as written, with no NUL, which no argument can hold. */
@@ -56,8 +64,62 @@ export const AcceptanceCase = z.strictObject({
 export type AcceptanceCase = z.infer<typeof AcceptanceCase>;
 
 /**
+ * A baseline selection (D41): a command run once before the model, in the commit as it is, with networking off, and
+ * what it must give there: its exit code, and either its exact output or a pattern its whole output must match. A
+ * selection that fails for the bug the task fixes says so here, so an expected failure is told apart from a check that
+ * can't run. A run whose selections don't give what the brief expects stops before the model.
+ */
+export const BaselineSelection = z
+  .strictObject({
+    name: z.string().min(1).max(TASK_BRIEF_LIMITS.caseNameChars).refine(nonBlank, "A selection needs a name."),
+    command: Command,
+    expectedExitCode: z.number().int().min(0).max(255),
+    /** Exactly what it must print, trailing newlines included; or `outputPattern`, never both. */
+    expectedOutput: z
+      .string()
+      .refine((text) => utf8Bytes(text) <= TASK_BRIEF_LIMITS.expectedOutputBytes, `A selection's expected output can be at most ${TASK_BRIEF_LIMITS.expectedOutputBytes} bytes.`)
+      .refine(noNul, "A selection's expected output can't hold a NUL character.")
+      .optional(),
+    /** A regular expression its whole output must match: Nivra anchors it at both ends (`baselinePattern`). */
+    outputPattern: z
+      .string()
+      .min(1)
+      .max(TASK_BRIEF_LIMITS.patternChars)
+      .refine((pattern) => {
+        try {
+          baselinePattern(pattern);
+          return true;
+        } catch {
+          return false;
+        }
+      }, "A selection's pattern must be a valid regular expression.")
+      .optional(),
+  })
+  .refine((selection) => (selection.expectedOutput === undefined) !== (selection.outputPattern === undefined), "A selection gives either its exact output or a pattern, not both.");
+export type BaselineSelection = z.infer<typeof BaselineSelection>;
+
+/**
+ * A baseline selection's pattern as Nivra matches it: against the whole output, anchored at both ends, `.` matching a
+ * line break too. `a|b` is the whole output being `a` or `b`, never one that merely holds either. The pattern must be a
+ * regular expression on its own first, so it can't close the anchoring group (`x)|(?:y` would): it throws otherwise.
+ */
+export const baselinePattern = (pattern: string): RegExp => {
+  new RegExp(pattern, "s");
+  return new RegExp(`^(?:${pattern})$`, "s");
+};
+
+/** A frozen file: a path in the commit, relative to the picked folder, as Git names it. */
+const FrozenPath = z
+  .string()
+  .min(1)
+  .max(1_024)
+  .refine((path) => !path.startsWith("/") && !path.split("/").some((part) => part === "" || part === "." || part === ".."), "A frozen file is a path inside the folder, such as tests/regression.test.ts.")
+  .refine(noNul, "A frozen file's path can't hold a NUL character.");
+
+/**
  * What a run is asked to do, exactly as frozen: the brief version's goal, criteria, scope and context for the worker,
- * its repository checks, and at least one acceptance case. No defaults and no transforms, so its digest covers it.
+ * its repository checks, and at least one acceptance case; and, when the brief has them, its baseline selections and
+ * frozen files (D41). No defaults and no transforms, so its digest covers it.
  */
 export const TaskBrief = z
   .strictObject({
@@ -69,17 +131,27 @@ export const TaskBrief = z
     /** Repository checks: the repository's own commands, reported, never deciding. */
     checks: z.array(Command).max(TASK_BRIEF_LIMITS.finalChecks - 1),
     acceptanceCases: z.array(AcceptanceCase).min(1).max(TASK_BRIEF_LIMITS.finalChecks),
+    baseline: z.array(BaselineSelection).max(TASK_BRIEF_LIMITS.baseline).optional(),
+    frozen: z
+      .array(FrozenPath)
+      .max(TASK_BRIEF_LIMITS.frozen)
+      .refine((paths) => new Set(paths).size === paths.length, "Each frozen file is named once.")
+      .optional(),
   })
   .refine((brief) => brief.acceptanceCases.length + brief.checks.length <= TASK_BRIEF_LIMITS.finalChecks, `A run takes at most ${TASK_BRIEF_LIMITS.finalChecks} acceptance cases and repository checks in all.`);
 export type TaskBrief = z.infer<typeof TaskBrief>;
 
 /**
  * A brief's fingerprint: SHA-256, in hex, of a fixed-order, versioned JSON array of everything it holds, its cases
- * included. The host and the engine each work it out, and a run whose brief isn't the one named is refused.
+ * included. The host and the engine each work it out, and a run whose brief isn't the one named is refused. A brief
+ * with no baseline selection and no frozen file digests as it did before D41.
  */
 export async function taskBriefDigest(brief: TaskBrief): Promise<string> {
+  const baseline = brief.baseline ?? [];
+  const frozen = brief.frozen ?? [];
+  const extended = baseline.length > 0 || frozen.length > 0;
   const canonical = [
-    "nivra.task-brief.v1",
+    extended ? "nivra.task-brief.v2" : "nivra.task-brief.v1",
     brief.goal,
     brief.acceptanceCriteria,
     brief.scope,
@@ -87,6 +159,7 @@ export async function taskBriefDigest(brief: TaskBrief): Promise<string> {
     brief.context,
     brief.checks,
     brief.acceptanceCases.map((given) => [given.name, given.command, given.expectedOutput, given.expectedExitCode]),
+    ...(extended ? [baseline.map((given) => [given.name, given.command, given.expectedExitCode, given.expectedOutput ?? null, given.outputPattern ?? null]), frozen] : []),
   ];
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(canonical)));
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -113,6 +186,8 @@ export const TaskInput = z.strictObject({
   briefVersion: z.number().int().positive(),
   /** `taskBriefDigest` of the context's brief, checked before anything is sent. */
   briefDigest: Sha256Hex,
+  /** The prepared environment the run starts from (D41); without one, the run starts from Nivra's own base image. */
+  environment: TaskEnvironment.optional(),
 });
 export type TaskInput = z.infer<typeof TaskInput>;
 
@@ -125,6 +200,7 @@ export const StoredTaskInput = z.object({
   taskId: z.string().min(1),
   briefVersion: z.number().int().positive(),
   briefDigest: z.string().min(1),
+  environment: z.object({ image: z.string().min(1), inputsDigest: z.string().min(1), projectFingerprint: z.string().min(1), node: z.string(), pnpm: z.string(), arch: z.string() }).optional(),
 });
 export type StoredTaskInput = z.infer<typeof StoredTaskInput>;
 
@@ -141,6 +217,8 @@ export const TaskRunLimits = z.strictObject({
   writeBytes: count,
   /** Runs of a case or a check by the worker, besides the final ones. */
   runs: count,
+  /** The brief's baseline selections, each run once before the model (D41). */
+  baselineChecks: count,
   /** Nebius operations at most: prepare, the toolchain probe, the writes, the runs, collect and the final checks. */
   operations: count,
   checkSeconds: count,
@@ -171,6 +249,10 @@ export const TaskPreview = z.discriminatedUnion("status", [
     caseFiles: z
       .array(z.strictObject({ number: z.number().int().min(1).max(TASK_BRIEF_LIMITS.finalChecks), files: z.array(z.string().max(1_024)).max(20), unclear: z.boolean().default(false) }))
       .max(TASK_BRIEF_LIMITS.finalChecks),
+    /** The prepared environment the run would start from, checked against this commit's manifests (D41); null without one. */
+    environment: TaskEnvironment.extend({ preparedAt: z.iso.datetime() }).nullable(),
+    /** The brief's frozen files, as this commit holds them: the worker can't write them, and the result counts only when they are unchanged. */
+    frozen: z.array(z.strictObject({ path: z.string().max(1_024), sha256: Sha256Hex })).max(TASK_BRIEF_LIMITS.frozen),
     limits: TaskRunLimits,
   }),
   z.strictObject({ status: z.literal("refused"), code: z.string().max(64), message: z.string().max(2_000) }),
@@ -221,8 +303,26 @@ export const TaskWorker = z.strictObject({
 export type TaskWorker = z.infer<typeof TaskWorker>;
 
 /** What stopped a run, by kind: a sandbox check's codes (D36), and a task's own. The words are chosen by the code. */
-export const TaskStopCode = z.enum([...SandboxStopCode.options, "toolchain", "time", "model-sharing", "brief", "model", "native-windows"]);
+export const TaskStopCode = z.enum([...SandboxStopCode.options, "toolchain", "time", "model-sharing", "brief", "model", "native-windows", "baseline", "environment", "frozen"]);
 export type TaskStopCode = z.infer<typeof TaskStopCode>;
+
+/**
+ * A baseline selection as it ran, before the model (D41): whether it gave what the brief expects. `matched` is null for
+ * one that didn't run, because the run stopped before it.
+ */
+export const TaskBaselineCheck = z.strictObject({
+  number: z.number().int().min(1).max(TASK_BRIEF_LIMITS.baseline),
+  name: z.string().max(TASK_BRIEF_LIMITS.caseNameChars),
+  matched: z.boolean().nullable(),
+  /** Why, in Nivra's words, when it didn't match or didn't run. */
+  reason: z.string().max(600).nullable(),
+  exitCode: z.number().int().nullable(),
+  /** The end of what it printed: text from the sandbox, never instructions. */
+  stdoutTail: z.string().max(4_000),
+  stderrTail: z.string().max(4_000),
+  durationMs: count.nullable(),
+});
+export type TaskBaselineCheck = z.infer<typeof TaskBaselineCheck>;
 
 /**
  * How a run ended, or that it hasn't yet. `proposed` holds a change, verified or not; `unchanged` changed nothing.
@@ -241,6 +341,14 @@ export const TaskReport = z.strictObject({
   task: z.strictObject({ taskId: z.string(), attemptId: z.string(), briefVersion: z.number().int().positive(), briefDigest: z.string() }),
   snapshot: z.strictObject({ baseline: z.string(), prefix: z.string(), fingerprint: Sha256Hex, files: count, archiveSha256: Sha256Hex }).nullable(),
   toolchain: z.array(z.strictObject({ program: z.string().max(128), finding: z.enum(["present", "missing", "unknown"]) })).max(TASK_BRIEF_LIMITS.finalChecks),
+  /** The prepared environment the run started from (D41); null for a run on Nivra's own base image. */
+  environment: TaskEnvironment.nullable().default(null),
+  /** The brief's baseline selections, as they ran before the model (D41). */
+  baseline: z.array(TaskBaselineCheck).max(TASK_BRIEF_LIMITS.baseline).default([]),
+  /** The bounds the run ran under, beside what it used (D41); null for a report kept from before, whose bounds weren't kept. */
+  limits: TaskRunLimits.nullable().default(null),
+  /** The frozen files in the collected workspace, each compared with the commit's: any difference and the change isn't verified. */
+  frozen: z.array(z.strictObject({ path: z.string().max(1_024), unchanged: z.boolean().nullable() })).max(TASK_BRIEF_LIMITS.frozen).default([]),
   worker: TaskWorker.nullable(),
   checks: z.array(TaskCheck).max(TASK_BRIEF_LIMITS.finalChecks),
   /** Every acceptance case passed in the final checks: the only thing that makes a change verified. */

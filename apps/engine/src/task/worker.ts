@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createTool } from "@mastra/core/tools";
-import type { JsonObject, Mask } from "@nivra/domain";
+import type { BaselineSelection, JsonObject, Mask, TaskBaselineCheck, TaskEnvironment } from "@nivra/domain";
 import { z } from "zod";
 import { ExecRefusedError, ExecUncertainError, type ExecResult, type ExecutionBackend, type ExecutionSession } from "../exec/backend.ts";
 import { WorkspaceRefusal } from "../exec/git-tool.ts";
@@ -13,9 +13,11 @@ import { runBudgetFailure, usageOf } from "../explain/reading.ts";
 import { failure as failure_, InternalFailure, ModelFailure, type ModelClient, type StepRecord as ModelStep } from "../providers/model.ts";
 import { requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget, type Hold, type Refusal } from "../providers/run-budget.ts";
+import { EnvironmentRefusal, environmentInputs } from "../environment/inputs.ts";
 import { WorkspaceCopy } from "./copy.ts";
-import { checkRequest, commandFiles, couldntRun, failedToSend, judgeCase, judgeCheck, notRun, programsOf, refusalWords, verified, type AcceptanceCase, type CheckResult, type NamedFiles } from "./harness.ts";
+import { checkRequest, commandFiles, couldntRun, failedToSend, judgeBaseline, judgeCase, judgeCheck, notRun, programsOf, refusalWords, verified, type AcceptanceCase, type CheckResult, type NamedFiles } from "./harness.ts";
 import { AFTER_SESSION_MS, operationsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
+import { frozenIn } from "./report.ts";
 import { firstWord, toolchainFindings, toolchainRequest, writeContentProblem, writeRequest } from "./scripts.ts";
 
 /**
@@ -45,6 +47,10 @@ export interface TaskBrief {
   /** Repository checks: reported, never deciding. */
   checks: string[];
   acceptanceCases: AcceptanceCase[];
+  /** Run once before the model, on the commit as it is (D41). */
+  baseline?: BaselineSelection[];
+  /** Files the worker can't write, and the result counts only with them unchanged (D41). */
+  frozen?: string[];
 }
 
 /** Why the worker's loop ended. */
@@ -67,11 +73,17 @@ export interface WorkerSummary {
 
 /** What the report binds about the task, besides the change: built before the proposal, so its digest is bound. */
 export interface TaskReportCore {
-  version: 2;
+  version: 3;
   kind: "task";
   task: { taskId: string; attemptId: string; runId: string; briefVersion: number; briefSha256: string };
   baseline: string;
   prefix: string;
+  /** The prepared environment the run started from (D41); null on Nivra's own base image. */
+  environment: TaskEnvironment | null;
+  /** The brief's baseline selections, as they ran before the model (D41). */
+  baselineChecks: TaskBaselineCheck[];
+  /** The frozen files in the collected workspace, each compared with the commit's; null when it wasn't collected. */
+  frozen: Array<{ path: string; unchanged: boolean | null }>;
   toolchain: Array<{ program: string; finding: "present" | "missing" | "unknown" }>;
   worker: WorkerSummary;
   checks: CheckResult[];
@@ -102,6 +114,8 @@ export interface WorkerRun {
   workspace?: string;
   /** What runs the engine's scripts' tools in the sandbox: busybox unless given. */
   applets?: string;
+  /** The prepared environment the backend's sessions start from (D41), as the run is bound to it. */
+  environment?: TaskEnvironment | null;
   now?: () => number;
   /**
    * The run's one absolute deadline, on `now`'s clock (D39): from when the run started, which can be before the worker
@@ -153,6 +167,7 @@ export function workerPrompt(brief: TaskBrief, paths: readonly string[]): string
     brief.context ? `Context: ${brief.context}` : "",
     `Acceptance cases (run_case by number; judged by Nivra):\n${brief.acceptanceCases.map((given, index) => `${index + 1}. ${given.name}\n   command: ${given.command}\n   expected exit code: ${given.expectedExitCode}\n   expected output: ${JSON.stringify(given.expectedOutput)}`).join("\n") || "(none)"}`,
     `Repository checks (run_check by number; reported, never deciding):\n${brief.checks.map((check, index) => `${index + 1}. ${check}`).join("\n") || "(none)"}`,
+    brief.frozen?.length ? `Frozen files (the task is judged by them, so edit_file and create_file refuse them):\n${list(brief.frozen)}` : "",
     `Files (${paths.length}${paths.length > shown.length ? `, the first ${shown.length} shown; list_files shows more` : ""}):\n${shown.join("\n")}`,
   ]
     .filter(Boolean)
@@ -209,6 +224,8 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   let copy: WorkspaceCopy | null = null;
   let findings = new Map<string, "present" | "missing" | "unknown">();
   const results: CheckResult[] = [];
+  const baselineChecks: TaskBaselineCheck[] = [];
+  const frozenFiles: Array<{ path: string; unchanged: boolean | null }> = [];
   const worker: WorkerSummary = {
     handedIn: false,
     summary: null,
@@ -230,21 +247,27 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     },
   };
   const progress = (message: string, data: JsonObject) => run.progress?.(mask(message), data);
+  /** The files the worker can't write, each with why (D41): the brief's frozen files, and those its environment was prepared from. */
+  const held = new Map<string, string>();
   const missingFor = (command: string): string | null => {
     const program = firstWord(command);
     return program !== null && findings.get(program) === "missing" ? program : null;
   };
   const coreOf = (): TaskReportCore | null =>
     copy && {
-      version: 2,
+      version: 3,
       kind: "task",
       task: { taskId: run.binding.taskId, attemptId: run.binding.attemptId, runId: run.binding.runId, briefVersion: run.binding.briefVersion, briefSha256: run.binding.briefSha256 },
       baseline: copy.snapshot.baseline,
       prefix: copy.snapshot.prefix,
+      environment: run.environment ?? null,
+      // Masked as the checks are: the report is bound into the proposal and kept (D41).
+      baselineChecks: baselineChecks.map((check) => ({ ...check, name: mask(check.name), reason: check.reason === null ? null : mask(check.reason), stdoutTail: mask(check.stdoutTail), stderrTail: mask(check.stderrTail) })),
+      frozen: [...frozenFiles],
       toolchain: programs.map((program) => ({ program, finding: findings.get(program) ?? "unknown" })),
       worker: { ...worker, written: [...copy.written] },
       checks: results.map((result) => ({ ...result, name: mask(result.name), reason: result.reason === null ? null : mask(result.reason), stdoutTail: mask(result.stdoutTail), stderrTail: mask(result.stderrTail), difference: result.difference && { line: result.difference.line, expected: mask(result.difference.expected), got: mask(result.difference.got) } })),
-      verified: verified(results),
+      verified: verifiedWith(results, frozenFiles),
     };
 
   /** One operation, its record kept whatever happens. A command refused before it was sent never ran: it is no step. */
@@ -262,6 +285,10 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
 
   const work = async (session: ExecutionSession, context: WorkContext): Promise<WorkResult> => {
     copy = new WorkspaceCopy(context.snapshot);
+    for (const path of brief.frozen ?? []) held.set(path, `${path.length > 200 ? `${path.slice(0, 199)}\u2026` : path} is frozen by the brief: the task is judged by it, so it can't be changed`);
+    if (run.environment) {
+      for (const file of environmentInputs(context.snapshot).files) held.set(file.path, `${file.path.length > 200 ? `${file.path.slice(0, 199)}\u2026` : file.path} is one the project's environment was prepared from, so changing it would leave the environment behind`);
+    }
     // The toolchain, before the model: a program the brief's commands need that isn't there stops the run now.
     if (programs.length) {
       context.stage = "toolchain";
@@ -281,6 +308,30 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
           return program ? couldntRun(kind, number, name, program) : notRun(kind, number, name, "the run stopped before it: a program the brief needs isn't in the sandbox image");
         }));
         return { going: false, outcome: "refused", stopped: { code: "toolchain", message: `The sandbox image has no ${first.program}, which ${which} needs. Nothing was installed, and nothing ran on your computer.`, step: "toolchain", detail: null } };
+      }
+    }
+    // The baseline selections (D41), before the model: each must give what the brief expects on the commit as it is,
+    // a bug the task fixes reproduced as the brief says, or the run stops with no model call.
+    const selections = brief.baseline ?? [];
+    for (const [index, given] of selections.entries()) {
+      const number = index + 1;
+      const rest = (reason: string) => selections.slice(index + 1).map((other, later) => ({ number: number + later + 1, name: other.name, matched: null, reason, exitCode: null, stdoutTail: "", stderrTail: "", durationMs: null }));
+      if (sessionDeadline - now() - reserveMs(finalChecks) < runNeedsMs()) {
+        baselineChecks.push({ number, name: given.name, matched: null, reason: "there wasn't time left in the session for it", exitCode: null, stdoutTail: "", stderrTail: "", durationMs: null }, ...rest("the run stopped before it"));
+        return { going: false, outcome: "failed", stopped: { code: "time", message: "baseline: there wasn't time left in the session for the baseline selections.", step: "baseline", detail: null } };
+      }
+      context.stage = "baseline";
+      const ran = await recorded(session, context, "baseline", () => session.exec(checkRequest({ workspace, command: given.command, label: "baseline" })));
+      if (ran.cancelled) {
+        baselineChecks.push({ number, name: given.name, matched: null, reason: "the run was cancelled while it ran", exitCode: null, stdoutTail: "", stderrTail: "", durationMs: ran.durationMs }, ...rest("the run was cancelled before it"));
+        return { going: false, outcome: "cancelled", stopped: { code: "cancelled", message: "baseline: the run was cancelled while it ran.", step: "baseline", detail: null } };
+      }
+      const judged = judgeBaseline(number, given, ran);
+      baselineChecks.push(judged);
+      progress(`Baseline ${number}: ${judged.matched ? "as the brief expects" : `not as the brief expects (${judged.reason ?? "unknown"})`}`, { number, matched: judged.matched });
+      if (!judged.matched) {
+        baselineChecks.push(...rest("the run stopped before it"));
+        return { going: false, outcome: "refused", stopped: { code: "baseline", message: `baseline: selection ${number} didn't give what the brief expects, so the model wasn't called.`, step: "baseline", detail: null } };
       }
     }
     context.stage = "worker";
@@ -336,7 +387,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
 
     const write = async (tool: string, path: string, content: string, created: boolean) => {
       const bytes = encoder.encode(content);
-      const problem = writeContentProblem(content, run.knownValues) ?? copy.writeProblem(path, bytes, run.knownValues);
+      const problem = held.get(path) ?? writeContentProblem(content, run.knownValues) ?? copy.writeProblem(path, bytes, run.knownValues);
       if (problem) return refuse(tool, problem);
       if (worker.tools.writes >= TASK_LIMITS.tools.writes) return refuse(tool, `this attempt has made its ${TASK_LIMITS.tools.writes} writes; call submit now`);
       if (windowLeft() < writeNeedsMs()) return refuse(tool, "there isn't time left in this attempt for another write; call submit now");
@@ -589,6 +640,10 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   const verify = async (session: ExecutionSession, context: WorkContext & { collected: Collected }) => {
     if (!copy) return;
     copy.checkIntegrity(context.collected);
+    // The frozen files as they came back, each compared with the commit's, outside anything the worker could edit (D41).
+    const collectedFiles = new Map(context.collected.entries.flatMap((entry) => (entry.kind === "file" ? [[entry.path, entry.sha256] as const] : [])));
+    const committed = frozenIn(context.snapshot, brief.frozen ?? []);
+    if ("files" in committed) for (const file of committed.files) frozenFiles.push({ path: file.path, unchanged: collectedFiles.get(file.path) === file.sha256 });
     context.stage = "final check";
     // The first start whose answer was lost: nothing more runs in the session, and the run ends uncertain (rule 9).
     let unsettled: ExecUncertainError | null = null;
@@ -625,6 +680,21 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     folder: run.folder,
     expectedFingerprint: run.preview,
     steps: [],
+    // Before anything is sent (D41): the environment must have been prepared from this commit's manifests, and every
+    // frozen file must be a file the commit holds.
+    admit: (snapshot) => {
+      if (run.environment) {
+        let digest: string | null = null;
+        try {
+          digest = environmentInputs(snapshot).digest;
+        } catch (error) {
+          if (!(error instanceof EnvironmentRefusal)) throw error;
+        }
+        if (digest !== run.environment.inputsDigest) return { code: "environment", message: "snapshot: this commit's manifests aren't the ones its environment was prepared from, so nothing was sent." };
+      }
+      const frozen = frozenIn(snapshot, brief.frozen ?? []);
+      return "missing" in frozen ? { code: "frozen", message: "snapshot: the brief freezes a file this commit doesn't hold, so nothing was sent." } : null;
+    },
     work,
     verify,
     finish: ({ snapshot, patch, steps, operations }) => {
@@ -677,5 +747,8 @@ function changedNamed(command: string, copy: WorkspaceCopy): NamedFiles {
   return { files: named.files, unclear: named.unclear && copy.written.length > 0 };
 }
 
-/** The operations a run's backend allows, for its brief. */
-export const operationsForBrief = (brief: Pick<TaskBrief, "acceptanceCases" | "checks">): number => operationsFor(brief.acceptanceCases.length + brief.checks.length);
+/** A change is verified only when every acceptance case passed and every frozen file came back as the commit holds it (D41). */
+export const verifiedWith = (results: readonly CheckResult[], frozen: ReadonlyArray<{ unchanged: boolean | null }>): boolean => verified(results) && frozen.every((file) => file.unchanged === true);
+
+/** The operations a run's backend allows, for its brief: its baseline selections among them (D41). */
+export const operationsForBrief = (brief: Pick<TaskBrief, "acceptanceCases" | "checks" | "baseline">): number => operationsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0);

@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { TaskOutcome, taskBriefDigest, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskReport, type TaskStopCode } from "@nivra/domain";
+import { projectFingerprint, TaskOutcome, taskBriefDigest, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskEnvironment, type TaskReport, type TaskStopCode } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import { Refusal } from "../diagnostics.ts";
@@ -9,7 +9,7 @@ import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClie
 import { policyFor } from "../providers/policy.ts";
 import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoError } from "../repo/paths.ts";
-import { TASK_LIMITS } from "../task/limits.ts";
+import { runLimitsFor, TASK_LIMITS } from "../task/limits.ts";
 import { earlyTaskReport, holdsValue, taskReport, taskStopWords, type TaskBound } from "../task/report.ts";
 import { operationsForBrief, runWorker } from "../task/worker.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -33,8 +33,11 @@ export interface TaskDeps {
   homeId: string;
   /** The Nebius key and project id, read from the vault as the run starts; null unless both are set. The key is Token Factory's too. */
   credentials: () => { key: string; project: string } | null;
-  /** A Nebius backend for one run, its operations limited to `operations`, its journals in the engine's home. */
-  sandbox: (operations: number) => ExecutionBackend;
+  /**
+   * A Nebius backend for one run, its operations limited to `operations`, its journals in the engine's home; its
+   * sessions start from the prepared environment's image when the run is bound to one (D41).
+   */
+  sandbox: (operations: number, environment: TaskEnvironment | null) => ExecutionBackend;
   /** The engine's own `Local` backend, for its git on the checkout. */
   local: ExecutionBackend;
   findGit: () => string | null;
@@ -72,8 +75,13 @@ export function createTaskWorkflow(deps: TaskDeps) {
   const routes = new Map<string, RunRoute>();
   const requestOf = (runId: string) => ({ runId, clientRequestId: deps.requestId(runId) ?? runId });
   const boundOf = (runId: string, task: StoredTaskInput): TaskBound => ({ taskId: task.taskId, attemptId: requestOf(runId).clientRequestId, briefVersion: task.briefVersion, briefDigest: task.briefDigest });
+  /** The bounds a run of its brief runs under, as its preview showed them; null when its context is gone. */
+  const limitsOf = (runId: string) => {
+    const brief = deps.context(runId)?.brief;
+    return brief ? runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0) : null;
+  };
   const early = (runId: string, task: StoredTaskInput, outcome: TaskReport["outcome"], code: TaskStopCode | null, step: string | null, finished: boolean) =>
-    deps.saveReport(runId, earlyTaskReport({ outcome, code, step, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, now: now(), finished }));
+    deps.saveReport(runId, earlyTaskReport({ outcome, code, step, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, limits: limitsOf(runId), now: now(), finished }));
   const forget = (runId: string) => {
     startedAt.delete(runId);
     routes.delete(runId);
@@ -105,6 +113,8 @@ export function createTaskWorkflow(deps: TaskDeps) {
     const credentials = deps.credentials();
     if (!credentials) throw refuse("credentials");
     if ((await taskBriefDigest(context.brief)) !== task.briefDigest) throw refuse("brief");
+    // An environment's image is reachable only from the Nebius project it was prepared in (D41).
+    if (task.environment && (await projectFingerprint(credentials.project)) !== task.environment.projectFingerprint) throw refuse("environment");
     return { task, context, credentials };
   };
 
@@ -212,6 +222,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
           const git = deps.findGit();
           if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
           const { brief } = context;
+          const environment: TaskEnvironment | null = task.environment ?? null;
           const local = await deps.local.open({ workspace: task.repoPath });
           let outcome;
           try {
@@ -220,7 +231,8 @@ export function createTaskWorkflow(deps: TaskDeps) {
               folder: task.repoPath,
               preview: task.preview,
               brief,
-              backend: deps.sandbox(operationsForBrief(brief)),
+              backend: deps.sandbox(operationsForBrief(brief), environment),
+              environment,
               local,
               git,
               client: clientFor(credentials.key),
@@ -247,7 +259,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
           if (outcome.core) deps.setMeta(runId, { usage: outcome.core.worker.usage });
           // The report first: a proposal is kept only once the report that describes it is, so neither says what the
           // other doesn't.
-          deps.saveReport(runId, taskReport({ result, core: outcome.core, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, now: now(), mask: deps.mask }));
+          deps.saveReport(runId, taskReport({ result, core: outcome.core, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, limits: limitsOf(runId), now: now(), mask: deps.mask }));
           reported = true;
           if (result.proposal) {
             try {

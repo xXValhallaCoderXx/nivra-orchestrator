@@ -1,6 +1,6 @@
 # Nivra: system architecture
 
-*Status as of 17 October 2026.*
+*Status as of 17 October 2026, with coding work brought up to date on 28 October (D39 to D41).*
 
 This document describes what is **built**:
 - the desktop host and its engines;
@@ -19,13 +19,18 @@ This document describes what is **built**:
   (`cad5eca`, D25) moves the Windows runtime's Visual C++ DLL beside the addon that imports it. Its Linux and WSL
   payloads are byte-identical, so that evidence carries over, and its Windows checks ran again.
 
+Since then, coding work has been built behind an execution boundary that enforces its limits:
+- a task's run: one worker on Nemotron in a Nebius sandbox with networking off, judged by acceptance cases it can't
+  edit, its change proposed as a checked patch with its hash (D39);
+- the person's approval by that hash, and the apply by the engine that owns the checkout, every end said exactly (D40);
+- a project's environment: one pinned Node and pnpm setup prepared inside Nebius from the commit's manifests, then
+  baseline checks before the model and frozen files the worker can't change (D41).
+
+The decisions are the current record for these. Where a section below still calls them planned, the decision wins.
+
 It also describes what is **planned**, in two parts. **None of it is working yet.**
 - **The rest of the immediate milestone (D20):** promoting a project's preference to a personal one (NIV-10).
-- **A later milestone, deferred by D20:**
-  - new-app creation;
-  - the coding worker;
-  - the sandboxes that would enforce limits on it;
-  - patch approval.
+- **Later:** new-app creation, a local container sandbox, and more workers.
 
 Each section says which parts are built and which are planned. Decisions are cited as D1, D2, … and are written up in
 [docs/decisions.md](docs/decisions.md). The questions about the hackathon's requirements are kept apart from the
@@ -85,14 +90,14 @@ flowchart LR
   M -- "JSON-RPC 2.0 over stdio, through wsl.exe" --> E2
   E1 -. "HTTPS: explain and chat runs, a check" .-> TF["Nebius Token Factory<br/>NVIDIA Nemotron"]
   E2 -. "HTTPS: explain and chat runs, a check" .-> TF
-  E2 -. "planned: tool calls" .-> SB["Planned sandbox<br/>local container, or Token Factory Sandboxes"]
+  E2 -. "HTTPS: sandbox checks, preparations and task runs" .-> SB["Nebius Sandboxes<br/>networking off, except a preparation"]
 ```
 
 | Layer | What it is | What it may do |
 |---|---|---|
 | **Renderer** | The window: React 19 + Mantine 9 | Call 48 named functions. It sees project ids and display paths. It holds a key only while the person types it into Settings, and it never reads a saved key back. It can't choose a path for a privileged operation: folders come from the native dialog in main. |
 | **Main process** | Electron's main process, a thin shell over plain Node modules | Own the project list, each project's consent, the preferences, the secret store and the engines. Translate the window's calls into engine calls, each run carrying its project's preference snapshot and consent. |
-| **Engine** | One Node process per target in use, each with its own databases | Today: the hello, explain and chat runs, Doctor, run records and a Token Factory check. Planned: sandboxes and coding work. It speaks only JSON-RPC on stdin and stdout. |
+| **Engine** | One Node process per target in use, each with its own databases | The hello, explain and chat runs, Doctor, run records and a Token Factory check; plan reviews and research; and, in Nebius Sandboxes, a project's sandbox check, its environment's preparation and a task's run, whose approved change it applies (D36, D39 to D41). It speaks only JSON-RPC on stdin and stdout. |
 
 The engine is never part of Electron. It runs on its own Node, shipped with the app (D5), which is what lets it run
 inside a WSL distribution while the window stays native on Windows.
@@ -440,7 +445,7 @@ run progress by polling with a cursor.
 | IPC | A trusted-sender check and zod validation on every handler. The renderer sends ids; the paths it shows are for display only. |
 | Starting programs | Programs start from argument lists, never through a shell, and a test bans `shell: true`. The one exception is probing and provisioning a WSL distribution: a fixed `/bin/sh -c` script runs inside it, with values passed as positional arguments, never spliced into the script. |
 | Child environments | Children get a filtered environment: provider key variables, `NODE_OPTIONS` and Electron's variables are removed, and exactly one PATH key is kept. This removes **known** variables; it is not an allow-list, so other secrets in the environment are passed on. |
-| Execution | Only the `Local` backend exists. It provides **no isolation** and is labelled "No isolation". It refuses sessions that need network rules, and Windows batch files. Today it runs only the hello check and git, which explain uses to read tracked files with its settings pinned. The container, Token Factory Sandboxes and OpenShell backends are planned (§11). |
+| Execution | The `Local` backend provides **no isolation** and is labelled "No isolation". It refuses sessions that need network rules, and Windows batch files. It runs the hello check and git, which explain uses to read tracked files with its settings pinned. Coding work needs a backend that isolates the filesystem, which `Local` refuses (D33): the Nebius backend runs each command in a remote VM with networking off. An environment's preparation is the one operation with networking on, declared in its preview (D41). The container and OpenShell backends are planned (§11). |
 | Model requests | Explaining needs the project's consent, off by default, checked by the host and by the engine; nothing is sent without it or without a key (D22). Removing a project withdraws it and stops the project's runs. The model gets excerpts of tracked files only: secret files and dependency or build output are never read, and text that looks like a key or token is masked, in file names and folder names too. Masking is pattern-based and can't recognise every secret; the consent dialog says so. The key travels only in the `Authorization` header. |
 | Databases | Each database has one owner, and none is ever opened across the Windows/WSL boundary. SQLite's exclusive lock refuses a second engine on the same data folder. |
 | Preferences | The engine never writes a statement it was given: runs record ids, revisions and a fingerprint, and a canary test checks that preference text never reaches `nivra.db*`, `mastra.db*` or the logs (D21). Text the model writes may paraphrase a preference; it is kept only in the engine's `nivra.db`, masked, never in `mastra.db` or the logs (D22). |
@@ -475,8 +480,8 @@ run progress by polling with a cursor.
   Windows.
 - A Windows check's run: `~/.nivra-test/<kind>-<UTC>-<id>` inside WSL, removed when the run ends.
 
-*Planned:* the engine gains patches, approvals, apply intents and sandbox sessions, through an additive migration.
-Migration v2 (D22) added the run's duration, usage and route, and the `artifacts` table.
+Migration v2 (D22) added the run's duration, usage and route, and the `artifacts` table. Migrations v4 (D39) and v5
+(D40) added a task run's proposal, kept exactly as it was bound, and applying it.
 
 ---
 
@@ -521,14 +526,17 @@ Migration v2 (D22) added the run's duration, usage and route, and the `artifacts
 
 ---
 
-## 11. Coding work *(a later milestone, deferred by D20; only the Nebius execution session, D33, and commit snapshots with checked patches, D34, are built, and nothing here is wired into the engine yet)*
+## 11. Coding work *(built since 26 October: D39, D40 and D41 are the current record; the design below came first)*
 
-Today the only execution backend the engine uses is `Local`. It provides no isolation and runs nothing but the hello
-check and git. The Nebius execution session (D33) is built and tested offline, but no run uses it yet. Neither does
-any run use commit snapshots and validated patches (D34): one commit's own bytes go in, and a checked patch comes out,
-bound to its destination by one hash.
-The design below follows D9 and D15, and is kept for when coding work is promoted again. The coding worker's first
-write task hasn't been chosen. Its open requirements are tracked in NIV-7 and NIV-8:
+A task's run is built (D39). One worker, a Mastra agent on Nemotron, works in a Nebius sandbox from a snapshot of one
+commit, with networking off. Acceptance cases it can't edit judge its change, which is proposed as a checked patch
+bound to its destination by one hash (D34). The person approves it by that hash; the engine that owns the checkout
+checks it again and applies it, moving each original aside and keeping it, and reconciles an interrupted apply, never
+replaying it (D40). A project's environment is prepared inside Nebius from the commit's manifests, and a run starts
+from it, running the brief's baseline checks before the model and refusing changes to its frozen files (D41).
+
+The design below follows D9 and D15, and was written before those decisions. Where they differ, the decisions are the
+record. What it asked of the first write task is met:
 - the patch captures new files explicitly;
 - approval is bound to the complete patch hash, the destination and its baseline;
 - the patch is checked again immediately before a serialised apply;
@@ -569,7 +577,7 @@ anything runs, so `Local` can never be used for coding work (D33). This replaces
 | Backend | Role | What it would enforce | Availability |
 |---|---|---|---|
 | **Docker or Podman container** | Intended local default | Only a copy of the workspace is mounted, never the person's checkout. No network. A non-root user with all capabilities dropped, no new privileges, and process and memory limits. | Needs Docker Desktop's WSL integration, Docker Engine or Podman. Not built. |
-| **Token Factory Sandboxes** | Cloud option | A remote VM for each step, with networking off. State moves between steps through the image each one leaves (D28). | **Beta.** Access is active. A bounded live probe on 20 October passed every critical check for one operation per step, on a synthetic fixture (D28). The execution session is built and tested offline (D33), with every request inside its deadline. The engine runs it as a sandbox check of a project's commit only, behind upload consent of its own (D36). |
+| **Token Factory Sandboxes** | Cloud option | A remote VM for each step, with networking off. State moves between steps through the image each one leaves (D28). | **Beta.** Access is active. A bounded live probe on 20 October passed every critical check for one operation per step, on a synthetic fixture (D28). The execution session is built and tested offline (D33), with every request inside its deadline. The engine runs it for a project's sandbox check (D36), a task's run (D39) and its environment's preparation (D41), behind upload consent of its own. |
 | **NVIDIA OpenShell** | Optional, stricter local sandbox | Landlock filesystem rules, a per-host network allow-list, credential placeholders | Linux and WSL with Docker or Podman. Not built; first to cut if time runs short. |
 
 **Network**
@@ -580,8 +588,9 @@ anything runs, so `Local` can never be used for coding work (D33). This replaces
   - need one explicit consent from the person;
   - run in a separate, short-lived networked container against the same workspace.
   
-  On Token Factory, the equivalent is a networked instance that saves a checkpoint image, followed by an instance with
-  no network.
+  On Nebius this is built for installs (D41): a preparation, run by the engine from the commit's manifests with the
+  frozen lockfile, is the one operation with networking on, and task runs start from the image it leaves, with no
+  network.
 
 **Choosing a sandbox.** Settings chooses the sandbox, separately from the target. A run whose sandbox is unavailable is
 refused with what is missing. Installing the app needs no Docker; coding locally will.

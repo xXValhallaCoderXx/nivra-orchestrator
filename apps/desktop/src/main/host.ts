@@ -1,20 +1,30 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import {
+  baselinePattern,
   CHAT_LIMITS,
+  ENVIRONMENT_LIMITS,
+  EnvironmentSpec,
   ErrorCode,
+  PreparedEnvironment,
   TASK_BRIEF_LIMITS,
   isTerminal,
   packetDigest,
   preferencesDigest,
+  projectFingerprint,
   RpcCallError,
   taskBriefDigest,
   type ApplyParams,
   type ApplyResolution,
   type ApplyView,
+  type BaselineSelection,
   type ChatContext,
   type ChatInput,
   type DoctorReport,
+  type EnvironmentContext,
+  type EnvironmentInput,
+  type EnvironmentPreview,
+  type EnvironmentReport,
   type ExplainResult,
   type PreferenceIntent,
   type ProviderCheck,
@@ -33,6 +43,7 @@ import {
   type SecretName,
   type TaskBrief,
   type TaskContext,
+  type TaskEnvironment,
   type TaskInput,
   type TaskReport,
 } from "@nivra/domain";
@@ -44,6 +55,7 @@ import type {
   ConversationSummary,
   ConversationView,
   EngineView,
+  EnvironmentView,
   BriefContent,
   BriefFields,
   ImportEntryView,
@@ -51,6 +63,7 @@ import type {
   PlanView,
   PreferencesView,
   PreferenceView,
+  PreparationView,
   ProjectView,
   ReviewPreview,
   ReviewView,
@@ -67,6 +80,21 @@ import type {
   WslView,
 } from "../shared/ipc.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView, StopCause } from "../shared/research.ts";
+import {
+  environmentOf,
+  getPreparation,
+  insertPreparation,
+  latestPreparation,
+  openPreparations,
+  preparationByRun,
+  recordPreparationRun,
+  requestPreparationStop,
+  setPreparationHome,
+  settlePreparation,
+  withdrawPreparationStop,
+  type PreparationRecord,
+  type PreparationStop,
+} from "./environment-store.ts";
 import { selectHistory } from "./history.ts";
 import { migrateHostData, NO_SHARING, type HostStore, type PreferenceRecord, type ProjectRecord } from "./host-store.ts";
 import { classifyPicked, folderLabel, sameFolder } from "./paths.ts";
@@ -226,6 +254,18 @@ const RUN_KEYS_MISSING = "A task run needs your Nebius key and project id, and t
 /** What nothing sent means for a task run: neither service got anything. */
 const RUN_NOTHING = "nothing was uploaded and nothing reached the model";
 
+/** Why a project's environment can't be prepared, and what stopped a preparation (D41), in the person's terms. */
+const PREPARE_NATIVE_WINDOWS = "Preparing an environment on Windows itself isn't available yet. Add the repository from a WSL distribution, then prepare it there.";
+const PREPARE_UPLOADS_OFF = "This project doesn't allow uploading to Nebius Sandboxes, where its environment is prepared. Allow uploads for it, then prepare the environment again.";
+const PREPARE_KEYS_MISSING = "Preparing an environment needs your Nebius key and project id, and they aren't both set. Add them in Settings, then prepare it again.";
+const PREPARE_REMOVING = "This project is being removed, so its environment can't be prepared.";
+const PREPARATION_GOING = "This project's environment is being prepared. Wait for it to end, or cancel it, then prepare it again.";
+const PREPARATION_CHANGED = "What preparing this environment would send has changed since you previewed it. Check the new preview, then prepare it again.";
+const PREPARED_ELSEWHERE =
+  "This environment was prepared in another Nebius project than the one in Settings, and an image can be used only in its own project, so task runs will refuse it. Prepare it again.";
+/** What nothing sent means for a preparation. */
+const PREPARATION_NOTHING = "nothing was uploaded";
+
 /** A decision on a task's change, and its apply (D40), in the person's terms. An apply can take a while on a big checkout. */
 const APPLY_MS = 120_000;
 const REVISION_NOTE_CHARS = 2_000;
@@ -319,6 +359,16 @@ export class Host {
   readonly #sandboxChecks = new Map<string, SandboxCheck>();
   /** Projects whose check is being started: one at a time, from before its first wait. */
   readonly #sandboxStarting = new Set<string>();
+  /** Each preparation started this session, by its request id: its project and the upload epoch it started under (D41). */
+  readonly #preparationRuns = new Map<string, { projectId: string; cloudEpoch: number }>();
+  /** Preparations whose `runs.start` this session hasn't finished with, and who asked them to stop meanwhile. */
+  readonly #preparationSubmissions = new Map<string, { cancel: PreparationStop | null }>();
+  /** Projects whose preparation is being started: one at a time, claimed before its first wait. */
+  readonly #preparing = new Set<string>();
+  /** Preparations being followed to their end. */
+  readonly #followingPreparations = new Set<string>();
+  /** The engine's own words for a preparation's start it answered with an error, shown if its search finds no run. */
+  readonly #preparationAnswers = new Map<string, string>();
   /** Each task run started this session, by its attempt: its project and the consent epochs it started under (D39). */
   readonly #taskRuns = new Map<string, { projectId: string; sharingEpoch: number; cloudEpoch: number }>();
   /** A task run being started: one at a time, claimed before its first wait (D39). */
@@ -971,22 +1021,52 @@ export class Host {
       sends: { tokenFactory: [...TASK_SENDS.tokenFactory], nebius: [...TASK_SENDS.nebius] },
       cases: content.acceptanceCases.map((given, index) => ({ number: index + 1, ...given })),
       checks: content.checks.map((command, index) => ({ number: index + 1, command })),
+      baseline: content.baseline.map((given, index) => ({ number: index + 1, ...given })),
       consents,
     };
-    const stopped = (blocked: string): TaskRunPreview => ({ ...base, keeps: { tokenFactory: TOKEN_FACTORY_KEEPS, nebius: null }, snapshot: null, programs: [], unprobed: 0, caseFiles: [], limits: null, blocked, expected: "", snapshotFingerprint: null });
+    const stopped = (blocked: string): TaskRunPreview => ({
+      ...base,
+      keeps: { tokenFactory: TOKEN_FACTORY_KEEPS, nebius: null },
+      snapshot: null,
+      frozen: content.frozen.map((path) => ({ path, sha256: null })),
+      environment: null,
+      programs: [],
+      unprobed: 0,
+      caseFiles: [],
+      limits: null,
+      blocked,
+      expected: "",
+      snapshotFingerprint: null,
+    });
     const early = this.#runBlocked(task, content);
     if (early || !project) return stopped(early ?? "Choose the repository this task runs on first.");
     const packet = (taskBriefOf(content) as { brief: TaskBrief }).brief;
+    // A project with a prepared environment runs from it (D41): its engine checks it against this commit's manifests and
+    // the saved Nebius project, and refuses a preview it doesn't fit.
+    const prepared = this.#preparedFor(project.id);
+    const environment = prepared ? { ...taskEnvironmentOf(prepared), preparedAt: prepared.preparedAt } : null;
     const engine = await this.#started(project.targetId);
-    const shown = await engine.supervisor.call("task.preview", { repoPath: project.nativePath, brief: packet }, { timeoutMs: SANDBOX_PREVIEW_MS });
+    const shown = await engine.supervisor.call("task.preview", { repoPath: project.nativePath, brief: packet, ...(environment ? { environment } : {}) }, { timeoutMs: SANDBOX_PREVIEW_MS });
     if (shown.status === "refused") return stopped(shown.message);
     const keys = await this.#options.credentials();
     const blocked = !consents.modelContext ? RUN_SHARING_OFF : !consents.cloudExecution ? RUN_UPLOADS_OFF : !(keys.NEBIUS_API_KEY && keys.NEBIUS_PROJECT_ID) ? RUN_KEYS_MISSING : null;
-    const expected = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest: await taskBriefDigest(packet), projectId: project.id, targetId: project.targetId, sharing: consents, snapshot: shown.snapshot.fingerprint });
+    const expected = taskRunFingerprint({
+      taskId,
+      briefId: brief.id,
+      briefVersion: brief.version,
+      briefDigest: await taskBriefDigest(packet),
+      projectId: project.id,
+      targetId: project.targetId,
+      sharing: consents,
+      snapshot: shown.snapshot.fingerprint,
+      environment: prepared,
+    });
     return {
       ...base,
       keeps: { tokenFactory: TOKEN_FACTORY_KEEPS, nebius: nebiusKeeps(shown.snapshot.retention) },
       snapshot: shown.snapshot,
+      frozen: shown.frozen,
+      environment: shown.environment,
       programs: shown.programs,
       unprobed: shown.unprobed,
       caseFiles: shown.caseFiles,
@@ -1057,7 +1137,14 @@ export class Host {
       const engine = await this.#attemptEngine(attempt);
       const report = await this.#reportOf(engine, attempt);
       if (!report.proposal) throw new Error("This run proposed no change, so there is nothing to approve.");
-      if (!report.verified) throw new Error("Not every acceptance case was shown to pass, so this change can't be approved. Reject it, or ask for a revision.");
+      if (!report.verified) {
+        // A frozen file that isn't shown unchanged leaves a change unverified whatever its cases printed (D41).
+        throw new Error(
+          report.frozen.some((file) => file.unchanged !== true)
+            ? "A frozen file isn't shown to be unchanged, so this change can't be approved. Reject it, or ask for a revision."
+            : "Not every acceptance case was shown to pass, so this change can't be approved. Reject it, or ask for a revision.",
+        );
+      }
       if (report.proposal.hash !== approvedHash) throw new Error("This isn't the change you were shown: the run's proposal is another one. Open the run again, then decide.");
       const brief = getArtifact(workspace, attempt.briefId);
       const packet = brief ? taskBriefOf(BriefContentSchema.parse(brief.content)) : null;
@@ -1387,6 +1474,7 @@ export class Host {
       const stops = await Promise.allSettled([
         stopCheck(),
         this.#stopProjectAttempts(projectId, "sharing", (why) => `Uploads for this project are off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
+        this.#stopProjectPreparations(projectId, "uploads", (why) => `Uploads for this project are off, but Nivra couldn't stop the preparation of its environment (${why}). Restart the project's engine to stop it.`),
       ]);
       const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
@@ -1495,6 +1583,70 @@ export class Host {
     return engine.supervisor.call("sandbox.status", {});
   }
 
+  /**
+   * A project's environment (D41), read from the workspace: the packages chosen with its last preparation, what its last
+   * successful preparation left, which its task runs start from, and its latest preparation, read from its engine while
+   * it goes. A preparation left open, by an earlier session or a lost answer, is followed on its own engine, which
+   * starts if need be. Nothing is resent.
+   */
+  async environment(projectId: string): Promise<EnvironmentView> {
+    const project = this.#project(projectId);
+    for (const open of openPreparations(this.#workspaceDb(), { projectId })) {
+      if (this.#preparationSubmissions.has(open.id)) continue;
+      void this.#ensure(open.targetId).catch(() => undefined);
+      this.#followPreparation(open.id);
+    }
+    return this.#environmentView(project);
+  }
+
+  /**
+   * What preparing the project's environment with `spec` would send and run (D41), worked out on the project's own
+   * engine with no network, for the person to see before anything is uploaded. It needs no consent, and nothing is stored.
+   */
+  async previewEnvironment(projectId: string, spec: EnvironmentSpec): Promise<EnvironmentPreview> {
+    const project = this.#project(projectId);
+    if (this.#removing.has(projectId)) throw new Error(PREPARE_REMOVING);
+    const chosen = environmentSpecOf(spec);
+    const engine = await this.#started(project.targetId);
+    return engine.supervisor.call("environment.preview", { repoPath: project.nativePath, spec: chosen }, { timeoutMs: SANDBOX_PREVIEW_MS });
+  }
+
+  /**
+   * Prepares the environment the person previewed (D41). Refused, before any engine starts, on Windows itself and while
+   * uploads are off; then without both the key and the project id, or while a preparation of the project goes. The
+   * preview is worked out again on the project's engine and refused when its fingerprint isn't the one shown, so the
+   * preparation sends what was shown, and its engine checks that once more before sending. Upload consent and its epoch
+   * are checked again after those waits, and when the request is out: one started while uploads were being turned off
+   * stops at once. It is stored first, its spec becoming the project's, then sent in the background on the project's
+   * engine, and found by its request id if the answer is lost. Its environment is kept only when it ends prepared.
+   */
+  async prepareEnvironment(projectId: string, spec: EnvironmentSpec, expected: string): Promise<EnvironmentView> {
+    const project = this.#project(projectId);
+    const chosen = environmentSpecOf(spec);
+    if (this.#removing.has(projectId)) throw new Error(PREPARE_REMOVING);
+    if (this.#nativeWindows(project)) throw new Error(PREPARE_NATIVE_WINDOWS);
+    if (!project.sharing.cloudExecution) throw new Error(PREPARE_UPLOADS_OFF);
+    // One start of a project's preparation at a time: claimed before the first wait, so a second can't slip in behind it.
+    if (this.#preparing.has(projectId)) throw new Error("This project's environment is already being prepared. Wait for it, then try again.");
+    this.#preparing.add(projectId);
+    try {
+      return await this.#startPreparation(project, chosen, expected);
+    } finally {
+      this.#preparing.delete(projectId);
+    }
+  }
+
+  /** Stops the project's preparation, or marks one whose run isn't known yet so it stops once it is; what it uploaded stays. */
+  async cancelPreparation(projectId: string): Promise<EnvironmentView> {
+    const project = this.#project(projectId);
+    const latest = latestPreparation(this.#workspaceDb(), projectId);
+    if (!latest || (latest.status !== "submitting" && latest.status !== "running")) throw new Error("No preparation of this project's environment is going.");
+    await this.#cancelPreparationRun(latest, "person").catch((error: unknown) => {
+      throw new Error(`Nivra couldn't stop the preparation (${errorText(error)}). Restart the project's engine to stop it.`);
+    });
+    return this.#environmentView(project);
+  }
+
   async runEvents(runId: string, after: number): Promise<RunEventsPage> {
     return this.#runEngine(runId).supervisor.call("runs.events", { runId, after, limit: 500 });
   }
@@ -1554,6 +1706,7 @@ export class Host {
         this.#stopProjectRuns(projectId, "removal", (runs, why) => `Nivra couldn't stop ${runs} (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
         stopCheck(),
         this.#stopProjectAttempts(projectId, "removal", (why) => `Nivra couldn't stop the project's task run (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
+        this.#stopProjectPreparations(projectId, "removal", (why) => `Nivra couldn't stop the preparation of the project's environment (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
       ]);
       const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
@@ -1771,7 +1924,9 @@ export class Host {
     // The brief goes to Token Factory: a key saved since it was written is refused here, and nothing is sent.
     for (const [field, text] of briefTexts(packet)) refuseCredentials(field, text, known, "send");
     const briefDigest = await taskBriefDigest(packet);
-    const current = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    // The prepared environment the preview was bound to, if any (D41): one prepared again since then changes the fingerprint.
+    const prepared = this.#preparedFor(project.id);
+    const current = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot, environment: prepared });
     if (current !== expected) throw new Error("What this run would send has changed since you previewed it. Preview it again, then start.");
     // Checked again after the waits: consent, and the project itself, can change while the keys are read.
     const now = this.#options.store.data.projects.find((p) => p.id === project.id);
@@ -1782,7 +1937,7 @@ export class Host {
     if (!insertAttempt(workspace, { id, taskId, briefId: brief.id, sessionId: this.#sessionId, targetId: project.targetId, createdAt: new Date().toISOString() })) throw new Error(TASK_RUNNING);
     this.#taskRuns.set(id, { projectId: project.id, ...epochs });
     this.#submissions.set(id, { cancel: null });
-    const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest };
+    const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest, ...(prepared ? { environment: taskEnvironmentOf(prepared) } : {}) };
     const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: packet };
     void this.#submitAttempt(id, project, input, context).catch((error: unknown) => this.#options.log(`A task run couldn't be sent: ${errorText(error)}`));
     return this.#attemptView(getAttempt(workspace, id)!);
@@ -2513,6 +2668,360 @@ export class Host {
     }
   }
 
+  /** Whether a project's folder is on Windows itself, where neither a task nor a preparation runs yet. */
+  #nativeWindows(project: ProjectRecord): boolean {
+    return this.#options.platform === "win32" && project.targetId === "local";
+  }
+
+  /** Whether both the Nebius key and the project id are saved, which preparing an environment needs. */
+  async #keysSet(): Promise<boolean> {
+    const keys = await this.#options.credentials();
+    return Boolean(keys.NEBIUS_API_KEY && keys.NEBIUS_PROJECT_ID);
+  }
+
+  /** The project's prepared environment, which its task runs start from (D41); null without one. */
+  #preparedFor(projectId: string): PreparedEnvironment | null {
+    return this.#workspace.state === "ready" ? (environmentOf(this.#workspace.db, projectId)?.prepared ?? null) : null;
+  }
+
+  /** A preparation's start, once its starting slot is claimed (D41): see `prepareEnvironment`. */
+  async #startPreparation(project: ProjectRecord, spec: EnvironmentSpec, expected: string): Promise<EnvironmentView> {
+    const workspace = this.#workspaceDb();
+    if (!(await this.#keysSet())) throw new Error(PREPARE_KEYS_MISSING);
+    const going = openPreparations(workspace, { projectId: project.id });
+    if (going.length) {
+      // One left open by an earlier session, or whose answer was lost, is followed, so it ends; this one waits for it.
+      for (const one of going) if (!this.#preparationSubmissions.has(one.id)) this.#followPreparation(one.id);
+      throw new Error(PREPARATION_GOING);
+    }
+    const epoch = this.#cloudEpochOf(project.id);
+    const label = this.#labelOf(project.targetId);
+    const engine = await this.#started(project.targetId);
+    if (engine.supervisor.state.status !== "online") throw new Error(`The engine on ${label} isn't running, so nothing was sent.`);
+    const shown = await engine.supervisor.call("environment.preview", { repoPath: project.nativePath, spec }, { timeoutMs: SANDBOX_PREVIEW_MS });
+    if (shown.status === "refused") throw new Error(shown.message);
+    if (shown.fingerprint !== expected) throw new Error(PREPARATION_CHANGED);
+    // Checked again after the waits: the keys can be removed, uploads turned off and the project removed meanwhile.
+    if (!(await this.#keysSet())) throw new Error(PREPARE_KEYS_MISSING);
+    const current = this.#options.store.data.projects.find((p) => p.id === project.id);
+    if (!current || this.#removing.has(project.id)) throw new Error("The project was removed, so its environment wasn't prepared.");
+    if (!this.#uploadsAllowed(project.id, epoch)) throw new Error("Uploads for this project were turned off, so the preparation wasn't started.");
+    const id = randomUUID();
+    if (!insertPreparation(workspace, { id, projectId: current.id, sessionId: this.#sessionId, targetId: current.targetId, spec, preview: expected, createdAt: new Date().toISOString() })) throw new Error(PREPARATION_GOING);
+    this.#preparationRuns.set(id, { projectId: current.id, cloudEpoch: epoch });
+    this.#preparationSubmissions.set(id, { cancel: null });
+    const input: EnvironmentInput = { repoPath: current.nativePath, project: current.id, target: current.targetId, preview: expected };
+    const context: EnvironmentContext = { sharing: { cloudExecution: true }, spec };
+    void this.#submitPreparation(id, current, input, context).catch((error: unknown) => this.#options.log(`A preparation couldn't be sent: ${errorText(error)}`));
+    return this.#environmentView(current);
+  }
+
+  /** Why a preparation started this session should stop: asked for meanwhile, its project removed, or uploads turned off since. */
+  #preparationStopReason(id: string): PreparationStop | null {
+    const asked = this.#preparationSubmissions.get(id)?.cancel ?? null;
+    if (asked) return asked;
+    const started = this.#preparationRuns.get(id);
+    if (!started) return null;
+    const project = this.#options.store.data.projects.find((p) => p.id === started.projectId);
+    if (!project || this.#removing.has(project.id)) return "removal";
+    if (!project.sharing.cloudExecution || this.#cloudEpochOf(project.id) !== started.cloudEpoch) return "uploads";
+    return null;
+  }
+
+  /**
+   * Sends a stored preparation (D41), as a task run is sent: the request is written only after the engine's store is
+   * recorded with it, so one with none was never sent. A failure known to come before writing is "not sent"; anything
+   * after it leaves the preparation to be found by its request id, never sent again.
+   */
+  async #submitPreparation(id: string, project: ProjectRecord, input: EnvironmentInput, context: EnvironmentContext): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const label = this.#labelOf(project.targetId);
+    const settle = (outcome: Parameters<typeof settlePreparation>[2]) => {
+      if (this.#workspace.state === "ready") settlePreparation(this.#workspace.db, id, outcome, { report: null, prepared: null }, new Date().toISOString());
+    };
+    const stopped = (): boolean => {
+      const reason = this.#preparationStopReason(id);
+      if (reason) requestPreparationStop(workspace, id, reason);
+      return reason !== null;
+    };
+    const notSent = (why: string) => {
+      this.#preparationSubmissions.delete(id);
+      settle({ status: "not-sent", errorMessage: why });
+    };
+    let engine: Engine;
+    try {
+      engine = await this.#ensure(project.targetId);
+      if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
+    } catch (error) {
+      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so the preparation wasn't sent: ${PREPARATION_NOTHING}.`);
+      return;
+    }
+    const state = engine.supervisor.state;
+    if (state.status !== "online") {
+      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so the preparation wasn't sent: ${PREPARATION_NOTHING}.`);
+      return;
+    }
+    if (stopped()) {
+      this.#preparationSubmissions.delete(id);
+      settle({ status: "cancelled", errorMessage: `It was stopped before it was sent, so ${PREPARATION_NOTHING}.` });
+      return;
+    }
+    // Ended meanwhile: nothing to send.
+    if (!setPreparationHome(workspace, id, state.info.homeId)) {
+      this.#preparationSubmissions.delete(id);
+      return;
+    }
+    let run: RunSummary;
+    try {
+      run = await engine.supervisor.call("runs.start", { clientRequestId: id, workflowId: "environment", input, context });
+    } catch (error) {
+      // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
+      if (error instanceof EngineOfflineError || error instanceof TypeError) {
+        notSent(`The engine on ${label} didn't take the preparation (${errorText(error)}), so ${PREPARATION_NOTHING}.`);
+        return;
+      }
+      this.#options.log(`A preparation's request got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
+      // An error answer is the engine's own words: shown if the search then finds no run.
+      if (error instanceof RpcCallError) this.#preparationAnswers.set(id, errorText(error));
+      this.#preparationSubmissions.delete(id);
+      this.#followPreparation(id);
+      return;
+    }
+    this.#runs.set(run.id, project.targetId);
+    recordPreparationRun(workspace, id, run.id);
+    // Stopped while the request was out (a cancel, uploads turned off, the project removed): the run stops now.
+    const late = stopped();
+    this.#preparationSubmissions.delete(id);
+    if (late) await engine.supervisor.call("runs.cancel", { runId: run.id }).catch((error: unknown) => this.#options.log(`A preparation stopped while it was being sent couldn't be cancelled yet: ${errorText(error)}`));
+    this.#followPreparation(id);
+  }
+
+  /**
+   * Follows an open preparation to its end on its own engine (D41), as a task run is followed, however it was left. No
+   * store recorded: never sent. Another store: unknown. No run id: found by its request id, and absent from the same
+   * store, never sent. A run: followed until it ends, a stop asked for meanwhile sent to it, then its end and its report
+   * kept, and its environment when it was prepared. A report that can't be read yet is read again, so a prepared
+   * environment is never lost to a passing error.
+   */
+  #followPreparation(id: string): void {
+    if (this.#followingPreparations.has(id) || this.#preparationSubmissions.has(id)) return;
+    this.#followingPreparations.add(id);
+    void (async () => {
+      let delay = 400;
+      let cancelSent = false;
+      try {
+        while (!this.#closing && this.#workspace.state === "ready") {
+          const workspace = this.#workspace.db;
+          const preparation = getPreparation(workspace, id);
+          if (!preparation || (preparation.status !== "submitting" && preparation.status !== "running")) return;
+          const label = this.#labelOf(preparation.targetId);
+          const settle = (outcome: Parameters<typeof settlePreparation>[2]) => settlePreparation(workspace, id, outcome, { report: null, prepared: null }, new Date().toISOString());
+          if (preparation.homeId === null) {
+            settle({ status: "not-sent", errorMessage: `Nivra stopped before sending the preparation, so ${PREPARATION_NOTHING}.` });
+            return;
+          }
+          const engine = this.#engines.get(preparation.targetId);
+          const state = engine?.supervisor.state;
+          if (engine && state?.status === "online") {
+            if (state.info.homeId !== preparation.homeId) {
+              settle({ status: "unknown", errorMessage: `it went to an engine whose records aren't here (another engine home on ${label})` });
+              return;
+            }
+            try {
+              let summary: RunSummary | null;
+              if (preparation.runId) summary = await engine.supervisor.call("runs.get", { runId: preparation.runId });
+              else {
+                summary = await engine.supervisor.call("runs.find", { clientRequestId: id });
+                if (!summary) {
+                  const answered = this.#preparationAnswers.get(id);
+                  settle({
+                    status: "not-sent",
+                    errorMessage: answered ? `The engine didn't start the preparation, so ${PREPARATION_NOTHING}. ${answered}` : `Its engine has no record of the preparation, so it never ran: ${PREPARATION_NOTHING}.`,
+                  });
+                  return;
+                }
+                this.#runs.set(summary.id, preparation.targetId);
+                recordPreparationRun(workspace, id, summary.id);
+              }
+              if (isTerminal(summary.status)) {
+                if (await this.#finishPreparation(getPreparation(workspace, id) ?? preparation, engine, summary)) return;
+                delay = Math.min(delay * 2, 5_000);
+              } else {
+                // Read again: a stop asked for meanwhile is sent, and one taken back since isn't.
+                if (getPreparation(workspace, id)?.cancelRequested && !cancelSent) {
+                  cancelSent = true;
+                  // A cancel its engine turned down is tried again on the next look, never left for the run to outlast.
+                  await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch((error: unknown) => {
+                    cancelSent = false;
+                    this.#options.log(`A preparation couldn't be cancelled yet, so Nivra tries again: ${errorText(error)}`);
+                  });
+                }
+                delay = 400;
+              }
+            } catch (error) {
+              if (isRunNotFound(error)) {
+                settle({ status: "unknown", errorMessage: `the engine on ${label} has no record of its run any more` });
+                return;
+              }
+              delay = Math.min(delay * 2, 5_000);
+            }
+          } else {
+            delay = Math.min(delay * 2, 5_000);
+          }
+          await pause(delay);
+        }
+      } catch (error) {
+        this.#options.log(`Following a preparation stopped: ${errorText(error)}`);
+      } finally {
+        this.#followingPreparations.delete(id);
+        this.#preparationAnswers.delete(id);
+      }
+    })();
+  }
+
+  /** Follows every open preparation of a target when its engine comes online: what it can say of them is read back (D41). */
+  #followPreparationsOn(targetId: string): void {
+    if (this.#workspace.state !== "ready") return;
+    for (const open of openPreparations(this.#workspace.db, { targetId })) if (!this.#preparationSubmissions.has(open.id)) this.#followPreparation(open.id);
+  }
+
+  /**
+   * Records how a preparation ended (D41), with the report its engine saved, masked again; false when the report can't
+   * be read yet. A report about another request, run or spec is kept nowhere, and the end is unknown. A run that
+   * succeeded keeps its environment only when its report's outcome is `prepared` and the environment is whole. A cancel
+   * Nivra asked for keeps its reason; any other cancel, or a `run.interrupted` event, means Nivra or its engine stopped
+   * first.
+   */
+  async #finishPreparation(preparation: PreparationRecord, engine: Engine, summary: RunSummary): Promise<boolean> {
+    let report: EnvironmentReport | null;
+    try {
+      report = await engine.supervisor.call("runs.environment", { runId: summary.id });
+    } catch (error) {
+      if (isRunNotFound(error)) throw error;
+      this.#options.log(`A preparation's report couldn't be read yet (${errorText(error)}); Nivra reads it again.`);
+      return false;
+    }
+    const end = (outcome: Parameters<typeof settlePreparation>[2], kept: EnvironmentReport | null, prepared: PreparedEnvironment | null = null) => {
+      if (this.#workspace.state === "ready") settlePreparation(this.#workspace.db, preparation.id, outcome, { report: kept, prepared }, new Date().toISOString());
+    };
+    if (report && !preparationReportMatches(report, preparation, summary.id)) {
+      end({ status: "unknown", errorMessage: "its engine's report is about another preparation than this one, so none of it was kept" }, null);
+      return true;
+    }
+    const known = await this.#knownSecrets();
+    const kept = report ? maskValue(report, known) : null;
+    if (summary.status === "succeeded") {
+      if (!report || !kept) {
+        end({ status: "unknown", errorMessage: "its run finished, but its engine has no report stored for it" }, null);
+        return true;
+      }
+      // Identifiers and digests, never text from the repository: kept as the engine reported them.
+      const prepared = report.outcome === "prepared" ? PreparedEnvironment.safeParse(report.prepared) : null;
+      end({ status: "answered" }, kept, prepared?.success ? prepared.data : null);
+      return true;
+    }
+    if (summary.status === "cancelled") {
+      const now = this.#workspace.state === "ready" ? getPreparation(this.#workspace.db, preparation.id) : null;
+      end({ status: now?.cancelReason ? "cancelled" : "interrupted" }, kept);
+      return true;
+    }
+    const { interrupted, kind } = await this.#failureOf(engine, summary.id);
+    end(interrupted ? { status: "interrupted" } : { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The preparation failed.", known) }, kept);
+    return true;
+  }
+
+  /**
+   * Stops a preparation for `reason`. One being sent stops at its own check; one whose run isn't known yet once it is
+   * found; one whose engine isn't online isn't running any more (D4), and its stop is on record. A stop its engine turns
+   * down is taken back and thrown, so the caller can say it couldn't stop it.
+   */
+  async #cancelPreparationRun(preparation: PreparationRecord, reason: PreparationStop): Promise<void> {
+    if (preparation.status !== "submitting" && preparation.status !== "running") return;
+    const workspace = this.#workspaceDb();
+    requestPreparationStop(workspace, preparation.id, reason);
+    const pending = this.#preparationSubmissions.get(preparation.id);
+    if (pending) pending.cancel ??= reason;
+    // Read again: its run may have become known meanwhile.
+    const runId = getPreparation(workspace, preparation.id)?.runId ?? preparation.runId;
+    if (runId) {
+      const engine = this.#engines.get(preparation.targetId);
+      if (!engine || engine.supervisor.state.status !== "online") return;
+      await engine.supervisor.call("runs.cancel", { runId }).catch((error: unknown) => {
+        if (isRunNotFound(error)) return;
+        withdrawPreparationStop(workspace, preparation.id, reason);
+        throw error;
+      });
+    } else if (!pending) this.#followPreparation(preparation.id);
+  }
+
+  /**
+   * Stops the project's open preparations, for `reason`; says through `refusal` when one couldn't be. One whose engine
+   * isn't online, and isn't being sent, isn't going any more (D4): its stop is recorded, and nothing is sent.
+   */
+  async #stopProjectPreparations(projectId: string, reason: PreparationStop, refusal: (why: string) => string): Promise<void> {
+    if (this.#workspace.state !== "ready") return;
+    const workspace = this.#workspace.db;
+    const open = openPreparations(workspace, { projectId });
+    const going = (one: PreparationRecord) => this.#preparationSubmissions.has(one.id) || this.#engines.get(one.targetId)?.supervisor.state.status === "online";
+    for (const one of open.filter((one) => !going(one))) requestPreparationStop(workspace, one.id, reason);
+    const results = await Promise.allSettled(open.filter(going).map((one) => this.#cancelPreparationRun(one, reason)));
+    const failed = results.flatMap((result) => (result.status === "rejected" ? [errorText(result.reason)] : []));
+    if (failed.length) throw new Error(refusal(failed[0]!));
+  }
+
+  /** A project's environment as the window shows it (D41). */
+  async #environmentView(project: ProjectRecord): Promise<EnvironmentView> {
+    const workspace = this.#workspaceDb();
+    const record = environmentOf(workspace, project.id);
+    const latest = latestPreparation(workspace, project.id);
+    const keys = await this.#options.credentials();
+    const keysSet = Boolean(keys.NEBIUS_API_KEY && keys.NEBIUS_PROJECT_ID);
+    const prepared = record?.prepared ?? null;
+    const going = latest !== null && (latest.status === "submitting" || latest.status === "running");
+    const blocked = this.#removing.has(project.id) ? PREPARE_REMOVING : this.#nativeWindows(project) ? PREPARE_NATIVE_WINDOWS : !keysSet ? PREPARE_KEYS_MISSING : going ? PREPARATION_GOING : null;
+    // Its image can be used only in the Nebius project it was made in: one made in another is said to be, here.
+    const savedProject = keys.NEBIUS_PROJECT_ID;
+    const elsewhere = prepared !== null && savedProject !== undefined && savedProject.length > 0 && (await projectFingerprint(savedProject)) !== prepared.projectFingerprint;
+    return { projectId: project.id, spec: record?.spec ?? null, prepared, preparation: latest ? await this.#preparationView(latest) : null, blocked, notice: elsewhere ? PREPARED_ELSEWHERE : null };
+  }
+
+  /**
+   * A preparation as the window shows it: its record, with the report kept when it ended; one still going, or one whose
+   * report wasn't kept, read from its engine when that is online and holds the same store.
+   */
+  async #preparationView(preparation: PreparationRecord): Promise<PreparationView> {
+    const going = preparation.status === "submitting" || preparation.status === "running";
+    const base: PreparationView = {
+      id: preparation.id,
+      runId: preparation.runId,
+      status: preparation.status,
+      note: preparationNote(preparation),
+      unresolved: null,
+      cancelRequested: preparation.cancelRequested,
+      spec: preparation.spec,
+      report: preparation.report,
+      progress: [],
+      createdAt: preparation.createdAt,
+      settledAt: preparation.settledAt,
+    };
+    if (!preparation.runId || (!going && preparation.report)) return base;
+    const engine = this.#engines.get(preparation.targetId);
+    const state = engine?.supervisor.state;
+    if (!engine || state?.status !== "online") return going ? { ...base, unresolved: `The engine on ${this.#labelOf(preparation.targetId)} isn't running, so this preparation can't be read now.` } : base;
+    if (state.info.homeId !== preparation.homeId) return { ...base, unresolved: "This preparation went to an engine whose records aren't here, so it can't be read." };
+    try {
+      const known = await this.#knownSecrets();
+      const report = await engine.supervisor.call("runs.environment", { runId: preparation.runId });
+      // A report about another request or run is shown nowhere.
+      if (report && !preparationReportMatches(report, preparation, preparation.runId)) return { ...base, unresolved: "Its engine's report is about another preparation, so none of it is shown." };
+      const progress = going ? await this.#progressOf(engine, preparation.runId) : [];
+      return { ...base, report: report && maskValue(report, known), progress: maskValue(progress, known) };
+    } catch (error) {
+      if (isRunNotFound(error)) return { ...base, unresolved: "Its engine has no record of this preparation any more." };
+      return { ...base, unresolved: `Nivra can't read this preparation from its engine now (${errorText(error)}).` };
+    }
+  }
+
   /**
    * Cancels the project's queued and running explain and conversation runs, and stops its research with stops of its
    * own for `cause` (D37), all at once. When any can't be stopped, says so through `refusal`, naming each kind.
@@ -3188,6 +3697,51 @@ export class Host {
       return { name, command, expectedOutput: given.expectedOutput, expectedExitCode: given.expectedExitCode };
     });
     if (cases.length > TASK_BRIEF_LIMITS.finalChecks) throw new Error(`There are ${cases.length} acceptance cases, and a brief can hold ${TASK_BRIEF_LIMITS.finalChecks}. Remove some, then save it again.`);
+    // A baseline check's command, output and pattern are kept as written, as a case's are (D41).
+    const baseline = (input.baseline ?? []).map((given, index) => {
+      const label = `Baseline check ${index + 1}`;
+      const name = given.name.trim();
+      const command = given.command.trim();
+      if (!name) throw new Error(`${label} needs a name. Add one, then save it again.`);
+      if (name.length > TASK_BRIEF_LIMITS.caseNameChars) throw new Error(`${label}'s name is ${name.length} characters long, and it can hold ${TASK_BRIEF_LIMITS.caseNameChars}. Shorten it, then save it again.`);
+      if (!command) throw new Error(`${label} needs a command to run. Add one, then save it again.`);
+      if (command.length > TASK_BRIEF_LIMITS.commandChars) throw new Error(`${label}'s command is ${command.length} characters long, and it can hold ${TASK_BRIEF_LIMITS.commandChars}. Shorten it, then save it again.`);
+      if (command.includes("\0")) throw new Error(`${label} holds a NUL character, which a command can't carry. Remove it, then save it again.`);
+      if (!Number.isInteger(given.expectedExitCode) || given.expectedExitCode < 0 || given.expectedExitCode > 255) throw new Error(`${label}'s exit code must be a whole number from 0 to 255. Change it, then save it again.`);
+      const { expectedOutput, outputPattern } = given;
+      if (expectedOutput !== undefined && outputPattern !== undefined) throw new Error(`${label} gives both its exact output and a pattern. Keep one of them, then save it again.`);
+      if (outputPattern !== undefined) {
+        if (!outputPattern) throw new Error(`${label} needs a pattern for what it prints. Write one, or give its exact output instead, then save it again.`);
+        if (outputPattern.length > TASK_BRIEF_LIMITS.patternChars) throw new Error(`${label}'s pattern is ${outputPattern.length} characters long, and it can hold ${TASK_BRIEF_LIMITS.patternChars}. Shorten it, then save it again.`);
+        // On its own, and as Nivra anchors it to the whole output: a pattern that closes the anchoring's group can't pass.
+        try {
+          new RegExp(outputPattern);
+          baselinePattern(outputPattern);
+        } catch (error) {
+          throw new Error(`${label}'s pattern isn't a regular expression Nivra can read (${errorText(error)}). Correct it, then save it again.`);
+        }
+        return { name, command, expectedExitCode: given.expectedExitCode, outputPattern };
+      }
+      if (expectedOutput === undefined) throw new Error(`${label} needs the exact output it must print, or a pattern for it. Add one, then save it again.`);
+      if (expectedOutput.includes("\0")) throw new Error(`${label}'s expected output holds a NUL character, which a command can't print. Remove it, then save it again.`);
+      const bytes = Buffer.byteLength(expectedOutput);
+      if (bytes > TASK_BRIEF_LIMITS.expectedOutputBytes) throw new Error(`${label}'s expected output is ${bytes} bytes, and it can hold ${TASK_BRIEF_LIMITS.expectedOutputBytes}. Shorten it, then save it again.`);
+      return { name, command, expectedExitCode: given.expectedExitCode, expectedOutput };
+    });
+    if (baseline.length > TASK_BRIEF_LIMITS.baseline) throw new Error(`There are ${baseline.length} baseline checks, and a brief can hold ${TASK_BRIEF_LIMITS.baseline}. Remove some, then save it again.`);
+    // A frozen file is named as Git names it, from the task's folder. A row is numbered as the person wrote the list.
+    const frozen: string[] = [];
+    (input.frozen ?? []).forEach((value, index) => {
+      const path = value.trim();
+      if (!path) return;
+      const label = `Frozen file ${index + 1}`;
+      if (path.length > 1_024) throw new Error(`${label} is ${path.length} characters long, and each can hold 1,024. Shorten it, then save it again.`);
+      if (path.includes("\0") || path.startsWith("/") || path.split("/").some((part) => part === "" || part === "." || part === ".."))
+        throw new Error(`${label}, ${path}, isn't a path inside the folder. Write it as Git names it from the folder, such as tests/regression.test.ts, then save it again.`);
+      if (frozen.includes(path)) throw new Error(`${label}, ${path}, is in the list already. Remove one of them, then save it again.`);
+      frozen.push(path);
+    });
+    if (frozen.length > TASK_BRIEF_LIMITS.frozen) throw new Error(`There are ${frozen.length} frozen files, and a brief can hold ${TASK_BRIEF_LIMITS.frozen}. Remove some, then save it again.`);
     return BriefFieldsSchema.parse({
       goal: text("The goal", input.goal, TASK_LIMITS.textChars),
       acceptanceCriteria: rows("Acceptance criterion", "acceptance criteria", input.acceptanceCriteria),
@@ -3197,6 +3751,8 @@ export class Host {
       assumptions: rows("Assumption", "assumptions", input.assumptions),
       checks: rows("Check", "checks", input.checks),
       acceptanceCases: cases,
+      baseline,
+      frozen,
     });
   }
 
@@ -3215,6 +3771,7 @@ export class Host {
       refuseCredentials("An acceptance case's command", given.command, known);
       refuseCredentials("An acceptance case's expected output", given.expectedOutput, known);
     }
+    for (const [field, text] of baselineTexts(fields.baseline ?? [], fields.frozen ?? [])) refuseCredentials(field, text, known);
   }
 
   /** The task, refused when it changed since the person read it (its revision moved) or is gone. */
@@ -3303,8 +3860,8 @@ export class Host {
   }
 
   #runEngine(runId: string): Engine {
-    // A conversation's run is routed from the workspace too, so it is reachable after a restart (D26).
-    const targetId = this.#runs.get(runId) ?? (this.#workspace.state === "ready" ? turnByRun(this.#workspace.db, runId)?.targetId : undefined);
+    // A conversation's run, and a preparation's, are routed from the workspace too, so they are reachable after a restart (D26, D41).
+    const targetId = this.#runs.get(runId) ?? (this.#workspace.state === "ready" ? (turnByRun(this.#workspace.db, runId)?.targetId ?? preparationByRun(this.#workspace.db, runId)?.targetId) : undefined);
     if (!targetId) throw new Error("Nivra has no record of that run in this session. Start it again.");
     const engine = this.#engines.get(targetId);
     if (!engine) throw new Error(`The engine on ${this.#labelOf(targetId)} isn't running.`);
@@ -3337,9 +3894,12 @@ export class Host {
       };
       this.#engines.set(targetId, engine);
       this.#unavailable.delete(targetId);
-      // Each time it comes online, at start or after a restart, what it can say of open applies is read back (D40).
+      // Each time it comes online, at start or after a restart, what it can say of open applies and preparations is read
+      // back (D40, D41).
       engine.supervisor.onChange((state) => {
-        if (state.status === "online") this.#reconcileApplies(targetId);
+        if (state.status !== "online") return;
+        this.#reconcileApplies(targetId);
+        this.#followPreparationsOn(targetId);
       });
       void this.#startEngine(engine);
       return engine;
@@ -3538,6 +4098,49 @@ function attemptNote(attempt: AttemptRecord): string | null {
   }
 }
 
+/** A preparation's end in Nivra's words (D41), when it was stopped or ended without its report; null while it goes. */
+function preparationNote(preparation: PreparationRecord): string | null {
+  switch (preparation.status) {
+    case "failed":
+      return `${preparation.errorMessage ?? "The preparation failed."} Nothing was resent.`;
+    case "cancelled": {
+      const why = preparation.cancelReason === "uploads" ? "Stopped: uploads for this project were turned off." : preparation.cancelReason === "removal" ? "Stopped: the project was removed." : "Cancelled.";
+      // One stopped before it was sent says so; one stopped after may have left something with Nebius.
+      return `${why} ${preparation.errorMessage ?? "What it had sent stays with Nebius; its report says what that was."}`;
+    }
+    case "interrupted":
+      return "Interrupted: Nivra or its engine stopped while the preparation was going. It wasn't started again.";
+    case "not-sent":
+      return preparation.errorMessage ?? `Not sent: ${PREPARATION_NOTHING}.`;
+    case "unknown":
+      return `Nivra can't tell how this preparation ended: ${preparation.errorMessage ?? "its engine can't say"}. Nothing was resent.`;
+    default:
+      return null;
+  }
+}
+
+/** What a task run is bound to of a prepared environment (D41): its image, what binds that, and its versions. */
+function taskEnvironmentOf(prepared: PreparedEnvironment): TaskEnvironment {
+  return { image: prepared.image, inputsDigest: prepared.inputsDigest, projectFingerprint: prepared.projectFingerprint, node: prepared.node, pnpm: prepared.pnpm, arch: prepared.arch };
+}
+
+/** Whether a preparation's report is about this preparation: its request, its run, and the spec it was sent (D41). */
+function preparationReportMatches(report: EnvironmentReport, preparation: PreparationRecord, runId: string): boolean {
+  return report.request.clientRequestId === preparation.id && report.request.runId === runId && (report.prepared === null || JSON.stringify(report.prepared.spec) === JSON.stringify(preparation.spec));
+}
+
+/** The packages chosen, as the domain takes them (D41), or why not, in the person's words. */
+function environmentSpecOf(spec: EnvironmentSpec): EnvironmentSpec {
+  if (spec.filters.length > ENVIRONMENT_LIMITS.filters) {
+    throw new Error(`${spec.filters.length} packages are chosen, and a preparation takes at most ${ENVIRONMENT_LIMITS.filters}. Choose fewer, or the whole workspace, then preview again.`);
+  }
+  const wrong = spec.filters.find((filter) => !EnvironmentSpec.safeParse({ filters: [filter] }).success);
+  if (wrong !== undefined) throw new Error(`"${wrong.slice(0, 200)}" isn't a pnpm workspace selector Nivra can send, such as @scope/data... Choose the packages again, then preview again.`);
+  const parsed = EnvironmentSpec.safeParse(spec);
+  if (!parsed.success) throw new Error("Those packages can't be sent as they are. Choose them again, then preview again.");
+  return parsed.data;
+}
+
 /** Every text of a run's brief, by the field a refusal names. */
 function briefTexts(brief: TaskBrief): Array<[string, string]> {
   return [
@@ -3552,5 +4155,19 @@ function briefTexts(brief: TaskBrief): Array<[string, string]> {
       ["An acceptance case's command", given.command],
       ["An acceptance case's expected output", given.expectedOutput],
     ]),
+    ...baselineTexts(brief.baseline ?? [], brief.frozen ?? []),
+  ];
+}
+
+/** Every text of a brief's baseline checks and frozen files (D41), by the field a refusal names. */
+function baselineTexts(baseline: readonly BaselineSelection[], frozen: readonly string[]): Array<[string, string]> {
+  return [
+    ...baseline.flatMap((given): Array<[string, string]> => [
+      ["A baseline check's name", given.name],
+      ["A baseline check's command", given.command],
+      ...(given.expectedOutput !== undefined ? [["A baseline check's expected output", given.expectedOutput] as [string, string]] : []),
+      ...(given.outputPattern !== undefined ? [["A baseline check's pattern", given.outputPattern] as [string, string]] : []),
+    ]),
+    ...frozen.map((path): [string, string] => ["A frozen file", path]),
   ];
 }

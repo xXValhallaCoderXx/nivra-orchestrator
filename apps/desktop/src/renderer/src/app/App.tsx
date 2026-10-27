@@ -131,6 +131,8 @@ export function App() {
                 key={view.id}
                 taskId={view.id}
                 projects={list}
+                engines={engines.value ?? []}
+                onEngineRestarted={() => engines.refresh()}
                 onDeleted={() => setView({ kind: "tasks" })}
                 onOpenConversation={(id) => setView({ kind: "conversation", id })}
               />

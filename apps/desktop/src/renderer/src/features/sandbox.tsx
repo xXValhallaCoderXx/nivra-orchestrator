@@ -308,8 +308,8 @@ export function SandboxCheck({ project, online, credentialsSaved, onProjectChang
             </Text>
             <Text size="sm">What Nebius keeps: {ready.retention}</Text>
             <Text size="sm">
-              This is separate from sending content to Token Factory, and it is for this project only: its sandbox checks and its task runs. You can turn it off at any time:
-              Nivra then stops a check or a run under way, and says so if it can't. What was already uploaded stays with Nebius.
+              This is separate from sending content to Token Factory, and it is for this project only: its sandbox checks, its environment and its task runs. You can turn it off at any time:
+              Nivra then stops a check, a preparation or a run under way, and says so if it can't. What was already uploaded stays with Nebius.
             </Text>
             <Group justify="flex-end" gap="sm">
               <Button variant="default" onClick={() => setConsent(false)}>

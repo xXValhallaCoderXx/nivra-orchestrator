@@ -12,6 +12,7 @@ import { SecretStore, type KeyCrypto } from "./secret-store.ts";
 import { channelOf, WSL_HOMES, wslHomeFrom, type Channel } from "./targets/homes.ts";
 import { runtimeIn, type RuntimeLayout } from "./targets/local.ts";
 import { targetFactory } from "./targets/registry.ts";
+import { testEngineArgs } from "./test-switches.ts";
 import type { EnginePlatform } from "./targets/types.ts";
 import type { WslRuntime } from "./targets/wsl.ts";
 import { defaultZoom, restoreBounds, stepZoom } from "./window-state.ts";
@@ -208,6 +209,13 @@ function start(): void {
   handle(IPC.cancelSandboxCheck, project, (_event, id) => host.cancelSandboxCheck(id));
   handle(IPC.getSandboxCheck, project, (_event, id) => host.sandboxCheck(id));
   handle(IPC.getSandboxStatus, project, (_event, id) => host.sandboxStatus(id));
+  // A project's environment (D41): packages chosen as pnpm filters, which the host checks with the domain's own schema,
+  // saying in words what to change; a preparation bound to its preview's fingerprint (SHA-256 in hex).
+  const Spec = z.strictObject({ filters: z.array(z.string().max(1_000)).max(100) });
+  handle(IPC.getEnvironment, project, (_event, id) => host.environment(id));
+  handle(IPC.previewEnvironment, z.tuple([z.uuid(), Spec]), (_event, id, spec) => host.previewEnvironment(id, spec));
+  handle(IPC.prepareEnvironment, z.tuple([z.uuid(), Spec, z.string().regex(/^[0-9a-f]{64}$/)]), (_event, id, spec, expected) => host.prepareEnvironment(id, spec, expected));
+  handle(IPC.cancelPreparation, project, (_event, id) => host.cancelPreparation(id));
   // The choices are required, so a caller that drops them fails here rather than explaining without them. The host
   // checks them again, with messages a person can act on (D23).
   handle(IPC.startExplain, z.tuple([z.uuid(), z.string().max(2_000), z.array(z.string().max(2_000)).max(20)]), (_event, id, question, choices) =>
@@ -229,7 +237,20 @@ function start(): void {
   const LongText = z.string().max(100_000);
   const Rows = z.array(z.string().max(10_000)).max(200);
   const Case = z.strictObject({ name: z.string().max(10_000), command: z.string().max(10_000), expectedOutput: z.string().max(100_000), expectedExitCode: z.number() });
-  const Fields = z.strictObject({ goal: LongText, acceptanceCriteria: Rows, scope: LongText, exclusions: LongText, context: LongText, assumptions: Rows, checks: Rows, acceptanceCases: z.array(Case).max(20) });
+  // A baseline check gives its exact output or a pattern (D41): which one, and whether it is valid, the host says in words.
+  const Baseline = z.strictObject({ name: z.string().max(10_000), command: z.string().max(10_000), expectedExitCode: z.number(), expectedOutput: z.string().max(100_000).optional(), outputPattern: z.string().max(10_000).optional() });
+  const Fields = z.strictObject({
+    goal: LongText,
+    acceptanceCriteria: Rows,
+    scope: LongText,
+    exclusions: LongText,
+    context: LongText,
+    assumptions: Rows,
+    checks: Rows,
+    acceptanceCases: z.array(Case).max(20),
+    baseline: z.array(Baseline).max(20).optional(),
+    frozen: Rows.optional(),
+  });
   const Fingerprint = z.string().regex(/^[0-9a-f]{64}$/);
   handle(IPC.getConversation, z.tuple([Id]), (_event, id) => host.conversation(id));
   handle(IPC.openConversation, z.tuple([Id]), (_event, id) => host.openConversation(id));
@@ -434,16 +455,10 @@ function runtimeSources(platform: EnginePlatform): { local: { runtime: RuntimeLa
   // Tests give each run a WSL home of its own too, below the distribution's $HOME.
   const wslSwitch = app.commandLine.getSwitchValue("nivra-wsl-home") || null;
   const wslHome = wslSwitch ? wslHomeFrom(wslSwitch) : WSL_HOMES[channel];
-  // Tests only: loopback stubs of Token Factory, Nebius Sandboxes and Tavily, honoured only when unpackaged (D22, D36,
-  // D37); the engine refuses any address that isn't on this machine.
-  const stubSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-token-factory-url") || null;
-  const sandboxSwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-sandboxes-url") || null;
-  const tavilySwitch = app.isPackaged ? null : app.commandLine.getSwitchValue("nivra-tavily-url") || null;
-  const stubArgs = [
-    ...(stubSwitch ? ["--token-factory-url", stubSwitch] : []),
-    ...(sandboxSwitch ? ["--sandboxes-url", sandboxSwitch] : []),
-    ...(tavilySwitch ? ["--tavily-url", tavilySwitch] : []),
-  ];
+  // Tests only, honoured only when unpackaged: loopback stubs of Token Factory, Nebius Sandboxes and Tavily, which the
+  // engine refuses unless they are on this machine (D22, D36, D37), and a file that holds an apply before a named writer
+  // step (D40). They go to the local engine alone.
+  const stubArgs = testEngineArgs(app.isPackaged, (name) => app.commandLine.getSwitchValue(name));
   const extraArgs = stubArgs.length ? { extraArgs: stubArgs } : {};
   const hostTarget = `${platform === "win32" ? "win" : platform === "darwin" ? "mac" : "linux"}-${process.arch}`;
   const readHash = (path: string): string | null => {

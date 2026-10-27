@@ -112,6 +112,10 @@ list.
 - Never fall back silently: if the required boundary is unavailable, refuse the run and say what is missing.
 - Snapshots sent into a boundary never include the engine home, the preferences store or files on the secrets deny
   list. An allowed endpoint can still carry data out, so send the minimum context.
+- Dependencies are installed only by an environment's preparation (D41): inside the boundary, from the commit's
+  manifests, lockfile and workspace file (never `.npmrc`), with its network declared in the preview. It is the only
+  operation with networking on; task runs start from its image with networking off. Never install or run a
+  repository's checks on the person's machine.
 
 ## Agent write rules (D15, D40)
 

@@ -2781,3 +2781,161 @@ tree (D34 saw it fail part way, an edited file deleted), so the engine writes th
   a settle left unanswered holds its task until its engine is next online.
 - `AGENTS.md`'s agent write rules say how changes are applied now.
 - **Evidence:** `docs/acceptance.md`, *Apply and the result view, checkpoint 2 (D40, NIV-8, NIV-13)*.
+
+## D41. A project's environment: one pinned Node and pnpm setup prepared inside Nebius from the commit's manifests and kept as an image, task runs that start from it, baseline selections before the model, and frozen files (2026-10-27)
+
+**Decision.** NIV-49, in the 48-hour delivery. A real repository's checks need its toolchain and its dependencies,
+and Nivra's base image has neither. So a project gets one environment, prepared inside the boundary and reused by its
+task runs. It is configuration, never code: nothing in Nivra names a repository.
+
+- **Feasibility, live (27 October, 15:00 SGT, recipe `5c937f1d…`, approved by Nate).**
+  - It ran once through Nivra's own session and passed 15 of 15 checks in 85 s.
+  - Nebius had no public Node 22 image, so `node:22.23.4-alpine3.24` was imported (12 s).
+  - The preparation installed SHE-65's filtered workspace with pnpm 11.5.3 (125 packages, 7.7 s).
+  - From the prepared image, with networking off:
+    - the session's listing matched with `node_modules` left out;
+    - the toolchain ran;
+    - the frozen regression failed with five AssertionError lines, as the brief expects;
+    - the data tests passed (227 passed, 4 skipped), and so did the domain suite (1,122).
+  - Collect gave exactly the commit.
+  - Evidence: `~/nivra-acceptance/env-probe-2026-10-27T070042901Z/`.
+- **The spec** is what the person chooses: pnpm filters (workspace selectors such as `@scope/data...`, at most 8), or
+  none for the whole workspace.
+  - Nivra pins the base by its registry address, together with its Node version.
+  - The commit pins pnpm in packageManager (an integrity suffix is dropped).
+  - An engines.node range that excludes Nivra's Node is refused. A range Nivra can't read is shown as written.
+- **The inputs come from Nivra's own snapshot of the commit:** the root and every package.json, pnpm-lock.yaml and
+  pnpm-workspace.yaml. So preparation never sends what a snapshot leaves out, `.npmrc` among them. pnpm 11 reads only
+  auth and registry settings from it, and wants nodeLinker in pnpm-workspace.yaml.
+- **Refused, naming the file:** a layout that needs the sources to install.
+  - an install lifecycle script in any manifest (`pnpm:devPreinstall`, preinstall, install, postinstall, prepare and
+    their pre and post forms, prepublish);
+  - a pnpmfile;
+  - patched dependencies;
+  - no exact pnpm pin;
+  - no lockfile.
+- **Preparation is a run of its own** (protocol 12, workflow `environment`, `environment.preview`, `runs.environment`).
+  - **Before anything is sent:** upload consent, the key and project id, and the platform (never native Windows).
+    Then the snapshot is taken again, and the preview's fingerprint must still match.
+  - **The base image:** the images are listed, and a public image with exactly the pinned tag is used if there is
+    one. Otherwise the image is imported into the person's own Nebius project, untagged, so private and reachable
+    only by its id. Nivra never tags an import, for two reasons in the API reference: an import's tag is how an image
+    is identified in the public listing, and a tag that already exists among the public images is replaced by the
+    import.
+  - **The upload:** the inputs are journaled, then uploaded. Bytes the sandbox says it stored that aren't the ones
+    sent stop the preparation.
+  - **The preparation**, the one operation besides the probe's approved network control that runs with networking
+    on:
+    - corepack activates the exact pnpm;
+    - `pnpm install --frozen-lockfile` runs with the filters, its log kept outside the workspace and only its end
+      printed;
+    - the result image is kept only when the install said it finished and printed the pinned Node and pnpm.
+  - **Identity and binding:** the image's id is the environment's identity. It is bound to the commit's manifests by
+    their digest, and to the Nebius project by a SHA-256 of the project id, since an image is reachable only from its
+    own project.
+  - **Journaling:** the import and the preparation are journaled among the engine's journals. Cleanup settles what a
+    cancel or a failure left, with the bounded pass recovery runs, and the next engine's pass settles what a crash
+    left. An import carries no correlation id, so one whose answer was lost is never searched for: it stays open, and
+    the pass says to look in the Nebius project.
+  - **Limits:** one preparation at a time on an engine, in a slot of its own, so it never holds up the shared slots
+    or a task. Import 900 s, install 600 s, both read every 5 s.
+- **Task runs from a prepared environment.**
+  - **The binding:** `TaskInput.environment` binds the run to the image, the inputs' digest and the project's hash.
+  - **Refused before anything is sent:** a commit whose manifests no longer digest to it, credentials naming another
+    project, or a brief freezing a file the commit doesn't hold.
+  - **The session:** it starts from the image, every command getting the image's path and pnpm's home (corepack's
+    cache) beneath its own. An imported image's environment applies only to commands run through a shell.
+  - **Output folders:** a snapshot never holds `OUTPUT_DIRS`, and neither the prepare step's listing nor collect reads
+    them, at any depth. So a prepared workspace may hold `node_modules`, and any other difference still refuses the
+    session or the result.
+  - **The worker's writes:** it can't write a dependency folder, a frozen file, or a manifest the environment was
+    prepared from.
+- **Baseline selections:**
+  - **Before the model:** up to three, each run once with networking off.
+  - **What each must give:** its exit code, and either its exact output or a pattern the whole output must match.
+    Nivra anchors the pattern; it must compile on its own, is matched against at most 16 KB, and matching stops
+    after 1 s.
+  - **A mismatch** stops the run before any model request, naming the selection and why.
+  - **A bug reproduced** as the brief says is a match, so an expected failure is told apart from a check that can't
+    run.
+- **Frozen files:** up to twenty paths.
+  - They must be files at the commit.
+  - The worker's writes to them are refused.
+  - After collect, each is compared with the commit's, outside anything the worker could edit.
+  - A change is verified only when every case passed and every frozen file is unchanged. Integrity already refuses any
+    change Nivra didn't write, and this is a second check.
+- **The snapshot is uploaded compressed:** gzip level 9, with no time or system in the header. Its tar's sha256 stays
+  its identity.
+  - **Old limits:** 6 MiB of content and an 8 MiB tar.
+  - **New limits:** 14 MiB of content, a 15 MiB tar, and 8 MiB compressed (the upload). File count and per-file size
+    are as they were. The tar's limit leaves room for every write a worker may make within the 16 MiB collect reads
+    back, and a test ties them together.
+- **A task run's report** keeps the limits it ran under, the environment, the baseline and the frozen files. A report
+  from before reads them as unknown, never as zero.
+- **The host's half:**
+  - **Workspace migration 5:** per project, the spec accepted with its last preparation and the environment its last
+    successful one left. Each preparation is kept as a task's attempt is: its request id saved before `runs.start` is
+    sent and the engine store recorded just before, so one whose answer was lost is found by its request id and
+    nothing is sent twice. One preparation of a project is open at a time, enforced by the schema too. The environment
+    is kept only from a report whose outcome is prepared, and a failed preparation leaves the one there was.
+  - **Four calls,** each through `ipc.ts`, the preload and `assertTrustedSender`: `getEnvironment`,
+    `previewEnvironment`, `prepareEnvironment` and `cancelPreparation`. A preparation is refused on Windows itself,
+    while uploads are off, without both the key and the project id, or while another of the project's goes, each in
+    plain words. Turning uploads off, or removing the project, stops one under way.
+  - **The window:** a project's Environment section shows the commit's pnpm pin and Node requirement, takes the whole
+    workspace or chosen packages, and says what preparing sends (never `.npmrc`), the install it runs, what it
+    reaches with networking on, what Nebius keeps and its bounds. Prepare asks for uploads, with that in front of the
+    person, when they are off. Its result shows Node, pnpm, arch, the image and when it was prepared; its stop is said
+    in Nivra's words, with the end of the install's log as text.
+  - **The brief** takes baseline checks and frozen files, checked with the domain's schemas after the host's own
+    checks, and a credential in any of them is refused. A brief saved before them reads as having neither, and digests
+    as it did.
+  - **A run's preview** says what the run starts from, lists the baseline checks and the frozen files with their
+    hashes in the commit, and counts the baseline checks in its bounds. Its fingerprint takes a v2 form with the
+    environment's image, inputs digest and project fingerprint; a run with no environment keeps v1's form exactly.
+  - **The run's card** says what it started from, how each baseline check went (matched, not matched, not run) with
+    its output, and each frozen file (unchanged, changed or unknown). A change whose frozen file isn't shown unchanged
+    is unverified for that reason, and Approve is refused with it.
+  - The task page shows its project's engine notice, with Restart.
+- **A test switch, `--apply-hold <file>`:** the engine holds the apply writer before the step the file names, so a
+  test can stop the engine there and see the apply reconciled after a restart. The host passes it only when
+  unpackaged (`--nivra-test-apply-hold`), and a hold that isn't an absolute path is refused.
+- **The independent review (27 October)** found nine problems, each fixed with a test that fails with its fix undone:
+  - a snapshot's limits let a worker's writes push collect past what it reads back;
+  - a preparation's retained count read its journal after settling had moved it, and one stopped before anything was
+    journaled tried to move a journal that didn't exist;
+  - a baseline pattern that backtracks without end could hold the engine;
+  - a preparation took one of the shared slots for up to half an hour;
+  - `pnpm:devPreinstall` wasn't refused;
+  - the upload's stored hash wasn't compared;
+  - an import whose answer was lost was searched for by a correlation id it never carries, spending the recovery
+    pass's time;
+  - no test showed that a changed frozen file is never verified (`verifiedWith` is now unit-tested);
+  - the probe matched patterns anywhere in the output, unlike the engine.
+- **Nate's review of PR 23 (27 October)** found two more, and a line of copy, each fixed with a test that fails with
+  its fix undone:
+  - a baseline selection's output reached the report bound into the proposal unmasked, though the run's report masked
+    it. It is masked there as every check's output is;
+  - a filter the spec took, such as `!@scope/web`, was refused by the sandbox after the import and the upload. A
+    filter now has one rule, `ENVIRONMENT_FILTER` in the domain, and the sandbox checks the install's exact arguments
+    against it: `--frozen-lockfile`, then `--filter <filter>` for each. A filter can't start with `-`;
+  - a run refused before anything was sent said it started from Nivra's own base image. The card says where a run
+    started only when an operation ran.
+
+**Why.** A real task needs its real checks, and they need the repository's toolchain. Installing on the person's
+machine is never a pre-check, and the worker and the checks must stay offline. Preparing once, from manifests alone,
+with the network declared and the result bound by identity, keeps the boundary's rules while making real checks
+possible. Frozen files and named-test evidence answer Nate's point that "worker-edited tests and a stable exit code
+alone are not proof of correct behaviour".
+
+**Consequences.**
+- Protocol 12; workspace migration 5. The engine's migrations are unchanged.
+- One environment per project: one Node (22.23.4 on Alpine), pnpm only. No npm, no other stacks, no image catalogue,
+  no shared cache. A layout that needs its sources to install is refused.
+- Judges prepare in their own Nebius project. That needs the import permission, not set_image_tag.
+- The import is by tag. Pinning by digest hasn't been tried against Nebius's importer; the versions are checked after
+  every preparation instead.
+- An import whose answer was lost stays open in its journal for the person to check; nothing can find it.
+- A preview's "to upload" figure is the tar's size.
+- `AGENTS.md`'s execution boundary rules say how an environment is prepared.
+- **Evidence:** `docs/acceptance.md`, *A project's environment (D41, NIV-49)*.

@@ -17,9 +17,14 @@ export const MAX_CONCURRENT_RUNS = 2;
  * slots that conversations, explanations, reviews, research and sandbox checks take, nor held up by them.
  */
 export const MAX_TASK_RUNS = 1;
+/**
+ * An environment's preparation (D41) has a slot of its own too: one at a time, each as long as about half an hour with
+ * its cleanup, so it never holds up the shared slots, nor a task.
+ */
+export const MAX_PREPARATIONS = 1;
 
-/** Which slots a run takes: its own for a task, the shared ones for everything else. */
-const slotKind = (workflowId: WorkflowId): "task" | "shared" => (workflowId === "task" ? "task" : "shared");
+/** Which slots a run takes: its own for a task or a preparation, the shared ones for everything else. */
+const slotKind = (workflowId: WorkflowId): "task" | "environment" | "shared" => (workflowId === "task" ? "task" : workflowId === "environment" ? "environment" : "shared");
 
 /** The parts of a Mastra run the scheduler drives. `watch` is Mastra internal API: re-test on every upgrade (D11). */
 export interface RunHandle {
@@ -217,6 +222,8 @@ export class RunScheduler {
         existing &&
         ((request.workflowId === "review" && !sameReview(existing.input, request.input)) ||
           (request.workflowId === "sandbox" && !sameSandbox(existing.input, request.input)) ||
+          // A preparation is bound to the same checkout, project, target and preview as a check (D41).
+          (request.workflowId === "environment" && !sameSandbox(existing.input, request.input)) ||
           (request.workflowId === "research" && !sameResearch(existing.input, request.input)) ||
           (request.workflowId === "task" && !sameTask(existing.input, request.input)));
       if (existing && (existing.workflowId !== request.workflowId || other)) {
@@ -295,7 +302,7 @@ export class RunScheduler {
   #hasRoom(workflowId: WorkflowId): boolean {
     const kind = slotKind(workflowId);
     const used = [...this.#slots.values()].filter((slot) => slotKind(slot.workflowId) === kind).length;
-    return used < (kind === "task" ? this.#maxTasks : this.#maxConcurrent);
+    return used < (kind === "task" ? this.#maxTasks : kind === "environment" ? MAX_PREPARATIONS : this.#maxConcurrent);
   }
 
   async #execute(runId: string, slot: Slot): Promise<void> {

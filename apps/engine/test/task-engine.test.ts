@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { isTerminal, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskPreview, type TaskReport } from "@nivra/domain";
+import { isTerminal, projectFingerprint, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskReport } from "@nivra/domain";
 import { CHECK_IMAGE } from "../src/exec/check.ts";
 import { operationsFor } from "../src/task/limits.ts";
 import { TASK_STOP_MESSAGES } from "../src/task/report.ts";
@@ -53,8 +53,8 @@ interface Setup {
   repo: string;
 }
 
-function engineAt(home: string, sandbox: SandboxStub<RealGuest>, model: Stub): EngineProcess {
-  const engine = startEngine(home, { args: ["--stdio", "--home", home, "--instance", randomUUID(), "--heartbeat-ms", "0", "--sandboxes-url", sandbox.url, "--token-factory-url", model.url] });
+function engineAt(home: string, sandbox: SandboxStub<RealGuest>, model: Stub, extra: string[] = []): EngineProcess {
+  const engine = startEngine(home, { args: ["--stdio", "--home", home, "--instance", randomUUID(), "--heartbeat-ms", "0", "--sandboxes-url", sandbox.url, "--token-factory-url", model.url, ...extra] });
   engines.push(engine);
   return engine;
 }
@@ -79,12 +79,12 @@ const ready = (shown: TaskPreview) => {
   assert.equal(shown.status, "ready", JSON.stringify(shown).slice(0, 300));
   return shown as Extract<TaskPreview, { status: "ready" }>;
 };
-async function start(engine: EngineProcess, repo: string, fingerprint: string, options: { brief?: TaskBrief; sharing?: { modelContext: boolean; cloudExecution: boolean }; requestId?: string; briefDigest?: string } = {}): Promise<RunSummary> {
+async function start(engine: EngineProcess, repo: string, fingerprint: string, options: { brief?: TaskBrief; sharing?: { modelContext: boolean; cloudExecution: boolean }; requestId?: string; briefDigest?: string; environment?: TaskEnvironment } = {}): Promise<RunSummary> {
   const brief = options.brief ?? BRIEF;
   return engine.client.call("runs.start", {
     clientRequestId: options.requestId ?? randomUUID(),
     workflowId: "task",
-    input: { repoPath: repo, project: PROJECT, target: "local", preview: fingerprint, taskId: TASK_ID, briefVersion: 2, briefDigest: options.briefDigest ?? (await taskBriefDigest(brief)) },
+    input: { repoPath: repo, project: PROJECT, target: "local", preview: fingerprint, taskId: TASK_ID, briefVersion: 2, briefDigest: options.briefDigest ?? (await taskBriefDigest(brief)), ...(options.environment ? { environment: options.environment } : {}) },
     context: { sharing: options.sharing ?? { modelContext: true, cloudExecution: true }, brief },
   });
 }
@@ -113,6 +113,32 @@ async function proposedRun(setup: Setup): Promise<{ run: RunSummary; done: TaskR
 const apply = (engine: EngineProcess, params: ApplyParams): Promise<ApplyView> => engine.client.call("task.apply", params);
 
 describe("applying a task's proposal through a real engine (NIV-8, D40)", () => {
+  it("holds an apply before the step the test switch names; killed there, the next engine reads it back part way, and restores the original (NIV-35)", async () => {
+    const setup_ = await setup();
+    const { params } = await proposedRun(setup_);
+    await setup_.engine.client.call("shutdown", {});
+    await setup_.engine.exited;
+    // The same home, its engine started with the hold: before linking the new file in, the original already moved aside.
+    const hold = join(setup_.home, "..", "apply-hold");
+    writeFileSync(hold, "link 0\n");
+    const held = engineAt(setup_.home, setup_.sandbox, setup_.model, ["--apply-hold", hold]);
+    await held.initialize(CREDENTIALS);
+    const going = held.client.call("task.apply", params).catch(() => null);
+    await waitFor(() => existsSync(`${hold}.held`), { timeoutMs: 20_000, what: "the writer to reach its hold" });
+    assert.equal(readFileSync(`${hold}.held`, "utf8"), "link 0\n");
+    // The engine still answers while the writer is held: only the apply waits.
+    assert.equal((await held.client.call("task.applyStatus", { requestId: params.requestId }))?.status, "writing");
+    held.kill();
+    await held.exited;
+    await going;
+    const later = engineAt(setup_.home, setup_.sandbox, setup_.model);
+    await later.initialize(CREDENTIALS);
+    const read = (await later.client.call("task.applyStatus", { requestId: params.requestId }))!;
+    assert.deepEqual([read.status, read.paths.map((one) => `${one.path} ${one.place}`), existsSync(join(setup_.repo, "greet.sh"))], ["partial", ["greet.sh aside"], false]);
+    const restored = await later.client.call("task.restore", { applyId: read.applyId });
+    assert.deepEqual([restored.status, readFileSync(join(setup_.repo, "greet.sh"), "utf8")], ["not-applied", FILES["greet.sh"]]);
+  });
+
   it("applies the approved proposal on its own engine: checked again, written unstaged, kept by its request id, settled as accepted, never applied twice", async () => {
     const setup_ = await setup();
     const { engine, repo } = setup_;
@@ -170,6 +196,8 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual([page.status, done.outcome, done.worker?.ended, done.worker?.handedIn, done.worker?.failure, done.worker?.written], ["succeeded", "proposed", "model-failed", false, "provider", ["greet.sh"]]);
     // Nivra's own checks of the change, apart from the worker's failure.
     assert.deepEqual([verdicts(done), done.verified, spawned(sandbox, "nivra-collect")], [["case 1 passed", "check 1 passed"], true, 1]);
+    // The bounds it ran under, beside what it used: a brief of one case, one check and no baseline (D41).
+    assert.deepEqual([done.limits?.operations, done.limits?.baselineChecks, done.environment, done.baseline], [17, 0, null, []]);
     assert.equal(model.chats().length, 3, "the request that failed was sent again");
   });
 
@@ -229,7 +257,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual([readdirSync(join(home, "sandbox")).filter((name) => name.endsWith(".jsonl")).length, readdirSync(join(home, "sandbox", "settled")).length], [0, 1]);
   });
 
-  it("refuses without model sharing, without uploads, without the key and project id, for a brief that isn't the one named, and for a commit changed since its preview, sending nothing", async () => {
+  it("refuses without model sharing, without uploads, without the key and project id, for a brief that isn't the one named, for an environment prepared in another Nebius project, and for a commit changed since its preview, sending nothing", async () => {
     const { sandbox, model, engine, repo } = await setup();
     const fingerprint = ready(await preview(engine, repo)).snapshot.fingerprint;
     const stopped = async (run: RunSummary) => {
@@ -241,6 +269,9 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual(await stopped(await start(engine, repo, fingerprint, { sharing: { modelContext: false, cloudExecution: true } })), ["refused", "model-sharing", "check"]);
     assert.deepEqual(await stopped(await start(engine, repo, fingerprint, { sharing: { modelContext: true, cloudExecution: false } })), ["refused", "consent", "check"]);
     assert.deepEqual(await stopped(await start(engine, repo, fingerprint, { briefDigest: "d".repeat(64) })), ["refused", "brief", "check"]);
+    // An environment's image is reachable only from the project it was prepared in (D41): the saved key names another.
+    const elsewhere = { image: "img-prepared", inputsDigest: "a".repeat(64), projectFingerprint: await projectFingerprint("project-e00anotherproject000"), node: "v22.23.4", pnpm: "11.5.3", arch: "x86_64" };
+    assert.deepEqual(await stopped(await start(engine, repo, fingerprint, { environment: elsewhere })), ["refused", "environment", "check"]);
     assert.deepEqual([sandbox.requests.length, model.requests.length], [0, 0], "a refused run sends nothing anywhere");
     // A commit changed since it was previewed is refused once the snapshot is taken, before the upload: only the model
     // list was asked for, which sends the key and nothing of the repository.

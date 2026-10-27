@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PATCH_SHOWN_BYTES, StoredTaskInput, type Mask, type RunRoute, type TaskBrief, type TaskPreview, type TaskProposal, type TaskReport, type TaskStopCode } from "@nivra/domain";
+import { PATCH_SHOWN_BYTES, StoredTaskInput, type Mask, type RunRoute, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskRunLimits, type TaskStopCode } from "@nivra/domain";
 import { previewOf, safeUnresolved, stepOf } from "../exec/check.ts";
 import type { PrescribedResult } from "../exec/prescribed.ts";
 import type { Proposal } from "../exec/proposal.ts";
@@ -57,6 +57,10 @@ export const TASK_STOP_MESSAGES: Readonly<Record<TaskStopCode, string>> = {
   brief: "This run's brief isn't the version it was started for, so nothing was sent. Run the task again.",
   model: "Token Factory couldn't be reached, or offered no model Nivra can use, so the run stopped before anything from your repository was sent. Check the key in Settings, then run the task again.",
   "native-windows": "Running tasks on Windows itself isn't available yet, so nothing was sent. Add the repository from a WSL distribution, then run the task there.",
+  baseline:
+    "The brief's baseline selections didn't give what it expects on the commit as it is, so the run stopped before the worker started: your commit was uploaded to Nebius, and nothing from your repository went to Token Factory. The baseline below says which selection differed, and how.",
+  environment: "This project's environment wasn't prepared from this commit's manifests, or was prepared in another Nebius project, so nothing was sent. Prepare the environment again, then run the task.",
+  frozen: "The brief freezes a file this commit doesn't have, so nothing was sent. Preview the run to see which, correct the brief, then run the task again.",
 };
 
 /**
@@ -111,7 +115,7 @@ export type TaskBound = TaskReport["task"];
  * it happened. A change is verified only when there is one and every acceptance case passed in the final checks.
  * Every text is masked, then cut to the protocol's bounds, and the whole is fitted under `REPORT_BYTES`.
  */
-export function taskReport(input: { result: PrescribedResult; core: TaskReportCore | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; now: Date; mask: Mask }): TaskReport {
+export function taskReport(input: { result: PrescribedResult; core: TaskReportCore | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; limits?: TaskRunLimits | null; now: Date; mask: Mask }): TaskReport {
   const { result, core, mask } = input;
   const { cleanup } = result;
   const report: TaskReport = {
@@ -120,6 +124,10 @@ export function taskReport(input: { result: PrescribedResult; core: TaskReportCo
     task: input.task,
     snapshot: result.snapshot,
     toolchain: (core?.toolchain ?? []).map((tool) => ({ program: kept(tool.program, 128, mask), finding: tool.finding })),
+    environment: core?.environment ?? null,
+    limits: input.limits ?? null,
+    baseline: (core?.baselineChecks ?? []).map((check) => ({ ...check, name: kept(check.name, 200, mask), reason: check.reason === null ? null : kept(check.reason, 600, mask), stdoutTail: kept(check.stdoutTail, 4_000, mask, "end"), stderrTail: kept(check.stderrTail, 4_000, mask, "end") })),
+    frozen: (core?.frozen ?? []).map((file) => ({ path: kept(file.path, 1_024, mask), unchanged: file.unchanged })),
     worker: core
       ? {
           ...core.worker,
@@ -163,6 +171,7 @@ export function fitted(report: TaskReport): TaskReport {
     current = {
       ...current,
       checks: current.checks.map((check) => ({ ...check, stdoutTail: cut(check.stdoutTail, room), stderrTail: cut(check.stderrTail, room) })),
+      baseline: current.baseline.map((check) => ({ ...check, stdoutTail: cut(check.stdoutTail, room), stderrTail: cut(check.stderrTail, room) })),
       steps: current.steps.map((step) => ({ ...step, stdoutTail: cut(step.stdoutTail, room / 4), stderrTail: cut(step.stderrTail, room / 4) })),
     };
   }
@@ -170,13 +179,17 @@ export function fitted(report: TaskReport): TaskReport {
 }
 
 /** A report for a run that stopped before the prescribed path ran, or one still going, in the same shape. */
-export function earlyTaskReport(input: { outcome: TaskReport["outcome"]; code: TaskStopCode | null; step: string | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; now: Date; finished: boolean }): TaskReport {
+export function earlyTaskReport(input: { outcome: TaskReport["outcome"]; code: TaskStopCode | null; step: string | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; limits?: TaskRunLimits | null; now: Date; finished: boolean }): TaskReport {
   return {
     outcome: input.outcome,
     stopped: input.code ? { code: input.code, step: input.step, message: taskStopWords(input.code, input.step) } : null,
     task: input.task,
     snapshot: null,
     toolchain: [],
+    environment: null,
+    limits: input.limits ?? null,
+    baseline: [],
+    frozen: [],
     worker: null,
     checks: [],
     verified: false,
@@ -191,8 +204,26 @@ export function earlyTaskReport(input: { outcome: TaskReport["outcome"]; code: T
   };
 }
 
-/** What a run of this brief on this snapshot would send to Nebius, and the bounds it runs under. Its fingerprint is the snapshot's. */
-export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "acceptanceCases" | "checks">): TaskPreview {
+/**
+ * A brief's frozen files as this commit holds them (D41); null, with the first one it doesn't hold, when the commit
+ * lacks one: such a run is refused before anything is sent.
+ */
+export function frozenIn(snapshot: Pick<Snapshot, "files">, paths: readonly string[]): { files: Array<{ path: string; sha256: string }> } | { missing: string } {
+  const byPath = new Map(snapshot.files.map((file) => [file.path, file]));
+  const files: Array<{ path: string; sha256: string }> = [];
+  for (const path of paths) {
+    const file = byPath.get(path);
+    if (!file || file.kind !== "file") return { missing: path };
+    files.push({ path, sha256: file.sha256 });
+  }
+  return { files };
+}
+
+/**
+ * What a run of this brief on this snapshot would send to Nebius, and the bounds it runs under. Its fingerprint is the
+ * snapshot's. With an environment (D41), the caller has checked it against the commit's manifests.
+ */
+export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | null = null): TaskPreview {
   const { status: _ready, ...shown } = previewOf(snapshot) as Extract<ReturnType<typeof previewOf>, { status: "ready" }>;
   const commands = [...brief.acceptanceCases.map((given) => given.command), ...brief.checks];
   const paths = new Set(snapshot.files.map((file) => file.path));
@@ -205,7 +236,9 @@ export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "accept
       return { number: index + 1, files: said.files.slice(0, 20).map(named), unclear: said.unclear };
     })
     .filter((one) => one.files.length > 0 || one.unclear);
-  return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, caseFiles, limits: runLimitsFor(commands.length) };
+  const frozen = frozenIn(snapshot, brief.frozen ?? []);
+  if ("missing" in frozen) return { status: "refused", code: "frozen", message: `The brief freezes ${frozen.missing.length > 300 ? `${frozen.missing.slice(0, 299)}\u2026` : frozen.missing}, which this commit doesn't hold as a file. Correct the brief, or commit the file, then preview the run again.` };
+  return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, caseFiles, environment, frozen: frozen.files, limits: runLimitsFor(commands.length, brief.baseline?.length ?? 0) };
 }
 
 /**
