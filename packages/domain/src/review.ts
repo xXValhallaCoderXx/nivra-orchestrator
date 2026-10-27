@@ -2,6 +2,7 @@ import { z } from "zod";
 import { PreferencesReceived } from "./chat.ts";
 import { PreferenceSnapshot } from "./context.ts";
 import { ModelFailureKind, RunBudgetRecord, RunRoute, RunUsage } from "./models.ts";
+import { MissionReviewPacket } from "./mission.ts";
 
 /**
  * A review of one saved plan version (NIV-38, D30). The host freezes what it sends as a packet: the plan's text, its
@@ -75,11 +76,14 @@ export const ReviewPacket = z
   .refine((packet) => packet.scope.kind === "project" || packet.references.length === 0, "A general plan has no repository references.");
 export type ReviewPacket = z.infer<typeof ReviewPacket>;
 
-/** What a review run gets besides its input (D21): held in the engine's memory for the run, never stored. */
+/**
+ * What a review run gets besides its input (D21): held in the engine's memory for the run, never stored. The packet is
+ * a saved plan version's, or a mission and up to five of its tasks (NIV-52), which the council reads in a mode of its own.
+ */
 export const ReviewContext = z.strictObject({
   preferences: PreferenceSnapshot,
   sharing: z.strictObject({ modelContext: z.boolean() }),
-  packet: ReviewPacket,
+  packet: z.union([ReviewPacket, MissionReviewPacket]),
 });
 export type ReviewContext = z.infer<typeof ReviewContext>;
 
@@ -180,7 +184,14 @@ export const ReviewFinding = z.strictObject({
 export type ReviewFinding = z.infer<typeof ReviewFinding>;
 
 /** What the engine had to change in a report to keep it within its limits and its packet, counted. */
-const Adjusted = z.strictObject({ dropped: count, refsDropped: count, relabelled: count, shortened: count });
+const Adjusted = z.strictObject({
+  dropped: count,
+  refsDropped: count,
+  relabelled: count,
+  shortened: count,
+  /** A mission review's findings set aside for naming no selected task, the mission or the backlog (NIV-52). */
+  unanchored: count.optional(),
+});
 
 export const ReviewerReport = z.strictObject({
   role: ReviewRole,

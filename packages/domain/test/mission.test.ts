@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
 import {
   bindingDigest,
@@ -15,7 +15,8 @@ import {
   type ContextBinding as Binding,
   type MissionReviewPacket as Packet,
 } from "../src/mission.ts";
-import { REVIEW_PACKET_LIMITS } from "../src/review.ts";
+import { StartRunParams } from "../src/methods.ts";
+import { REVIEW_PACKET_LIMITS, ReviewerReport } from "../src/review.ts";
 import { MISSION_COUNCIL, SPECIALISTS, SpecialistId, specialistRef } from "../src/specialists.ts";
 
 /** The mission contract (NIV-52): what a mission holds, how context is bound, and what a mission review sends. */
@@ -269,5 +270,31 @@ describe("the specialist catalogue (NIV-52)", () => {
     }
     assert.deepEqual(MISSION_COUNCIL, ["product-architect", "risk-testability", "council-chair"]);
     assert.deepEqual(specialistRef("council-chair"), { id: "council-chair", version: SPECIALISTS["council-chair"].version });
+  });
+});
+
+describe("a mission review as a review run (NIV-52)", () => {
+  const request = (packet: unknown) => ({
+    clientRequestId: randomUUID(),
+    workflowId: "review",
+    input: { panel: "council", planId: randomUUID(), planVersion: 1, packetDigest: SHA, preferencesDigest: SHA },
+    context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false }, packet },
+  });
+
+  it("takes a mission packet in a review's context, and a plan packet exactly as before", () => {
+    const mission = StartRunParams.parse(request(PACKET));
+    assert.deepEqual(mission.workflowId === "review" ? mission.context.packet : null, PACKET);
+    const plan = { scope: { kind: "general" }, text: "A plan", assumptions: [], references: [] };
+    const parsed = StartRunParams.parse(request(plan));
+    assert.deepEqual(parsed.workflowId === "review" ? parsed.context.packet : null, plan);
+    assert.equal(StartRunParams.safeParse(request({ ...plan, kind: "mission" })).success, false, "a plan packet with a kind is neither");
+    assert.equal(StartRunParams.safeParse(request({ ...PACKET, text: "A plan" })).success, false, "a mission packet with a plan's text is neither");
+  });
+
+  it("counts a reviewer's findings set aside for naming nothing in the selection, and reads a report without that count as before", () => {
+    const report = { role: "risks", summary: "s", findings: [], assumptions: [], gaps: [], adjusted: { dropped: 0, refsDropped: 2, relabelled: 0, shortened: 0 } };
+    assert.equal(ReviewerReport.safeParse(report).success, true);
+    assert.equal(ReviewerReport.safeParse({ ...report, adjusted: { ...report.adjusted, unanchored: 3 } }).success, true);
+    assert.equal(ReviewerReport.safeParse({ ...report, adjusted: { ...report.adjusted, unanchored: -1 } }).success, false);
   });
 });
