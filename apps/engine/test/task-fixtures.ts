@@ -52,6 +52,10 @@ export interface Attempt {
   time?: ReturnType<typeof clock>;
   /** Wraps the engine's own session on the checkout, for its git. */
   wrapLocal?: (session: ExecutionSession) => ExecutionSession;
+  /** The model hands in whenever it is offered only submit, as a model following its instructions would. */
+  handInWhenAsked?: boolean;
+  /** Each request's input is reported as its size would make it, about 3.5 characters a token, not a flat 3,000. */
+  usageFromPrompt?: boolean;
 }
 
 export async function attempt(options: Attempt = {}) {
@@ -70,10 +74,14 @@ export async function attempt(options: Attempt = {}) {
   const model = new MastraLanguageModelV2Mock({
     doGenerate: (async (call: { prompt: unknown; tools?: Array<{ name: string }> }) => {
       const index = requests++;
-      prompts.push(JSON.stringify(call.prompt));
+      const sent = JSON.stringify(call.prompt);
+      prompts.push(sent);
       offered.push((call.tools ?? []).map((tool) => tool.name).sort());
       options.beforeRequest?.(index);
-      return calling(script[Math.min(index, script.length - 1)]!, index);
+      const onlySubmit = offered.at(-1)!.length === 1 && offered.at(-1)![0] === "submit";
+      const answer = calling(options.handInWhenAsked && onlySubmit ? ["submit", { summary: "Nothing I can justify changing yet." }] : script[Math.min(index, script.length - 1)]!, index);
+      if (options.usageFromPrompt) answer.usage = { inputTokens: Math.ceil(sent.length / 3.5), outputTokens: 200, totalTokens: Math.ceil(sent.length / 3.5) + 200 };
+      return answer;
     }) as never,
   });
   const before = folderState(root);

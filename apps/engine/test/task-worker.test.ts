@@ -235,24 +235,75 @@ describe("a task's worker (NIV-7, D39)", () => {
     // The search's answer, as the next request carried it: the line where greet is defined, found ignoring case, and
     // what the attempt has left once that first request is answered.
     assert.ok(run.prompts()[1]!.includes('"matches":[{"path":"greet.sh","line":1,"text":"greet() {"}],"total":1,"truncated":false'), run.prompts()[1]!.slice(-600));
-    assert.match(run.prompts()[1]!, /"left":\{"modelRequests":23,"toolCalls":47,"writes":8,"runs":4,"seconds":\d+\}/);
+    assert.match(run.prompts()[1]!, /"left":\{"modelRequests":23,"toolCalls":47,"writes":8,"runs":4,"seconds":\d+,"estimatedInputTokens":\d+\}/);
     // After the write and the run, what is left counts them.
-    assert.match(run.prompts()[4]!, /"left":\{"modelRequests":20,"toolCalls":44,"writes":7,"runs":3,"seconds":\d+\}/);
+    assert.match(run.prompts()[4]!, /"left":\{"modelRequests":20,"toolCalls":44,"writes":7,"runs":3,"seconds":\d+,"estimatedInputTokens":\d+\}/);
     assert.ok(!run.prompts().some((prompt) => prompt.includes("near its end")), "no end note in a short attempt");
   });
 
   it("says what is left with every answer, and before its last request that handing in unchanged is fair; it never makes the worker write (NIV-35)", async () => {
     const searching: Call[] = Array.from({ length: 23 }, () => ["search_files", { text: "greet", in: "names" }]);
     const run = await attempt({ calls: searching });
-    const note = "This attempt is near its end: 4 model requests are left, and the last of them can only hand in. If you have a change you can justify, write it and run its case now. If you don't, hand in and say what you found: handing in unchanged is a fair result.";
-    // The note comes with the answers once 4 requests are left after the one under way, never before.
+    const note = "This attempt is near its end: 4 model requests are left, the last of them only for handing in. If you have a change you can justify, write it and run its case now. If you don't, hand in and say what you found: handing in unchanged is a fair result.";
+    // The note comes with the answers once 4 requests are left after the one under way, never before, and its advice
+    // follows what can still be done: one request with tools, then only handing in.
     assert.deepEqual([run.prompts()[19]!.includes("near its end"), run.prompts()[20]!.includes(note)], [false, true]);
-    assert.ok(run.prompts()[23]!.includes("1 model request is left, and the last of them can only hand in"), run.prompts()[23]!.slice(-800));
+    assert.ok(run.prompts()[22]!.includes("2 model requests are left, the last of them only for handing in. There is room for one more request with tools: use it for a change you can justify, or hand in now. Handing in unchanged is a fair result."), run.prompts()[22]!.slice(-800));
+    assert.ok(run.prompts()[23]!.includes("1 model request is left, the last of them only for handing in. Your next request can only hand in: say what you changed, or what you found. Handing in unchanged is a fair result."), run.prompts()[23]!.slice(-800));
     // The last request offers only handing in; the worker hands in with nothing written, and nothing was written for it.
     assert.deepEqual([run.offered()[22]!.length, run.offered()[23]], [8, ["submit"]]);
     assert.deepEqual([run.requests(), run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended, run.core!.worker.tools.writes, run.core!.worker.written], [24, "last-request", true, "submitted", 0, []]);
     assert.ok(!labels(run.guest).includes("nivra-write"), "a write was sent");
     assert.deepEqual([run.result.outcome, verdicts(run.core)], ["unchanged", ["case 1 failed", "check 1 failed"]]);
+  });
+
+  it("names the tool calls in the end note when they are what is running out (NIV-35)", async () => {
+    const listing: Call[] = Array.from({ length: 43 }, () => ["list_files", {}]);
+    const run = await attempt({ calls: [listing] });
+    assert.ok(run.prompts()[1]!.includes("This attempt is near its end: 5 tool calls are left. If you have a change you can justify"), run.prompts()[1]!.slice(-700));
+  });
+
+  it("says the time for tools is running out before only handing in is left, then offers only handing in (NIV-35)", async () => {
+    const time = clock();
+    // Each request takes a minute of the work window, so its time, not its requests, ends the attempt.
+    const run = await attempt({ time, handInWhenAsked: true, beforeRequest: () => void time.sleep(60_000), calls: Array.from({ length: 23 }, (): Call => ["search_files", { text: "greet", in: "names" }]) });
+    const warned = run.prompts().findIndex((prompt) => /about \d+ seconds are left for tools/.test(prompt));
+    const handIn = run.offered().findIndex((tools) => tools.length === 1 && tools[0] === "submit");
+    assert.ok(warned > 0 && handIn > warned, `warned at ${warned}, only handing in from ${handIn}`);
+    assert.deepEqual([run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.tools.writes, run.requests() < 24], ["time", true, 0, true]);
+  });
+
+  it("offers only handing in, said beforehand, once the run's input budget holds no more than the hand-in (NIV-35)", async () => {
+    const lines: string[] = [];
+    const big = Array.from({ length: 160 }, () => "x".repeat(99)).join("\n");
+    const files = { ...FIXTURE, ...Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`big/f${index}.txt`, big])) };
+    // Eight 16 KB reads fill each request's context to about 45,000 tokens; small searches then keep it there.
+    const calls: Call[] = [...Array.from({ length: 8 }, (_, index): Call => ["read_file", { path: `big/f${index}.txt` }]), ...Array.from({ length: 15 }, (): Call => ["search_files", { text: "greet", in: "names" }])];
+    const run = await attempt({ files, calls, handInWhenAsked: true, usageFromPrompt: true, extra: { progress: (message) => void lines.push(message) } });
+    const handIn = run.offered().findIndex((tools) => tools.length === 1 && tools[0] === "submit");
+    assert.ok(handIn > 8 && handIn < 23, `only handing in from request ${handIn}`);
+    assert.ok(run.prompts()[handIn - 1]!.includes("the run's input budget has room for about"), run.prompts()[handIn - 1]!.slice(-700));
+    assert.ok(lines.includes("Only handing in is left: the run's input budget, or this request's context, has room for the hand-in and no more."), lines.join(" | "));
+    assert.deepEqual([run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.ended, run.core!.worker.tools.writes], ["last-request", true, "submitted", 0]);
+  });
+
+  it("keeps every request within its context's room: reads are cut, then refused, and only handing in is left (NIV-35)", async () => {
+    const big = Array.from({ length: 160 }, () => "x".repeat(99)).join("\n");
+    const files = { ...FIXTURE, ...Object.fromEntries(Array.from({ length: 16 }, (_, index) => [`big/f${index}.txt`, big])) };
+    const calls: Call[] = Array.from({ length: 23 }, (_, index): Call => ["read_file", { path: `big/f${index % 16}.txt` }]);
+    const run = await attempt({ files, calls, handInWhenAsked: true, usageFromPrompt: true });
+    // No request carried more than the per-request cap (D22), at three characters a token.
+    const largest = Math.max(...run.prompts().map((prompt) => prompt.length));
+    assert.ok(largest / 3 <= 64_000, `a request carried about ${Math.round(largest / 3)} tokens`);
+    assert.ok(run.prompts().some((prompt) => prompt.includes("this request's context is nearly full, so nothing more is shown")));
+    assert.deepEqual([run.core!.worker.handInDue, run.core!.worker.handedIn, run.core!.worker.tools.writes], ["last-request", true, 0]);
+  });
+
+  it("masks what a search finds before the model is given it (NIV-35)", async () => {
+    const files = { ...FIXTURE, "notes.txt": "the passphrase is tango-hotel-42\n" };
+    const run = await attempt({ files, calls: [["search_files", { text: "passphrase", in: "content" }]], extra: { mask: (text: string) => text.replaceAll("tango-hotel-42", "[masked]") } });
+    assert.ok(run.prompts()[1]!.includes('"text":"the passphrase is [masked]"'), run.prompts()[1]!.slice(-500));
+    assert.ok(!run.prompts()[1]!.includes("tango-hotel-42"));
   });
 
   it("searches only the workspace it was given, within its bounds: a folder outside it is refused, and a long result is cut and counted (NIV-35)", async () => {

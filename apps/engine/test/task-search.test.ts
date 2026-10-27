@@ -37,6 +37,11 @@ describe("the worker's search (NIV-35)", () => {
     assert.equal(found.text!.length, 50 + 6);
   });
 
+  it("shows the match in a long line whose letters change length when lowercased (İ)", async () => {
+    const found = (await copyOf({ "turkish.txt": `${"İ".repeat(300)}NEEDLE${"b".repeat(1_000)}\n` })).search("needle", "content", "", 40, 50).matches[0]!;
+    assert.ok(found.text!.includes("NEEDLE"), found.text);
+  });
+
   it("skips what isn't UTF-8 text, and links, counting them, and never follows a link", async () => {
     const copy = await copyOf({ "a.bin": new Uint8Array([0x6e, 0x65, 0x65, 0x64, 0x00]), "b.txt": new Uint8Array([0x6e, 0x65, 0x65, 0x64, 0xff]), "c.txt": "need\n", "d.lnk": { link: "c.txt" } });
     const found = copy.search("need", "content", "", 40, 200);

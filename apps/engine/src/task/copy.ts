@@ -78,7 +78,9 @@ export class WorkspaceCopy {
    * characters around the match; `total` counts every match, up to `SEARCH_COUNT_MAX`.
    */
   search(text: string, where: "names" | "content", folder: string, max: number, lineChars: number): { matches: SearchMatch[]; total: number; capped: boolean; skipped: number } {
-    const wanted = text.toLowerCase();
+    // Literal text, found ignoring case in the line as it is, so a match's place is the line's own, whatever lowercasing
+    // would do to its length.
+    const wanted = new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu");
     const matches: SearchMatch[] = [];
     let total = 0;
     let skipped = 0;
@@ -89,7 +91,7 @@ export class WorkspaceCopy {
     for (const path of this.paths(folder)) {
       if (total >= SEARCH_COUNT_MAX) break;
       if (where === "names") {
-        if (path.toLowerCase().includes(wanted)) found({ path });
+        if (wanted.test(path)) found({ path });
         continue;
       }
       const read = this.text(path);
@@ -99,8 +101,8 @@ export class WorkspaceCopy {
       }
       const lines = read.text.split("\n");
       for (let index = 0; index < lines.length && total < SEARCH_COUNT_MAX; index++) {
-        const at = lines[index]!.toLowerCase().indexOf(wanted);
-        if (at >= 0) found({ path, line: index + 1, text: excerpt(lines[index]!, at, wanted.length, lineChars) });
+        const hit = wanted.exec(lines[index]!);
+        if (hit) found({ path, line: index + 1, text: excerpt(lines[index]!, hit.index, hit[0].length, lineChars) });
       }
     }
     return { matches, total, capped: total >= SEARCH_COUNT_MAX, skipped };
