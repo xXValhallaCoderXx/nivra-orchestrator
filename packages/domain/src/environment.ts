@@ -39,8 +39,13 @@ export const ENVIRONMENT_LIMITS = {
   inputBytes: 8 * 1024 * 1024,
 } as const;
 
-/** A pnpm filter: a workspace selector, such as `@scope/package...` or `./packages/data`, with no shell meaning. */
-const Filter = z.string().regex(/^[A-Za-z0-9@._/^~*!-]{1,200}$/, "A filter is one pnpm workspace selector, such as @scope/package...");
+/**
+ * A pnpm filter: a workspace selector, such as `@scope/package...`, `./packages/data` or `!@scope/web`, with no shell
+ * meaning. It never starts with `-`, so pnpm can't read it as an option. The sandbox checks a preparation's arguments
+ * against this same rule, so a filter the preview takes is one the preparation runs.
+ */
+export const ENVIRONMENT_FILTER = /^(?!-)[A-Za-z0-9@._/^~*!-]{1,200}$/;
+const Filter = z.string().regex(ENVIRONMENT_FILTER, "A filter is one pnpm workspace selector, such as @scope/package...");
 
 /** What the person chose: which workspace packages to install, as pnpm filters. None installs the whole workspace. */
 export const EnvironmentSpec = z.strictObject({

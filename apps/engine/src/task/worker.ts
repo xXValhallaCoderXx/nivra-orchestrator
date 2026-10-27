@@ -261,7 +261,8 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       baseline: copy.snapshot.baseline,
       prefix: copy.snapshot.prefix,
       environment: run.environment ?? null,
-      baselineChecks: [...baselineChecks],
+      // Masked as the checks are: the report is bound into the proposal and kept (D41).
+      baselineChecks: baselineChecks.map((check) => ({ ...check, name: mask(check.name), reason: check.reason === null ? null : mask(check.reason), stdoutTail: mask(check.stdoutTail), stderrTail: mask(check.stderrTail) })),
       frozen: [...frozenFiles],
       toolchain: programs.map((program) => ({ program, finding: findings.get(program) ?? "unknown" })),
       worker: { ...worker, written: [...copy.written] },

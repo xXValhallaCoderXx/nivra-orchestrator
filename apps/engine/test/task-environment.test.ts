@@ -97,6 +97,16 @@ describe("a task run from a prepared environment (NIV-49, D41)", () => {
     assert.deepEqual(run.result.proposal?.binding.paths.map((path) => path.path), ["greet.sh"], "node_modules or a manifest came back in the change");
   });
 
+  it("masks a baseline selection's output in the report bound into the proposal, as it masks every check's", async () => {
+    const environment = await environmentFor(FILES, "base-image");
+    // Prints a token's shape, made by the command so the brief never holds one.
+    const printsToken = { name: "greets, then prints a token's shape", command: `. ./greet.sh; greet Ada; greet; printf 'ghp_%s\\n' "$(printf 'a1B2%.0s' 1 2 3 4 5 6 7 8 9)"`, expectedExitCode: 0, outputPattern: "Hello, Ada\\nHello, \\nghp_[A-Za-z0-9]{36}\\n" };
+    const run = await attempt({ files: FILES, brief: { ...ENV_BRIEF, baseline: [printsToken] }, setup: prepared, extra: { environment, mask: (text: string) => text.replace(/ghp_[A-Za-z0-9]{36}/g, "[masked token]") } });
+    assert.deepEqual([run.result.outcome, run.core!.baselineChecks.map((check) => check.matched)], ["proposed", [true]]);
+    const report = new TextDecoder().decode(run.result.proposal!.report);
+    assert.deepEqual([report.includes("ghp_a1B2"), report.includes("[masked token]")], [false, true], "the token's shape is in the proposal's report");
+  });
+
   it("stops before the model when a baseline selection doesn't give what the brief expects, and says which and why", async () => {
     const environment = await environmentFor(FILES, "base-image");
     const wrong = { ...REPRODUCED, expectedOutput: "Hello, Ada\nHello, world\n" };

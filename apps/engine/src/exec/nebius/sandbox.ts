@@ -1,3 +1,4 @@
+import { ENVIRONMENT_FILTER } from "@nivra/domain";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, sleepFor, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
@@ -295,6 +296,19 @@ export const ENV_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 export const ENV_COMMAND_ENV: Readonly<Record<string, string>> = Object.freeze({ PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
 
 /**
+ * Whether a preparation's install arguments are the only shape Nivra sends: `--frozen-lockfile`, then each filter as
+ * `--filter <filter>`, every filter one the domain's spec takes (`ENVIRONMENT_FILTER`), so a preview and its preparation
+ * agree on what runs.
+ */
+export function isInstallArgs(args: readonly string[]): boolean {
+  if (args[0] !== "--frozen-lockfile" || (args.length - 1) % 2 !== 0) return false;
+  for (let index = 1; index < args.length; index += 2) {
+    if (args[index] !== "--filter" || !ENVIRONMENT_FILTER.test(args[index + 1]!)) return false;
+  }
+  return true;
+}
+
+/**
  * An environment's preparation: a fixed script, given everything as positional arguments, so nothing is interpolated
  * into it. $1 the workspace, $2 the inputs archive, $3 pnpm's exact version, then pnpm install's own arguments
  * (--frozen-lockfile first). It prints the versions and the machine it prepared, for the environment's binding. The
@@ -438,7 +452,7 @@ export class Sandbox {
    */
   async prepareEnvironment(input: { image: string; inputs: FileRef; packageManager: string; installArgs: string[]; timeoutSeconds: number }): Promise<{ operationId: string } | { uncertain: string }> {
     if (!/^pnpm@\d+\.\d+\.\d+$/.test(input.packageManager)) throw new SandboxRefusal("An environment pins its package manager to an exact pnpm version, such as pnpm@11.5.3.");
-    if (input.installArgs[0] !== "--frozen-lockfile" || input.installArgs.some((arg) => !/^[A-Za-z0-9@._/=:^~*-]{1,200}$/.test(arg))) throw new SandboxRefusal("An environment installs only from its frozen lockfile, with plain arguments.");
+    if (!isInstallArgs(input.installArgs)) throw new SandboxRefusal("An environment installs only from its frozen lockfile, with plain arguments.");
     if (!(input.timeoutSeconds > 0 && input.timeoutSeconds <= this.#maxTimeoutSeconds)) throw new SandboxRefusal(`A step's timeout must be between 1 and ${this.#maxTimeoutSeconds} s.`);
     return this.#spawn("environment preparation", {
       command: "/bin/sh",

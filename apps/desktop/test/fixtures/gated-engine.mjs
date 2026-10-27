@@ -124,7 +124,7 @@ const taskReport = (runId) => {
     worker: null,
     checks: [],
     verified: true,
-    steps: [],
+    steps: [{ label: "prepare", exitCode: 0, signal: null, timedOut: false, cancelled: false, truncated: false, persisted: true, durationMs: 900, status: "SUCCESS", usage: null, stdoutTail: "", stderrTail: "" }],
     proposal: { hash: TASK_HASH, patchSha256: "6".repeat(64), patchBytes: 10, files: 1 },
     reportSha256: "7".repeat(64),
     cleanup: null,

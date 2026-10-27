@@ -28,7 +28,7 @@ import { findGit } from "../src/exec/find-executable.ts";
 import { createLocalBackend } from "../src/exec/local.ts";
 import { fetchTransport, SandboxApi, type Transport } from "../src/exec/nebius/api.ts";
 import { insideRepository, RETENTION, tokenOutlasts } from "../src/exec/nebius/probe.ts";
-import { Journal } from "../src/exec/nebius/sandbox.ts";
+import { isInstallArgs, Journal } from "../src/exec/nebius/sandbox.ts";
 import { compressSnapshot, createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals } from "../src/exec/nebius/session.ts";
 import { canonicalJson } from "../src/exec/proposal.ts";
 import { takeSnapshot, type Snapshot } from "../src/exec/snapshot.ts";
@@ -69,7 +69,8 @@ const Config = z.strictObject({
   /** `registryDigest`: what the registry said the tag pointed to when the config was written; a tag can be rebuilt. */
   image: z.strictObject({ tag: z.string().regex(/^[a-z0-9._/-]+:[A-Za-z0-9._-]+$/), tagPrefix: z.string().min(1), registryUrl: z.string().min(1), registryDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/), node: z.string().regex(/^v\d+\.\d+\.\d+$/) }),
   packageManager: z.string().regex(/^pnpm@\d+\.\d+\.\d+$/),
-  installArgs: z.array(z.string().min(1)).min(1),
+  // The shape the sandbox sends, checked here so a config it would refuse is refused before anything is sent.
+  installArgs: z.array(z.string().min(1)).min(1).refine(isInstallArgs, "installArgs is --frozen-lockfile, then --filter <filter> for each filter."),
   inputs: z.array(z.string().regex(/^[A-Za-z0-9._@*-]+(\/[A-Za-z0-9._@*-]+)*$/)).min(1),
   dependencyFolders: z.array(z.string().regex(/^[A-Za-z0-9._-]+$/)).min(1),
   selections: z
