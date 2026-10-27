@@ -3697,6 +3697,30 @@ describe("Host: missions and their council reviews, with no repository (NIV-52)"
     assert.deepEqual(host.tasks().tasks.map((task) => task.state), ["draft", "draft"]);
   });
 
+  it("refuses a start when a task changes while the review is being prepared, inside the transaction that would store it", async () => {
+    const stub = await stubFor();
+    // The keys are read while a start is prepared, after the composition and before its transaction: rename there.
+    let during: (() => Promise<unknown>) | null = null;
+    const { host } = makeHost({
+      tokenFactoryUrl: stub.url,
+      credentials: async () => {
+        const run = during;
+        during = null;
+        if (run) await run();
+        return { NEBIUS_API_KEY: KEY };
+      },
+    });
+    const view = await missionWith(host, ["Store runs"]);
+    const ids = view.backlog.map((entry) => entry.task.id);
+    const preview = await host.prepareMissionReview(view.id, ids);
+    during = () => host.renameTask(ids[0]!, host.task(ids[0]!).revision, "Store runs on the phone");
+    assert.equal(
+      await refusal(() => host.startMissionReview(view.id, ids, preview.expected)),
+      `What this review would send has changed since you opened it: "Store runs" is now called "Store runs on the phone". Check the new preview, then start again.`,
+    );
+    assert.deepEqual([host.mission(view.id).reviews, stub.chats().length], [[], 0], "nothing was stored or sent");
+  });
+
   it("shows rejected output as an incomplete review with the count, never as nothing raised", async () => {
     const stub = await stubFor({ architecture: review("Two problems.", [{ title: "About T7", refs: ["T7"] }, { title: "About E1", refs: ["E1", "plan"] }]) });
     const { host, keys } = makeHost({ tokenFactoryUrl: stub.url });

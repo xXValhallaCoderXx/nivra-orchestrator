@@ -512,7 +512,7 @@ export function MissionDetail({ missionId, onOpenTask, onDeleted }: { missionId:
           )}
         </Group>
         <Group gap="xs">
-          <Button size="sm" onClick={() => setReviewing(true)} disabled={chosen.length === 0 || view.reviewing} data-testid="mission-review">
+          <Button size="sm" onClick={() => setReviewing(true)} disabled={chosen.length === 0 || view.reviewing} data-testid="mission-review-open">
             Review {chosen.length || ""} selected…
           </Button>
           <Text size="xs" c="var(--nivra-text-3)" data-testid="mission-review-note">

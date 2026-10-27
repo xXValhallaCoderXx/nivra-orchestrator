@@ -185,7 +185,7 @@ test("a mission on Windows: its backlog and the review's exact preview, refused 
   await page.getByTestId("nav-missions").click();
   await page.getByTestId("mission-open").filter({ hasText: "Runner's log" }).click();
   await page.getByTestId("backlog-row").filter({ hasText: "Store runs" }).getByTestId("backlog-select").check();
-  await page.getByTestId("mission-review").click();
+  await page.getByTestId("mission-review-open").click();
   await expect(page.getByTestId("mission-preview-text")).toContainText("T1. Store runs");
   await page.getByTestId("mission-review-start").click();
   await expect(page.getByTestId("mission-review").first().getByTestId("review-status")).toHaveText("Failed", { timeout: 120_000 });

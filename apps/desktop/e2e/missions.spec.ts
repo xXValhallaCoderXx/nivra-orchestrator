@@ -75,7 +75,7 @@ const row = (title: string) => page.getByTestId("backlog-row").filter({ hasText:
 /** Selects the given tasks, opens the review's preview, and starts it once the preview is in. */
 async function reviewTasks(titles: string[]) {
   for (const title of titles) await row(title).getByTestId("backlog-select").check();
-  await page.getByTestId("mission-review").click();
+  await page.getByTestId("mission-review-open").click();
   await expect(page.getByTestId("mission-preview-text")).toBeVisible();
   await page.getByTestId("mission-review-start").click();
   await expect(page.getByTestId("mission-review-dialog")).toBeHidden();
@@ -149,7 +149,7 @@ test("a review's preview shows exactly what it sends, who reads it and what it d
   await openMission("Runner's log");
   await row("Store runs").getByTestId("backlog-select").check();
   await row("Weekly total").getByTestId("backlog-select").check();
-  await page.getByTestId("mission-review").click();
+  await page.getByTestId("mission-review-open").click();
   const text = page.getByTestId("mission-preview-text");
   await expect(text).toContainText("The mission (mission):\nName: Runner's log");
   await expect(text).toContainText("Non-goals:\n- Social features");
