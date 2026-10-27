@@ -1,9 +1,12 @@
 import { Alert, Anchor, Badge, Button, Code, Group, List, Modal, Select, Stack, Table, Text, Textarea, TextInput, Title } from "@mantine/core";
-import { useState, type ChangeEvent, type ReactNode } from "react";
+import type { CoachQuestionField } from "@nivra/domain";
+import { useEffect, useState, type ChangeEvent, type ReactNode } from "react";
+import type { CoachingView } from "../../../shared/coach";
 import type { BriefContent, BriefFields, EngineView, PlanView, ProjectView, TaskState, TaskSummary, TasksView, TaskView } from "../../../shared/ipc";
 import { errorMessage, Section, usePoll } from "../shared/ui";
 import { EngineNotices } from "./engine";
 import { BaselineInput, BaselineRead, baselineDraftOf, baselineOf, caseDraftOf, caseOf, CasesInput, CasesRead, TaskRun, type BaselineDraft, type CaseDraft } from "./task-run";
+import { isOpenCoaching, TaskCoach } from "./task-coach";
 
 /**
  * Native tasks (D26, NIV-32): a brief written directly or made from a plan, the same form either way. Every change to a
@@ -26,6 +29,18 @@ const repositoryOf = (task: TaskSummary) =>
   task.projectId === null ? "No repository yet" : `${task.projectLabel ?? "A project"}${task.projectPresent === false ? " (removed from the list)" : ""}`;
 
 const repositoryChoices = (projects: ProjectView[]) => [{ value: NONE, label: "No repository yet" }, ...projects.map((p) => ({ value: p.id, label: `${p.label} · ${p.targetLabel}` }))];
+
+/** Where the brief editor takes the person when a coach's question names a field (NIV-53): the field's own input. */
+const FIELD_INPUT: Readonly<Record<CoachQuestionField, string>> = {
+  goal: "brief-goal",
+  acceptanceCriteria: "brief-criteria",
+  scope: "brief-scope",
+  exclusions: "brief-exclusions",
+  context: "brief-context",
+  assumptions: "brief-assumptions",
+  checks: "brief-checks",
+  acceptanceCases: "brief-case-add",
+};
 
 /** A brief's fields as the form holds them: lists are one entry per line. */
 interface Draft {
@@ -376,6 +391,16 @@ export function TaskDetail({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The coach (NIV-53): its coachings, read again while one is open; a save of its changes going; a field to focus.
+  const coachings = usePoll<CoachingView[]>(() => window.nivra.listCoachings(taskId), (value) => (value?.some(isOpenCoaching) ? 700 : null), [taskId, readCount]);
+  const [coachSaving, setCoachSaving] = useState(false);
+  const [focus, setFocus] = useState<{ field: CoachQuestionField; at: number } | null>(null);
+  useEffect(() => {
+    if (!focus || editing !== "brief") return;
+    // Once the editor shows, the field the question named takes the focus; the draft is left as it is.
+    const frame = requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-testid="${FIELD_INPUT[focus.field]}"]`)?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [focus, editing]);
 
   const view = task.value;
   if (!view) {
@@ -422,6 +447,15 @@ export function TaskDetail({
     setEditing(null);
     setBase(null);
     setConflict(false);
+  }
+
+  /** A coach's question names a field: the brief editor opens there, or the open one is used as it is, edits and all. */
+  function updateField(field: CoachQuestionField) {
+    if (editing !== "brief") {
+      setDraft(draftOf(brief.content));
+      startEdit("brief");
+    }
+    setFocus({ field, at: Date.now() });
   }
 
   /**
@@ -620,7 +654,7 @@ export function TaskDetail({
                 setDraft(draftOf(brief.content));
                 startEdit("brief");
               }}
-              disabled={completed}
+              disabled={completed || coachSaving}
               data-testid="task-edit-brief"
             >
               Edit brief
@@ -651,6 +685,33 @@ export function TaskDetail({
         <Text size="xs" c="var(--nivra-text-3)" data-testid="task-versions">
           Versions: {view.versions.map((version) => `v${version.version} (${new Date(version.createdAt).toLocaleString()})`).join(", ")}
         </Text>
+      </Section>
+
+      <Section title="Prepare this task" description="What the brief may be missing, and a coach to ask if you want one. Nothing here changes the brief until you save.">
+        <TaskCoach
+          task={view}
+          coachings={coachings.value}
+          editing={editing === "brief"}
+          onPrepare={(selection) => window.nivra.prepareCoach(taskId, selection)}
+          onStart={async (selection, expected) => {
+            const started = await window.nivra.startCoach(taskId, selection, expected);
+            reread();
+            return started;
+          }}
+          onCancel={async (coachingId) => {
+            await window.nivra.cancelCoach(taskId, coachingId);
+            reread();
+          }}
+          onAccept={async (coachingId, fields) => {
+            try {
+              await window.nivra.acceptCoachChanges(taskId, revision, coachingId, fields);
+            } finally {
+              reread();
+            }
+          }}
+          onUpdateField={updateField}
+          onSavingChange={setCoachSaving}
+        />
       </Section>
 
       <Section title="Progress">
@@ -684,7 +745,10 @@ export function TaskDetail({
 
       <Modal opened={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete this task?" data-testid="task-delete-dialog">
         <Stack gap="sm">
-          <Text size="sm">The task and every version of its brief are deleted. The plans and conversations it came from stay.</Text>
+          <Text size="sm">
+            The task and every version of its brief are deleted. The plans and conversations it came from stay. Its engines keep their records of its runs and coachings, and
+            what was sent to Token Factory stays there.
+          </Text>
           <Group justify="flex-end" gap="sm">
             <Button variant="default" onClick={() => setConfirmDelete(false)}>
               Cancel

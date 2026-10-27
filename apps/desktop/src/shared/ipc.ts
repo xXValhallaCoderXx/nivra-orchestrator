@@ -5,6 +5,7 @@ import type {
   ApplyStatus,
   BaselineSelection,
   ChatResult,
+  CoachField,
   DoctorReport,
   EngineInfo,
   EnvironmentPreview,
@@ -30,6 +31,7 @@ import type {
   TaskReport,
   TaskRunLimits,
 } from "@nivra/domain";
+import type { CoachingView, CoachPreview, CoachSelection } from "./coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView } from "./research.ts";
 
 /**
@@ -119,6 +121,11 @@ export const IPC = {
   requestTaskRevision: "tasks:request-revision",
   settleTaskChange: "tasks:settle",
   restoreTaskChange: "tasks:restore",
+  prepareCoach: "coach:prepare",
+  startCoach: "coach:start",
+  listCoachings: "coach:list",
+  cancelCoach: "coach:cancel",
+  acceptCoachChanges: "coach:accept",
 } as const;
 
 /** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
@@ -851,4 +858,13 @@ export interface NivraApi {
   settleTaskChange(taskId: string, attemptId: string, as: ApplyResolution): Promise<TaskAttemptView>;
   /** Takes a partial apply back to the originals, never overwriting a version another program saved. */
   restoreTaskChange(taskId: string, attemptId: string): Promise<TaskAttemptView>;
+  /** What asking the coach about the task would send (NIV-53), with the mission and findings ticked; nothing is sent. */
+  prepareCoach(taskId: string, selection: CoachSelection): Promise<CoachPreview>;
+  /** Asks the coach, bound to the preview the person saw: refused when what it would send changed since. */
+  startCoach(taskId: string, selection: CoachSelection, expected: string): Promise<CoachingView>;
+  /** The task's coachings, the newest first; one left open is followed on its own engine, and nothing is resent. */
+  listCoachings(taskId: string): Promise<CoachingView[]>;
+  cancelCoach(taskId: string, coachingId: string): Promise<void>;
+  /** Saves the ticked changes as the brief's next version, from the task's revision as it was read; a stale answer is refused. */
+  acceptCoachChanges(taskId: string, revision: number, coachingId: string, fields: CoachField[]): Promise<TaskView>;
 }

@@ -418,12 +418,9 @@ function CoachingCard({
   const [error, setError] = useState<string | null>(null);
   const open = isOpenCoaching(coaching);
   const report = coaching.report;
+  // An answer set aside entirely, or none at all, ends its run as failed: the label says which.
   const look =
-    coaching.status === "answered" && report?.outcome === "unusable"
-      ? { label: "Unusable", color: "orange" }
-      : coaching.status === "answered" && report?.outcome === "empty"
-        ? { label: "Empty", color: "gray" }
-        : STATUS_LOOK[coaching.status];
+    !open && report?.outcome === "unusable" ? { label: "Unusable", color: "orange" } : !open && report?.outcome === "empty" ? { label: "Empty", color: "gray" } : STATUS_LOOK[coaching.status];
   const stale = coaching.stale.length > 0;
   const applied = coaching.applied;
   // Only changes that may be saved count, whatever was ticked before one became blocked.
