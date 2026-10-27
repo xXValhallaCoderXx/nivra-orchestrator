@@ -435,7 +435,7 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     const { host, ids, keys } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }] });
     keys.current = { NEBIUS_API_KEY: "test-key-0123456789" };
     const leaky = host.addPreference({ statement: "Call the API with test-key-0123456789", scope: "personal", projectId: null });
-    await assert.rejects(host.exportPreferences({ personal: true, projectIds: [] }), /holds your saved Token Factory key, so nothing was exported/);
+    await assert.rejects(host.exportPreferences({ personal: true, projectIds: [] }), /holds your saved Nebius key, so nothing was exported/);
     host.deletePreference(leaky.id);
     host.addPreference({ statement: "Prefer named exports", scope: "personal", projectId: null });
     host.addPreference({ statement: "Replace Jest with Vitest", scope: "project", projectId: ids[0]!, intent: "override" });
