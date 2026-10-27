@@ -16,7 +16,7 @@ import type { TargetFactory } from "../src/main/targets/registry.ts";
 import type { ExecutionTarget } from "../src/main/targets/types.ts";
 import type { WslDiscovery } from "../src/main/targets/wsl-discovery.ts";
 import { httpError, startStub, text, toolCall, type Reply, type StubRequest, type Stub } from "../../engine/test/stub-token-factory.ts";
-import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandboxes.ts";
+import { startSandboxStub, type SandboxStub, type StubGuest } from "../../engine/test/stub-sandboxes.ts";
 import { extractAnswer, searchAnswer, startTavilyStub, type TavilyStub } from "../../engine/test/stub-tavily.ts";
 import { researchFingerprint } from "../src/main/research.ts";
 import type { ResearchSelection, ResearchView } from "../src/shared/research.ts";
@@ -66,6 +66,14 @@ async function waitFor<T>(check: () => T | null | false | Promise<T | null | fal
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
+
+/**
+ * Whether the engine has read the nth sandbox operation whose arguments name `name` (the first unless given). It reads
+ * one only once the spawn's answer is in and journaled, so a stop after that read can't race the answer, as one after
+ * the spawn alone can.
+ */
+const operationRead = (stub: SandboxStub<StubGuest>, name: string, nth = 1) =>
+  (stub.guest.service.operations.filter((operation) => JSON.stringify(operation.body["args"] ?? []).includes(name))[nth - 1]?.reads ?? 0) > 0;
 
 function makeRepo(path: string, files: Record<string, string> = {}): string {
   mkdirSync(path, { recursive: true });
@@ -1782,7 +1790,7 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     const [first, second] = await Promise.allSettled([host.startSandboxCheck(ids[0]!, fingerprint), host.startSandboxCheck(ids[0]!, fingerprint)]);
     assert.deepEqual([first.status, second.status === "rejected" ? String(second.reason) : second.status], ["fulfilled", "Error: A sandbox check of this project is already being started."]);
     const probes = () => sandboxes.guest.service.operations.filter((operation) => (operation.body["args"] as string[] | undefined)?.[1] === PROBE_SCRIPT);
-    await waitFor(() => probes().length === 1, "the probe to start");
+    await waitFor(() => operationRead(sandboxes, "nivra-probe"), "the engine's first read of the probe's operation");
     await assert.rejects(host.startSandboxCheck(ids[0]!, fingerprint), /is still going/);
     assert.match((await host.setCloudExecution(ids[0]!, false)).notice ?? "", STOPPED);
     const view = await checkEnded(host, ids[0]!);
@@ -1931,7 +1939,7 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     keys.current = SECRETS;
     await host.setCloudExecution(ids[0]!, true);
     await host.startSandboxCheck(ids[0]!, await fingerprintOf(host, ids[0]!));
-    await waitFor(() => sandboxes.requests.some((request) => request.path === "/v1/instances" && request.body.includes("nivra-probe")), "the probe to start");
+    await waitFor(() => operationRead(sandboxes, "nivra-probe"), "the engine's first read of the probe's operation");
     const project = await host.setCloudExecution(ids[0]!, false);
     assert.match(project.notice ?? "", STOPPED);
     const view = await checkEnded(host, ids[0]!);
@@ -1947,7 +1955,7 @@ describe("Host: sandbox checks, with upload consent of their own (D36)", () => {
     keys.current = SECRETS;
     await host.setCloudExecution(ids[0]!, true);
     const view = await host.startSandboxCheck(ids[0]!, await fingerprintOf(host, ids[0]!));
-    await waitFor(() => sandboxes.requests.some((request) => request.path === "/v1/instances" && request.body.includes("nivra-probe")), "the probe to start");
+    await waitFor(() => operationRead(sandboxes, "nivra-probe"), "the engine's first read of the probe's operation");
     await host.removeProject(ids[0]!);
     assert.equal(host.projects().length, 0);
     // The run is still reachable by its id on the engine that ran it: it ends cancelled, its operation asked to stop.
@@ -2546,7 +2554,6 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
       return view.status !== "submitting" && view.status !== "running" ? view : null;
     }, what, 60_000);
   const uploads = (stub: SandboxStub<RealGuest>) => stub.requests.filter((request) => request.path === "/v1/files").length;
-  const spawnedWith = (stub: SandboxStub<RealGuest>, name: string) => stub.requests.filter((request) => request.method === "POST" && request.path === "/v1/instances" && request.body.includes(name)).length;
 
   it("runs a ready task's brief on its project's engine, previewed and bound, and reads back its report and change, the checkout untouched", async () => {
     const { host, ids, sandbox, model, repo } = await taskHost();
@@ -2630,7 +2637,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
       return host.startTaskRun(taskId, preview.expected, preview.snapshotFingerprint!);
     };
     const run = await start(first.summary.id);
-    await waitFor(() => spawnedWith(sandbox, "nivra-toolchain") === 1, "the run's toolchain probe", 30_000);
+    await waitFor(() => operationRead(sandbox, "nivra-toolchain"), "the engine's first read of the toolchain probe's operation", 30_000);
     assert.equal(host.task(second.summary.id).runBlocked, RUNNING);
     await assert.rejects(host.startTaskRun(second.summary.id, "a".repeat(64), "b".repeat(64)), new RegExp(RUNNING.replace(/[.]/g, "\\.")));
     assert.throws(() => host.deleteTask(first.summary.id), /^Error: This task's run is still going\. Cancel it, and wait for it to end, then delete the task\.$/);
@@ -2641,7 +2648,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     // The next run starts once that one has ended, and removing the project stops it.
     await host.setCloudExecution(ids[0]!, true);
     const next = await start(second.summary.id);
-    await waitFor(() => spawnedWith(sandbox, "nivra-toolchain") === 2, "the next run's toolchain probe", 30_000);
+    await waitFor(() => operationRead(sandbox, "nivra-toolchain", 2), "the engine's first read of the next toolchain probe's operation", 30_000);
     await host.removeProject(ids[0]!);
     const removed = await ended(host, second.summary.id, next.id);
     assert.deepEqual([removed.status, removed.note], ["cancelled", "Stopped: the project was removed. What it had sent stays where it went."]);
