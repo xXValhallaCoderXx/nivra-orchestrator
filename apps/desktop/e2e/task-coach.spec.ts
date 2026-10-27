@@ -8,6 +8,7 @@ import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandb
 import { startStub, text, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 import { startTavilyStub, type TavilyStub } from "../../engine/test/stub-tavily.ts";
 import type { BriefFields, TaskView } from "../src/shared/ipc";
+import { seedMission, seedMissionReview } from "./seed-workspace.ts";
 
 /**
  * The task readiness coach through the window (NIV-53): what a brief is missing, worked out without a model; a preview
@@ -53,6 +54,8 @@ let tavily: TavilyStub;
 let app: ElectronApplication;
 let page: Page;
 let packaged = false;
+/** A task in a seeded mission, with four findings about it from a seeded review: the last one's detail holds the key. */
+let missionTaskId: string;
 /** The stub's next answers to the coach, as a test sets them. */
 let script: () => Reply = () => toolCall(COACH_TOOL, ANSWER);
 
@@ -111,6 +114,20 @@ test.beforeAll(async ({}, testInfo) => {
   git(["init", "-q", "-b", "main"]);
   git(["add", "-A"]);
   git(["-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "commit", "-q", "-m", "init"]);
+  // A mission and a review of it, put there through the workspace's own functions before the app opens it.
+  mkdirSync(join(root, "user data"), { recursive: true });
+  const workspace = join(root, "user data", "workspace.db");
+  const seeded = seedMission(workspace, {
+    mission: { name: "Trustworthy records", intendedUsers: "Runners", outcome: "Records compare like with like.", successCriteria: [], constraints: [], nonGoals: [] },
+    tasks: [{ title: "Records keep their units", goal: "Store each run's unit with it", acceptanceCriteria: ["It works"] }],
+  });
+  missionTaskId = seeded.taskIds[0]!;
+  const finding = (role: "architecture" | "risks", title: string, detail = "Older runs have no unit.") => ({ role, title, detail, recommendation: "Say what happens to them.", refs: ["T1"] });
+  seedMissionReview(workspace, {
+    missionId: seeded.missionId,
+    taskIds: seeded.taskIds,
+    findings: [finding("architecture", "Units aren't stored"), finding("architecture", "Two code paths compare times"), finding("risks", "Old records change"), finding("risks", "A pasted key", `Someone pasted ${KEY} into a note.`)],
+  });
   model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: () => script() });
   sandbox = await startSandboxStub();
   tavily = await startTavilyStub(() => ({ status: 500, body: { error: "nothing here is for research" } }));
@@ -286,6 +303,53 @@ test("a project's task needs its sharing: the preview says so, Ask is off, and n
   await expect(page.getByTestId("coach-start")).toBeDisabled();
   await page.getByTestId("coach-dialog-cancel").click();
   expect(coachRequests()).toBe(before);
+});
+
+test("findings to tick: a fourth can't be ticked, and one that can't be sent leaves the choices there to untick", async () => {
+  test.skip(packaged, "a packaged app ignores the stub switches");
+  const before = coachRequests();
+  await openTask(missionTaskId);
+  await page.getByTestId("coach-ask").click();
+  await expect(page.getByTestId("coach-preview")).toBeVisible();
+  const finding = (id: string) => page.locator(`[data-testid="coach-option-finding"][data-finding-id="${id}"]`);
+  await expect(page.getByTestId("coach-option-finding")).toHaveCount(4);
+  for (const id of ["arch-1", "arch-2", "risk-1"]) {
+    await finding(id).check();
+    await expect(page.getByTestId("coach-preview")).toBeVisible();
+  }
+  await expect(finding("risk-2")).toBeDisabled();
+  await expect(page.getByTestId("coach-findings-limit")).toHaveText("At most 3 findings go with one coaching. Untick one to choose another.");
+  await finding("arch-1").uncheck();
+  await expect(finding("risk-2")).toBeEnabled();
+  await expect(page.getByTestId("coach-findings-limit")).toBeHidden();
+  // The fourth holds the saved key: its preview is refused, and the choices stay so it can be unticked.
+  await finding("risk-2").check();
+  await expect(page.getByTestId("coach-preview-error")).toContainText("detail holds");
+  await expect(page.getByTestId("coach-preview")).toBeHidden();
+  await expect(page.getByTestId("coach-option-finding")).toHaveCount(4);
+  await finding("risk-2").uncheck();
+  await expect(page.getByTestId("coach-preview")).toBeVisible();
+  await expect(page.getByTestId("coach-preview-error")).toBeHidden();
+  await expect(page.getByTestId("coach-preview-text")).toContainText("F2 (its review read brief v1): Old records change");
+  await page.getByTestId("coach-dialog-cancel").click();
+  expect(coachRequests()).toBe(before);
+});
+
+test("a completed task's coaching offers no editor and no save, and says to reopen it", async () => {
+  test.skip(packaged, "a packaged app ignores the stub switches");
+  const taskId = await createTask("Completed after the answer", VAGUE);
+  await askTheCoach();
+  await expect(latestCoaching()).toHaveAttribute("data-status", "answered", { timeout: 30_000 });
+  for (const state of ["ready", "completed"] as const) {
+    await page.evaluate(async ({ id, to }) => window.nivra.setTaskState(id, (await window.nivra.getTask(id)).revision, to), { id: taskId, to: state });
+  }
+  await openTask(taskId);
+  await expect(page.getByTestId("task-state")).toHaveText("Completed");
+  await expect(page.getByTestId("coach-update-field").first()).toBeDisabled();
+  await expect(page.getByTestId("coach-update-blocked").first()).toHaveText("A completed task's brief can't change. Reopen it to change it.");
+  await expect(page.getByTestId("coach-save")).toBeDisabled();
+  await expect(page.getByTestId("coach-save-blocked")).toHaveText("A completed task's brief can't change. Reopen it to save these changes.");
+  await expect(page.getByTestId("task-edit-brief")).toBeDisabled();
 });
 
 test("the coach reached no sandbox, no web search and no task run, and left the checkout as it was", async () => {

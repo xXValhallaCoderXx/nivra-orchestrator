@@ -1,7 +1,7 @@
 import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, Paper, Stack, Text } from "@mantine/core";
 import type { CoachField, CoachQuestionField, CoachReport, PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { useEffect, useRef, useState } from "react";
-import { COACH_FIELD_LABELS, type CoachChangeView, type CoachingView, type CoachPreview, type CoachSelection } from "../../../shared/coach";
+import { COACH_FIELD_LABELS, COACH_FINDINGS_LIMIT, type CoachChangeView, type CoachingView, type CoachPreview, type CoachSelection } from "../../../shared/coach";
 import type { BriefContent, TaskView, TurnStatus } from "../../../shared/ipc";
 import { PreviewGuard } from "../../../shared/preview-guard";
 import { NO_GAPS, NO_GAPS_DETAIL, taskGuidance, type GuidanceItem } from "../../../shared/task-guidance";
@@ -110,6 +110,7 @@ export function TaskCoach({ task, coachings, editing, onPrepare, onStart, onCanc
             coaching={coaching}
             collapsed={index > 0}
             editing={editing}
+            completed={task.summary.state === "completed"}
             askBlocked={askBlocked}
             onAskAgain={() => setDialog(true)}
             onCancel={onCancel}
@@ -208,6 +209,7 @@ function CoachDialog({
   const [selection, setSelection] = useState<CoachSelection>({ mission: false, findings: [] });
   // The preview, with the selection it was made from: Start sends exactly that selection.
   const [previewed, setPreviewed] = useState<{ preview: CoachPreview; selection: CoachSelection } | null>(null);
+  const [options, setOptions] = useState<CoachPreview["options"] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Drops a preview asked for before the latest change, or before a later request, when it arrives.
@@ -218,7 +220,10 @@ function CoachDialog({
     setError(null);
     try {
       const value = await onPrepare(chosen);
-      if (guard.current.current(mine)) setPreviewed({ preview: value, selection: chosen });
+      if (guard.current.current(mine)) {
+        setPreviewed({ preview: value, selection: chosen });
+        setOptions(value.options);
+      }
     } catch (reason) {
       if (guard.current.current(mine)) setError(errorMessage(reason));
     }
@@ -230,6 +235,7 @@ function CoachDialog({
     guard.current.changed();
     setSelection(fresh);
     setPreviewed(null);
+    setOptions(null);
     setError(null);
     void prepare(guard.current.asked(), fresh);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -263,6 +269,47 @@ function CoachDialog({
 
   const preview = previewed?.preview ?? null;
   const ticked = (reviewId: string, findingId: string) => selection.findings.some((finding) => finding.reviewId === reviewId && finding.findingId === findingId);
+  // The mission and findings to tick, from the last preview shown: they stay while a new one is worked out, and when one
+  // is refused, so a choice that can't be sent can be unticked.
+  const shownOptions =
+    options && (options.mission || options.findings.length > 0) ? (
+      <Stack gap={4} data-testid="coach-preview-options">
+        <Text size="sm" fw={600}>
+          Add context, if you want
+        </Text>
+        {options.mission && (
+          <Checkbox
+            label={`The task's mission: ${options.mission.name} (v${options.mission.version})`}
+            checked={selection.mission}
+            onChange={(event) => choose({ ...selection, mission: event.currentTarget.checked })}
+            data-testid="coach-option-mission"
+          />
+        )}
+        {options.findings.map((finding) => (
+          <Checkbox
+            key={`${finding.reviewId}:${finding.findingId}`}
+            label={`${finding.title}${finding.reviewedBriefVersion !== null ? ` (its review read brief v${finding.reviewedBriefVersion})` : ""}`}
+            checked={ticked(finding.reviewId, finding.findingId)}
+            onChange={(event) =>
+              choose({
+                ...selection,
+                findings: event.currentTarget.checked
+                  ? [...selection.findings, { reviewId: finding.reviewId, findingId: finding.findingId }]
+                  : selection.findings.filter((chosen) => !(chosen.reviewId === finding.reviewId && chosen.findingId === finding.findingId)),
+              })
+            }
+            disabled={!ticked(finding.reviewId, finding.findingId) && selection.findings.length >= COACH_FINDINGS_LIMIT}
+            data-testid="coach-option-finding"
+            data-finding-id={finding.findingId}
+          />
+        ))}
+        {selection.findings.length >= COACH_FINDINGS_LIMIT && (
+          <Text size="xs" c="var(--nivra-text-3)" data-testid="coach-findings-limit">
+            At most {plural(COACH_FINDINGS_LIMIT, "finding")} go with one coaching. Untick one to choose another.
+          </Text>
+        )}
+      </Stack>
+    ) : null;
   return (
     <Modal opened={opened} onClose={onClose} title={`Ask the coach about brief v${preview?.briefVersion ?? briefVersion}`} size="lg" data-testid="coach-dialog">
       <Stack gap="sm">
@@ -277,38 +324,7 @@ function CoachDialog({
               {preview.profile.name}, version {preview.profile.version}: patient, precise, encouraging and concise. It asks at most three questions and proposes
               changes you choose from. It runs nothing and changes nothing by itself.
             </Text>
-            {(preview.options.mission || preview.options.findings.length > 0) && (
-              <Stack gap={4} data-testid="coach-preview-options">
-                <Text size="sm" fw={600}>
-                  Add context, if you want
-                </Text>
-                {preview.options.mission && (
-                  <Checkbox
-                    label={`The task's mission: ${preview.options.mission.name} (v${preview.options.mission.version})`}
-                    checked={selection.mission}
-                    onChange={(event) => choose({ ...selection, mission: event.currentTarget.checked })}
-                    data-testid="coach-option-mission"
-                  />
-                )}
-                {preview.options.findings.map((finding) => (
-                  <Checkbox
-                    key={`${finding.reviewId}:${finding.findingId}`}
-                    label={`${finding.title}${finding.reviewedBriefVersion !== null ? ` (its review read brief v${finding.reviewedBriefVersion})` : ""}`}
-                    checked={ticked(finding.reviewId, finding.findingId)}
-                    onChange={(event) =>
-                      choose({
-                        ...selection,
-                        findings: event.currentTarget.checked
-                          ? [...selection.findings, { reviewId: finding.reviewId, findingId: finding.findingId }]
-                          : selection.findings.filter((chosen) => !(chosen.reviewId === finding.reviewId && chosen.findingId === finding.findingId)),
-                      })
-                    }
-                    data-testid="coach-option-finding"
-                    data-finding-id={finding.findingId}
-                  />
-                ))}
-              </Stack>
-            )}
+            {shownOptions}
             <Stack gap={4}>
               <Text size="sm" fw={600}>
                 Exactly what the coach reads
@@ -362,11 +378,14 @@ function CoachDialog({
             </Text>
           </Stack>
         ) : (
-          !error && (
-            <Text size="sm" c="var(--nivra-text-3)">
-              Working out what the coach would read…
-            </Text>
-          )
+          <>
+            {shownOptions}
+            {!error && (
+              <Text size="sm" c="var(--nivra-text-3)">
+                Working out what the coach would read…
+              </Text>
+            )}
+          </>
         )}
         {editing && (
           <Alert color="yellow" variant="light" data-testid="coach-preview-unsaved">
@@ -401,6 +420,7 @@ function CoachingCard({
   coaching,
   collapsed,
   editing,
+  completed,
   askBlocked,
   onAskAgain,
   onCancel,
@@ -412,6 +432,8 @@ function CoachingCard({
   coaching: CoachingView;
   collapsed: boolean;
   editing: boolean;
+  /** A completed task's brief can't change: its coaching's changes can't be saved until it is reopened. */
+  completed: boolean;
   askBlocked: string | null;
   onAskAgain(): void;
   onCancel(coachingId: string): Promise<void>;
@@ -433,13 +455,15 @@ function CoachingCard({
   const applied = coaching.applied;
   // Only changes that may be saved count, whatever was ticked before one became blocked.
   const chosen = ticked.filter((field) => coaching.changes.some((change) => change.field === field && change.blocked === null));
-  const saveBlocked = editing
-    ? "Save or cancel your brief edits first."
-    : stale
-      ? "Something the coach read has changed since, as the lines below say, so these suggestions can't be saved. Ask the coach again for the task as it is now."
-      : chosen.length === 0
-        ? "Tick the changes you want to save."
-        : null;
+  const saveBlocked = completed
+    ? "A completed task's brief can't change. Reopen it to save these changes."
+    : editing
+      ? "Save or cancel your brief edits first."
+      : stale
+        ? "Something the coach read has changed since, as the lines below say, so these suggestions can't be saved. Ask the coach again for the task as it is now."
+        : chosen.length === 0
+          ? "Tick the changes you want to save."
+          : null;
 
   async function cancel() {
     setError(null);

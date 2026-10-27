@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CoachField, CoachQuestionField, type CoachChange } from "@nivra/domain";
-import { applyCoachChange, COACH_FIELD_LABELS, fieldValue } from "../src/shared/coach.ts";
+import { COACH_PACKET_LIMITS, CoachField, CoachQuestionField, type CoachChange } from "@nivra/domain";
+import { applyCoachChange, COACH_FIELD_LABELS, COACH_FINDINGS_LIMIT, fieldValue } from "../src/shared/coach.ts";
 import { BRIEFS } from "./fixtures/briefs.ts";
 
 const about = { reason: "Says what someone would see.", refs: [], usable: true };
@@ -33,6 +33,8 @@ describe("a coach's change to one field (NIV-53)", () => {
   it("reads each field's value, and names every field a question can point to", () => {
     assert.deepEqual([fieldValue(BRIEFS.vague, "goal"), fieldValue(BRIEFS.vague, "acceptanceCriteria")], ["Fix the PR detection bug", ["It works"]]);
     assert.deepEqual(Object.keys(COACH_FIELD_LABELS).sort(), [...CoachQuestionField.options].sort());
+    // The window's copy of how many findings go with one coaching is the domain's.
+    assert.equal(COACH_FINDINGS_LIMIT, COACH_PACKET_LIMITS.findings);
     assert.ok(CoachField.options.every((field) => COACH_FIELD_LABELS[field]));
   });
 });

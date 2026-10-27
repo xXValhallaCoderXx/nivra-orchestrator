@@ -9,6 +9,12 @@ import type { BriefContent, TurnStatus } from "./ipc.ts";
  */
 
 /** The six fields the coach may propose changes to, as the person reads their names. */
+/**
+ * The most findings that go with one coaching: the domain's COACH_PACKET_LIMITS.findings, copied because the window
+ * can't load the domain at run time (its checks trip the CSP). A test keeps the two equal.
+ */
+export const COACH_FINDINGS_LIMIT = 3;
+
 export const COACH_FIELD_LABELS: Readonly<Record<CoachQuestionField, string>> = {
   goal: "Goal",
   acceptanceCriteria: "Acceptance criteria",

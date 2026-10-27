@@ -451,8 +451,8 @@ export function TaskDetail({
 
   /** A coach's question names a field: the brief editor opens there, or the open one is used as it is, edits and all. */
   function updateField(field: CoachQuestionField) {
-    // Never over another edit, or while the coach's changes are being saved: the panel says so and offers nothing.
-    if (coachSaving || editing === "title" || editing === "repository") return;
+    // Never on a completed task, over another edit, or while the coach's changes are being saved: the panel says so.
+    if (completed || coachSaving || editing === "title" || editing === "repository") return;
     if (editing !== "brief") {
       setDraft(draftOf(brief.content));
       startEdit("brief");
@@ -712,7 +712,15 @@ export function TaskDetail({
             }
           }}
           onUpdateField={updateField}
-          updateBlocked={coachSaving ? "Wait for the coach's changes to be saved." : editing === "title" || editing === "repository" ? "Save or cancel your other edit first." : null}
+          updateBlocked={
+            completed
+              ? "A completed task's brief can't change. Reopen it to change it."
+              : coachSaving
+                ? "Wait for the coach's changes to be saved."
+                : editing === "title" || editing === "repository"
+                  ? "Save or cancel your other edit first."
+                  : null
+          }
           onSavingChange={setCoachSaving}
         />
       </Section>
