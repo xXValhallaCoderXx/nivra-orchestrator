@@ -100,9 +100,13 @@ export type BaselineSelection = z.infer<typeof BaselineSelection>;
 
 /**
  * A baseline selection's pattern as Nivra matches it: against the whole output, anchored at both ends, `.` matching a
- * line break too. `a|b` is the whole output being `a` or `b`, never one that merely holds either.
+ * line break too. `a|b` is the whole output being `a` or `b`, never one that merely holds either. The pattern must be a
+ * regular expression on its own first, so it can't close the anchoring group (`x)|(?:y` would): it throws otherwise.
  */
-export const baselinePattern = (pattern: string): RegExp => new RegExp(`^(?:${pattern})$`, "s");
+export const baselinePattern = (pattern: string): RegExp => {
+  new RegExp(pattern, "s");
+  return new RegExp(`^(?:${pattern})$`, "s");
+};
 
 /** A frozen file: a path in the commit, relative to the picked folder, as Git names it. */
 const FrozenPath = z
@@ -341,6 +345,8 @@ export const TaskReport = z.strictObject({
   environment: TaskEnvironment.nullable().default(null),
   /** The brief's baseline selections, as they ran before the model (D41). */
   baseline: z.array(TaskBaselineCheck).max(TASK_BRIEF_LIMITS.baseline).default([]),
+  /** The bounds the run ran under, beside what it used (D41); null for a report kept from before, whose bounds weren't kept. */
+  limits: TaskRunLimits.nullable().default(null),
   /** The frozen files in the collected workspace, each compared with the commit's: any difference and the change isn't verified. */
   frozen: z.array(z.strictObject({ path: z.string().max(1_024), unchanged: z.boolean().nullable() })).max(TASK_BRIEF_LIMITS.frozen).default([]),
   worker: TaskWorker.nullable(),

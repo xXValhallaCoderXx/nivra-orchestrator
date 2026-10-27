@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PATCH_SHOWN_BYTES, StoredTaskInput, type Mask, type RunRoute, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskStopCode } from "@nivra/domain";
+import { PATCH_SHOWN_BYTES, StoredTaskInput, type Mask, type RunRoute, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskRunLimits, type TaskStopCode } from "@nivra/domain";
 import { previewOf, safeUnresolved, stepOf } from "../exec/check.ts";
 import type { PrescribedResult } from "../exec/prescribed.ts";
 import type { Proposal } from "../exec/proposal.ts";
@@ -115,7 +115,7 @@ export type TaskBound = TaskReport["task"];
  * it happened. A change is verified only when there is one and every acceptance case passed in the final checks.
  * Every text is masked, then cut to the protocol's bounds, and the whole is fitted under `REPORT_BYTES`.
  */
-export function taskReport(input: { result: PrescribedResult; core: TaskReportCore | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; now: Date; mask: Mask }): TaskReport {
+export function taskReport(input: { result: PrescribedResult; core: TaskReportCore | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; limits?: TaskRunLimits | null; now: Date; mask: Mask }): TaskReport {
   const { result, core, mask } = input;
   const { cleanup } = result;
   const report: TaskReport = {
@@ -125,6 +125,7 @@ export function taskReport(input: { result: PrescribedResult; core: TaskReportCo
     snapshot: result.snapshot,
     toolchain: (core?.toolchain ?? []).map((tool) => ({ program: kept(tool.program, 128, mask), finding: tool.finding })),
     environment: core?.environment ?? null,
+    limits: input.limits ?? null,
     baseline: (core?.baselineChecks ?? []).map((check) => ({ ...check, name: kept(check.name, 200, mask), reason: check.reason === null ? null : kept(check.reason, 600, mask), stdoutTail: kept(check.stdoutTail, 4_000, mask, "end"), stderrTail: kept(check.stderrTail, 4_000, mask, "end") })),
     frozen: (core?.frozen ?? []).map((file) => ({ path: kept(file.path, 1_024, mask), unchanged: file.unchanged })),
     worker: core
@@ -178,7 +179,7 @@ export function fitted(report: TaskReport): TaskReport {
 }
 
 /** A report for a run that stopped before the prescribed path ran, or one still going, in the same shape. */
-export function earlyTaskReport(input: { outcome: TaskReport["outcome"]; code: TaskStopCode | null; step: string | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; now: Date; finished: boolean }): TaskReport {
+export function earlyTaskReport(input: { outcome: TaskReport["outcome"]; code: TaskStopCode | null; step: string | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; limits?: TaskRunLimits | null; now: Date; finished: boolean }): TaskReport {
   return {
     outcome: input.outcome,
     stopped: input.code ? { code: input.code, step: input.step, message: taskStopWords(input.code, input.step) } : null,
@@ -186,6 +187,7 @@ export function earlyTaskReport(input: { outcome: TaskReport["outcome"]; code: T
     snapshot: null,
     toolchain: [],
     environment: null,
+    limits: input.limits ?? null,
     baseline: [],
     frozen: [],
     worker: null,
