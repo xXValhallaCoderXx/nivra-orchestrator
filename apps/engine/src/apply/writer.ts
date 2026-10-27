@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { Anchors, parentOf } from "./anchors.ts";
 import { type ApplyIo, nodeIo } from "./io.ts";
 import { ABSENT, ApplyRefusal, type PathState, type PlannedPath, type RevalidatedPlan } from "./plan.ts";
 
@@ -140,11 +141,40 @@ function nearestFolder(io: ApplyIo, folder: string, path: string): string {
   return folder;
 }
 
+/**
+ * An apply's two roots, held open: the picked folder, and the repository's git folder with the recovery folder in it.
+ * Every call names its file through them (`anchors.ts`), never by its path from the root.
+ */
+interface Held {
+  tree: Anchors;
+  git: Anchors;
+  /** The recovery folder, under the git folder. */
+  recovery: string;
+}
+const heldFor = (io: ApplyIo, roots: Pick<ApplyIntent, "folder" | "gitDir" | "applyId">): Held => ({ tree: new Anchors(io, roots.folder), git: new Anchors(io, roots.gitDir), recovery: `nivra-apply/${roots.applyId}` });
+const letGo = (held: Held) => {
+  held.tree.close();
+  held.git.close();
+};
+const inRecovery = (held: Held, name: string) => held.git.at(`${held.recovery}/${name}`);
+
+/** A path's state through the folders held open: absent when a folder above it is missing, never read through a link. */
+function stateIn(io: ApplyIo, anchors: Anchors, path: string): PathState {
+  let name: string;
+  try {
+    name = anchors.at(path);
+  } catch (error) {
+    if (codeOf(error) === "ENOENT") return ABSENT;
+    throw error;
+  }
+  return stateOf(io, name);
+}
+
 /** What is in the recovery folder for one path: its original and every version taken back. */
-function keptFor(io: ApplyIo, intent: ApplyIntent, index: number, one: IntendedPath): string[] {
+function keptFor(io: ApplyIo, held: Held, index: number, one: IntendedPath): string[] {
   let names: string[] = [];
   try {
-    names = io.readdir(intent.recovery);
+    names = io.readdir(held.git.dir(held.recovery));
   } catch {
     return [];
   }
@@ -153,19 +183,30 @@ function keptFor(io: ApplyIo, intent: ApplyIntent, index: number, one: IntendedP
 
 /**
  * Where every path is against the intent, writing nothing: what reconciling at engine start reports, and what an
- * apply that stopped part way leaves.
+ * apply that stopped part way leaves. A path whose folder can't be reached without following a link is other.
  */
 export function reconcile(intent: ApplyIntent, io: ApplyIo = nodeIo, created: readonly string[] = []): ApplyResult {
-  const paths = intent.paths.map((_, index) => outcomeOf(io, intent, index));
-  // Only the folders the apply recorded making: one that was there already, or made just before a crash and never
-  // recorded, isn't called Nivra's.
-  const folders = created.filter((folder) => io.lstat(absPath(intent.folder, folder))?.isDirectory() === true);
-  return { state: overall(paths), paths, folders, failure: null };
+  const held = heldFor(io, intent);
+  try {
+    const paths = intent.paths.map((_, index) => outcomeOf(io, held, intent, index));
+    // Only the folders the apply recorded making: one that was there already, or made just before a crash and never
+    // recorded, isn't called Nivra's.
+    const folders = created.filter((folder) => {
+      try {
+        return io.lstat(held.tree.at(folder))?.isDirectory() === true;
+      } catch {
+        return false;
+      }
+    });
+    return { state: overall(paths), paths, folders, failure: null };
+  } finally {
+    letGo(held);
+  }
 }
 
 /** A name in the recovery folder nothing has: a rename onto a name that exists would replace it. */
-function freeName(io: ApplyIo, recovery: string, base: string): string {
-  for (let n = 0; ; n++) if (!io.lstat(join(recovery, `${base}-${n}`))) return `${base}-${n}`;
+function freeName(io: ApplyIo, held: Held, base: string): string {
+  for (let n = 0; ; n++) if (!io.lstat(inRecovery(held, `${base}-${n}`))) return `${base}-${n}`;
 }
 
 /**
@@ -176,64 +217,88 @@ function freeName(io: ApplyIo, recovery: string, base: string): string {
  * - a path moved aside with nothing in its place gets its original linked back;
  * - anything else is left as it is, and everything in the recovery folder is kept.
  * Then the folders Nivra created are removed, deepest first, only when empty. It is the same whether an apply stopped
- * part way or the person asks to restore the originals after a crash.
+ * part way (through the folders it held open: `held`) or the person asks to restore the originals after a crash, when
+ * a path whose folder can't be reached without following a link is left as it is.
  */
-export async function restore(intent: ApplyIntent, options: { io?: ApplyIo; created?: readonly string[]; before?: ApplyHook; theirs?: ReadonlyMap<number, boolean> } = {}): Promise<ApplyResult> {
+export async function restore(intent: ApplyIntent, options: { io?: ApplyIo; created?: readonly string[]; before?: ApplyHook; theirs?: ReadonlyMap<number, boolean>; held?: Held } = {}): Promise<ApplyResult> {
   const io = options.io ?? nodeIo;
   const before = options.before ?? (() => undefined);
+  const held = options.held ?? heldFor(io, intent);
   // Paths known to hold another program's version, and whether it was saved after Nivra wrote them.
   const theirs = new Map(options.theirs);
   let failure: ApplyResult["failure"] = null;
   const paths: PathOutcome[] = [];
-  for (let index = intent.paths.length - 1; index >= 0; index--) {
-    const one = intent.paths[index]!;
-    const target = absPath(intent.folder, one.path);
-    const original = one.aside ? join(intent.recovery, one.aside) : null;
-    try {
-      const found = stateOf(io, target);
-      if (isPost(found, one)) {
-        const back = join(intent.recovery, freeName(io, intent.recovery, `back-${index}`));
-        await before(`take back ${index}`);
-        io.rename(target, back);
-        if (!isPost(stateOf(io, back), one)) {
-          // Saved by another program after Nivra's write: that version goes back where it was.
-          theirs.set(index, true);
-          await before(`put back ${index}`);
-          io.link(back, target);
-        } else if (original) {
+  try {
+    for (let index = intent.paths.length - 1; index >= 0; index--) {
+      const one = intent.paths[index]!;
+      try {
+        const original = one.aside ? inRecovery(held, one.aside) : null;
+        const found = stateIn(io, held.tree, one.path);
+        // Named only when something is done there: a path whose folder is gone is absent, with nothing to take back.
+        const target = () => held.tree.at(one.path);
+        if (isPost(found, one)) {
+          const back = inRecovery(held, freeName(io, held, `back-${index}`));
+          await before(`take back ${index}`);
+          io.rename(target(), back);
+          if (!isPost(stateOf(io, back), one)) {
+            // Saved by another program after Nivra's write: that version goes back where it was.
+            theirs.set(index, true);
+            await before(`put back ${index}`);
+            io.link(back, target());
+          } else if (original) {
+            await before(`restore ${index}`);
+            io.link(original, target());
+          }
+        } else if (found.kind === "absent" && original && isPre(stateOf(io, original), one)) {
           await before(`restore ${index}`);
-          io.link(original, target);
+          io.link(original, target());
         }
-      } else if (found.kind === "absent" && original && isPre(stateOf(io, original), one)) {
-        await before(`restore ${index}`);
-        io.link(original, target);
+      } catch (error) {
+        failure ??= { step: `restore ${index}`, code: codeOf(error) };
       }
-    } catch (error) {
-      failure ??= { step: `restore ${index}`, code: codeOf(error) };
+      paths.unshift(outcomeOf(io, held, intent, index, theirs.get(index)));
     }
-    paths.unshift(outcomeOf(io, intent, index, theirs.get(index)));
-  }
-  const left: string[] = [];
-  for (const folder of [...(options.created ?? [])].reverse()) {
-    try {
-      await before(`remove folder ${folder}`);
-      io.rmdir(absPath(intent.folder, folder));
-    } catch (error) {
-      // Not empty, or not Nivra's to remove after all: it stays.
-      if (codeOf(error) !== "ENOTEMPTY" && codeOf(error) !== "EEXIST") failure ??= { step: `remove folder ${folder}`, code: codeOf(error) };
-      if (io.lstat(absPath(intent.folder, folder))) left.push(folder);
+    const left: string[] = [];
+    for (const folder of [...(options.created ?? [])].reverse()) {
+      try {
+        await before(`remove folder ${folder}`);
+        io.rmdir(held.tree.at(folder));
+        held.tree.forget(folder);
+      } catch (error) {
+        // Not empty, or not Nivra's to remove after all: it stays.
+        if (codeOf(error) !== "ENOTEMPTY" && codeOf(error) !== "EEXIST") failure ??= { step: `remove folder ${folder}`, code: codeOf(error) };
+        try {
+          if (io.lstat(held.tree.at(folder))) left.push(folder);
+        } catch {
+          left.push(folder);
+        }
+      }
     }
-  }
-  // What restore changed is made durable before its result is recorded: the folders it touched, and the recovery folder.
-  for (const folder of new Set([...intent.paths.map((one) => dirname(absPath(intent.folder, one.path))), intent.recovery])) {
+    // What restore changed is made durable before its result is recorded: the folders it touched, and the recovery folder.
+    for (const sync of [...new Set(intent.paths.map((one) => parentOf(one.path)))].map((rel) => () => held.tree.dir(rel)).concat(() => held.git.dir(held.recovery))) {
+      try {
+        io.syncDir(sync());
+      } catch {
+        // Best effort: a folder that can't be synced still holds what it holds.
+      }
+    }
+    // A folder moved or replaced meanwhile: what was done is in the folders held open, which may now be somewhere else,
+    // so every path is reported as it is found from the picked folder by name, never through a link.
+    let away = true;
     try {
-      if (io.lstat(folder)?.isDirectory()) io.syncDir(folder);
+      away = held.tree.moved();
     } catch {
-      // Best effort: a folder that can't be synced still holds what it holds.
+      // Can't tell: reported by name.
     }
+    if (away) {
+      const seen = reconcile(intent, io, options.created ?? []);
+      return { ...seen, failure: seen.state === "not-applied" ? null : (failure ?? { step: "check folders", code: "moved" }) };
+    }
+    const state = overall(paths);
+    return { state, paths, folders: left.reverse(), failure: state === "not-applied" ? null : failure };
+  } finally {
+    if (!options.held) letGo(held);
   }
-  const state = overall(paths);
-  return { state, paths, folders: left.reverse(), failure: state === "not-applied" ? null : failure };
 }
 
 /**
@@ -241,21 +306,21 @@ export async function restore(intent: ApplyIntent, options: { io?: ApplyIo; crea
  * the path, when true); only a live apply knows that, so it applies only to a version that is neither Nivra's nor the
  * original.
  */
-function outcomeOf(io: ApplyIo, intent: ApplyIntent, index: number, theirs?: boolean, seen?: PathState): PathOutcome {
+function outcomeOf(io: ApplyIo, held: Held, intent: ApplyIntent, index: number, theirs?: boolean, seen?: PathState): PathOutcome {
   const one = intent.paths[index]!;
-  const kept = keptFor(io, intent, index, one);
+  const kept = keptFor(io, held, index, one);
   let found: PathState;
   try {
-    found = seen ?? stateOf(io, absPath(intent.folder, one.path));
+    found = seen ?? stateIn(io, held.tree, one.path);
   } catch {
-    // It couldn't be read: not known, so other.
+    // It couldn't be read, or only through a link: not known, so other.
     return { path: one.path, place: "other", found: { kind: "other", mode: null, size: null, sha256: null }, kept, changedSince: false };
   }
   if (isPre(found, one)) return { path: one.path, place: "pre", found, kept, changedSince: false };
   if (isPost(found, one)) return { path: one.path, place: "post", found, kept, changedSince: false };
   if (found.kind === "absent" && one.aside) {
     try {
-      if (isPre(stateOf(io, join(intent.recovery, one.aside)), one)) return { path: one.path, place: "aside", found, kept, changedSince: false };
+      if (isPre(stateOf(io, inRecovery(held, one.aside)), one)) return { path: one.path, place: "aside", found, kept, changedSince: false };
     } catch {
       // Its copy can't be read: it isn't known to be intact.
     }
@@ -267,10 +332,12 @@ function outcomeOf(io: ApplyIo, intent: ApplyIntent, index: number, theirs?: boo
 /** Stops the write: a planned step found something it won't overwrite or take for the original. */
 class Stop extends Error {
   readonly step: string;
-  constructor(step: string) {
+  readonly code: string;
+  constructor(step: string, code = "changed") {
     super(step);
     this.name = "Stop";
     this.step = step;
+    this.code = code;
   }
 }
 
@@ -284,21 +351,27 @@ export interface WriteInput {
   before?: ApplyHook;
 }
 
+/** The folders above a path, outermost first, the picked folder ("") included: `a/b/c` gives "", `a`, `a/b`. */
+function foldersOf(path: string): string[] {
+  const parts = path.split("/").slice(0, -1);
+  return ["", ...parts.map((_, depth) => parts.slice(0, depth + 1).join("/"))];
+}
+
 /**
  * Applies a revalidated plan. A refusal before the intent is recorded throws `ApplyRefusal`, having written nothing of
  * the person's (and taken back what it made in the git folder). From the intent on, nothing throws: the result says
- * where every path is, and the recovery folder and the journal keep the rest.
+ * where every path is, and the recovery folder and the journal keep the rest. Every call names its file through the
+ * folders held open (`anchors.ts`), so nothing is written through a folder swapped for a link after it was checked.
  */
 export async function writeChange(input: WriteInput): Promise<ApplyResult> {
   const io = input.io ?? nodeIo;
   const before = input.before ?? (() => undefined);
   const { plan, applyId } = input;
-  const area = join(plan.gitDir, "nivra-apply");
-  const recovery = join(area, applyId);
-  const lock = join(area, "lock");
+  const recovery = join(plan.gitDir, "nivra-apply", applyId);
 
-  // The recovery folder must be on the same filesystem as every path the change touches: a rename across two is a
-  // copy, which isn't atomic. Read only.
+  // Names through held folders need `/proc`, and the recovery folder must be on the same filesystem as every path the
+  // change touches: a rename across two is a copy, which isn't atomic. Read only.
+  if (!Anchors.available(io)) throw new ApplyRefusal("filesystem", null, "no /proc/self/fd");
   try {
     const device = io.stat(plan.gitDir).dev;
     for (const one of plan.paths) {
@@ -309,93 +382,108 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
     throw new ApplyRefusal("filesystem", null, codeOf(error));
   }
 
+  const held = heldFor(io, { folder: plan.folder, gitDir: plan.gitDir, applyId });
+  const area = "nivra-apply";
+  const lock = `${area}/lock`;
+  const lockTemp = `${area}/lock-${applyId}`;
   // The lock, the recovery folder, and a hard link in it; anything made here is taken back on a refusal. The lock is
   // written whole under a name of this apply's own, then linked into place, which fails rather than replace another:
   // whatever stops the write, a lock is never left empty.
-  const lockTemp = join(area, `lock-${applyId}`);
   let madeArea = false;
   let madeLock = false;
+  const quietly = (work: () => void) => {
+    try {
+      work();
+    } catch {
+      // Not made, already gone, or left in the git folder, where it holds nothing of the person's.
+    }
+  };
   const takeBack = () => {
     // This apply's own names first, whether or not their call said it made them: one can fail after doing its work.
-    for (const undo of [() => io.unlink(join(recovery, "probe-link")), () => io.unlink(join(recovery, "probe")), () => io.unlink(lockTemp), () => io.rmdir(recovery)]) {
-      try {
-        undo();
-      } catch {
-        // Not made, or already gone.
-      }
-    }
+    quietly(() => io.unlink(inRecovery(held, "probe-link")));
+    quietly(() => io.unlink(inRecovery(held, "probe")));
+    quietly(() => io.unlink(held.git.at(lockTemp)));
+    quietly(() => {
+      io.rmdir(held.git.at(held.recovery));
+      held.git.forget(held.recovery);
+    });
     // The lock, when it is this apply's own: made, or linked by a call that then reported failure.
-    try {
-      const held = JSON.parse(new TextDecoder().decode(io.read(lock))) as { engine?: unknown; applyId?: unknown };
-      if (madeLock || (held.engine === input.engineId && held.applyId === applyId)) io.unlink(lock);
-    } catch {
-      // None, or another's.
-    }
-    try {
-      if (madeArea) io.rmdir(area);
-    } catch {
-      // Left in the git folder: it holds nothing of the person's.
-    }
+    quietly(() => {
+      const holder = JSON.parse(new TextDecoder().decode(io.read(held.git.at(lock)))) as { engine?: unknown; applyId?: unknown };
+      if (madeLock || (holder.engine === input.engineId && holder.applyId === applyId)) io.unlink(held.git.at(lock));
+    });
+    quietly(() => {
+      if (!madeArea) return;
+      io.rmdir(held.git.at(area));
+      held.git.forget(area);
+    });
+    letGo(held);
   };
   /** A lock that is there: another engine's (or one that can't be read) refuses; this engine's own, over, is taken over. */
   const judgeLock = () => {
-    let held: { engine?: unknown; applyId?: unknown } = {};
+    let holder: { engine?: unknown; applyId?: unknown } = {};
     try {
-      held = JSON.parse(new TextDecoder().decode(io.read(lock))) as typeof held;
+      holder = JSON.parse(new TextDecoder().decode(io.read(held.git.at(lock)))) as typeof holder;
     } catch {
       // Unreadable or empty: not this engine's, as far as it can tell.
     }
-    if (held.engine !== input.engineId || typeof held.applyId !== "string") throw new ApplyRefusal("locked");
-    if (!input.journal.settled(held.applyId)) throw new ApplyRefusal("busy");
-    io.unlink(lock);
+    if (holder.engine !== input.engineId || typeof holder.applyId !== "string") throw new ApplyRefusal("locked");
+    if (!input.journal.settled(holder.applyId)) throw new ApplyRefusal("busy");
+    io.unlink(held.git.at(lock));
   };
   try {
     // A lock already there is judged before anything is written.
-    if (io.lstat(lock)) judgeLock();
-    if (!io.lstat(area)) {
-      io.mkdir(area);
+    const there = io.lstat(held.git.at(area));
+    if (there && !there.isDirectory()) throw new ApplyRefusal("filesystem", null, "nivra-apply isn't a folder");
+    if (there && io.lstat(held.git.at(lock))) judgeLock();
+    if (!there) {
+      io.mkdir(held.git.at(area));
       madeArea = true;
     }
-    io.create(lockTemp, new TextEncoder().encode(`${JSON.stringify({ engine: input.engineId, applyId })}\n`), 0o600);
+    io.create(held.git.at(lockTemp), new TextEncoder().encode(`${JSON.stringify({ engine: input.engineId, applyId })}\n`), 0o600);
     try {
-      io.link(lockTemp, lock);
+      io.link(held.git.at(lockTemp), held.git.at(lock));
     } catch (error) {
       // The lock is a hard link too: one refused for another reason means links don't work in the git folder.
       if (codeOf(error) !== "EEXIST") throw new ApplyRefusal("recovery", null, codeOf(error));
       // One that appeared since it was looked at.
       judgeLock();
-      io.link(lockTemp, lock);
+      io.link(held.git.at(lockTemp), held.git.at(lock));
     }
     madeLock = true;
-    io.unlink(lockTemp);
-    io.mkdir(recovery);
-    io.syncDir(area);
-    io.create(join(recovery, "probe"), new Uint8Array(0), 0o600);
+    io.unlink(held.git.at(lockTemp));
+    io.mkdir(held.git.at(held.recovery));
+    io.syncDir(held.git.dir(area));
+    io.create(inRecovery(held, "probe"), new Uint8Array(0), 0o600);
     try {
-      io.link(join(recovery, "probe"), join(recovery, "probe-link"));
+      io.link(inRecovery(held, "probe"), inRecovery(held, "probe-link"));
     } catch (error) {
       throw new ApplyRefusal("recovery", null, codeOf(error));
     }
-    io.unlink(join(recovery, "probe-link"));
-    io.unlink(join(recovery, "probe"));
+    io.unlink(inRecovery(held, "probe-link"));
+    io.unlink(inRecovery(held, "probe"));
   } catch (error) {
     takeBack();
     if (error instanceof ApplyRefusal) throw error;
     throw new ApplyRefusal("filesystem", null, codeOf(error));
   }
 
-  // The intent, with each changed file's own permission bits, so the new file keeps them.
+  // Every folder already there that the change writes in is held open now, one name at a time from the picked folder,
+  // never through a link: everything from here on lands in these very folders. Then the intent, with each changed
+  // file's own permission bits, so the new file keeps them.
   const paths: IntendedPath[] = [];
   for (const [index, one] of plan.paths.entries()) {
     let perm = one.post.mode === "100755" ? 0o755 : 0o644;
+    let stats;
+    try {
+      for (const rel of foldersOf(one.path)) if (!plan.folders.includes(rel)) held.tree.dir(rel);
+      if (one.change === "changed") stats = io.lstat(held.tree.at(one.path));
+    } catch (error) {
+      takeBack();
+      // A folder on its path that is gone, isn't a folder, or is a link now was changed since it was checked.
+      throw ["ENOENT", "ENOTDIR", "ELOOP"].includes(codeOf(error) ?? "") ? new ApplyRefusal("changed-since", one.path) : new ApplyRefusal("filesystem", one.path, codeOf(error));
+    }
     if (one.change === "changed") {
-      let stats;
-      try {
-        stats = io.lstat(absPath(plan.folder, one.path));
-      } catch (error) {
-        takeBack();
-        throw new ApplyRefusal("filesystem", one.path, codeOf(error));
-      }
       if (!stats?.isFile() || gitMode(stats.mode) !== one.pre.mode) {
         takeBack();
         throw new ApplyRefusal("changed-since", one.path);
@@ -424,20 +512,21 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
     for (const [index, one] of paths.entries()) {
       step = `temp ${index}`;
       await before(step);
-      const temp = join(recovery, one.temp);
+      const temp = inRecovery(held, one.temp);
       io.create(temp, plan.paths[index]!.bytes, one.perm);
       const stats = io.lstat(temp);
       const bytes = io.read(temp);
       if (!stats?.isFile() || (stats.mode & 0o7777) !== one.perm || sha256(bytes) !== one.post.sha256) throw new Stop(step);
     }
     step = "sync recovery";
-    io.syncDir(recovery);
+    io.syncDir(held.git.dir(held.recovery));
 
-    // Missing folders, parents first. One that appeared meanwhile must be a real folder, and is never removed.
+    // Missing folders, parents first, each held open once made. One that appeared meanwhile must be a real folder, and
+    // is never removed.
     for (const folder of plan.folders) {
       step = `folder ${folder}`;
       await before(step);
-      const target = absPath(plan.folder, folder);
+      const target = held.tree.at(folder);
       try {
         io.mkdir(target);
         created.push(folder);
@@ -445,14 +534,15 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
       } catch (error) {
         if (codeOf(error) !== "EEXIST" || !io.lstat(target)?.isDirectory()) throw error;
       }
-      io.syncDir(dirname(target));
+      held.tree.dir(folder);
+      io.syncDir(held.tree.dir(parentOf(folder)));
     }
 
     // Each changed file: moved aside, whatever is there at that instant, checked, then the new one linked in its place.
     for (const [index, one] of paths.entries()) {
       if (one.change !== "changed") continue;
-      const target = absPath(plan.folder, one.path);
-      const aside = join(recovery, one.aside!);
+      const target = held.tree.at(one.path);
+      const aside = inRecovery(held, one.aside!);
       step = `aside ${index}`;
       await before(step);
       // Only a file is moved aside: anything else there now (a folder, a link) is left where it is.
@@ -478,7 +568,7 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
       step = `link ${index}`;
       await before(step);
       try {
-        io.link(join(recovery, one.temp), target);
+        io.link(inRecovery(held, one.temp), target);
       } catch (error) {
         // Saved after the original was moved aside: that save stays, and the original is kept.
         if (codeOf(error) === "EEXIST") theirs.set(index, false);
@@ -492,7 +582,7 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
       step = `link ${index}`;
       await before(step);
       try {
-        io.link(join(recovery, one.temp), absPath(plan.folder, one.path));
+        io.link(inRecovery(held, one.temp), held.tree.at(one.path));
       } catch (error) {
         if (codeOf(error) === "EEXIST") theirs.set(index, false);
         throw error;
@@ -502,42 +592,50 @@ export async function writeChange(input: WriteInput): Promise<ApplyResult> {
 
     // Durable, then read back. A file another program changed after Nivra wrote it is reported, never overwritten.
     step = "sync";
-    for (const folder of new Set(paths.map((one) => dirname(absPath(plan.folder, one.path))))) io.syncDir(folder);
+    for (const rel of new Set(paths.map((one) => parentOf(one.path)))) io.syncDir(held.tree.dir(rel));
     // The originals moved into the recovery folder, too.
-    io.syncDir(recovery);
+    io.syncDir(held.git.dir(held.recovery));
     step = "read back";
     await before(step);
     for (const [index, one] of paths.entries()) {
-      found[index] = stateOf(io, absPath(plan.folder, one.path));
+      found[index] = stateOf(io, held.tree.at(one.path));
       if (!isPost(found[index], one)) theirs.set(index, true);
     }
+    // Last, every folder written in must still be the one at its name: one moved or replaced meanwhile means what Nivra
+    // wrote isn't where the person looks for it, and the apply rolls back.
+    step = "check folders";
+    await before(step);
+    if (held.tree.moved()) throw new Stop(step, "moved");
   } catch (error) {
     // A path Nivra wrote that holds neither its bytes nor the original was saved by another program since.
     for (const index of written) if (!theirs.has(index)) theirs.set(index, true);
-    const result = await restore(intent, { io, created, before, theirs });
-    const stopped: ApplyResult = { ...result, failure: { step, code: error instanceof Stop ? "changed" : codeOf(error) } };
-    return settle(io, input, intent, stopped, lock);
+    const result = await restore(intent, { io, created, before, theirs, held });
+    return settle(io, input, intent, { ...result, failure: { step, code: error instanceof Stop ? error.code : codeOf(error) } }, held, lock);
   }
   // Every new file was linked into place. A path another program saved since is reported as such; one removed since
   // makes the apply partial.
-  const outcomes = paths.map((_, index) => outcomeOf(io, intent, index, theirs.get(index), found[index]));
-  return settle(io, input, intent, { state: overall(outcomes), paths: outcomes, folders: created, failure: null }, lock);
+  const outcomes = paths.map((_, index) => outcomeOf(io, held, intent, index, theirs.get(index), found[index]));
+  return settle(io, input, intent, { state: overall(outcomes), paths: outcomes, folders: created, failure: null }, held, lock);
 }
 
 /** Records the result; an apply that is over lets go of its lock, and one partial or unknown keeps it. */
-function settle(io: ApplyIo, input: WriteInput, intent: ApplyIntent, result: ApplyResult, lock: string): ApplyResult {
+function settle(io: ApplyIo, input: WriteInput, intent: ApplyIntent, result: ApplyResult, held: Held, lock: string): ApplyResult {
   try {
-    input.journal.settle(intent.applyId, result);
-  } catch {
-    // The intent stays as the record: reconciling reads where every path is.
-    return result;
-  }
-  if (result.state === "applied" || result.state === "not-applied") {
     try {
-      io.unlink(lock);
+      input.journal.settle(intent.applyId, result);
     } catch {
-      // A lock left by an apply that is over is taken over by this engine's next apply.
+      // The intent stays as the record: reconciling reads where every path is.
+      return result;
     }
+    if (result.state === "applied" || result.state === "not-applied") {
+      try {
+        io.unlink(held.git.at(lock));
+      } catch {
+        // A lock left by an apply that is over is taken over by this engine's next apply.
+      }
+    }
+    return result;
+  } finally {
+    letGo(held);
   }
-  return result;
 }

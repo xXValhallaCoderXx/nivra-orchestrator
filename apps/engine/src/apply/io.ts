@@ -27,6 +27,11 @@ export interface ApplyIo {
   readdir(path: string): string[];
   /** Makes a folder's entries durable. */
   syncDir(path: string): void;
+  /** Opens a folder, failing when the last name is a link or isn't a folder: the anchors a change writes through. */
+  openDir(path: string): number;
+  closeDir(fd: number): void;
+  /** What a descriptor holds open, by device and inode. */
+  statFd(fd: number): fs.Stats;
 }
 
 const absent = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -73,6 +78,9 @@ export const nodeIo: ApplyIo = {
   link: (existing, created) => fs.linkSync(existing, created),
   unlink: (path) => fs.unlinkSync(path),
   readdir: (path) => fs.readdirSync(path),
+  openDir: (path) => fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)),
+  closeDir: (fd) => fs.closeSync(fd),
+  statFd: (fd) => fs.fstatSync(fd),
   syncDir: (path) => {
     const fd = fs.openSync(path, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0));
     try {

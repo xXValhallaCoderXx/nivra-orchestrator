@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { type ApplyIo, nodeIo } from "../src/apply/io.ts";
@@ -224,6 +224,15 @@ describe("the apply writer (NIV-8, D40)", () => {
     assert.deepEqual([...folderState(root)].filter(([key, value]) => all.get(key) !== value), []);
   });
 
+  it("refuses where a file can't be named through a folder held open, writing nothing", async () => {
+    const root = repoWith(FILES);
+    const all = folderState(root);
+    const noProc: ApplyIo = { ...nodeIo, lstat: (path) => (path === "/proc/self/fd" ? null : nodeIo.lstat(path)) };
+    const run = await apply(root, { io: noProc });
+    assert.ok(run.outcome instanceof ApplyRefusal && run.outcome.code === "filesystem");
+    assert.deepEqual([...folderState(root)].filter(([key, value]) => all.get(key) !== value), []);
+  });
+
   it("refuses a changed file whose mode changed since it was checked, before anything of the person's is touched", async () => {
     const root = repoWith(FILES);
     const plan = planFor(root, CHANGE);
@@ -340,6 +349,77 @@ describe("the apply writer (NIV-8, D40)", () => {
     assert.ok(!(run.outcome instanceof ApplyRefusal));
     assert.deepEqual([run.outcome.state, run.outcome.paths[0]?.place, run.outcome.paths[0]?.found.kind, existsSync(join(run.recovery, "orig-0"))], ["not-applied", "theirs", "folder", false]);
     assert.equal(String(readFileSync(join(root, "README.md", "work.txt"))), "work\n");
+  });
+
+  it("writes only into the folders it checked: one swapped for a link to a folder outside, before the intent or just before the link, is never written through", async () => {
+    const fresh = copies();
+    const swap = (root: string) => {
+      const outside = join(root, "..", "outside");
+      mkdirSync(outside);
+      renameSync(join(root, "docs"), join(root, "docs-moved"));
+      symlinkSync(outside, join(root, "docs"));
+      return outside;
+    };
+    // Swapped after revalidation, before the apply holds its folders: refused, and nothing is written.
+    const early = fresh();
+    const plan = planFor(early, { "docs/old.md": { text: "new\n" } });
+    const outsideEarly = swap(early);
+    const refused = await apply(early, { plan });
+    assert.ok(refused.outcome instanceof ApplyRefusal);
+    assert.deepEqual([refused.outcome.code, refused.outcome.path, readdirSync(outsideEarly), existsSync(refused.recovery)], ["changed-since", "docs/old.md", [], false]);
+    // Swapped just before the new file is linked in: it lands in the folder that was checked, wherever that is now, and
+    // the apply rolls back there. Nothing is called applied, and the folder outside is never touched.
+    const root = fresh();
+    let outside = "";
+    const run = await apply(root, { changes: { "docs/old.md": { text: "new\n" } }, before: (step) => void (step === "link 0" && (outside = swap(root))) });
+    assert.ok(!(run.outcome instanceof ApplyRefusal));
+    assert.deepEqual([run.outcome.state, run.outcome.paths.map((one) => one.place), run.outcome.failure, readdirSync(outside)], ["unknown", ["other"], { step: "check folders", code: "moved" }, []]);
+    assert.deepEqual([String(readFileSync(join(root, "docs-moved", "old.md"))), String(readFileSync(join(run.recovery, "orig-0")))], ["old\n", "old\n"]);
+    holds(run.outcome, run, "a folder swapped for a link just before the link");
+  });
+
+  it("takes a change back only in the folders it wrote in: one swapped for a link while rolling back, or before the person restores, is never written through", async () => {
+    const fresh = copies();
+    const swap = (root: string) => {
+      const outside = join(root, "..", "outside");
+      mkdirSync(outside);
+      renameSync(join(root, "docs"), join(root, "docs-moved"));
+      symlinkSync(outside, join(root, "docs"));
+      return outside;
+    };
+    const changes = { "README.md": { text: "new readme\n" }, "docs/old.md": { text: "new\n" }, "notes/new.md": { text: "added\n" } };
+    // The added file's link fails, and the folder is swapped as rollback begins taking docs/old.md back.
+    const root = fresh();
+    let outside = "";
+    const failing: ApplyIo = { ...nodeIo, link: (existing, created) => (created.endsWith("new.md") ? (() => { throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); })() : nodeIo.link(existing, created)) };
+    const run = await apply(root, { changes, io: failing, before: (step) => void (step === "take back 1" && (outside = swap(root))) });
+    assert.ok(!(run.outcome instanceof ApplyRefusal));
+    assert.deepEqual([run.outcome.state, run.outcome.paths.map((one) => `${one.path} ${one.place}`), run.outcome.failure?.code, readdirSync(outside)], ["unknown", ["README.md pre", "docs/old.md other", "notes/new.md pre"], "ENOSPC", []]);
+    assert.equal(String(readFileSync(join(root, "docs-moved", "old.md"))), "old\n");
+    holds(run.outcome, run, "a folder swapped for a link during rollback");
+
+    // Applied, then swapped before the person asks to restore the originals: docs/old.md can't be reached without
+    // following the link, so it is left as it is; README.md is restored.
+    const later = fresh();
+    const applied = await apply(later, { changes: { "README.md": changes["README.md"], "docs/old.md": changes["docs/old.md"] } });
+    assert.ok(!(applied.outcome instanceof ApplyRefusal) && applied.outcome.state === "applied");
+    const intent = applied.journal.get(applied.applyId)!.intent!;
+    const outsideLater = swap(later);
+    const restored = await restore(intent);
+    assert.deepEqual([restored.state, restored.paths.map((one) => `${one.path} ${one.place}`), restored.failure?.step, readdirSync(outsideLater)], ["unknown", ["README.md pre", "docs/old.md other"], "restore 1", []]);
+    // Opening a link as a folder without following it: Linux says it isn't one, or that it is a link.
+    assert.ok(["ENOTDIR", "ELOOP"].includes(restored.failure?.code ?? ""), String(restored.failure?.code));
+    assert.deepEqual([String(files(later, "README.md")), String(readFileSync(join(later, "docs-moved", "old.md")))], [FILES["README.md"], "new\n"]);
+
+    // Swapped while that restore runs, between taking Nivra's version back and linking the original: the original goes
+    // back into the folder it came from, and nothing outside is touched.
+    const during = fresh();
+    const second = await apply(during, { changes: { "README.md": changes["README.md"], "docs/old.md": changes["docs/old.md"] } });
+    assert.ok(!(second.outcome instanceof ApplyRefusal) && second.outcome.state === "applied");
+    let outsideDuring = "";
+    const midway = await restore(second.journal.get(second.applyId)!.intent!, { before: (step) => void (step === "restore 1" && (outsideDuring = swap(during))) });
+    assert.deepEqual([midway.state, midway.paths.map((one) => `${one.path} ${one.place}`), readdirSync(outsideDuring)], ["unknown", ["README.md pre", "docs/old.md other"], []]);
+    assert.equal(String(readFileSync(join(during, "docs-moved", "old.md"))), "old\n");
   });
 
   it("names only the folders the apply recorded making, never one made just before a crash and not recorded", async () => {
