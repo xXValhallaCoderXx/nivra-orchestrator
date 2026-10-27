@@ -72,6 +72,11 @@ describe("readArgs", () => {
     const args = readArgs(["--stdio", "--home", "/tmp/x", "--tavily-url", "http://127.0.0.1:4000/"]);
     assert.deepEqual([args.tavilyUrl, args.tokenFactoryUrl, args.sandboxesUrl], ["http://127.0.0.1:4000", null, null]);
   });
+
+  it("takes a test's apply hold only as an absolute path, and none in normal use (NIV-35)", () => {
+    assert.throws(() => readArgs(["--stdio", "--home", "/tmp/x", "--apply-hold", "hold"]), ArgsError);
+    assert.deepEqual([readArgs(["--stdio", "--home", "/tmp/x", "--apply-hold", "/tmp/hold"]).applyHold, readArgs(["--stdio", "--home", "/tmp/x"]).applyHold], ["/tmp/hold", null]);
+  });
 });
 
 describe("startWatchdog", () => {

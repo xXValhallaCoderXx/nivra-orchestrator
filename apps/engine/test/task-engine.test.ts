@@ -53,8 +53,8 @@ interface Setup {
   repo: string;
 }
 
-function engineAt(home: string, sandbox: SandboxStub<RealGuest>, model: Stub): EngineProcess {
-  const engine = startEngine(home, { args: ["--stdio", "--home", home, "--instance", randomUUID(), "--heartbeat-ms", "0", "--sandboxes-url", sandbox.url, "--token-factory-url", model.url] });
+function engineAt(home: string, sandbox: SandboxStub<RealGuest>, model: Stub, extra: string[] = []): EngineProcess {
+  const engine = startEngine(home, { args: ["--stdio", "--home", home, "--instance", randomUUID(), "--heartbeat-ms", "0", "--sandboxes-url", sandbox.url, "--token-factory-url", model.url, ...extra] });
   engines.push(engine);
   return engine;
 }
@@ -107,6 +107,32 @@ async function proposedRun(setup: Setup): Promise<{ run: RunSummary; done: TaskR
 const apply = (engine: EngineProcess, params: ApplyParams): Promise<ApplyView> => engine.client.call("task.apply", params);
 
 describe("applying a task's proposal through a real engine (NIV-8, D40)", () => {
+  it("holds an apply before the step the test switch names; killed there, the next engine reads it back part way, and restores the original (NIV-35)", async () => {
+    const setup_ = await setup();
+    const { params } = await proposedRun(setup_);
+    await setup_.engine.client.call("shutdown", {});
+    await setup_.engine.exited;
+    // The same home, its engine started with the hold: before linking the new file in, the original already moved aside.
+    const hold = join(setup_.home, "..", "apply-hold");
+    writeFileSync(hold, "link 0\n");
+    const held = engineAt(setup_.home, setup_.sandbox, setup_.model, ["--apply-hold", hold]);
+    await held.initialize(CREDENTIALS);
+    const going = held.client.call("task.apply", params).catch(() => null);
+    await waitFor(() => existsSync(`${hold}.held`), { timeoutMs: 20_000, what: "the writer to reach its hold" });
+    assert.equal(readFileSync(`${hold}.held`, "utf8"), "link 0\n");
+    // The engine still answers while the writer is held: only the apply waits.
+    assert.equal((await held.client.call("task.applyStatus", { requestId: params.requestId }))?.status, "writing");
+    held.kill();
+    await held.exited;
+    await going;
+    const later = engineAt(setup_.home, setup_.sandbox, setup_.model);
+    await later.initialize(CREDENTIALS);
+    const read = (await later.client.call("task.applyStatus", { requestId: params.requestId }))!;
+    assert.deepEqual([read.status, read.paths.map((one) => `${one.path} ${one.place}`), existsSync(join(setup_.repo, "greet.sh"))], ["partial", ["greet.sh aside"], false]);
+    const restored = await later.client.call("task.restore", { applyId: read.applyId });
+    assert.deepEqual([restored.status, readFileSync(join(setup_.repo, "greet.sh"), "utf8")], ["not-applied", FILES["greet.sh"]]);
+  });
+
   it("applies the approved proposal on its own engine: checked again, written unstaged, kept by its request id, settled as accepted, never applied twice", async () => {
     const setup_ = await setup();
     const { engine, repo } = setup_;
