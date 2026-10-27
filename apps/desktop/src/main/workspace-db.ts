@@ -304,6 +304,39 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
       AND NOT EXISTS (SELECT 1 FROM preparations WHERE id = NEW.prepared_by AND project_id = NEW.project_id AND report_json IS NOT NULL))
   BEGIN SELECT RAISE(ABORT, 'a prepared environment comes from a preparation of its own project'); END;
   `,
+  `
+  -- Missions (NIV-52): what a piece of work is for, in immutable versions, with a backlog of native tasks. A mission
+  -- needs no repository. Its review plans and their reviews belong to a general conversation of its own, because a plan
+  -- and a review's run link belong to a conversation (D26, D31); that conversation has no messages and isn't listed. No
+  -- table before this one changes.
+  CREATE TABLE missions (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL
+  ) STRICT;
+  CREATE TRIGGER missions_conversation BEFORE INSERT ON missions
+  WHEN NOT EXISTS (SELECT 1 FROM conversations WHERE id = NEW.conversation_id AND kind = 'general')
+    OR EXISTS (SELECT 1 FROM messages WHERE conversation_id = NEW.conversation_id)
+  BEGIN SELECT RAISE(ABORT, 'a mission owns a general conversation of its own, with no messages'); END;
+  CREATE TRIGGER missions_fixed BEFORE UPDATE ON missions BEGIN SELECT RAISE(ABORT, 'a mission keeps its conversation'); END;
+  CREATE TABLE mission_versions (
+    id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    content_json TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (mission_id, version)
+  ) STRICT;
+  CREATE TRIGGER mission_versions_immutable BEFORE UPDATE ON mission_versions BEGIN SELECT RAISE(ABORT, 'mission versions are immutable'); END;
+  -- A task is in at most one mission's backlog. Leaving it, or the mission going, leaves the task as it was.
+  CREATE TABLE mission_tasks (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    added_at TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX mission_tasks_mission ON mission_tasks(mission_id, added_at);
+  `,
 ];
 
 export type WorkspaceOpening =

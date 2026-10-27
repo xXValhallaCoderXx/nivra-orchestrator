@@ -39,9 +39,9 @@ export function insertConversation(workspace: WorkspaceDb, record: ConversationR
     .run(record.id, record.kind, record.projectId, record.projectLabel, record.targetId, record.title, record.createdAt, record.updatedAt);
 }
 
-/** Every conversation, the most recently active first. */
+/** Every conversation, the most recently active first. A mission's own conversation (NIV-52) isn't one of them. */
 export function listConversations(workspace: WorkspaceDb): ConversationRecord[] {
-  return workspace.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC, id").all().map(conversationOf);
+  return workspace.db.prepare("SELECT * FROM conversations WHERE id NOT IN (SELECT conversation_id FROM missions) ORDER BY updated_at DESC, id").all().map(conversationOf);
 }
 
 export function getConversation(workspace: WorkspaceDb, id: string): ConversationRecord | null {

@@ -55,7 +55,7 @@ test("the workspace opens in the Windows app, keeps a conversation across a rela
 
   let { app, page } = await launch();
   const fresh = await page.evaluate(() => window.nivra.listConversations());
-  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 5, notice: null });
+  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 6, notice: null });
   const created = await page.evaluate(() => window.nivra.createConversation({ kind: "general" }));
   expect([created.kind, created.projectId, created.targetId]).toEqual(["general", null, "local"]);
   expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);

@@ -112,7 +112,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v5\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v6\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -568,6 +568,8 @@ describe("a project's environment (D41)", () => {
     // v3's and v4's text are pinned too, now that v5 follows them.
     assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[2]!).digest("hex"), "2e78a5cf059685f43088c3972680a1d7cfd4fc91eb3e5e057d1d261eef172dca");
     assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[3]!).digest("hex"), "1a730d45a78676e8ea59b7719ace1854ea48bb6fb580b7edf78eae2cd906633e");
+    // v5's text is pinned too, now that v6 (missions, NIV-52) follows it.
+    assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[4]!).digest("hex"), "52329f99bba37c8918ac28b8ec27ae55c6573363c07ac22b72a3c0d4ec3b81d0");
     const path = join(folder(), "workspace.db");
     // A v4 file, written as v4 wrote one: its schema alone, then rows through the same functions.
     const raw = new DatabaseSync(path);
