@@ -102,7 +102,7 @@ export async function prepareIn(run: PrepareRun): Promise<PrepareOutcome> {
 
     // 3. The preparation, networking on, declared.
     at = "install";
-    run.progress(`Installing with ${run.packageManager}: pnpm install ${run.installArgs.join(" ")}.`);
+    run.progress(`Installing with ${run.packageManager}, networking on: pnpm install ${run.installArgs.join(" ")}`);
     const submitted = await run.sandbox.prepareEnvironment({ image: base.image, inputs: { uuid: uploaded.uuid }, packageManager: run.packageManager, installArgs: run.installArgs, timeoutSeconds: run.limits.prepareSeconds });
     if (!("operationId" in submitted)) return stopped("uncertain");
     const ended = await run.sandbox.observe(submitted.operationId, run.limits.prepareSeconds);

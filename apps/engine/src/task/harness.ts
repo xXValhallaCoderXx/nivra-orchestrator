@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { TASK_BRIEF_LIMITS, type BaselineSelection, type TaskBaselineCheck } from "@nivra/domain";
+import { baselinePattern, TASK_BRIEF_LIMITS, type BaselineSelection, type TaskBaselineCheck } from "@nivra/domain";
 import { ExecRefusedError, ExecUncertainError, type ExecRequest, type ExecResult } from "../exec/backend.ts";
 import { TASK_LIMITS } from "./limits.ts";
 import { firstWord } from "./scripts.ts";
@@ -125,7 +125,7 @@ function ending(ran: ExecResult, timeoutMs: number): Pick<CheckResult, "verdict"
 
 /**
  * A baseline selection, judged by the engine before the model (D41): its exit code, and its exact output or a pattern
- * over its whole output. A selection that fails for the bug the task fixes matches when it fails as the brief says:
+ * its whole output must match (`baselinePattern`). A selection that fails for the bug the task fixes matches when it fails as the brief says:
  * that is told apart from one that can't run. A pattern is matched against at most `patternInputBytes` of output.
  */
 export function judgeBaseline(number: number, given: BaselineSelection, ran: ExecResult, timeoutMs: number = TASK_LIMITS.checks.timeoutMs): TaskBaselineCheck {
@@ -138,7 +138,7 @@ export function judgeBaseline(number: number, given: BaselineSelection, ran: Exe
     const difference = firstDifference(given.expectedOutput, ran.stdout);
     if (difference) why = `its output differs from the expected output at line ${difference.line}`;
   } else if (Buffer.byteLength(ran.stdout) > TASK_BRIEF_LIMITS.patternInputBytes) why = "its output is longer than Nivra matches a pattern against";
-  else if (!new RegExp(given.outputPattern ?? "(?!)").test(ran.stdout)) why = "its output doesn't match the pattern";
+  else if (given.outputPattern === undefined || !baselinePattern(given.outputPattern).test(ran.stdout)) why = "its output doesn't match the pattern";
   const exit = ran.exitCode === given.expectedExitCode ? null : `it exited ${String(ran.exitCode)}, not ${given.expectedExitCode}`;
   if (!why && !exit) return { ...result, matched: true };
   return { ...result, reason: [why, exit].filter(Boolean).join(", and ") };

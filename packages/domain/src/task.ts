@@ -80,14 +80,14 @@ export const BaselineSelection = z
       .refine((text) => utf8Bytes(text) <= TASK_BRIEF_LIMITS.expectedOutputBytes, `A selection's expected output can be at most ${TASK_BRIEF_LIMITS.expectedOutputBytes} bytes.`)
       .refine(noNul, "A selection's expected output can't hold a NUL character.")
       .optional(),
-    /** A regular expression its whole output must match. */
+    /** A regular expression its whole output must match: Nivra anchors it at both ends (`baselinePattern`). */
     outputPattern: z
       .string()
       .min(1)
       .max(TASK_BRIEF_LIMITS.patternChars)
       .refine((pattern) => {
         try {
-          new RegExp(pattern);
+          baselinePattern(pattern);
           return true;
         } catch {
           return false;
@@ -97,6 +97,12 @@ export const BaselineSelection = z
   })
   .refine((selection) => (selection.expectedOutput === undefined) !== (selection.outputPattern === undefined), "A selection gives either its exact output or a pattern, not both.");
 export type BaselineSelection = z.infer<typeof BaselineSelection>;
+
+/**
+ * A baseline selection's pattern as Nivra matches it: against the whole output, anchored at both ends, `.` matching a
+ * line break too. `a|b` is the whole output being `a` or `b`, never one that merely holds either.
+ */
+export const baselinePattern = (pattern: string): RegExp => new RegExp(`^(?:${pattern})$`, "s");
 
 /** A frozen file: a path in the commit, relative to the picked folder, as Git names it. */
 const FrozenPath = z

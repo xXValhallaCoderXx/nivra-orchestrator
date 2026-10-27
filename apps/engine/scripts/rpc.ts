@@ -34,6 +34,12 @@
 // for Nebius and Token Factory, pass --sandboxes-url and --token-factory-url:
 //   pnpm rpc task.preview '{"repoPath":"/path/to/repo","brief":{"goal":"…","acceptanceCriteria":[],"scope":"","exclusions":"","context":"","checks":[],"acceptanceCases":[{"name":"…","command":"…","expectedOutput":"…\n","expectedExitCode":0}]}}'
 //   pnpm rpc runs.start '{"workflowId":"task","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"modelContext":true,"cloudExecution":true},"brief":{…}}}' --follow --sandboxes-url http://127.0.0.1:<port> --token-factory-url http://127.0.0.1:<port>/v1
+// An environment's preparation (D41) needs upload consent and the spec; without a context it has neither consent nor
+// filters. Its preview's fingerprint is taken here from `environment.preview` when it is left out, and a project id and
+// the local target are filled in; after --follow, its report is printed. A task run bound to it carries the prepared
+// environment in its input ("environment": {image, inputsDigest, projectFingerprint, node, pnpm, arch}):
+//   pnpm rpc environment.preview '{"repoPath":"/path/to/repo","spec":{"filters":["@scope/package..."]}}'
+//   pnpm rpc runs.start '{"workflowId":"environment","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"cloudExecution":true},"spec":{"filters":[]}}}' --follow --sandboxes-url http://127.0.0.1:<port>
 // Applying a finished task run's proposal (D40) needs only the run's id: the approval is filled in from the run, its
 // report and its proposal, and this engine's home, as the host would send it, with a new request id. It writes to the
 // run's checkout:
@@ -95,6 +101,11 @@ if (task) {
   params = { ...params, input, context };
 }
 const sandbox = method === "runs.start" && params["workflowId"] === "sandbox";
+// A preparation without the rest of its context: no upload consent, and the whole workspace (D41).
+const environment = method === "runs.start" && params["workflowId"] === "environment";
+if (environment) {
+  params = { ...params, input: { project: randomUUID(), target: "local", ...(params["input"] as Record<string, unknown>) }, context: { sharing: { cloudExecution: false }, spec: { filters: [] }, ...(params["context"] as Record<string, unknown> | undefined) } };
+}
 // Without a context: no preferences, no consent to send repository content to a model (D22), and for a turn no
 // history. A sandbox check gets no upload consent (D36).
 if (method === "runs.start" && params["context"] === undefined) {
@@ -148,11 +159,20 @@ try {
     console.error(`preview: ${shown.files} files, ${shown.bytes} bytes from ${shown.baseline}; fingerprint ${shown.fingerprint}`);
     input["preview"] = shown.fingerprint;
   }
+  // A preparation is bound to what its preview showed (D41), taken the same way.
+  if (environment && input && input["preview"] === undefined) {
+    const spec = (params["context"] as { spec: { filters: string[] } }).spec;
+    const shown = await client.call("environment.preview", { repoPath: String(input["repoPath"]), spec });
+    if (shown.status !== "ready") throw new Error(`The preview refused this checkout (${shown.code}): ${shown.message}`);
+    console.error(`preview: ${shown.inputs.length} inputs, ${shown.sentBytes} bytes to send from ${shown.baseline}; ${shown.packageManager}; pnpm install ${shown.installArgs.join(" ")}; fingerprint ${shown.fingerprint}`);
+    input["preview"] = shown.fingerprint;
+  }
   // A task run is bound to what its preview showed too (D39), taken the same way.
   if (task && input && input["preview"] === undefined) {
     const brief = (params["context"] as { brief?: TaskBrief }).brief;
     if (!brief) throw new Error("A task run needs its brief in the context, to preview what it would send.");
-    const shown = await client.call("task.preview", { repoPath: String(input["repoPath"]), brief });
+    const bound = input["environment"] as Record<string, string> | undefined;
+    const shown = await client.call("task.preview", { repoPath: String(input["repoPath"]), brief, ...(bound ? { environment: { ...bound, preparedAt: new Date().toISOString() } as never } : {}) });
     if (shown.status !== "ready") throw new Error(`The preview refused this checkout (${shown.code}): ${shown.message}`);
     console.error(`preview: ${shown.snapshot.files} files, ${shown.snapshot.bytes} bytes from ${shown.snapshot.baseline}; programs ${shown.programs.join(", ") || "none"}; fingerprint ${shown.snapshot.fingerprint}`);
     input["preview"] = shown.snapshot.fingerprint;
@@ -183,6 +203,7 @@ try {
         if ((result as { workflowId?: string }).workflowId === "review") console.log(JSON.stringify(await client.call("runs.review", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "sandbox") console.log(JSON.stringify(await client.call("runs.sandbox", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "research") console.log(JSON.stringify(await client.call("runs.research", { runId }), null, 2));
+        if ((result as { workflowId?: string }).workflowId === "environment") console.log(JSON.stringify(await client.call("runs.environment", { runId }), null, 2));
         if ((result as { workflowId?: string }).workflowId === "task") {
           console.log(JSON.stringify(await client.call("runs.task", { runId }), null, 2));
           console.log(JSON.stringify(await client.call("runs.proposal", { runId }), null, 2));
