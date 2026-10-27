@@ -129,6 +129,7 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   await expect(report).toHaveAttribute("data-outcome", "proposed");
   await expect(report).toHaveAttribute("data-verified", "true");
   await expect(report.getByTestId("task-attempt-verdict")).toContainText("Every acceptance case passed: the change is verified.");
+  await expect(report.getByTestId("task-attempt-environment")).toHaveText("Started from Nivra's own base image, with nothing installed.");
   await expect(report.getByTestId("task-attempt-check")).toHaveCount(2);
   for (const row of await report.getByTestId("task-attempt-check").all()) await expect(row).toHaveAttribute("data-verdict", "passed");
   await expect(report.getByTestId("task-attempt-check-files")).toHaveText("The change also changes greet.sh, which this case runs: Nivra judged only what it printed.");

@@ -26,7 +26,8 @@ describe("a project's environment (NIV-49, D41)", () => {
   it("is chosen as pnpm filters only: workspace selectors, never anything a shell would read", () => {
     assert.equal(EnvironmentSpec.safeParse({ filters: [] }).success, true);
     assert.equal(EnvironmentSpec.safeParse({ filters: ["@sheetless/data...", "./packages/domain", "!web", "^app"] }).success, true);
-    for (const filter of ["a b", "a;b", "$(x)", "`x`", "a|b", "", "x".repeat(201)]) assert.equal(EnvironmentSpec.safeParse({ filters: [filter] }).success, false, filter);
+    // A leading dash would read as an option to pnpm.
+    for (const filter of ["a b", "a;b", "$(x)", "`x`", "a|b", "", "x".repeat(201), "-x", "--frozen-lockfile"]) assert.equal(EnvironmentSpec.safeParse({ filters: [filter] }).success, false, filter);
     assert.equal(EnvironmentSpec.safeParse({ filters: Array.from({ length: 9 }, (_, i) => `p${i}`) }).success, false, "eight filters at most");
     assert.equal(EnvironmentSpec.safeParse({ filters: [], command: "pnpm install" }).success, false, "no command");
   });

@@ -103,10 +103,18 @@ describe("Nebius Sandboxes, offline: spawning, one at a time, networking off (NI
       [{ packageManager: "npm@10.0.0" }, /exact pnpm version/],
       [{ installArgs: ["--filter", "a"] }, /frozen lockfile/],
       [{ installArgs: ["--frozen-lockfile", "a; curl x"] }, /plain arguments/],
+      [{ installArgs: ["--frozen-lockfile", "@scope/data..."] }, /plain arguments/],
+      [{ installArgs: ["--frozen-lockfile", "--filter"] }, /plain arguments/],
+      [{ installArgs: ["--frozen-lockfile", "--filter", "--prod"] }, /plain arguments/],
+      [{ installArgs: ["--frozen-lockfile", "--prod"] }, /plain arguments/],
       [{ timeoutSeconds: 500 }, /timeout must be between 1 and 180 s/],
     ];
     for (const [change, pattern] of refusals) await assert.rejects(sandbox.prepareEnvironment({ ...given, ...change }), pattern);
     assert.equal(service.spawns, 0);
+    // Every filter the domain's spec takes is one the preparation sends, pnpm's exclusions among them.
+    const other = new FakeService(() => succeed());
+    await sandboxOn(other).sandbox.prepareEnvironment({ ...given, installArgs: ["--frozen-lockfile", "--filter", "@scope/data...", "--filter", "!@scope/web"] });
+    assert.deepEqual((spawned(other)[0] as unknown as { args: string[] }).args.slice(-4), ["--filter", "@scope/data...", "--filter", "!@scope/web"]);
     await sandbox.prepareEnvironment(given);
     const [body] = spawned(service) as unknown as Array<{ networking: { enabled: boolean }; disposable: boolean; image: string; args: string[]; files: Record<string, { uuid: string }> }>;
     assert.deepEqual([body?.networking.enabled, body?.disposable, body?.image, body?.args.slice(2), Object.keys(body?.files ?? {})], [true, false, "img-node", ["nivra-env-prepare", "/workspace", "/nivra/env-inputs.tar.gz", "11.5.3", "--frozen-lockfile", "--filter", "@scope/data..."], ["/nivra/env-inputs.tar.gz"]]);

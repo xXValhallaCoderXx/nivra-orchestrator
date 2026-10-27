@@ -109,6 +109,17 @@ describe("an environment's preparation through a real engine (NIV-49, D41)", () 
     assert.ok(!JSON.stringify(stub.requests.map((request) => request.body)).includes(PROJECT_ID), "the project id went in a body");
   });
 
+  it("prepares with an exclusion filter: the preview takes it, and the preparation sends it as it was shown", async () => {
+    const { stub, engine, repo } = await setup();
+    const withExclusion = { filters: ["@mono/data...", "!@mono/web"] };
+    const shown = ready(await preview(engine, repo, withExclusion));
+    const run = await start(engine, repo, shown.fingerprint, { spec: withExclusion });
+    await ended(engine, run.id);
+    const done = await report(engine, run.id);
+    const sent = spawns(stub) as unknown as Array<{ args: string[] }>;
+    assert.deepEqual([done.outcome, done.stopped, sent.length, sent[0]?.args.slice(-4)], ["prepared", null, 1, ["--filter", "@mono/data...", "--filter", "!@mono/web"]]);
+  });
+
   it("prepares a single-package repository with no workspace file the same way, with no change to Nivra", async () => {
     const { engine, received } = await setup();
     const single = repoWith({ "package.json": json({ name: "tool", version: "1.0.0", packageManager: "pnpm@11.5.3", engines: { node: "^22.10.0" } }), "pnpm-lock.yaml": "lockfileVersion: '9.0'\n", "src/index.mjs": "export const tool = 1;\n" });

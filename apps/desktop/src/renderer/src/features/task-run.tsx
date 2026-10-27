@@ -2,6 +2,7 @@ import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, NumberInput, 
 import type { BaselineSelection, TaskBaselineCheck, TaskCheck, TaskReport } from "@nivra/domain";
 import { useEffect, useRef, useState } from "react";
 import type { AcceptanceCaseView, TaskAttemptView, TaskRunPreview, TaskView, TurnStatus } from "../../../shared/ipc";
+import { startedFrom } from "../../../shared/task-started";
 import { CONSENT_COVERS } from "../shared/evidence";
 import { errorMessage, Section, usePoll } from "../shared/ui";
 import { applyGoing, ApplyResult, AttemptsList, Decision } from "./task-apply";
@@ -774,11 +775,11 @@ function Found({ report, proposal }: { report: TaskReport; proposal: TaskAttempt
           {report.stopped.message}
         </Text>
       )}
-      <Text size="sm" c="var(--nivra-text-2)" data-testid="task-attempt-environment">
-        {report.environment
-          ? `Started from the prepared environment: Node ${report.environment.node}, pnpm ${report.environment.pnpm}, ${report.environment.arch}, image ${report.environment.image.slice(0, 12)}.`
-          : "Started from Nivra's own base image, with nothing installed."}
-      </Text>
+      {startedFrom(report) && (
+        <Text size="sm" c="var(--nivra-text-2)" data-testid="task-attempt-environment">
+          {startedFrom(report)}
+        </Text>
+      )}
       {report.baseline.length > 0 && (
         <Stack gap={2} data-testid="task-attempt-baseline">
           <Text size="sm">Baseline checks, before the worker, on the commit as it was:</Text>
