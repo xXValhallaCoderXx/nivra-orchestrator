@@ -529,14 +529,21 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-reco
   operation goes, then Restart; a quit mid-run, timed; a stale approval; an apply held by `--nivra-test-apply-hold`,
   its engine killed, read back as partial and restored.
 - **The live run's script** (`apps/desktop/scripts/task-live.ts`), never part of `pnpm verify`:
-  - `--freeze` copies a release candidate's unpacked Linux build, made from a clean tree, with its hashes;
+  - `--freeze` copies a release candidate's unpacked Linux build, made from a clean tree, with its hashes: every file
+    of the build, and its runtime's files as staging names them, refused when the runtime's manifest names others.
+    Every other mode hashes the frozen build again first (`scripts/task-live-checks.ts`);
   - `--plan` prints the recipe and its digest, with no network;
-  - `--rehearse` drives the frozen build with fake keys up to each preview, sending nothing;
+  - `--rehearse` drives the frozen build with fake keys up to each preview, sending nothing. It checks the run's
+    preview as the live run does, with no environment;
   - `--live --approved <digest>` runs the approved run: the person pastes the keys, the script presses Prepare and
-    Start once each, and the decisions are the person's, in the window;
-  - `--cleanup` removes the keys from the last live profile.
+    Start once each, and the decisions are the person's, in the window.
+    Before Start, the run's preview must carry the fingerprint worked out from the recipe's brief digest and snapshot
+    with the environment just prepared (the window's, which Start sends and the host checks again, and the app's),
+    and show the approved commit, snapshot, frozen files with their hashes and environment inputs;
+  - `--cleanup` removes the keys from the last live profile, whatever the task's checkout holds.
   The task, its repository and its brief are in a file outside the repository (by default
-  `~/nivra-work/she65/task-live.json`), and nothing in the script names one.
+  `~/nivra-work/she65/task-live.json`), with any `review` points: what the person checks in the proposal that its
+  tests can't show, which the recipe binds and lists. Nothing in the script names a repository.
 
 ## Where things will live
 

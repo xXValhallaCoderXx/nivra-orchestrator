@@ -2345,6 +2345,8 @@ stacked on `feature/niv-49-host`.
 | `1a087bb` | A task run's recovery through the real host and engine |
 | `8dba58b` | A task's whole journey from a prepared environment, through the window |
 | `f094ad1` | The live run's script, `scripts/task-live.ts` |
+| `31245a6` | Nate's review of PR 24: the run's preview checked against the recipe before Start, every file of the frozen build hashed, and cleanup apart from the checkout |
+| `4bf14f7` | The recipe lists what the person checks in the proposal that its tests can't show |
 | this record | The development notes and this section |
 
 **NIV-35's criteria, so far:**
@@ -2364,9 +2366,14 @@ hello run, isn't retimed here.
 
 **Checks:**
 - `pnpm verify` at `f31086a` (this branch, with `main` merged in through the environment's branch): 1,067 tests
-  (domain 75, desktop 307, engine 685), none skipped.
-- The built app (`test:e2e`) at `f31086a`: 75 passed and 1 skipped (`explain.spec.ts`'s packaged-only test), among
-  them `task-journey.spec.ts` and the five tests of `task-recovery.spec.ts`.
+  (domain 75, desktop 307, engine 685); at `31245a6`, with Nate's review fixed on both branches, 1,075 (domain 75,
+  desktop 313, engine 687), none skipped. The five new desktop tests are `task-live-checks.test.ts`, and each fails
+  with its check undone.
+- The built app (`test:e2e`) at `f31086a`, and again at `31245a6`: 75 passed and 1 skipped (`explain.spec.ts`'s
+  packaged-only test), among them `task-journey.spec.ts` and the five tests of `task-recovery.spec.ts`. The quit took
+  115 ms, then 120 ms.
+- `--cleanup` with a task file that doesn't exist now stops only at the missing freeze; before, it failed reading the
+  task.
 - The packaged app: these specs skip there, since a packaged app ignores the switches they need;
   `test-switches.test.ts` shows it ignores the apply hold too.
 - The Windows turn: 12 of 12 on the Windows build of `3a56d75`, this branch before `main`'s test and docs changes
