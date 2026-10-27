@@ -292,7 +292,9 @@ export const ENV_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 /**
  * An environment's preparation: a fixed script, given everything as positional arguments, so nothing is interpolated
  * into it. $1 the workspace, $2 the inputs archive, $3 pnpm's exact version, then pnpm install's own arguments
- * (--frozen-lockfile first). It prints the versions and the machine it prepared, for the environment's binding.
+ * (--frozen-lockfile first). It prints the versions and the machine it prepared, for the environment's binding. The
+ * install's own log goes to a file outside the workspace, and only its end is printed, so the service's output cap
+ * can't cut off the last line, which says whether the install finished.
  */
 export const ENV_PREPARE_SCRIPT = [
   "set -e",
@@ -306,8 +308,7 @@ export const ENV_PREPARE_SCRIPT = [
   'echo "node $(node --version)"',
   'echo "pnpm $(pnpm --version)"',
   'echo "arch $(uname -m)"',
-  'pnpm install "$@"',
-  'echo "installed"',
+  'if pnpm install "$@" > /nivra/install.log 2>&1; then tail -c 8000 /nivra/install.log; echo "installed"; else status=$?; tail -c 16000 /nivra/install.log; exit "$status"; fi',
 ].join("\n");
 
 export class Sandbox {

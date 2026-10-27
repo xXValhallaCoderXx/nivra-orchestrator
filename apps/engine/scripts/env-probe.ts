@@ -53,7 +53,7 @@ const { values } = parseArgs({
 });
 
 /** The probe's bounds, which the adapter itself enforces: each operation's time, the session's, cleanup's. */
-const PROBE = Object.freeze({ importSeconds: 900, prepareSeconds: 600, overlaySeconds: 180, toolchainSeconds: 60, selectionSeconds: 300, collectSeconds: 180, sessionMinutes: 30, cleanupMinutes: 7 });
+const PROBE = Object.freeze({ importSeconds: 900, prepareSeconds: 600, pollSeconds: 5, overlaySeconds: 180, toolchainSeconds: 60, selectionSeconds: 300, collectSeconds: 180, sessionMinutes: 30, cleanupMinutes: 7 });
 /** The session's own operations: the snapshot's overlay, the toolchain, each selection, and collect. */
 const sessionOperations = (selections: number) => 3 + selections;
 const STOP_SECONDS = Math.round((NEBIUS_LIMITS.minWriteMs + NEBIUS_LIMITS.requestTimeoutMs + NEBIUS_LIMITS.cancelWaitMs) / 1000);
@@ -204,8 +204,8 @@ function recipeOf(config: Config, inputs: ReturnType<typeof preparationInputs>, 
     snapshot: { files: snapshot.files.length, bytes: snapshot.files.reduce((sum, file) => sum + file.size, 0), archiveBytes: snapshot.archive.archive.byteLength, archiveSha256: snapshot.archive.sha256, sentBytes: sent.byteLength, sentSha256: sha(sent), listingDigest: snapshot.archive.listingDigest, leftOut: { secret: snapshot.leftOut.secret.sample, output: snapshot.leftOut.output.sample, submodule: snapshot.leftOut.submodule.sample, counts: [snapshot.leftOut.secret.count, snapshot.leftOut.output.count, snapshot.leftOut.submodule.count] } },
     limits: { ...PROBE, sessionOperations: operations, stopSeconds: STOP_SECONDS, neededSeconds: NEEDED_SECONDS },
     operations: [
-      `image: GET /v1/images?tag=${config.image.tagPrefix}; the public ${config.image.tag} is used if listed with exactly that tag, otherwise POST /v1/images/import of ${config.image.registryUrl} (untagged, so private), followed to its end (timeout ${PROBE.importSeconds} s)`,
-      `preparation, networking ON: the inputs uploaded; ${config.image.tag} runs Nivra's fixed preparation script: corepack enable, corepack prepare ${config.packageManager} --activate, prints node, pnpm and uname -m, then pnpm install ${config.installArgs.join(" ")} in /workspace; kept, its result image is the environment (timeout ${PROBE.prepareSeconds} s)`,
+      `image: GET /v1/images?tag=${config.image.tagPrefix}; the public ${config.image.tag} is used if listed with exactly that tag, otherwise POST /v1/images/import of ${config.image.registryUrl} (untagged, so private), read every ${PROBE.pollSeconds} s to its end (timeout ${PROBE.importSeconds} s)`,
+      `preparation, networking ON: the inputs uploaded; ${config.image.tag} runs Nivra's fixed preparation script: corepack enable, corepack prepare ${config.packageManager} --activate, prints node, pnpm and uname -m, then pnpm install ${config.installArgs.join(" ")} in /workspace, its log kept outside the workspace and only its end printed; kept, its result image is the environment; read every ${PROBE.pollSeconds} s (timeout ${PROBE.prepareSeconds} s)`,
       `session from the prepared image, networking off: the snapshot uploaded and overlaid on /workspace, its listing checked with ${config.dependencyFolders.join(", ")} left out (timeout ${PROBE.overlaySeconds} s)`,
       `toolchain, networking off: node --version and pnpm --version must print ${config.image.node} and ${config.packageManager.slice("pnpm@".length)}, changes thrown away (timeout ${PROBE.toolchainSeconds} s)`,
       ...config.selections.map((selection) => `baseline ${selection.name}, networking off, changes thrown away (timeout ${PROBE.selectionSeconds} s)`),
@@ -417,7 +417,7 @@ const outcome = await runEnvProbe({
   pin: { tag: plan.config.image.tag, tagPrefix: plan.config.image.tagPrefix, registryUrl: plan.config.image.registryUrl, node: plan.config.image.node, packageManager: plan.config.packageManager, installArgs: plan.config.installArgs },
   selections: plan.config.selections,
   dependencyFolders: plan.config.dependencyFolders,
-  limits: { importSeconds: PROBE.importSeconds, prepareSeconds: PROBE.prepareSeconds, toolchainSeconds: PROBE.toolchainSeconds, selectionSeconds: PROBE.selectionSeconds, collectSeconds: PROBE.collectSeconds, sessionMs: PROBE.sessionMinutes * 60_000, closeMs: PROBE.cleanupMinutes * 60_000 },
+  limits: { importSeconds: PROBE.importSeconds, prepareSeconds: PROBE.prepareSeconds, toolchainSeconds: PROBE.toolchainSeconds, selectionSeconds: PROBE.selectionSeconds, collectSeconds: PROBE.collectSeconds, sessionMs: PROBE.sessionMinutes * 60_000, closeMs: PROBE.cleanupMinutes * 60_000, pollMs: PROBE.pollSeconds * 1000 },
   signal: work.signal,
   closeSignal: settling.signal,
   log,
