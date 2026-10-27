@@ -334,6 +334,20 @@ describe("tasks, brief versions and attempts (D26)", () => {
     const [attempt] = attemptsOf(workspace.db, taskId);
     assert.deepEqual([attempt?.briefId, (getArtifact(workspace.db, attempt!.briefId)?.content as { goal: string }).goal], [v1.id, "First goal"]);
   });
+
+  it("counts a task's runs only as its attempts, never another run link it owns, such as a coaching (NIV-53)", () => {
+    const workspace = ready(join(folder(), "workspace.db"));
+    const taskId = randomUUID();
+    const v1 = { id: randomUUID(), content: { goal: "First goal" }, derivedFrom: null };
+    insertTask(workspace.db, { id: taskId, title: "Export", projectId: null, createdAt: AT, updatedAt: AT }, v1);
+    const run = randomUUID();
+    insertAttempt(workspace.db, { id: run, taskId, briefId: v1.id, sessionId: "s", targetId: "local", status: "answered", createdAt: AT });
+    // A later run link the task owns that isn't a run of it, still going: the last attempt stays the run.
+    workspace.db.db
+      .prepare("INSERT INTO run_links (id, task_id, brief_id, session_id, workflow_id, target_id, status, preferences_json, created_at) VALUES (?, ?, ?, 's', 'coach', 'local', 'running', '[]', ?)")
+      .run(randomUUID(), taskId, v1.id, "2026-10-20T11:00:00.000Z");
+    assert.deepEqual(attemptsOf(workspace.db, taskId).map((attempt) => [attempt.id, attempt.status]), [[run, "answered"]]);
+  });
 });
 
 describe("reviews of plan versions (D31)", () => {
