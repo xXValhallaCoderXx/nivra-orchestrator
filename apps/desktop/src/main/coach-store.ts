@@ -47,8 +47,12 @@ export interface CoachingRecord {
   title: string;
   /** The task's project when it was asked for; null for a task with no repository. */
   projectId: string | null;
-  /** What it was bound to (Track B's context binding): ids, versions, digests and the title as sent, never the brief's text. */
-  binding: ContextBinding;
+  /**
+   * What it was bound to (Track B's context binding): ids, versions, digests and the title as sent, never the brief's
+   * text. Null when the stored binding can't be read back: the coaching still shows, stops and goes with its task, and
+   * its changes can't be saved.
+   */
+  binding: ContextBinding | null;
   bindingDigest: string;
   packetDigest: string;
   preferencesDigest: string;
@@ -66,6 +70,9 @@ export interface CoachingRecord {
   createdAt: string;
   link: CoachLink;
 }
+
+/** A coaching as it is stored when it is asked for: everything it is bound to, its binding always readable. */
+export type NewCoaching = Omit<CoachingRecord, "report" | "reportedAt" | "applied" | "link" | "binding"> & { binding: ContextBinding };
 
 const linkOf = (row: Row): CoachLink => ({
   id: str(row["id"]),
@@ -91,6 +98,16 @@ export function getCoachLink(workspace: WorkspaceDb, id: string): CoachLink | nu
   return row ? linkOf(row) : null;
 }
 
+/** A stored binding as Track B's contract reads it, or null when it can't be read back. */
+function bindingOf(json: string): ContextBinding | null {
+  try {
+    const parsed = ContextBinding.safeParse(JSON.parse(json));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
 function recordOf(workspace: WorkspaceDb, row: Row): CoachingRecord | null {
   const link = getCoachLink(workspace, str(row["id"]));
   if (!link) return null;
@@ -103,7 +120,7 @@ function recordOf(workspace: WorkspaceDb, row: Row): CoachingRecord | null {
     briefSha256: str(row["brief_sha256"]),
     title: str(row["title"]),
     projectId: strOrNull(row["project_id"]),
-    binding: ContextBinding.parse(JSON.parse(str(row["binding_json"]))),
+    binding: bindingOf(str(row["binding_json"])),
     bindingDigest: str(row["binding_digest"]),
     packetDigest: str(row["packet_digest"]),
     preferencesDigest: str(row["preferences_digest"]),
@@ -125,7 +142,7 @@ function recordOf(workspace: WorkspaceDb, row: Row): CoachingRecord | null {
  */
 export function insertCoaching(
   workspace: WorkspaceDb,
-  coaching: Omit<CoachingRecord, "report" | "reportedAt" | "applied" | "link">,
+  coaching: NewCoaching,
   link: Pick<CoachLink, "sessionId" | "targetId" | "preferences">,
 ): boolean {
   return workspace.tx((db) => {

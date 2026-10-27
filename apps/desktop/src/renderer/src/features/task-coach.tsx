@@ -29,6 +29,8 @@ export interface TaskCoachProps {
   onAccept(coachingId: string, fields: CoachField[]): Promise<void>;
   /** Opens the brief editor, or uses the open one, at this field. */
   onUpdateField(field: CoachQuestionField): void;
+  /** Why a question's Update can't open the editor now (a save going, another edit open); null when it can. */
+  updateBlocked: string | null;
   /** Whether a save of the coach's changes is going: the brief editor waits for it. */
   onSavingChange(saving: boolean): void;
 }
@@ -79,7 +81,7 @@ function droppedText(dropped: CoachReport["dropped"]): string | null {
 }
 
 /** The brief's guidance, an Ask the coach button, and the task's coachings, newest first. */
-export function TaskCoach({ task, coachings, editing, onPrepare, onStart, onCancel, onAccept, onUpdateField, onSavingChange }: TaskCoachProps) {
+export function TaskCoach({ task, coachings, editing, onPrepare, onStart, onCancel, onAccept, onUpdateField, updateBlocked, onSavingChange }: TaskCoachProps) {
   const [dialog, setDialog] = useState(false);
   const open = coachings?.find(isOpenCoaching) ?? null;
   const askBlocked =
@@ -113,6 +115,7 @@ export function TaskCoach({ task, coachings, editing, onPrepare, onStart, onCanc
             onCancel={onCancel}
             onAccept={onAccept}
             onUpdateField={onUpdateField}
+            updateBlocked={updateBlocked}
             onSavingChange={onSavingChange}
           />
         ))
@@ -400,6 +403,7 @@ function CoachingCard({
   onCancel,
   onAccept,
   onUpdateField,
+  updateBlocked,
   onSavingChange,
 }: {
   coaching: CoachingView;
@@ -410,6 +414,7 @@ function CoachingCard({
   onCancel(coachingId: string): Promise<void>;
   onAccept(coachingId: string, fields: CoachField[]): Promise<void>;
   onUpdateField(field: CoachQuestionField): void;
+  updateBlocked: string | null;
   onSavingChange(saving: boolean): void;
 }) {
   const [shown, setShown] = useState(!collapsed);
@@ -428,7 +433,7 @@ function CoachingCard({
   const saveBlocked = editing
     ? "Save or cancel your brief edits first."
     : stale
-      ? "These suggestions are for an earlier version of the brief, so they can't be saved. Ask again for this version."
+      ? "Something the coach read has changed since, as the lines below say, so these suggestions can't be saved. Ask the coach again for the task as it is now."
       : chosen.length === 0
         ? "Tick the changes you want to save."
         : null;
@@ -538,9 +543,22 @@ function CoachingCard({
                       </Text>
                     )}
                     <Group>
-                      <Button size="compact-xs" variant="default" onClick={() => onUpdateField(question.field)} data-testid="coach-update-field" data-field={question.field}>
+                      <Button
+                        size="compact-xs"
+                        variant="default"
+                        onClick={() => onUpdateField(question.field)}
+                        disabled={updateBlocked !== null}
+                        title={updateBlocked ?? undefined}
+                        data-testid="coach-update-field"
+                        data-field={question.field}
+                      >
                         Update {COACH_FIELD_LABELS[question.field].toLowerCase()}
                       </Button>
+                      {updateBlocked && (
+                        <Text size="xs" c="var(--nivra-text-3)" data-testid="coach-update-blocked">
+                          {updateBlocked}
+                        </Text>
+                      )}
                     </Group>
                   </Stack>
                 ))}

@@ -79,8 +79,8 @@ export const COACH_WORDS = {
     `The coach can't use ${model}: Nivra hasn't checked that it hands in an answer through a form, which the coach needs, so nothing was sent. Check Token Factory in Settings to see which models the key can use.`,
   notNamed: (allowed: string, offered: string) => `This coaching may use ${allowed} only, and the key's listing offers ${offered}, so nothing was sent. Check Token Factory in Settings to see which models the key can use.`,
   tooSmall: (needed: number, available: number) =>
-    `The model's context is too small for this coaching: about ${n(needed)} tokens are needed, and ${n(Math.max(0, available))} are available once ${n(ANSWER_TOKENS)} are held back for the answer, so nothing was sent. Shorten the brief's context, then ask the coach again.`,
-  overBudget: (needed: number, available: number) => `The coach's request needs about ${n(needed)} tokens, more than the ${n(available)} its estimated budget allows, so nothing was sent. Shorten the brief's context, then ask the coach again.`,
+    `The model's context is too small for this coaching: about ${n(needed)} tokens are needed, and ${n(Math.max(0, available))} are available once ${n(ANSWER_TOKENS)} are held back for the answer, so nothing was sent. Shorten the brief, starting with its longest part, then ask the coach again.`,
+  overBudget: (needed: number, available: number) => `The coach's request needs about ${n(needed)} tokens, more than the ${n(available)} its estimated budget allows, so nothing was sent. Shorten the brief, starting with its longest part, then ask the coach again.`,
   noTime: "The coaching ran out of time before its request could be sent, so nothing was sent. Ask the coach again.",
   late: (seconds: number) => `The coach didn't answer within the ${seconds} s this coaching had left. ${UNCHANGED} Ask the coach again.`,
   unreadable: (why: string) => `The coach's answer couldn't be used: ${why}. ${UNCHANGED} Ask the coach again if you want another try.`,

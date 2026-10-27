@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { coachingsOf, getCoaching, getCoachLink, insertCoaching, markCoachingApplied, openCoachings, settleCoaching, type CoachingRecord } from "../src/main/coach-store.ts";
+import { coachingsOf, getCoaching, getCoachLink, insertCoaching, markCoachingApplied, openCoachings, settleCoaching, type NewCoaching } from "../src/main/coach-store.ts";
 import { deleteTask, insertArtifact, insertAttempt, insertTask, recordRun, versionsOf, type ArtifactRecord } from "../src/main/workspace.ts";
 import { openWorkspace, type WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 import { BRIEFS } from "./fixtures/briefs.ts";
@@ -43,7 +43,7 @@ function task(db: WorkspaceDb, projectId: string | null = null): { taskId: strin
 const nextBrief = (db: WorkspaceDb, taskId: string, from: ArtifactRecord, derivedFrom: string | null = from.id) =>
   insertArtifact(db, { id: randomUUID(), kind: "brief", lineageId: taskId, content: { ...BRIEFS.vague, goal: "Records compare finish times in one unit" }, conversationId: null, taskId, messageId: null, runLinkId: null, derivedFrom, createdAt: LATER }, from.version)!;
 
-const coachingFor = (taskId: string, brief: ArtifactRecord, projectId: string | null = null, id: string = randomUUID()): Omit<CoachingRecord, "report" | "reportedAt" | "applied" | "link"> => ({
+const coachingFor = (taskId: string, brief: ArtifactRecord, projectId: string | null = null, id: string = randomUUID()): NewCoaching => ({
   id,
   taskId,
   briefId: brief.id,
@@ -230,5 +230,19 @@ describe("coachings of tasks in the workspace (NIV-53)", () => {
     });
     assert.equal(deleteTask(db, taskId), true);
     assert.deepEqual([getCoaching(db, coaching.id), versionsOf(db, taskId).length], [null, 0]);
+  });
+  it("lists, cancels and settles a coaching whose stored binding can't be read back, and lets its task go", () => {
+    const db = workspace();
+    const { taskId, brief } = task(db);
+    const coaching = coachingFor(taskId, brief);
+    // A binding the contract refuses (a finding named twice) is still stored as it came: reading it back must not throw.
+    const finding = { reviewId: randomUUID(), findingId: "arch-1" };
+    assert.equal(insertCoaching(db, { ...coaching, binding: { ...coaching.binding, findings: [finding, finding] } }, LINK), true);
+    const [read] = coachingsOf(db, taskId);
+    assert.deepEqual([read?.id, read?.binding, openCoachings(db, { taskId }).length], [coaching.id, null, 1]);
+    assert.equal(settleCoaching(db, coaching.id, { status: "cancelled" }, null, LATER), true);
+    assert.equal(getCoaching(db, coaching.id)?.link.status, "cancelled");
+    deleteTask(db, taskId);
+    assert.equal(getCoaching(db, coaching.id), null);
   });
 });

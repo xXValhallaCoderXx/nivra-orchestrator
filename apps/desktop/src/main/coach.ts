@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   bindingDigest,
   COACH_PROFILE,
+  ContextBinding,
   COACH_RUN_LIMITS,
   CoachField,
   CoachPacket,
@@ -12,7 +13,6 @@ import {
   type CoachContext,
   type CoachInput,
   type CoachReport,
-  type ContextBinding,
   type ContextChange,
   type FindingRef,
   type MissionContent,
@@ -287,6 +287,8 @@ export function sizeBlocked(packet: CoachPacket, preferences: PreferenceSnapshot
 export async function coachRequest(subject: CoachSubject, state: CoachState): Promise<{ preview: CoachPreview; input: CoachInput; context: CoachContext; packet: CoachPacket }> {
   const { project, brief } = subject;
   if (state.profile.id !== COACH_PROFILE.id || state.profile.version !== COACH_PROFILE.version) throw new Error("That isn't this version of the task readiness coach, so nothing was sent.");
+  // Parsed before anything is worked out from it, so nothing is stored that can't be read back (a finding named twice).
+  if (!ContextBinding.safeParse(state.binding).success) throw new Error("What this coaching would be bound to can't be recorded as it is, so nothing was sent. Open the task again, then ask the coach again.");
   // The binding names exactly this task as it is sent, the mission and findings sent with it, and the coach.
   const [bound] = state.binding.tasks;
   if (
@@ -445,7 +447,7 @@ export function applySelected(base: BriefContent, report: CoachReport, fields: r
 }
 
 /** What the coach's own checks find before a save, beside Track B's validator. */
-export type CoachOwnChange = "project-changed" | "profile-changed" | "applied" | "not-complete";
+export type CoachOwnChange = "project-changed" | "profile-changed" | "applied" | "not-complete" | "unreadable";
 
 /**
  * Why a coaching's changes can't be saved now, in the person's words, one line each. What Track B's validator reports
@@ -477,6 +479,9 @@ export function staleLines(changes: readonly ContextChange[], own: readonly Coac
         break;
       case "not-complete":
         lines.push("This coaching didn't end with a usable answer, so there is nothing to save. Ask the coach again if you want another answer.");
+        break;
+      case "unreadable":
+        lines.push("What this coaching was bound to can't be read back, so its changes can't be saved. Ask the coach again for the task as it is now.");
         break;
     }
   }

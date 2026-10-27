@@ -1076,8 +1076,13 @@ export class Host {
     const project = task.projectId ? this.#options.store.data.projects.find((p) => p.id === task.projectId) : undefined;
     if (task.projectId) {
       if (!project || this.#removing.has(project.id)) throw new Error("This task's repository was removed, so the coach wasn't asked. Choose another repository for it, or none, then ask again.");
-      if (!project.sharing.modelContext || this.#epochOf(project.id) !== epoch) throw new Error("Sharing for this task's project was turned off, so the coach wasn't asked.");
+      if (!project.sharing.modelContext || this.#epochOf(project.id) !== epoch) throw new Error("Sharing for this task's project was turned off, so the coach wasn't asked. Allow sharing for it, then ask the coach again.");
     }
+    // Read again just before it is stored, with no wait between: a move, a rename, a brief edit or a deletion during the
+    // waits above would otherwise go past the checks, or bind the coaching to a project the task has left.
+    const now = getTask(workspace, taskId);
+    if (!now) throw new Error("That task is no longer in the list.");
+    if (now.projectId !== task.projectId || now.title !== task.title || versionsOf(workspace, taskId).at(-1)?.id !== brief.id) throw new Error(COACH_CHANGED);
     const id = randomUUID();
     const coaching = {
       id,
@@ -1180,6 +1185,7 @@ export class Host {
       findings: found.findings.map((finding) => ({ reviewId: finding.ref.reviewId, findingId: finding.ref.findingId, title: finding.finding.title, reviewedBriefVersion: finding.reviewed.briefVersion })),
     };
     if (selection.findings.length > 3) throw new Error("Tick at most three findings, then ask the coach.");
+    if (new Set(selection.findings.map((ref) => `${ref.reviewId} ${ref.findingId}`)).size !== selection.findings.length) throw new Error("Tick each finding once, then ask the coach.");
     const ticked = selection.findings.map((ref) => {
       const finding = found.findings.find((one) => one.ref.reviewId === ref.reviewId && one.ref.findingId === ref.findingId);
       if (!finding) throw new Error("A finding you ticked is no longer about this task. Check the new preview, then ask the coach again.");
@@ -1219,6 +1225,7 @@ export class Host {
     if (coaching.applied) own.push("applied");
     const report = coaching.report ? CoachReport.safeParse(coaching.report) : null;
     if (coaching.link.status !== "answered" || !report?.success || report.data.outcome !== "complete") own.push("not-complete");
+    if (!coaching.binding) return staleLines([], [...own, "unreadable"]);
     return staleLines(validateBinding(workspace, coaching.binding), own);
   }
 
@@ -4590,11 +4597,11 @@ function coachNote(link: CoachLink): string | null {
             ? `Cancelled. ${link.errorMessage}`
             : "Cancelled. Nothing was resent, and your brief is unchanged.";
     case "interrupted":
-      return "Interrupted: Nivra or its engine stopped before the coach answered. Nothing was resent, and your brief is unchanged.";
+      return "Interrupted: Nivra or its engine stopped before the coach answered. Nothing was resent, and your brief is unchanged. Ask the coach again if you want an answer.";
     case "not-sent":
-      return `Not sent: ${link.errorMessage ?? "nothing reached the model."}`;
+      return `Not sent: ${link.errorMessage ?? "nothing reached the model."} Ask the coach again when you're ready.`;
     case "unknown":
-      return `Nivra can't tell how this coaching ended: ${link.errorMessage ?? "its engine can't say"}. Nothing was resent, and your brief is unchanged.`;
+      return `Nivra can't tell how this coaching ended: ${link.errorMessage ?? "its engine can't say"}. Nothing was resent, and your brief is unchanged. Ask the coach again if you want an answer.`;
     default:
       return null;
   }

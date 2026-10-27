@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import { openWorkspace, type WorkspaceOpening } from "../src/main/workspace-db.t
 import type { CoachSelection } from "../src/shared/coach.ts";
 import type { BriefFields } from "../src/shared/ipc.ts";
 import { startStub, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
+import { seedMission, seedMissionReview } from "../e2e/seed-workspace.ts";
 import { CASE } from "./fixtures/briefs.ts";
 
 /**
@@ -27,6 +28,7 @@ import { CASE } from "./fixtures/briefs.ts";
  * coach never moves a task's state, its runs or what a run is judged by.
  */
 const ENGINE = fileURLToPath(new URL("../../engine/src/main.mjs", import.meta.url));
+const GATED = fileURLToPath(new URL("./fixtures/gated-engine.mjs", import.meta.url));
 const KEY = "test-key-0123456789";
 const NONE: CoachSelection = { mission: false, findings: [] };
 const dirs: string[] = [];
@@ -48,16 +50,16 @@ async function waitFor<T>(check: () => T | null | false | Promise<T | null | fal
   }
 }
 
-const localTarget = (home: string, extraArgs: readonly string[]) => new LocalTarget({ platform: "linux", runtime: { node: process.execPath, entry: ENGINE, runtimeHash: null }, home, extraArgs });
+const localTarget = (home: string, extraArgs: readonly string[], entry = ENGINE) => new LocalTarget({ platform: "linux", runtime: { node: process.execPath, entry, runtimeHash: null }, home, extraArgs });
 /** A target that says it is a WSL distribution, running its engine locally with its own home. */
 const standInWsl = (inner: ExecutionTarget): ExecutionTarget => ({ descriptor: { id: "wsl:Test", kind: "wsl", label: "Test · WSL", platform: "linux", distro: "Test" }, probe: () => inner.probe(), prepare: (request) => inner.prepare(request) });
 
 /** A host on the records under `root`, its engines reaching the stub: a second one is a restart. */
-function hostAt(root: string, url: string, testHooks?: { coachApplying?(coachingId: string): void }) {
+function hostAt(root: string, url: string, testHooks?: { coachApplying?(coachingId: string): void }, localEntry = ENGINE) {
   const extraArgs = ["--token-factory-url", url];
   const wsl = standInWsl(localTarget(join(root, "wsl home"), extraArgs));
   const targets: TargetFactory = {
-    local: localTarget(join(root, "local home"), extraArgs),
+    local: localTarget(join(root, "local home"), extraArgs, localEntry),
     discoverWsl: async () => ({ discovery: { status: "ready", wslExe: "wsl.exe", distros: [{ name: "Test", version: 2, isDefault: true, defaultUid: 1000, osVersion: null }], hidden: [] }, targets: [wsl] }),
   };
   const keys: { current: Partial<Record<SecretName, string>> } = { current: { NEBIUS_API_KEY: KEY } };
@@ -290,6 +292,85 @@ describe("Host: the task readiness coach (NIV-53)", () => {
     assert.deepEqual([stopped.status, stopped.note], ["cancelled", "Stopped: sharing for this task's project was turned off. Nothing was resent, and your brief is unchanged."]);
     assert.equal(coachRequests(stub).length, 1);
     host.deleteTask(taskId);
+  });
+
+  it("refuses a finding ticked twice before anything is worked out, stored or sent, and sends one ticked once", async () => {
+    const stub = await stubFor();
+    const root = mkdtempSync(join(tmpdir(), "nivra coach ü%# "));
+    dirs.push(root);
+    const seeded = seedMission(join(root, "workspace.db"), {
+      mission: { name: "Trustworthy records", intendedUsers: "Runners", outcome: "Records compare like with like.", successCriteria: [], constraints: [], nonGoals: [] },
+      tasks: [{ title: "Personal records use one unit", goal: "Fix the PR detection bug", acceptanceCriteria: ["It works"] }],
+    });
+    const { reviewId } = seedMissionReview(join(root, "workspace.db"), {
+      missionId: seeded.missionId,
+      taskIds: seeded.taskIds,
+      findings: [{ role: "architecture", title: "Units aren't stored", detail: "Older runs have no unit.", recommendation: "Say what happens to them.", refs: ["T1"] }],
+    });
+    const { host } = hostAt(root, stub.url);
+    const taskId = seeded.taskIds[0]!;
+    const ref = { reviewId, findingId: "arch-1" };
+    for (const call of [() => host.prepareCoach(taskId, { mission: false, findings: [ref, ref] }), () => host.startCoach(taskId, { mission: false, findings: [ref, ref] }, "a".repeat(64))]) {
+      await assert.rejects(call(), /^Error: Tick each finding once, then ask the coach\.$/);
+    }
+    assert.deepEqual([host.coachings(taskId).length, stub.requests.length], [0, 0]);
+    const once = await host.prepareCoach(taskId, { mission: true, findings: [ref] });
+    assert.deepEqual([once.options.findings.map((finding) => finding.findingId), once.text.includes("F1"), once.text.includes("F2"), once.text.includes("Mission (M), v1: Trustworthy records")], [["arch-1"], true, false, true]);
+    await host.startCoach(taskId, { mission: true, findings: [ref] }, once.expected);
+    const coaching = await ended(host, taskId);
+    assert.deepEqual([coaching.status, coaching.sent.findings, coaching.sent.mission?.name, coaching.stale], ["answered", 1, "Trustworthy records", []]);
+  });
+
+  it("stops a coaching when its task's project is removed, says why, and sends nothing again", async () => {
+    const stub = await stubFor(() => ({ ...toolCall(COACH_TOOL, ANSWER), delayMs: 15_000 }));
+    const { root, projectId } = rootWithProject(true);
+    const { host } = hostAt(root, stub.url);
+    const task = await host.createTask({ title: "Personal records use one unit", fields: VAGUE, projectId, planId: null });
+    const taskId = task.summary.id;
+    await ask(host, taskId);
+    await waitFor(() => coachRequests(stub).length === 1, "the coach's request");
+    await host.removeProject(projectId);
+    const stopped = await ended(host, taskId);
+    assert.deepEqual([stopped.status, stopped.note], ["cancelled", "Stopped: the task's project was removed. Nothing was resent, and your brief is unchanged."]);
+    assert.equal(coachRequests(stub).length, 1);
+  });
+
+  it("reads a coaching left open by a quit as interrupted after a restart, keeps the brief, and sends nothing again", async () => {
+    const stub = await stubFor(() => ({ ...toolCall(COACH_TOOL, ANSWER), delayMs: 30_000 }));
+    const root = mkdtempSync(join(tmpdir(), "nivra coach ü%# "));
+    dirs.push(root);
+    const first = hostAt(root, stub.url).host;
+    const task = await first.createTask({ title: "Personal records use one unit", fields: VAGUE, projectId: null, planId: null });
+    const taskId = task.summary.id;
+    await ask(first, taskId);
+    await waitFor(() => coachRequests(stub).length === 1, "the coach's request");
+    await first.shutdown();
+    const second = hostAt(root, stub.url).host;
+    const ended2 = await ended(second, taskId);
+    assert.deepEqual([ended2.status, ended2.note?.startsWith("Interrupted: Nivra or its engine stopped before the coach answered."), second.task(taskId).brief.version], ["interrupted", true, 1]);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(coachRequests(stub).length, 1, "nothing was sent again");
+  });
+
+  it("finds a coaching whose start answer was lost by its request id after a restart, keeps its report, and sends it once", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra coach ü%# "));
+    dirs.push(root);
+    const home = join(root, "local home");
+    mkdirSync(home, { recursive: true });
+    // The gated engine records the run when it is asked to (`accept`) and holds its answer (no `release`): the answer is lost.
+    writeFileSync(join(home, "accept"), "");
+    const calls = () => (existsSync(join(home, "calls.log")) ? readFileSync(join(home, "calls.log"), "utf8").split("\n").filter(Boolean) : []);
+    const first = hostAt(root, "http://127.0.0.1:9/v1", undefined, GATED).host;
+    const task = await first.createTask({ title: "Personal records use one unit", fields: VAGUE, projectId: null, planId: null });
+    const taskId = task.summary.id;
+    await ask(first, taskId);
+    await waitFor(() => calls().includes("runs.start"), "the coaching's request to reach the engine");
+    await first.shutdown();
+    const second = hostAt(root, "http://127.0.0.1:9/v1", undefined, GATED).host;
+    const coaching = await ended(second, taskId);
+    assert.deepEqual([coaching.status, coaching.report?.summary, calls().includes("runs.find"), calls().filter((call) => call === "runs.start").length], ["answered", "A gated coaching.", true, 1]);
+    const saved = await second.acceptCoachChanges(taskId, second.task(taskId).revision, coaching.id, ["goal"]);
+    assert.equal(saved.brief.content.goal, "A gated goal");
   });
 
   it("keeps its report after a restart, still savable, and the applied mark after another", async () => {
