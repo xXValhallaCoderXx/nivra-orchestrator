@@ -2558,7 +2558,7 @@ except where the list above says so):
 
 Track B's mission review, on D42's foundation: a mission written with no repository, a backlog and its board, a review
 of up to five selected tasks by the council's specialists, findings that open the task, and stale reports. On
-`feature/niv-52`, stacked on `feature/niv-52-foundation`. The engine mode was built in parallel by a helper on
+`feature/niv-52`, on the foundation (#26), and integrated with `main` after the coach (#27) merged. The engine mode was built in parallel by a helper on
 `feature/niv-52-engine`, from the foundation's contract commit, then merged; then an independent review.
 
 | Commit | What |
@@ -2576,6 +2576,8 @@ of up to five selected tasks by the council's specialists, findings that open th
 | `a46fe7c` | Nate's review of #25: the live check's approval is used once, claimed atomically and kept, whatever `--out` or `--home` says |
 | `ca44e48` | The claim's place said as it is: before the checkout is checked, the key is read or anything is sent |
 | `65094d7`, `1be62b3`, `9427884` | Merges of the foundation, bringing its review fixes (`2b61660`, `1c27882`) and its record |
+| `ff9bba5` | `main` merged in, with the foundation (#26) and the coach (#27): both tracks' calls, the expected API as their union, and the coach's D43 and record before this one |
+| `4440a57` | Protocol 14 and D44, after the coach's 13 and D43: the version, its six pins, this decision and this record |
 | this record | D44, the development notes and this section |
 
 **NIV-52's flow, shown:**
@@ -2622,9 +2624,17 @@ of up to five selected tasks by the council's specialists, findings that open th
   C covers it, in Track A's candidate step, including `workspace-windows.spec.ts`'s mission test (`7745c6e`). Windows
   validation is pending on that candidate. Nothing here changes a target, the supervisor or staging, so
   `verify:windows` isn't needed for this branch.
-- **Not run: the live check.** Nate deferred it until after the integration with Track C and the renumbering. The
-  digest printed at `68a49df` is withdrawn: a fresh recipe and digest will be printed for the revision to be tested,
-  and nothing runs under the old one. No paid call was made.
+- **On the integrated code, `4440a57`** (Nate asked for the checks after `main` was merged in):
+  - `pnpm verify`: 1,241 (domain 100, engine 743, desktop 398), none skipped.
+  - The built app, every spec: 94 passed and 1 skipped (the same packaged-only `explain.spec.ts` test). The missions
+    spec's 8 tests and the coach spec's 11 passed among them.
+  - The packaged app, after `stage:runtime linux-x64` and `package:dir`: 32 passed and 63 skipped. The skips are the
+    53 skipped before and the coach spec's 10, all needing the stub switches a packaged app ignores.
+  - A real engine through `rpc.ts`, on protocol 14, against a loopback stub: a three-task mission review completed with
+    exactly three chat requests; a key split across two parts was refused in the context step, with no request.
+- **Not run: the live check.** Nate deferred it until after the integration. Its recipe and digest for the revision
+  to be tested are printed apart from this record, since a digest bound to a commit can't be written into it. The
+  digest printed at `68a49df` is withdrawn. No paid call was made.
 
 ### Deferred to a later milestone (kept, not dropped)
 
