@@ -120,6 +120,7 @@ import {
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
 import { amendedContent, amendedPlanFields, researchNoteFor, researchReportMatches, researchRequest, researchStopFailedText, type ResearchSubject } from "./research.ts";
 import { getResearch, insertResearch, openResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
+import { missionOfConversation } from "./mission-store.ts";
 import { historicalReferences, packetFor, previewFingerprint, reportMatches, REVIEW_REQUESTS, reviewNoteFor } from "./reviews.ts";
 import {
   BriefContentSchema,
@@ -456,7 +457,7 @@ export class Host {
   /** One conversation as it is now, read from the workspace. Asks no engine and starts nothing. */
   conversation(conversationId: string): ConversationView {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const summary = this.#conversationView(record);
     const engine = this.#engineView(record.targetId);
@@ -479,7 +480,7 @@ export class Host {
    */
   async openConversation(conversationId: string): Promise<ConversationView> {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const open = openTurns(workspace, { conversationId }).filter((turn) => !this.#submissions.has(turn.id));
     if (open.length) {
@@ -501,7 +502,7 @@ export class Host {
     if (!message) throw new Error("Type a message first.");
     if (message.length > CHAT_LIMITS.messageChars) throw new Error(`That message is ${message.length} characters long, and a turn can carry ${CHAT_LIMITS.messageChars}. Shorten it, then send it again.`);
     refuseCredentials("Your message", message, await this.#knownSecrets(), "send");
-    const conversation = getConversation(workspace, conversationId);
+    const conversation = this.#listedConversation(conversationId);
     if (!conversation) throw new Error("That conversation is no longer in the list.");
     const busy = () => this.#busyReason(conversationId, "send again") ?? "This conversation is still waiting for an answer. Wait for it, or cancel it, then send again.";
     if (openTurns(workspace, { conversationId }).length) throw new Error(busy());
@@ -547,7 +548,7 @@ export class Host {
    */
   async deleteConversation(conversationId: string): Promise<void> {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const open = openTurns(workspace, { conversationId });
     // Research is stopped with a stop of its own (D37), which alone is taken back if the conversation stays.
@@ -589,7 +590,7 @@ export class Host {
    */
   async savePlan(conversationId: string, messageId: string, text?: string): Promise<PlanView> {
     const workspace = this.#workspaceDb();
-    const conversation = getConversation(workspace, conversationId);
+    const conversation = this.#listedConversation(conversationId);
     if (!conversation) throw new Error("That conversation is no longer in the list.");
     const answer = messagesOf(workspace, conversationId).find((m) => m.id === messageId && m.role === "assistant");
     if (!answer?.reply) throw new Error("That answer is no longer in this conversation.");
@@ -607,8 +608,8 @@ export class Host {
   /** Saves an edit of a plan as its next version; the versions before it, and briefs made from them, stay as they are. */
   async revisePlan(planId: string, text: string): Promise<PlanView> {
     const workspace = this.#workspaceDb();
-    const plan = getArtifact(workspace, planId);
-    if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+    const plan = this.#listedPlan(planId);
+    if (!plan) throw new Error("That plan is no longer here.");
     const edited = this.#planText(text);
     refuseCredentials("The plan", edited, await this.#knownSecrets());
     const latest = versionsOf(workspace, plan.lineageId).at(-1)!;
@@ -624,6 +625,7 @@ export class Host {
   /** A conversation's plans: every version, oldest first. */
   plans(conversationId: string): PlanView[] {
     const workspace = this.#workspaceDb();
+    if (missionOfConversation(workspace, conversationId)) throw new Error("That conversation is no longer in the list.");
     const plans = workspace.db.prepare("SELECT id FROM artifacts WHERE kind = 'plan' AND conversation_id = ? ORDER BY created_at, version").all(conversationId);
     return plans.map((row) => this.#planView(getArtifact(workspace, String(row["id"]))!));
   }
@@ -685,7 +687,7 @@ export class Host {
   /** A conversation's reviews, oldest first, read from the workspace. Asks no engine and starts nothing. */
   reviews(conversationId: string): ReviewView[] {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const engine = this.#engineView(record.targetId);
     return reviewsOf(workspace, conversationId).map((review) => this.#reviewView(review, engine));
@@ -693,6 +695,7 @@ export class Host {
 
   /** Stops a review the person no longer wants, as a turn is stopped; its end is recorded as cancelled by the person. */
   async cancelReview(conversationId: string, reviewId: string): Promise<ReviewView[]> {
+    if (!this.#listedConversation(conversationId)) throw new Error("That review is no longer in this conversation.");
     const review = getReview(this.#workspaceDb(), reviewId);
     if (!review || review.conversationId !== conversationId) throw new Error("That review is no longer in this conversation.");
     await this.#cancelLink(review.link);
@@ -762,7 +765,7 @@ export class Host {
   /** A conversation's research, oldest first, read from the workspace. Asks no engine and starts nothing. */
   research(conversationId: string): ResearchView[] {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const engine = this.#engineView(record.targetId);
     return researchOf(workspace, conversationId).map((research) => this.#researchView(research, engine));
@@ -770,6 +773,7 @@ export class Host {
 
   /** Stops research the person no longer wants (D37); its end is recorded as cancelled by the person. */
   async cancelResearch(conversationId: string, researchId: string): Promise<ResearchView[]> {
+    if (!this.#listedConversation(conversationId)) throw new Error("That research is no longer in this conversation.");
     const research = getResearch(this.#workspaceDb(), researchId);
     if (!research || research.conversationId !== conversationId) throw new Error("That research is no longer in this conversation.");
     await this.#cancelLink(research.link);
@@ -900,8 +904,8 @@ export class Host {
     if (input.projectId !== null) this.#project(input.projectId);
     let sources: BriefContent["sources"] = [];
     if (input.planId !== null) {
-      const plan = getArtifact(workspace, input.planId);
-      if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+      const plan = this.#listedPlan(input.planId);
+      if (!plan) throw new Error("That plan is no longer here.");
       sources = [sourceFrom({ id: plan.id, lineageId: plan.lineageId, version: plan.version, content: plan.content as PlanContent })];
     }
     const drafted = briefFrom(fields, sources);
@@ -938,8 +942,8 @@ export class Host {
     const task = this.#taskAt(taskId, revision);
     if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
     this.#holdForSettling(taskId, "its brief can't change");
-    const plan = getArtifact(workspace, planId);
-    if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+    const plan = this.#listedPlan(planId);
+    if (!plan) throw new Error("That plan is no longer here.");
     const latest = versionsOf(workspace, taskId).at(-1)!;
     const before = BriefContentSchema.parse(latest.content);
     if (!before.sources.some((source) => source.planLineage === plan.lineageId)) throw new Error("This task's brief didn't come from that plan.");
@@ -1340,7 +1344,7 @@ export class Host {
    * has no project to restart it from, so this is its way back after its engine stops.
    */
   async restartConversationEngine(conversationId: string): Promise<ConversationView> {
-    const record = getConversation(this.#workspaceDb(), conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     await this.#restartTarget(record.targetId);
     return this.openConversation(conversationId);
@@ -3082,6 +3086,22 @@ export class Host {
     };
   }
 
+  /**
+   * A conversation the person can reach: any but a mission's own (NIV-52), which holds only that mission's review plans
+   * and reviews, and is reached through its mission.
+   */
+  #listedConversation(conversationId: string): ConversationRecord | null {
+    const workspace = this.#workspaceDb();
+    return missionOfConversation(workspace, conversationId) ? null : getConversation(workspace, conversationId);
+  }
+
+  /** A saved plan version the person can reach: one in a listed conversation, never a mission's review plan (NIV-52). */
+  #listedPlan(planId: string): ArtifactRecord | null {
+    const workspace = this.#workspaceDb();
+    const plan = getArtifact(workspace, planId);
+    return plan?.kind === "plan" && plan.conversationId !== null && !missionOfConversation(workspace, plan.conversationId) ? plan : null;
+  }
+
   /** The keys the host holds, for the protection policy (D8, D26). */
   async #knownSecrets(): Promise<KnownSecrets> {
     return Object.entries(await this.#options.credentials()).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
@@ -3131,7 +3151,7 @@ export class Host {
   #reviewSubject(planId: string): ReviewSubject {
     const workspace = this.#workspaceDb();
     const plan = getArtifact(workspace, planId);
-    const conversation = plan?.kind === "plan" && plan.conversationId ? getConversation(workspace, plan.conversationId) : null;
+    const conversation = plan?.kind === "plan" && plan.conversationId ? this.#listedConversation(plan.conversationId) : null;
     if (!plan || !conversation) throw new Error("That plan is no longer here.");
     if (conversation.projectId === null) return { plan, conversation, project: null };
     const project = this.#options.store.data.projects.find((p) => p.id === conversation.projectId);
@@ -3185,7 +3205,7 @@ export class Host {
   #researchSubject(planId: string): ResearchSubject {
     const workspace = this.#workspaceDb();
     const plan = getArtifact(workspace, planId);
-    const conversation = plan?.kind === "plan" && plan.conversationId ? getConversation(workspace, plan.conversationId) : null;
+    const conversation = plan?.kind === "plan" && plan.conversationId ? this.#listedConversation(plan.conversationId) : null;
     if (!plan || !conversation) throw new Error("That plan is no longer here.");
     const latestVersion = versionsOf(workspace, plan.lineageId).at(-1)?.version ?? plan.version;
     if (conversation.projectId === null) return { plan, latestVersion, conversation, project: null };
