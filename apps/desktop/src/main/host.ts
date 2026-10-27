@@ -226,7 +226,11 @@ export interface HostOptions {
   supervisor?: Pick<SupervisorOptions, "heartbeatMs" | "shutdownGraceMs" | "eofGraceMs" | "startTimeoutMs">;
   log: (line: string) => void;
   /** Tests only: called between fetching a turn's reply and writing it, so a deletion can land there. */
-  testHooks?: { beforeProjection?(turnId: string): Promise<void> };
+  testHooks?: {
+    beforeProjection?(turnId: string): Promise<void>;
+    /** Inside the transaction that saves a coach's ticked changes, after the new version and before the applied mark: a throw here must leave neither (NIV-53). */
+    coachApplying?(coachingId: string): void;
+  };
 }
 
 /** Why a conversation can't continue once its project is gone. */
@@ -1149,6 +1153,7 @@ export class Host {
       if (latest.id !== coaching.briefId || latest.sha256 !== coaching.briefSha256) throw new Error(staleLines([{ kind: "brief-changed", taskId, title: task.title, from: coaching.briefVersion, to: latest.version }], []).join(" "));
       const report = CoachReport.parse(coaching.report);
       const saved = this.#reviseFrom(task, latest, applySelected(BriefContentSchema.parse(latest.content), report, fields), known);
+      this.#options.testHooks?.coachApplying?.(coachingId);
       if (!markCoachingApplied(workspace, coachingId, saved.id, fields, new Date().toISOString())) throw new Error("Changes from this coaching were saved already, so nothing new was saved.");
     });
     return this.task(taskId);
