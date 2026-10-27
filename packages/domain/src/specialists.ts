@@ -3,9 +3,10 @@ import { z } from "zod";
 /**
  * Nivra's built-in specialists (NIV-52, NIV-53): fixed, versioned instructions, each with a name, a personality and a
  * purpose the window shows. A profile grants nothing: no tools, no memory, no writes and no permission. Its personality
- * changes how it writes, never what it may do. The engine holds each profile's instructions, and an engine test pins
- * their hash to the version here, so the text can't change without a new version. A result records the versions it
- * was made with, and stays readable, labelled with them, after a profile moves on.
+ * changes how it writes, never what it may do. Whoever holds a profile's instructions pins their hash to its version
+ * here in a test (the council's with the mission review, the coach's with Track C's coach), so the text can't change
+ * without a new version. A result records the versions it was made with, and stays readable, labelled with them, after
+ * a profile moves on.
  *
  * The council's three profiles review a mission's selected tasks (Track B). The coach prepares one task (Track C,
  * which owns its entry's wording and version).

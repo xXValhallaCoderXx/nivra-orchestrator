@@ -594,4 +594,35 @@ describe("a project's environment (D41)", () => {
     assert.equal(insertPreparation(migrated.db, { id, projectId, sessionId: "s", targetId: "wsl:Ubuntu", spec: { filters: [] }, preview: "e".repeat(64), createdAt: AT }), true);
     assert.deepEqual([environmentOf(migrated.db, projectId)?.spec, environmentOf(migrated.db, projectId)?.prepared, latestPreparation(migrated.db, projectId)?.id], [{ filters: [] }, null, id]);
   });
+
+  it("moves a v5 file to v6 (missions, NIV-52) with every row and every earlier table as it was, and no mission yet", () => {
+    const path = join(folder(), "workspace.db");
+    // A v5 file, written as v5 wrote one: its schema alone, then rows through the same functions, an environment included.
+    const raw = new DatabaseSync(path);
+    raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+    raw.exec("BEGIN IMMEDIATE");
+    for (const migration of WORKSPACE_MIGRATIONS.slice(0, 5)) raw.exec(migration);
+    raw.exec("PRAGMA user_version = 5; COMMIT;");
+    const v5 = new WorkspaceDb(path, raw);
+    const chat = general();
+    insertConversation(v5, chat);
+    insertTurn(v5, { id: randomUUID(), conversationId: chat.id, sessionId: "s", targetId: "local", preferences: [], history: null, createdAt: AT }, { id: randomUUID(), text: "How do I stage this?" });
+    insertTask(v5, { id: randomUUID(), title: "Stage", projectId: null, createdAt: AT, updatedAt: AT }, { id: randomUUID(), content: { goal: "Stage" }, derivedFrom: null });
+    insertPreparation(v5, { id: randomUUID(), projectId: randomUUID(), sessionId: "s", targetId: "wsl:Ubuntu", spec: { filters: [] }, preview: "e".repeat(64), createdAt: AT });
+    const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages", "reviews", "research", "attempt_records", "environments", "preparations"];
+    const dump = (db: DatabaseSync) => ({
+      rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
+      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
+    });
+    const before = dump(raw);
+    assert.deepEqual(before.rows.map((rows) => rows.length), [1, 1, 1, 1, 1, 0, 0, 0, 1, 1]);
+    v5.close();
+
+    const migrated = ready(path);
+    assert.equal(migrated.schemaVersion, 6);
+    assert.deepEqual(dump(migrated.db.db), before);
+    const count = (table: string) => Number(migrated.db.db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
+    assert.deepEqual([count("missions"), count("mission_versions"), count("mission_tasks")], [0, 0, 0]);
+    assert.deepEqual(listConversations(migrated.db).map((conversation) => conversation.id), [chat.id], "an existing conversation stays listed");
+  });
 });

@@ -270,10 +270,56 @@ describe("the shared context check (NIV-52, NIV-53)", () => {
     const db = workspace(path);
     const base = bindingFor(db, seeded.missionId, seeded.taskIds);
     assert.deepEqual(validateBinding(db, { ...base, findings: [{ reviewId, findingId: "risk-1" }] }), []);
-    assert.deepEqual(validateBinding(db, { ...base, findings: [{ reviewId, findingId: "risk-2" }] }), [{ kind: "finding-gone", reviewId, findingId: "risk-2" }]);
+    assert.deepEqual(validateBinding(db, { ...base, findings: [{ reviewId, findingId: "risk-2" }] }), [{ kind: "finding-gone", reviewId, findingId: "risk-2", reason: "gone" }]);
     assert.deepEqual(validateBinding(db, { ...base, findings: [{ reviewId: randomUUID(), findingId: "arch-1" }] }).map((change) => change.kind), ["finding-gone"]);
     const forged = { ...base, tasks: [{ ...base.tasks[0]!, briefSha256: "f".repeat(64) }] };
     assert.deepEqual(validateBinding(db, forged).map((change) => change.kind), ["brief-changed"]);
+  });
+
+  it("keeps a finding to its review's mission and to the tasks it names, even when no mission was bound", () => {
+    const path = join(folder(), "workspace.db");
+    const seeded = seedMission(path, {
+      mission: MISSION,
+      tasks: [
+        { title: "Store runs", goal: "g", acceptanceCriteria: ["c"] },
+        { title: "Weekly total", goal: "g", acceptanceCriteria: ["c"] },
+      ],
+    });
+    const [store, total] = seeded.taskIds as [string, string];
+    const { reviewId } = seedMissionReview(path, {
+      missionId: seeded.missionId,
+      taskIds: [store, total],
+      findings: [{ role: "risks", title: "No check for a lost run", detail: "d", recommendation: "r", refs: ["T1"] }],
+    });
+    const db = workspace(path);
+    // As the coach binds one: the task and the finding the person ticked, without the mission.
+    const coached = { ...bindingFor(db, seeded.missionId, [store]), mission: null, findings: [{ reviewId, findingId: "risk-1" }] };
+    assert.deepEqual(validateBinding(db, coached), []);
+    // The finding names T1, Store runs: bound to the other task, it isn't about anything bound here.
+    const elsewhere = { ...bindingFor(db, seeded.missionId, [total]), mission: null, findings: [{ reviewId, findingId: "risk-1" }] };
+    assert.deepEqual(validateBinding(db, elsewhere).map((change) => [change.kind, changeText(change)]), [["finding-gone", "Finding risk-1 isn't about a task this was made from."]]);
+    // The task moves to another mission: the finding stays its old mission's, so the task has left it behind.
+    removeMissionTask(db, seeded.missionId, store);
+    const other = mission(db);
+    addMissionTask(db, other.id, store, AT);
+    assert.deepEqual(validateBinding(db, coached), [{ kind: "membership-removed", taskId: store, title: "Store runs", missionId: seeded.missionId }]);
+    // Bound with the mission too, the removal is reported once.
+    const both = { ...coached, mission: missionRefOf(latestMissionVersion(db, seeded.missionId)!) };
+    assert.deepEqual(validateBinding(db, both).map((change) => change.kind), ["membership-removed"]);
+  });
+
+  it("compares the version numbers it was given, and checks a binding's shape before anything else", () => {
+    const db = workspace();
+    const { id } = mission(db);
+    const first = task(db, "Store runs");
+    addMissionTask(db, id, first, AT);
+    const binding = bindingFor(db, id, [first]);
+    const wrongBrief = { ...binding, tasks: [{ ...binding.tasks[0]!, briefVersion: 7 }] };
+    assert.deepEqual(validateBinding(db, wrongBrief).map((change) => change.kind), ["brief-changed"]);
+    const wrongMission = { ...binding, mission: { ...binding.mission!, version: 7 } };
+    assert.deepEqual(validateBinding(db, wrongMission).map((change) => [change.kind, changeText(change)]), [["mission-changed", "The mission is now at v1; v7 was sent."]]);
+    const twice = { ...binding, tasks: [binding.tasks[0]!, binding.tasks[0]!] };
+    assert.match(refusal(() => validateBinding(db, twice)), /Each task appears once/);
   });
 
   it("runs inside the transaction that would save a suggestion: a stale one saves nothing, while ordinary editing goes on", () => {
