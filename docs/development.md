@@ -457,17 +457,21 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e task-apply.spec.ts
 
 - **The engine's parts** (`apps/engine/src/apply/`): `plan.ts` (the shared contract and the refusals' words),
   `revalidate.ts` (the checks before anything is written), `writer.ts` (the write, rollback and restore, and
-  reconciling), `io.ts` (every filesystem call the writer makes, so a test can fail any of them), `journal.ts` (engine
-  migration 5) and `service.ts` (the protocol's four calls, one apply at a time, and reconciling at start).
+  reconciling), `anchors.ts` (the folders an apply holds open: every call names its file through
+  `/proc/self/fd/<descriptor>/<name>`, so nothing is written through a folder swapped for a link), `io.ts` (every
+  filesystem call the writer makes, so a test can fail any of them), `journal.ts` (engine migration 5) and `service.ts`
+  (the protocol's four calls, one apply at a time, and reconciling at start).
 - **Recovery folder names** are positional: `new-<n>` (Nivra's bytes), `orig-<n>` (the original moved aside),
   `back-<n>-<m>` (a version taken back by rollback or restore). `nivra-apply/lock` names the engine and the apply that
-  hold the folder.
+  hold the folder. Settling removes only a name that is a second name for the file at its path, so each apply's folder
+  stays, its originals in it, until the person deletes it.
 - **The writer's tests** fail every filesystem call in turn (`apply-writer.test.ts`), save a file at each gap through
   the writer's step hooks, and kill a child process at every call (`apply-kill.test.ts`, with `apply-kill-child.ts`);
   `apply-fixtures.ts` holds the plan helpers. Revalidation's tests use real proposals from `attempt()`.
 - **The gated engine** stands in for the apply calls in the host's tests: `task-report` makes runs.task answer with a
-  verified proposal; `refuse-apply`, `hold-apply`/`release-apply`, `error-apply` and `partial-apply` shape
-  `task.apply`'s answer, and `applies.log` records each request id.
+  verified proposal; `refuse-apply`, `hold-apply`/`release-apply`, `error-apply` and `partial-apply` (with
+  `aside-apply`, a file moved aside too) shape `task.apply`'s answer; `error-settle` settles and then answers with an
+  error, `hold-settle` settles and never answers; and `applies.log` records each request id.
 - **The window's journey** (`e2e/task-apply.spec.ts`) approves, applies and accepts one run, rejects another, and asks
   for a revision of a third, on the built app against the stand-ins.
 

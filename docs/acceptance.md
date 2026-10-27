@@ -2145,7 +2145,8 @@ against a contract committed first, then reviewed and merged.
 - The packaged app (`test:packaged`, a runtime staged from this code): 27 passed and 41 skipped, the tests that need the
   stand-in switches.
 - `rpc.ts` against the stand-ins: a run's proposal applied (`greet.sh` changed, unstaged), accepted (the recovery
-  folder and the lock removed, the change kept), and applied again refused as a duplicate.
+  folder and the lock removed, the change kept), and applied again refused as a duplicate. Since Nate's review of PR 19,
+  accepting keeps the original (below).
 - **Mutation checks:** 58 of 58 apply rules broken on purpose each failed a test (three scripts):
   - the writer and service, 28: the move-aside check, both no-replace links, restore's two guards and its memory of
     another program's save, the read back, the same-filesystem check, another engine's lock and a refusal's own lock,
@@ -2161,9 +2162,67 @@ against a contract committed first, then reviewed and merged.
 - **The independent review (27 October):** five findings shown by its scripts and several smaller ones, all fixed
   with a test each (D40, *Why*). Its own verdict: no version of a person's file was destroyed in any scenario it ran.
 
+**Nate's review of PR 19 (27 October)** found four more, each reproduced there, then fixed with a test each (D40,
+*Why*). They were built in parallel, as before: the engine's fixes here, the host's by a helper in a worktree of its
+own, then reviewed and merged. PR 18's fix was merged in (`4fde8bd`).
+
+| Commit | What |
+|---|---|
+| `40df5f8`, `7c46ae7` | Every folder an apply touches held open from `/` down, only to pass through, and written through; a moved folder rolls the apply back; rollback and restore report a path behind a link as unknown |
+| `ea36e33` | Settling keeps every copy that isn't a second name for the file in place, the originals among them |
+| `0c5e636` | A settle or restore saved before it is sent, and read back whenever its engine comes online |
+| `85bd441` | A task's brief and repository held until its change is settled; accepting an older brief's change doesn't complete the task |
+| `6736a9a`, `9928802` | The card's copy (the originals stay; a moved folder in plain words), and the tests that expected copies removed |
+| this section | D40, AGENTS.md's agent write rules, the development notes |
+
+- **A folder swapped for a link** (`apply-writer.test.ts`): the reviewer's case and more. In every one the folder or
+  copy outside is untouched.
+  - In the repository, swapped before the apply holds its folders: refused as `changed-since`, nothing written.
+  - Swapped just before the link: the new file lands in the folder that was checked, and the apply rolls back there
+    (`docs-moved/old.md` is the original again, `orig-0` kept). The result is unknown with the failure
+    `check folders: moved`, never applied.
+  - Swapped while rollback takes a file back, before a later restore, or midway through one: the original goes back
+    into the folder it came from, or the path is left alone. Each reads unknown.
+  - A folder above the repository swapped for a link to a copy of it: refused before the intent; just before the
+    link, rolled back in the real folder and read as unknown.
+  - An apply under a folder it may pass through but not read applies. A system without `/proc` is refused, writing
+    nothing.
+- **The held descriptor** (`apply-service.test.ts`), the reviewer's regression:
+  - an editor opens `README.md` before the apply, and the change is applied and accepted;
+  - the editor then writes and fsyncs through its descriptor;
+  - the save lands in `orig-0`, which still has a name, and the checkout keeps the change.
+  The old release removed the whole folder, and the test fails against it.
+- **The host** (`host.test.ts`):
+  - a settle whose answer is held when Nivra stops is read back by a new host once its engine is online: accepted,
+    the task completed, nothing offered, and `task.dismiss` sent once;
+  - an apply settled elsewhere is read again when its engine restarts;
+  - with a change applied, revising the brief and moving the task are refused;
+  - a change made for an older brief is accepted and settled, the task isn't completed, and the card says why;
+  - a real engine's accepted apply leaves exactly `orig-0` in the recovery folder.
+- **On a real engine through `rpc.ts`** at `7c46ae7` (the stand-ins, `~/.nivra-dev-track-b`):
+  - a run proposed a verified change;
+  - a shell opened `greet.sh` read-write, then the change was applied: unstaged, with `new-0` and `orig-0` in the
+    recovery folder;
+  - it was accepted: `new-0` was removed as a second name, `orig-0` was kept, and the lock was gone;
+  - the shell then wrote through its descriptor: the save was in `orig-0`, and `greet.sh` kept the change;
+  - applying again was refused as a duplicate.
+- **Mutation checks** on the new code:
+  - the writer and service: 35 of 35, each failed a test. New among them: a name built from the root instead of
+    through the folder held open, the root opened by its whole path, folders held open for reading, a folder opened
+    through a link, no check for a moved folder before the result, rollback reporting through a moved folder, a
+    missing `/proc` not refused, and accepting removing an original that isn't the file in place;
+  - the kill tests: 6 of 6;
+  - the host: 14 of 15, with five new rules for the review's fixes, each caught. The fifteenth, dropping the follow-up
+    after a lost apply answer, has a second route, as in the first pass: reading the attempt starts the same
+    follow-up.
+- `pnpm verify` at `7c46ae7`: 992 tests (domain 66, desktop 288, engine 638), none skipped.
+- The built app (`test:e2e`): 67 passed and 1 skipped (the packaged-only test), the apply journeys among them.
+- The packaged app (`test:packaged`, a runtime staged from this code): 27 passed and 41 skipped, the tests that need the
+  stand-in switches.
+
 **Not shown yet:**
 - **The Windows turn** for this checkpoint (`pnpm dev:win --no-launch`, then `test:windows`): main-process and preload
-  behaviour changed. It needs Nate's approval.
+  behaviour changed, and Nate's review of PR 19 says it is needed before merging. It needs his approval.
 - **A partial or unknown apply through the host on a real engine:** getting one takes a crash mid-write, so the host's
   partial, restore and keep tests run on the gated engine, and the writer's own tests and the kill tests show the real
   thing.

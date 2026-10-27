@@ -120,8 +120,9 @@ list.
 - Its changes reach the checkout only as a proposal that the engine has checked and the person has approved by hash.
   The engine applies it itself, never with git apply in the working tree (D40): it records the intent first, moves
   each file it replaces aside into a recovery folder in the repository's git folder and checks it, and links each new
-  file into place without replacing anything. Changes are left unstaged, nothing is replayed after a crash, and a
-  version of a file Nivra didn't write is never overwritten.
+  file into place without replacing anything, working only through folders it opened without following a link.
+  Changes are left unstaged, nothing is replayed after a crash, a version of a file Nivra didn't write is never
+  overwritten, and the originals it moved aside are kept after the change is settled.
 - Checks and dependency installs run inside an execution boundary, against the workspace. Never run them unconfined
   as a fallback.
 - The engine on the OS that owns a checkout's filesystem is the only thing that writes it; the host and the renderer

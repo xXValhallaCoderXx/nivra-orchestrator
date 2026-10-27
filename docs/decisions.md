@@ -2649,8 +2649,14 @@ tree (D34 saw it fail part way, an edited file deleted), so the engine writes th
      out a second engine (`locked`, with words that say how to clear one left behind); a hard link is tried in the
      recovery folder (`nivra-apply/<apply id>`); a refusal takes back what it made there, whatever its calls
      reported;
-  2. the intent (each path's state before and after, the folders to make, every name in the recovery folder) is
-     recorded with SQLite's synchronous mode FULL;
+  2. every folder already there that the change touches is opened one name at a time from `/`, never through a link,
+     and held open only to pass through it (O_PATH, so a folder the person can pass through but not read is fine).
+     From here on every call names its file through those folders (`/proc/self/fd/<descriptor>/<name>`,
+     `apply/anchors.ts`), in the person's tree and in the recovery folder, so a folder renamed or swapped for a link
+     afterwards is never written through. A folder in the repository already replaced is refused (`changed-since`),
+     one above it (`filesystem`), and so is a system without `/proc` (`filesystem`). Then the intent (each path's
+     state before and after, the folders to make, every name in the recovery folder) is recorded with SQLite's
+     synchronous mode FULL;
   3. each new file is written into the recovery folder (O_EXCL, its exact mode whatever the umask, a changed file
      keeping the original's permission bits), made durable and read back;
   4. missing folders are made, parents first; one that appeared meanwhile must be a real folder, and is never removed;
@@ -2659,13 +2665,17 @@ tree (D34 saw it fail part way, an edited file deleted), so the engine writes th
      at the last moment is never moved), and the apply rolls back; then the new file is linked into place, which fails
      rather than replace a file saved meanwhile;
   6. each added file is linked into place the same way;
-  7. every touched folder is made durable, every path is read back, and the record is applied. A file another program
-     saved after Nivra wrote it is reported as such, never overwritten.
+  7. every touched folder is made durable and every path read back. A file another program saved after Nivra wrote it
+     is reported as such, never overwritten. Last, every folder held open must still be the one at its name, and the
+     picked folder's path must still lead to it: one moved or replaced meanwhile rolls the apply back (`moved`). Then
+     the record is applied.
   Changes are left unstaged: no index write, no commit.
 - **Rollback and "restore the originals" are one function**, from the disk and the intent alone, last path first: a
   path still Nivra's is moved aside again, checked again, and its original linked back; a version another program saved
   is left in place (or put back if it was saved as restore moved it), its original kept; then only the folders Nivra
-  made, only when empty.
+  made, only when empty. It works only through folders held open. When one of them was moved meanwhile, every path is
+  reported as it is found from the picked folder by name, never through a link: a path behind a link is unknown, never
+  called applied or not applied.
 - **Where each path is:** as it was, as the change leaves it, moved aside with its original intact, another program's
   version (saved before or after Nivra wrote it), or anything else. The apply is applied, not applied, partial (each
   path one or the other, or moved aside intact) or unknown, and only a live apply can know a version is another
@@ -2674,10 +2684,12 @@ tree (D34 saw it fail part way, an edited file deleted), so the engine writes th
   claim left before its intent is refused as interrupted. Nothing of the person's is written, and nothing is replayed.
 - **Settling:** `task.restore` takes a partial apply back to its originals, keeping what the apply knew of another
   program's saves; `task.dismiss` settles an apply as accepted (applied), dismissed (not applied, refused or unknown)
-  or kept (partial), removing only the copies still equal to the original or to Nivra's own bytes. A copy a program
-  changed since (one still writing through a file it had open writes into the kept original) stays, and so does the
-  original of any file missing from the checkout, its only copy there; a partial apply with a file moved aside can't be
-  kept as it is, only restored. Asked again the same way, after an answer lost on the way back, each gives the apply as
+  or kept (partial). Settling removes a name in the recovery folder only while it is a second name for the file now at
+  its path (Nivra's new file once in place, or an original restored), so removing it loses nothing. Every other copy
+  stays, whatever its bytes: the originals, versions taken back, new files never linked into place. A program that had
+  a file open before the apply saves into its original, and nothing can tell that none does, so the recovery folder
+  outlives settling and the person deletes it. A partial apply with a file moved aside can't be kept as it is, only
+  restored. Asked again the same way, after an answer lost on the way back, each gives the apply as
   it is and writes nothing. A view keeps to the protocol's bounds.
 - **What leaves the engine (D29):** a refusal's words by its code, the proposal's own paths, the recovery folder named
   inside the git folder, a failure by its step and the error's code. Native Windows is refused.
@@ -2692,22 +2704,28 @@ tree (D34 saw it fail part way, an edited file deleted), so the engine writes th
   - **A lost answer** is followed with `task.applyStatus`, never sent again. When the same engine home has no record of
     it, the request never reached the engine (a claim is made the moment it arrives): the approval is taken back, in
     the engine's own words when it answered with an error, so the person can approve again. Another engine home can't
-    say, and the card says so. A settle or restore whose answer is lost is read back the same way, nothing offered
-    while it is asked.
+    say, and the card says so.
+  - **A settle or restore is saved before it is sent**, which way included. One whose answer is lost, or that Nivra
+    stopped during, is read back by the apply's request id each time its engine comes online, and never sent again.
+    Meanwhile nothing is offered, the task shows as active and its brief, repository and deletion are held. An apply
+    its engine reported and the person hasn't settled is read once more then too, so one settled elsewhere is followed.
   - **Reject** sends nothing. **A revision's note** (not empty, bounded, holding no saved key) goes on its own line into
     the brief's context as a new version, in one transaction; the next run starts when the person presses Run.
-  - **Accept** completes the task, after an applied change only. **Dismiss** takes the approval back, so the person
+  - **Accept** completes the task, after an applied change only, and only while the task still has the brief version
+    and the repository its run had. Otherwise the change is accepted, the task keeps its state, and the card says why
+    and what to do. **Dismiss** takes the approval back, so the person
     can approve again once the checkout is ready. **Restore** is offered for a partial apply only, and **Keep as is**
     settles it as it stands, except while a file is moved aside, when only Restore is offered and the card says why.
   - **What the person may do** is computed by the host and offered exactly by the window, none while a call is out.
     Task states follow attempts: active while a run or its apply goes, in review while its last run waits on the person,
     completed only on acceptance; a task can't be set by hand while active or in review, and Run says why it can't be
-    pressed while the last run waits on a decision or its apply. Editing or refreshing a task's brief, or moving it to
-    another repository, is refused while an apply is open, and deleting it while any of its applies is unsettled (its
-    engine keeps the record and the copies until it is).
+    pressed while the last run waits on a decision or its apply. Editing or refreshing a task's brief, asking for a
+    revision, or moving it to another repository is refused while any of its applies is going, being settled or waiting
+    to be settled, and deleting it while any of its applies is unsettled (its engine keeps the record until it is).
 - **The window** (NIV-13): a run's card offers Approve and apply (the change's hash and commit shown, and a confirmation
   that says what applying does), Reject, and Request revision with a note. Then the apply, file by file: where each
-  path is, what is there now, the copies kept, the folders made, where the originals are kept (inside the git folder),
+  path is, what is there now, the copies kept, the folders made, where the originals are kept (inside the git folder,
+  before and after the change is settled),
   a refusal in the engine's own words, and where a stopped apply was, in plain words; then Accept the change, Dismiss,
   Restore the originals or Keep as is, each with one line on what it does. Every run of the task is listed newest first
   with its outcome, decision and apply, read from the workspace.
@@ -2738,10 +2756,23 @@ tree (D34 saw it fail part way, an edited file deleted), so the engine writes th
     moment, a folder made just before a crash called Nivra's, refusals for line endings git doesn't convert, an
     unverified change applied when asked directly, missing fsyncs, and fault tests that couldn't model a call failing
     after it had acted.
+- **Nate's review of PR 19 (27 October)** found four more, each reproduced there, then fixed with a test each:
+  1. a checked folder renamed, with a link to a folder outside put in its place just before the link step, sent the
+     proposal outside and still read applied. Every folder is now held open from `/` down and written through, a moved
+     one rolls the apply back, and rollback and restore report a path behind a link as unknown (`40df5f8`, `7c46ae7`);
+  2. accepting removed a moved-aside original whose bytes still matched, so a program that had the file open saved
+     into a file with no name left. Only a second name for the file in place is removed now (`ea36e33`); the card says
+     the originals stay (`6736a9a`);
+  3. accepting an older run's change completed a task whose brief had moved on. The brief and repository are held
+     until the change is settled, and accepting completes the task only when neither changed (`85bd441`);
+  4. a settle whose answer was lost was remembered only in memory, so a restart offered it again. Which way is saved
+     before it is sent and read back when its engine comes online (`0c5e636`).
 
 **Consequences.**
 - **Limits:** no deletions, mode changes or links in a proposal; no undo after a successful apply; native Windows
   refused; a filesystem that folds case is guarded by exact names but not tested (task runs are on Linux and WSL); a
-  crash between making a folder and recording it leaves an empty folder that restore doesn't remove.
+  crash between making a folder and recording it leaves an empty folder that restore doesn't remove; an apply needs
+  `/proc` (Linux and WSL have it); each apply's recovery folder stays after it is settled, until the person deletes it;
+  a settle left unanswered holds its task until its engine is next online.
 - `AGENTS.md`'s agent write rules say how changes are applied now.
 - **Evidence:** `docs/acceptance.md`, *Apply and the result view, checkpoint 2 (D40, NIV-8, NIV-13)*.
