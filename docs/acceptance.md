@@ -2329,6 +2329,44 @@ and the engine here; then an independent review.
 **Not shown here:** a task run from the environment with the real model. That is NIV-35's live run, with its own
 recipe.
 
+### A task's journey and recovery through the real host and engine, offline (NIV-35)
+
+The packaged journey's offline half: the steps the live run takes, and the recovery cases, on the built app with the
+production engine against the stand-ins, reached through the unpackaged-only switches. On `feature/niv-35-recovery`,
+stacked on `feature/niv-49-host`.
+
+| Commit | What |
+|---|---|
+| `1a087bb` | A task run's recovery through the real host and engine |
+| `8dba58b` | A task's whole journey from a prepared environment, through the window |
+| `f094ad1` | The live run's script, `scripts/task-live.ts` |
+| this record | The development notes and this section |
+
+**NIV-35's criteria, so far:**
+
+| Criterion | Shown offline | Still to show |
+|---|---|---|
+| One small change and its regression check through the UI, concurrency one, no tracker | `task-journey.spec.ts`: a task made from a saved plan, run from the prepared environment with its baseline and frozen file, verified, approved by its hash, applied and accepted; `task-apply.spec.ts` (D40): a task written directly | The live run on SHE-65, through the packaged Linux app |
+| Reject leaves the checkout untouched; a revision is another attempt under the task | `task-apply.spec.ts` (D40) | Nothing more offline |
+| Failed commands, provider failure, cancellation, engine loss and restart; NIV-25's shutdown | `task-recovery.spec.ts`: a cancel while the worker waits on the model, with nothing new sent after it; an engine killed while an operation goes, read as interrupted after Restart, its operation stopped by the recovery pass; a quit while an operation goes, timed at 115 ms, the run read as interrupted after a relaunch. Failed commands and provider failure: D39's engine tests (`task-worker.test.ts`, `task-engine.test.ts`) | The live run's own failures, if any, as found |
+| Stale approvals refused; crashes around the apply reconcile without reapplying | `task-recovery.spec.ts`: a checkout edited after the run, then one moved to another commit, each refused in the engine's words with nothing written; an apply held before its new file is linked in, its engine killed, read back as partial after Restart, and restored. `apply-kill.test.ts` (D40) kills the writer at every call | Nothing more offline |
+| Linux and Windows-to-WSL evidence naming the packaged revision and backend | Not offline | The live Linux run from the release candidate; Windows to WSL needs its own recipe and approval |
+| The result, the checks run, duration, usage and remaining work; acceptance apart from run success | The card (D39 to D41), in the journey | The live run's record |
+
+**NIV-25:** quitting while a task run's operation goes closed the app in 115 ms here (134 ms in an earlier run), and
+the run read as interrupted after a relaunch, its operation stopped. That is this case only: NIV-25's own case, a held
+hello run, isn't retimed here.
+
+**Checks:**
+- `pnpm verify` at `f31086a` (this branch, with `main` merged in through the environment's branch): 1,067 tests
+  (domain 75, desktop 307, engine 685), none skipped.
+- The built app (`test:e2e`) at `f31086a`: 75 passed and 1 skipped (`explain.spec.ts`'s packaged-only test), among
+  them `task-journey.spec.ts` and the five tests of `task-recovery.spec.ts`.
+- The packaged app: these specs skip there, since a packaged app ignores the switches they need;
+  `test-switches.test.ts` shows it ignores the apply hold too.
+- The Windows turn: 12 of 12 on the Windows build of `3a56d75`, this branch before `main`'s test and docs changes
+  were merged in.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

@@ -512,6 +512,32 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e environment.spec.ts
   `--apply-hold <file>` on the engine, `--nivra-test-apply-hold <file>` on an unpackaged app (an absolute path). The
   engine writes `<file>.held` when it holds.
 
+A task's journey and its recovery, through the real host and engine (NIV-35): the built app with the production engine
+against the stand-ins, through the unpackaged-only switches. A packaged app ignores the switches, so these skip there.
+
+```bash
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-recovery.spec.ts
+```
+
+- **Run e2e specs through the package's script**, never `pnpm exec playwright`: only the script sets
+  `npm_node_execpath`, and without it the app's local engine doesn't start ("Engine stopped").
+- **The journey** (`e2e/task-journey.spec.ts`) takes the live run's own steps (`scripts/task-journey.ts`): the
+  environment previewed and prepared in the window, uploads allowed in their own dialog; a task made from a saved plan
+  with baseline checks and a frozen file; its run previewed and started once; the change judged, approved by its hash,
+  applied and accepted.
+- **Recovery** (`e2e/task-recovery.spec.ts`): a cancel while the worker waits on the model; an engine killed while an
+  operation goes, then Restart; a quit mid-run, timed; a stale approval; an apply held by `--nivra-test-apply-hold`,
+  its engine killed, read back as partial and restored.
+- **The live run's script** (`apps/desktop/scripts/task-live.ts`), never part of `pnpm verify`:
+  - `--freeze` copies a release candidate's unpacked Linux build, made from a clean tree, with its hashes;
+  - `--plan` prints the recipe and its digest, with no network;
+  - `--rehearse` drives the frozen build with fake keys up to each preview, sending nothing;
+  - `--live --approved <digest>` runs the approved run: the person pastes the keys, the script presses Prepare and
+    Start once each, and the decisions are the person's, in the window;
+  - `--cleanup` removes the keys from the last live profile.
+  The task, its repository and its brief are in a file outside the repository (by default
+  `~/nivra-work/she65/task-live.json`), and nothing in the script names one.
+
 ## Where things will live
 
 | What | Where |
