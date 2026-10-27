@@ -66,10 +66,10 @@ function foundText(found: ApplyPath["found"]): string {
 
 /** What each way of settling an apply does, said beside its button. */
 const SETTLE: Record<"accept" | "dismiss" | "restore" | "keep", { label: string; says: string; testid: string }> = {
-  accept: { label: "Accept the change", says: "Completes the task, unless its brief or repository changed after this run. Nivra removes the copies it kept that are still your original or its own; your checkout stays as it is.", testid: "task-apply-accept" },
-  dismiss: { label: "Dismiss", says: "Closes this result. Nivra removes the copies it kept that are still your original or its own, and keeps any other.", testid: "task-apply-dismiss" },
+  accept: { label: "Accept the change", says: "Completes the task, unless its brief or repository changed after this run. Your checkout stays as it is, and the originals Nivra moved aside stay in the recovery folder.", testid: "task-apply-accept" },
+  dismiss: { label: "Dismiss", says: "Closes this result. The copies Nivra kept stay in the recovery folder.", testid: "task-apply-dismiss" },
   restore: { label: "Restore the originals", says: "Puts each original back where the change replaced it, and takes out the files and folders the change added, never over a version another program saved.", testid: "task-apply-restore" },
-  keep: { label: "Keep as is", says: "Leaves your checkout as it is now. Nivra removes the copies it kept that are still your original or its own.", testid: "task-apply-keep" },
+  keep: { label: "Keep as is", says: "Leaves your checkout as it is now. The originals Nivra moved aside stay in the recovery folder.", testid: "task-apply-keep" },
 };
 
 const RESOLVED: Record<ApplyResolution, string> = {
@@ -90,6 +90,7 @@ function stepText(step: string): string {
     [/^link /, "putting a new file in place"],
     [/^sync$/, "making the change durable"],
     [/^read back$/, "reading the change back"],
+    [/^check folders$/, "checking that each folder was still where it was"],
     [/^(take back|restore) /, "putting an original back"],
     [/^remove folder /, "removing a folder it made"],
     [/^interrupted$/, "applying, when its engine stopped"],
@@ -99,7 +100,7 @@ function stepText(step: string): string {
 }
 
 /** Error codes a person can act on, in plain words; any other is shown as its code. */
-const ERROR_WORDS: Record<string, string> = { changed: "a file changed after Nivra checked it", ENOSPC: "the disk is full", EACCES: "permission was denied", EPERM: "the operation isn't permitted", EBUSY: "a file was busy", EIO: "the disk reported an error", EXDEV: "a file was on another disk", EEXIST: "something was already there" };
+const ERROR_WORDS: Record<string, string> = { changed: "a file changed after Nivra checked it", moved: "a folder was moved or replaced while the change was applied", ENOTDIR: "a folder on the way is no longer a folder", ELOOP: "a folder on the way is a link now", ENOSPC: "the disk is full", EACCES: "permission was denied", EPERM: "the operation isn't permitted", EBUSY: "a file was busy", EIO: "the disk reported an error", EXDEV: "a file was on another disk", EEXIST: "something was already there" };
 
 /** An approval taken back (its request never reached the engine): no apply stands, and the change can be decided on again. */
 const takenBack = (value: { decision: AttemptDecision | null; apply: { status: ApplyStatus | null } | null }) => value.decision === null && value.apply !== null && value.apply.status === null;
@@ -336,7 +337,13 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
       )}
       {apply.recovery && apply.resolution === null && (
         <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-recovery">
-          Nivra keeps the originals it moved aside in the repository's git folder, in <Code>{apply.recovery}</Code>, until you settle this change.
+          Nivra keeps the originals it moved aside in the repository's git folder, in <Code>{apply.recovery}</Code>. They stay there after you settle this change, in case a program that had
+          a file open saves into it.
+        </Text>
+      )}
+      {apply.recovery && apply.resolution !== null && apply.paths.some((path) => path.change === "changed") && (
+        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-recovery">
+          Any originals Nivra moved aside stay in the repository's git folder, in <Code>{apply.recovery}</Code>. Delete that folder when you no longer need them.
         </Text>
       )}
       {apply.resolution && (
