@@ -1,12 +1,10 @@
-# Submission checklist (NIV-15)
+# Submission checklist (NIV-15, refreshed for the execution release by NIV-50)
 
-**How this was checked:** verified on 17 October 2026 against the [official rules](https://nebiusglobalaihackathon.devpost.com/rules)
-(sections 1 and 4) and the [official FAQ](https://nebiusglobalaihackathon.devpost.com/details/faqs).
-- The pages were read in a browser during the 17 October review, and the findings were recorded in NIV-15.
-- Devpost answers automated requests with HTTP 403, so tooling has not re-fetched them for this file.
-- On 18 October Nate fetched the official rules in a browser: the Best Apps and Agents track's wording supports this
-  submission (#5).
-- Re-check the pages before submitting.
+**How this was checked:** against the [official rules](https://nebiusglobalaihackathon.devpost.com/rules) and the
+[official FAQ](https://nebiusglobalaihackathon.devpost.com/details/faqs), as Nate read them on 27 October 2026 (NIV-50,
+and the delivery plan linked there). The 17 October reading (NIV-15) is kept in this file's history.
+- Exact wording quoted here comes from Nate's reading of the official pages.
+- Re-read the rules, the track's wording and the form in a browser before submitting.
 
 A requirement counts as met only when its evidence exists. A plan or a design is not evidence.
 
@@ -14,171 +12,184 @@ A requirement counts as met only when its evidence exists. A plan or a design is
 
 | # | Requirement | Source | Evidence (where it will be) | Owner | Status |
 |---|---|---|---|---|---|
-| 1 | Submit by **30 October 2026, 10:00 PDT**, which is **31 October, 01:00 SGT** | Rules §1 | The submission form | Nate | Open |
-| 2 | Judging runs 1–15 December 2026, ending 15 December at 12:00 Pacific (16 December, 04:00 SGT) | Rules §1 | — | — | Noted |
-| 3 | A runtime Token Factory inference call: this meets the general Nebius platform requirement | Rules §4, FAQ | The NIV-6 explain workflow, plus a recorded live run (model id, timing, usage) | Claude builds it; Nate supplies the key | **Evidence recorded** on 17 October: live explanations of fixture A with `nvidia/nemotron-3-super-120b-a12b`. The default question took 76.3 s, with 77,514 tokens in and 2,420 out over 11 calls, all reporting usage, and 13 of 13 citations shown to the model. The workflow (D22) is merged (PR #1), with precedence and the preference lifecycle (D23, PR #2). |
-| 4 | An NVIDIA open-source model is used | Rules §4 | The model id in the run record | Claude | **Evidence recorded**, as for #3: the run records `nvidia/nemotron-3-super-120b-a12b` and the route `token-factory`. |
-| 5 | Track selection | Rules §4 | See *Track* below | Nate | **Decided** on 18 October: Best Apps and Agents |
-| 6 | A working demo or test-build URL | Rules §4 | The v0.1.1 GitHub Release: the Windows zip, the Linux deb, `build-info.json` and `SHA256SUMS`, published unchanged | Claude prepares; Nate publishes (NIV-16) | **Candidate 0.1.1** (`cad5eca`, D25). v0.1.0 (`ead56e8`, accepted live, D24) is a published pre-release, but its native Windows engine needs the Visual C++ Redistributable. 0.1.1 fixes that, and its Linux and WSL payloads are unchanged, so NIV-14's evidence carries over. **Published** on 19 October, and marked Latest on 20 October after clean-setup checks 1 and 2 passed on its files. Check 3, a PC without the Visual C++ Redistributable, is still to run. v0.1.0 is marked superseded |
-| 7 | A public open-source repository with setup instructions | Rules §4 | github.com/xXValhallaCoderXx/nivra-orchestrator (MIT) and its README | Claude | Repository public; setup instructions final at release |
-| 8 | A public YouTube demonstration, under three minutes | Rules §4 | The video link (NIV-17) | Nate | Pending |
-| 9 | Technology feedback (Token Factory, the NVIDIA models) | Rules §4 | The submission form's text | Nate, with a draft from Claude | **Draft below**, for Nate to edit |
-| 10 | An explanation of pre-existing work and substantial updates | Rules §4, FAQ | [provenance.md](provenance.md) | Claude | In place; final wording at submission |
-| 11 | Free judge access until judging ends (16 December, 04:00 SGT) | Rules §4 | Nate's existing Token Factory key, in the submission's private testing instructions (D24, NIV-16) | Nate | **Decided** on 19 October |
+| 1 | Submit by **30 October 2026, 10:00 PDT**, which is **31 October, 01:00 SGT**. Nate's working budget ends sooner: Thursday 29 October, 13:00 SGT | Rules | The submission form | Nate | Open |
+| 2 | Judging ends 15 December 2026 at 12:00 Pacific (16 December, 04:00 SGT) | Rules | — | — | Noted |
+| 3 | A runtime Token Factory inference call | Rules, FAQ | Recorded runs: the v0.1.1 explanations (17–20 October), and the execution release's live task run | Claude records; Nate supplies the key | v0.1.1's evidence is recorded (below). The execution release's: PENDING-H3 |
+| 4 | An NVIDIA open-source model is used | Rules | The model id in each run record | Claude | `nvidia/nemotron-3-super-120b-a12b`, route `token-factory`, in every recorded run. The task run's: PENDING-H3 |
+| 5 | Track selection | Rules | See *Track* below | Nate | **Decided** on 27 October: Coding and Agentic Engineering. It replaces Best Apps and Agents (18 October) |
+| 6 | A working demo or test-build URL | Rules | The release: the Windows zip, the Linux deb, `build-info.json` and `SHA256SUMS`, published unchanged | Claude prepares; Nate publishes | PENDING-H4 |
+| 7 | A public open-source repository with setup instructions | Rules | github.com/xXValhallaCoderXx/nivra-orchestrator (MIT) and its README | Claude | Public. The README is refreshed for the release |
+| 8 | A public YouTube demonstration, under three minutes | Rules | The video link | Nate records and uploads | PENDING-TAKE |
+| 9 | Technology feedback | Rules | The submission form's text | Nate, with a draft from Claude | **Draft below** |
+| 10 | An explanation of pre-existing work and significant new work | Rules, FAQ | [provenance.md](provenance.md), and *Significant new work* below | Claude | Draft below |
+| 11 | Free judge access until judging ends (16 December, 04:00 SGT) | Rules | The private testing instructions: judges enter their own credentials, or ones from a project made for judging | Nate | Decided on 27 October. Checked: PENDING-J0, PENDING-J1; through the app: PENDING-TAKE |
 | 12 | Eligibility and licensing (entrant eligibility, third-party licences) | Rules | — | Nate | To check; not presumed |
 
-## The demonstration (D20, Best Apps and Agents)
+## The demonstration
 
-Under three minutes, on the packaged app, with the two public demonstration repositories: A,
-[valhalla-fitness](https://github.com/xXValhallaCoderXx/valhalla-fitness) (PascalCase component files, Vitest), and B,
-`nivra-demo-timer` (kebab-case component files, Jest), a small synthetic repository made for the purpose. It shows
-only behaviour that has been observed working; it doesn't promise scaffolding, code execution or applying patches.
+One real bug in a real public repository, fixed through the packaged app. The bug is valhalla-fitness's
+finish-time personal-record detection, which compared old workouts' loads in the wrong units. NVIDIA Nemotron makes the
+change in a Nebius sandbox. Tests it can't edit judge it there, before and after. The person reviews the exact patch,
+approves it by its hash, and the engine applies it on the repository's own system. The script is
+[demo-script.md](demo-script.md).
 
-| Time | Beat | What is on screen |
-|---|---|---|
-| 0:00–0:15 | The problem | An engineer's preferences, and a repository with its own conventions: which governs? |
-| 0:15–0:50 | Evidence | Explain A: findings with citation chips, each "shown to the model". |
-| 0:50–1:10 | Confirmed memory | Confirm a personal preference (PascalCase, Vitest) and one for A only (its Mantine web UI). |
-| 1:10–1:45 | A contrasting repository | Explain B: its kebab-case and Jest govern over the personal default; Context used shows A's own was never sent. |
-| 1:45–2:15 | An explicit override | A task choice governs that run only; "Currently" still shows B's convention, and the stored preferences are unchanged. |
-| 2:15–2:40 | Fresh context | Edit, then delete, the preference; the next run uses the preferences as they are now. |
-| 2:40–3:00 | How it runs | NVIDIA Nemotron 3 Super through Nebius Token Factory at runtime; the engine on the repository's own system (Windows → WSL, or Linux); open source. |
-
-Long model runs are cut in the edit, never faked.
-
-**How it uses NVIDIA and Nebius:** the explain workflow (NIV-6, D22) calls an NVIDIA Nemotron model through Token
-Factory at runtime, with tool calls to list, search and read the repository, and a structured answer whose citations
-the engine checks. Fixture A's live explanation is the recorded evidence (#3, #4).
-
-**Linked gaps**
-- The release, the judges' instructions and judge access: NIV-16.
-- Recording and evidence: NIV-17.
+Long waits are cut in the edit, with a caption saying so, never sped up or simulated.
 
 ## Track
 
-**Best Apps and Agents**, decided by Nate on 18 October 2026 after reading the official rules: Nivra is a desktop app
-whose agent explains repositories with evidence and applies an engineer's confirmed preferences with explicit
-precedence. The Coding and Agentic Engineering track's "write, run, and test code" wording described work that D20
-defers, so that track is no longer the target.
+**Coding and Agentic Engineering**, chosen by Nate on 27 October 2026 after the execution path was built. The track
+asks for coding agents and developer tools that work inside Token Factory Sandboxes (PENDING-NATE: the track's exact
+wording, from the official page). Nivra's worker is such an agent:
+- NVIDIA Nemotron, through Token Factory, makes a change in a Nebius sandbox, on a copy of one commit, with networking
+  off;
+- the repository's own tests run there before the model starts and after it hands in, and acceptance cases it can't
+  edit decide whether the change is verified;
+- nothing reaches the checkout until the person approves that exact patch, and the engine that owns the checkout
+  applies it.
 
-**Questions for the organisers:** not needed. The track is decided, Sandboxes no longer matter to this submission,
-and judges get a key in the private testing instructions (#11). None was sent.
+Best Apps and Agents (18 October) was chosen when coding work was deferred (D20, D24). It no longer was by 27 October.
 
 ## Submission text (draft for the form)
 
-For Nate to paste into Devpost and edit. Each claim rests on recorded evidence, and planned work is labelled as planned.
-Match the field names to the form when submitting: Devpost blocks tooling, so they haven't been read here.
+For Nate to paste into Devpost and edit. Each claim rests on recorded evidence. Placeholders in capitals wait for
+results not yet produced. Match the field names to the form when submitting.
 
 **Project name:** Nivra
 
-**Elevator pitch** (200 characters at most):
-> A desktop agent that explains your repository with checked evidence, and applies your confirmed preferences with
-> explicit precedence, on NVIDIA Nemotron through Nebius Token Factory.
+**Elevator pitch** (200 characters at most; this one is 172):
+> A desktop agent that turns a task into a verified code change: NVIDIA Nemotron writes it in a Nebius sandbox, tests
+> it can't edit judge it, and you approve the exact patch.
 
 **About the project**
 
-*Inspiration.* Coding assistants remember what you like, but they rarely say whose rule wins when a repository's own
-conventions disagree, or which lines they actually read. Nivra makes both visible.
+*Inspiration.* Coding agents can write code. It's harder to see what they read, where the code ran, whether the tests
+that passed were the ones that matter, and what reaches your files. Nivra makes each of those visible, and nothing
+reaches your checkout without your approval of the exact change.
 
 *What it does*
-- **It explains a repository with evidence.** Each finding cites files and lines. Nivra checks every citation against
-  the lines the model was actually shown, and labels it as just that, never as proof that the explanation is right.
-- **It remembers preferences you confirm.** Personal ones apply to every project, and a project's own apply only to it.
-  Each run gets a snapshot of the ones that apply when it starts, so an edit or a deletion reaches the next run.
-- **It applies explicit precedence.** When a repository's conventions differ from your preferences, the explanation
-  reports the conflict, and the engine says which source governs. Highest first:
-  1. this task's choices;
-  2. a project's decisions to change its conventions;
-  3. the repository's existing conventions;
-  4. a project's defaults;
-  5. personal defaults.
-
-  A task's choice governs that run only, and is shown as intended, never as current behaviour.
-- **Nothing is sent without consent.** Sending a project's content to the model is off until you allow it for that
-  project.
-- **It runs where the repository lives.** On Windows, folders in WSL run in their distribution; on Linux, locally.
+- **Runs a coding task in a Nebius sandbox.**
+  - A task's brief has a goal and acceptance cases: commands, each with the exact output and exit code only the right
+    behaviour gives. The files they depend on are frozen.
+  - The Run preview says what goes to Token Factory and Nebius, what each keeps, and the run's limits, before anything
+    is sent.
+  - The repository's checks run first (PENDING-H2), then NVIDIA Nemotron makes the change on a copy of one commit, with
+    networking off, through fixed tools Nivra's engine carries out.
+  - Nivra judges the result outside what the model can edit, and proposes it as an exact patch.
+  - The person approves it by its hash. The engine on the repository's own system applies it, keeping every original,
+    and leaves it unstaged. No commit, no push.
+- **Prepares a Node and pnpm environment inside the boundary:** the pinned Node image imported into the person's Nebius
+  project, and the dependencies installed from the frozen lockfile in a run of its own, the only one with networking
+  on.
+- **Explains a repository with evidence,** each citation checked against the lines the model was shown.
+- **Remembers preferences you confirm,** with explicit precedence over a repository's own conventions.
+- **Plans with you:** saved plans in versions, a council review (two reviewers and a chair), and web research of a
+  plan's assumptions through Tavily, its quotations checked for where they came from.
+- **Asks first:** sending content to the model, uploading a commit to Nebius, and research queries are separate
+  permissions, each off until allowed.
 
 *How we built it*
 - **The desktop app:** Electron, with React and Mantine.
-- **Engines:** a Node engine for each place repositories live, speaking JSON-RPC over stdio. Its workflows run on
-  Mastra, with SQLite for runs and workflow state.
-- **The model:** explanations call NVIDIA Nemotron 3 Super (`nvidia/nemotron-3-super-120b-a12b`) through Nebius Token
-  Factory's OpenAI-compatible API.
-  - The model reads the repository only through fixed, read-only tools that the engine runs: list, search and read.
-  - It answers in a structured form that the engine validates.
-  - Every call has a deadline, and so does the whole run. The usage each call reports is recorded.
-- **Ranking:** the model reports each conflict and names its sources. The engine ranks them by the sources' kind and
-  id, never by their words.
+- **Engines:** a Node engine for each place repositories live (Linux, or the WSL distribution holding the
+  repository), speaking JSON-RPC over stdio. Workflows run on Mastra, with SQLite for runs and workflow state.
+- **The model:** NVIDIA Nemotron 3 Super (`nvidia/nemotron-3-super-120b-a12b`) through Nebius Token Factory's
+  OpenAI-compatible API. Every call has a deadline, so does every run, and the usage each call reports is recorded.
+- **Execution:** Nebius Sandboxes, one operation per step, with state carried by the image each leaves. Commit
+  snapshots go in, and a validated patch comes out. Nivra runs fixed scripts with the model's input as arguments, so
+  nothing the model writes is interpolated into a command.
+- **Verification:** acceptance cases compared byte for byte on the person's computer; frozen files checked; named test
+  results required, not just an exit code.
+- **Apply:** a writer that holds every folder it passes through open, never follows a link, records its intent first,
+  and reconciles after a crash. It never replays a write, and it never removes the originals it keeps.
 
 *Challenges*
-- **Evidence discipline.** Models cite files they have only seen named. Nivra turns down an answer that cites lines the
-  model wasn't shown, naming each one, while there's time to read them. After two refusals, or once the answer is due,
-  it accepts the answer, and any such citation stays labelled "Not checked".
-- **Running across Windows and WSL.** That meant a protocol-only stdout, `wsl.exe`'s UTF-16 output, a runtime
-  installed into each distribution on first use, and paths that cross the boundary.
-- **Packaging honestly.** Preparing clean-machine checks, we found that the Windows runtime shipped a C++ runtime DLL
-  where Windows never looks. We fixed it in v0.1.1, with a regression check that an installed copy can't satisfy.
+- **Making approval mean something.** An approval isn't a boundary: the sandbox is. Several rounds of independent
+  review of the apply path found races a careful design still had, such as an editor's atomic save landing between a
+  check and a removal. Each was reproduced, then fixed with a test.
+- **Real checks with networking off.** Nebius has no public Node 22 image, so the environment imports a pinned one and
+  installs the dependencies in a run of its own, with networking on only there.
+- **Keeping the verdict away from the worker.** The tests that judge the change are frozen before the worker starts,
+  and a regression shows that editing, skipping or excluding them can't produce a verified change (PENDING-H2).
 
-*Accomplishments*
-- **Live acceptance on the packaged builds:** every criterion passed on the Linux deb and on the Windows zip driving
-  WSL, 14 of 14 each. It ran on candidate 0.1.0, whose Linux and WSL payloads v0.1.1 keeps unchanged.
-- **Clean-setup checks of the published v0.1.1 files,** with README testing steps 4–8 run through the app:
-  - Windows → WSL against a fresh Ubuntu 26.04.1: 23 of 23 checks;
-  - Ubuntu 24.04 with AppArmor on: 22 of 22.
+*Accomplishments* (measured; the conditions are below)
+- **The live task:** PENDING-H3.
+- **The offline suite:** PENDING-H4 tests at the release's commit, with the packaged and Windows checks as recorded.
+- **Earlier, still valid:** the explain and preferences features passed live acceptance on packaged builds (14 of 14
+  criteria on Linux and on Windows to WSL, 18–19 October), and the v0.1.1 clean setups (23 of 23, and 22 of 22).
 
-*What we learned:* structured answers need a refusal loop that names the problem, and an agent's evidence is worth
-showing only when the app checks it.
+*What we learned:* PENDING-H3, from the live run and the reviews.
 
-*What's next (planned, not built):*
-- coding work inside a sandbox, with patches you approve;
-- new-app creation;
-- macOS.
+*What's next (planned, not built):* macOS; a browser and screenshot specialist; read-only ticket intake; another
+execution backend; task runs from the native Windows engine; package managers other than pnpm.
 
 **Built with:** Electron, React, Mantine, TypeScript, Node.js, Mastra, SQLite, zod, NVIDIA Nemotron, Nebius Token
-Factory, WSL, Playwright.
+Factory, Nebius Sandboxes, Tavily, WSL, Playwright.
 
 **Links**
 - Source: https://github.com/xXValhallaCoderXx/nivra-orchestrator (MIT)
-- Release: https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1
-- Demonstration repositories: https://github.com/xXValhallaCoderXx/valhalla-fitness and
-  https://github.com/xXValhallaCoderXx/nivra-demo-timer
-- Video: to add from NIV-17
+- Release: PENDING-H4
+- Video: PENDING-TAKE
+- The public sample: PENDING-SAMPLE
 
-**Track:** Best Apps and Agents (#5).
+**Track:** Coding and Agentic Engineering (item 5).
 
-**Testing instructions** (the private field for judges, #11)
-1. Install v0.1.1 from the release.
-   - Windows 10/11 x64: the zip. Folders inside WSL 2 run there. SmartScreen asks once: **More info → Run anyway**.
-     Smart App Control may refuse an unsigned app.
-   - Linux x64: the deb, installed with `sudo apt install ./Nivra-0.1.1-amd64.deb`.
-2. Under Settings, paste this Token Factory key: `<the key, entered here only>`. It works until judging ends, 16
-   December, 04:00 SGT.
-3. Follow the README's testing instructions: about ten minutes, with five explanations that take one to four minutes
-   each.
+**Testing instructions** (the private field for judges, item 11). Never put these values anywhere else.
+1. Install the release: PENDING-H4 (the Windows zip, or the Linux deb).
+2. Under Settings, paste the key and the project id below, or your own if your Nebius project has Sandboxes access.
+   - Key: `<entered only in this private field>`
+   - Project id: `<entered only in this private field>`
+   - They belong to a project made for judging, and work until judging ends, 16 December, 04:00 SGT.
+3. Follow the README's testing instructions: the quick path takes about PENDING-TAKE minutes; the full task about
+   PENDING-TAKE more.
+4. Use the public sample, or code you're happy to share: whatever is uploaded with these credentials stays with Nebius
+   in that project, where anyone holding them can read it.
 
-**Measured, with conditions,** for the text or the video. The model runs on Nebius, so times depend on the service.
-These were measured on 19–20 October on Windows 11 with WSL 2.7.8, and on an Ubuntu 24.04 VM:
-- explanations took 46–212 s each;
-- each used 11,887–142,580 input tokens;
-- every citation pointed to lines the model was shown: 129 of 129, across the ten explanations.
+**Measured, with conditions,** for the text or the video. The model and the sandboxes run on Nebius, so times depend on
+the service.
+- **The environment's feasibility run** (27 October, revision `9fb57a2`, run by the engine's own script, not the app):
+  - importing the Node 22 image took 9.7 s. Then pnpm 11.5.3 installed the data package's dependencies in one
+    operation, with networking on, which took 13.1 s by Nebius's own usage figure;
+  - then, with networking off, the regression alone failed for the bug's reason in 2.9 s (5 of 5 tests); the existing
+    data tests passed in 6.5 s (227 passed, 4 skipped); the domain suite passed in 11.7 s (1,122).
+- **The live task run:** PENDING-H3.
+- **v0.1.1's explanations** (19–20 October, Windows 11 with WSL 2.7.8, and an Ubuntu 24.04 VM): 46–212 s each, and
+  11,887–142,580 input tokens each. Every citation pointed to lines the model was shown: 129 of 129, across ten
+  explanations.
 
-**Pre-existing work (#10):** Nivra was started on 16 October 2026, inside the submission period (26 August to 30
+**Significant new work (item 10).** Nivra was started on 16 October 2026, inside the submission period (26 August to 30
 October 2026). It reuses concepts and some code from Hird, an earlier desktop app by the same author, also started
 inside the period, on 8 October 2026. [provenance.md](provenance.md) lists every piece, with the Hird commit it came
-from.
+from. Since v0.1.1 (19 October): saved plans and conversations, the council review, Tavily research, the Nebius
+sandbox adapter and sandbox checks, task runs judged by acceptance cases, approval by hash and the apply writer, and
+the prepared environment (D26 to D40, and PENDING-H4).
 
-## Technology feedback (draft for #9)
+## Technology feedback (draft for item 9)
 
-From recorded runs (D22, D23); Nate edits before submitting.
-- **Token Factory's OpenAI-compatible API** worked for runtime tool calling with `nvidia/nemotron-3-super-120b-a12b`:
-  every call reported usage, and the documented rate-limit headers were present.
+From recorded runs; Nate edits before submitting.
+
+**Token Factory and Nemotron**
+- **The OpenAI-compatible API** worked for runtime tool calling with `nvidia/nemotron-3-super-120b-a12b`: every call
+  reported usage, and the documented rate-limit headers were present.
 - **Tool choice:** Nemotron 3 Super honoured `toolChoice: "required"`, a forced choice between two tools, and a forced
   structured answer that validated against our schema.
 - **`/models?verbose=true`** reports each model's `context_length` (262,144 tokens for Nemotron 3 Super), which let us
   size requests without guessing.
 - **Structured answers:** when an answer was due in one step, Nemotron sometimes sent lists as strings. Allowing three
   answer steps, with the problem named in a tool result, let it recover.
-- **Optional fields:** Nemotron left optional suggestions empty until the prompt asked for one per established
-  convention.
 - **Evidence discipline:** it sometimes cited files it had only seen named. Refusing citations of lines it hadn't been
-  shown, and saying which, made it read them and resubmit, with every citation then checked.
+  shown, and saying which, made it read them and resubmit.
+
+**Nebius Sandboxes** (beta)
+- **One operation per step worked**, with state carried by the image each leaves: a median step of 2.9 s in our first
+  probe (20 October).
+- **Networking off held, shown by behaviour:** only the loopback interface existed, and requests failed to resolve or
+  reach. The same request with networking on connected.
+- **Outcomes need care:** a failing test comes back as `SUCCESS` with exit 1, and a timeout as exit -1 with signal 9,
+  while `signal: -1` means no signal at all. A client has to read all three.
+- **The access token renews with each request,** about five minutes ahead. The API key's own expiry is only in the
+  console.
+- **Nothing can be deleted:** uploads, operation records and logs stay, and an operation's record keeps the content a
+  command wrote. That shaped what Nivra sends and what its preview says.
+- **The `cost` field has no documented unit,** so Nivra shows it raw and never turns it into money.
+- **No public Node 22 image:** importing a pinned one from Docker Hub worked (27 October). Nivra leaves the import
+  untagged (PENDING-H1-SOURCE: why a tag would make it public).
+- **One upload was answered with HTTP 500** on a first attempt (21 October). The approved rerun passed.
