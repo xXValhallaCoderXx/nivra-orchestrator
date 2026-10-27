@@ -3344,14 +3344,14 @@ export class Host {
   /** A mission's review (NIV-52): its plan review's view, with what it was sent and what has changed since. */
   #missionReviewView(review: ReviewRecord, engine: EngineView): MissionReviewView {
     const workspace = this.#workspaceDb();
-    const base = this.#reviewView(review, engine);
+    const base = this.#reviewView(review, engine, "mission");
     const plan = getArtifact(workspace, review.planId);
     const composition = plan ? compositionOf(plan) : null;
     const now = snapshotFor(this.#options.store.data, null).records.map(({ id, revision }) => `${id} ${revision}`).sort();
     const sent = review.link.preferences.map(({ id, revision }) => `${id} ${revision}`).sort();
     return {
       ...base,
-      missionVersion: composition?.binding.mission?.version ?? 0,
+      missionVersion: composition?.binding.mission?.version ?? null,
       tasks: (composition?.binding.tasks ?? []).map((task, index) => ({ ref: taskRef(index), taskId: task.taskId, title: task.title, briefVersion: task.briefVersion, present: getTask(workspace, task.taskId) !== null })),
       specialists: (composition?.packet.specialists ?? []).map((ref) => specialistView(ref.id, ref.version)),
       model: composition?.packet.model ?? null,
@@ -3882,7 +3882,8 @@ export class Host {
     };
   }
 
-  #reviewView(review: ReviewRecord, engine: EngineView): ReviewView {
+  /** A review as the window shows it; `where` names what the person opens to have it checked again. */
+  #reviewView(review: ReviewRecord, engine: EngineView, where: "conversation" | "mission" = "conversation"): ReviewView {
     const { link } = review;
     const workspace = this.#workspaceDb();
     const open = link.status === "submitting" || link.status === "running";
@@ -3898,7 +3899,7 @@ export class Host {
       panel: review.panel,
       status: link.status,
       note: reviewNoteFor(link),
-      unresolved: away ? (engine.state.status === "failed" ? engine.state.reason : `The engine on ${engine.label} isn't running, so Nivra can't check this review yet. It checks again when you open the conversation.`) : null,
+      unresolved: away ? (engine.state.status === "failed" ? engine.state.reason : `The engine on ${engine.label} isn't running, so Nivra can't check this review yet. It checks again when you open the ${where}.`) : null,
       runId: link.runId,
       cancelRequested: link.cancelRequested,
       scope: review.scope.kind === "project" ? { kind: "project", projectLabel: review.scope.projectLabel, headAtStart: review.scope.headAtStart } : { kind: "general" },

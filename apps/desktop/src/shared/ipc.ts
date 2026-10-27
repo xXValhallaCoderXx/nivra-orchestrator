@@ -742,7 +742,8 @@ export interface ReviewedTaskView {
  * what it was sent, and what has changed since.
  */
 export interface MissionReviewView extends ReviewView {
-  missionVersion: number;
+  /** The mission's version it was sent; null when Nivra can't read what it was sent. */
+  missionVersion: number | null;
   tasks: ReviewedTaskView[];
   specialists: SpecialistView[];
   /** The only model it could use, or null for the listing's Nemotron pick (D22). */

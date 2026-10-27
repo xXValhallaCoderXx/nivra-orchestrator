@@ -188,7 +188,8 @@ function PreviewBody({ preview }: { preview: MissionReviewPreview }) {
       </Text>
       <Stack gap={4}>
         <Text size="sm" fw={600}>
-          Sent to Nebius Token Factory: this text, {preview.chars.toLocaleString("en")} characters
+          Sent to Nebius Token Factory: this text, {preview.chars.toLocaleString("en")} characters, then{" "}
+          {preview.preferences.length > 0 ? "the preferences below, each with its id and what it is" : "a line saying you have no preferences"}
         </Text>
         <ScrollArea.Autosize mah={240} type="auto">
           <Code block data-testid="mission-preview-text">
@@ -241,21 +242,22 @@ function PreviewBody({ preview }: { preview: MissionReviewPreview }) {
 function ReviewDialog({ missionId, selected, opened, onClose, onStarted }: { missionId: string; selected: string[]; opened: boolean; onClose(): void; onStarted(): void }) {
   const [previewed, setPreviewed] = useState<{ preview: MissionReviewPreview; selection: string[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const [starting, setStarting] = useState(false);
   const guard = useRef(new PreviewGuard());
   const key = selected.join(" ");
 
   /** Previews `chosen`, shown only while nothing changed since `mine` was asked for. */
   const prepare = async (chosen: string[]) => {
     const mine = guard.current.asked();
-    setBusy(true);
+    setPreparing(true);
     try {
       const preview = await window.nivra.prepareMissionReview(missionId, chosen);
       if (guard.current.current(mine)) setPreviewed({ preview, selection: chosen });
     } catch (reason) {
       if (guard.current.current(mine)) setError(errorMessage(reason));
     } finally {
-      setBusy(false);
+      if (guard.current.current(mine)) setPreparing(false);
     }
   };
 
@@ -269,7 +271,7 @@ function ReviewDialog({ missionId, selected, opened, onClose, onStarted }: { mis
 
   const start = async () => {
     if (!previewed) return;
-    setBusy(true);
+    setStarting(true);
     setError(null);
     try {
       await window.nivra.startMissionReview(missionId, previewed.selection, previewed.preview.expected);
@@ -281,7 +283,7 @@ function ReviewDialog({ missionId, selected, opened, onClose, onStarted }: { mis
       setPreviewed(null);
       void prepare(previewed.selection);
     } finally {
-      setBusy(false);
+      setStarting(false);
     }
   };
 
@@ -300,10 +302,10 @@ function ReviewDialog({ missionId, selected, opened, onClose, onStarted }: { mis
           </Text>
         )}
         <Group gap="xs">
-          <Button size="sm" onClick={() => void start()} loading={busy} disabled={!previewed || previewed.preview.blocked !== null} data-testid="mission-review-start">
+          <Button size="sm" onClick={() => void start()} loading={starting} disabled={preparing || !previewed || previewed.preview.blocked !== null} data-testid="mission-review-start">
             Start review
           </Button>
-          <Button size="sm" variant="subtle" onClick={onClose} disabled={busy}>
+          <Button size="sm" variant="subtle" onClick={onClose} disabled={starting}>
             Cancel
           </Button>
         </Group>

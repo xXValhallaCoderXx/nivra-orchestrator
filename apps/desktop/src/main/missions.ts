@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import {
   bindingDigest,
+  hasKeyBlock,
+  KEY_FOOTER,
+  KEY_HEADER,
   MISSION_COUNCIL,
   MISSION_LIMITS,
   MISSION_REVIEW_LIMITS,
@@ -38,6 +41,7 @@ export const MISSION_REVIEW_NOT_SENT = [
   "Any repository, file or conversation.",
 ] as const;
 
+/** A task's parts in the person's words, in the order the reviewers read them. */
 const FIELD_WORDS: Readonly<Record<keyof PacketTask, string>> = {
   title: "title",
   goal: "goal",
@@ -46,8 +50,8 @@ const FIELD_WORDS: Readonly<Record<keyof PacketTask, string>> = {
   exclusions: "exclusions",
   assumptions: "assumptions",
   checks: "checks",
-  context: "context",
   acceptanceCaseNames: "acceptance case names",
+  context: "context",
 };
 
 const MISSION_WORDS: Readonly<Record<keyof MissionContent, string>> = {
@@ -61,13 +65,35 @@ const MISSION_WORDS: Readonly<Record<keyof MissionContent, string>> = {
 
 const textOf = (value: string | readonly string[]) => (typeof value === "string" ? value : value.join("\n"));
 
-/** Everything a review would send, checked as a whole: a credential anywhere refuses it, naming the part, never the value. */
-export function refusePacketCredentials(packet: MissionReviewPacket, preferences: PreferenceSnapshot, known: KnownSecrets): void {
-  for (const [key, words] of Object.entries(MISSION_WORDS) as Array<[keyof MissionContent, string]>) refuseCredentials(`The mission's ${words}`, textOf(packet.mission[key]), known, "preview");
+/** Each part a review would send, named in the person's words, in the order the reviewers read them. */
+function sentParts(packet: MissionReviewPacket, preferences: PreferenceSnapshot): Array<[words: string, text: string]> {
+  const parts = (Object.entries(MISSION_WORDS) as Array<[keyof MissionContent, string]>).map(([key, words]): [string, string] => [`The mission's ${words}`, textOf(packet.mission[key])]);
   packet.tasks.forEach((task, index) => {
-    for (const [key, words] of Object.entries(FIELD_WORDS) as Array<[keyof PacketTask, string]>) refuseCredentials(`${taskRef(index)}'s ${words}`, textOf(task[key]), known, "preview");
+    for (const [key, words] of Object.entries(FIELD_WORDS) as Array<[keyof PacketTask, string]>) parts.push([`${taskRef(index)}'s ${words}`, textOf(task[key])]);
   });
-  preferences.records.forEach((record, index) => refuseCredentials(`Your preference ${index + 1}`, record.statement, known, "preview"));
+  preferences.records.forEach((record, index) => parts.push([`Your preference ${index + 1}`, record.statement]));
+  return parts;
+}
+
+/** A part's name inside a sentence. */
+const within = (words: string) => words.replace(/^(The|Your) /, (start) => start.toLowerCase());
+
+/**
+ * Everything a review would send, checked part by part, then as the one text the reviewers read: a credential anywhere
+ * refuses it, naming the part, never the value. The engine masks that text as a whole, so a private key's first line in
+ * one part and its last in another would be sent redacted; that is refused too, naming both parts.
+ */
+export function refusePacketCredentials(packet: MissionReviewPacket, preferences: PreferenceSnapshot, known: KnownSecrets): void {
+  const parts = sentParts(packet, preferences);
+  for (const [words, text] of parts) refuseCredentials(words, text, known, "preview");
+  const whole = [renderMissionPacket(packet), ...preferences.records.map((record) => record.statement)].join("\n");
+  if (!hasKeyBlock(whole)) return refuseCredentials("The text this review would send", whole, known, "preview");
+  const header = new RegExp(KEY_HEADER);
+  const footer = new RegExp(KEY_FOOTER);
+  const starts = parts.findIndex(([, text]) => header.test(text));
+  const ends = starts < 0 ? -1 : parts.findIndex(([, text], index) => index > starts && footer.test(text));
+  if (starts < 0 || ends < 0) return refuseCredentials("The text this review would send", whole, known, "preview");
+  throw new Error(`What looks like a private key starts in ${within(parts[starts]![0])} and ends in ${within(parts[ends]![0])}, so nothing was sent. Remove its first or last line, then preview again.`);
 }
 
 const sentChars = (task: PacketTask) => [task.title, task.goal, task.scope, task.exclusions, task.context, ...task.acceptanceCriteria, ...task.assumptions, ...task.checks, ...task.acceptanceCaseNames].reduce((sum, part) => sum + part.length, 0);

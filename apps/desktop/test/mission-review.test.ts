@@ -151,6 +151,21 @@ describe("credentials anywhere in a mission review are refused (NIV-52)", () => 
     assert.match(refusal(() => refusePacketCredentials({ ...cleanPacket, tasks: [{ ...cleanPacket.tasks[0]!, checks: ["curl -H 'Authorization: Bearer ghp_0123456789abcdefghijklmnopqrstuvwxyzAB'"] }] }, NONE, [])), /^T1's checks looks like it holds /);
   });
 
+  it("refuses a private key that starts in one part and ends in another, which the engine would mask as one, naming both parts", () => {
+    const { db, mission, ids } = seeded(["Flag key files"]);
+    const packet = composeMissionReview(db, mission, ids, null).packet;
+    const task = packet.tasks[0]!;
+    const acrossFields = { ...packet, tasks: [{ ...task, goal: "Flag a file whose first line is -----BEGIN RSA PRIVATE KEY-----.", acceptanceCriteria: ["A file holding only -----END RSA PRIVATE KEY----- isn't flagged."] }] };
+    assert.equal(
+      refusal(() => refusePacketCredentials(acrossFields, NONE, [])),
+      "What looks like a private key starts in T1's goal and ends in T1's acceptance criteria, so nothing was sent. Remove its first or last line, then preview again.",
+    );
+    const footer = { revision: 1, records: [{ id: randomUUID(), statement: "Never commit a file ending -----END OPENSSH PRIVATE KEY-----.", scope: "personal" as const, intent: "default" as const, revision: 1 }] };
+    const intoPreference = { ...packet, tasks: [{ ...task, context: "Keys begin -----BEGIN OPENSSH PRIVATE KEY-----" }] };
+    assert.match(refusal(() => refusePacketCredentials(intoPreference, footer, [])), /^What looks like a private key starts in T1's context and ends in your preference 1, so nothing was sent\./);
+    assert.equal(refusal(() => refusePacketCredentials({ ...packet, tasks: [{ ...task, goal: "Flag a file whose first line is -----BEGIN RSA PRIVATE KEY-----." }] }, NONE, [])), "not refused", "a first line alone is no key");
+  });
+
   it("refuses a mission saved with a credential in it", () => {
     assert.match(refusal(() => refuseMissionCredentials({ ...MISSION, intendedUsers: KEY }, [["NEBIUS_API_KEY", KEY]])), /^The mission's intended users holds .+, so nothing was saved\./);
   });

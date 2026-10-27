@@ -39,7 +39,8 @@ function RefChip({ reference, tasks, onOpenTask }: { reference: string; tasks: R
       </Button>
     );
   }
-  const label = reference === "mission" ? "the mission" : reference === "backlog" ? "the backlog: no selected task covers it" : "a preference";
+  // A task reference whose task can't be read now is shown as it is, never as something else.
+  const label = reference === "mission" ? "the mission" : reference === "backlog" ? "the backlog: no selected task covers it" : /^T\d+$/.test(reference) ? reference : "a preference";
   return (
     <Badge size="sm" variant="light" color="gray" style={{ textTransform: "none" }} data-testid="review-ref" data-ref={reference}>
       {label}
@@ -85,7 +86,7 @@ function Finding({ finding, tasks, onOpenTask }: { finding: ReviewFinding; tasks
       )}
       {finding.relabelled && (
         <Text size="xs" c="var(--nivra-text-3)">
-          Marked as an assumption: what it names in what was sent doesn&apos;t support more.
+          Marked as an assumption: its reviewer didn&apos;t say it follows from what was sent.
         </Text>
       )}
     </Stack>
@@ -96,6 +97,7 @@ function Reviewer({ review, reviewer, onOpenTask }: { review: MissionReviewView;
   const { adjusted } = reviewer;
   const changes = [
     adjusted.unanchored ? `${plural(adjusted.unanchored, "finding")} set aside for naming no selected task, the mission or the backlog` : "",
+    adjusted.empty ? `${plural(adjusted.empty, "finding")} with no title or detail left out` : "",
     adjusted.dropped ? `${plural(adjusted.dropped, "finding")} over the limit left out` : "",
     adjusted.refsDropped ? `${plural(adjusted.refsDropped, "reference")} to something that wasn't sent dropped` : "",
     adjusted.relabelled ? `${plural(adjusted.relabelled, "finding")} marked as an assumption` : "",
@@ -108,8 +110,8 @@ function Reviewer({ review, reviewer, onOpenTask }: { review: MissionReviewView;
       </Text>
       {reviewer.findings.length === 0 ? (
         <Text size="sm" c="var(--nivra-text-2)" data-testid="review-nothing-raised">
-          {adjusted.unanchored
-            ? "Every finding it gave named nothing in the selection, so none was kept. That isn't an approval."
+          {adjusted.unanchored || adjusted.empty
+            ? "None of the findings it gave could be kept. That isn't an approval."
             : "Raised nothing material. That isn't an approval: it saw only the mission and the selected tasks."}
         </Text>
       ) : (
@@ -201,7 +203,7 @@ export function MissionReviewCard({
         <Group justify="space-between" wrap="nowrap">
           <Group gap="xs">
             <Text size="xs" fw={600}>
-              Council review · mission v{review.missionVersion} · {review.tasks.map((task) => task.ref).join(", ")}
+              Council review · {review.missionVersion === null ? "mission version unknown" : `mission v${review.missionVersion}`} · {review.tasks.map((task) => task.ref).join(", ")}
             </Text>
             <Badge color={look.color} variant="light" data-testid="review-status">
               {open && review.cancelRequested ? "Cancelling" : look.label}
