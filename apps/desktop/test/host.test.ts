@@ -31,6 +31,7 @@ import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
 import { briefFrom, NO_CASE, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
 import { insertTask } from "../src/main/workspace.ts";
 import { openWorkspace } from "../src/main/workspace-db.ts";
+import { seedMission, seedMissionReview } from "../e2e/seed-workspace.ts";
 import type { BriefFields, TaskAttemptView } from "../src/shared/ipc.ts";
 
 /**
@@ -3499,5 +3500,70 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     const refused = await host.previewTaskRun(task.summary.id);
     assert.deepEqual([refused.environment, refused.expected], [null, ""]);
     assert.match(refused.blocked ?? "", /aren't the ones the project's environment was prepared from\. Prepare the environment again, then preview the run\.$/);
+  });
+});
+
+describe("Host: a mission's own conversation and review plans stay out of the conversation and plan calls (NIV-52)", () => {
+  it("lists no mission's conversation, and refuses it, and its review plans, everywhere a conversation or a plan is named", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra mission host "));
+    dirs.push(root);
+    const seeded = seedMission(join(root, "workspace.db"), { mission: { name: "Runner's log", intendedUsers: "", outcome: "A runner sees the week's distance.", successCriteria: [], constraints: [], nonGoals: [] }, tasks: [{ title: "Store runs", goal: "g", acceptanceCriteria: ["c"] }] });
+    const { reviewId, planId } = seedMissionReview(join(root, "workspace.db"), { missionId: seeded.missionId, taskIds: seeded.taskIds, findings: [] });
+    const { host } = hostAt(root);
+    const conversationId = seeded.conversationId;
+    const taskId = seeded.taskIds[0]!;
+    assert.deepEqual(host.conversations().conversations, []);
+    const fields: BriefFields = { goal: "g", acceptanceCriteria: ["c"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] };
+    const calls: Array<[string, () => unknown]> = [
+      ["conversation", () => host.conversation(conversationId)],
+      ["openConversation", () => host.openConversation(conversationId)],
+      ["sendMessage", () => host.sendMessage(conversationId, "hello")],
+      ["deleteConversation", () => host.deleteConversation(conversationId)],
+      ["savePlan", () => host.savePlan(conversationId, randomUUID())],
+      ["plans", () => host.plans(conversationId)],
+      ["reviews", () => host.reviews(conversationId)],
+      ["cancelReview", () => host.cancelReview(conversationId, reviewId)],
+      ["research", () => host.research(conversationId)],
+      ["restartConversationEngine", () => host.restartConversationEngine(conversationId)],
+      ["revisePlan", () => host.revisePlan(planId, "edited")],
+      ["prepareReview", () => host.prepareReview(planId, "council")],
+      ["startReview", () => host.startReview(planId, "council", "a".repeat(64))],
+      ["prepareResearch", () => host.prepareResearch(planId, { assumptions: [], sites: null })],
+      ["createTask", () => host.createTask({ title: "From the review plan", fields, projectId: null, planId })],
+      ["refreshBriefFromPlan", () => host.refreshBriefFromPlan(taskId, 1, planId)],
+    ];
+    const outcomes = await Promise.all(
+      calls.map(async ([name, call]) => {
+        try {
+          await call();
+          return [name, "allowed"];
+        } catch (error) {
+          return [name, error instanceof Error ? error.message : String(error)];
+        }
+      }),
+    );
+    const NO_CONVERSATION = "That conversation is no longer in the list.";
+    const NO_PLAN = "That plan is no longer here.";
+    assert.deepEqual(outcomes, [
+      ["conversation", NO_CONVERSATION],
+      ["openConversation", NO_CONVERSATION],
+      ["sendMessage", NO_CONVERSATION],
+      ["deleteConversation", NO_CONVERSATION],
+      ["savePlan", NO_CONVERSATION],
+      ["plans", NO_CONVERSATION],
+      ["reviews", NO_CONVERSATION],
+      ["cancelReview", "That review is no longer in this conversation."],
+      ["research", NO_CONVERSATION],
+      ["restartConversationEngine", NO_CONVERSATION],
+      ["revisePlan", NO_PLAN],
+      ["prepareReview", NO_PLAN],
+      ["startReview", NO_PLAN],
+      ["prepareResearch", NO_PLAN],
+      ["createTask", NO_PLAN],
+      ["refreshBriefFromPlan", NO_PLAN],
+    ]);
+    // Nothing was written: the task still has one brief version, and no task was made from the review plan.
+    assert.deepEqual([host.task(taskId).versions.length, host.tasks().tasks.length], [1, 1]);
+    assert.deepEqual(host.engines().filter((engine) => engine.state.status !== "stopped").map((engine) => engine.targetId), [], "no engine started");
   });
 });
