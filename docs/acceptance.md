@@ -2285,6 +2285,7 @@ and the engine here; then an independent review.
 | `26bcbb2`, `41fa8bc` | The window: the Environment section, the brief's form, the run preview and card |
 | `c5529ba` | The independent review's nine findings |
 | `c491eed`, `80608bc` | Tests the criteria and mutation checks asked for: the baseline's time, and an environment from another project |
+| `6ca70ca` | Nate's review of PR 23: baseline output masked in the proposal's report, one rule for filters, and a run's start claimed only from evidence |
 | this record | D41, `AGENTS.md`'s boundary rule, the development notes, this section, and the stale lines in this file and `system-architecture.md` |
 
 **NIV-49's criteria, shown:**
@@ -2301,22 +2302,26 @@ and the engine here; then an independent review.
 | A second, small pnpm layout works offline with no change to Nivra | `environment-engine.test.ts`, `environment-inputs.test.ts` | A single-package repository with no workspace file is prepared the same way, through a real engine, as the workspace is |
 
 **Checks:**
-- `pnpm verify` at `7237e04`: 1,064 tests (domain 75, desktop 307, engine 682), none skipped; at `f3fa984`, the code as
-  reviewed here, 1,066 (domain 75, desktop 307, engine 684), none skipped.
-- The built app (`test:e2e`) at `7237e04`: 69 passed and 1 skipped (`explain.spec.ts`'s packaged-only test), among
-  them `environment.spec.ts`: the Environment section, the brief's form, the preview and the card.
+- `pnpm verify` at `7237e04`: 1,064 tests (domain 75, desktop 307, engine 682), none skipped; at `f3fa984`, the code
+  first reviewed here, 1,066 (domain 75, desktop 307, engine 684); at `6ca70ca`, with `main` merged in and Nate's
+  review fixed, 1,070 (domain 75, desktop 308, engine 687), none skipped.
+- The built app (`test:e2e`) at `7237e04`, and again at `6ca70ca`: 69 passed and 1 skipped (`explain.spec.ts`'s
+  packaged-only test), among them `environment.spec.ts`: the Environment section, the brief's form, the preview and
+  the card.
 - The packaged app (`test:packaged`, a runtime staged from this code) at `7237e04`: 27 passed and 43 skipped, the tests
   that need the stand-in switches a packaged app ignores.
 - The real engine through `rpc.ts`, against the stand-in: an environment prepared; a task preview bound to it; an
   environment with another inputs digest, or from another Nebius project, refused at the task preview.
-- **Mutation checks:** 20 of D41's rules broken on purpose, one at a time; 19 each failed a test:
+- **Mutation checks:** 24 of D41's rules broken on purpose, one at a time; 23 each failed a test:
   - the preparation's networking, the steps' networking (with the guard that refuses it removed, and with it kept),
     the manifests' digest checked in the worker, the project's binding, the environment's inputs held from the
     worker, output folders left out of the listing;
   - the baseline: a mismatch ignored, its output or its exit code not compared, its time guard, the reserve;
   - the review's: the preparation's slot, `pnpm:devPreinstall`, the upload's hash, a lost import searched for, the
-    journal read after settling, a missing journal moved, a changed frozen file verified (`verifiedWith`).
-  The twentieth, the frozen files' comparison after collect, stands behind integrity, which refuses any change Nivra
+    journal read after settling, a missing journal moved, a changed frozen file verified (`verifiedWith`);
+  - Nate's review: baseline output unmasked in the proposal's report, an exclusion filter refused, a filter starting
+    with `-` taken, a start claimed with no operation run.
+  The twenty-fourth, the frozen files' comparison after collect, stands behind integrity, which refuses any change Nivra
   didn't write first: no run reaches it with integrity whole, so breaking it alone fails no test. `verifiedWith`'s
   unit test shows a changed frozen file is never verified. The project's binding and the baseline's time had no test
   until these checks (`80608bc`, `c491eed`).

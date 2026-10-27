@@ -2912,6 +2912,15 @@ task runs. It is configuration, never code: nothing in Nivra names a repository.
     pass's time;
   - no test showed that a changed frozen file is never verified (`verifiedWith` is now unit-tested);
   - the probe matched patterns anywhere in the output, unlike the engine.
+- **Nate's review of PR 23 (27 October)** found two more, and a line of copy, each fixed with a test that fails with
+  its fix undone:
+  - a baseline selection's output reached the report bound into the proposal unmasked, though the run's report masked
+    it. It is masked there as every check's output is;
+  - a filter the spec took, such as `!@scope/web`, was refused by the sandbox after the import and the upload. A
+    filter now has one rule, `ENVIRONMENT_FILTER` in the domain, and the sandbox checks the install's exact arguments
+    against it: `--frozen-lockfile`, then `--filter <filter>` for each. A filter can't start with `-`;
+  - a run refused before anything was sent said it started from Nivra's own base image. The card says where a run
+    started only when an operation ran.
 
 **Why.** A real task needs its real checks, and they need the repository's toolchain. Installing on the person's
 machine is never a pre-check, and the worker and the checks must stay offline. Preparing once, from manifests alone,
