@@ -77,7 +77,13 @@ export type PrescribedStopCode =
   /** A task's: a program its checks need isn't in the sandbox image (D39). Nothing was installed. */
   | "toolchain"
   /** A task's: its run's deadline left no time for a session (D39). Nothing was sent. */
-  | "time";
+  | "time"
+  /** A task's: its baseline selections didn't give what the brief expects, so the model wasn't called (D41). */
+  | "baseline"
+  /** A task's: its environment wasn't prepared from this commit's manifests (D41). Nothing was sent. */
+  | "environment"
+  /** A task's: the brief freezes a file the commit doesn't hold (D41). Nothing was sent. */
+  | "frozen";
 
 export interface PrescribedResult {
   outcome: PrescribedOutcome;
@@ -126,6 +132,11 @@ export interface PrescribedRun {
    * (an uncertain command, a refusal, a cancel), or says how it stopped.
    */
   work?: (session: ExecutionSession, context: WorkContext) => Promise<WorkResult>;
+  /**
+   * After the snapshot, before anything is sent: why the run can't go on with this commit, or null. A task's
+   * environment and frozen files are checked here (D41).
+   */
+  admit?: (snapshot: Snapshot) => { code: PrescribedStopCode; message: string } | null;
   /** After collect, before close: checks from collect's image. What they find is the hook's own to record. */
   verify?: (session: ExecutionSession, context: WorkContext & { collected: Collected }) => Promise<void>;
   /** The report and the proposal, in place of the prescribed path's own: a task's, which binds more. */
@@ -239,6 +250,10 @@ export async function runPrescribed(run: PrescribedRun): Promise<PrescribedResul
   if (run.expectedFingerprint !== undefined && snapshot.fingerprint !== run.expectedFingerprint) {
     return ended("refused", { snapshot: summary, stopped: { code: "preview", message: "snapshot: what would be sent changed since it was previewed, so nothing was sent.", step: "snapshot", detail: null } });
   }
+
+  // What the run's own rules refuse of this commit goes nowhere either.
+  const refusal = run.admit?.(snapshot) ?? null;
+  if (refusal) return ended("refused", { snapshot: summary, stopped: { code: refusal.code, message: refusal.message, step: "snapshot", detail: null } });
 
   // 2. The session. A backend that can't keep commands away from this computer's files is refused here, and so is a
   // session the run's deadline leaves too little time to settle.

@@ -190,7 +190,7 @@ export const StoredTaskInput = z.object({
   taskId: z.string().min(1),
   briefVersion: z.number().int().positive(),
   briefDigest: z.string().min(1),
-  environment: z.object({ image: z.string().min(1), inputsDigest: z.string().min(1), projectFingerprint: z.string().min(1) }).optional(),
+  environment: z.object({ image: z.string().min(1), inputsDigest: z.string().min(1), projectFingerprint: z.string().min(1), node: z.string(), pnpm: z.string(), arch: z.string() }).optional(),
 });
 export type StoredTaskInput = z.infer<typeof StoredTaskInput>;
 

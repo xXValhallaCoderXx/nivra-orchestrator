@@ -106,6 +106,12 @@ export interface NebiusBackendOptions {
   transport?: (credentials: NebiusCredentials) => Transport;
   /** What runs the prepare step's tools inside the sandbox: busybox, on the base image. */
   applets?: string;
+  /**
+   * The environment every command of a session gets beneath its own (D41). An imported image's own environment
+   * applies only to commands run through a shell, so a prepared Node image's path is given here. Nothing in it is
+   * secret: it goes to the provider with each command.
+   */
+  env?: Readonly<Record<string, string>>;
   now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   wallNow?: () => Date;
@@ -500,7 +506,7 @@ class NebiusSession implements ExecutionSession {
       image: this.#image,
       disposable: !persist,
       timeoutSeconds: Math.ceil(request.timeoutMs / 1000),
-      env: { ...request.env },
+      env: { ...this.#options.env, ...request.env },
       cwd: request.cwd,
       maxOutputBytes: Math.min(request.maxOutputBytes, this.#limits.maxOutputBytes),
     };

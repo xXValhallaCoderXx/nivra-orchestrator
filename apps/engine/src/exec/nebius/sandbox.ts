@@ -288,6 +288,11 @@ export const ENV_WORKSPACE = "/workspace";
 const ENV_INPUTS = "/nivra/env-inputs.tar.gz";
 /** The path an environment's commands run with: a Node image's own, which isn't applied without a shell. */
 export const ENV_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/**
+ * What every command in a session from a prepared environment gets beneath its own (D41): the image's path, the home
+ * corepack keeps pnpm in, and the switches that keep pnpm and corepack from asking anything. Nothing here is secret.
+ */
+export const ENV_COMMAND_ENV: Readonly<Record<string, string>> = Object.freeze({ PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
 
 /**
  * An environment's preparation: a fixed script, given everything as positional arguments, so nothing is interpolated

@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { TaskOutcome, taskBriefDigest, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskReport, type TaskStopCode } from "@nivra/domain";
+import { projectFingerprint, TaskOutcome, taskBriefDigest, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskEnvironment, type TaskReport, type TaskStopCode } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import { Refusal } from "../diagnostics.ts";
@@ -33,8 +33,11 @@ export interface TaskDeps {
   homeId: string;
   /** The Nebius key and project id, read from the vault as the run starts; null unless both are set. The key is Token Factory's too. */
   credentials: () => { key: string; project: string } | null;
-  /** A Nebius backend for one run, its operations limited to `operations`, its journals in the engine's home. */
-  sandbox: (operations: number) => ExecutionBackend;
+  /**
+   * A Nebius backend for one run, its operations limited to `operations`, its journals in the engine's home; its
+   * sessions start from the prepared environment's image when the run is bound to one (D41).
+   */
+  sandbox: (operations: number, environment: TaskEnvironment | null) => ExecutionBackend;
   /** The engine's own `Local` backend, for its git on the checkout. */
   local: ExecutionBackend;
   findGit: () => string | null;
@@ -105,6 +108,8 @@ export function createTaskWorkflow(deps: TaskDeps) {
     const credentials = deps.credentials();
     if (!credentials) throw refuse("credentials");
     if ((await taskBriefDigest(context.brief)) !== task.briefDigest) throw refuse("brief");
+    // An environment's image is reachable only from the Nebius project it was prepared in (D41).
+    if (task.environment && (await projectFingerprint(credentials.project)) !== task.environment.projectFingerprint) throw refuse("environment");
     return { task, context, credentials };
   };
 
@@ -212,6 +217,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
           const git = deps.findGit();
           if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
           const { brief } = context;
+          const environment: TaskEnvironment | null = task.environment ?? null;
           const local = await deps.local.open({ workspace: task.repoPath });
           let outcome;
           try {
@@ -220,7 +226,8 @@ export function createTaskWorkflow(deps: TaskDeps) {
               folder: task.repoPath,
               preview: task.preview,
               brief,
-              backend: deps.sandbox(operationsForBrief(brief)),
+              backend: deps.sandbox(operationsForBrief(brief), environment),
+              environment,
               local,
               git,
               client: clientFor(credentials.key),

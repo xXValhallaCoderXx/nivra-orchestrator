@@ -48,7 +48,7 @@ import { findGit } from "./exec/find-executable.ts";
 import { WorkspaceRefusal } from "./exec/git-tool.ts";
 import { createLocalBackend } from "./exec/local.ts";
 import { fetchTransport, SandboxApi, SANDBOXES_BASE_URL, type Transport } from "./exec/nebius/api.ts";
-import { Journal } from "./exec/nebius/sandbox.ts";
+import { ENV_COMMAND_ENV, Journal } from "./exec/nebius/sandbox.ts";
 import { createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals, type NebiusCredentials } from "./exec/nebius/session.ts";
 import { takeSnapshot } from "./exec/snapshot.ts";
 import { ChatUnreadable, readChatTask } from "./chat/task.ts";
@@ -351,10 +351,12 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const sandboxTransport = (given: NebiusCredentials): Transport => fetchTransport(given, options.sandboxesUrl ?? SANDBOXES_BASE_URL);
   const sandboxBackend = () => createNebiusBackend({ credentials: sandboxCredentials, baseImage: CHECK_IMAGE.uuid, journalDir: journals, limits: sandboxLimits, transport: sandboxTransport });
   // A task run's backend (D39): its operations limited to what its brief needs, its commands to the longest it runs.
-  const taskBackend = (operations: number) =>
+  // Bound to a prepared environment (D41), its sessions start from that image, every command with the image's path.
+  const taskBackend = (operations: number, environment: TaskEnvironment | null) =>
     createNebiusBackend({
       credentials: sandboxCredentials,
-      baseImage: CHECK_IMAGE.uuid,
+      baseImage: environment?.image ?? CHECK_IMAGE.uuid,
+      ...(environment ? { env: ENV_COMMAND_ENV } : {}),
       journalDir: journals,
       limits: { ...NEBIUS_LIMITS, maxOperations: operations, maxTimeoutSeconds: TASK_LIMITS.checks.timeoutMs / 1000, prepareTimeoutSeconds: TASK_LIMITS.prepareTimeoutSeconds, sessionBudgetMs: TASK_LIMITS.sessionMs, cleanupBudgetMs: TASK_LIMITS.closeMs },
       transport: sandboxTransport,
