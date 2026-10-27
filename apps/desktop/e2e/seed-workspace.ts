@@ -139,7 +139,8 @@ export interface MissionReviewSeed {
 /**
  * Seeds a completed mission review (NIV-52) as one would be kept: its review plan made from the mission's latest version
  * and the tasks' latest briefs, the review bound to it, and a complete report holding the given findings. No model and
- * no engine: the run never happened, and the report says nothing about usage. For checks that need findings to show or
+ * no engine: the run never happened, the report says nothing about usage, and its packet and preferences digests are
+ * placeholders (the text's sha256), not what an engine would have worked out. For checks that need findings to show or
  * to pick (Track C) before a real review is possible.
  */
 export function seedMissionReview(workspacePath: string, seed: MissionReviewSeed): { reviewId: string; planId: string } {
