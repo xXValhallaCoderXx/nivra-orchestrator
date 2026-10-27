@@ -30,9 +30,10 @@ export class RealGuest {
   readonly ran: Array<{ label: string; disposable: boolean; script: string | null; args: string[] }> = [];
   /**
    * A test's change to a command before it runs: a behaviour given here stands for the command's whole result, and the
-   * image keeps the folder it started from, so whatever the command was meant to change, it didn't.
+   * image keeps the folder it started from, so whatever the command was meant to change, it didn't, unless the test
+   * changes the folder itself (as an environment's preparation stands in for an install it never runs here).
    */
-  intercept: (command: { label: string; args: readonly string[]; body: Record<string, unknown> }) => Behaviour | undefined = () => undefined;
+  intercept: (command: { label: string; args: readonly string[]; body: Record<string, unknown> }, folder: string) => Behaviour | undefined = () => undefined;
   /** A test's change to how a command that ran is reported: a hang, a lost answer, a failure. */
   override: (command: { label: string; args: readonly string[]; body: Record<string, unknown> }) => Partial<Behaviour> | undefined = () => undefined;
   /** A test's change to an image after its command ran, before its files are kept: something Nivra didn't write. */
@@ -69,7 +70,7 @@ export class RealGuest {
     const folder = mkdtempSync(join(this.root, "image-"));
     if (parent) cpSync(parent, folder, { recursive: true, verbatimSymlinks: true });
     const image = `img-real-${++this.#images}`;
-    const intercepted = this.intercept({ label, args, body });
+    const intercepted = this.intercept({ label, args, body }, folder);
     if (intercepted) {
       this.images.set(image, folder);
       return { ...intercepted, resultImage: image, files: filesOf(folder) };
