@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PATCH_SHOWN_BYTES, StoredTaskInput, type Mask, type RunRoute, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskRunLimits, type TaskStopCode } from "@nivra/domain";
+import { PATCH_SHOWN_BYTES, StoredTaskInput, TASK_MODEL, type Mask, type RunRoute, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskRunLimits, type TaskStopCode } from "@nivra/domain";
 import { previewOf, safeUnresolved, stepOf } from "../exec/check.ts";
 import type { PrescribedResult } from "../exec/prescribed.ts";
 import type { Proposal } from "../exec/proposal.ts";
@@ -55,7 +55,7 @@ export const TASK_STOP_MESSAGES: Readonly<Record<TaskStopCode, string>> = {
   time: "The run's time ran out before a sandbox could be opened, so nothing was sent. Run the task again.",
   "model-sharing": "This project doesn't allow sending its content to Token Factory, and the worker reads its files there, so nothing was sent. Allow sharing for it, then run the task again.",
   brief: "This run's brief isn't the version it was started for, so nothing was sent. Run the task again.",
-  model: "Token Factory couldn't be reached, or offered no model Nivra can use, so the run stopped before anything from your repository was sent. Check the key in Settings, then run the task again.",
+  model: `Token Factory couldn't be reached, or doesn't offer this key ${TASK_MODEL}, the only model task runs use, so the run stopped before anything from your repository was sent. Check the key in Settings, then run the task again.`,
   "native-windows": "Running tasks on Windows itself isn't available yet, so nothing was sent. Add the repository from a WSL distribution, then run the task there.",
   baseline:
     "The brief's baseline selections didn't give what it expects on the commit as it is, so the run stopped before the worker started: your commit was uploaded to Nebius, and nothing from your repository went to Token Factory. The baseline below says which selection differed, and how.",

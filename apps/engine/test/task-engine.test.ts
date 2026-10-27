@@ -59,12 +59,12 @@ function engineAt(home: string, sandbox: SandboxStub<RealGuest>, model: Stub, ex
   return engine;
 }
 
-async function setup(options: { credentials?: boolean; calls?: Call[]; files?: Record<string, string>; chat?: (request: StubRequest, index: number) => Reply } = {}): Promise<Setup> {
+async function setup(options: { credentials?: boolean; calls?: Call[]; files?: Record<string, string>; chat?: (request: StubRequest, index: number) => Reply; models?: Array<{ id: string }> } = {}): Promise<Setup> {
   const guest = new RealGuest(CHECK_IMAGE.uuid);
   guest.busybox = true;
   const sandbox = await startSandboxStub({ guest });
   const calls = options.calls ?? WORK;
-  const model = await startStub({ chat: options.chat ?? ((_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` })) });
+  const model = await startStub({ ...(options.models ? { models: options.models } : {}), chat: options.chat ?? ((_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` })) });
   stubs.push(sandbox, model);
   const root = tempDir("nivra task engine");
   dirs.push(root);
@@ -282,6 +282,17 @@ describe("a task run through a real engine (NIV-7)", () => {
     const unkeyed = await start(none.engine, none.repo, ready(await preview(none.engine, none.repo)).snapshot.fingerprint);
     assert.equal((await ended(none.engine, unkeyed.id)).status, "failed");
     assert.deepEqual([(await report(none.engine, unkeyed.id)).stopped?.code, none.sandbox.requests.length, none.model.requests.length], ["credentials", 0, 0]);
+  });
+
+  it("uses only the model its preview names: a key offered other NVIDIA models but not that one stops at the model step, with no request to a model and nothing uploaded (NIV-35)", async () => {
+    const { sandbox, model, engine, repo } = await setup({ models: [{ id: "nvidia/Nemotron-3_5-Lightning" }, { id: "nvidia/Nemotron-3-Ultra-550b-a55b" }] });
+    const run = await start(engine, repo, ready(await preview(engine, repo)).snapshot.fingerprint);
+    assert.equal((await ended(engine, run.id)).status, "failed");
+    const shown = await report(engine, run.id);
+    assert.deepEqual([shown.outcome, shown.stopped?.code, shown.stopped?.step, shown.route], ["failed", "model", "prepare", null]);
+    assert.equal(shown.stopped?.message, "Token Factory couldn't be reached, or doesn't offer this key nvidia/nemotron-3-super-120b-a12b, the only model task runs use, so the run stopped before anything from your repository was sent. Check the key in Settings, then run the task again.");
+    // The listing was the one request Token Factory received: no model was asked anything, and nothing reached Nebius.
+    assert.deepEqual([model.requests.map((request) => `${request.method} ${request.path}`), model.chats().length, sandbox.requests.length], [["GET /v1/models"], 0, 0]);
   });
 
   it("runs one task at a time on its own slot: a second is refused and never recorded, a repeated request gets its run, and other runs still start", async () => {
