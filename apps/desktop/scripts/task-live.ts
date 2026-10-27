@@ -59,6 +59,8 @@ export interface LiveTask {
   environment: EnvironmentSpec;
   task: { title: string };
   brief: TaskBrief;
+  /** What the person checks in the proposal before deciding, beyond what the tests can show; in the recipe. */
+  review?: string[];
 }
 
 function readTask(path: string): LiveTask {
@@ -66,6 +68,7 @@ function readTask(path: string): LiveTask {
   const brief = TaskBrief.safeParse(given.brief);
   if (!brief.success) throw new Error(`The brief in ${path} isn't one Nivra takes: ${brief.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
   if (!/^[0-9a-f]{40}$/.test(given.baseline)) throw new Error(`${path} names no baseline commit.`);
+  if (given.review !== undefined && !(Array.isArray(given.review) && given.review.length <= 10 && given.review.every((point) => typeof point === "string" && point.length > 0 && point.length <= 600))) throw new Error(`${path}'s review is a list of at most 10 points, each a line of text.`);
   return { ...given, brief: brief.data };
 }
 
@@ -171,7 +174,7 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
       "the script adds the repository as a project, and allows its model sharing and its uploads, each through its own dialog",
       "the script previews the environment and checks its fingerprint is the one above, claims the approval, and presses Prepare once",
       "once it is prepared, the script creates the task with the brief above, marks it ready, and previews the run. It checks the preview is bound to this brief's digest, this commit's snapshot and the environment just prepared (the fingerprint Start sends, which the app checks again), and shows the frozen files above with their hashes, then presses Start once",
-      "Nate reads the proposal and its checks, and decides: Approve and then Accept, Reject, or a revision (which this approval doesn't run)",
+      "Nate reads the proposal and its checks, with the review points below, and decides: Approve and then Accept, Reject, or a revision (which this approval doesn't run)",
       "on Nate's go-ahead, the app is closed and relaunched, the keys are removed, and ~/.nivra is checked unchanged",
     ],
     requests: [
@@ -180,6 +183,7 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
       "Token Factory: one model listing; at most the run's model requests, each with the brief, the files the worker reads and the output of what it runs",
     ],
     keeps: { nebius: `${RETENTION} Nebius keeps each operation's arguments in its records, so what the worker writes stays there too.`, tokenFactory: "Token Factory keeps what it receives, under its own terms. What was sent can't be withdrawn." },
+    review: task.review ?? [],
     never: ["a second Prepare or Start", "a retry or a retake", "a push, a PR or a ticket closed", "any command run on this machine against the repository"],
     failure: "Whatever the run gives is recorded as it is. No retake under this approval; another run needs another approval.",
   };
@@ -213,6 +217,7 @@ function recipeText(recipe: Awaited<ReturnType<typeof recipeOf>>, digest: string
     `Model: ${recipe.model.expected} expected. ${recipe.model.rule}`,
     "Steps:",
     ...recipe.steps.map((step) => `  - ${step}`),
+    ...(recipe.review.length ? ["Before deciding, check in the proposal (what its tests can't show):", ...recipe.review.map((point) => `  - ${point}`)] : []),
     "Every request the run can make:",
     ...recipe.requests.map((request) => `  - ${request}`),
     `Nebius keeps: ${recipe.keeps.nebius}`,
