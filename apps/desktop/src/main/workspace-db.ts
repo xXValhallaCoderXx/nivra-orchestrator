@@ -5,7 +5,8 @@ import { renameRetrying } from "./host-store.ts";
 
 /**
  * The host's workspace (D26): conversations, their messages and turns, native tasks, the versions of plans and briefs,
- * the reviews of plan versions (D31) and research of their assumptions (D37), in one SQLite file beside `nivra.json`.
+ * the reviews of plan versions (D31) and research of their assumptions (D37), and each project's environment (D41), in
+ * one SQLite file beside `nivra.json`.
  * The host is its only owner and opens it only on its own OS (D7); the engines keep their own run records. Built on
  * Node's own `node:sqlite`, so Electron's main process loads no addon (D6). Opened like an engine's database: WAL,
  * SQLite's exclusive lock taken at once and held until close (so a second Nivra on the same profile is refused instead
@@ -247,6 +248,61 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   CREATE TRIGGER attempt_records_task BEFORE INSERT ON attempt_records
   WHEN NOT EXISTS (SELECT 1 FROM run_links WHERE id = NEW.attempt_id AND workflow_id = 'task')
   BEGIN SELECT RAISE(ABORT, 'an attempt record belongs to a task run'); END;
+  `,
+  `
+  -- A project's environment (D41): the spec the person accepted for it, and the environment its last successful
+  -- preparation left; and each preparation, kept as a task's attempt is: its id is the request id, saved before
+  -- runs.start is sent, the engine store it went to is recorded just before, and its engine's report, masked again, is
+  -- kept when it ends. Projects live in nivra.json, so both name theirs by id; a removed project's rows stay, as its
+  -- conversations do.
+  CREATE TABLE environments (
+    project_id TEXT PRIMARY KEY,
+    spec_json TEXT NOT NULL,
+    prepared_json TEXT,
+    prepared_by TEXT,
+    updated_at TEXT NOT NULL,
+    CHECK ((prepared_json IS NULL) = (prepared_by IS NULL))
+  ) STRICT;
+
+  CREATE TABLE preparations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    home_id TEXT,
+    run_id TEXT UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('submitting', 'running', 'answered', 'failed', 'cancelled', 'interrupted', 'not-sent', 'unknown')),
+    cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+    cancel_reason TEXT CHECK (cancel_reason IN ('person', 'uploads', 'removal')),
+    error_kind TEXT,
+    error_message TEXT,
+    spec_json TEXT NOT NULL,
+    preview TEXT NOT NULL,
+    report_json TEXT,
+    reported_at TEXT,
+    created_at TEXT NOT NULL,
+    settled_at TEXT,
+    CHECK ((report_json IS NULL) = (reported_at IS NULL)),
+    CHECK ((status IN ('submitting', 'running')) = (settled_at IS NULL))
+  ) STRICT;
+  CREATE INDEX preparations_project ON preparations(project_id, created_at);
+  -- One preparation of a project at a time, however quickly two arrive.
+  CREATE UNIQUE INDEX preparations_one_open ON preparations(project_id) WHERE status IN ('submitting', 'running');
+  CREATE TRIGGER preparations_bound BEFORE UPDATE ON preparations
+  WHEN NEW.id IS NOT OLD.id OR NEW.project_id IS NOT OLD.project_id OR NEW.session_id IS NOT OLD.session_id OR NEW.target_id IS NOT OLD.target_id
+    OR NEW.spec_json IS NOT OLD.spec_json OR NEW.preview IS NOT OLD.preview OR NEW.created_at IS NOT OLD.created_at
+    OR (OLD.home_id IS NOT NULL AND NEW.home_id IS NOT OLD.home_id) OR (OLD.run_id IS NOT NULL AND NEW.run_id IS NOT OLD.run_id)
+    OR (OLD.report_json IS NOT NULL AND (NEW.report_json IS NOT OLD.report_json OR NEW.reported_at IS NOT OLD.reported_at))
+  BEGIN SELECT RAISE(ABORT, 'a preparation keeps what it was bound to, and its first report'); END;
+  -- The environment kept is one that a preparation of the same project reported.
+  CREATE TRIGGER environments_prepared BEFORE INSERT ON environments
+  WHEN NEW.prepared_by IS NOT NULL AND NOT EXISTS (SELECT 1 FROM preparations WHERE id = NEW.prepared_by AND project_id = NEW.project_id AND report_json IS NOT NULL)
+  BEGIN SELECT RAISE(ABORT, 'a prepared environment comes from a preparation of its own project'); END;
+  CREATE TRIGGER environments_kept BEFORE UPDATE ON environments
+  WHEN NEW.project_id IS NOT OLD.project_id
+    OR (NEW.prepared_by IS NOT NULL AND NEW.prepared_by IS NOT OLD.prepared_by
+      AND NOT EXISTS (SELECT 1 FROM preparations WHERE id = NEW.prepared_by AND project_id = NEW.project_id AND report_json IS NOT NULL))
+  BEGIN SELECT RAISE(ABORT, 'a prepared environment comes from a preparation of its own project'); END;
   `,
 ];
 
