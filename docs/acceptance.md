@@ -2395,7 +2395,8 @@ their own PR.
 | `64fc1c3` | D42, the development notes and this section |
 | `2b61660` | A stored composition reads back without the checks made when it was composed, so an old report stays readable; a composition's profiles must be its packet's |
 | `1c27882` | The independent review's fixes: a finding stays its review's mission's, bound or not; version numbers compared; the binding parsed before it is read; the v5 to v6 migration tested |
-| this record | The record brought up to date with the review and the checks at `1c27882` |
+| `8d14d80` | The record brought up to date with the review and the checks at `1c27882` |
+| this record | The packaged rerun on this branch's head, and Windows validation moved to the final candidate (Nate, 28 Oct) |
 
 **What it shows:**
 
@@ -2427,13 +2428,16 @@ their own PR.
   membership check, and that version numbers and the binding's own shape went unchecked (`1c27882`). Each fix has a
   test that fails without it.
 - `pnpm verify` at `1c27882`: 1,107 (domain 88, engine 687, desktop 332), none skipped.
-- The built and packaged specs weren't run again after `ac01522` on this branch: `2b61660` and `1c27882` change the
-  composition reader, the context check, tests and a seed's comment, and no window or IPC code. The mission review PR's
-  packaged run, at a commit holding all of this branch's code, passed (31 passed, 53 skipped for the stub switch).
-- **Not run: `test:windows`**, which AGENTS.md asks for when the main process changes (the guards). A Windows turn needs
-  Nate's approval and Track A's clearance, and Track A's candidate holds the Windows folders tonight. Track B proposes
-  to run it in its full PR's turn (Wed 12:00 to 14:00 SGT), which covers these changes too. Nothing here changes a
-  target, the supervisor, staging or the preload, so `verify:windows` isn't needed.
+- The packaged app again on this branch's own head, `8d14d80` (Nate asked for it before the merge): 27 passed and 49
+  skipped (the stub switch), none failed. `workspace-store.spec.ts`, whose schema pin failed at `ac01522`, passed.
+- The built specs weren't run again after `ac01522` on this branch: `2b61660` and `1c27882` change the composition
+  reader, the context check, tests and a seed's comment, and no window or IPC code. The mission review PR's built run,
+  at a commit holding all of this branch's code, passed every spec (83 passed, 1 packaged-only skipped).
+- **Not run on this branch: `test:windows`**, which AGENTS.md asks for when the main process changes (the guards). By
+  Nate's decision (28 Oct, 01:44 SGT), Track B's own Windows turn is deferred: one Windows staging and test run on the
+  final candidate containing Tracks B and C covers it, in Track A's candidate step. Windows validation is pending on
+  that candidate. Nothing here changes a target, the supervisor, staging or the preload, so `verify:windows` isn't
+  needed for this branch.
 
 ### Mission reviews (D43, NIV-52)
 
