@@ -6,6 +6,7 @@ import { projectFingerprint, type TaskEnvironment } from "@nivra/domain";
 import { environmentInputs } from "../src/environment/inputs.ts";
 import type { ExecResult } from "../src/exec/backend.ts";
 import { judgeBaseline, notRun, type CheckResult } from "../src/task/harness.ts";
+import { reserveMs, TASK_LIMITS } from "../src/task/limits.ts";
 import { verifiedWith } from "../src/task/worker.ts";
 import { attempt, BRIEF, FIX, FIXTURE, PROJECT, verdicts } from "./task-fixtures.ts";
 import { cleanUp, repoWith, scratch, snap } from "./workspace-fixtures.ts";
@@ -30,6 +31,12 @@ const ENV_BRIEF = { ...BRIEF, baseline: [REPRODUCED, CHECK_FAILS], frozen: ["che
 
 async function environmentFor(files: Record<string, string>, image: string): Promise<TaskEnvironment> {
   return { image, inputsDigest: environmentInputs(await snap(repoWith(files))).digest, projectFingerprint: await projectFingerprint(PROJECT), node: "v22.23.4", pnpm: "11.5.3", arch: "x86_64" };
+}
+
+/** A fake clock a test can move on, as the timing tests' is. */
+function movable() {
+  let now = 0;
+  return { now: () => now, sleep: async (ms: number) => void (now += ms), advance: (ms: number) => void (now += ms), waits: [] as number[] };
 }
 
 /** The guest's base image, prepared: its workspace holds the manifests and node_modules, as a preparation leaves it. */
@@ -97,6 +104,56 @@ describe("a task run from a prepared environment (NIV-49, D41)", () => {
     assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.requests()], ["refused", "baseline", 0]);
     assert.deepEqual(run.core!.baselineChecks.map((check) => [check.matched, check.reason]), [[false, "its output differs from the expected output at line 2"], [null, "the run stopped before it"]]);
     assert.equal(run.result.proposal, null);
+  });
+
+  it("keeps collect's and every final check's reserve when the baseline takes most of the session: the worker's window shrinks instead", async () => {
+    const environment = await environmentFor(FILES, "base-image");
+    const time = movable();
+    let shown: Record<string, unknown> = {};
+    let slowed = false;
+    const run = await attempt({
+      files: FILES,
+      brief: ENV_BRIEF,
+      setup: prepared,
+      time,
+      calls: [["edit_file", FIX]],
+      extra: {
+        environment,
+        progress: (message, data) => {
+          if (message.startsWith("Work window")) shown = data;
+          // The first baseline selection has taken 300 s, with nothing under way between the two.
+          if (message.startsWith("Baseline 1:")) {
+            slowed = true;
+            time.advance(300_000);
+          }
+        },
+      },
+    });
+    assert.ok(slowed, "the baseline wasn't slowed");
+    assert.deepEqual([run.result.outcome, run.core!.baselineChecks.map((check) => check.matched), verdicts(run.core), run.core!.verified], ["proposed", [true, true], ["case 1 passed", "check 1 passed"], true]);
+    // The reserve is whole, and the baseline's time came out of the worker's window.
+    const room = TASK_LIMITS.sessionMs - reserveMs(2);
+    assert.equal(shown["reserveMs"], reserveMs(2));
+    assert.ok(Number(shown["windowMs"]) <= room - 300_000 && Number(shown["windowMs"]) > room - 330_000, `a window of ${String(shown["windowMs"])} ms`);
+  });
+
+  it("stops before the model when the baseline leaves no time for its next selection outside the reserve, and says so", async () => {
+    const environment = await environmentFor(FILES, "base-image");
+    const time = movable();
+    const run = await attempt({
+      files: FILES,
+      brief: ENV_BRIEF,
+      setup: prepared,
+      time,
+      extra: {
+        environment,
+        // The first selection has taken 600 s: what is left before the reserve can't hold another operation.
+        progress: (message) => void (message.startsWith("Baseline 1:") && time.advance(600_000)),
+      },
+    });
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.result.stopped?.step, run.requests(), run.result.proposal], ["failed", "time", "baseline", 0, null]);
+    assert.deepEqual(run.core!.baselineChecks.map((check) => [check.matched, check.reason]), [[true, null], [null, "there wasn't time left in the session for it"]]);
+    assert.equal(run.guest.ran.filter((entry) => entry.label === "command").length, 1, "the second selection ran");
   });
 
   it("refuses the worker's writes to a frozen file and to a file the environment was prepared from, saying why", async () => {
