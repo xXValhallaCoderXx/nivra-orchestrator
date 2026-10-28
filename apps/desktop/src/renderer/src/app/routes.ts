@@ -64,13 +64,16 @@ export interface TaskStripProps {
 
 /**
  * Drafts kept across navigation and restarts (Nate, G2), on this computer only, never sent anywhere. A draft holding
- * what looks like a credential isn't kept, and `refused` says so, so the page can tell the person why. `key` is a
- * stable name such as `new-task:<scope>` or `brief:<taskId>:<version>`.
+ * what looks like a credential isn't kept, and neither is one this computer's storage refused: `reason` says which, so
+ * the page can tell the person (shell/drafts: `DraftNotice`). `key` is a stable name such as `new-task:<scope>` or
+ * `brief:<taskId>:<version>`.
  */
+export type DraftWrite = { kept: true } | { kept: false; reason: "credential" | "storage" };
+
 export interface DraftStore {
   read<T>(key: string): T | null;
   /** `label` is the line the sidebar's "Unsaved drafts" shows, such as the brief's title: the page knows it best. */
-  write<T>(key: string, value: T, label: string): { kept: true } | { kept: false; refused: "credential" };
+  write<T>(key: string, value: T, label: string): DraftWrite;
   discard(key: string): void;
   /** The drafts that exist, newest first, for the sidebar's "Unsaved drafts" list. */
   list(): ReadonlyArray<{ key: string; label: string; savedAt: string }>;
