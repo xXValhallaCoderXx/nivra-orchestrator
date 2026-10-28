@@ -162,6 +162,15 @@ function Shell() {
     setChosen(next);
     setRoute((current) => routeAfterSwitch(current, next));
   };
+  /**
+   * A project's environment, from a page about one of its tasks: the switcher moves to that project. For the task
+   * page's onOpenEnvironment(projectId) (Next A), wired in TaskDetail once its prop lands.
+   */
+  const openEnvironment = (projectId: string) => {
+    setNavOpen(false);
+    setChosen({ kind: "project", projectId });
+    setRoute({ kind: "environment" });
+  };
   const opened = (summary: ConversationSummary) => {
     setConversationsVersion((n) => n + 1);
     navigate({ kind: "conversation", id: summary.id });
