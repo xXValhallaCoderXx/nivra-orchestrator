@@ -3407,10 +3407,16 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     // Choosing one makes the recipe ready, on the Node chosen.
     const chosen = await host.resolveEnvironment(id, { runtime: "22.23.4" });
     assert.deepEqual([chosen.status, chosen.status === "ready" ? chosen.recipe.image.tag : null], ["ready", "node:22.23.4-alpine"]);
+    // Prepared on the Node chosen: the next resolution keeps it, marked as the person's choice, so it isn't kept once they stop choosing it.
+    await host.prepareEnvironment(id, { runtime: "22.23.4" }, await fingerprintOf(host, id, { runtime: "22.23.4" }));
+    const prepared = await ended(host, id);
+    assert.deepEqual([prepared.choices, prepared.prepared?.recipe.image.tag], [{ runtime: "22.23.4" }, "node:22.23.4-alpine"]);
+    await host.resolveEnvironment(id, { runtime: "22.23.4" });
+    assert.deepEqual(JSON.parse(lines(home, "env-resolves.log").at(-1)!).previous, { configuration: "2".repeat(64), runtime: "22.23.4", manager: "pnpm", managerVersion: "11.5.3", chosen: { runtime: true, managerVersion: false } });
     writeFileSync(join(home, "env-refused"), "");
     const refused = await host.resolveEnvironment(id, CHOICES);
     assert.deepEqual([refused.status, refused.status === "refused" ? refused.code : null], ["refused", "unsupported-manager"]);
-    assert.equal(calls(home, "runs.start"), 0);
+    assert.equal(calls(home, "runs.start"), 1);
   });
 
   it("binds a task run to the prepared environment: its preview carries it to the engine, its start sends it, and its fingerprint is v1 without one and v3 with a recipe's", async () => {
