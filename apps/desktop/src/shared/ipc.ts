@@ -10,10 +10,9 @@ import type {
   DoctorReport,
   EngineInfo,
   EnvironmentChoices,
-  EnvironmentPreview,
+  EnvironmentPreviewV2,
   EnvironmentRef,
   EnvironmentReport,
-  EnvironmentSpec,
   ExplainResult,
   HistoryRecord,
   MissionContent,
@@ -64,8 +63,9 @@ export const IPC = {
   getSandboxCheck: "sandbox:get",
   getSandboxStatus: "sandbox:status",
   getEnvironment: "environment:get",
-  previewEnvironment: "environment:preview",
+  resolveEnvironment: "environment:resolve",
   prepareEnvironment: "environment:prepare",
+  acceptMissingBuilds: "environment:accept-builds",
   cancelPreparation: "environment:cancel",
   listPreferences: "preferences:list",
   addPreference: "preferences:add",
@@ -866,15 +866,20 @@ export interface NivraApi {
   getSandboxCheck(projectId: string): Promise<SandboxCheckView | null>;
   /** What the project's engine has left open in Nebius from earlier sessions, and its recovery pass. */
   getSandboxStatus(projectId: string): Promise<SandboxStatus>;
-  /** The project's environment (D41): its chosen packages, what its task runs start from, and its latest preparation. */
+  /** The project's environment (D41, NIV-55): the choices made, what its task runs start from and whether it is ready, and its latest preparation. */
   getEnvironment(projectId: string): Promise<EnvironmentView>;
-  /** What preparing the project's environment with these packages would send and run, from its own engine with no network. Nothing is stored. */
-  previewEnvironment(projectId: string, spec: EnvironmentSpec): Promise<EnvironmentPreview>;
   /**
-   * Prepares the environment previewed (D41); refused when uploads are off, the key or project id is missing, on Windows
-   * itself, or when what it would send changed since the preview (`expected`).
+   * The project's own setup resolved into a recipe with these choices (NIV-55), from its own engine with no network:
+   * refused, waiting for a choice, or ready with what preparing it would send and run. Nothing is stored.
    */
-  prepareEnvironment(projectId: string, spec: EnvironmentSpec, expected: string): Promise<EnvironmentView>;
+  resolveEnvironment(projectId: string, choices: EnvironmentChoices): Promise<EnvironmentPreviewV2>;
+  /**
+   * Prepares the environment previewed (D41, NIV-55); refused when uploads are off, the key or project id is missing, on
+   * Windows itself, or when what it would send changed since the preview (`expected`).
+   */
+  prepareEnvironment(projectId: string, choices: EnvironmentChoices, expected: string): Promise<EnvironmentView>;
+  /** Accepts the environment without the dependency builds its preparation didn't run, for the verified record shown (`verified`). */
+  acceptMissingBuilds(projectId: string, verified: string): Promise<EnvironmentView>;
   /** Stops the project's preparation; what it uploaded stays with Nebius. */
   cancelPreparation(projectId: string): Promise<EnvironmentView>;
   /**
