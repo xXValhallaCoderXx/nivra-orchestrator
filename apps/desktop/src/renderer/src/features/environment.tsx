@@ -336,7 +336,7 @@ function PreviewPanel({ ready, choices, stale, prepared, onChoose }: { ready: Re
         <Text size="sm" c="var(--nivra-warning)" data-testid="environment-differs">
           {prepared.recipe.configuration.digest !== recipe.configuration.digest
             ? "This commit's setup files aren't the ones the environment was prepared from, so its task runs won't start from it. Prepare it again."
-            : "Preparing now would make a different environment from the one prepared, with the choices or the Nivra shown here. Prepare it again to use it."}
+            : "Preparing now would make a different environment from the one prepared: your choices, or how this version of Nivra prepares it, changed. Prepare it again to use it."}
         </Text>
       )}
       {recipe.install.tool === "npm" && (
