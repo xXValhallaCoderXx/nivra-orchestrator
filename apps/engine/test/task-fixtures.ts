@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
+import { isEnvironmentRef } from "@nivra/domain";
+import { leftOutFor } from "../src/environment/inputs.ts";
 import type { ExecutionSession } from "../src/exec/backend.ts";
 import type { Transport } from "../src/exec/nebius/api.ts";
 import { createNebiusBackend } from "../src/exec/nebius/session.ts";
@@ -60,6 +62,8 @@ export interface Attempt {
   handInWhenAsked?: boolean;
   /** Each request's input is reported as its size would make it, about 3.5 characters a token, not a flat 3,000. */
   usageFromPrompt?: boolean;
+  /** The folders the sessions leave out, for a prepared image given without an environment; an environment's own otherwise. */
+  leftOut?: readonly string[];
 }
 
 export async function attempt(options: Attempt = {}) {
@@ -69,7 +73,11 @@ export async function attempt(options: Attempt = {}) {
   options.setup?.(guest);
   const time = options.time ?? clock();
   const brief = options.brief ?? BRIEF;
-  const backend = createNebiusBackend({ credentials: () => ({ key: KEY, project: PROJECT }), baseImage: guest.baseImage, journalDir: scratch("journals"), transport: () => (options.wrap ? options.wrap(guest.service.transport, guest) : guest.service.transport), applets: "", limits: { maxOperations: operationsForBrief(brief), maxTimeoutSeconds: 60, prepareTimeoutSeconds: 60, pollMs: 10 }, now: time.now, sleep: time.sleep });
+  // As the engine's task backend gives a run with an environment: the folders its sessions leave out, and for a
+  // recipe's (NIV-55) its task variables and its image.
+  const environment = options.extra?.environment ?? null;
+  const bound = environment ? { dependencyFolders: leftOutFor(environment), ...(isEnvironmentRef(environment) ? { env: environment.env, environmentImage: guest.baseImage } : {}) } : options.leftOut ? { dependencyFolders: options.leftOut } : {};
+  const backend = createNebiusBackend({ credentials: () => ({ key: KEY, project: PROJECT }), baseImage: guest.baseImage, ...bound, journalDir: scratch("journals"), transport: () => (options.wrap ? options.wrap(guest.service.transport, guest) : guest.service.transport), applets: "", limits: { maxOperations: operationsForBrief(brief), maxTimeoutSeconds: 60, prepareTimeoutSeconds: 60, pollMs: 10 }, now: time.now, sleep: time.sleep });
   const script = [...(options.calls ?? [["read_file", { path: "greet.sh" }], ["edit_file", FIX], ["run_case", { number: 1 }]]), ["submit", { summary: "Defaulted the name to world." }]] as Step[];
   let requests = 0;
   // What each request carried, the tools it offered and its output cap: what the worker was told, as the model would

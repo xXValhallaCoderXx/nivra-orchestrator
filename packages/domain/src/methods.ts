@@ -3,7 +3,7 @@ import { ApplyParams, ApplyResolution, ApplyView } from "./apply.ts";
 import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { CoachContext, CoachInput, CoachReport } from "./coach.ts";
 import { RunContext } from "./context.ts";
-import { EnvironmentChoices, EnvironmentContext, EnvironmentContextV2, EnvironmentInput, EnvironmentPreview, EnvironmentPreviewV2, EnvironmentReport, EnvironmentSpec, PreviousSettlement, TaskEnvironment } from "./environment.ts";
+import { EnvironmentChoices, EnvironmentContext, EnvironmentContextV2, EnvironmentInput, EnvironmentPreview, EnvironmentPreviewV2, EnvironmentRef, EnvironmentReport, EnvironmentSpec, PreviousSettlement, TaskEnvironment } from "./environment.ts";
 import { ExplainResult } from "./explain.ts";
 import { ModelEndpoint, ModelFailureKind } from "./models.ts";
 import { ResearchContext, ResearchInput, ResearchReport } from "./research.ts";
@@ -221,7 +221,7 @@ export const Methods = {
    * What a task run of this checkout would send to Nebius, with no network, and the bounds it runs under (D39). With an
    * environment, the commit's manifests are checked against the one it was prepared from (D41).
    */
-  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief, environment: TaskEnvironment.extend({ preparedAt: z.iso.datetime() }).optional() }), result: TaskPreview },
+  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief, environment: z.union([TaskEnvironment.extend({ preparedAt: z.iso.datetime() }), EnvironmentRef]).optional() }), result: TaskPreview },
   /** What preparing this checkout's environment would send and run, with no network (D41). */
   "environment.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), spec: EnvironmentSpec }), result: EnvironmentPreview },
   /**

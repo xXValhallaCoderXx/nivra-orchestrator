@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createTool } from "@mastra/core/tools";
-import type { BaselineSelection, JsonObject, Mask, TaskBaselineCheck, TaskEnvironment } from "@nivra/domain";
+import { isEnvironmentRef, type BaselineSelection, type EnvironmentRef, type JsonObject, type Mask, type TaskBaselineCheck, type TaskEnvironment, type TaskSetupCheck } from "@nivra/domain";
 import { z } from "zod";
 import { ExecRefusedError, ExecUncertainError, type ExecResult, type ExecutionBackend, type ExecutionSession } from "../exec/backend.ts";
 import { WorkspaceRefusal } from "../exec/git-tool.ts";
@@ -13,7 +13,8 @@ import { runBudgetFailure, usageOf } from "../explain/reading.ts";
 import { failure as failure_, InternalFailure, ModelFailure, type ModelClient, type StepRecord as ModelStep } from "../providers/model.ts";
 import { requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget, type Hold, type Refusal } from "../providers/run-budget.ts";
-import { EnvironmentRefusal, environmentInputs } from "../environment/inputs.ts";
+import { EnvironmentRefusal, environmentInputs, leftOutFor, setupCheck, setupConfiguration, trackedUnder } from "../environment/inputs.ts";
+import { isNodeSetupPath } from "../environment/node-files.ts";
 import { SEARCH_COUNT_MAX, WorkspaceCopy } from "./copy.ts";
 import { checkRequest, commandFiles, couldntRun, failedToSend, judgeBaseline, judgeCase, judgeCheck, notRun, programsOf, refusalWords, verified, type AcceptanceCase, type CheckResult, type NamedFiles } from "./harness.ts";
 import { AFTER_SESSION_MS, operationsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
@@ -80,6 +81,10 @@ export interface TaskReportCore {
   prefix: string;
   /** The prepared environment the run started from (D41); null on Nivra's own base image. */
   environment: TaskEnvironment | null;
+  /** A project-driven recipe's environment the run started from instead (NIV-55); null otherwise. */
+  environmentRef: EnvironmentRef | null;
+  /** The setup files in the collected workspace against the commit's (NIV-55); null without a prepared environment, or before collect. */
+  setup: TaskSetupCheck | null;
   /** The brief's baseline selections, as they ran before the model (D41). */
   baselineChecks: TaskBaselineCheck[];
   /** The frozen files in the collected workspace, each compared with the commit's; null when it wasn't collected. */
@@ -114,8 +119,8 @@ export interface WorkerRun {
   workspace?: string;
   /** What runs the engine's scripts' tools in the sandbox: busybox unless given. */
   applets?: string;
-  /** The prepared environment the backend's sessions start from (D41), as the run is bound to it. */
-  environment?: TaskEnvironment | null;
+  /** The prepared environment the backend's sessions start from, D41's or a recipe's (NIV-55), as the run is bound to it. */
+  environment?: TaskEnvironment | EnvironmentRef | null;
   now?: () => number;
   /**
    * The run's one absolute deadline, on `now`'s clock (D39): from when the run started, which can be before the worker
@@ -256,6 +261,8 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   const results: CheckResult[] = [];
   const baselineChecks: TaskBaselineCheck[] = [];
   const frozenFiles: Array<{ path: string; unchanged: boolean | null }> = [];
+  /** The setup files after collect (NIV-55): a change to one leaves the result unverified, as a frozen file's does. */
+  let setup: TaskSetupCheck | null = null;
   const worker: WorkerSummary = {
     handedIn: false,
     summary: null,
@@ -277,8 +284,15 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     },
   };
   const progress = (message: string, data: JsonObject) => run.progress?.(mask(message), data);
-  /** The files the worker can't write, each with why (D41): the brief's frozen files, and those its environment was prepared from. */
+  /** The files the worker can't write, each with why (D41): the brief's frozen files. */
   const held = new Map<string, string>();
+  /**
+   * The project's setup files, held by pattern whether or not one exists yet (NIV-55): a package.json at any depth,
+   * the lockfiles, the workspace file, the version files and the pnpmfiles. Changing one, or creating one, would leave
+   * the environment behind, so with an environment the worker writes none.
+   */
+  const setupProblem = (path: string): string | null =>
+    run.environment && isNodeSetupPath(path) ? `${path.length > 200 ? `${path.slice(0, 199)}\u2026` : path} is one of the setup files the project's environment was prepared from, so a task can't create or change it` : null;
   const missingFor = (command: string): string | null => {
     const program = firstWord(command);
     return program !== null && findings.get(program) === "missing" ? program : null;
@@ -290,14 +304,17 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       task: { taskId: run.binding.taskId, attemptId: run.binding.attemptId, runId: run.binding.runId, briefVersion: run.binding.briefVersion, briefSha256: run.binding.briefSha256 },
       baseline: copy.snapshot.baseline,
       prefix: copy.snapshot.prefix,
-      environment: run.environment ?? null,
+      environment: run.environment && !isEnvironmentRef(run.environment) ? run.environment : null,
+      environmentRef: run.environment && isEnvironmentRef(run.environment) ? run.environment : null,
+      setup,
       // Masked as the checks are: the report is bound into the proposal and kept (D41).
       baselineChecks: baselineChecks.map((check) => ({ ...check, name: mask(check.name), reason: check.reason === null ? null : mask(check.reason), stdoutTail: mask(check.stdoutTail), stderrTail: mask(check.stderrTail) })),
       frozen: [...frozenFiles],
       toolchain: programs.map((program) => ({ program, finding: findings.get(program) ?? "unknown" })),
       worker: { ...worker, written: [...copy.written] },
       checks: results.map((result) => ({ ...result, name: mask(result.name), reason: result.reason === null ? null : mask(result.reason), stdoutTail: mask(result.stdoutTail), stderrTail: mask(result.stderrTail), difference: result.difference && { line: result.difference.line, expected: mask(result.difference.expected), got: mask(result.difference.got) } })),
-      verified: verifiedWith(results, frozenFiles),
+      // The setup files count as held ones: any change to them and the result isn't verified (NIV-55).
+      verified: verifiedWith(results, [...frozenFiles, ...(setup ? [{ unchanged: setup.unchanged }] : [])]),
     };
 
   /** One operation, its record kept whatever happens. A command refused before it was sent never ran: it is no step. */
@@ -314,11 +331,8 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   };
 
   const work = async (session: ExecutionSession, context: WorkContext): Promise<WorkResult> => {
-    copy = new WorkspaceCopy(context.snapshot);
+    copy = new WorkspaceCopy(context.snapshot, session.leftOut ?? []);
     for (const path of brief.frozen ?? []) held.set(path, `${path.length > 200 ? `${path.slice(0, 199)}\u2026` : path} is frozen by the brief: the task is judged by it, so it can't be changed`);
-    if (run.environment) {
-      for (const file of environmentInputs(context.snapshot).files) held.set(file.path, `${file.path.length > 200 ? `${file.path.slice(0, 199)}\u2026` : file.path} is one the project's environment was prepared from, so changing it would leave the environment behind`);
-    }
     // The toolchain, before the model: a program the brief's commands need that isn't there stops the run now.
     if (programs.length) {
       context.stage = "toolchain";
@@ -477,7 +491,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
 
     const write = async (tool: string, path: string, content: string, created: boolean) => {
       const bytes = encoder.encode(content);
-      const problem = held.get(path) ?? writeContentProblem(content, run.knownValues) ?? copy.writeProblem(path, bytes, run.knownValues);
+      const problem = held.get(path) ?? setupProblem(path) ?? writeContentProblem(content, run.knownValues) ?? copy.writeProblem(path, bytes, run.knownValues);
       if (problem) return refuse(tool, problem);
       if (worker.tools.writes >= TASK_LIMITS.tools.writes) return refuse(tool, `this attempt has made its ${TASK_LIMITS.tools.writes} writes; call submit now`);
       if (windowLeft() - HAND_IN_KEPT_MS < writeNeedsMs()) return refuse(tool, "there isn't time left in this attempt for another write; call submit now");
@@ -777,6 +791,9 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     const collectedFiles = new Map(context.collected.entries.flatMap((entry) => (entry.kind === "file" ? [[entry.path, entry.sha256] as const] : [])));
     const committed = frozenIn(context.snapshot, brief.frozen ?? []);
     if ("files" in committed) for (const file of committed.files) frozenFiles.push({ path: file.path, unchanged: collectedFiles.get(file.path) === file.sha256 });
+    // The setup files as they came back, against the commit's (NIV-55), digested again outside anything the worker could
+    // edit: the worker can't write one, so any difference is one Nivra didn't make.
+    if (run.environment) setup = setupCheck(context.snapshot, context.collected.entries, isNodeSetupPath);
     context.stage = "final check";
     // The first start whose answer was lost: nothing more runs in the session, and the run ends uncertain (rule 9).
     let unsettled: ExecUncertainError | null = null;
@@ -813,18 +830,24 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     folder: run.folder,
     expectedFingerprint: run.preview,
     steps: [],
-    // Before anything is sent (D41): the environment must have been prepared from this commit's manifests, and every
-    // frozen file must be a file the commit holds.
+    // Before anything is sent (D41): the environment must have been prepared from this commit's setup files, the commit
+    // may track no file where the environment's sessions leave folders out (NIV-55), and every frozen file must be a
+    // file the commit holds.
     admit: (snapshot) => {
-      if (run.environment) {
+      const environment = run.environment ?? null;
+      if (environment && isEnvironmentRef(environment)) {
+        if (setupConfiguration(snapshot, isNodeSetupPath).digest !== environment.configuration) return { code: "environment", message: "snapshot: this commit's setup files aren't the ones its environment was prepared from, so nothing was sent." };
+      } else if (environment) {
         let digest: string | null = null;
         try {
           digest = environmentInputs(snapshot).digest;
         } catch (error) {
           if (!(error instanceof EnvironmentRefusal)) throw error;
         }
-        if (digest !== run.environment.inputsDigest) return { code: "environment", message: "snapshot: this commit's manifests aren't the ones its environment was prepared from, so nothing was sent." };
+        if (digest !== environment.inputsDigest) return { code: "environment", message: "snapshot: this commit's manifests aren't the ones its environment was prepared from, so nothing was sent." };
       }
+      const tracked = environment ? trackedUnder(snapshot, leftOutFor(environment)) : null;
+      if (tracked !== null) return { code: "environment", message: "snapshot: this commit tracks a file in a folder its environment's sandbox leaves out, so nothing was sent." };
       const frozen = frozenIn(snapshot, brief.frozen ?? []);
       return "missing" in frozen ? { code: "frozen", message: "snapshot: the brief freezes a file this commit doesn't hold, so nothing was sent." } : null;
     },

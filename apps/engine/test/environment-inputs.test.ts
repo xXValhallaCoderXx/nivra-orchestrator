@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { after, describe, it } from "node:test";
 import { gunzipSync } from "node:zlib";
 import { EnvironmentPreview } from "@nivra/domain";
 import { readTar } from "../src/exec/tar.ts";
-import { configurationDigest, environmentInputs, EnvironmentRefusal, inputsArchive, inputsDigest, installArgsFor, satisfies, setupConfiguration } from "../src/environment/inputs.ts";
+import { configurationDigest, environmentInputs, EnvironmentRefusal, inputsArchive, inputsDigest, installArgsFor, satisfies, setupCheck, setupConfiguration } from "../src/environment/inputs.ts";
 import { isNodeSetupPath } from "../src/environment/node-files.ts";
 import { environmentPreviewOf } from "../src/environment/preview.ts";
 import { cleanUp, repoWith, snap } from "./workspace-fixtures.ts";
@@ -150,5 +151,18 @@ describe("a setup configuration (NIV-55)", () => {
     assert.deepEqual(before.files.map((file) => file.path), ["toy.json", "toy.lock"]);
     const after = setupConfiguration(await snap(repoWith({ "toy.json": "{}\n", "toy.lock": "b\n", "src/main.toy": "print\n" })), isToySetup);
     assert.notEqual(after.digest, before.digest);
+  });
+});
+
+describe("the setup files after a task, against the commit's (NIV-55)", () => {
+  const entries = (files: Record<string, string>) => Object.entries(files).map(([path, text]) => ({ path, kind: "file" as const, sha256: createHash("sha256").update(text).digest("hex") }));
+  it("finds a setup file changed, added or removed, and never counts a source", async () => {
+    const files = { "package.json": "{}\n", ".nvmrc": "24\n", "packages/a/package.json": "{}\n", "src/a.ts": "a\n" };
+    const snapshot = await snap(repoWith(files));
+    assert.deepEqual(setupCheck(snapshot, entries({ ...files, "src/a.ts": "edited\n", "src/b.ts": "new\n" }), isNodeSetupPath), { unchanged: true, changed: [] });
+    const { ".nvmrc": _removed, ...rest } = files;
+    assert.deepEqual(setupCheck(snapshot, entries({ ...rest, "package.json": '{ "edited": true }\n', "packages/b/package.json": "{}\n" }), isNodeSetupPath), { unchanged: false, changed: [".nvmrc", "package.json", "packages/b/package.json"] });
+    // A setup file come back as a link is a change, even one whose target reads as the file's text did.
+    assert.deepEqual(setupCheck(snapshot, [...entries(rest), { path: ".nvmrc", kind: "link" as const, target: "24\n" }], isNodeSetupPath), { unchanged: false, changed: [".nvmrc"] });
   });
 });

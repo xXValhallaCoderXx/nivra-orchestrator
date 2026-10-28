@@ -188,7 +188,7 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
   const manifests = configuration.files.filter((file) => file.path === "package.json" || file.path.endsWith("/package.json")).map(manifestOf);
   const root = manifests.find((manifest) => manifest.folder === "")!.json;
 
-  const tracked = input.snapshot.leftOutPaths.find((path) => /(^|\/)node_modules\//i.test(path));
+  const tracked = [...input.snapshot.files.map((file) => file.path), ...input.snapshot.leftOutPaths].find((path) => /(^|\/)node_modules\//i.test(path));
   if (tracked) throw new Refused("tracked-dependencies", `This commit tracks files inside node_modules, such as ${quoted(tracked)}. An environment installs dependencies there, where they would mix with tracked files. Stop tracking node_modules, commit, then try again.`);
 
   // The workspace file, read only as far as it can be read.

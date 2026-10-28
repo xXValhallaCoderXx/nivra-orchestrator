@@ -91,7 +91,7 @@ describe("commit snapshots", () => {
     assert.deepEqual(changedSince(before, root), [], "the checkout changed");
   });
 
-  it("leaves out secret-named files, dependency and build output, submodules and the engine home, and counts each", async () => {
+  it("leaves out secret-named files, submodules and the engine home, and counts each, wherever they are; tracked dependency and build output is sent (NIV-55)", async () => {
     const library = repoWith({ "lib.ts": "export const lib = 1;\n" });
     const root = repoWith({
       "src/app.ts": "export const app = 1;\n",
@@ -101,27 +101,31 @@ describe("commit snapshots", () => {
       "keys/deploy.pem": "not a key at all\n",
       "node_modules/lib/index.js": "module.exports = 1;\n",
       "apps/web/dist/bundle.js": "var a;\n",
+      // The deny list and the exclusions hold inside folders named like build output too.
+      "apps/web/dist/.env": "API_KEY=harmless\n",
+      "build/keys/release.pem": "not a key at all\n",
       ".nivra-home/nivra.db": "a pretend database\n",
+      "build/.nivra-home/nivra.db": "another pretend database\n",
     });
     git(root, ["submodule", "add", "-q", library, "vendored"]);
     git(root, ["commit", "-q", "-m", "submodule"]);
     const before = folderState(root);
 
-    const snapshot = await snap(root, { exclude: [join(root, ".nivra-home")] });
+    const snapshot = await snap(root, { exclude: [join(root, ".nivra-home"), join(root, "build", ".nivra-home")] });
     assert.deepEqual(
       snapshot.files.map((file) => file.path),
-      [".env.example", ".gitmodules", "src/app.ts"],
+      [".env.example", ".gitmodules", "apps/web/dist/bundle.js", "node_modules/lib/index.js", "src/app.ts"],
     );
     assert.deepEqual(
       Object.fromEntries(Object.entries(snapshot.leftOut).map(([reason, counted]) => [reason, counted.count])),
-      { secret: 3, output: 2, submodule: 1, excluded: 1 },
+      { secret: 5, output: 0, submodule: 1, excluded: 2 },
     );
-    assert.deepEqual(snapshot.leftOut.secret.sample.sort(), [".env", "config/credentials.json", "keys/deploy.pem"]);
-    assert.deepEqual(snapshot.leftOut.excluded.sample, [".nivra-home/nivra.db"]);
+    assert.deepEqual(snapshot.leftOut.secret.sample.sort(), [".env", "apps/web/dist/.env", "build/keys/release.pem", "config/credentials.json", "keys/deploy.pem"]);
+    assert.deepEqual(snapshot.leftOut.excluded.sample.sort(), [".nivra-home/nivra.db", "build/.nivra-home/nivra.db"]);
     const sent = readTar(snapshot.archive.archive, { maxEntries: 100, maxBytes: 1 << 20, maxEntryBytes: 1 << 20, maxPathBytes: 1_024 }).filter((entry) => entry.kind !== "dir");
     assert.deepEqual(
       sent.map((entry) => entry.path),
-      [".env.example", ".gitmodules", "src/app.ts"],
+      [".env.example", ".gitmodules", "apps/web/dist/bundle.js", "node_modules/lib/index.js", "src/app.ts"],
     );
     assert.deepEqual(changedSince(before, root), [], "the checkout changed");
 

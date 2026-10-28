@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { ENVIRONMENT_BASE, ENVIRONMENT_LIMITS, type EnvironmentSpec } from "@nivra/domain";
+import { ENVIRONMENT_BASE, ENVIRONMENT_LIMITS, isEnvironmentRef, type EnvironmentRef, type EnvironmentSpec, type TaskEnvironment } from "@nivra/domain";
 import { compressSnapshot } from "../exec/nebius/session.ts";
+import { OUTPUT_DIRS } from "../repo/deny.ts";
 import type { Snapshot, SnapshotFile } from "../exec/snapshot.ts";
 import { writeTar } from "../exec/tar.ts";
 
@@ -128,6 +129,36 @@ export function environmentFingerprint(parts: { baseline: string; prefix: string
 export function setupConfiguration(snapshot: Pick<Snapshot, "files">, isSetupPath: (path: string) => boolean): { files: SnapshotFile[]; digest: string } {
   const files = snapshot.files.filter((file) => isSetupPath(file.path));
   return { files, digest: configurationDigest(files) };
+}
+
+/**
+ * The folder names a task run's sessions leave out of their listings and collect, by the environment the run starts
+ * from: a recipe's dependency folders (NIV-55), or D41's output folders as its sessions always left them out. A run's
+ * commit may track no file under one, since neither listing would see it.
+ */
+export function leftOutFor(environment: TaskEnvironment | EnvironmentRef): readonly string[] {
+  return isEnvironmentRef(environment) ? environment.dependencyFolders : OUTPUT_DIRS;
+}
+
+/** The first tracked file under one of `folders`, at any depth, with that folder's name; null when there is none. */
+export function trackedUnder(snapshot: Pick<Snapshot, "files">, folders: readonly string[]): { path: string; folder: string } | null {
+  for (const file of snapshot.files) {
+    const folder = file.path.split("/").slice(0, -1).find((segment) => folders.includes(segment));
+    if (folder !== undefined) return { path: file.path, folder };
+  }
+  return null;
+}
+
+/**
+ * The setup files as a collected workspace holds them, against the commit's (NIV-55): unchanged, or the paths that
+ * differ, one added or removed included, sorted by their bytes. Each is compared by its kind and its hash, a link's
+ * hash being its target's, as a snapshot hashes it: a file come back as a link is a change.
+ */
+export function setupCheck(snapshot: Pick<Snapshot, "files">, entries: ReadonlyArray<{ path: string; kind: "file"; sha256: string } | { path: string; kind: "link"; target: string }>, isSetupPath: (path: string) => boolean): { unchanged: boolean; changed: string[] } {
+  const before = new Map(setupConfiguration(snapshot, isSetupPath).files.map((file) => [file.path, `${file.kind} ${file.sha256}`] as const));
+  const after = new Map(entries.flatMap((entry) => (isSetupPath(entry.path) ? [[entry.path, entry.kind === "file" ? `file ${entry.sha256}` : `link ${sha256(entry.target)}`] as const] : [])));
+  const changed = [...new Set([...before.keys(), ...after.keys()])].filter((path) => before.get(path) !== after.get(path)).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+  return { unchanged: changed.length === 0, changed: changed.slice(0, 20) };
 }
 
 /** A setup configuration's digest: its paths and hashes, sorted by the path's bytes. */

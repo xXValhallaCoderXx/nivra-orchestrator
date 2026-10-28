@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { TaskEnvironment } from "./environment.ts";
+import { EnvironmentRef, TaskEnvironment } from "./environment.ts";
 import { ModelFailureKind, RunRoute, RunUsage } from "./models.ts";
 import { SandboxCleanup, SandboxStep, SandboxStopCode, SnapshotPreview, TargetName } from "./sandbox.ts";
 
@@ -186,8 +186,11 @@ export const TaskInput = z.strictObject({
   briefVersion: z.number().int().positive(),
   /** `taskBriefDigest` of the context's brief, checked before anything is sent. */
   briefDigest: Sha256Hex,
-  /** The prepared environment the run starts from (D41); without one, the run starts from Nivra's own base image. */
-  environment: TaskEnvironment.optional(),
+  /**
+   * The prepared environment the run starts from: D41's single setup, or a project-driven recipe's (NIV-55). Without
+   * one, the run starts from Nivra's own base image.
+   */
+  environment: z.union([TaskEnvironment, EnvironmentRef]).optional(),
 });
 export type TaskInput = z.infer<typeof TaskInput>;
 
@@ -200,7 +203,7 @@ export const StoredTaskInput = z.object({
   taskId: z.string().min(1),
   briefVersion: z.number().int().positive(),
   briefDigest: z.string().min(1),
-  environment: z.object({ image: z.string().min(1), inputsDigest: z.string().min(1), projectFingerprint: z.string().min(1), node: z.string(), pnpm: z.string(), arch: z.string() }).optional(),
+  environment: z.union([z.object({ image: z.string().min(1), inputsDigest: z.string().min(1), projectFingerprint: z.string().min(1), node: z.string(), pnpm: z.string(), arch: z.string() }), EnvironmentRef]).optional(),
 });
 export type StoredTaskInput = z.infer<typeof StoredTaskInput>;
 
@@ -258,6 +261,8 @@ export const TaskPreview = z.discriminatedUnion("status", [
       .max(TASK_BRIEF_LIMITS.finalChecks),
     /** The prepared environment the run would start from, checked against this commit's manifests (D41); null without one. */
     environment: TaskEnvironment.extend({ preparedAt: z.iso.datetime() }).nullable(),
+    /** A project-driven recipe's environment instead (NIV-55), checked against this commit's setup files. D41's field is then null. */
+    environmentRef: EnvironmentRef.nullable().optional(),
     /** The brief's frozen files, as this commit holds them: the worker can't write them, and the result counts only when they are unchanged. */
     frozen: z.array(z.strictObject({ path: z.string().max(1_024), sha256: Sha256Hex })).max(TASK_BRIEF_LIMITS.frozen),
     limits: TaskRunLimits,
@@ -311,7 +316,7 @@ export const TaskWorker = z.strictObject({
 export type TaskWorker = z.infer<typeof TaskWorker>;
 
 /** What stopped a run, by kind: a sandbox check's codes (D36), and a task's own. The words are chosen by the code. */
-export const TaskStopCode = z.enum([...SandboxStopCode.options, "toolchain", "time", "model-sharing", "brief", "model", "native-windows", "baseline", "environment", "frozen"]);
+export const TaskStopCode = z.enum([...SandboxStopCode.options, "toolchain", "time", "model-sharing", "brief", "model", "native-windows", "baseline", "environment", "frozen", "environment-missing"]);
 export type TaskStopCode = z.infer<typeof TaskStopCode>;
 
 /**
@@ -339,6 +344,10 @@ export type TaskBaselineCheck = z.infer<typeof TaskBaselineCheck>;
 export const TaskOutcome = z.enum(["in-progress", "proposed", "unchanged", "refused", "cancelled", "failed", "uncertain", "interrupted"]);
 export type TaskOutcome = z.infer<typeof TaskOutcome>;
 
+/** The setup files after the run, against the commit's: unchanged, or the paths that differ (up to 20). */
+export const TaskSetupCheck = z.strictObject({ unchanged: z.boolean().nullable(), changed: z.array(z.string().max(1_024)).max(20) });
+export type TaskSetupCheck = z.infer<typeof TaskSetupCheck>;
+
 /**
  * A task run's report, saved by the engine (masked) when the run starts and when it ends, and read with `runs.task`.
  * What the worker said is kept apart from what Nivra checked, and cleanup's record is its own.
@@ -351,6 +360,13 @@ export const TaskReport = z.strictObject({
   toolchain: z.array(z.strictObject({ program: z.string().max(128), finding: z.enum(["present", "missing", "unknown"]) })).max(TASK_BRIEF_LIMITS.finalChecks),
   /** The prepared environment the run started from (D41); null for a run on Nivra's own base image. */
   environment: TaskEnvironment.nullable().default(null),
+  /** A project-driven recipe's environment the run started from (NIV-55); D41's field is then null. */
+  environmentRef: EnvironmentRef.nullable().optional(),
+  /**
+   * The setup files in the collected workspace, compared with the commit's (NIV-55): any difference and the change
+   * isn't verified. Null when the run has no prepared environment, or nothing was collected.
+   */
+  setup: TaskSetupCheck.nullable().optional(),
   /** The brief's baseline selections, as they ran before the model (D41). */
   baseline: z.array(TaskBaselineCheck).max(TASK_BRIEF_LIMITS.baseline).default([]),
   /** The bounds the run ran under, beside what it used (D41); null for a report kept from before, whose bounds weren't kept. */

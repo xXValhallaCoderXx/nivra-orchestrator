@@ -11,7 +11,8 @@ import { BoundaryUnavailableError, ExecRefusedError, ExecUncertainError, Session
 import type { Transport, TransportResponse } from "../src/exec/nebius/api.ts";
 import { Journal, RETENTION } from "../src/exec/nebius/sandbox.ts";
 import { safeUnresolved } from "../src/exec/check.ts";
-import { compressSnapshot, createNebiusBackend, listingDigest, NEBIUS_CAPABILITIES, NEBIUS_LIMITS, PREPARE_SCRIPT, reconcileJournals, SandboxOperationError, scanJournals, signalName, type ListingEntry, type NebiusBackendOptions } from "../src/exec/nebius/session.ts";
+import { OUTPUT_DIRS } from "../src/repo/deny.ts";
+import { compressSnapshot, createNebiusBackend, EnvironmentMissingError, listingDigest, NEBIUS_CAPABILITIES, NEBIUS_LIMITS, PREPARE_SCRIPT, reconcileJournals, SandboxOperationError, scanJournals, signalName, type ListingEntry, type NebiusBackendOptions } from "../src/exec/nebius/session.ts";
 import { writeTar } from "../src/exec/tar.ts";
 import { FakeGuest } from "./fake-guest.ts";
 import { clock, FakeService, holding, settles, sha, succeed, type Behaviour } from "./fake-sandboxes.ts";
@@ -235,6 +236,37 @@ describe("Nebius session: one owned operation at a time, the state moving only o
     await assert.rejects(session.exec(command(["/bin/true"])), /no longer has this workspace's saved state \(its image answered HTTP 410\)/);
     await session.close();
     assert.deepEqual([service.uploads.length, spawnBodies(service).filter((body) => body["image"] === "base-image").length], [1, 1], "no second upload, and nothing started again from the base image");
+  });
+
+  it("says a prepared environment is gone when its own image answers 404 or 410, after the snapshot was sent, and only for that image (NIV-55)", async () => {
+    for (const status of [404, 410]) {
+      const service = serviceFor();
+      const via: Transport = async (request) => (request.method === "POST" && request.path === "/v1/instances" ? { status, headers: {}, body: new TextEncoder().encode('{"error":"image not found"}') } : service.transport(request));
+      const { backend } = backendOn(service, { environmentImage: "base-image", dependencyFolders: ["node_modules"], via });
+      const error = await backend.open(spec()).catch((caught: unknown) => caught);
+      assert.ok(error instanceof EnvironmentMissingError && error instanceof SessionOpenError, String(error));
+      assert.match((error as Error).message, new RegExp(`The project's prepared environment is no longer in Nebius \\(HTTP ${status}\\)`));
+      assert.equal(service.uploads.length, 1, "the snapshot was sent first");
+    }
+    // A base image that isn't an environment's: the same answer is no environment's absence.
+    const service = serviceFor();
+    const via: Transport = async (request) => (request.method === "POST" && request.path === "/v1/instances" ? { status: 404, headers: {}, body: new TextEncoder().encode("{}") } : service.transport(request));
+    const plain = await backendOn(service, { via }).backend.open(spec()).catch((caught: unknown) => caught);
+    assert.ok(plain instanceof SessionOpenError && !(plain instanceof EnvironmentMissingError), String(plain));
+  });
+
+  it("leaves out the dependency folders it is given, by plain names only, and gives them to the prepare step as arguments (NIV-55)", async () => {
+    const service = serviceFor();
+    const session = await backendOn(service, { dependencyFolders: ["node_modules", ".venv"] }).backend.open(spec());
+    assert.deepEqual([session.leftOut, args(spawnBodies(service).find(isPrepare)!).slice(7)], [["node_modules", ".venv"], ["node_modules", ".venv"]]);
+    await session.close();
+    const none = serviceFor();
+    const bare = await backendOn(none).backend.open(spec());
+    assert.deepEqual([bare.leftOut, args(spawnBodies(none).find(isPrepare)!).length], [[], 7]);
+    await bare.close();
+    for (const folders of [["."], [".."], ["a/b"], ["*"], ["a b"], [""], ["-name"].map((name) => `${name}\n`), Array.from({ length: 17 }, (_, index) => `f${index}`)]) {
+      assert.throws(() => backendOn(serviceFor(), { dependencyFolders: folders }), /A session leaves out at most 16 folders, each by a plain name/, JSON.stringify(folders));
+    }
   });
 
   it("says when output was cut, by the service or by the command's own cap", async () => {
@@ -770,7 +802,7 @@ describe("Nebius session: the prepare step's listing, checked with this machine'
     assert.equal(existsSync(archive), false, "the archive is removed once extracted");
   });
 
-  it("extracts over what the workspace already holds, and leaves out only the dependency and build folders in it, at any depth", { skip: process.platform === "win32" ? "needs a POSIX shell and tar" : false }, () => {
+  it("extracts over what the workspace already holds, and leaves out only the folders it is given, at any depth", { skip: process.platform === "win32" ? "needs a POSIX shell and tar" : false }, () => {
     const root = tempDir("prepared listing");
     const source = join(root, "source");
     mkdirSync(join(source, "src"), { recursive: true });
@@ -786,8 +818,8 @@ describe("Nebius session: the prepare step's listing, checked with this machine'
       { path: "out", kind: "file", executable: false, sha256: sha("a file named out\n") },
       { path: "dist", kind: "link", target: "src" },
     ]);
-    /** The digest the prepare step prints for the snapshot extracted over a workspace holding `held`. */
-    const printed = (held: Record<string, string>) => {
+    /** The digest the prepare step prints for the snapshot extracted over a workspace holding `held`, leaving out `leftOut`. */
+    const printed = (held: Record<string, string>, leftOut: readonly string[]) => {
       const guest = tempDir("prepared guest");
       const workspace = join(guest, "workspace");
       for (const [path, text] of Object.entries(held)) {
@@ -795,13 +827,20 @@ describe("Nebius session: the prepare step's listing, checked with this machine'
         writeFileSync(join(workspace, path), text);
       }
       writeFileSync(join(guest, "snapshot.tar"), compressSnapshot(readFileSync(plain)));
-      const ran = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", workspace, join(guest, "snapshot.tar"), "", join(guest, "listing")], { encoding: "utf8" });
+      const ran = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", workspace, join(guest, "snapshot.tar"), "", join(guest, "listing"), ...leftOut], { encoding: "utf8" });
       assert.equal(ran.status, 0, ran.stderr);
       assert.equal(readFileSync(join(workspace, "node_modules", "dep", "index.js"), "utf8"), "dep\n", "the workspace was emptied");
       return /^digest ([0-9a-f]{64})$/m.exec(ran.stdout)?.[1];
     };
     const dependencies = { "node_modules/dep/index.js": "dep\n", "packages/a/node_modules/dep/index.js": "dep\n", "packages/a/.next/cache/x": "x\n", "coverage/lcov.info": "x\n", "crates/b/target/debug/b": "x\n" };
-    assert.equal(printed(dependencies), digest);
-    assert.notEqual(printed({ ...dependencies, "packages/a/index.js": "stray\n" }), digest, "a file outside the dependency folders was left out");
+    // D41's sessions leave out every output folder's name, as they always did.
+    assert.equal(printed(dependencies, OUTPUT_DIRS), digest);
+    assert.notEqual(printed({ ...dependencies, "packages/a/index.js": "stray\n" }, OUTPUT_DIRS), digest, "a file outside the left-out folders was left out");
+    // A recipe's leave out only its dependency folders (NIV-55): build output the workspace holds is listed, and differs.
+    const installed = { "node_modules/dep/index.js": "dep\n", "packages/a/node_modules/dep/index.js": "dep\n" };
+    assert.equal(printed(installed, ["node_modules"]), digest);
+    assert.notEqual(printed(dependencies, ["node_modules"]), digest, "build output outside the dependency folders was left out");
+    // With none given, nothing is left out.
+    assert.notEqual(printed(installed, []), digest, "a folder was left out that the session wasn't given");
   });
 });

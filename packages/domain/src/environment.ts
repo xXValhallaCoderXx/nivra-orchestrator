@@ -403,6 +403,9 @@ export const EnvironmentRef = z.strictObject({
 });
 export type EnvironmentRef = z.infer<typeof EnvironmentRef>;
 
+/** Whether a run's environment is a project-driven recipe's (NIV-55), not D41's single setup. */
+export const isEnvironmentRef = (environment: TaskEnvironment | EnvironmentRef): environment is EnvironmentRef => "format" in environment && environment.format === REF_FORMAT;
+
 /** Why a prepared environment can't be used any more. Refreshing Nivra's release index is never one. */
 export const InvalidationReason = z.enum(["inputs-changed", "recipe-changed", "advisory", "project-changed", "target-changed", "image-missing", "legacy"]);
 export type InvalidationReason = z.infer<typeof InvalidationReason>;
