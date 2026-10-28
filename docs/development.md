@@ -722,17 +722,21 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e budget-api.spec.ts
 
 - **The harness sets a policy** the way it already calls `window.nivra` for keys and checks, through
   `apps/desktop/scripts/live-ui.ts`: the same preload, IPC, trusted-sender check and validation the screen uses.
-- **Amounts** are integer micro-units (25 dollars is 25000000). A money policy admits no model until the price list's
-  currency and the model's bounds are established; a call that reaches no model costs no money. Without a policy,
-  today's allowances apply and the ledger still records.
+- **Amounts** are integer micro-units (25 dollars is 25000000). A budget in dollars is set only when the price list's
+  currency, every model's bounds and free listings are established, and today's aren't: `setBudgetPolicy` refuses one
+  with the reason and saves nothing, and `null` (the budget off: the existing per-run limits apply) keeps recording.
+  With the budget off, a call to a model the price list doesn't have is counted, its money unknown; under a dollar
+  budget it is refused. Tests set dollar budgets through the host's `prices` option (tests only), with a test list. A
+  call that reaches no model costs no money.
 - **A history put back.** Close Nivra, replace `workspace.db` with the matching copy, and open Nivra: the check at the
   first budget call clears the recovery once the ledger holds the guard's last revision and digest again. Deleting
-  `budget-guard.log` while the workspace exists rebuilds it from the ledger. `budget-guard.test.ts` makes these faults
+  `budget-guard.log` while the workspace exists rebuilds it from the ledger (after a loss was found and before it was
+  resolved, that clears the recorded recovery: one of D49's known limits). `budget-guard.test.ts` makes these faults
   with real files: it takes backups at each point the plan names, does paid work, and puts them back.
-- **A new history's restriction** (the wait, or what is left) holds through the recovery month, the summary's
-  `afterLoss.through`: the latest month the ledger, the computer's clock or the guard's last record shows. A history
-  put back from an older month keeps its own month until the person confirms the real one, and the restriction holds
-  in both.
+- **A new history's restriction** (the wait, or what is left) holds through the summary's `afterLoss.through`: the
+  latest month the lost history established, which every guard record keeps (`month` in `budget-guard.log`), or the
+  ledger's own when that is later, never a clock's. A history put back from an older month keeps its own month until
+  the later one is established again, and the restriction holds in both.
 - **The parts** (`apps/desktop/src/main/`): `budget-store.ts` (grants, journals, months and the summary, synchronous,
   each write in one transaction), `budget-guard.ts` (the log and the start-of-session check), migration 9 in
   `workspace-db.ts`, and the budget block at the end of `host.ts`. The contract is `packages/domain/src/budget.ts`, and

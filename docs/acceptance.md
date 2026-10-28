@@ -2823,8 +2823,8 @@ packages, Debian) is a decision for Nate.
 
 Lane C's PR 1 for NIV-57: the budget's contract, the host's ledger, its guard and the six calls the budget screen and
 the evaluation harness will both use. Backend only, and nothing spends through it yet. On `feature/budget-ledger`, from
-`main` at `a902bc8`. Tested at `662efbc`: the fix for Nate's review (`bb451ee`), with main at `ab82e91` (Track A's
-docs) merged in. The commit after it adds only docs.
+`main` at `a902bc8`. Tested at `cb422f2`: Nate's findings at `529321d` and both of his choices, with main at `9b9728a`
+merged in. The commit after it adds only docs.
 
 | Commit | What |
 |---|---|
@@ -2834,6 +2834,14 @@ docs) merged in. The commit after it adds only docs.
 | `40b7564` | D48 (now D49), AGENTS.md's rules, the development notes and this record, with the checks at `42c9c47` |
 | `bb451ee` | Nate's review of `40b7564`: a lost history's restriction holds through its recovery month, with regression tests |
 | `662efbc` | Main (`ab82e91`) merged in |
+| `529321d` | D48 and this record for the recovery-month fix, with the checks at `662efbc` |
+| `0c4a71c` | Main (`b795bec`, PR 36) merged in: the budget takes workspace migration 9 and D49 |
+| `0ee515a` | Nate's review of `529321d`: the guard keeps the latest established month; his choice (b): a dollar budget the price list can't keep is refused |
+| `e4ba2d6` | Guard records from before months were kept are read, recovery and all; the host's records of the month tested |
+| `45223d4` | His choice (b) on the price-list rule: with the budget off, a model the list doesn't have is admitted, counted and unpriced |
+| `6574aee` | Main (`9b9728a`, PR 37) merged in |
+| `4b28fe0` | The independent review's points: the guard's month never goes back, old records keep their protection, listings must be free for a dollar budget |
+| `cb422f2` | Each layer of the guard's month pinned by its own test |
 
 NIV-66's checkpoints, as this PR leaves them:
 - **Checkpoint 1, the contract:** done. Money in integer micro-units, rounded up per request; presets as starting
@@ -2843,45 +2851,94 @@ NIV-66's checkpoints, as this PR leaves them:
   evidence and only on the ledger the guard verified, journal rows worked out again, months only on the provider's
   clock or the person's word, and the guard. The reconciler and the engine's journal come with PR 2a.
 - **Checkpoint 3, every paid activity:** not started. Model calls come with PR 2a, Tavily and Nebius with PR 2b.
-- **Bounds and currency:** not established. Until C1 checkpoint 1 establishes them from a supported source, no model is
-  admitted under a money policy.
+- **Bounds, currency and listings:** not established, so no budget in dollars can be set: today's mode is "Budget off,
+  existing per-run limits apply".
 
 Nate's finding at `40b7564`, and its fix in `bb451ee`: a backup from an older month, put back, took the new history's
-restriction to that old month, and confirming the real month bypassed it. The restriction now holds through the
-recovery month (D49). Its regression tests:
-- `budget-store.test.ts`, "a lost history's recovery month": a wait, and a finite allowance with Nebius operations, each
-  refused in the history's old month and again once the real month is confirmed, counting what was admitted before the
-  confirmation, and freed in the month after; the guard's last record as evidence with the computer's clock behind;
-  and only the loss's own months excused.
-- `budget-guard.test.ts`, "a backup from an older month put back after the real month began": the same, on real files,
-  with October's backup put back after November opened on the provider's clock.
-- Mutations of the bug's three parts (a loss binding only the ledger month it was recorded in, grants since a loss
-  counted only in the current month, and the recovery month taken from the ledger's month alone) are each caught by
-  an assertion, the last one on real files too.
+restriction to that old month, and confirming the real month bypassed it. The restriction then held through the
+recovery month. Its regression tests stand, now taking the guard's month as their evidence (below).
 
-Passes, at `662efbc`, one at a time under the shared lock:
-- `pnpm verify`: 1,381 passed (domain 120, engine 779, desktop 482).
+Nate's finding at `529321d`, and its fix in `0ee515a`, `e4ba2d6` and `4b28fe0`: the recovery month still came from
+clocks. His case: the ledger entered November and was spent in; the computer's clock moved back to October, and a
+policy saved then wrote October's time into the guard's last record; October's backup was put back and wait or zero
+left was chosen; once provider time established November again, a grant was admitted. The month was the latest of the
+ledger's, the computer's and the guard record's time, and all three said October. Now every guard record keeps the
+latest month the ledger established, never earlier than one the guard has read or written and never read from a
+clock; a recovery carries it; and the new history's restriction, and its records, hold through it (D49). A guard record
+from a review build before months were kept falls back to the clocks that build read, and the guard catches up with
+the ledger's month at the next start. Its regression tests:
+- `budget-guard.test.ts`, "the latest month a lost history established, kept by the guard whatever the computer's
+  clock says", on real files:
+  - his case, the computer's clock moved back (November spent in, a policy saved at October's time, October's copy put
+    back), and the provider's clock ahead of the computer's (November opened and spent in with every guard record
+    written at October's time). Each runs with a wait, nothing left, and a finite allowance with Nebius operations, and
+    each is refused once the provider's clock shows November again with the computer's still in October: a wait for a
+    model call and a Nebius operation; nothing left as "pool" and "counted"; a finite allowance once it is used up. All
+    are freed in December;
+  - a second loss after the recovery, from a copy holding neither November nor the first loss, with each choice: only
+    the guard remembers November, and the restriction holds through it;
+  - a guard lost after the recovery, rebuilt from the new history's ledger, still names November;
+  - the guard never names an earlier month than one it has read or written, record by record, and reads back the
+    latest month any whole record named; a record written before months were kept is read, recovery and all.
+- `budget-store.test.ts`: the recovery month's tests take the month the guard kept; "never takes a month from a clock"
+  (a month the lost history never reached is its own); the fallback for records with no month; the latest month the
+  ledger established.
+- `host-budget.test.ts`: the month the host records, with the computer's clock run 70 days ahead; and the guard catching
+  up with a month opened after its last record.
+- Shown failing on `529321d`'s logic (its `budget-store.ts`, `budget-guard.ts` and domain `budget.ts`, with the new
+  tests and the new lookup standing in as "no month"; `~/nivra-acceptance/niv57/regressions-on-529321d-logic.log`): the
+  three cases fail where Nate's did, with a model call and a Nebius operation "granted" once November is established
+  again, and the old guard keeps no month.
+
+Nate's choice (b), with the fix: a budget in dollars that can't be enforced is refused clearly, with no other policy put
+in its place. `setPolicy` takes the price list new grants are priced with, and sets a budget in dollars only when the
+list's currency, every model's bounds and free listings are established. Otherwise the call is refused, saying which is
+missing and what to do; nothing is saved, and the budget in force stays as it was. Turning the budget off stays the
+person's own choice, and the grant-level refusals stay. Today's list establishes none of the three, so the app refuses
+every budget in dollars today. Its tests:
+- `budget-store.test.ts`, "a budget in dollars": refused with today's list (the exact words, nothing written); refused
+  with one model's bounds missing (naming it), with the currency missing, and with listings unknown or charged; set
+  with a test list, its grants kept within it; never turned off or switched to counts alone when a change can't be
+  kept, with the grant-level refusal still in place; counts alone as the person's own choice.
+- `host-budget.test.ts`: refused through the host with today's list, saving and recording nothing, with the summary
+  naming the gaps and the budget off still available; a budget saved under a test list kept as it was when a change is
+  refused with today's list, and turned off only by the person.
+- `budget-api.spec.ts` (built and packaged): refused through `window.nivra` with today's list; the budget off; a month
+  confirmed by its label and kept across a relaunch; a damaged history blocking every change.
+- Three of the store's five failed on `529321d`'s logic ("Missing expected exception"); the two that passed there
+  describe what the old code already did.
+
+Nate's choice (b) on the price-list rule, in `45223d4`: with the budget off, a call to a model the price list doesn't
+have is admitted, written and counted, its requests and reported tokens recorded, and its money unknown, never 0. Under
+a dollar budget it is refused by name. Money the person set after a loss still holds it. Its tests, in
+`budget-store.test.ts`: Nemotron 3.5 Super VL admitted with the budget off, through a journal and the summary; with a
+listed model beside it; off again after a dollar budget; refused by name under a dollar budget; and refused after a
+loss with money left.
+
+The independent review of `0c4a71c..e4ba2d6` found nothing blocking; its points are fixed in `4b28fe0` and `cb422f2`
+(above). One is named rather than fixed: deleting the guard after a loss was found, before it was resolved, clears the
+recorded recovery (D49's known limits).
+
+Passes, at `cb422f2`, one at a time under the shared lock:
+- `pnpm verify`: 1,527 passed (domain 125, engine 883, desktop 519).
 - Built e2e (`test:e2e`, under `xvfb-run -a`): 95 passed, `budget-api.spec.ts` among them.
 - Packaged (`stage:runtime linux-x64`, `package:dir`, then `test:packaged`): 33 passed, `budget-api.spec.ts` among them.
-- `test:windows`, after `pnpm dev:win --no-launch`, in a second Windows turn on the fixed revision, within Nate's
-  approval (28 Oct, 21:31 to 21:33 SGT, each step taking the lock as it queued, from this lane's worktree, with Track
-  A's clearance): 13 passed (`windows.spec.ts` 8, `workspace-windows.spec.ts` 5), among them `windows.spec.ts:224`,
-  "the release's WSL home, ~/.nivra, is as it was, and this run's own home goes". `tasklist` showed no `Nivra.exe`
-  before the turn or after it, and fingerprints of `~/.nivra` and `~/.nivra-dev` (each file's name, size and
-  modification time) were the same before and after. The Windows suite has no budget test of its own: it shows that the
-  Windows build, with these main and preload changes, passes the suite it has.
-- Mutations, each of the PR's 62 safety claims broken alone and its test file run: 62 of 62 caught. Five were caught
+- `test:windows`, after `pnpm dev:win --no-launch`, in the Windows turn on this revision (29 Oct, 00:52:57 to 00:55:10
+  SGT, each step taking the lock as it queued, from this lane's worktree): 13 passed (`windows.spec.ts` 8,
+  `workspace-windows.spec.ts` 5), among them `windows.spec.ts:224`, "the release's WSL home, ~/.nivra, is as it was,
+  and this run's own home goes". `tasklist` showed no `Nivra.exe` before the turn or after it, and fingerprints of
+  `~/.nivra` and `~/.nivra-dev` (each file's name, size and modification time) were the same before and after. The
+  Windows suite has no budget test of its own: it shows that the Windows build, with these main and preload changes,
+  passes the suite it has.
+- Mutations, each of the PR's 87 safety claims broken alone and its test file run: 87 of 87 caught. Five were caught
   only by a deeper layer, a trigger or schema check refusing the write before an assertion could: a grant that may
   have been sent released, an interrupted seal settling, a grant's day going back, and the provider's clock or the
   person opening the current month again.
 
-Skips, apart from the passes, at `662efbc`:
+Skips, apart from the passes, at `cb422f2`:
 - `pnpm verify`: none.
-- Built e2e: 1, `explain.spec.ts:197`, "only a packaged app ignores the switch": it checks that a packaged app ignores
-  a test switch, so it runs only in the packaged project.
-- Packaged: 63, each a test that needs a test switch a packaged app ignores, as the JSON report gives them: the test
-  endpoint switch (25) or switches (8), the stub switches (10), the stand-in switches (9), the test engine switch (3)
-  or `--nivra-test-engine` (2), the test switches (2), and four that also need a signal to kill the engine with.
+- Built e2e: 1, `explain.spec.ts:197`, "only a packaged app ignores the switch": it runs only in the packaged project.
+- Packaged: 63, each a test that needs a test switch a packaged app ignores, as the JSON report gives them.
 - `test:windows`: none.
 - Not run, and not needed: `verify:windows`, since nothing here changes a target, the supervisor or staging; and
   `rpc.ts`, since there is no engine change. No live check: nothing here sends anything.
@@ -2889,21 +2946,24 @@ Skips, apart from the passes, at `662efbc`:
   through a screen; the packaged user journey needs its own check once NIV-56's design is built.
 
 Earlier runs:
-- At `42c9c47` (the head before Nate's review): verify 1,375 passed; built e2e 95 passed, 1 skipped
-  (`explain.spec.ts:197`); packaged 33 passed, 63 skipped; `test:windows` 13 passed (20:50 to 20:52 SGT, with no
-  `Nivra.exe` left and `~/.nivra` as it was); mutations 56 of 56.
+- At `662efbc` (the head Nate reviewed as `529321d`): verify 1,381 passed; built e2e 95 passed, 1 skipped; packaged 33
+  passed, 63 skipped; `test:windows` 13 passed; mutations 62 of 62.
+- At `42c9c47`: verify 1,375 passed; built e2e 95 passed, 1 skipped; packaged 33 passed, 63 skipped; `test:windows` 13
+  passed; mutations 56 of 56.
 - At `5ed855a`: verify 1,342 passed; built e2e 95 passed, 1 skipped; packaged 33 passed, 63 skipped; mutations 23 of 23.
 - At `b796823`: verify 1,363 passed; built e2e 95 passed, 1 skipped; packaged 33 passed, 63 skipped; mutations 43 of
-  43 (the first run caught 40: three trigger tests failed for the wrong reason, a hand edit refused for its revision
-  rather than for what it changed, and were rewritten to fail only on the rule under test).
-- A first built e2e run at `42c9c47` was started with `pnpm exec playwright` instead of the package script. Without
-  `npm_node_execpath`, the unpackaged app gave its engine no absolute node, and 29 tests failed on "Engine stopped"
-  (8 passed, 59 didn't run). It was rerun through `pnpm test:e2e`, as every other run was (above).
+  43 (the first run caught 40: three trigger tests failed for the wrong reason and were rewritten).
+- A first built e2e run at `42c9c47` was started with `pnpm exec playwright` instead of the package script, and 29
+  tests failed on "Engine stopped"; it was rerun through `pnpm test:e2e`, as every other run was.
+- Mutations during this round: 76 of 76 before `e4ba2d6`; 78 of 78 at `e4ba2d6`; 80 of 81 at `45223d4` (an
+  equivalent mutant of two redundant guards, made one condition); 84 of 87 at `4b28fe0` (three masked by the guard's
+  two layers, each then pinned by its own test).
 
 Reviews:
 - An independent review of `5ed855a` found three blocking holes and eight significant ones, all fixed in `b796823`.
 - A second independent review, of `b796823`, found two blocking holes and four significant ones, all fixed in
-  `42c9c47`. D49 lists both reviews' findings.
+  `42c9c47`.
+- A third, of `0c4a71c..e4ba2d6`, found none blocking; its points are fixed or named above. D49 lists all three.
 
 ### Deferred to a later milestone (kept, not dropped)
 

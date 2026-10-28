@@ -3404,9 +3404,21 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
   things for the model: the most input it accepts and bills, that max_tokens caps billed output with reasoning
   included, and the list's currency. Today's list establishes none of them (the list names no currency, and on 28
   October Nebius's billing page said nothing on any of the three), so no model is admitted under a money policy until
-  C1 checkpoint 1 establishes them. Without a policy, grants are still written, priced where they can be, and counted,
-  and runs keep today's fixed allowances. Sample runs never establish a bound. A context window shared by input and
-  output would allow less input, but only a source that establishes it may lower the reservation.
+  C1 checkpoint 1 establishes them. A budget in dollars is set only with a price list that can keep it: its currency,
+  every model's bounds, and listing models known to be free (a listing charge nobody can price would fall outside the
+  budget). Otherwise setBudgetPolicy refuses it, saying which is missing and what to do, and saves nothing. The budget
+  in force stays as it was, never turned off or switched to counts alone in its place: the budget off stays the
+  person's own choice. Today's list can't keep one, so today no budget in dollars can be set ("Budget off, existing
+  per-run limits apply"), and a budget set under a list that later can't keep it still meets the grant-level refusals.
+  Without a policy, grants are still written, priced where they can be, and counted, and runs keep the existing per-run
+  limits. Sample runs never establish a bound. A context window shared by input and output would allow less input, but
+  only a source that establishes it may lower the reservation.
+- **A model the price list doesn't have** (Nate's choice (b) on the price-list rule): with the budget off, its call is
+  admitted, written and counted, its requests and reported tokens recorded, and its money unknown, never 0; one such
+  model leaves the whole grant unpriced. Under a dollar budget it is refused by name, and money the person set after a
+  loss holds it too. Model selection and tool capabilities don't change. The price list naming the engine's preferred
+  models after a model switch lands before or with the wiring of grants into model calls (PR 2a), with an offline test
+  that every preferred model and the task model has an entry.
 - **This supersedes D30's** "no currency is ever computed". D30's estimate stays an admission estimate for context
   room, and is never a money bound.
 - **Policies** are immutable versions; a change is the next version and never resets what was spent, reserved or left
@@ -3442,21 +3454,25 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
   never reopens one, unused allowance never carries over, and every jump of the clock is recorded and shown.
 - **The guard.** Every change to spending authority moves the ledger's authority revision forward in its transaction,
   with a digest chained to the one before, kept for every revision. An append-only log beside workspace.db
-  (`budget-guard.log`: checksummed lines, each fsynced) records the revision and its digest before anything that depends
-  on it is sent, and each commit is durable when it returns (SQLite's FULL synchronous mode). At the first budget call
-  of a session, a ledger that is missing, another, behind its guard (a backup put back, even holding the same number of
-  grants), or diverged from it (the guard's revision reached along another history) means the budget history needs
-  recovery. The guard records that, so it survives restarts, and every budget change is refused (and, from PR 2a, every
-  spendable call) until the person puts back the matching copy and opens Nivra again, or starts a new history.
+  (`budget-guard.log`: checksummed lines, each fsynced) records the revision, its digest and the latest budget month the
+  ledger has established (never earlier than the record before, and never read from a clock) before anything that
+  depends on it is sent, and each commit is durable when it returns (SQLite's FULL synchronous mode). At the first
+  budget call of a session, a ledger that is missing, another, behind its guard (a backup put back, even holding the
+  same number of grants), or diverged from it (the guard's revision reached along another history) means the budget
+  history needs recovery. The guard records that, so it survives restarts, and every budget change is refused (and, from
+  PR 2a, every spendable call) until the person puts back the matching copy and opens Nivra again, or starts a new
+  history.
 - **A new history** takes a new ledger id, at a revision past both the ledger's and the guard's, so no copy of the lost
   history can later pass for it. It records the loss, and makes every grant still open uncertain, since whether it was
   sent can't be known. Spend earlier in that month is unknown, never zero. The person says what is left of the month,
   money and each counted service, or chooses to wait for the month after, and that binds in every mode, with or without
   a policy: waiting admits nothing, and what is left admits only priced grants whose money and counted services fit it.
-  The restriction holds through the recovery month, the latest month that the ledger, this computer's clock or the
-  guard's last record of the lost history shows, in every ledger month up to it: a history put back from an older month
-  keeps its own month, but confirming the real one doesn't leave the restriction behind, and what was admitted since the
-  loss counts in whichever of those months it fell. A new history whose guard record couldn't be written clears the
+  The restriction holds through the latest month the lost history had established, as the guard kept it, or the
+  ledger's own month when that is later, in every ledger month up to it. A history put back from an older month keeps
+  its own month, but establishing the later one again, on the provider's clock or by the person's confirmation, doesn't
+  leave the restriction behind, however the computer's clock moved. What was admitted since the loss counts in
+  whichever of those months it fell, and the new history's records carry the month, so a second loss holds through it
+  too. A new history whose guard record couldn't be written clears the
   recovery at the next start, with no second loss, as long as the ledger is unchanged since. A guard that can't be read
   or written stops all spending, and so do budget records in the history that can't be read.
 - **Six calls** on `window.nivra`, each through ipc.ts, the preload and `assertTrustedSender` with its arguments
@@ -3489,6 +3505,21 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
 - Nate's review of the PR (at `40b7564`) found that a backup from an older month, put back, took the new history's
   restriction with it to that old month, so confirming the real current month bypassed it. The restriction now holds
   through the recovery month.
+- Nate's review at `529321d` found that the recovery month still came from clocks: the ledger's month, the computer's,
+  and the time of the guard's last record. With the computer's clock moved back (a policy saved then wrote October's
+  time into the guard's last record), or with the provider's clock ahead of the computer's, all three said October after
+  November had been established and spent in. So once the provider's clock established November again after the
+  recovery, a grant was admitted, under a wait or nothing left alike. The guard now keeps the latest established month.
+- Nate's choice (b), 28 October: a budget in dollars that can't be enforced is refused clearly, never silently replaced
+  by another policy; counts alone stays a separate, explicit choice; the grant-level protections stay. And on the
+  price-list rule: "In budget-off or counts-only mode, a missing price must not by itself refuse an otherwise permitted
+  model call. Record requests and reported tokens, with monetary cost unknown, not zero." Until the monthly
+  counts-only policy is built (a follow-up), today's mode is "Budget off, existing per-run limits apply".
+- A third independent review, of the fixes for \`529321d\`, found nothing blocking. Its points are fixed: records from
+  review builds before months were kept keep the protection those builds gave; the guard's month never goes back; the
+  host's record of the month is tested where it differs from the computer's; a month that can't be read back is
+  blamed on the history, not the guard; listing models must be known to be free for a dollar budget; and the second
+  loss is tested with every choice. One is named below, as a known limit.
 
 **Consequences.**
 - A workspace this build writes (v9) is refused by older builds, so this lane's app profile is never one a release
@@ -3508,8 +3539,18 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
     passes it (the month still needs the provider's clock or the person);
   - after a loss with nothing left of the ledger, its first month opens by the computer's clock; what the person says
     is left is their own statement;
-  - a clock that is ahead when a new history starts holds its restriction through the clock's month, longer than the
-    real one, which errs on the side of spending less; a clock behind is checked against the guard's last record;
+  - a guard record written before months were kept (by review builds of this PR, never released) names none: a
+    recovery from it holds through the latest month the computer's clock or that record's time shows, as those builds
+    did, and the guard catches up with the ledger's month at the next start;
+  - deleting the guard after a loss was found, before the person resolved it, clears the recorded recovery: the guard
+    is rebuilt from the copy put back. Like deleting the guard and the workspace together, it is an act on Nivra's own
+    files. A pending-recovery mark kept in the workspace would close it, as a follow-up if Nate chooses one;
+  - a new history's restriction ends with the latest month the lost history established: a later month it never
+    reached is that month's own, as it would have been without the loss, since its grants counted in the ledger's
+    month;
+  - until the price list establishes its currency, every model's bounds and free listings, no budget in dollars can be
+    set: only the budget off, with the existing per-run limits. `budgetPrices()` and the summary's gaps show what is
+    missing;
   - when everything is refused (the pool spent, or a wait after a loss), the next month opens only on the person's
     confirmation: a refused grant sends nothing that could bring the provider's clock.
 - **Tests:**
@@ -3520,18 +3561,31 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
     don't add up, interrupted seals, write-offs, counted services, policies turned off, unpriced spend under a policy,
     sublimits against a clock moved back and a month's end, a daily limit with the clock ahead and back, a queue's
     limit, months, price lists, extensions, a lost history in every mode, against a clock moved back and ahead and
-    holding the counted services, a lost history's recovery month (a wait and a finite allowance, before and after the
-    real month is confirmed, and the guard's record time as evidence), writes refused on a ledger the guard didn't
-    verify, the summary of a history that needs recovery, durability, and every hand edit the triggers refuse);
+    holding the counted services, a lost history's recovery month (a wait and a finite allowance, through the month the
+    guard kept, before and after it is established again, and never a clock's month), the latest month the ledger
+    established, the fallback for records with no month, a budget in dollars (refused with today's list, and with a
+    model's bounds, the currency or free listings missing; set with a test list; never turned off or to counts alone
+    when a change can't be kept; counts alone as the person's own choice), a model the price list doesn't have
+    (admitted, counted and unpriced with the budget off; refused by name under a dollar budget and after a loss with
+    money left), writes refused on a ledger the guard didn't verify, the summary of a history that needs recovery,
+    durability, and every hand edit the triggers refuse);
   - `budget-guard.test.ts` (the log; the check; a backup put back at each point the plan names, and one changed past
     the guard's revision; a crash around each guard update; a damaged workspace after spend, resolved both ways; a new
     history after a ledger behind, a copy of the lost history put back after it, a new history whose guard record was
     never written, and October's backup put back after November began, with a wait and with a finite allowance of
-    money and Nebius operations, held before and after November is confirmed);
-  - `host-budget.test.ts` (the calls, a month confirmed by its label, a damaged history through restarts, a guard that
-    can't be read, and one that can't be written after a commit);
-  - `e2e/budget-api.spec.ts` (the calls through the built and the packaged app's `window.nivra`).
-- **Mutations:** 62 of 62 caught, each safety claim broken on purpose in turn. Five were caught only by a deeper
+    money and Nebius operations, held before and after November is confirmed; and the latest month a lost history
+    established, kept by the guard: the computer's clock moved back, and the provider's clock ahead of it, each with a
+    wait, nothing left and a finite allowance with Nebius operations, a second loss after the recovery with each, a
+    guard lost after the recovery and rebuilt, records read from before months were kept, and a month that never goes
+    back, record by record);
+  - `host-budget.test.ts` (the calls, a budget in dollars with a test list and refused with today's, a month confirmed
+    by its label, a damaged history through restarts, the month the guard records with the clock run ahead and the
+    guard catching up with a later one, a guard that can't be read, and one that can't be written after a commit);
+  - `workspace-store.test.ts` (a v8 file moved to v9, every table and row as it was, with v8's text pinned);
+  - `e2e/budget-api.spec.ts` (the calls through the built and the packaged app's `window.nivra`: a budget in dollars
+    refused with today's list, the budget off, a month confirmed by its label and kept across a relaunch, and a damaged
+    history).
+- **Mutations:** 87 of 87 caught, each safety claim broken on purpose in turn. Five were caught only by a deeper
   layer, a trigger or schema check refusing the write before an assertion could: a grant that may have been sent
   released, an interrupted seal settling, a grant's day going back, and the provider's clock or the person opening the
   current month again.

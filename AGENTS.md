@@ -159,6 +159,13 @@ list.
   releases it, and the ledger works out each journal row's amount itself, never taking it on the engine's word.
 - Unknown usage counts at its reserved bound and shows as unknown (null), never as 0 or 0 dollars. Money counts only
   for a model whose bounds, and whose price list's currency, are established from a supported source.
+- A budget in dollars is set only when the price list's currency, every model's bounds and free listings are
+  established. Otherwise it is refused with the reason, and the budget in force stays as it was: never turned off or
+  switched to counts alone in its place. With the budget off ("Budget off, existing per-run limits apply"), a call to a
+  model the price list doesn't have is admitted and counted, its money unknown; under a dollar budget it is refused.
+- The price list names every model the engine prefers, and the task model, before grants are wired into model calls.
+- Every guard record keeps the latest month the ledger has established, never earlier than the record before it and
+  never read from a clock. A lost history's restriction holds through that month.
 - Grants and budget context travel in memory and RPC. They never go in workflow input, step output, run events,
   requestContext or logs.
 
