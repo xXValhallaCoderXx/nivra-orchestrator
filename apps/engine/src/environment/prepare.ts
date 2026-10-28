@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { ENVIRONMENT_BASE, VERIFIED_FORMAT, VerifiedToolRecord, type BuildsState, type EnvironmentRecipe, type EnvironmentStopCode, type SandboxStep, type VerifiedTool } from "@nivra/domain";
 import { SandboxCancelledError, SandboxHttpError, SandboxNetworkError, SandboxNotSentError, SandboxTooLargeError, type SandboxApi } from "../exec/nebius/api.ts";
 import { ENV_PATH, type Journal, type Outcome, type Sandbox } from "../exec/nebius/sandbox.ts";
-import { ignoredBuilds, imageFacts, INSPECT_SCRIPT, installDiagnosis, preparedFacts, READINESS_SCRIPT, readinessFacts } from "./scripts.ts";
+import { bootstrapFailure, ignoredBuilds, imageFacts, INSPECT_SCRIPT, installDiagnosis, preparedFacts, READINESS_FILES, READINESS_SCRIPT, readinessFacts } from "./scripts.ts";
 import { versionParts } from "./versions.ts";
 
 /**
@@ -254,7 +254,8 @@ export async function prepareRecipe(run: RecipeRun): Promise<RecipeOutcome> {
     steps.push(stepOf("preparation", ended, true));
     install = { exitCode: ended.exitCode, logTail: tail(ended.stderr ? `${ended.stdout}\n${ended.stderr}` : ended.stdout, 8_000) };
     if (ended.verdict === "cancelled") return stopped("cancelled");
-    if (ended.exitCode === 70 || ended.exitCode === 71) return stopped("bootstrap", ended.exitCode === 70 ? `npm ${npmBootstrap?.version} couldn't be installed.` : `pnpm ${version} couldn't be activated.`);
+    const bootstrap = ended.exitCode === 70 || ended.exitCode === 71 ? bootstrapFailure(ended.stdout) : null;
+    if (bootstrap) return stopped("bootstrap", bootstrap === "npm" ? `npm ${npmBootstrap?.version ?? "at the version pinned"} couldn't be installed.` : `pnpm ${version} couldn't be activated.`);
     if (ended.verdict === "timed-out") return stopped("install", `The install ran past its limit of ${recipe.limits.prepareSeconds} s and was stopped.`);
     if (ended.verdict === "command-failed") return stopped("install", installDiagnosis(manager, `${ended.stdout}\n${ended.stderr}`));
     if (ended.verdict !== "passed" || !ended.resultImage) return stopped("sandbox-failed");
@@ -282,7 +283,7 @@ export async function prepareRecipe(run: RecipeRun): Promise<RecipeOutcome> {
     at = "readiness";
     const readyStarted = now();
     const keys = manager === "pnpm" ? settingsToRead(versionParts(version)?.[0] ?? 99) : [];
-    const probe = await run.sandbox.submit({ label: "environment readiness", command: "/bin/sh", args: ["-c", READINESS_SCRIPT, "nivra-env-readiness", manager, ...keys], image: ended.resultImage, disposable: true, timeoutSeconds: recipe.limits.probeSeconds, env: { ...recipe.env.task } });
+    const probe = await run.sandbox.submit({ label: "environment readiness", command: "/bin/sh", args: ["-c", READINESS_SCRIPT, "nivra-env-readiness", manager, String(keys.length), ...keys, ...recipe.artifacts.dependency], image: ended.resultImage, disposable: true, timeoutSeconds: recipe.limits.probeSeconds, env: { ...recipe.env.task } });
     if (!("operationId" in probe)) return stopped("uncertain");
     const checked = await run.sandbox.observe(probe.operationId, recipe.limits.probeSeconds);
     steps.push(stepOf("readiness", checked, false));
@@ -292,8 +293,14 @@ export async function prepareRecipe(run: RecipeRun): Promise<RecipeOutcome> {
     const ready = readinessFacts(checked.stdout);
     const expected: Record<string, string> = { "verify-deps-before-run": "false", "pm-on-fail": "ignore", "manage-package-manager-versions": "false" };
     const essential = versionParts(version)?.[0] ?? 99;
+    // The workspace must hold the setup files and the install's folders, and nothing else.
+    const setupFiles = new Set(recipe.configuration.files.map((file) => file.path));
+    const extra = ready.files === null ? null : ready.files.filter((path) => !setupFiles.has(path));
+    const named = (path: string) => JSON.stringify(path.length > 120 ? `${path.slice(0, 117)}...` : path);
     const problems = [
       ...Object.entries(ready.tools).filter(([, ok]) => !ok).map(([name]) => `${name} is missing`),
+      extra === null ? "the workspace couldn't be listed" : null,
+      extra && extra.length ? `the install left ${ready.files!.length > READINESS_FILES ? `more than ${READINESS_FILES}` : extra.length} ${extra.length === 1 ? "file" : "files"} outside ${recipe.artifacts.dependency.join(", ")}, such as ${named(extra[0]!)}, which a task's session would read as the commit's own` : null,
       ...(Object.keys(ready.tools).length === 0 ? ["no session tools were listed"] : []),
       ready.node !== node ? "Node answers with another version" : null,
       manager === "pnpm" && ready.pnpm !== version ? "pnpm answers with another version" : null,

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { fetchTransport, SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, SandboxNotSentError, SandboxTooLargeError, type SpawnBody, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
 import { CLEANUP_MAX_SECONDS, evaluate, insideRepository, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, tokenOutlasts, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
-import { classify, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
+import { classify, ENV_PREPARE_SCRIPT, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
 import { ANY_SIZE, clock, encode, FakeService, holding, PATCH, REPORT, sandboxOn, settles, sha, spawned, step, succeed } from "./fake-sandboxes.ts";
 
 /**
@@ -61,6 +61,23 @@ describe("Nebius Sandboxes, offline: the operation's status apart from its comma
       ["passed", "command-failed", "timed-out", "signalled", "signalled"],
     );
     assert.equal(classify(op({ exit_code: 0, signal: -1 })).signal, -1, "the evidence keeps the service's own value");
+  });
+});
+
+describe("an environment's preparation script (NIV-55)", () => {
+  it("asks pnpm 10.1 and later which builds it didn't run, and never an older pnpm or npm, which would run a program of that name", { skip: process.platform === "win32" ? "needs a POSIX shell" : false }, () => {
+    const lines = ENV_PREPARE_SCRIPT.split("\n");
+    const guard = lines.filter((line) => line.startsWith('major="') || line.includes("ignored-builds")).join("\n").replace("pnpm ignored-builds 2>&1 | tail -c 4000 || true", "echo asked");
+    assert.equal(guard.split("\n").length, 2, "the guard's lines weren't found");
+    for (const [manager, version, asked] of [["pnpm", "9.15.9", false], ["pnpm", "10.0.0", false], ["pnpm", "10.1.0", true], ["pnpm", "11.5.3", true], ["pnpm", "12.0.0", true], ["npm", "bundled", false], ["npm", "11.19.0", false]] as const) {
+      const ran = spawnSync("/bin/sh", ["-c", `manager=${manager}; version=${version}\n${guard}`], { encoding: "utf8" });
+      assert.deepEqual([ran.status, ran.stdout.includes("asked"), ran.stderr], [0, asked, ""], `${manager} ${version}`);
+    }
+  });
+
+  it("takes no manager but npm and pnpm", async () => {
+    const { sandbox } = sandboxOn(new FakeService(() => succeed()));
+    await assert.rejects(sandbox.prepareEnvironment({ image: "img", inputs: { uuid: "u" }, timeoutSeconds: 60, recipe: { manager: "yarn" as never, version: "4.1.0", via: "none", npmPin: null, installArgs: ["install"], env: {} } }), /^SandboxRefusal: An environment installs with npm or pnpm\.$/);
   });
 });
 

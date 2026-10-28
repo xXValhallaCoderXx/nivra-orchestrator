@@ -60,7 +60,8 @@ interface Image {
   /** What a failing install prints. */
   installLog?: string;
   builds?: string;
-  readiness?: { tools?: string; settings?: string };
+  /** What readiness sees: the tools, pnpm's settings, and files the install left besides the setup files and node_modules. */
+  readiness?: { tools?: string; settings?: string; extraFiles?: string[] };
 }
 
 /** Each intercepted step ends at its first read: the engine reads an operation every 5 s, and a recipe runs four. */
@@ -97,7 +98,9 @@ async function setup(image: Image) {
     if (args[1] === READINESS_SCRIPT) {
       const tools = image.readiness?.tools ?? ["sh", "tar", "find", "sha256sum", "gzip", "sort"].map((tool) => `tool ${tool} ok`).join("\n");
       const settings = image.readiness?.settings ?? "setting verify-deps-before-run false\nsetting pm-on-fail ignore";
-      return done({ stdout: `node v${image.node}\nnpm ${image.npm}\n${pnpm ? "pnpm 11.5.3\n" : ""}${tools}\n${pnpm ? settings : ""}\n` });
+      // As the step lists the workspace: the setup files the preparation was sent, and what the install left besides.
+      const listed = [...(received.inputs ?? []), ...(image.readiness?.extraFiles ?? [])].sort().map((path) => `file ./${path}`).join("\n");
+      return done({ stdout: `node v${image.node}\nnpm ${image.npm}\n${pnpm ? "pnpm 11.5.3\n" : ""}${tools}\n${pnpm ? settings : ""}\n${listed}\nlisted\n` });
     }
     return undefined;
   };
@@ -227,16 +230,26 @@ describe("a project-driven recipe's preparation through a real engine (NIV-55)",
     }
   });
 
-  it("refuses a commit whose setup changed since the preview, before anything is sent", async () => {
-    const { stub, engine } = await setup({ node: "24.21.0", npm: "11.19.0" });
-    const first = repoWith(PNPM);
-    const shown = ready(await resolve(engine, first));
-    const changed = repoWith({ ...PNPM, ".nvmrc": "24.20.0\n" });
-    const run = await start(engine, changed, shown.fingerprint);
+  it("refuses a run whose recipe isn't the one previewed, on the same commit, before anything is sent", async () => {
+    // The same commit, other choices: only the recipe's digest tells the two apart.
+    const { stub, engine } = await setup({ node: "22.23.4", npm: "10.9.9" });
+    const repo = repoWith(NPM);
+    const shown = ready(await resolve(engine, repo));
+    const run = await start(engine, repo, shown.fingerprint, { options: { "ignore-scripts": true } });
     await ended(engine, run.id);
     const done = await report(engine, run.id);
     assert.deepEqual([done.outcome, done.stopped?.code], ["refused", "preview"]);
     assert.equal(spawns(stub).length, 0);
+  });
+
+  it("keeps nothing when the install left files outside node_modules, which every task's session would refuse, and names one", async () => {
+    const { engine } = await setup({ node: "24.21.0", npm: "11.19.0", readiness: { extraFiles: [".pnp.cjs"] } });
+    const repo = repoWith(PNPM);
+    const run = await start(engine, repo, ready(await resolve(engine, repo)).fingerprint);
+    await ended(engine, run.id);
+    const done = await report(engine, run.id);
+    assert.deepEqual([done.outcome, done.stopped?.code, done.environment], ["failed", "readiness", null]);
+    assert.match(done.stopped!.detail!, /the install left 1 file outside node_modules, such as "\.pnp\.cjs", which a task's session would read as the commit's own/);
   });
 
   it("answers a resolution that needs the person's choice, and one it refuses, through the same method", async () => {

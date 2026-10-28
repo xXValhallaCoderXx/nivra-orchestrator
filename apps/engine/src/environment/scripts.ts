@@ -1,3 +1,5 @@
+import { PRUNE_LINES } from "../exec/nebius/session.ts";
+
 /**
  * The fixed scripts a recipe's preparation runs besides the install (NIV-55), each with networking off and thrown away
  * afterwards, given everything as positional arguments, and the readers of what they print. Nothing here is
@@ -6,7 +8,9 @@
  * - The inspect step runs on the base image before anything is uploaded: what Node, npm and corepack it holds, its
  *   machine and its libc. A recipe whose facts the image doesn't have stops there.
  * - The readiness step runs on the prepared image with the task operations' own variables: the tools a session needs,
- *   the versions again, and whether pnpm reads the switches that keep it from installing or changing version.
+ *   the versions again, whether pnpm reads the switches that keep it from installing or changing version, and what the
+ *   workspace holds besides the folders the install writes, which must be the setup files and nothing else: a task's
+ *   session would read anything more as the commit's own, and refuse it.
  */
 
 /** What the inspect step prints, one fact a line. */
@@ -19,15 +23,24 @@ export const INSPECT_SCRIPT = [
   'if ldd --version 2>&1 | grep -qi musl; then echo "libc musl"; elif ldd --version 2>&1 | grep -qi -e glibc -e "gnu libc"; then echo "libc glibc"; else echo "libc unknown"; fi',
 ].join("\n");
 
-/** What the readiness step prints. $1 the package manager, then the settings to read back from pnpm, if any. */
+/** The most files the readiness step lists; one more says there are more. */
+export const READINESS_FILES = 1_000;
+
+/**
+ * What the readiness step prints. $1 the package manager, $2 how many settings to read back from pnpm, then those
+ * settings, then the folders the install writes, left out of the workspace's listing at any depth.
+ */
 export const READINESS_SCRIPT = [
-  'manager="$1"; shift',
+  'manager="$1"; count="$2"; shift 2',
   "cd /workspace",
   'echo "node $(node --version 2>/dev/null || echo none)"',
   'echo "npm $(npm --version 2>/dev/null || echo none)"',
   'if [ "$manager" = "pnpm" ]; then echo "pnpm $(pnpm --version 2>/dev/null || echo none)"; fi',
   'for tool in sh tar find sha256sum gzip sort; do if /bin/busybox --list 2>/dev/null | grep -qx "$tool"; then echo "tool $tool ok"; else echo "tool $tool missing"; fi; done',
-  'for key in "$@"; do echo "setting $key $(pnpm config get "$key" 2>/dev/null | tail -n 1)"; done',
+  'i=0; while [ "$i" -lt "$count" ]; do key="$1"; shift; echo "setting $key $(pnpm config get "$key" 2>/dev/null | tail -n 1)"; i=$((i + 1)); done',
+  ...PRUNE_LINES,
+  `find . "$@" \\( -type f -o -type l \\) -print | LC_ALL=C sort | head -n ${READINESS_FILES + 1} | sed 's/^/file /'`,
+  'echo "listed"',
 ].join("\n");
 
 /** The lines a script printed as name and value, the first of each name winning. */
@@ -60,7 +73,9 @@ const archOf = (value: string | undefined) => (value && /^[a-z0-9_]{1,32}$/.test
 export function imageFacts(stdout: string): ImageFacts {
   const facts = printedFacts(stdout, ["node", "npm", "corepack", "arch", "os", "libc"]);
   const libc = facts["libc"] === "musl" || facts["libc"] === "glibc" ? facts["libc"] : null;
-  return { node: versionOf(facts["node"]), npm: versionOf(facts["npm"]), corepack: versionOf(facts["corepack"]), arch: archOf(facts["arch"]), os: facts["os"] && facts["os"] !== "" ? facts["os"].slice(0, 200) : null, libc };
+  // The OS release is the image's own words: kept only when it reads as a release's name does.
+  const os = facts["os"] && /^[A-Za-z0-9 ._()/+-]{1,100}$/.test(facts["os"]) ? facts["os"] : null;
+  return { node: versionOf(facts["node"]), npm: versionOf(facts["npm"]), corepack: versionOf(facts["corepack"]), arch: archOf(facts["arch"]), os, libc };
 }
 
 /** What the preparation's own script printed: how pnpm was activated, the versions and the machine. */
@@ -70,11 +85,21 @@ export function preparedFacts(stdout: string): { via: string | null; node: strin
 }
 
 /**
+ * Which bootstrap the preparation's script says failed, before it printed any version: its own line, and nothing an
+ * install printed later could stand in for, since the versions are printed before the install starts.
+ */
+export function bootstrapFailure(stdout: string): "npm" | "pnpm" | null {
+  const said = /^bootstrap-failed (npm|pnpm)$/m.exec(stdout)?.[1] ?? null;
+  return said !== null && preparedFacts(stdout).node === null ? (said as "npm" | "pnpm") : null;
+}
+
+/**
  * The dependency builds pnpm says it didn't run, from what `pnpm ignored-builds` printed between the preparation's
  * markers: none, a list of packages, or unknown when there is no such section or Nivra can't read it.
  */
 export function ignoredBuilds(stdout: string): { state: "complete" | "missing" | "unknown"; missing: string[] } {
-  const section = /builds-begin\n([\s\S]*?)builds-end/.exec(stdout)?.[1];
+  // The last section: the script's own comes after the install's log, which could hold one that looks like it.
+  const section = [...stdout.matchAll(/builds-begin\n([\s\S]*?)builds-end/g)].at(-1)?.[1];
   if (section === undefined) return { state: "unknown", missing: [] };
   const lines = section.split("\n").map((line) => line.replace(/\s+$/, ""));
   const header = lines.findIndex((line) => /ignored builds/i.test(line));
@@ -89,18 +114,24 @@ export function ignoredBuilds(stdout: string): { state: "complete" | "missing" |
   return names.length ? { state: "missing", missing: names.slice(0, 200) } : { state: "unknown", missing: [] };
 }
 
-/** What the readiness step found: missing tools, the versions, and each setting pnpm read back. */
-export function readinessFacts(stdout: string): { tools: Record<string, boolean>; node: string | null; npm: string | null; pnpm: string | null; settings: Record<string, string> } {
+/**
+ * What the readiness step found: missing tools, the versions, each setting pnpm read back, and the files the workspace
+ * holds besides the install's folders, null when the listing didn't finish.
+ */
+export function readinessFacts(stdout: string): { tools: Record<string, boolean>; node: string | null; npm: string | null; pnpm: string | null; settings: Record<string, string>; files: string[] | null } {
   const tools: Record<string, boolean> = {};
   const settings: Record<string, string> = {};
+  const files: string[] = [];
   for (const line of stdout.split("\n")) {
     const tool = /^tool (\S+) (ok|missing)$/.exec(line.trim());
     if (tool) tools[tool[1]!] = tool[2] === "ok";
     const setting = /^setting (\S+) ?(.*)$/.exec(line.trim());
     if (setting && !(setting[1]! in settings)) settings[setting[1]!] = setting[2]!.trim();
+    const file = /^file \.\/(.+)$/.exec(line);
+    if (file) files.push(file[1]!);
   }
   const facts = printedFacts(stdout, ["node", "npm", "pnpm"]);
-  return { tools, node: versionOf(facts["node"]), npm: versionOf(facts["npm"]), pnpm: versionOf(facts["pnpm"]), settings };
+  return { tools, node: versionOf(facts["node"]), npm: versionOf(facts["npm"]), pnpm: versionOf(facts["pnpm"]), settings, files: stdout.split("\n").includes("listed") ? files : null };
 }
 
 /**

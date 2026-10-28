@@ -216,6 +216,17 @@ describe("the package manager and its version (NIV-58)", () => {
     assert.deepEqual([volta!.why, volta!.options.map((option) => option.value)], ["conflict", ["11.5.3", "10.4.1"]]);
   });
 
+  it("installs a pnpm the person chose over packageManager's pin with npm, where corepack can't swap in the pin, and the pinned one through corepack", async () => {
+    // Inside the project, corepack runs the version packageManager pins whatever was activated.
+    const [volta] = choice(await resolveIn(pnpmProject({ volta: { pnpm: "10.4.1" } })));
+    const chosen = ready(await resolveIn(pnpmProject({ volta: { pnpm: "10.4.1" } }), { choices: { managerVersion: volta!.options[1]!.value } }));
+    assert.deepEqual([tool(chosen, "pnpm"), chosen.recipe.bootstrap], [{ kind: "exact", version: "10.4.1" }, [{ tool: "pnpm", version: "10.4.1", via: "npm-global" }]]);
+    const pinned = ready(await resolveIn(pnpmProject({ volta: { pnpm: "10.4.1" } }), { choices: { managerVersion: volta!.options[0]!.value } }));
+    assert.deepEqual(pinned.recipe.bootstrap, [{ tool: "pnpm", version: "11.5.3", via: "corepack-else-npm-global" }]);
+    // And corepack is told not to take a version from the project wherever it reads that switch, before and after.
+    assert.deepEqual([chosen.recipe.env.preparation["COREPACK_ENABLE_PROJECT_SPEC"], chosen.recipe.env.task["COREPACK_ENABLE_PROJECT_SPEC"]], ["0", "0"]);
+  });
+
   it("asks when the manager can't run on the project's Node or read its lockfile, offering versions that can", async () => {
     const [node] = choice(await resolveIn(pnpmProject({}, { ".nvmrc": "20.19.0\n" })));
     assert.deepEqual([node!.id, node!.why], ["manager-version", "conflict"]);

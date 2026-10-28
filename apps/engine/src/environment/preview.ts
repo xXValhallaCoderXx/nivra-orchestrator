@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { ENVIRONMENT_BASE, recipeDigest, type EnvironmentChoices, type EnvironmentPreview, type EnvironmentPreviewV2, type EnvironmentSpec, type PreviousSettlement } from "@nivra/domain";
 import { RETENTION } from "../exec/nebius/sandbox.ts";
 import type { Snapshot } from "../exec/snapshot.ts";
-import { environmentFingerprint, environmentInputs, inputsArchive, installArgsFor } from "./inputs.ts";
+import { OUTPUT_DIRS } from "../repo/deny.ts";
+import { environmentFingerprint, environmentInputs, EnvironmentRefusal, inputsArchive, installArgsFor, trackedUnder } from "./inputs.ts";
 import { resolveNodeEnvironment } from "./node.ts";
 import type { ReleaseIndex } from "./releases.ts";
 
@@ -22,6 +23,9 @@ export const ENVIRONMENT_NETWORK =
 
 /** What preparing this commit's environment would send and run, and its fingerprint. Throws `EnvironmentRefusal`. */
 export function environmentPreviewOf(snapshot: Snapshot, spec: EnvironmentSpec): Extract<EnvironmentPreview, { status: "ready" }> {
+  // D41's task runs leave its output folders out, and refuse a commit that tracks files in one (NIV-55): so does this.
+  const tracked = trackedUnder(snapshot, OUTPUT_DIRS);
+  if (tracked) throw new EnvironmentRefusal(`This commit tracks files in ${tracked.folder}, such as ${JSON.stringify(tracked.path.slice(0, 200))}, which this kind of environment leaves out of its task runs, so they would refuse it. Prepare the project's own recipe instead.`);
   const inputs = environmentInputs(snapshot);
   const installArgs = installArgsFor(spec);
   return {

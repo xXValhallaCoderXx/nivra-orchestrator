@@ -245,7 +245,11 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
   }
   if (managerName === "pnpm") {
     tools.push({ name: "pnpm", version: { kind: "exact", version: managerVersion.version }, from: "bootstrap" });
-    bootstrap.push({ tool: "pnpm", version: managerVersion.version, via: "corepack-else-npm-global" });
+    // Inside the project, corepack runs the version packageManager pins whatever was activated: a different version,
+    // the person's choice or an advisory's replacement, is installed with npm instead, where corepack doesn't reach it.
+    const pinned = managerPin(stringAt(root["packageManager"]) ?? "");
+    const corepackRunsIt = pinned === null || (pinned.name === "pnpm" && pinned.version === managerVersion.version);
+    bootstrap.push({ tool: "pnpm", version: managerVersion.version, via: corepackRunsIt ? "corepack-else-npm-global" : "npm-global" });
   }
 
   const args = managerName === "npm" ? ["ci", "--no-audit", "--no-fund", ...npmFlags(options)] : ["install", "--frozen-lockfile", ...(scope.kind === "selected" ? scope.selectors.flatMap((selector) => ["--filter", selector]) : [])];
@@ -725,6 +729,8 @@ function npmFlags(options: InstallOptions): string[] {
 }
 
 const baseEnv = (): Record<string, string> => ({ PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", npm_config_update_notifier: "false" });
+/** corepack's switch against taking a version from the project's packageManager, where its version reads it. */
+const NO_PROJECT_SPEC = { COREPACK_ENABLE_PROJECT_SPEC: "0" };
 
 /**
  * pnpm's switches against running a different version than the recipe's: pnpm 10 and older read npm_config_ variables,
@@ -748,7 +754,7 @@ function pnpmSwitches(major: number | null, verifyBeforeRun: boolean): Record<st
 function preparationEnv(manager: string, pnpmMajor: number | null, options: InstallOptions): Record<string, string> {
   if (manager !== "pnpm") return baseEnv();
   const optionEnv = pnpmMajor !== null && pnpmMajor <= 10 ? Object.fromEntries(Object.entries(options).map(([key, value]) => [`npm_config_${key.replaceAll("-", "_")}`, String(value)])) : {};
-  return { ...baseEnv(), COREPACK_ENABLE_STRICT: "0", ...pnpmSwitches(pnpmMajor, false), ...optionEnv };
+  return { ...baseEnv(), COREPACK_ENABLE_STRICT: "0", ...NO_PROJECT_SPEC, ...pnpmSwitches(pnpmMajor, false), ...optionEnv };
 }
 
 /**
@@ -757,7 +763,7 @@ function preparationEnv(manager: string, pnpmMajor: number | null, options: Inst
  */
 function taskEnv(manager: string, pnpmMajor: number | null): Record<string, string> {
   const env: Record<string, string> = { ...baseEnv(), COREPACK_ENABLE_NETWORK: "0", npm_config_audit: "false", npm_config_fund: "false" };
-  return manager === "pnpm" ? { ...env, COREPACK_ENABLE_STRICT: "0", ...pnpmSwitches(pnpmMajor, true) } : env;
+  return manager === "pnpm" ? { ...env, COREPACK_ENABLE_STRICT: "0", ...NO_PROJECT_SPEC, ...pnpmSwitches(pnpmMajor, true) } : env;
 }
 
 /** A YAML value as a list of package names, or a map of names to whether their builds may run. */

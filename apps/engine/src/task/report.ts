@@ -60,7 +60,7 @@ export const TASK_STOP_MESSAGES: Readonly<Record<TaskStopCode, string>> = {
   baseline:
     "The brief's baseline selections didn't give what it expects on the commit as it is, so the run stopped before the worker started: your commit was uploaded to Nebius, and nothing from your repository went to Token Factory. The baseline below says which selection differed, and how.",
   environment:
-    "This project's environment doesn't fit this commit, so nothing was sent: it was prepared from other setup files or in another Nebius project, or the commit tracks files in a folder the environment keeps for what it installs. Preview the run to see which, then prepare the environment again and run the task.",
+    "This project's environment doesn't fit this run, so nothing was sent: it was prepared from other setup files, in another Nebius project or for another target, or the commit tracks files in a folder the environment leaves out. Preview the run to see which, then prepare the environment again and run the task.",
   frozen: "The brief freezes a file this commit doesn't have, so nothing was sent. Preview the run to see which, correct the brief, then run the task again.",
   "environment-missing":
     "The project's prepared environment is no longer in your Nebius project, so the run stopped and nothing was proposed. Your commit was uploaded, and what Nebius keeps is listed with the run. Prepare the environment again, then run the task again.",

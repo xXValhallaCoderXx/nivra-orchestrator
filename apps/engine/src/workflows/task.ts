@@ -116,6 +116,9 @@ export function createTaskWorkflow(deps: TaskDeps) {
     // environment serves only the target it was prepared on (NIV-55).
     if (task.environment && (await projectFingerprint(credentials.project)) !== task.environment.projectFingerprint) throw refuse("environment");
     if (task.environment && isEnvironmentRef(task.environment) && task.environment.target !== task.target) throw refuse("environment");
+    // Its task variables go to Nebius with every command: none may carry a value the vault keeps.
+    const known = deps.knownValues().filter((value) => value.length > 0);
+    if (task.environment && isEnvironmentRef(task.environment) && Object.values(task.environment.env).some((value) => known.some((secret) => value.includes(secret)))) throw refuse("environment");
     return { task, context, credentials };
   };
 

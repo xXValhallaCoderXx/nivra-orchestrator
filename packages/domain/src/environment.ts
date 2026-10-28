@@ -305,7 +305,7 @@ export type RecipeEnv = z.infer<typeof RecipeEnv>;
 
 export const ArtifactFolders = z.strictObject({
   /** Folder names the install writes in the workspace, left out of listing and collect at any depth. */
-  dependency: z.array(z.string().regex(/^[A-Za-z0-9._-]{1,64}$/)).min(1).max(8),
+  dependency: z.array(z.string().regex(/^(?!\.{1,2}$)[A-Za-z0-9._-]{1,64}$/)).min(1).max(8),
   /** Caches outside the workspace, kept in the image. */
   caches: z.array(z.string().regex(/^\/[A-Za-z0-9._/-]{1,200}$/)).max(8),
 });

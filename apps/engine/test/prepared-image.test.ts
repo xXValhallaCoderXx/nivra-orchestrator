@@ -146,7 +146,7 @@ describe("a session from a prepared image (NIV-49)", () => {
     const copy = new WorkspaceCopy(await snap(repoWith(REPO)), DEPENDENCY);
     const bytes = new TextEncoder().encode("x\n");
     for (const path of ["node_modules/dep/index.js", "packages/a/node_modules/dep/index.js"]) {
-      assert.match(copy.writeProblem(path, bytes) ?? "", /is in a folder the project's environment installs into, which a change leaves out$/, path);
+      assert.match(copy.writeProblem(path, bytes) ?? "", /is under node_modules, a folder the project's environment leaves out of the workspace, so a change can't hold it$/, path);
     }
     assert.match(copy.writeProblem("packages/a/.turbo/turbo-build.log", bytes) ?? "", /is dependency, cache or build output \(in a folder the commit doesn't track\), which a change leaves out$/);
     // A folder named like build output that the commit tracks is source (NIV-55): its file can be edited, and added to.

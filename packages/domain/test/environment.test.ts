@@ -225,6 +225,7 @@ describe("a project-driven environment's contract (NIV-55)", () => {
     const { env: __, ...bare } = ref;
     assert.equal(EnvironmentRef.safeParse(bare).success, false, "a run carries the task operations' own variables");
     assert.equal(EnvironmentRef.safeParse({ ...ref, env: { TOKEN: "a b" } }).success, false, "no free text in a task variable");
+    for (const folder of [".", "..", "a/b", ""]) assert.equal(EnvironmentRef.safeParse({ ...ref, dependencyFolders: [folder] }).success, false, `a dependency folder is a plain name, never ${JSON.stringify(folder)}`);
   });
 
   it("never lists a release-index refresh as a reason to prepare again", () => {

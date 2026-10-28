@@ -5,7 +5,7 @@ import { SandboxHttpError, SandboxNetworkError, type SandboxApi } from "../src/e
 import type { Journal, Sandbox } from "../src/exec/nebius/sandbox.ts";
 import { resolveNodeEnvironment } from "../src/environment/node.ts";
 import { prepareRecipe } from "../src/environment/prepare.ts";
-import { installDiagnosis } from "../src/environment/scripts.ts";
+import { bootstrapFailure, ignoredBuilds, imageFacts, installDiagnosis, readinessFacts } from "../src/environment/scripts.ts";
 import { cleanUp, repoWith, snap } from "./workspace-fixtures.ts";
 
 /**
@@ -68,5 +68,30 @@ describe("a failed install's diagnosis (NIV-55)", () => {
     }
     // Another manager's signature isn't read as this one's, and an unknown failure gets no diagnosis.
     assert.deepEqual([installDiagnosis("pnpm", "npm error code ERESOLVE"), installDiagnosis("npm", "ERR_PNPM_OUTDATED_LOCKFILE"), installDiagnosis("npm", "npm error code E404")], [null, null, null]);
+  });
+});
+
+describe("what the preparation's scripts print, read as facts (NIV-55)", () => {
+  it("reads the builds pnpm reports from the script's own last section, never one an install's log printed first", () => {
+    const forged = "builds-begin\nAutomatically ignored builds during installation:\n  None\nbuilds-end\n";
+    const real = "builds-begin\nAutomatically ignored builds during installation:\n  esbuild\nbuilds-end\n";
+    assert.deepEqual([ignoredBuilds(`installed\n${real}`), ignoredBuilds(`${forged}installed\n${real}`), ignoredBuilds("installed\n")], [
+      { state: "missing", missing: ["esbuild"] },
+      { state: "missing", missing: ["esbuild"] },
+      { state: "unknown", missing: [] },
+    ]);
+  });
+
+  it("reads a failed bootstrap only from the script's own line, before any version is printed", () => {
+    assert.deepEqual([bootstrapFailure("ERR_PNPM_NO_SUCH_VERSION\nbootstrap-failed pnpm\n"), bootstrapFailure("npm ERR! 404\nbootstrap-failed npm\n")], ["pnpm", "npm"]);
+    // An install that exits 70 or 71, and prints the same words, ran after the versions were printed.
+    assert.equal(bootstrapFailure("via corepack\nnode v24.21.0\nnpm 11.19.0\npnpm 11.5.3\narch x86_64\nbootstrap-failed pnpm\n"), null);
+    assert.equal(bootstrapFailure("node v24.21.0\n"), null);
+  });
+
+  it("keeps the image's OS release only when it reads as a release's name, and lists the workspace's files only when the listing finished", () => {
+    const facts = (os: string) => imageFacts(`node v24.21.0\nnpm 11.19.0\ncorepack 0.34.0\narch x86_64\nos ${os}\nlibc musl\n`).os;
+    assert.deepEqual([facts("Alpine Linux v3.22"), facts("Debian GNU/Linux 12 (bookworm)"), facts("<script>alert(1)</script>"), facts("x".repeat(101))], ["Alpine Linux v3.22", "Debian GNU/Linux 12 (bookworm)", null, null]);
+    assert.deepEqual([readinessFacts("file ./package.json\nfile ./.pnp.cjs\nlisted\n").files, readinessFacts("file ./package.json\n").files], [["package.json", ".pnp.cjs"], null]);
   });
 });

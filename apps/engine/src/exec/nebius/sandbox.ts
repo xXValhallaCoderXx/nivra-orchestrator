@@ -319,7 +319,7 @@ export function isInstallArgs(args: readonly string[], manager?: "npm" | "pnpm")
  * pnpm from asking, downloading or switching versions, and pnpm 10's install options. Nothing that names a registry, a
  * proxy or a credential: an install with networking on reaches only what the lockfile names.
  */
-const PREPARATION_ENV = /^(PATH|HOME|CI|COREPACK_ENABLE_DOWNLOAD_PROMPT|COREPACK_ENABLE_STRICT|npm_config_update_notifier|npm_config_manage_package_manager_versions|pnpm_config_pm_on_fail|npm_config_node_linker|npm_config_shamefully_hoist|npm_config_auto_install_peers|npm_config_strict_peer_dependencies)$/;
+const PREPARATION_ENV = /^(PATH|HOME|CI|COREPACK_ENABLE_DOWNLOAD_PROMPT|COREPACK_ENABLE_STRICT|COREPACK_ENABLE_PROJECT_SPEC|npm_config_update_notifier|npm_config_manage_package_manager_versions|pnpm_config_pm_on_fail|npm_config_node_linker|npm_config_shamefully_hoist|npm_config_auto_install_peers|npm_config_strict_peer_dependencies)$/;
 const PREPARATION_VALUE = /^[A-Za-z0-9@._/:,=+-]{0,400}$/;
 
 /**
@@ -330,8 +330,10 @@ const PREPARATION_VALUE = /^[A-Za-z0-9@._/:,=+-]{0,400}$/;
  *
  * It prints how pnpm was activated, the versions and the machine it prepared, for the environment's verified record;
  * then the install. The install's own log goes to a file outside the workspace, and only its end is printed, so the
- * service's output cap can't cut off the line that says whether the install finished. After it, pnpm is asked which
- * dependency builds it didn't run, between markers. A bootstrap that fails exits 70 (npm) or 71 (pnpm).
+ * service's output cap can't cut off the line that says whether the install finished. After it, pnpm 10.1 and later is
+ * asked which dependency builds it didn't run, between markers: an older pnpm would read the unknown command as the name
+ * of a script or a dependency's program and run it, so it isn't asked. A bootstrap that fails says so on a line of its
+ * own and exits 70 (npm) or 71 (pnpm), before any version is printed.
  */
 export const ENV_PREPARE_SCRIPT = [
   "set -e",
@@ -358,7 +360,8 @@ export const ENV_PREPARE_SCRIPT = [
   'if [ "$manager" = "pnpm" ]; then echo "pnpm $(pnpm --version)"; fi',
   'echo "arch $(uname -m)"',
   'if "$manager" "$@" > /nivra/install.log 2>&1; then tail -c 8000 /nivra/install.log; echo "installed"; else status=$?; tail -c 16000 /nivra/install.log; exit "$status"; fi',
-  'if [ "$manager" = "pnpm" ]; then echo "builds-begin"; pnpm ignored-builds 2>&1 | tail -c 4000 || true; echo "builds-end"; fi',
+  'major="${version%%.*}"; rest="${version#*.}"; minor="${rest%%.*}"',
+  'if [ "$manager" = "pnpm" ] && { [ "$major" -gt 10 ] || { [ "$major" -eq 10 ] && [ "$minor" -ge 1 ]; }; }; then echo "builds-begin"; pnpm ignored-builds 2>&1 | tail -c 4000 || true; echo "builds-end"; fi',
 ].join("\n");
 
 export class Sandbox {
@@ -499,6 +502,7 @@ export class Sandbox {
     } else {
       // A project-driven recipe (NIV-55): its manager, version, activation and install, each in the one shape allowed.
       const recipe = input.recipe;
+      if (recipe.manager !== "npm" && recipe.manager !== "pnpm") throw new SandboxRefusal("An environment installs with npm or pnpm.");
       const exact = /^\d+\.\d+\.\d+$/;
       if (recipe.manager === "pnpm" ? !exact.test(recipe.version) : recipe.version !== "bundled" && !exact.test(recipe.version)) throw new SandboxRefusal("An environment pins its package manager to an exact version.");
       if (recipe.manager === "pnpm" ? !["corepack", "npm-global", "corepack-else-npm-global"].includes(recipe.via) : recipe.via !== "none") throw new SandboxRefusal("An environment activates pnpm through corepack or npm, and npm through nothing.");

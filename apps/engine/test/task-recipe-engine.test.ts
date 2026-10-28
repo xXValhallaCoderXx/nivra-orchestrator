@@ -133,6 +133,18 @@ describe("a task run from a recipe's environment, through a real engine (NIV-55)
     assert.ok(sent.slice(1).every((body) => body.env?.["COREPACK_ENABLE_NETWORK"] === "0" && body.env?.["pnpm_config_verify_deps_before_run"] === "false"), "a command ran without the recipe's task variables");
   });
 
+  it("sends nothing for a run whose environment's task variables carry a key the vault keeps", async () => {
+    const { sandbox, model, engine, repo } = await setup();
+    const environment = { ...(await refFor(FILES)), env: { ...(await refFor(FILES)).env, LEAK: KEY } };
+    const shown = await preview(engine, repo, environment);
+    assert.equal(shown.status, "ready");
+    const run = await start(engine, repo, (shown as Extract<TaskPreview, { status: "ready" }>).snapshot.fingerprint, environment);
+    // The engine keeps the request masked, so the value can't be read back as an environment, and the run stops there;
+    // the run's own environment check would refuse it next. Either way, nothing reaches Nebius or Token Factory.
+    const summary = await ended(engine, run.id);
+    assert.deepEqual([summary.status, await report(engine, run.id), spawns(sandbox).length, model.requests.filter((request) => request.path.endsWith("/chat/completions")).length], ["failed", null, 0, 0]);
+  });
+
   it("refuses, before anything is sent, a run bound to an environment prepared on another target", async () => {
     const { sandbox, model, engine, repo } = await setup();
     const environment = await refFor(FILES, "wsl:Ubuntu");

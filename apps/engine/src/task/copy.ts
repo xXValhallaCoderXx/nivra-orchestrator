@@ -130,7 +130,8 @@ export class WorkspaceCopy {
     if (!node && this.paths(path).length) return `${quoted(path)} is a folder`;
     // Collect leaves the session's dependency folders out, and a patch leaves new generated files out: such a write
     // would never be proposed.
-    if (parts.slice(0, -1).some((segment) => this.leftOut.includes(segment))) return `${quoted(path)} is in a folder the project's environment installs into, which a change leaves out`;
+    const leftOut = parts.slice(0, -1).find((segment) => this.leftOut.includes(segment));
+    if (leftOut !== undefined) return `${quoted(path)} is under ${leftOut}, a folder the project's environment leaves out of the workspace, so a change can't hold it`;
     if (!node && isGenerated(path, this.snapshot.prefix ? `${this.snapshot.prefix}/${path}` : path, this.snapshot)) return `${quoted(path)} is dependency, cache or build output (in a folder the commit doesn't track), which a change leaves out`;
     try {
       findChanges(this.snapshot, this.#collected(path, bytes), { knownValues });

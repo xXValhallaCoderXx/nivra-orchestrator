@@ -166,3 +166,11 @@ describe("the setup files after a task, against the commit's (NIV-55)", () => {
     assert.deepEqual(setupCheck(snapshot, [...entries(rest), { path: ".nvmrc", kind: "link" as const, target: "24\n" }], isNodeSetupPath), { unchanged: false, changed: [".nvmrc"] });
   });
 });
+
+describe("D41's preview of a commit that tracks build output (NIV-55)", () => {
+  it("refuses it, naming the folder and a file, since its task runs leave the folder out and would refuse it", async () => {
+    const files = { "package.json": `${JSON.stringify({ name: "app", private: true, packageManager: "pnpm@11.5.3" })}\n`, "pnpm-lock.yaml": "lockfileVersion: '9.0'\n", "src/index.js": "export {};\n", "build/icon.png": "png" };
+    const snapshot = await snap(repoWith(files));
+    assert.throws(() => environmentPreviewOf(snapshot, { filters: [] }), (error: Error) => error instanceof EnvironmentRefusal && /^This commit tracks files in build, such as "build\/icon\.png", which this kind of environment leaves out of its task runs, so they would refuse it\./.test(error.message));
+  });
+});
