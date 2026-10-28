@@ -3590,3 +3590,80 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
   released, an interrupted seal settling, a grant's day going back, and the provider's clock or the person opening the
   current month again.
 - **Evidence:** NIV-66, and acceptance.md's record of PR 1.
+
+## D50. Nemotron 3.5 Super VL replaces Nemotron 3 Super, and every request's cap is sent as max_completion_tokens (2026-10-28)
+
+**Decision.** Nate's decision on the model switch, option A (28 Oct). It supersedes D46's choice of model; the rest of
+D46 stands.
+- **The model:** `TASK_MODEL` is `nvidia/Nemotron-3.5-Super-VL`, and it heads D22's order of Nemotron models
+  (`PREFERRED_NEMOTRON`), before Nemotron 3.5 Lightning and Nemotron 3 Ultra.
+  - Nemotron 3 Super leaves the order. Token Factory retires it from Serverless on 9 November 2026 and doesn't
+    reroute requests to deprecated models (its model deprecations page). While it is listed, it is still used when no
+    preferred model is, as any NVIDIA model is.
+  - A task run still uses only `TASK_MODEL`. It stops at its model step when the listing doesn't offer it, and its
+    preview names it (D46).
+- **What the listing shows,** in a listing-only check approved by Nate (28 Oct, 22:09 SGT). The key's
+  `GET /v1/models?verbose=true` lists it at the base URL Nivra already calls, with:
+  - context length 1,048,576, bf16, region us-north1;
+  - `tools` and `reasoning` among its features;
+  - no sampling parameters named. Nivra sends none.
+  - No inference request was made.
+- **Its prices** are 0.30 USD per million input tokens and 0.90 USD per million output tokens. Nebius's post of 16
+  October 2026 ("Three new open-weight models from US companies give builders more choice") gives them in USD. The
+  listing gives the same numbers per token, with no unit.
+- **Its policy, from a check.** The paid tool-choice check Nate approved saw it honour a `required` tool choice and a
+  forced named tool, and give a forced answer that fits the schema, on tiny probes:
+  - 28 Oct, 23:28 SGT, digest `3bb7057c8d34af01c75fe2460f6a57716ff477479189b470a5881129f44cf098`, at `77e3a45`;
+  - Settings' Check Token Factory, named on the model.
+  So it gets D22's checked policy, as Nemotron 3 Super has: it explores with `required` and is forced to answer. That
+  includes the task worker's hand-in, and the coach, which needs a forced answer and refuses any model without one.
+- **The cap:** every request through `ModelClient` carries its output cap as `max_completion_tokens`, and no
+  `max_tokens`.
+  - Token Factory documents `max_completion_tokens` as the bound on what a completion generates, reasoning tokens
+    included. Its `max_tokens` is documented without them.
+  - Mastra's router builds the provider with no request hook, and its chat model writes `max_tokens` from
+    `maxOutputTokens`. So `capCompletionTokens` (`tokenfactory.ts`) moves each call's `maxOutputTokens`, a step's own
+    cap included, into the provider options, which the provider writes into the body as they are.
+  - It wraps the model the router builds, the production path. A model a test hands in is left as it is.
+  - `countAttempts` stays outermost, so it sees each call with its `maxOutputTokens` before the cap is moved. Next C's
+    budget journal, which works out each request's bound from it, relies on that order. Whichever PR merges second
+    combines the line as `countAttempts(options.model ? resolved : capCompletionTokens(resolved), slot, options.budget
+    ?? null)`.
+
+**Why.** Nemotron 3 Super is gone from Token Factory on 9 November, and nothing reroutes a request for it. A cap that
+leaves reasoning out doesn't bound what a request generates, and so neither its time nor its cost. And the evidence has
+to show what Nivra actually sends: a direct API probe that accepts a field isn't that.
+
+**Consequences.**
+- **Tests:**
+  - `tokenfactory.test.ts`, through the client's production adapter and a stub server: a call's cap, and a step's own
+    cap set through `prepareStep` as the hand-in sets it, arrive as `max_completion_tokens`, with no `max_tokens`; a
+    call without a cap passes unchanged; the task model heads the preferred order, and Super is no longer preferred.
+  - `task-engine.test.ts`: every request of a real engine's task run carries `max_completion_tokens` 8,000 and no
+    `max_tokens`. The heartbeat test's wait for the run's first request is now bounded: a run that ends first fails it
+    at once.
+  - `coach.test.ts`: with Super and the new model listed, a coaching sends one forced request to the new model, capped
+    with `max_completion_tokens`, and succeeds. `tokenfactory.test.ts`: the new model's policy, whatever its case.
+  - Task tests list the task model themselves. Explain, chat, research and the coach keep Super in their other stub
+    listings, where it keeps its checked policy.
+- **Shown by that check:** 5 inference requests, all answered 200. Evidence:
+  `~/nivra-acceptance/model-switch/tool-choice-2026-10-28T152835449Z`.
+  - Token Factory takes `max_completion_tokens` for this model: every request carried it (400 or 1,000), and none
+    carried `max_tokens`.
+  - Its usage reports `completion_tokens_details.reasoning_tokens`, and `completion_tokens` includes them. The
+    forced-answer probe stopped at its cap (`length`) after exactly 1,000 completion tokens, 139 of them reasoning.
+  - 3,293 input and 1,489 completion tokens across the 5 inference requests; the completion total already includes
+    the 547 reasoning tokens. No cost was reported, so none is shown.
+- **Not shown yet:**
+  - how a whole task run does on it: a candidate and a live run, each with its own approved recipe;
+  - whether billing follows `completion_tokens`;
+  - that reasoning-inclusive usage reaches the budget ledger, which is Next C's, in the journal of NIV-66's PR 2a.
+  The forced-answer probe returned a valid answer but finished at its 1,000-token limit. These probes establish the
+  tested capabilities, not general reliability or confirmed billing.
+- **Money:** until dollar budgets are established, the count-based limits stay, and costs are shown only as labelled
+  estimates (Nate, 28 Oct).
+- **Evidence is credited to its model.** The live scripts (`research-live.ts`, `research-check.ts`,
+  `mission-review-live.ts`) keep the model their recorded runs used until each is next run with a new recipe; none
+  can run on Super after 9 November. Recorded runs and their fixtures name the model they ran on, and
+  `docs/submission.md` keeps its model line until the release's build is chosen.
+- D50 is a provisional number: D48 is PR 36's, and D49 is PR 35's.

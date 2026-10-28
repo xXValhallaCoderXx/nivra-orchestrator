@@ -4,10 +4,11 @@ import { z } from "zod";
 export const TOKEN_FACTORY_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
 
 /**
- * Nemotron models in the order Nivra prefers them when none is named. Mastra 1.75's provider registry lists these IDs
- * for Nebius; the live model list is the authority, so an ID is used only when the key can see it.
+ * Nemotron models in the order Nivra prefers them when none is named: Nemotron 3.5 Super VL first, which replaces
+ * Nemotron 3 Super when Token Factory retires it on 9 November 2026 (D50). The live model list is the authority, so an
+ * ID is used only when the key can see it.
  */
-export const PREFERRED_NEMOTRON = ["nvidia/nemotron-3-super-120b-a12b", "nvidia/Nemotron-3_5-Lightning", "nvidia/Nemotron-3-Ultra-550b-a55b"] as const;
+export const PREFERRED_NEMOTRON = ["nvidia/Nemotron-3.5-Super-VL", "nvidia/Nemotron-3_5-Lightning", "nvidia/Nemotron-3-Ultra-550b-a55b"] as const;
 
 export interface ModelEntry {
   id: string;
@@ -92,4 +93,40 @@ export function pickNemotron(ids: readonly string[]): string | null {
     if (match) return match;
   }
   return ids.find(isNvidiaModel) ?? null;
+}
+
+// ---- the completion cap a request carries (D50) --------------------------------------------------------------------
+
+/**
+ * The request field Token Factory documents as the bound on what a completion generates, reasoning tokens included.
+ * Its `max_tokens`, which the OpenAI-compatible provider writes from `maxOutputTokens`, is documented without them.
+ */
+export const COMPLETION_CAP_FIELD = "max_completion_tokens";
+
+/** The provider-options key of the model Mastra's router builds for `providerId: "nebius"`. */
+const PROVIDER_OPTIONS_KEY = "nebius";
+
+/**
+ * A model resolved for Token Factory, with each request's cap sent as `max_completion_tokens` and no `max_tokens`
+ * (D50): every call's `maxOutputTokens`, a step's own cap included, moves into the provider's options, which the
+ * provider writes into the request body as they are. A call without a cap is passed on unchanged. Methods run on the
+ * model itself, as `countAttempts` does it, so Mastra's private fields stay reachable.
+ */
+export function capCompletionTokens<T extends object>(model: T): T {
+  return new Proxy(model, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property);
+      if (typeof value !== "function") return value;
+      if (property !== "doGenerate" && property !== "doStream") return (value as (...a: unknown[]) => unknown).bind(target);
+      return (options: unknown, ...rest: unknown[]) => (value as (...a: unknown[]) => unknown).apply(target, [withCompletionCap(options), ...rest]);
+    },
+  });
+}
+
+function withCompletionCap(options: unknown): unknown {
+  if (!options || typeof options !== "object") return options;
+  const { maxOutputTokens, ...call } = options as { maxOutputTokens?: unknown; providerOptions?: Record<string, Record<string, unknown> | undefined> };
+  if (typeof maxOutputTokens !== "number") return options;
+  const providerOptions = call.providerOptions ?? {};
+  return { ...call, providerOptions: { ...providerOptions, [PROVIDER_OPTIONS_KEY]: { ...providerOptions[PROVIDER_OPTIONS_KEY], [COMPLETION_CAP_FIELD]: maxOutputTokens } } };
 }

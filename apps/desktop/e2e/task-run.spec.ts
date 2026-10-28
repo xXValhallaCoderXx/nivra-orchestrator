@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { TASK_MODEL } from "@nivra/domain";
 import { CHECK_IMAGE } from "../../engine/src/exec/check.ts";
 import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
 import { RealGuest } from "../../engine/test/real-guest.ts";
@@ -47,7 +48,7 @@ test.beforeAll(async ({}, testInfo) => {
   guest.busybox = true;
   sandbox = await startSandboxStub({ guest });
   const calls: Array<[string, Record<string, unknown>]> = [["read_file", { path: "greet.sh" }], ["edit_file", TASK_FIX], ["run_case", { number: 1 }], ["submit", { summary: "Defaulted the name to world." }]];
-  model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: (_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }) });
+  model = await startStub({ models: [{ id: TASK_MODEL, context_length: 131_072 }], chat: (_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }) });
   const executable = testInfo.project.metadata["executable"] as string | undefined;
   packaged = executable !== undefined;
   const args = [`--user-data-dir=${join(root, "user data")}`, `--nivra-engine-home=${join(root, "engine home")}`, `--nivra-sandboxes-url=${sandbox.url}`, `--nivra-token-factory-url=${model.url}`];
