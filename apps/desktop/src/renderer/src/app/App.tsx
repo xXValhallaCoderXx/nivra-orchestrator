@@ -11,8 +11,8 @@ import { PlanningHome } from "../features/navigation";
 import { AddedWarning, useAddProject, type AddOutcome } from "../features/projects";
 import { NewTask, TaskDetail, TasksPage } from "../features/tasks";
 import { errorMessage, usePoll } from "../shared/ui";
-import { browserStorage, DraftsProvider, useDraftList } from "../shell/drafts";
-import { newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
+import { browserStorage, DraftsProvider, useDraftList, useDrafts } from "../shell/drafts";
+import { composerDraftKey, newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
 import { Sidebar } from "../shell/Sidebar";
 import { useShortcuts } from "../shell/keyboard";
 import { NARROW_QUERY, SIDEBAR_WIDTH } from "../shell/layout";
@@ -61,6 +61,9 @@ function Page({ shown, testId, children }: { shown: boolean; testId: string; chi
 function Shell() {
   const toast = useToast();
   const drafts = useDraftList();
+  const draftStore = useDrafts();
+  // The Home composer's draft a new task page was opened from: it ends when that task is created, not before.
+  const [composerOrigin, setComposerOrigin] = useState<string | null>(null);
   const [projectsVersion, setProjectsVersion] = useState(0);
   const [preferencesVersion, setPreferencesVersion] = useState(0);
   const [conversationsVersion, setConversationsVersion] = useState(0);
@@ -142,6 +145,7 @@ function Shell() {
 
   const navigate = (next: Route) => {
     setNavOpen(false);
+    if (next.kind !== "new-task") setComposerOrigin(null);
     if (next.kind !== "settings") return setRoute(next);
     const section = shownSection(next.section);
     setSettingsSection(section);
@@ -159,6 +163,7 @@ function Shell() {
   });
   const switchTo = (next: Scope) => {
     setNavOpen(false);
+    setComposerOrigin(null);
     setChosen(next);
     setRoute((current) => routeAfterSwitch(current, next));
   };
@@ -246,10 +251,12 @@ function Shell() {
         onOpenSettings={openSettings}
         onOpenDraft={(key) => {
           const place = placeOfDraft(key);
-          if (!place) return;
+          // Never a removed project's scope: such a draft offers Discard instead.
+          if (!place || (place.scope?.kind === "project" && !list.some((p) => p.id === (place.scope as { projectId: string }).projectId))) return;
           if (place.scope) setChosen(place.scope);
           navigate(place.route);
         }}
+        onDiscardDraft={(key) => draftStore.discard(key)}
         onConversationCreated={opened}
       />
       <AppShell.Main ref={main} id="page" tabIndex={-1} aria-label="Page" style={{ outline: "none" }} data-testid="main">
@@ -279,7 +286,10 @@ function Shell() {
                       tasks={tasks.value}
                       running={busyIds.includes(project.id)}
                       onNavigate={navigate}
-                      onCreateTask={(title) => navigate({ kind: "new-task", draftKey: newTaskDraftKey(scope), plan: null, title })}
+                      onCreateTask={(title) => {
+                        navigate({ kind: "new-task", draftKey: newTaskDraftKey(scope), plan: null, title });
+                        setComposerOrigin(composerDraftKey(scope));
+                      }}
                       onStartConversation={async () => {
                         try {
                           opened(await window.nivra.createConversation({ kind: "project", projectId: project.id }));
@@ -288,6 +298,8 @@ function Shell() {
                         }
                       }}
                       onRemoved={(label, preferencesRemoved) => {
+                        // Its composer's draft goes with it: nothing would open it again.
+                        draftStore.discard(composerDraftKey({ kind: "project", projectId: project.id }));
                         setProjectsVersion((n) => n + 1);
                         setChosen({ kind: "general" });
                         setRoute({ kind: "home" });
@@ -326,7 +338,11 @@ function Shell() {
                   projects={list}
                   plan={shown.plan}
                   initialTitle={shown.title}
-                  onCreated={(task) => navigate({ kind: "task", id: task.summary.id, tab: "brief" })}
+                  onCreated={(task) => {
+                    // The composer's draft this page came from is a task now.
+                    if (composerOrigin) draftStore.discard(composerOrigin);
+                    navigate({ kind: "task", id: task.summary.id, tab: "brief" });
+                  }}
                   onCancel={() => navigate(shown.plan ? { kind: "conversation", id: shown.plan.conversationId } : { kind: "tasks" })}
                 />
               </Box>

@@ -99,8 +99,8 @@ export function ProjectHome({
   onStartConversation(): Promise<void>;
   onRemoved(label: string, preferencesRemoved: number): void;
 }) {
-  // The title typed here is a draft (R30): kept on this computer across navigation and restarts until the task is
-  // created, never one that looks like it holds a credential, and never sent anywhere.
+  // The title typed here is a draft (R30): kept on this computer across navigation and restarts until a task is
+  // created from it, never one that looks like it holds a credential, and never sent anywhere.
   const drafts = useDrafts();
   const draftKey = composerDraftKey({ kind: "project", projectId: project.id });
   const [title, setTitle] = useState(() => drafts.read<{ title: string }>(draftKey)?.title ?? "");
@@ -132,8 +132,7 @@ export function ProjectHome({
         onSubmit={(event) => {
           event.preventDefault();
           if (!workspaceReady) return;
-          // The title moves on to the new task's brief, which keeps its own draft.
-          drafts.discard(draftKey);
+          // The draft stays until the task is created from it, so leaving the new task's page loses nothing.
           onCreateTask(title.trim());
         }}
       >

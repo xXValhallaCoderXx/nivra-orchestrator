@@ -87,12 +87,20 @@ test("a draft typed in the composer outlives navigation and a relaunch, and the 
   await page.getByTestId("nav-draft").click();
   await expect(composer()).toHaveValue(TITLE);
 
-  // Creating the task takes the title to the new task's page and ends the composer's draft. Nothing is sent.
+  // Create task takes the title to the new task's page, and nothing is sent; the draft stays until the task exists, so
+  // leaving the page first loses nothing.
   await page.getByTestId("home-create-task").click();
   await expect(page.getByTestId("page-new-task")).toBeVisible();
   await expect(page.getByTestId("task-form-title")).toHaveValue(TITLE);
-  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+  await expect(page.getByTestId("nav-draft")).toHaveCount(1);
   expect((await page.evaluate(() => window.nivra.listTasks())).tasks).toHaveLength(0);
+  await goTo(page, "home");
+  await expect(composer()).toHaveValue(TITLE);
+  // Once the task is created from it, the draft ends.
+  await page.getByTestId("home-create-task").click();
+  await page.getByTestId("task-form-create").click();
+  await expect(page.getByTestId("task-title")).toHaveText(TITLE);
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
   await goTo(page, "home");
   await expect(composer()).toHaveValue("");
 });
@@ -306,11 +314,15 @@ test("storage that refuses every write: a draft says it couldn't be kept and kee
       throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
     };
   });
+  // The draft kept before storage refused is still there, listed and restorable.
+  await expect(page.getByTestId("nav-draft")).toContainText(TITLE);
   await composer().fill("Fix rounding in invoice totals");
   const warning = page.getByTestId("draft-not-kept");
   await expect(warning).toHaveAttribute("data-reason", "storage");
-  await expect(warning).toHaveText("This draft couldn't be kept on this computer. What you typed is still here.");
+  await expect(warning).toHaveText("This draft couldn't be kept on this computer. What you typed is still here. An earlier copy may still be listed under Unsaved drafts.");
   await expect(composer()).toHaveValue("Fix rounding in invoice totals");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(1);
+  await expect(page.getByTestId("nav-draft")).toContainText(TITLE);
 
   await goTo(page, "settings-preferences");
   await expect(page.getByTestId("appearance-not-kept")).toHaveCount(0);

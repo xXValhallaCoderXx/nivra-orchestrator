@@ -49,8 +49,8 @@ export function useDraftList() {
 
 export const DRAFT_NOT_KEPT = {
   credential:
-    "This draft isn't kept: it looks like it holds a key or token, and Nivra never keeps one on this computer. What you typed is still in the field. Remove the key or token to keep the draft.",
-  storage: "This draft couldn't be kept on this computer. What you typed is still here.",
+    "This draft isn't kept: it looks like it holds a key or token, and Nivra never keeps one in a draft. What you typed is still in the field. Remove the key or token to keep the draft.",
+  storage: "This draft couldn't be kept on this computer. What you typed is still here. An earlier copy may still be listed under Unsaved drafts.",
 } as const;
 
 /**

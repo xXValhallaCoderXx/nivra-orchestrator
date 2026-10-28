@@ -200,6 +200,7 @@ export function Sidebar({
   onNavigate,
   onOpenSettings,
   onOpenDraft,
+  onDiscardDraft,
   onConversationCreated,
 }: {
   ref?: Ref<HTMLDivElement>;
@@ -221,6 +222,8 @@ export function Sidebar({
   /** Settings, on the section last shown there. */
   onOpenSettings(): void;
   onOpenDraft(key: string): void;
+  /** For a draft nothing can open any more, such as one whose project was removed. */
+  onDiscardDraft(key: string): void;
   onConversationCreated(summary: ConversationSummary): void;
 }) {
   const section = sectionOf(route);
@@ -274,12 +277,26 @@ export function Sidebar({
                 <Text className="nivra-nav-label">Unsaved drafts</Text>
                 {drafts.list.map((draft) => {
                   const place = placeOfDraft(draft.key);
-                  return (
+                  const scope = place?.scope;
+                  // A draft of a project no longer in the list opens nothing: it can only be discarded.
+                  const gone = scope?.kind === "project" && !projects.some((p) => p.id === scope.projectId);
+                  const label = (
+                    <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={draft.label}>
+                      {draft.label || "Untitled"}
+                    </span>
+                  );
+                  return gone ? (
+                    <Box key={draft.key} className="nivra-nav" data-testid="nav-draft" data-draft-key={draft.key} data-gone>
+                      <Icon name="draft" />
+                      {label}
+                      <UnstyledButton className="nivra-subnav-action" style={{ fontSize: 12 }} onClick={() => onDiscardDraft(draft.key)} aria-label={`Discard the draft ${draft.label || "Untitled"}: its project was removed`} data-testid="nav-draft-discard">
+                        Discard
+                      </UnstyledButton>
+                    </Box>
+                  ) : (
                     <UnstyledButton key={draft.key} className="nivra-nav" onClick={() => onOpenDraft(draft.key)} disabled={!place} data-testid="nav-draft" data-draft-key={draft.key}>
                       <Icon name="draft" />
-                      <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={draft.label}>
-                        {draft.label || "Untitled"}
-                      </span>
+                      {label}
                       {place && <span className="nivra-nav-detail">{place.kind}</span>}
                     </UnstyledButton>
                   );
