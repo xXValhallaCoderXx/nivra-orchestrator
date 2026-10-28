@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import {
   ChatInput,
   ChatResult,
+  CoachReport,
   combinedMask,
   EnvironmentReport,
   projectFingerprint,
@@ -20,6 +21,7 @@ import {
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
+  type CoachContext,
   type EnvironmentPreview,
   type EnvironmentSpec,
   type JsonObject,
@@ -53,6 +55,7 @@ import { ENV_COMMAND_ENV, Journal } from "./exec/nebius/sandbox.ts";
 import { createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals, type NebiusCredentials } from "./exec/nebius/session.ts";
 import { takeSnapshot } from "./exec/snapshot.ts";
 import { ChatUnreadable, readChatTask } from "./chat/task.ts";
+import { asEnded as asEndedCoaching, coachUnreadable, readCoachTask } from "./coach/task.ts";
 import { readTask, TaskUnreadable } from "./explain/task.ts";
 import { asInterrupted, readResearchTask } from "./research/task.ts";
 import { asEnded, readReviewTask, ReviewUnreadable } from "./review/task.ts";
@@ -180,6 +183,23 @@ const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, Wo
     },
   ],
   [
+    "coach",
+    {
+      id: "coach",
+      // The brief's version only: a task's title is the person's words, and stays out of the run's record (NIV-53).
+      title: (input: unknown) => {
+        const task = readCoachTask(input);
+        return task ? `Coach · brief v${task.briefVersion}` : "Coach";
+      },
+      // Mastra gets nothing of a coaching: the task's ids, the brief version and the fingerprints stay in the run store,
+      // and the packet in memory (D21, NIV-53).
+      mastraInput: (input: unknown) => {
+        if (!readCoachTask(input)) throw coachUnreadable();
+        return {};
+      },
+    },
+  ],
+  [
     "research",
     {
       id: "research",
@@ -255,6 +275,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/research.ts"),
     typeof import("./workflows/task.ts"),
     typeof import("./workflows/environment.ts"),
+    typeof import("./workflows/coach.ts"),
   ];
   try {
     mastraModules = await Promise.all([
@@ -268,6 +289,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       import("./workflows/research.ts"),
       import("./workflows/task.ts"),
       import("./workflows/environment.ts"),
+      import("./workflows/coach.ts"),
     ]);
   } catch (error) {
     database.close();
@@ -284,6 +306,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     { createResearchWorkflow, RESEARCH_WORKFLOW_ID },
     { createTaskWorkflow, TASK_WORKFLOW_ID },
     { createEnvironmentWorkflow, ENVIRONMENT_WORKFLOW_ID },
+    { createCoachWorkflow, COACH_WORKFLOW_ID },
   ] = mastraModules;
 
   const vault = new SecretVault();
@@ -346,6 +369,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const chatContext = (runId: string): ChatContext | null => scheduler.contextOf(runId, "chat");
   const researchContext = (runId: string): ResearchContext | null => scheduler.contextOf(runId, "research");
   const taskContext = (runId: string): TaskContext | null => scheduler.contextOf(runId, "task");
+  const coachContext = (runId: string): CoachContext | null => scheduler.contextOf(runId, "coach");
   const recorder = {
     output: (runId: string, stepId: string, message: string, data?: JsonObject) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
     event: (runId: string, type: "model.call" | "tool.called", stepId: string, message: string, data: JsonObject) => void store.append(runId, { type, stepId, message, data }),
@@ -576,6 +600,17 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         setMeta: (runId, meta) => store.setMeta(runId, meta),
         saveResult: (runId, report) => store.saveArtifact(runId, "review", JSON.stringify(report)),
         recorder,
+      }),
+      [COACH_WORKFLOW_ID]: createCoachWorkflow({
+        recorder,
+        context: coachContext,
+        task: (runId) => readCoachTask(store.summary(runId)?.input),
+        requestId: (runId) => store.requestIdOf(runId),
+        apiKey: () => vault.get("NEBIUS_API_KEY"),
+        endpoint,
+        mask,
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        saveResult: (runId, report) => store.saveArtifact(runId, "coach", JSON.stringify(report)),
       }),
       [SANDBOX_WORKFLOW_ID]: createSandboxWorkflow({
         recorder,
@@ -822,6 +857,15 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       },
       "task.preview": ({ repoPath, brief, environment }) => taskPreview(repoPath, brief, environment),
       "environment.preview": ({ repoPath, spec }) => environmentPreview(repoPath, spec),
+      "runs.coach": ({ runId }) => {
+        const status = store.status(runId);
+        if (!status) notFound(runId);
+        const stored = store.artifact(runId, "coach");
+        if (stored === null) return null;
+        // A report saved mid-coaching, of a run that has ended, reads as interrupted (NIV-53).
+        const report = CoachReport.parse(JSON.parse(stored));
+        return status && isTerminal(status) ? asEndedCoaching(report) : report;
+      },
       "runs.environment": ({ runId }) => {
         const status = store.status(runId);
         if (!status) notFound(runId);
@@ -913,6 +957,7 @@ export async function selfCheck(output: ProtocolOutput, log: (line: string) => v
       import("./workflows/research.ts"),
       import("./workflows/task.ts"),
       import("./workflows/environment.ts"),
+      import("./workflows/coach.ts"),
     ]);
     await new LibSQLStore({ id: "nivra-self-check", url: ":memory:" }).init();
   } catch (error) {

@@ -34,7 +34,7 @@ const ROLE_TITLE: Record<ReviewStage["role"], string> = {
   chair: "Chair",
 };
 
-const STATUS_LOOK: Record<TurnStatus, { label: string; color: string }> = {
+export const STATUS_LOOK: Record<TurnStatus, { label: string; color: string }> = {
   submitting: { label: "Sending", color: "gray" },
   running: { label: "Reviewing", color: "blue" },
   // Complete is about the review, never the plan: no green.
@@ -376,7 +376,7 @@ function ReviewCard({ review, reviewing, onReviewAgain }: { review: ReviewView; 
 }
 
 /** What a review in progress is doing, from its run's events. */
-function ReviewProgress({ runId, online }: { runId: string; online: boolean }) {
+export function ReviewProgress({ runId, online }: { runId: string; online: boolean }) {
   const { events } = useRunEvents(runId, online, "running");
   const latest = [...events].reverse().find((event) => event.type === "step.output" || event.type === "model.call");
   return latest ? (
@@ -401,7 +401,7 @@ function Stages({ stages }: { stages: ReviewStage[] }) {
   );
 }
 
-function Part({ title, note, testId, children }: { title: string; note?: string; testId: string; children: ReactNode }) {
+export function Part({ title, note, testId, children }: { title: string; note?: string; testId: string; children: ReactNode }) {
   return (
     <Stack gap={4} data-testid={testId}>
       <Stack gap={0}>

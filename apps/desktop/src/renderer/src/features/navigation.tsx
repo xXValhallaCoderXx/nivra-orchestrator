@@ -10,7 +10,9 @@ export type View =
   | { kind: "conversation"; id: string }
   | { kind: "tasks" }
   | { kind: "task"; id: string }
-  | { kind: "new-task"; plan: PlanView | null; title: string };
+  | { kind: "new-task"; plan: PlanView | null; title: string }
+  | { kind: "missions" }
+  | { kind: "mission"; id: string };
 
 /** Starts a conversation, general or about one project; its scope never changes afterwards. Starts no engine. */
 function useCreate(onCreated: (summary: ConversationSummary) => void) {
@@ -30,8 +32,8 @@ const scopeOf = (conversation: ConversationSummary) =>
   conversation.kind === "general" ? "General" : `${conversation.projectLabel ?? "A project"}${conversation.projectPresent === false ? " · removed" : ""}`;
 
 /**
- * The side navigation: Review & planning, with a new chat and the conversations (the most recent first), Tasks, and
- * Projects & settings. A project chosen on that page changes no conversation: each keeps the scope it started with.
+ * The side navigation: Review & planning, with a new chat and the conversations (the most recent first), Missions (NIV-52),
+ * Tasks, and Projects & settings. A project chosen on that page changes no conversation: each keeps the scope it started with.
  */
 export function Navigation({
   view,
@@ -118,6 +120,7 @@ export function Navigation({
         )}
       </AppShell.Section>
       <AppShell.Section>
+        <NavLink component="button" label="Missions" active={view.kind === "missions" || view.kind === "mission"} onClick={() => onNavigate({ kind: "missions" })} data-testid="nav-missions" />
         <NavLink
           component="button"
           label="Tasks"

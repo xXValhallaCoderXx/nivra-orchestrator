@@ -2939,3 +2939,232 @@ alone are not proof of correct behaviour".
 - A preview's "to upload" figure is the tar's size.
 - `AGENTS.md`'s execution boundary rules say how an environment is prepared.
 - **Evidence:** `docs/acceptance.md`, *A project's environment (D41, NIV-49)*.
+
+## D42. Missions in the workspace, and one context check both planning tracks share: what a result was sent is bound by version and by title, and checked where it would be applied (2026-10-28)
+
+**Decision.** NIV-52's foundation, landed first so that NIV-53 (the task readiness coach) builds on the same seam. Nate
+set the scope on 27 October: a mission and a small backlog reviewed without a repository or a tracker, by the council's
+two reviewers and its chair, with no automatic change to any task. This entry covers the storage, the shared contract
+and the check; the review itself comes in its own entry.
+
+- **A mission** is what a piece of work is for: a name, the people it is for, its outcome, how success shows, what
+  bounds it and what it leaves out. Only the name and the outcome are needed.
+  - **Versions are immutable** (`mission_versions`, a trigger refuses changes). An edit adds the next version only
+    while the latest is the one the person read, as a brief's does.
+  - **A backlog** is the tasks a mission holds: a task is in one backlog at most, and a backlog holds at most 50.
+    Leaving a backlog, or the mission going, leaves the task as it was.
+  - **Workspace migration 6** (`WORKSPACE_MIGRATIONS[5]`) adds `missions`, `mission_versions` and `mission_tasks`.
+    No other table changes.
+- **Each mission owns one conversation record** (general, on this computer's engine, no project). It holds only the
+  mission's review plans and their reviews.
+  - **Why:** a plan and a review's run link belong to a conversation (D26's and D31's CHECKs, in hash-pinned
+    migrations). Rebuilding `run_links`, which messages, reviews, research and attempt records point at, was the
+    larger risk days before a release. A table of the review's own would have repeated the whole lifecycle that
+    `#submit`, `#follow` and `#finishReview` already give a review.
+  - **It is never one of the person's conversations:** it isn't listed; a trigger refuses a mission on a conversation
+    that has a project or messages; and every conversation and plan call refuses it and its review plans (send, open,
+    delete, save or revise a plan, plans, reviews, research, cancel, restart, a task from a plan, a refresh from a plan,
+    a generic review), so nothing can be said in it. A review plan is written by Nivra from a mission and its tasks, never
+    from an answer, and holds nothing that isn't already in them (a brief's words may themselves have come from a saved
+    answer, as D26 allows).
+  - Deleting a mission deletes its conversation, which takes its versions, backlog, review plans and reviews with it.
+- **The shared contract** (`packages/domain`: `mission.ts`, `specialists.ts`).
+  - **What was sent is bound by reference** (`ContextBinding`): each task by its brief version (immutable) and by its
+    title as sent, since a rename makes no brief version; the mission by its version, and each bound task's membership
+    of it; findings by their review and id; profiles by version. `bindingDigest` (`nivra.context-binding.v1`) is the
+    selection's fingerprint, pinned by a test vector.
+  - **The specialists** are a static catalogue: the product architect, the risk and testability reviewer, the council
+    chair, and the task readiness coach (whose wording and version NIV-53 owns). Each is versioned, grants no tools,
+    memory, writes or permission, and makes one call per action. Its personality changes how it writes, never what it
+    may do.
+  - **The mission review's packet** (`MissionReviewPacket`): the mission, up to five tasks as T1 to T5 (each task's
+    title, goal, criteria, scope, exclusions, assumptions, checks, context and its acceptance cases' names), the count
+    of other tasks in the backlog, the council's profile versions, and the only model it may use or none. One renderer
+    makes the text both the preview shows and the reviewers read. It keeps D30's 20,000-character text limit, and over
+    it is refused, never shortened.
+- **One context check** (`validateBinding`, in the host's `mission-context.ts`), synchronous, so it runs inside the
+  transaction that would act on a result. It checks the binding's shape first, then names each change: a task deleted,
+  its brief at another version, its title changed, the mission at another version or deleted, a task no longer in the
+  mission's backlog, and a finding gone or not about any bound task. A finding stays its review's mission's, so a task
+  that left that mission is reported even when the mission itself wasn't bound (the independent review's finding).
+  - **The coach runs it inside its acceptance transaction**, beside the brief's own version check, so an accepted
+    suggestion made from context that changed since is refused, with what changed. Ordinary editing never depends on
+    it, so editing a task from an old report works as before.
+  - **A review uses it for its stale lines.** A stale result stays readable and is never applied.
+  - A preference changed since, or a newer profile version, doesn't make a result stale; a window says so on its own
+    line.
+- **For the coach** (`missionContextForTask`): a task's mission at its latest version, and the findings of that
+  mission's reviews that name the task, each with what it reviewed and what has changed since. Nothing is sent by it:
+  the person picks what goes.
+
+**Why.** Nate's review of the first plan (27 October): a brief-version check can't see a changed mission or a removed
+membership, and a title goes to the model without a brief version, so binding by version alone would let stale context
+through. Two tracks accepting or showing model output about the same tasks need one check, run where the result would
+be applied. Landing it first gives the coach an integration window before the shared cut.
+
+**Consequences.**
+- Workspace v6: a profile this build opens is refused by older builds ("saved by a newer version of Nivra"). A v5
+  profile moves to v6 with every row as it was. No protocol change, and the engine's migrations are unchanged.
+- **This increment reviews only tasks that aren't linked to a repository.** A repository-linked task's brief is that
+  project's content, which needs its sharing consent and its stop paths in a review. Reviewing a repository's backlog
+  is follow-up work.
+- Seeds for checks that can't reach a model: `seedMission` and `seedMissionReview` (`e2e/seed-workspace.ts`).
+- **Evidence:** `docs/acceptance.md`, *Mission foundation (D42, NIV-52)*.
+
+## D43. The task readiness coach: what a brief is missing, worked out without a model; one bounded call when the person asks; and only the changes they tick, saved as the next version from the version it read (2026-10-28)
+
+**Decision.** NIV-53, built on D42's seam. A person turns a vague native task into a small, testable brief, with no
+tracker, repository or mission required. Nate's choices on 27 October: the coach's contract goes on NIV-53, linked from
+NIV-52; a suggested check is plain text to copy with the keyboard; a question points to the field that answers it, in
+the existing editor, with no answer boxes. His review of the plan added these rules: an edit keeps the revision it
+started from; the accepting transaction is synchronous; wording claims no more than was shown; and a reused request id
+compares the whole request. His review of PR 27 (28 October) added two more: a preview is bound to the task's project
+and engine target too, and a rewording names its own list's item. It also put the narrow rule in AGENTS.md.
+
+- **What a brief is missing, without a model** (`shared/task-guidance.ts`). Fixed rules over the brief's own fields:
+  a blank goal; no criterion; a short, vague criterion; a fix that doesn't say what happens now; a large brief with no
+  scope; no failure case; more than eight criteria; parts a repository move cleared; and, only to run it, no acceptance
+  case. Every needed gap shows, and at most three that could help. Finding none says "No basic gaps detected", never
+  that the brief is complete. It never asks for a repository, a baseline or an environment.
+- **The coach is one specialist** (`task-readiness-coach`, version 1, in D42's catalogue): patient, precise, encouraging
+  and concise. It asks at most three questions, each naming a field the person updates, and proposes at most one
+  change per field among six (the goal, criteria, scope, exclusions, context and assumptions), each with its reason.
+  Nothing is deleted: a goal, scope or exclusions is replaced; context is added to; criteria and assumptions are added
+  and reworded by number, bare or with the list's own letter (C for a criterion, A for an assumption). The other list's
+  letter is set aside and counted, never read as this list's item. Suggested checks and expected results are text, labelled as not run. A test pins the
+  instructions' hash to the version.
+- **What it reads** (`renderCoachPacket`): exactly what a mission review sends for a task (D42's `packetTaskOf`), plus
+  the brief's version, how many baseline checks and frozen files it has, the gaps the rules found, and the mission and
+  findings the person ticks. Not sent: the cases' commands and outputs, baseline checks, frozen files, sources, the
+  execution policy, the state, the repository and its runs, and keys. One renderer makes the text the preview shows and
+  the coach reads.
+- **One bounded call per explicit action.** One model listing, then one forced request, inside one 180 s deadline from
+  the run's first step (the listing within it), the request within min(150 s, time left), at most 4,000 output tokens,
+  an estimated 60,000 input tokens for admission (an estimate, not a cap), no retries and no repair asks. A model whose
+  answer the policy can't force, or another than the one a live recipe names, is refused before any inference.
+- **Bound to what was sent.** The preview's fingerprint covers D42's context binding (the task's brief version and title,
+  the ticked mission and findings, the coach's version), the packet, the preferences, the sharing, the task's project
+  and the engine target it would run on, and an allowed model. A start that differs is refused, with nothing sent and no
+  engine started: a task moved to another project keeps its brief and packet, so its old preview would otherwise start
+  on the new project's engine. Start reads the task again just before it stores the coaching, so
+  a move, a rename, a brief edit or a deletion during its checks refuses it too, and a finding ticked twice is refused.
+  The packet and preferences stay in the scheduler's memory (D21): the run stores ids and fingerprints, Mastra gets
+  nothing, and the run's title names only the brief version. Credentials are checked over the whole packet, preferences
+  included. A reused request id with any other part of the request is refused.
+- **A coaching is a task-owned run link** (workflow `coach`) with a `coachings` row (workspace migration 7), sent,
+  followed and settled as a task's run is, on the task's project's engine or local. One is open per task. Moving or
+  deleting the task is refused while it is open, and turning sharing off or removing the project stops it. Its report is
+  kept once; what was saved from it, once. A stored binding that can't be read back blocks only the save.
+- **Saving is the person's.** They tick changes; the host resolves what needs waiting for, then in one synchronous
+  transaction re-reads the task, runs D42's `validateBinding` and the coach's own checks (the repository, the coach's
+  version, a save already made, a usable answer), makes the ticked changes to the version the coach read, all or
+  nothing, checks them as any edit is checked, and writes the next version, the task's change and the applied mark.
+  Anything stale refuses the save and says what changed. A masked change can't be ticked. Saving never calls the model.
+- **The coach never** changes Ready, Active or Completed, waives a run prerequisite, grants consent, approves a patch,
+  adds an acceptance case or writes a ticket. A task's attempts are its runs alone (`attemptsOf`), so a coaching never
+  stands in for one.
+- **An edit keeps its base.** The task page saves an edit from the revision it started from, never the one a refresh
+  shows; a refused save keeps the editor open with the text and says what changed.
+- **The window offers only what can work.** The mission and findings to tick stay when a preview is refused, so a choice
+  that can't be sent can be unticked, and at most three findings can be ticked. A completed task's coaching offers no
+  editor and no save, with the brief editor's own reason.
+
+**Why.** A filled field isn't a testable brief, and a person often can't see what is missing. A model can ask the few
+questions that matter and propose wording, but it can't know the task, so its output is a suggestion the person picks
+from, saved only against the version it read. Fixed rules catch the common gaps for free, and spare a small, clear task
+a questionnaire.
+
+**Consequences.**
+- Protocol 13 and workspace migration 7. A profile this build opens is refused by older builds ("saved by a newer
+  version of Nivra"); a v6 profile moves to v7 with every row as it was. The engine's migrations are unchanged. Track
+  B's mission review merges after this and takes the next numbers (protocol 14, D44).
+- The coach is advisory: its answers are kept with their binding and stay readable after a restart, labelled when stale.
+  A preference changed since an answer is a note, not a block.
+- AGENTS.md's suggestion rules (D43): a specialist's suggestion changes a brief only through the person's selection,
+  saved as a new brief version based on the version the specialist read, and never changes a task's state, adds an
+  acceptance case, waives a run prerequisite or grants consent.
+- Deferred by Nate's choice: a Copy button with a clipboard bridge, and answer boxes with a conversation history.
+- Stand-ins prove the contract, not the coach's quality. No live coaching has run; one needs its own approved recipe.
+- **Evidence:** `docs/acceptance.md`, *Task readiness coach (D43, NIV-53)*.
+
+## D44. Mission reviews: the council reads a mission and up to five of its tasks, as the product architect, the risk and testability reviewer and the chair; findings name the tasks they are about, and a task is changed only by the person (2026-10-28)
+
+**Decision.** NIV-52's mission review, on D42's foundation. Nate set the scope on 27 October, and his review of the plan
+added five requirements, all met here: an early foundation (D42), full-context stale checks, rejected output told apart
+from a clean review, credential checks over the whole outgoing packet, and a live recipe that enforces its model.
+
+- **What a review sends** (`MissionReviewPacket`, D42): the mission's latest version and up to five selected tasks from
+  its backlog, each as its title and these parts of its latest brief: goal, acceptance criteria, scope, exclusions,
+  assumptions, checks, context, and its acceptance cases' names. The count of the backlog's other tasks goes; their
+  titles don't. Case commands and expected outputs, baseline checks, frozen files, sources, state and any repository
+  never go. The preview shows the rendered text itself, exactly as the reviewers read it, and the preferences that
+  follow it.
+  - **Refused before anything is stored or sent:** no selection, more than five, a task twice, a task outside the
+    backlog or gone, a task linked to a repository (this increment's scope), a packet over D30's 20,000 characters
+    (never shortened; the words name the longest task), and a credential anywhere in the packet: the mission, every
+    task's title and sent parts, and every preference statement, named by part, never by value. The text is checked
+    as a whole too, because the engine masks it as one: a private key's first line in one part and its last in another
+    is refused, naming both parts, where it would otherwise be sent redacted.
+  - **Bound** by the binding's digest (mission version, each task's brief version and title, the profiles), the packet's
+    and the preferences'. Start works it out again and refuses a difference; inside the transaction that saves the
+    review plan and stores the review, `validateBinding` runs once more.
+- **The review plan.** Starting saves the composition as a directly authored plan version in the mission's own
+  conversation (D42): the binding, the packet and the text, read back for the report even after a task changes or goes.
+  An identical composition reuses its version. The review is then a plan review's, with D31's lifecycle unchanged.
+- **The engine's mission mode** (protocol 14): `ReviewContext.packet` is the plan packet or a mission packet; nothing
+  else in the protocol changed. One seam in `review/run.ts` chooses the mode by the packet's kind; the plan mode wraps
+  today's functions exactly, and its tests and the council-eval approval digest (`c3b9225a…`) are unchanged.
+  - **The profiles** (D42's catalogue, v1): the product architect (architecture's role), the risk and testability
+    reviewer (risks') and the council chair. Their instructions are pinned by hash to their versions in an engine test.
+  - **The form** a reviewer hands in is the plan review's, field for field, with each field described for a mission
+    (`MissionReviewAnswer`), so the tool asks for the references the instructions do. Its definition's hash is pinned
+    with the instructions' to the profiles' version.
+  - **References:** `T1`… for the selected tasks, `mission`, `backlog` for a gap no selected task covers, and the
+    preferences' ids. Anything else is dropped and counted. A finding left naming none of these is set aside and counted
+    (`unanchored`), and so is one with neither a title nor a detail (`empty`). Basis: what was sent, unless the reviewer
+    said otherwise; a label other than "plan" or "assumption" makes it an assumption.
+  - **Rejected output is not a clean review:** a reviewer none of whose findings could be kept fails its stage as
+    `malformed`, with the counts in Nivra's words and never the model's references; the review is incomplete and the
+    chair skipped. A reviewer with a summary and no findings stays a valid "nothing material" review.
+  - **Never sent redacted:** the context step refuses, before the listing, a message that masking would change (the
+    host refuses it first, naming the part). The chair's message masks each report on its own, so no mask spans the
+    person's text and a report.
+  - **The model:** a mission packet can name the only model it may use. The prepare step uses exactly that model when
+    the listing has it and it is NVIDIA's, even if the listing's own pick would differ, and refuses the run otherwise,
+    before the first inference request (a listing is not inference). The window's reviews name none, so they take the
+    listing's Nemotron as D22 says; the live recipe names `nvidia/nemotron-3-super-120b-a12b`.
+  - **The context step** checks the digest by kind, the profiles against the catalogue and the council panel, and
+    records counts, the model and the profile versions, never the text.
+- **The window.** Missions in the side navigation: a mission's versions, its backlog (a new task by title, an existing
+  task, remove), select up to five, the preview, reviews newest first, and a board of the backlog's states (Draft,
+  Ready, Active, In review, Completed; Active and In review from runs, never set here). A finding's task chip opens the
+  task's own page, where the person edits it; nothing here changes a task. A report shows the reviewers under their
+  profiles' names, set-aside counts, the chair's synthesis ("agreement isn't proof"), and stale lines from the
+  validator; a preference changed since is a line of its own, not blocking.
+
+**Why.** A plan review reviews one text; a backlog's tasks change on their own, so a mission review is bound to each
+task's version and title and says when any moved. A filtered answer must never read as a clean bill of health, a
+credential typed into any task must never leave, and a recorded substitute model isn't the approved run (Nate's review
+of the plan, 27 October).
+
+**Consequences.**
+- Protocol 14, after the coach's 13 (D43), which merged first: the runtime is re-staged. No migration of its own: the
+  workspace is at v7, D42's missions and then D43's coachings.
+- **Sizes, estimated at characters ÷ 3 with the instructions and the tools:** the largest packet (20,000 characters)
+  comes to about 8,000 tokens per reviewer and 21,500 reserved for the chair, about 37,600 of the run's 120,000; with
+  50 preferences of 500 characters, about 17,400, 30,900 and 65,600. Three short tasks come to about 1,750 per reviewer.
+- Mission reviews take only tasks with no repository. A repository's backlog needs its project's sharing consent and
+  stop paths, and is follow-up work.
+- The mission mode has no labelled evaluation as the plan mode had (D32): its offline tests show the plumbing, not the
+  quality of findings. Live evidence needs Nate's approval of `scripts/mission-review-live.ts`'s recipe, whose digest
+  binds the forms' definitions as well as the instructions. One approval is one run (Nate's review of #25): the first
+  launch that presents it claims it atomically in `~/nivra-acceptance/claims/mission-review/`, apart from `--out` and
+  the engine's home, before the checkout is checked, the key is read or anything is sent, and the claim is kept after
+  an interruption, so neither a repeated nor a simultaneous launch can spend again. The checks before the claim send
+  nothing and leave the approval unused. The next run needs the next digest `--plan` prints.
+- An independent review before review found four defects, all fixed with tests that fail without them: the plan
+  review's form given to mission reviewers, a key block across two parts sent redacted, an unknown basis shown as what
+  was sent, and findings with no title or detail read as a clean review. The plan review has the same unknown-basis
+  wording (a label it doesn't know, on a finding that names the plan, is kept as "plan" and marked relabelled); it is
+  left as it is here, since the plan mode doesn't change, and is follow-up work.
+- **Evidence:** `docs/acceptance.md`, *Mission reviews (D44, NIV-52)*.

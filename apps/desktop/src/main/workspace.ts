@@ -39,9 +39,9 @@ export function insertConversation(workspace: WorkspaceDb, record: ConversationR
     .run(record.id, record.kind, record.projectId, record.projectLabel, record.targetId, record.title, record.createdAt, record.updatedAt);
 }
 
-/** Every conversation, the most recently active first. */
+/** Every conversation, the most recently active first. A mission's own conversation (NIV-52) isn't one of them. */
 export function listConversations(workspace: WorkspaceDb): ConversationRecord[] {
-  return workspace.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC, id").all().map(conversationOf);
+  return workspace.db.prepare("SELECT * FROM conversations WHERE id NOT IN (SELECT conversation_id FROM missions) ORDER BY updated_at DESC, id").all().map(conversationOf);
 }
 
 export function getConversation(workspace: WorkspaceDb, id: string): ConversationRecord | null {
@@ -469,9 +469,13 @@ export function getAttempt(workspace: WorkspaceDb, attemptId: string): AttemptRe
   return row ? attemptOf(row) : null;
 }
 
-/** A task's attempts, oldest first, each with the brief version it is bound to. */
+/**
+ * A task's attempts, oldest first, each with the brief version it is bound to: its runs (workflow 'task') only. A task
+ * owns other run links too, such as a coaching (NIV-53), and none of them is a run of it: counted here, one would show
+ * the task as active, or hide an undecided proposal behind it.
+ */
 export function attemptsOf(workspace: WorkspaceDb, taskId: string): AttemptRecord[] {
-  return workspace.db.prepare("SELECT * FROM run_links WHERE task_id = ? ORDER BY created_at, rowid").all(taskId).map(attemptOf);
+  return workspace.db.prepare("SELECT * FROM run_links WHERE task_id = ? AND workflow_id = 'task' ORDER BY created_at, rowid").all(taskId).map(attemptOf);
 }
 
 /** Every task's attempt still being sent or going: at most one, while one task runs at a time (D39). */

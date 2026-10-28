@@ -80,6 +80,16 @@ A third switch, `--nivra-token-factory-url=<loopback url>`, points the local eng
   `workspace-windows.spec.ts` (`test:windows`) seed one into the profile before launch through
   `e2e/seed-workspace.ts`, which uses the workspace's own functions. On Windows the staged `node.exe` runs it, bundled,
   so the file is only ever opened on Windows (D7): run `pnpm stage:runtime all` first.
+- **A mission without a model** (D42). `seedMission` seeds a mission at v1 with its backlog of direct tasks, and
+  `seedMissionReview` a completed review of some of them, with the findings given and no run behind it, through the
+  workspace's own functions (`e2e/seed-workspace.ts`). Track C uses them to test the coach with a mission and
+  findings before a real mission review is possible.
+- **The context check** (D42). Code that applies a result made from a mission, its tasks or their findings calls
+  `validateBinding(workspace, binding)` (`src/main/mission-context.ts`) inside the same `workspace.tx` as the save,
+  next to the brief's version check, and refuses when it names any change (`changeText` words each one). It checks
+  the stored binding itself, field by field; `bindingDigest` is asynchronous (WebCrypto), so it belongs in a preview's
+  fingerprint, never inside the transaction.
+  `missionContextForTask` gives a task's mission and the findings that name it, each with what changed since.
 
 Cross-platform checks (D14; there is no CI):
 
@@ -89,6 +99,28 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 ```
 
 `verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`.
+- **A mission review** (NIV-52). `rpc.ts` drives one against a real engine: give `runs.start` a `review` with a mission
+  packet in its context (`"packet": {"kind": "mission", ...}`, as `apps/engine/test/fixtures/mission-review/live.json`
+  holds one), and it fills in the packet's and the preferences' digests when the input leaves them out. A packet that
+  names a model is refused before any inference request unless the listing gives exactly that model.
+- **The mission review's live check** is an explicit script, never part of `verify`, and runs only with Nate's approval
+  of its digest:
+
+  ```bash
+  node apps/engine/scripts/mission-review-live.ts --plan                                   # the recipe; no network
+  node apps/engine/scripts/mission-review-live.ts --credentials <file> --approved <digest> # one review, at most 3 requests
+  ```
+
+  The digest binds the revision (a clean checkout), the fixture, the three profiles, their instructions' hashes and the
+  forms they hand in (the tools' definitions), the model and the limits. The engine home is a fresh folder under
+  `~/.nivra-dev-niv52` (one inside `~/.nivra` or `~/.nivra-dev` is refused); evidence goes to
+  `~/nivra-acceptance/mission-review-<UTC>-<rev>/`. The model counts as held only when every answer named it. One
+  approval is one run: a launch claims it in `~/nivra-acceptance/claims/mission-review/` before the checkout is
+  checked, the key is read or anything is sent, the claim is kept whatever happens next, and `--plan` then prints the
+  next run's digest.
+- **The window's tests** (`e2e/missions.spec.ts`) drive missions with the token factory stub: the council's roles are
+  told apart by the instructions' first line, as for plan reviews. A packaged app runs only the parts that need no
+  model.
 - **Its WSL engine runs in a home of the run's own** (D27): `~/.nivra-test/verify-<UTC>-<id>` inside the distribution,
   removed at the end. `test:windows` does the same with `e2e-…`, and `verify:interrupt` with `interrupt-…`. A home an
   interrupted run left is removed by a later run once it is a day old.
@@ -544,6 +576,43 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-reco
   The task, its repository and its brief are in a file outside the repository (by default
   `~/nivra-work/she65/task-live.json`), with any `review` points: what the person checks in the proposal that its
   tests can't show, which the recipe binds and lists. Nothing in the script names a repository.
+
+The task readiness coach (NIV-53, D43): what a brief is missing, worked out without a model; one bounded coach call
+when the person asks; and only the changes they tick, saved as the next brief version. The engine's half is checked in
+process and over stdio, the host's against real engines and a stub, and the window's in the built app against
+stand-ins. A packaged app ignores the stub switches, so there only the coach's checks that need no stand-in run: no
+key, no sharing, and nothing else reached.
+
+```bash
+(cd apps/engine && node --test test/coach.test.ts test/coach-units.test.ts test/coach-answers.test.ts)
+(cd apps/desktop && node --test test/host-coach.test.ts test/coach.test.ts test/coach-store.test.ts test/task-guidance.test.ts test/coach-shared.test.ts)
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-coach.spec.ts
+```
+
+- **`rpc.ts` fills in** a coaching's packet and preferences fingerprints, a task and a brief, a binding naming them, and
+  the coach's profile, when they are left out; after `--follow` it prints the report. Pass a home of its own, never
+  `~/.nivra-dev`, and a stand-in with a test key in `NEBIUS_API_KEY`:
+  `pnpm rpc runs.start '{"workflowId":"coach","context":{"packet":{…}}}' --follow --token-factory-url http://127.0.0.1:<port>/v1 --home ~/.nivra-dev-niv53/<check>`.
+- **Stand-ins.** `stub-token-factory.ts` plays the coach, told apart by `Nivra coach role: task-readiness-coach` on the
+  first line of its instructions. Its tool is `submit_coaching`. The gated engine (`test/fixtures/gated-engine.mjs`)
+  plays a coaching too: `runs.start` records it in `coaches.log`, and `runs.coach` answers with a report bound to it.
+- **The engine's parts** (`apps/engine/src/coach/`):
+  - `prompt.ts`: the instructions, whose hash a test pins to the profile's version;
+  - `answers.ts`: the lenient form and the strict pass that sets aside and counts what doesn't fit;
+  - `run.ts`: the one request;
+  - `task.ts`: the stored input, and `asEnded`;
+  - `workflows/coach.ts` holds the steps.
+- **The host's parts** (`apps/desktop/src/main/`):
+  - `coach.ts`: the packet, the preview's fingerprint, the report check, the change views, the ticked changes and the
+    stale words;
+  - `coach-store.ts`: the coachings table's functions (workspace migration 7);
+  - the coach's block in `host.ts`.
+  - In `src/shared/`: `task-guidance.ts` holds the rules without a model, and `coach.ts` the views and
+    `applyCoachChange`.
+- **A test hook,** `coachApplying`, runs inside the transaction that saves a coach's ticked changes, after the new
+  version and before the applied mark. The host's test throws there to show that both or neither are kept.
+- **Track B's seam** (D42): `validateBinding` runs inside that transaction; `missionContextForTask` lists a task's
+  mission and the findings about it for the person to tick.
 
 ## Where things will live
 

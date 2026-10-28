@@ -16,6 +16,8 @@
 // For sandbox checks (D36): runs.sandbox answers that there is no report yet; runs.get says "running" for a run it
 // wasn't asked to cancel while a `running` file exists, and is turned down while a `fail-get` file exists, as an engine
 // that can't read a run would.
+// For coachings (NIV-53): runs.start records each coaching's request id and input (`coaches.log`), and runs.coach
+// answers with a complete report that repeats what it was bound to, with one change to the goal.
 // For research (D37): runs.start records each research request and what it was bound to (`research.log`), and
 // runs.research answers with a report that repeats it: complete, or cancelled for a run it was asked to cancel. With a
 // `fail-cancel-once` file, the next runs.cancel it answers is turned down, and the file is removed; with a
@@ -160,6 +162,42 @@ const accepted = (clientRequestId) => {
   return line ? line.split(" ")[1] : null;
 };
 /** A review's report as an engine keeps one, repeating what the review was asked for. */
+/** A coaching's report, bound to what its request was: complete, with one change to the goal (NIV-53). */
+const coachReport = (runId) => {
+  const line = existsSync(join(home, "coaches.log")) ? readFileSync(join(home, "coaches.log"), "utf8").split("\n").find((entry) => entry.startsWith(`${runId} `)) : undefined;
+  if (!line) return null;
+  const { clientRequestId, input } = JSON.parse(line.slice(runId.length + 1));
+  const now = new Date().toISOString();
+  return {
+    profile: input.profile,
+    instructionsSha256: "a".repeat(64),
+    taskId: input.taskId,
+    briefVersion: input.briefVersion,
+    bindingDigest: input.bindingDigest,
+    packetDigest: input.packetDigest,
+    preferencesDigest: input.preferencesDigest,
+    outcome: "complete",
+    scope: "general",
+    packet: { chars: 100, criteria: 1, assumptions: 0, gaps: 0, mission: false, findings: 0 },
+    summary: "A gated coaching.",
+    questions: [],
+    changes: [{ field: "goal", text: "A gated goal", reason: "", refs: [], usable: true }],
+    suggestedChecks: [],
+    unknowns: [],
+    dropped: { questions: 0, changes: 0, items: 0, refs: 0, checks: 0, unknowns: 0 },
+    stage: { status: "answered", reason: null, kind: null, message: null, problems: [], requests: 1, estimatedInputTokens: 100, inputTokens: null, outputTokens: null, elapsedMs: 10, finishReason: null, servedModel: null },
+    request: { runId, clientRequestId },
+    route: null,
+    sampling: { temperature: null, topP: null, maxOutputTokens: 4000, toolChoice: "forced" },
+    preferences: { revision: 0, digest: input.preferencesDigest, records: [] },
+    usage: { inputTokens: null, outputTokens: null, calls: 1, reportedCalls: 0 },
+    budget: { limits: { requests: 1, totalMs: 180000, outputTokensPerRequest: 4000, estimatedInputTokens: 60000 }, used: { requests: 1, elapsedMs: 10, inputTokens: 100, reportedInputTokens: null, reportedOutputTokens: null, unreportedRequests: 1, overrunTokens: 0 }, stopped: null },
+    elapsedMs: 10,
+    updatedAt: now,
+    finishedAt: now,
+  };
+};
+
 const reviewReport = (runId) => {
   const line = existsSync(join(home, "reviews.log")) ? readFileSync(join(home, "reviews.log"), "utf8").split("\n").find((entry) => entry.startsWith(`${runId} `)) : undefined;
   if (!line) return null;
@@ -250,6 +288,7 @@ process.stdin.on("data", (chunk) => {
       if (request.params.workflowId === "environment") {
         appendFileSync(join(home, "environments.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input, context: request.params.context })}\n`);
       }
+      if (request.params.workflowId === "coach") appendFileSync(join(home, "coaches.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input })}\n`);
       if (request.params.workflowId === "research") {
         appendFileSync(join(home, "research.log"), `${runId} ${JSON.stringify({ clientRequestId: request.params.clientRequestId, input: request.params.input, packet: request.params.context.packet })}\n`);
       }
@@ -282,6 +321,8 @@ process.stdin.on("data", (chunk) => {
       send({ id: request.id, result: { kind: "general", text: "A gated reply.", cutOff: false, context: { preferences: { revision: 0, digest: "gated", records: [] }, history: record }, finishedAt: new Date().toISOString() } });
     } else if (request.method === "runs.review") {
       send({ id: request.id, result: reviewReport(request.params.runId) });
+    } else if (request.method === "runs.coach") {
+      send({ id: request.id, result: coachReport(request.params.runId) });
     } else if (request.method === "runs.research") {
       send({ id: request.id, result: researchReport(request.params.runId) });
     } else if (request.method === "runs.sandbox") {

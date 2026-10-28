@@ -1,0 +1,54 @@
+{
+  "kind": "mission",
+  "scope": { "kind": "general" },
+  "specialists": [
+    { "id": "product-architect", "version": 1 },
+    { "id": "risk-testability", "version": 1 },
+    { "id": "council-chair", "version": 1 }
+  ],
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "mission": {
+    "name": "Runner's weekly log",
+    "intendedUsers": "Club runners who log about three runs a week on their phone, often with no signal on the trail.",
+    "outcome": "A runner opens the app and sees this week's distance against the plan they set, including runs logged offline.",
+    "successCriteria": ["The weekly total shows within a second of opening the app.", "A run logged offline is in the total once the phone is back online, never twice."],
+    "constraints": ["Works offline: logging a run never needs a connection.", "No account is needed to log a run."],
+    "nonGoals": ["Social features or sharing.", "Heart-rate or GPS tracking."]
+  },
+  "tasks": [
+    {
+      "title": "Weekly total against the plan",
+      "goal": "Show this week's total distance next to the weekly target the runner set.",
+      "acceptanceCriteria": ["The total and the target show on the home screen.", "The week starts on Monday."],
+      "scope": "The home screen's total and target.",
+      "exclusions": "Monthly or yearly totals.",
+      "assumptions": ["Runs are already stored on the phone."],
+      "checks": [],
+      "context": "",
+      "acceptanceCaseNames": []
+    },
+    {
+      "title": "Sync runs logged offline",
+      "goal": "Send runs logged offline to the server once the phone is online again.",
+      "acceptanceCriteria": ["A run logged offline reaches the server after reconnecting."],
+      "scope": "Background upload of pending runs.",
+      "exclusions": "",
+      "assumptions": ["The server accepts a run more than once without harm."],
+      "checks": [],
+      "context": "",
+      "acceptanceCaseNames": []
+    },
+    {
+      "title": "Set a weekly target",
+      "goal": "Let the runner set a weekly distance target.",
+      "acceptanceCriteria": ["The target can be set and changed in settings.", "It works well."],
+      "scope": "A settings field for the target.",
+      "exclusions": "Training plans.",
+      "assumptions": [],
+      "checks": [],
+      "context": "",
+      "acceptanceCaseNames": []
+    }
+  ],
+  "othersInBacklog": 0
+}

@@ -304,6 +304,97 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
       AND NOT EXISTS (SELECT 1 FROM preparations WHERE id = NEW.prepared_by AND project_id = NEW.project_id AND report_json IS NOT NULL))
   BEGIN SELECT RAISE(ABORT, 'a prepared environment comes from a preparation of its own project'); END;
   `,
+  `
+  -- Missions (NIV-52): what a piece of work is for, in immutable versions, with a backlog of native tasks. A mission
+  -- needs no repository. Its review plans and their reviews belong to a general conversation of its own, because a plan
+  -- and a review's run link belong to a conversation (D26, D31); that conversation has no messages and isn't listed. No
+  -- table before this one changes.
+  CREATE TABLE missions (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL
+  ) STRICT;
+  CREATE TRIGGER missions_conversation BEFORE INSERT ON missions
+  WHEN NOT EXISTS (SELECT 1 FROM conversations WHERE id = NEW.conversation_id AND kind = 'general')
+    OR EXISTS (SELECT 1 FROM messages WHERE conversation_id = NEW.conversation_id)
+  BEGIN SELECT RAISE(ABORT, 'a mission owns a general conversation of its own, with no messages'); END;
+  CREATE TRIGGER missions_fixed BEFORE UPDATE ON missions BEGIN SELECT RAISE(ABORT, 'a mission keeps its conversation'); END;
+  CREATE TABLE mission_versions (
+    id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    content_json TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (mission_id, version)
+  ) STRICT;
+  CREATE TRIGGER mission_versions_immutable BEFORE UPDATE ON mission_versions BEGIN SELECT RAISE(ABORT, 'mission versions are immutable'); END;
+  -- A task is in at most one mission's backlog. Leaving it, or the mission going, leaves the task as it was.
+  CREATE TABLE mission_tasks (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
+    added_at TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX mission_tasks_mission ON mission_tasks(mission_id, added_at);
+  `,
+  `
+  -- A coaching of one task (NIV-53): a run link with workflow 'coach', owned by the task and bound to the brief version
+  -- the coach read, and what it was bound to when it was asked for. The packet isn't kept: its fingerprint is, with the
+  -- context binding's and the preferences'. The engine's report, masked again, is kept once, when the run ends; the
+  -- brief version the person's ticked changes made, and which fields, once, after the report.
+  CREATE TABLE coachings (
+    id TEXT PRIMARY KEY REFERENCES run_links(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    brief_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    brief_version INTEGER NOT NULL CHECK (brief_version >= 1),
+    brief_sha256 TEXT NOT NULL,
+    title TEXT NOT NULL,
+    project_id TEXT,
+    binding_json TEXT NOT NULL,
+    binding_digest TEXT NOT NULL,
+    packet_digest TEXT NOT NULL,
+    preferences_digest TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    profile_version INTEGER NOT NULL CHECK (profile_version >= 1),
+    mission_json TEXT,
+    findings INTEGER NOT NULL CHECK (findings >= 0),
+    preferences INTEGER NOT NULL CHECK (preferences >= 0),
+    report_json TEXT,
+    reported_at TEXT,
+    applied_brief_id TEXT REFERENCES artifacts(id) ON DELETE CASCADE,
+    applied_fields_json TEXT,
+    applied_at TEXT,
+    created_at TEXT NOT NULL,
+    CHECK ((report_json IS NULL) = (reported_at IS NULL)),
+    CHECK ((applied_brief_id IS NULL) = (applied_at IS NULL)),
+    CHECK ((applied_brief_id IS NULL) = (applied_fields_json IS NULL)),
+    CHECK (applied_brief_id IS NULL OR report_json IS NOT NULL)
+  ) STRICT;
+  CREATE INDEX coachings_task ON coachings(task_id, created_at);
+  CREATE TRIGGER coachings_bound BEFORE INSERT ON coachings
+  WHEN NOT EXISTS (SELECT 1 FROM run_links WHERE id = NEW.id AND workflow_id = 'coach' AND task_id = NEW.task_id AND brief_id = NEW.brief_id)
+    OR NOT EXISTS (
+      SELECT 1 FROM artifacts
+      WHERE id = NEW.brief_id AND kind = 'brief' AND task_id = NEW.task_id AND lineage_id = NEW.task_id AND version = NEW.brief_version AND sha256 = NEW.brief_sha256
+    )
+    OR NEW.report_json IS NOT NULL OR NEW.applied_brief_id IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'a coaching is bound to a coach run of its own task and to a version of that task''s brief'); END;
+  CREATE TRIGGER coachings_frozen BEFORE UPDATE ON coachings
+  WHEN NEW.id IS NOT OLD.id OR NEW.task_id IS NOT OLD.task_id OR NEW.brief_id IS NOT OLD.brief_id OR NEW.brief_version IS NOT OLD.brief_version
+    OR NEW.brief_sha256 IS NOT OLD.brief_sha256 OR NEW.title IS NOT OLD.title OR NEW.project_id IS NOT OLD.project_id
+    OR NEW.binding_json IS NOT OLD.binding_json OR NEW.binding_digest IS NOT OLD.binding_digest OR NEW.packet_digest IS NOT OLD.packet_digest
+    OR NEW.preferences_digest IS NOT OLD.preferences_digest OR NEW.profile_id IS NOT OLD.profile_id OR NEW.profile_version IS NOT OLD.profile_version
+    OR NEW.mission_json IS NOT OLD.mission_json OR NEW.findings IS NOT OLD.findings OR NEW.preferences IS NOT OLD.preferences
+    OR NEW.created_at IS NOT OLD.created_at
+    OR (OLD.report_json IS NOT NULL AND (NEW.report_json IS NOT OLD.report_json OR NEW.reported_at IS NOT OLD.reported_at))
+    OR (OLD.applied_brief_id IS NOT NULL AND (NEW.applied_brief_id IS NOT OLD.applied_brief_id OR NEW.applied_fields_json IS NOT OLD.applied_fields_json OR NEW.applied_at IS NOT OLD.applied_at))
+    -- Saved changes come from a report, as the next version of the same task's brief, made from the version the coach read.
+    OR (OLD.applied_brief_id IS NULL AND NEW.applied_brief_id IS NOT NULL AND (NEW.report_json IS NULL OR NOT EXISTS (
+      SELECT 1 FROM artifacts
+      WHERE id = NEW.applied_brief_id AND kind = 'brief' AND task_id = OLD.task_id AND version > OLD.brief_version AND derived_from = OLD.brief_id
+    )))
+  BEGIN SELECT RAISE(ABORT, 'a coaching never changes what it was bound to, keeps its first report, and records its saved changes once, after its report'); END;
+`,
 ];
 
 export type WorkspaceOpening =

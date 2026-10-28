@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
+import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { z } from "zod";
 import { IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
@@ -304,6 +304,29 @@ function start(): void {
   handle(IPC.requestTaskRevision, z.tuple([Id, Id, z.string().max(4_000)]), (_event, id, attemptId, note) => host.requestTaskRevision(id, attemptId, note));
   handle(IPC.settleTaskChange, z.tuple([Id, Id, z.enum(["accepted", "dismissed", "kept"])]), (_event, id, attemptId, as) => host.settleTaskChange(id, attemptId, as));
   handle(IPC.restoreTaskChange, z.tuple([Id, Id]), (_event, id, attemptId) => host.restoreTaskChange(id, attemptId));
+  // Missions (NIV-52). The host checks a mission's words and limits, and says what's wrong in words the person can act on.
+  const Mission = z.strictObject({ name: LongText, intendedUsers: LongText, outcome: LongText, successCriteria: Rows, constraints: Rows, nonGoals: Rows });
+  const Picked = z.array(Id).max(20);
+  handle(IPC.listMissions, none, () => host.missions());
+  handle(IPC.getMission, z.tuple([Id]), (_event, id) => host.mission(id));
+  handle(IPC.openMission, z.tuple([Id]), (_event, id) => host.openMission(id));
+  handle(IPC.createMission, z.tuple([Mission]), (_event, content) => host.createMission(content));
+  handle(IPC.reviseMission, z.tuple([Id, Revision, Mission]), (_event, id, version, content) => host.reviseMission(id, version, content));
+  handle(IPC.deleteMission, z.tuple([Id]), (_event, id) => host.deleteMission(id));
+  handle(IPC.createMissionTask, z.tuple([Id, LongText]), (_event, id, title) => host.createMissionTask(id, title));
+  handle(IPC.addMissionTask, z.tuple([Id, Id]), (_event, id, taskId) => host.addMissionTask(id, taskId));
+  handle(IPC.removeMissionTask, z.tuple([Id, Id]), (_event, id, taskId) => host.removeMissionTask(id, taskId));
+  handle(IPC.prepareMissionReview, z.tuple([Id, Picked]), (_event, id, taskIds) => host.prepareMissionReview(id, taskIds));
+  handle(IPC.startMissionReview, z.tuple([Id, Picked, Fingerprint]), (_event, id, taskIds, expected) => host.startMissionReview(id, taskIds, expected));
+  handle(IPC.cancelMissionReview, z.tuple([Id, Id]), (_event, id, reviewId) => host.cancelMissionReview(id, reviewId));
+  // The task readiness coach (NIV-53). A selection is checked for its shape only: the host refuses a mission or finding
+  // that isn't the task's, and what can't be sent, in words the person can act on.
+  const CoachSelection = z.strictObject({ mission: z.boolean(), findings: z.array(z.strictObject({ reviewId: Id, findingId: z.string().max(64) })).max(20) });
+  handle(IPC.prepareCoach, z.tuple([Id, CoachSelection]), (_event, id, selection) => host.prepareCoach(id, selection));
+  handle(IPC.startCoach, z.tuple([Id, CoachSelection, Fingerprint]), (_event, id, selection, expected) => host.startCoach(id, selection, expected));
+  handle(IPC.listCoachings, z.tuple([Id]), (_event, id) => host.coachings(id));
+  handle(IPC.cancelCoach, z.tuple([Id, Id]), (_event, id, coachingId) => host.cancelCoach(id, coachingId));
+  handle(IPC.acceptCoachChanges, z.tuple([Id, Revision, Id, z.array(CoachField).max(CoachField.options.length)]), (_event, id, revision, coachingId, fields) => host.acceptCoachChanges(id, revision, coachingId, fields));
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {

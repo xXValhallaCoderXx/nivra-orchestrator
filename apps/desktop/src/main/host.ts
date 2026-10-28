@@ -3,6 +3,8 @@ import { realpathSync } from "node:fs";
 import {
   baselinePattern,
   CHAT_LIMITS,
+  COACH_PROFILE,
+  CoachReport,
   ENVIRONMENT_LIMITS,
   EnvironmentSpec,
   ErrorCode,
@@ -13,19 +15,25 @@ import {
   preferencesDigest,
   projectFingerprint,
   RpcCallError,
+  SPECIALISTS,
   taskBriefDigest,
+  taskRef,
   type ApplyParams,
   type ApplyResolution,
   type ApplyView,
   type BaselineSelection,
   type ChatContext,
   type ChatInput,
+  type CoachContext,
+  type CoachField,
+  type CoachInput,
   type DoctorReport,
   type EnvironmentContext,
   type EnvironmentInput,
   type EnvironmentPreview,
   type EnvironmentReport,
   type ExplainResult,
+  type MissionContent,
   type PreferenceIntent,
   type ProviderCheck,
   type ResearchContext,
@@ -41,6 +49,7 @@ import {
   type SandboxPreview,
   type SandboxStatus,
   type SecretName,
+  type SpecialistId,
   type TaskBrief,
   type TaskContext,
   type TaskEnvironment,
@@ -60,6 +69,10 @@ import type {
   BriefFields,
   ImportEntryView,
   ImportSourceView,
+  MissionReviewPreview,
+  MissionReviewView,
+  MissionsView,
+  MissionView,
   PlanView,
   PreferencesView,
   PreferenceView,
@@ -79,6 +92,7 @@ import type {
   WorkspaceView,
   WslView,
 } from "../shared/ipc.ts";
+import type { CoachingView, CoachPreview, CoachSelection } from "../shared/coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView, StopCause } from "../shared/research.ts";
 import {
   environmentOf,
@@ -120,6 +134,34 @@ import {
 import { maskForStorage, maskValue, refuseCredentials, type KnownSecrets } from "./protect.ts";
 import { amendedContent, amendedPlanFields, researchNoteFor, researchReportMatches, researchRequest, researchStopFailedText, type ResearchSubject } from "./research.ts";
 import { getResearch, insertResearch, openResearch, recordAmendedPlan, researchOf, settleResearch, stopResearch, withdrawStop, type ResearchRecord } from "./research-store.ts";
+import { applySelected, coachBindingFor, coachChangeViews, coachFindingOf, coachMissionOf, coachReportMatches, coachRequest, staleLines, type CoachOwnChange, type CoachProject, type CoachSubject } from "./coach.ts";
+import { coachingsOf, getCoaching, getCoachLink, insertCoaching, markCoachingApplied, openCoachings, settleCoaching, type CoachingRecord, type CoachLink } from "./coach-store.ts";
+import { changeText, compositionOf, missionContextForTask, missionPlanContent, validateBinding } from "./mission-context.ts";
+import {
+  addMissionTask as addToBacklog,
+  getMission,
+  insertMission,
+  insertMissionVersion,
+  latestMissionVersion,
+  listMissions,
+  missionOfConversation,
+  missionOfTask,
+  missionTaskIds,
+  missionVersions,
+  removeMissionTask as removeFromBacklog,
+} from "./mission-store.ts";
+import {
+  addedText,
+  composeMissionReview,
+  MISSION_REPOSITORY_TASK,
+  MISSION_REVIEW_NOT_SENT,
+  MISSION_REVIEW_REQUESTS,
+  missionContentOf,
+  missionDigests,
+  missionPreviewFingerprint,
+  refuseMissionCredentials,
+  refusePacketCredentials,
+} from "./missions.ts";
 import { historicalReferences, packetFor, previewFingerprint, reportMatches, REVIEW_REQUESTS, reviewNoteFor } from "./reviews.ts";
 import {
   BriefContentSchema,
@@ -215,7 +257,11 @@ export interface HostOptions {
   supervisor?: Pick<SupervisorOptions, "heartbeatMs" | "shutdownGraceMs" | "eofGraceMs" | "startTimeoutMs">;
   log: (line: string) => void;
   /** Tests only: called between fetching a turn's reply and writing it, so a deletion can land there. */
-  testHooks?: { beforeProjection?(turnId: string): Promise<void> };
+  testHooks?: {
+    beforeProjection?(turnId: string): Promise<void>;
+    /** Inside the transaction that saves a coach's ticked changes, after the new version and before the applied mark: a throw here must leave neither (NIV-53). */
+    coachApplying?(coachingId: string): void;
+  };
 }
 
 /** Why a conversation can't continue once its project is gone. */
@@ -225,6 +271,12 @@ const REVIEW_CLOSED = "This plan's project was removed, so it can't be reviewed.
 /** Why a plan's assumptions can't be checked once its project is gone. */
 const RESEARCH_CLOSED = "This plan's project was removed, so its assumptions can't be checked. Its history stays here until you delete it.";
 /** Why research leads to one amended version at most (D37). */
+const MISSION_BUSY = "A review of this mission is still going. Wait for it, or cancel it, then start again.";
+/** A specialist as the window shows it: the catalogue's words, with the version a result names (NIV-52). */
+const specialistView = (id: SpecialistId, version: number) => {
+  const { name, personality, purpose } = SPECIALISTS[id];
+  return { id, version, name, personality, purpose };
+};
 const AMENDED_ALREADY = "A version amended from this research was saved already, so nothing new was saved. Open the plan to see it.";
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 /**
@@ -253,6 +305,11 @@ const RUN_UPLOADS_OFF = "This project doesn't allow uploading its commit to Nebi
 const RUN_KEYS_MISSING = "A task run needs your Nebius key and project id, and they aren't both set. Add them in Settings, then preview the run again.";
 /** What nothing sent means for a task run: neither service got anything. */
 const RUN_NOTHING = "nothing was uploaded and nothing reached the model";
+
+/** Why the coach can't be asked now, and what nothing sent means for a coaching (NIV-53), in the person's terms. */
+const COACH_OPEN = "The coach is still answering about this task. Wait for it, or cancel it, then ask again.";
+const COACH_NOTHING = "nothing reached the model";
+const COACH_CHANGED = "What the coach would read has changed since you opened it. Check the new preview, then ask the coach again.";
 
 /** Why a project's environment can't be prepared, and what stopped a preparation (D41), in the person's terms. */
 const PREPARE_NATIVE_WINDOWS = "Preparing an environment on Windows itself isn't available yet. Add the repository from a WSL distribution, then prepare it there.";
@@ -377,6 +434,12 @@ export class Host {
   readonly #followingAttempts = new Set<string>();
   /** The engine's own words for a run start it answered with an error, shown if its search then finds no run. */
   readonly #attemptAnswers = new Map<string, string>();
+  /** Each coaching started this session, by its id: its project (none for a task with no repository) and the sharing epoch it started under (NIV-53). */
+  readonly #coachRuns = new Map<string, { projectId: string | null; sharingEpoch: number }>();
+  /** Coachings being followed to their end. */
+  readonly #followingCoachings = new Set<string>();
+  /** The engine's own words for a coaching's start it answered with an error, shown if its search then finds no run. */
+  readonly #coachAnswers = new Map<string, string>();
   /** Attempts with a decision, or a call about their apply, out: they offer nothing until it is back (D40). */
   readonly #applyCalls = new Set<string>();
   /** Applies being followed by their request ids, never sent again (D40). */
@@ -456,7 +519,7 @@ export class Host {
   /** One conversation as it is now, read from the workspace. Asks no engine and starts nothing. */
   conversation(conversationId: string): ConversationView {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const summary = this.#conversationView(record);
     const engine = this.#engineView(record.targetId);
@@ -479,7 +542,7 @@ export class Host {
    */
   async openConversation(conversationId: string): Promise<ConversationView> {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const open = openTurns(workspace, { conversationId }).filter((turn) => !this.#submissions.has(turn.id));
     if (open.length) {
@@ -501,7 +564,7 @@ export class Host {
     if (!message) throw new Error("Type a message first.");
     if (message.length > CHAT_LIMITS.messageChars) throw new Error(`That message is ${message.length} characters long, and a turn can carry ${CHAT_LIMITS.messageChars}. Shorten it, then send it again.`);
     refuseCredentials("Your message", message, await this.#knownSecrets(), "send");
-    const conversation = getConversation(workspace, conversationId);
+    const conversation = this.#listedConversation(conversationId);
     if (!conversation) throw new Error("That conversation is no longer in the list.");
     const busy = () => this.#busyReason(conversationId, "send again") ?? "This conversation is still waiting for an answer. Wait for it, or cancel it, then send again.";
     if (openTurns(workspace, { conversationId }).length) throw new Error(busy());
@@ -546,9 +609,15 @@ export class Host {
    * task's brief stays with the task, and each engine keeps its own record of the runs.
    */
   async deleteConversation(conversationId: string): Promise<void> {
-    const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
+    await this.#deleteConversation(record, "conversation");
+  }
+
+  /** Deletes a conversation, or a mission's own (NIV-52), as `deleteConversation` says; `what` names it in a refusal. */
+  async #deleteConversation(record: ConversationRecord, what: "conversation" | "mission"): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const conversationId = record.id;
     const open = openTurns(workspace, { conversationId });
     // Research is stopped with a stop of its own (D37), which alone is taken back if the conversation stays.
     const researchStops: Array<{ id: string; token: string }> = [];
@@ -568,9 +637,9 @@ export class Host {
     const failedAt = results.findIndex((result) => result.status === "rejected");
     if (failedAt >= 0) {
       if (this.#workspace.state === "ready") for (const { id, token } of researchStops) withdrawStop(this.#workspace.db, id, token);
-      const what = running[failedAt]!.workflowId === "research" ? "research" : "answer";
+      const run = running[failedAt]!.workflowId === "research" ? "research" : what === "mission" ? "review" : "answer";
       const why = errorText((results[failedAt] as PromiseRejectedResult).reason);
-      throw new Error(`Nivra couldn't stop this conversation's ${what} on ${this.#labelOf(record.targetId)} (${why}), so the conversation is still here. Restart that engine, then delete it again.`);
+      throw new Error(`Nivra couldn't stop this ${what}'s ${run} on ${this.#labelOf(record.targetId)} (${why}), so the ${what} is still here. Restart that engine, then delete it again.`);
     }
     // Sent by this session to an engine still online, with no run known: its answer was lost. One still being sent is
     // stopped by its submission, when its engine answers.
@@ -589,7 +658,7 @@ export class Host {
    */
   async savePlan(conversationId: string, messageId: string, text?: string): Promise<PlanView> {
     const workspace = this.#workspaceDb();
-    const conversation = getConversation(workspace, conversationId);
+    const conversation = this.#listedConversation(conversationId);
     if (!conversation) throw new Error("That conversation is no longer in the list.");
     const answer = messagesOf(workspace, conversationId).find((m) => m.id === messageId && m.role === "assistant");
     if (!answer?.reply) throw new Error("That answer is no longer in this conversation.");
@@ -607,8 +676,8 @@ export class Host {
   /** Saves an edit of a plan as its next version; the versions before it, and briefs made from them, stay as they are. */
   async revisePlan(planId: string, text: string): Promise<PlanView> {
     const workspace = this.#workspaceDb();
-    const plan = getArtifact(workspace, planId);
-    if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+    const plan = this.#listedPlan(planId);
+    if (!plan) throw new Error("That plan is no longer here.");
     const edited = this.#planText(text);
     refuseCredentials("The plan", edited, await this.#knownSecrets());
     const latest = versionsOf(workspace, plan.lineageId).at(-1)!;
@@ -624,6 +693,7 @@ export class Host {
   /** A conversation's plans: every version, oldest first. */
   plans(conversationId: string): PlanView[] {
     const workspace = this.#workspaceDb();
+    if (missionOfConversation(workspace, conversationId)) throw new Error("That conversation is no longer in the list.");
     const plans = workspace.db.prepare("SELECT id FROM artifacts WHERE kind = 'plan' AND conversation_id = ? ORDER BY created_at, version").all(conversationId);
     return plans.map((row) => this.#planView(getArtifact(workspace, String(row["id"]))!));
   }
@@ -685,7 +755,7 @@ export class Host {
   /** A conversation's reviews, oldest first, read from the workspace. Asks no engine and starts nothing. */
   reviews(conversationId: string): ReviewView[] {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const engine = this.#engineView(record.targetId);
     return reviewsOf(workspace, conversationId).map((review) => this.#reviewView(review, engine));
@@ -693,6 +763,7 @@ export class Host {
 
   /** Stops a review the person no longer wants, as a turn is stopped; its end is recorded as cancelled by the person. */
   async cancelReview(conversationId: string, reviewId: string): Promise<ReviewView[]> {
+    if (!this.#listedConversation(conversationId)) throw new Error("That review is no longer in this conversation.");
     const review = getReview(this.#workspaceDb(), reviewId);
     if (!review || review.conversationId !== conversationId) throw new Error("That review is no longer in this conversation.");
     await this.#cancelLink(review.link);
@@ -762,7 +833,7 @@ export class Host {
   /** A conversation's research, oldest first, read from the workspace. Asks no engine and starts nothing. */
   research(conversationId: string): ResearchView[] {
     const workspace = this.#workspaceDb();
-    const record = getConversation(workspace, conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     const engine = this.#engineView(record.targetId);
     return researchOf(workspace, conversationId).map((research) => this.#researchView(research, engine));
@@ -770,6 +841,7 @@ export class Host {
 
   /** Stops research the person no longer wants (D37); its end is recorded as cancelled by the person. */
   async cancelResearch(conversationId: string, researchId: string): Promise<ResearchView[]> {
+    if (!this.#listedConversation(conversationId)) throw new Error("That research is no longer in this conversation.");
     const research = getResearch(this.#workspaceDb(), researchId);
     if (!research || research.conversationId !== conversationId) throw new Error("That research is no longer in this conversation.");
     await this.#cancelLink(research.link);
@@ -900,8 +972,8 @@ export class Host {
     if (input.projectId !== null) this.#project(input.projectId);
     let sources: BriefContent["sources"] = [];
     if (input.planId !== null) {
-      const plan = getArtifact(workspace, input.planId);
-      if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+      const plan = this.#listedPlan(input.planId);
+      if (!plan) throw new Error("That plan is no longer here.");
       sources = [sourceFrom({ id: plan.id, lineageId: plan.lineageId, version: plan.version, content: plan.content as PlanContent })];
     }
     const drafted = briefFrom(fields, sources);
@@ -917,19 +989,31 @@ export class Host {
    * brief no longer has a goal and a criterion goes back to draft. A completed task is reopened first.
    */
   async reviseBrief(taskId: string, revision: number, input: BriefFields): Promise<TaskView> {
+    // What needs waiting for comes first; then every check and the save, in one synchronous transaction (NIV-53).
+    const known = await this.#knownSecrets();
     const workspace = this.#workspaceDb();
-    const task = this.#taskAt(taskId, revision);
-    if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
-    this.#holdForSettling(taskId, "its brief can't change");
+    workspace.tx(() => {
+      const task = this.#taskAt(taskId, revision);
+      if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
+      this.#holdForSettling(taskId, "its brief can't change");
+      this.#reviseFrom(task, versionsOf(workspace, taskId).at(-1)!, input, known);
+    });
+    return this.task(taskId);
+  }
+
+  /**
+   * A brief's next version from the person's fields, made inside the caller's transaction (NIV-53): the fields' checks,
+   * the protection policy (D26), the parts a moved repository cleared kept marked until something is written there, and
+   * the new version with the task's change. Synchronous, so the transaction around it holds every check it makes.
+   */
+  #reviseFrom(task: TaskRecord, latest: ArtifactRecord, input: BriefFields, known: KnownSecrets): ArtifactRecord {
     const fields = this.#briefFields(input);
-    this.#refuseInBrief(task.title, fields, await this.#knownSecrets());
-    const latest = versionsOf(workspace, taskId).at(-1)!;
+    this.#refuseInBrief(task.title, fields, known);
     const before = BriefContentSchema.parse(latest.content);
     // A part marked to be written again for a new repository stays marked until something is written there.
     const revalidate = before.revalidate.filter((part) => (part === "context" ? fields.context === "" : fields.assumptions.length === 0));
     const content: BriefContent = { ...before, ...fields, revalidate };
-    this.#commitBrief(task, latest, content, { state: task.state === "ready" && !briefIsReady(content) ? "draft" : task.state });
-    return this.task(taskId);
+    return this.#commitBrief(task, latest, content, { state: task.state === "ready" && !briefIsReady(content) ? "draft" : task.state });
   }
 
   /** Takes a newer version of a plan the brief came from into its next version: the plan's text, assumptions and source. */
@@ -938,8 +1022,8 @@ export class Host {
     const task = this.#taskAt(taskId, revision);
     if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
     this.#holdForSettling(taskId, "its brief can't change");
-    const plan = getArtifact(workspace, planId);
-    if (!plan || plan.kind !== "plan") throw new Error("That plan is no longer here.");
+    const plan = this.#listedPlan(planId);
+    if (!plan) throw new Error("That plan is no longer here.");
     const latest = versionsOf(workspace, taskId).at(-1)!;
     const before = BriefContentSchema.parse(latest.content);
     if (!before.sources.some((source) => source.planLineage === plan.lineageId)) throw new Error("This task's brief didn't come from that plan.");
@@ -958,6 +1042,8 @@ export class Host {
     const workspace = this.#workspaceDb();
     const task = this.#taskAt(taskId, revision);
     this.#holdForSettling(taskId, "it can't move to another repository");
+    // The coach reads a task as it is in its repository (NIV-53): it doesn't move while one is answering.
+    if (openCoachings(workspace, { taskId }).length) throw new Error("The coach is still answering about this task. Wait for it, or cancel it, then change its repository.");
     if (projectId !== null) this.#project(projectId);
     const latest = versionsOf(workspace, taskId).at(-1)!;
     const cleared = briefForRepository(BriefContentSchema.parse(latest.content), projectId);
@@ -996,9 +1082,455 @@ export class Host {
       throw new Error("This task's run is still going. Cancel it, and wait for it to end, then delete the task.");
     }
     if (this.#applyOpen(taskId)) throw new Error(APPLY_OPEN);
+    if (openCoachings(workspace, { taskId }).length) throw new Error("The coach is still answering about this task. Cancel it, and wait for it to end, then delete the task.");
     // An apply its engine reported and the person hasn't settled still has an engine record and kept copies.
     if (attemptsOf(workspace, taskId).some((attempt) => this.#applyUnresolved(attemptRecord(workspace, attempt.id)))) throw new Error(SETTLE_BEFORE_DELETE);
     if (!deleteTask(workspace, taskId)) throw new Error("That task is no longer in the list.");
+  }
+
+  // The task readiness coach (NIV-53). One coaching at a time for a task, on the task's project's engine or `local`: a
+  // run link owned by the task, bound to the brief version, title, mission, findings and profile it was sent (Track B's
+  // context binding), and sent, followed and settled as a task's run is. It never changes the brief: only the person's
+  // ticked changes do, saved as a new version, from the version it read, in one synchronous transaction.
+
+  /**
+   * What a coaching of the task would send (NIV-53), worked out from its records as they are now: its latest brief and
+   * title, the gaps Nivra's own rules find, the preferences that apply, and the task's mission and findings the person
+   * ticked. Nothing is sent or stored, and no engine starts.
+   */
+  async prepareCoach(taskId: string, selection: CoachSelection): Promise<CoachPreview> {
+    return (await this.#coachRequest(taskId, selection)).preview;
+  }
+
+  /**
+   * Asks the coach about the task as the person previewed it (NIV-53). Everything is worked out again from the records
+   * as they are now and refused when its fingerprint isn't the one previewed, so a coaching sends exactly what was shown.
+   * A project's consent is checked now, again after that wait against the consent epoch, and once more when its request
+   * is out. The coaching is stored first, then sent in the background; its report is kept when it ends.
+   */
+  async startCoach(taskId: string, selection: CoachSelection, expected: string): Promise<CoachingView> {
+    const workspace = this.#workspaceDb();
+    const before = getTask(workspace, taskId);
+    const epoch = before?.projectId ? this.#epochOf(before.projectId) : 0;
+    const request = await this.#coachRequest(taskId, selection);
+    if (request.preview.blocked) throw new Error(request.preview.blocked);
+    if (request.preview.expected !== expected) throw new Error(COACH_CHANGED);
+    const { task, brief, binding, input, context, packet } = request;
+    const project = task.projectId ? this.#options.store.data.projects.find((p) => p.id === task.projectId) : undefined;
+    if (task.projectId) {
+      if (!project || this.#removing.has(project.id)) throw new Error("This task's repository was removed, so the coach wasn't asked. Choose another repository for it, or none, then ask again.");
+      if (!project.sharing.modelContext || this.#epochOf(project.id) !== epoch) throw new Error("Sharing for this task's project was turned off, so the coach wasn't asked. Allow sharing for it, then ask the coach again.");
+    }
+    // Read again just before it is stored, with no wait between: a move, a rename, a brief edit or a deletion during the
+    // waits above would otherwise go past the checks, or bind the coaching to a project the task has left.
+    const now = getTask(workspace, taskId);
+    if (!now) throw new Error("That task is no longer in the list.");
+    if (now.projectId !== task.projectId || now.title !== task.title || versionsOf(workspace, taskId).at(-1)?.id !== brief.id) throw new Error(COACH_CHANGED);
+    const id = randomUUID();
+    const coaching = {
+      id,
+      taskId,
+      briefId: brief.id,
+      briefVersion: brief.version,
+      briefSha256: brief.sha256,
+      title: task.title,
+      projectId: task.projectId,
+      binding,
+      bindingDigest: input.bindingDigest,
+      packetDigest: input.packetDigest,
+      preferencesDigest: input.preferencesDigest,
+      profile: input.profile,
+      mission: packet.mission ? { name: packet.mission.name, version: packet.mission.version } : null,
+      findings: packet.findings.length,
+      preferences: context.preferences.records.length,
+      createdAt: new Date().toISOString(),
+    };
+    const given = context.preferences.records.map(({ id: preferenceId, revision }) => ({ id: preferenceId, revision }));
+    const targetId = project?.targetId ?? "local";
+    if (!insertCoaching(workspace, coaching, { sessionId: this.#sessionId, targetId, preferences: given })) throw new Error(COACH_OPEN);
+    this.#coachRuns.set(id, { projectId: task.projectId, sharingEpoch: epoch });
+    this.#submissions.set(id, { cancel: null });
+    void this.#submitCoaching(id, targetId, input, context).catch((error: unknown) => this.#options.log(`A coaching couldn't be sent: ${errorText(error)}`));
+    return this.#coachingView(getCoaching(workspace, id)!);
+  }
+
+  /**
+   * A task's coachings, the newest first, read from the workspace. One left open by an earlier session, or with its
+   * answer lost, is followed on its own engine, which starts when needed; nothing is ever resent.
+   */
+  coachings(taskId: string): CoachingView[] {
+    const workspace = this.#workspaceDb();
+    if (!getTask(workspace, taskId)) throw new Error("That task is no longer in the list.");
+    const records = coachingsOf(workspace, taskId);
+    for (const record of records) {
+      if ((record.link.status === "submitting" || record.link.status === "running") && !this.#submissions.has(record.id)) {
+        void this.#ensure(record.link.targetId).catch(() => undefined);
+        this.#followCoaching(record.id);
+      }
+    }
+    return records.map((record) => this.#coachingView(record));
+  }
+
+  /** Stops a coaching the person no longer wants; its end is recorded as cancelled by the person. */
+  async cancelCoach(taskId: string, coachingId: string): Promise<void> {
+    const coaching = getCoaching(this.#workspaceDb(), coachingId);
+    if (!coaching || coaching.taskId !== taskId) throw new Error("That coaching is no longer here.");
+    await this.#cancelCoaching(coaching.link, "person");
+  }
+
+  /**
+   * Saves the changes the person ticked in a coaching's answer as the brief's next version (NIV-53), from the task's
+   * revision as it was read. What needs waiting for is read first; then, in one synchronous transaction, the task, the
+   * coaching and what it was bound to are read again and checked (Track B's validator, and the coach's own checks:
+   * the task's repository, the coach's profile, a save already made), the ticked changes are made to the version the
+   * coach read, all or nothing, and checked as any edit is, and the new version, the task's change and the record of
+   * what was saved are written. Anything stale refuses the save, says what changed, and changes nothing.
+   */
+  async acceptCoachChanges(taskId: string, revision: number, coachingId: string, fields: CoachField[]): Promise<TaskView> {
+    const known = await this.#knownSecrets();
+    const workspace = this.#workspaceDb();
+    workspace.tx(() => {
+      const task = this.#taskAt(taskId, revision);
+      if (task.state === "completed") throw new Error("This task is completed. Reopen it to change its brief.");
+      this.#holdForSettling(taskId, "its brief can't change");
+      const coaching = getCoaching(workspace, coachingId);
+      if (!coaching || coaching.taskId !== taskId) throw new Error("That coaching is no longer here.");
+      const blockers = this.#coachBlockers(coaching);
+      if (blockers.length) throw new Error(blockers.join(" "));
+      const latest = versionsOf(workspace, taskId).at(-1)!;
+      if (latest.id !== coaching.briefId || latest.sha256 !== coaching.briefSha256) throw new Error(staleLines([{ kind: "brief-changed", taskId, title: task.title, from: coaching.briefVersion, to: latest.version }], []).join(" "));
+      const report = CoachReport.parse(coaching.report);
+      const saved = this.#reviseFrom(task, latest, applySelected(BriefContentSchema.parse(latest.content), report, fields), known);
+      this.#options.testHooks?.coachApplying?.(coachingId);
+      if (!markCoachingApplied(workspace, coachingId, saved.id, fields, new Date().toISOString())) throw new Error("Changes from this coaching were saved already, so nothing new was saved.");
+    });
+    return this.task(taskId);
+  }
+
+  /**
+   * Everything a coaching of the task would be, worked out from the records as they are now: the context binding (the
+   * task's latest brief and title, the mission and findings the person ticked, the coach's profile), the preview, and
+   * the run's input and context. A finding or mission ticked that is no longer the task's is refused.
+   */
+  async #coachRequest(taskId: string, selection: CoachSelection) {
+    const workspace = this.#workspaceDb();
+    const task = getTask(workspace, taskId);
+    if (!task) throw new Error("That task is no longer in the list.");
+    const brief = versionsOf(workspace, taskId).at(-1)!;
+    const content = BriefContentSchema.parse(brief.content);
+    const record = task.projectId ? this.#options.store.data.projects.find((p) => p.id === task.projectId) : undefined;
+    const project: CoachProject =
+      task.projectId === null ? { kind: "none" } : !record || this.#removing.has(record.id) ? { kind: "removed" } : { kind: "project", projectId: record.id, targetId: record.targetId, label: record.label, targetLabel: this.#labelOf(record.targetId), modelSharing: record.sharing.modelContext };
+    // The task's mission and the findings about it (Track B's records), for the person to tick: nothing goes unless ticked.
+    const found = missionContextForTask(workspace, taskId);
+    const options: CoachPreview["options"] = {
+      mission: found.mission ? { name: found.mission.content.name, version: found.mission.ref.version } : null,
+      findings: found.findings.map((finding) => ({ reviewId: finding.ref.reviewId, findingId: finding.ref.findingId, title: finding.finding.title, reviewedBriefVersion: finding.reviewed.briefVersion })),
+    };
+    if (selection.findings.length > 3) throw new Error("Tick at most three findings, then ask the coach.");
+    if (new Set(selection.findings.map((ref) => `${ref.reviewId} ${ref.findingId}`)).size !== selection.findings.length) throw new Error("Tick each finding once, then ask the coach.");
+    const ticked = selection.findings.map((ref) => {
+      const finding = found.findings.find((one) => one.ref.reviewId === ref.reviewId && one.ref.findingId === ref.findingId);
+      if (!finding) throw new Error("A finding you ticked is no longer about this task. Check the new preview, then ask the coach again.");
+      return finding;
+    });
+    if (selection.mission && !found.mission) throw new Error("This task is no longer in a mission. Check the new preview, then ask the coach again.");
+    const mission = selection.mission ? found.mission : null;
+    const subject: CoachSubject = { taskId, title: task.title, brief: { id: brief.id, version: brief.version, sha256: brief.sha256, content }, project };
+    const binding = coachBindingFor(subject, mission?.ref ?? null, ticked.map((finding) => finding.ref), { version: COACH_PROFILE.version });
+    const busy = task.state === "completed" ? "This task is completed. Reopen it to ask the coach about it." : openCoachings(workspace, { taskId }).length ? COACH_OPEN : null;
+    const result = await coachRequest(subject, {
+      known: await this.#knownSecrets(),
+      preferences: snapshotFor(this.#options.store.data, project.kind === "project" ? task.projectId : null),
+      binding,
+      busy,
+      options,
+      selection,
+      mission: mission ? coachMissionOf(mission.ref, mission.content) : null,
+      findings: ticked.map(coachFindingOf),
+      profile: { id: COACH_PROFILE.id, version: COACH_PROFILE.version, name: SPECIALISTS["task-readiness-coach"].name },
+    });
+    return { ...result, task, brief, binding };
+  }
+
+  /**
+   * What stops a coaching's changes from being saved now, in the person's words; empty when nothing does. Track B's
+   * validator (the brief, the title, the mission, the task's membership and the findings, as sent), then the coach's own:
+   * the task's repository, the coach's profile, a save already made, an answer that wasn't usable. Synchronous, so the
+   * save's transaction runs it.
+   */
+  #coachBlockers(coaching: CoachingRecord): string[] {
+    const workspace = this.#workspaceDb();
+    const own: CoachOwnChange[] = [];
+    const task = getTask(workspace, coaching.taskId);
+    if (task && task.projectId !== coaching.projectId) own.push("project-changed");
+    if (coaching.profile.id !== COACH_PROFILE.id || coaching.profile.version !== COACH_PROFILE.version) own.push("profile-changed");
+    if (coaching.applied) own.push("applied");
+    const report = coaching.report ? CoachReport.safeParse(coaching.report) : null;
+    if (coaching.link.status !== "answered" || !report?.success || report.data.outcome !== "complete") own.push("not-complete");
+    if (!coaching.binding) return staleLines([], [...own, "unreadable"]);
+    return staleLines(validateBinding(workspace, coaching.binding), own);
+  }
+
+  /** A coaching as the window shows it: its record, its report, its changes before and after, and what stops a save. */
+  #coachingView(record: CoachingRecord): CoachingView {
+    const workspace = this.#workspaceDb();
+    const latest = versionsOf(workspace, record.taskId).at(-1);
+    const parsed = record.report ? CoachReport.safeParse(record.report) : null;
+    const report = parsed?.success ? parsed.data : null;
+    const answered = record.link.status === "answered" && report?.outcome === "complete";
+    // A save is offered only from an answer with changes, never once made; what stops it is said line by line.
+    const stale = answered && !record.applied && report.changes.length > 0 ? this.#coachBlockers(record) : [];
+    const blocked = record.applied ? "Changes from this answer were saved already." : stale.length ? "These suggestions are for a task that has changed since, so they can't be saved." : null;
+    const base = getArtifact(workspace, record.briefId);
+    const changes = report && base ? coachChangeViews(BriefContentSchema.parse(base.content), report, blocked) : [];
+    // A preference changed since doesn't stop a save: the answer was made with the ones it lists.
+    const now = snapshotFor(this.#options.store.data, record.projectId).records.map(({ id, revision }) => `${id}:${revision}`).sort();
+    const then = record.link.preferences.map(({ id, revision }) => `${id}:${revision}`).sort();
+    const notes = answered && JSON.stringify(now) !== JSON.stringify(then) ? ["Your preferences changed since the coach read them: its suggestions don't reflect the change."] : [];
+    const appliedBrief = record.applied ? getArtifact(workspace, record.applied.briefId) : null;
+    const engine = this.#engines.get(record.link.targetId);
+    const open = record.link.status === "submitting" || record.link.status === "running";
+    return {
+      id: record.id,
+      taskId: record.taskId,
+      briefVersion: record.briefVersion,
+      latestVersion: latest?.version ?? record.briefVersion,
+      status: record.link.status,
+      note: coachNote(record.link),
+      unresolved: open && engine?.supervisor.state.status !== "online" ? `The engine on ${this.#labelOf(record.link.targetId)} isn't running, so this coaching can't be checked now.` : null,
+      runId: record.link.runId,
+      cancelRequested: record.link.cancelRequested,
+      profile: record.profile,
+      sent: { mission: record.mission, findings: record.findings, preferences: record.preferences },
+      report,
+      changes,
+      stale,
+      notes,
+      applied: record.applied ? { briefVersion: appliedBrief?.version ?? 0, fields: record.applied.fields as CoachField[], at: record.applied.at } : null,
+      createdAt: record.createdAt,
+      settledAt: record.link.settledAt,
+    };
+  }
+
+  /** Why a coaching should stop: asked for meanwhile, or its project removed, or its sharing withdrawn since it started. */
+  #coachStopReason(coachingId: string): CancelReason | null {
+    const asked = this.#submissions.get(coachingId)?.cancel ?? null;
+    if (asked) return asked;
+    const run = this.#coachRuns.get(coachingId);
+    if (!run || run.projectId === null) return null;
+    const project = this.#options.store.data.projects.find((p) => p.id === run.projectId);
+    if (!project || this.#removing.has(project.id)) return "removal";
+    if (!project.sharing.modelContext || this.#epochOf(project.id) !== run.sharingEpoch) return "sharing";
+    return null;
+  }
+
+  /**
+   * Sends a stored coaching (NIV-53), as a task's run is sent: the request is written only after the engine's store is
+   * recorded with it, so one with none was never sent. A failure known to come before writing is "not sent"; anything
+   * after it leaves the coaching to be found by its request id, never sent again.
+   */
+  async #submitCoaching(id: string, targetId: string, input: CoachInput, context: CoachContext): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const label = this.#labelOf(targetId);
+    const settle = (outcome: Parameters<typeof settleCoaching>[2]) => {
+      if (this.#workspace.state === "ready") settleCoaching(this.#workspace.db, id, outcome, null, new Date().toISOString());
+    };
+    const stopped = (): boolean => {
+      const reason = this.#coachStopReason(id);
+      if (reason) requestCancel(workspace, id, reason);
+      return reason !== null;
+    };
+    const notSent = (why: string) => {
+      this.#submissions.delete(id);
+      settle({ status: "not-sent", errorMessage: why });
+    };
+    let engine: Engine;
+    try {
+      engine = await this.#ensure(targetId);
+      if (engine.supervisor.state.status === "starting") await engine.supervisor.start();
+    } catch (error) {
+      notSent(`The engine on ${label} couldn't start (${errorText(error)}), so the coach wasn't asked and ${COACH_NOTHING}.`);
+      return;
+    }
+    const state = engine.supervisor.state;
+    if (state.status !== "online") {
+      notSent(`The engine on ${label} isn't running${state.status === "failed" ? ` (${state.reason})` : ""}, so the coach wasn't asked and ${COACH_NOTHING}.`);
+      return;
+    }
+    if (stopped()) {
+      this.#submissions.delete(id);
+      settle({ status: "cancelled", errorMessage: `It was stopped before it was sent, so ${COACH_NOTHING}.` });
+      return;
+    }
+    // Deleted or ended meanwhile: nothing to send.
+    if (!setTurnHome(workspace, id, state.info.homeId)) {
+      this.#submissions.delete(id);
+      return;
+    }
+    let run: RunSummary;
+    try {
+      run = await engine.supervisor.call("runs.start", { clientRequestId: id, workflowId: "coach", input, context });
+    } catch (error) {
+      // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
+      if (error instanceof EngineOfflineError || error instanceof TypeError) {
+        notSent(`The engine on ${label} didn't take the coaching (${errorText(error)}), so ${COACH_NOTHING}.`);
+        return;
+      }
+      this.#options.log(`A coaching's request got no usable answer (${error instanceof Error ? error.name : "unknown"}); it is found by its request id, never sent again.`);
+      // An error answer is the engine's own words: shown if the search then finds no run.
+      if (error instanceof RpcCallError) this.#coachAnswers.set(id, errorText(error));
+      this.#submissions.delete(id);
+      this.#followCoaching(id);
+      return;
+    }
+    this.#runs.set(run.id, targetId);
+    recordRun(workspace, id, run.id);
+    // Stopped while the request was out (a cancel, consent withdrawn, the project removed): the run stops now.
+    const late = stopped();
+    this.#submissions.delete(id);
+    if (late) await engine.supervisor.call("runs.cancel", { runId: run.id }).catch((error: unknown) => this.#options.log(`A coaching stopped while it was being sent couldn't be cancelled: ${errorText(error)}`));
+    this.#followCoaching(id);
+  }
+
+  /**
+   * Follows an open coaching to its end on its own engine, as a task's run is followed, however it was left. No store
+   * recorded: never sent. Another store: unknown. No run id: found by its request id, and absent from the same store,
+   * never sent. A run: followed until it ends, then its end and its report recorded.
+   */
+  #followCoaching(id: string): void {
+    if (this.#followingCoachings.has(id) || this.#submissions.has(id)) return;
+    this.#followingCoachings.add(id);
+    void (async () => {
+      let delay = 400;
+      let cancelSent = false;
+      try {
+        while (!this.#closing && this.#workspace.state === "ready") {
+          const workspace = this.#workspace.db;
+          const link = getCoachLink(workspace, id);
+          if (!link || (link.status !== "submitting" && link.status !== "running")) return;
+          const settle = (outcome: Parameters<typeof settleCoaching>[2]) => settleCoaching(workspace, id, outcome, null, new Date().toISOString());
+          if (link.homeId === null) {
+            settle({ status: "not-sent", errorMessage: `Nivra stopped before asking the coach, so ${COACH_NOTHING}.` });
+            return;
+          }
+          const engine = this.#engines.get(link.targetId);
+          const state = engine?.supervisor.state;
+          if (engine && state?.status === "online") {
+            if (state.info.homeId !== link.homeId) {
+              settle({ status: "unknown", errorMessage: `it went to an engine whose records aren't here (another engine home on ${this.#labelOf(link.targetId)})` });
+              return;
+            }
+            try {
+              let summary: RunSummary | null;
+              if (link.runId) summary = await engine.supervisor.call("runs.get", { runId: link.runId });
+              else {
+                summary = await engine.supervisor.call("runs.find", { clientRequestId: id });
+                if (!summary) {
+                  const answered = this.#coachAnswers.get(id);
+                  settle({ status: "not-sent", errorMessage: answered ? `The engine didn't start the coaching, so ${COACH_NOTHING}. ${answered}` : `Its engine has no record of the coaching, so it never ran: ${COACH_NOTHING}.` });
+                  return;
+                }
+                this.#runs.set(summary.id, link.targetId);
+                recordRun(workspace, id, summary.id);
+              }
+              if (isTerminal(summary.status)) {
+                await this.#finishCoaching(link, engine, summary);
+                return;
+              }
+              if (link.cancelRequested && !cancelSent) {
+                cancelSent = true;
+                // A cancel its engine turned down is tried again on the next look, never left for the run to outlast.
+                await engine.supervisor.call("runs.cancel", { runId: summary.id }).catch((error: unknown) => {
+                  cancelSent = false;
+                  this.#options.log(`A coaching couldn't be cancelled yet, so Nivra tries again: ${errorText(error)}`);
+                });
+              }
+              delay = 400;
+            } catch (error) {
+              if (isRunNotFound(error)) {
+                settle({ status: "unknown", errorMessage: `the engine on ${this.#labelOf(link.targetId)} has no record of its run any more` });
+                return;
+              }
+              delay = Math.min(delay * 2, 5_000);
+            }
+          } else {
+            delay = Math.min(delay * 2, 5_000);
+          }
+          await pause(delay);
+        }
+      } catch (error) {
+        this.#options.log(`Following a coaching stopped: ${errorText(error)}`);
+      } finally {
+        this.#followingCoachings.delete(id);
+        this.#coachAnswers.delete(id);
+      }
+    })();
+  }
+
+  /**
+   * Records how a coaching's run ended, with the report its engine saved, masked again. A report that isn't the one this
+   * coaching asked for (another task, brief version, fingerprint, profile, request or run) is kept nowhere, and its end is
+   * unknown. One that ended short is kept with how it ended: a failed, cancelled or interrupted answer stays readable.
+   */
+  async #finishCoaching(link: CoachLink, engine: Engine, summary: RunSummary): Promise<void> {
+    const coaching = getCoaching(this.#workspaceDb(), link.id);
+    if (!coaching) return;
+    const known = await this.#knownSecrets();
+    const end = (outcome: Parameters<typeof settleCoaching>[2], report: CoachReport | null) => {
+      if (this.#workspace.state === "ready") settleCoaching(this.#workspace.db, link.id, outcome, report, new Date().toISOString());
+    };
+    const report = await engine.supervisor.call("runs.coach", { runId: summary.id });
+    if (report && !coachReportMatches(report, coaching, summary.id, coaching.id)) {
+      end({ status: "unknown", errorMessage: "its engine's report is about something other than what this coaching sent, so none of it was kept" }, null);
+      return;
+    }
+    const kept = report ? maskValue(report, known) : null;
+    if (summary.status === "succeeded") {
+      if (kept?.outcome === "complete") end({ status: "answered" }, kept);
+      else end({ status: "unknown", errorMessage: "its run finished, but its engine has no complete report stored for it" }, null);
+      return;
+    }
+    if (summary.status === "cancelled") {
+      end({ status: getCoachLink(this.#workspaceDb(), link.id)?.cancelReason ? "cancelled" : "interrupted" }, kept);
+      return;
+    }
+    const { interrupted, kind } = await this.#failureOf(engine, summary.id);
+    end(interrupted ? { status: "interrupted" } : { status: "failed", errorKind: kind, errorMessage: maskForStorage(summary.error ?? "The coaching failed.", known) }, kept);
+  }
+
+  /**
+   * Stops a coaching for `reason`. One being sent stops at its own check; one whose run isn't known yet once it is found.
+   * A stop its engine turns down is taken back and thrown, so the caller can say it couldn't stop it.
+   */
+  async #cancelCoaching(link: CoachLink, reason: CancelReason): Promise<void> {
+    if (link.status !== "submitting" && link.status !== "running") return;
+    const workspace = this.#workspaceDb();
+    requestCancel(workspace, link.id, reason);
+    const pending = this.#submissions.get(link.id);
+    if (pending) pending.cancel ??= reason;
+    if (link.runId) {
+      await this.cancelRun(link.runId).catch((error: unknown) => {
+        withdrawCancel(workspace, link.id, reason);
+        throw error;
+      });
+    } else if (!pending) this.#followCoaching(link.id);
+  }
+
+  /**
+   * Stops the coachings of a project's tasks for `reason`, from the workspace's records, whichever session started
+   * them; says through `refusal` when it couldn't. One whose engine isn't online, and isn't being sent, isn't going any
+   * more (D4): its stop is recorded, and nothing is sent.
+   */
+  async #stopProjectCoachings(projectId: string, reason: CancelReason, refusal: (why: string) => string): Promise<void> {
+    if (this.#workspace.state !== "ready") return;
+    const workspace = this.#workspace.db;
+    const open = openCoachings(workspace, { projectId }).map((coaching) => coaching.link);
+    const going = (link: CoachLink) => this.#submissions.has(link.id) || this.#engines.get(link.targetId)?.supervisor.state.status === "online";
+    for (const link of open.filter((one) => !going(one))) requestCancel(workspace, link.id, reason);
+    const results = await Promise.allSettled(open.filter(going).map((link) => this.#cancelCoaching(link, reason)));
+    const failed = results.flatMap((result) => (result.status === "rejected" ? [errorText(result.reason)] : []));
+    if (failed.length) throw new Error(refusal(failed[0]!));
   }
 
   /**
@@ -1302,6 +1834,184 @@ export class Host {
   }
 
   /** What WSL offers on a Windows host, and what to do when it offers nothing; null elsewhere. */
+  /** Every mission, the most recently changed first (NIV-52). Asks no engine and starts nothing. */
+  missions(): MissionsView {
+    const workspace = this.#workspace;
+    if (workspace.state !== "ready") return { workspace: this.#workspaceView(), missions: [] };
+    return {
+      workspace: this.#workspaceView(),
+      missions: listMissions(workspace.db).map(({ mission, latest }) => ({
+        id: mission.id,
+        name: latest.content.name,
+        version: latest.version,
+        tasks: missionTaskIds(workspace.db, mission.id).length,
+        updatedAt: latest.createdAt,
+        reviewing: openTurns(workspace.db, { conversationId: mission.conversationId }).length > 0,
+      })),
+    };
+  }
+
+  /** One mission as it is now (NIV-52): its latest version, its backlog, the tasks it could take, and its reviews. */
+  mission(missionId: string): MissionView {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    const latest = mission ? latestMissionVersion(workspace, mission.id) : null;
+    if (!mission || !latest) throw new Error("That mission is no longer here.");
+    const engine = this.#engineView("local");
+    return {
+      id: mission.id,
+      latest: { id: latest.id, version: latest.version, content: latest.content, createdAt: latest.createdAt },
+      versions: missionVersions(workspace, mission.id).map(({ version, createdAt }) => ({ version, createdAt })),
+      backlog: missionTaskIds(workspace, mission.id).flatMap((taskId) => {
+        const task = getTask(workspace, taskId);
+        return task ? [{ task: this.#taskSummary(task), unreviewable: task.projectId === null ? null : MISSION_REPOSITORY_TASK }] : [];
+      }),
+      available: listTasks(workspace)
+        .filter((task) => missionOfTask(workspace, task.id) === null)
+        .map((task) => this.#taskSummary(task)),
+      reviews: reviewsOf(workspace, mission.conversationId)
+        .reverse()
+        .map((review) => this.#missionReviewView(review, engine)),
+      reviewing: openTurns(workspace, { conversationId: mission.conversationId }).length > 0,
+      engine,
+    };
+  }
+
+  /**
+   * Opens a mission (NIV-52). A review left open by an earlier session, or with its answer lost, is followed on its
+   * engine, as a conversation's turns are (D26). Nothing is ever resent.
+   */
+  async openMission(missionId: string): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    if (!mission) throw new Error("That mission is no longer here.");
+    const open = openTurns(workspace, { conversationId: mission.conversationId }).filter((turn) => !this.#submissions.has(turn.id));
+    if (open.length) {
+      if (!this.#unavailable.has("local")) await this.#ensure("local").catch(() => undefined);
+      for (const turn of open) this.#follow(turn.id);
+    }
+    return this.mission(missionId);
+  }
+
+  /** Saves a new mission as v1 (NIV-52). What the person wrote is checked as anything they type is. */
+  async createMission(input: MissionContent): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    const content = missionContentOf(input);
+    refuseMissionCredentials(content, await this.#knownSecrets());
+    const id = randomUUID();
+    insertMission(workspace, { id, conversationId: randomUUID(), createdAt: new Date().toISOString() }, { id: randomUUID(), content });
+    return this.mission(id);
+  }
+
+  /** Saves an edit of a mission as its next version, only from the version the person read (NIV-52). */
+  async reviseMission(missionId: string, version: number, input: MissionContent): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    if (!getMission(workspace, missionId)) throw new Error("That mission is no longer here.");
+    const content = missionContentOf(input);
+    refuseMissionCredentials(content, await this.#knownSecrets());
+    if (!insertMissionVersion(workspace, missionId, { id: randomUUID(), content, createdAt: new Date().toISOString() }, version)) {
+      throw new Error("This mission changed since you opened it. Open it again, then make your edit.");
+    }
+    return this.mission(missionId);
+  }
+
+  /**
+   * Deletes a mission (NIV-52): its review still going is stopped first, as a conversation's turn is, then its versions,
+   * backlog, review plans and reviews go. Its tasks stay, in no backlog. Each engine keeps its own record of the runs.
+   */
+  async deleteMission(missionId: string): Promise<void> {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    const record = mission ? getConversation(workspace, mission.conversationId) : null;
+    if (!mission || !record) throw new Error("That mission is no longer here.");
+    await this.#deleteConversation(record, "mission");
+  }
+
+  /** Makes a direct task, with a title only, in a mission's backlog (NIV-52): its brief is written on the task's own page. */
+  async createMissionTask(missionId: string, title: string): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    if (!getMission(workspace, missionId)) throw new Error("That mission is no longer here.");
+    const name = this.#taskTitle(title);
+    const fields = this.#briefFields({ goal: "", acceptanceCriteria: [], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] });
+    this.#refuseInBrief(name, fields, await this.#knownSecrets());
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    workspace.tx(() => {
+      insertTask(workspace, { id, title: name, projectId: null, createdAt: now, updatedAt: now }, { id: randomUUID(), content: briefFrom(fields), derivedFrom: null });
+      const added = addToBacklog(workspace, missionId, id, now);
+      if (added !== "added" && added !== "already-here") throw new Error(addedText(added));
+    });
+    return this.mission(missionId);
+  }
+
+  /** Puts an existing task in a mission's backlog (NIV-52). The task itself doesn't change. */
+  addMissionTask(missionId: string, taskId: string): MissionView {
+    const added = addToBacklog(this.#workspaceDb(), missionId, taskId, new Date().toISOString());
+    if (added !== "added" && added !== "already-here") throw new Error(addedText(added));
+    return this.mission(missionId);
+  }
+
+  /** Takes a task out of a mission's backlog (NIV-52). The task itself doesn't change, and earlier reviews say so. */
+  removeMissionTask(missionId: string, taskId: string): MissionView {
+    if (!removeFromBacklog(this.#workspaceDb(), missionId, taskId)) throw new Error("That task isn't in this mission's backlog any more.");
+    return this.mission(missionId);
+  }
+
+  /**
+   * What a review of the mission's selected tasks would send (NIV-52), and the fingerprint that binds it. Reads only:
+   * nothing is stored or sent, and no engine starts.
+   */
+  async prepareMissionReview(missionId: string, taskIds: readonly string[]): Promise<MissionReviewPreview> {
+    return (await this.#missionReviewRequest(missionId, taskIds)).preview;
+  }
+
+  /**
+   * Starts the review the person previewed (NIV-52). Everything is worked out again from the records as they are now,
+   * and refused when its fingerprint isn't the one previewed. In one transaction, the context is checked once more, the
+   * review plan saved (an identical one reused) and the review stored; then it is sent in the background on this
+   * computer's engine, as a plan's review is (D31). A review writes no mission, task, brief or preference.
+   */
+  async startMissionReview(missionId: string, taskIds: readonly string[], expected: string): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    const request = await this.#missionReviewRequest(missionId, taskIds);
+    if (request.preview.blocked) throw new Error(request.preview.blocked);
+    if (request.preview.expected !== expected) throw new Error("What this review would send has changed since you opened it. Check the new preview, then start again.");
+    const { mission, conversation, composition, digests, preferences } = request;
+    const id = randomUUID();
+    const content = missionPlanContent(composition, conversation.id);
+    const plan = workspace.tx(() => {
+      const changes = validateBinding(workspace, composition.binding);
+      if (changes.length) throw new Error(`What this review would send has changed since you opened it: ${changes.map(changeText).join(" ")} Check the new preview, then start again.`);
+      // Linked to a repository meanwhile: this increment reviews only tasks with none (D42).
+      const linked = composition.binding.tasks.find((task) => getTask(workspace, task.taskId)?.projectId != null);
+      if (linked) throw new Error(`"${linked.title}" was linked to a repository meanwhile, and mission reviews take only tasks that aren't, for now. Leave it out, then preview again.`);
+      const latest = versionsOf(workspace, mission.id).at(-1);
+      const saved =
+        latest && JSON.stringify(latest.content) === JSON.stringify(content)
+          ? latest
+          : insertArtifact(workspace, { id: randomUUID(), kind: "plan", lineageId: mission.id, content, conversationId: conversation.id, taskId: null, messageId: null, runLinkId: null, derivedFrom: latest?.id ?? null, createdAt: new Date().toISOString() }, latest?.version ?? 0);
+      if (!saved) throw new Error("This mission's review plan changed meanwhile. Check the new preview, then start again.");
+      const review = { id, conversationId: conversation.id, planId: saved.id, planLineage: saved.lineageId, planVersion: saved.version, planSha256: saved.sha256, panel: "council" as const, packetDigest: digests.packet, preferencesDigest: digests.preferences, scope: { kind: "general" as const }, createdAt: new Date().toISOString() };
+      const given = preferences.records.map(({ id: preferenceId, revision }) => ({ id: preferenceId, revision }));
+      if (!insertReview(workspace, review, { sessionId: this.#sessionId, targetId: conversation.targetId, preferences: given })) throw new Error(MISSION_BUSY);
+      return saved;
+    });
+    this.#submissions.set(id, { cancel: null });
+    const input = { panel: "council" as const, planId: plan.id, planVersion: plan.version, packetDigest: digests.packet, preferencesDigest: digests.preferences };
+    void this.#submit(id, conversation, { workflowId: "review", input, context: { preferences, sharing: { modelContext: false }, packet: composition.packet } }, 0).catch((error: unknown) => this.#options.log(`A mission review couldn't be sent: ${errorText(error)}`));
+    return this.mission(missionId);
+  }
+
+  /** Stops a mission's review the person no longer wants; its end is recorded as cancelled by the person (NIV-52). */
+  async cancelMissionReview(missionId: string, reviewId: string): Promise<MissionView> {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    const review = getReview(workspace, reviewId);
+    if (!mission || !review || review.conversationId !== mission.conversationId) throw new Error("That review is no longer in this mission.");
+    await this.#cancelLink(review.link);
+    return this.mission(missionId);
+  }
+
   wsl(): WslView | null {
     if (this.#options.platform !== "win32") return null;
     if (!this.#wslChecked || !this.#wsl) return { status: "checking", message: null, code: null, distros: [] };
@@ -1340,7 +2050,7 @@ export class Host {
    * has no project to restart it from, so this is its way back after its engine stops.
    */
   async restartConversationEngine(conversationId: string): Promise<ConversationView> {
-    const record = getConversation(this.#workspaceDb(), conversationId);
+    const record = this.#listedConversation(conversationId);
     if (!record) throw new Error("That conversation is no longer in the list.");
     await this.#restartTarget(record.targetId);
     return this.openConversation(conversationId);
@@ -1440,12 +2150,13 @@ export class Host {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
       const withdraw = this.#markProjectTurns(projectId, "sharing");
       // Every stop is tried, whatever another's fate, and then any that failed is reported (D39).
-      const [runs, attempts] = await Promise.allSettled([
+      const [runs, attempts, coachings] = await Promise.allSettled([
         this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`),
         this.#stopProjectAttempts(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
+        this.#stopProjectCoachings(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop the coach answering about one of its tasks (${why}). Restart the project's engine to stop it.`),
       ]);
       if (runs.status === "rejected") withdraw();
-      const failed = [runs, attempts].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      const failed = [runs, attempts, coachings].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
     }
     return this.#view(this.#project(projectId));
@@ -1707,6 +2418,7 @@ export class Host {
         stopCheck(),
         this.#stopProjectAttempts(projectId, "removal", (why) => `Nivra couldn't stop the project's task run (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
         this.#stopProjectPreparations(projectId, "removal", (why) => `Nivra couldn't stop the preparation of the project's environment (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
+        this.#stopProjectCoachings(projectId, "removal", (why) => `Nivra couldn't stop the coach answering about one of the project's tasks (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
       ]);
       const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
@@ -3082,6 +3794,74 @@ export class Host {
     };
   }
 
+  /**
+   * Everything a review of a mission's selected tasks would send, worked out from the records as they are now (NIV-52):
+   * the composition, the whole packet checked for credentials, the preference snapshot (personal preferences only, as a
+   * general plan's, D21 and D26), their fingerprints, and the preview that shows them.
+   */
+  async #missionReviewRequest(missionId: string, taskIds: readonly string[]) {
+    const workspace = this.#workspaceDb();
+    const mission = getMission(workspace, missionId);
+    const conversation = mission ? getConversation(workspace, mission.conversationId) : null;
+    if (!mission || !conversation) throw new Error("That mission is no longer here.");
+    const composition = composeMissionReview(workspace, mission, taskIds, null);
+    const preferences = snapshotFor(this.#options.store.data, null);
+    refusePacketCredentials(composition.packet, preferences, await this.#knownSecrets());
+    const digests = await missionDigests(composition, preferences);
+    const preview: MissionReviewPreview = {
+      missionId: mission.id,
+      missionVersion: composition.binding.mission!.version,
+      tasks: composition.binding.tasks.map((task, index) => ({ ref: taskRef(index), taskId: task.taskId, title: task.title, briefVersion: task.briefVersion, present: true })),
+      text: composition.text,
+      chars: composition.text.length,
+      othersInBacklog: composition.packet.othersInBacklog,
+      preferences: preferences.records.map(({ statement, scope, intent }) => ({ statement, scope, intent })),
+      specialists: composition.packet.specialists.map((ref) => specialistView(ref.id, ref.version)),
+      model: composition.packet.model,
+      requests: MISSION_REVIEW_REQUESTS,
+      notSent: MISSION_REVIEW_NOT_SENT,
+      blocked: openTurns(workspace, { conversationId: conversation.id }).length ? MISSION_BUSY : null,
+      expected: missionPreviewFingerprint(digests),
+    };
+    return { mission, conversation, composition, digests, preferences, preview };
+  }
+
+  /** A mission's review (NIV-52): its plan review's view, with what it was sent and what has changed since. */
+  #missionReviewView(review: ReviewRecord, engine: EngineView): MissionReviewView {
+    const workspace = this.#workspaceDb();
+    const base = this.#reviewView(review, engine, "mission");
+    const plan = getArtifact(workspace, review.planId);
+    const composition = plan ? compositionOf(plan) : null;
+    const now = snapshotFor(this.#options.store.data, null).records.map(({ id, revision }) => `${id} ${revision}`).sort();
+    const sent = review.link.preferences.map(({ id, revision }) => `${id} ${revision}`).sort();
+    return {
+      ...base,
+      missionVersion: composition?.binding.mission?.version ?? null,
+      tasks: (composition?.binding.tasks ?? []).map((task, index) => ({ ref: taskRef(index), taskId: task.taskId, title: task.title, briefVersion: task.briefVersion, present: getTask(workspace, task.taskId) !== null })),
+      specialists: (composition?.packet.specialists ?? []).map((ref) => specialistView(ref.id, ref.version)),
+      model: composition?.packet.model ?? null,
+      text: composition?.text ?? "",
+      stale: composition ? validateBinding(workspace, composition.binding).map(changeText) : ["Nivra can't read what this review was sent."],
+      preferencesChanged: JSON.stringify(now) !== JSON.stringify(sent),
+    };
+  }
+
+  /**
+   * A conversation the person can reach: any but a mission's own (NIV-52), which holds only that mission's review plans
+   * and reviews, and is reached through its mission.
+   */
+  #listedConversation(conversationId: string): ConversationRecord | null {
+    const workspace = this.#workspaceDb();
+    return missionOfConversation(workspace, conversationId) ? null : getConversation(workspace, conversationId);
+  }
+
+  /** A saved plan version the person can reach: one in a listed conversation, never a mission's review plan (NIV-52). */
+  #listedPlan(planId: string): ArtifactRecord | null {
+    const workspace = this.#workspaceDb();
+    const plan = getArtifact(workspace, planId);
+    return plan?.kind === "plan" && plan.conversationId !== null && !missionOfConversation(workspace, plan.conversationId) ? plan : null;
+  }
+
   /** The keys the host holds, for the protection policy (D8, D26). */
   async #knownSecrets(): Promise<KnownSecrets> {
     return Object.entries(await this.#options.credentials()).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
@@ -3131,7 +3911,7 @@ export class Host {
   #reviewSubject(planId: string): ReviewSubject {
     const workspace = this.#workspaceDb();
     const plan = getArtifact(workspace, planId);
-    const conversation = plan?.kind === "plan" && plan.conversationId ? getConversation(workspace, plan.conversationId) : null;
+    const conversation = plan?.kind === "plan" && plan.conversationId ? this.#listedConversation(plan.conversationId) : null;
     if (!plan || !conversation) throw new Error("That plan is no longer here.");
     if (conversation.projectId === null) return { plan, conversation, project: null };
     const project = this.#options.store.data.projects.find((p) => p.id === conversation.projectId);
@@ -3185,7 +3965,7 @@ export class Host {
   #researchSubject(planId: string): ResearchSubject {
     const workspace = this.#workspaceDb();
     const plan = getArtifact(workspace, planId);
-    const conversation = plan?.kind === "plan" && plan.conversationId ? getConversation(workspace, plan.conversationId) : null;
+    const conversation = plan?.kind === "plan" && plan.conversationId ? this.#listedConversation(plan.conversationId) : null;
     if (!plan || !conversation) throw new Error("That plan is no longer here.");
     const latestVersion = versionsOf(workspace, plan.lineageId).at(-1)?.version ?? plan.version;
     if (conversation.projectId === null) return { plan, latestVersion, conversation, project: null };
@@ -3587,7 +4367,8 @@ export class Host {
     };
   }
 
-  #reviewView(review: ReviewRecord, engine: EngineView): ReviewView {
+  /** A review as the window shows it; `where` names what the person opens to have it checked again. */
+  #reviewView(review: ReviewRecord, engine: EngineView, where: "conversation" | "mission" = "conversation"): ReviewView {
     const { link } = review;
     const workspace = this.#workspaceDb();
     const open = link.status === "submitting" || link.status === "running";
@@ -3603,7 +4384,7 @@ export class Host {
       panel: review.panel,
       status: link.status,
       note: reviewNoteFor(link),
-      unresolved: away ? (engine.state.status === "failed" ? engine.state.reason : `The engine on ${engine.label} isn't running, so Nivra can't check this review yet. It checks again when you open the conversation.`) : null,
+      unresolved: away ? (engine.state.status === "failed" ? engine.state.reason : `The engine on ${engine.label} isn't running, so Nivra can't check this review yet. It checks again when you open the ${where}.`) : null,
       runId: link.runId,
       cancelRequested: link.cancelRequested,
       scope: review.scope.kind === "project" ? { kind: "project", projectLabel: review.scope.projectLabel, headAtStart: review.scope.headAtStart } : { kind: "general" },
@@ -3783,12 +4564,13 @@ export class Host {
   }
 
   /** A new brief version and the task's change, in one transaction, from the versions the person saw. */
-  #commitBrief(task: TaskRecord, latest: ArtifactRecord, content: BriefContent, change: Partial<Pick<TaskRecord, "projectId" | "state">>): void {
+  #commitBrief(task: TaskRecord, latest: ArtifactRecord, content: BriefContent, change: Partial<Pick<TaskRecord, "projectId" | "state">>): ArtifactRecord {
     const workspace = this.#workspaceDb();
     const now = new Date().toISOString();
-    workspace.tx(() => {
+    return workspace.tx(() => {
       const brief = insertArtifact(workspace, { id: randomUUID(), kind: "brief", lineageId: task.id, content: BriefContentSchema.parse(content), conversationId: null, taskId: task.id, messageId: null, runLinkId: null, derivedFrom: latest.id, createdAt: now }, latest.version);
       if (!brief || !updateTask(workspace, task.id, task.revision, change, now)) throw new Error("This task changed since you opened it. Open it again, then try again.");
+      return brief;
     });
   }
 
@@ -4073,6 +4855,30 @@ function applyUnsettled(record: AttemptDecisionRecord): boolean {
   const apply = record.apply;
   if (record.decision !== "approved" || !apply || apply.note !== null) return false;
   return !apply.view || apply.view.status === "claimed" || apply.view.status === "writing";
+}
+
+/** What happened to a coaching that ended without a complete answer, in Nivra's words; null while it goes, or once answered. */
+function coachNote(link: CoachLink): string | null {
+  switch (link.status) {
+    case "failed":
+      return `${link.errorMessage ?? "The coaching failed."} Nothing was resent, and your brief is unchanged.`;
+    case "cancelled":
+      return link.cancelReason === "sharing"
+        ? "Stopped: sharing for this task's project was turned off. Nothing was resent, and your brief is unchanged."
+        : link.cancelReason === "removal"
+          ? "Stopped: the task's project was removed. Nothing was resent, and your brief is unchanged."
+          : link.errorMessage
+            ? `Cancelled. ${link.errorMessage}`
+            : "Cancelled. Nothing was resent, and your brief is unchanged.";
+    case "interrupted":
+      return "Interrupted: Nivra or its engine stopped before the coach answered. Nothing was resent, and your brief is unchanged. Ask the coach again if you want an answer.";
+    case "not-sent":
+      return `Not sent: ${link.errorMessage ?? "nothing reached the model."} Ask the coach again when you're ready.`;
+    case "unknown":
+      return `Nivra can't tell how this coaching ended: ${link.errorMessage ?? "its engine can't say"}. Nothing was resent, and your brief is unchanged. Ask the coach again if you want an answer.`;
+    default:
+      return null;
+  }
 }
 
 function attemptNote(attempt: AttemptRecord): string | null {

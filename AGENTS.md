@@ -133,6 +133,12 @@ list.
   never write repository files.
 - Move intent (patches, reports) between environments, never built artefacts.
 
+## Suggestion rules (D43)
+
+- A specialist's suggestion changes a brief only through the person's selection, saved as a new brief version based
+  on the version the specialist read. It never changes a task's state, adds an acceptance case, waives a run
+  prerequisite or grants consent.
+
 ## Engineering rules
 
 - Keep main thin and the renderer free of Node APIs.

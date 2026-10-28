@@ -1,11 +1,16 @@
 import { createTool } from "@mastra/core/tools";
 import {
+  MISSION_COUNCIL,
   preferencesDigest,
+  renderMissionPacket,
   REVIEW_TOOLS,
+  SPECIALISTS,
   type JsonObject,
   type Mask,
+  type MissionReviewPacket,
   type ModelFailureKind,
   type ReviewContext,
+  type ReviewPacket,
   type ReviewPanel,
   type ReviewReport,
   type ReviewRole,
@@ -13,6 +18,7 @@ import {
   type ReviewerReport,
   type RunRoute,
 } from "@nivra/domain";
+import { z } from "zod";
 import { failure, InternalFailure, ModelFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
 import { ANSWER_TOKENS, requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget, type Hold, type RunLimits } from "../providers/run-budget.ts";
@@ -20,6 +26,8 @@ import { usageOf } from "../explain/reading.ts";
 import { CHARS_PER_TOKEN } from "../explain/budget.ts";
 import { toolDefinitionChars } from "../explain/tools.ts";
 import { largestReport, normaliseReview, normaliseSynthesis, REVIEW_TOOL_DESCRIPTION, ReviewAnswer, SYNTHESIS_TOOL_DESCRIPTION, SynthesisAnswer } from "./answers.ts";
+import { MissionReviewAnswer, normaliseMissionReview, rejectedProblems, rejectedReason } from "./mission-answers.ts";
+import { MISSION_CHAIR_INSTRUCTIONS, missionReviewerInstructions, renderMissionChairMessage, renderMissionMessage } from "./mission-prompt.ts";
 import { CHAIR_INSTRUCTIONS, renderChairMessage, renderPacket, reviewerInstructions } from "./prompt.ts";
 import type { ReviewTask } from "./task.ts";
 
@@ -44,16 +52,104 @@ const MESSAGE_ALLOWANCE_TOKENS = 64;
 const TOOL_SPECS = {
   reviewer: { [REVIEW_TOOLS.reviewer]: { description: REVIEW_TOOL_DESCRIPTION, inputSchema: ReviewAnswer } },
   chair: { [REVIEW_TOOLS.chair]: { description: SYNTHESIS_TOOL_DESCRIPTION, inputSchema: SynthesisAnswer } },
+  /** A mission reviewer's: the same form, its fields described for a mission (NIV-52). */
+  "mission-reviewer": { [REVIEW_TOOLS.reviewer]: { description: REVIEW_TOOL_DESCRIPTION, inputSchema: MissionReviewAnswer } },
 };
 
+/**
+ * The tools a mission review's stages are given (NIV-52), as JSON: what the model reads besides the instructions. A test
+ * pins its hash to the profiles' version, and the live recipe binds it.
+ */
+export function missionToolDefinitions(): string {
+  return JSON.stringify(
+    [TOOL_SPECS["mission-reviewer"], TOOL_SPECS.chair].flatMap((specs) =>
+      Object.entries(specs).map(([name, spec]) => ({ name, description: spec.description, parameters: z.toJSONSchema(spec.inputSchema, { target: "draft-7", io: "input", unrepresentable: "any" }) })),
+    ),
+  );
+}
+
 /** A whole request's estimated input: instructions, message, every tool definition, and the template's allowance (D30). */
-export function estimateRequest(instructions: string, message: string, tools: "reviewer" | "chair"): number {
+export function estimateRequest(instructions: string, message: string, tools: keyof typeof TOOL_SPECS): number {
   return Math.ceil((instructions.length + message.length + toolDefinitionChars(TOOL_SPECS[tools])) / CHARS_PER_TOKEN) + MESSAGE_ALLOWANCE_TOKENS;
 }
 
 const ROLE_LABEL: Readonly<Record<ReviewRole | "chair", string>> = { architecture: "Architecture review", risks: "Risks review", single: "Review", chair: "The chair" };
 /** Each stage as a sentence names it, so a stage's message stands alone, in the report and in a run's failure. */
 const ROLE_NOUN: Readonly<Record<ReviewRole | "chair", string>> = { architecture: "The architecture review", risks: "The risks review", single: "The review", chair: "The chair's synthesis" };
+
+const [ARCHITECT, RISK, CHAIR] = MISSION_COUNCIL.map((id) => SPECIALISTS[id].name);
+/** A mission review's stages, named by the profiles that play them (NIV-52). */
+const MISSION_LABEL: Readonly<Record<ReviewRole | "chair", string>> = { architecture: ARCHITECT!, risks: RISK!, single: "Review", chair: CHAIR! };
+const MISSION_NOUN: Readonly<Record<ReviewRole | "chair", string>> = { architecture: "The product architect's review", risks: "The risk and testability review", single: "The review", chair: "The council chair's synthesis" };
+
+/**
+ * What differs between a review of a saved plan (D30) and one of a mission and its selected tasks (NIV-52): what the
+ * reviewers read, the instructions each role gets, what a reference may name, what the stages are called and what the
+ * report counts. Everything else, the budget, the requests and how stages end, is the same run.
+ */
+interface ReviewMode {
+  /** What every reviewer reads, byte for byte. */
+  message: string;
+  instructions: (role: ReviewRole) => string;
+  chairInstructions: string;
+  chairMessage: (reports: readonly ReviewerReport[], mask: Mask) => string;
+  /** The form a reviewer hands in, and the tools its request's estimate counts. */
+  answer: typeof ReviewAnswer | typeof MissionReviewAnswer;
+  tools: "reviewer" | "mission-reviewer";
+  /** The report the engine keeps of an answer, or why the stage can't use it, in Nivra's words. */
+  normalise: (role: ReviewRole, answer: ReviewAnswer) => { report: ReviewerReport } | { unusable: string; problems: string[] };
+  label: Readonly<Record<ReviewRole | "chair", string>>;
+  noun: Readonly<Record<ReviewRole | "chair", string>>;
+  packet: ReviewReport["packet"];
+  /** The timeline's line when the reviewers start. */
+  reading: string;
+}
+
+const isMission = (packet: ReviewContext["packet"]): packet is MissionReviewPacket => "kind" in packet && packet.kind === "mission";
+
+function planMode(packet: ReviewPacket, context: ReviewContext, task: ReviewTask, mask: Mask): ReviewMode {
+  const message = renderPacket(packet, context.preferences, mask);
+  return {
+    message,
+    instructions: reviewerInstructions,
+    chairInstructions: CHAIR_INSTRUCTIONS,
+    chairMessage: (reports, chairMask) => renderChairMessage(message, reports, chairMask),
+    answer: ReviewAnswer,
+    tools: "reviewer",
+    normalise: (role, answer) => {
+      const kept = normaliseReview(role, answer, packet, context.preferences, mask);
+      return kept ? { report: kept } : { unusable: "it handed in an empty review", problems: [] };
+    },
+    label: ROLE_LABEL,
+    noun: ROLE_NOUN,
+    packet: { textChars: packet.text.length, assumptions: packet.assumptions.length, references: packet.references.length },
+    reading: task.panel === "council" ? `Two reviewers are reading plan v${task.planVersion}` : `One reviewer is reading plan v${task.planVersion}`,
+  };
+}
+
+function missionMode(packet: MissionReviewPacket, context: ReviewContext, task: ReviewTask, mask: Mask): ReviewMode {
+  // The workflow refuses any other panel before a request; this keeps the runtime from ever trying one.
+  if (task.panel !== "council") throw failure("internal", "a mission review needs the council").because("input-refused", "review.review");
+  const message = renderMissionMessage(packet, context.preferences, mask);
+  return {
+    message,
+    instructions: (role) => missionReviewerInstructions(role === "risks" ? "risks" : "architecture"),
+    chairInstructions: MISSION_CHAIR_INSTRUCTIONS,
+    chairMessage: (reports, chairMask) => renderMissionChairMessage(message, reports, chairMask),
+    answer: MissionReviewAnswer,
+    tools: "mission-reviewer",
+    normalise: (role, answer) => {
+      const kept = normaliseMissionReview(role, answer, packet, context.preferences, mask);
+      if (kept.kind === "kept") return { report: kept.report };
+      if (kept.kind === "rejected") return { unusable: rejectedReason(kept.setAside, kept.empty), problems: rejectedProblems(kept.setAside, kept.empty) };
+      return { unusable: "it handed in an empty review", problems: [] };
+    },
+    label: MISSION_LABEL,
+    noun: MISSION_NOUN,
+    packet: { textChars: renderMissionPacket(packet).length, assumptions: 0, references: 0 },
+    reading: `Two reviewers are reading the mission and ${packet.tasks.length} selected ${packet.tasks.length === 1 ? "task" : "tasks"}`,
+  };
+}
 
 export interface ReviewRunOptions {
   runId: string;
@@ -113,11 +209,12 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
   const now = options.now ?? (() => performance.now());
   const started = now();
   const roles: ReviewRole[] = panel === "council" ? ["architecture", "risks"] : ["single"];
-  const packetMessage = renderPacket(context.packet, context.preferences, mask);
-  const instructions = new Map(roles.map((role) => [role, reviewerInstructions(role)] as const));
-  const reviewerAsk = roles.map((role) => ({ inputTokens: estimateRequest(instructions.get(role)!, packetMessage, "reviewer"), ms: requestMs }));
+  const mode = isMission(context.packet) ? missionMode(context.packet, context, task, mask) : planMode(context.packet, context, task, mask);
+  const packetMessage = mode.message;
+  const instructions = new Map(roles.map((role) => [role, mode.instructions(role)] as const));
+  const reviewerAsk = roles.map((role) => ({ inputTokens: estimateRequest(instructions.get(role)!, packetMessage, mode.tools), ms: requestMs }));
   // The chair's room is reserved at its largest: the packet and both reports as large as the engine lets them be.
-  const chairAsk = { inputTokens: estimateRequest(CHAIR_INSTRUCTIONS, renderChairMessage(packetMessage, roles.map(largestReport), (text) => text), "chair"), ms: requestMs };
+  const chairAsk = { inputTokens: estimateRequest(mode.chairInstructions, mode.chairMessage(roles.map(largestReport), (text) => text), "chair"), ms: requestMs };
 
   // A request larger than the model's window is never sent (D23): say which, and how large.
   const window = requestBudget(options.contextLength);
@@ -158,7 +255,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
     preferencesDigest: task.preferencesDigest,
     outcome,
     scope: context.packet.scope,
-    packet: { textChars: context.packet.text.length, assumptions: context.packet.assumptions.length, references: context.packet.references.length },
+    packet: mode.packet,
     request: { runId: options.runId, clientRequestId: options.clientRequestId },
     route: options.route,
     sampling: { temperature: null, topP: null, maxOutputTokens: limits.outputTokensPerRequest, toolChoice: options.policy.forceAnswer ? "forced" : "auto" },
@@ -179,7 +276,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
   const request = async <A>(
     entry: ReviewStage,
     hold: Hold,
-    spec: { role: ReviewRole | "chair"; instructions: string; message: string; tool: string; description: string; schema: typeof ReviewAnswer | typeof SynthesisAnswer; estimated: number },
+    spec: { role: ReviewRole | "chair"; instructions: string; message: string; tool: string; description: string; schema: typeof ReviewAnswer | typeof MissionReviewAnswer | typeof SynthesisAnswer; estimated: number },
   ): Promise<A | null> => {
     const admitted = hold.admit();
     if (!admitted.ok) {
@@ -202,7 +299,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
       },
     });
     const internal = new InternalFailure();
-    const agent = client.agent({ id: `nivra-review-${spec.role}`, name: `Nivra ${ROLE_LABEL[spec.role].toLowerCase()}`, modelId: options.model, instructions: spec.instructions, tools: { [spec.tool]: tool } });
+    const agent = client.agent({ id: `nivra-review-${spec.role}`, name: `Nivra ${mode.label[spec.role].toLowerCase()}`, modelId: options.model, instructions: spec.instructions, tools: { [spec.tool]: tool } });
     const own: StepRecord[] = [];
     try {
       await client.call(agent, spec.message, {
@@ -221,13 +318,13 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
         entry,
         failed.kind === "cancelled"
           ? { status: "failed", kind: "cancelled", reason: "cancelled", message: "Cancelled while its request was out." }
-          : { status: "failed", kind: failed.kind, message: `${ROLE_NOUN[spec.role]} failed: ${failed.message}`.slice(0, 400) },
+          : { status: "failed", kind: failed.kind, message: `${mode.noun[spec.role]} failed: ${failed.message}`.slice(0, 400) },
       );
     }
     for (const step of own) {
       steps.push(step);
       const tokens = step.inputTokens !== null && step.outputTokens !== null ? `${step.inputTokens} in / ${step.outputTokens} out tokens` : "tokens not reported";
-      options.modelCall(`${ROLE_LABEL[spec.role]}: ${tokens}, ${(step.elapsedMs / 1000).toFixed(1)} s`, {
+      options.modelCall(`${mode.label[spec.role]}: ${tokens}, ${(step.elapsedMs / 1000).toFixed(1)} s`, {
         stage: entry.stage,
         role: spec.role,
         model: options.model,
@@ -250,13 +347,13 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
     if (entry.status === "failed") return null;
     if (handedIn === null) {
       const problems = own.flatMap((step) => step.rejectedTools.filter((rejected) => rejected.tool === spec.tool).flatMap((rejected) => rejected.problems));
-      Object.assign(entry, { status: "failed", kind: "malformed", message: `${ROLE_NOUN[spec.role]} couldn't be used: ${unusable(own, problems)}.`, problems: problems.slice(0, 10) });
+      Object.assign(entry, { status: "failed", kind: "malformed", message: `${mode.noun[spec.role]} couldn't be used: ${unusable(own, problems)}.`, problems: problems.slice(0, 10) });
       return null;
     }
     return handedIn as A;
   };
 
-  options.progress(panel === "council" ? `Two reviewers are reading plan v${task.planVersion}` : `One reviewer is reading plan v${task.planVersion}`, {
+  options.progress(mode.reading, {
     stage: "reviewer",
     phase: "started",
     panel,
@@ -274,20 +371,20 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
         message: packetMessage,
         tool: REVIEW_TOOLS.reviewer,
         description: REVIEW_TOOL_DESCRIPTION,
-        schema: ReviewAnswer,
+        schema: mode.answer,
         estimated: reviewerAsk[index]!.inputTokens,
       });
       if (answer) {
-        const kept = normaliseReview(role, answer, context.packet, context.preferences, mask);
-        if (kept) {
-          reports.set(role, kept);
+        const kept = mode.normalise(role, answer);
+        if ("report" in kept) {
+          reports.set(role, kept.report);
           entry.status = "answered";
         } else {
-          Object.assign(entry, { status: "failed", kind: "malformed", message: `${ROLE_NOUN[role]} couldn't be used: it handed in an empty review.` });
+          Object.assign(entry, { status: "failed", kind: "malformed", message: `${mode.noun[role]} couldn't be used: ${kept.unusable}.`, problems: kept.problems });
         }
       }
       options.progress(
-        entry.status === "answered" ? `${ROLE_LABEL[role]}: ${reports.get(role)!.findings.length} ${reports.get(role)!.findings.length === 1 ? "finding" : "findings"}` : `${ROLE_LABEL[role]} didn't finish: ${entry.message ?? entry.status}`,
+        entry.status === "answered" ? `${mode.label[role]}: ${reports.get(role)!.findings.length} ${reports.get(role)!.findings.length === 1 ? "finding" : "findings"}` : `${mode.label[role]} didn't finish: ${entry.message ?? entry.status}`,
         { stage: "reviewer", role, phase: "ended", status: entry.status, kind: entry.kind, findings: reports.get(role)?.findings.length ?? 0 },
       );
       save();
@@ -297,16 +394,16 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
   if (panel === "council") {
     const chairHold = holds[1]![0]!;
     if (roles.every((role) => reports.has(role))) {
-      const chairMessage = renderChairMessage(packetMessage, roles.map((role) => reports.get(role)!), mask);
+      const chairMessage = mode.chairMessage(roles.map((role) => reports.get(role)!), mask);
       options.progress("The chair is reading both reports", { stage: "chair", role: "chair", phase: "started" });
       const answer = await request<SynthesisAnswer>(chairStage, chairHold, {
         role: "chair",
-        instructions: CHAIR_INSTRUCTIONS,
+        instructions: mode.chairInstructions,
         message: chairMessage,
         tool: REVIEW_TOOLS.chair,
         description: SYNTHESIS_TOOL_DESCRIPTION,
         schema: SynthesisAnswer,
-        estimated: estimateRequest(CHAIR_INSTRUCTIONS, chairMessage, "chair"),
+        estimated: estimateRequest(mode.chairInstructions, chairMessage, "chair"),
       });
       if (answer) {
         synthesis = normaliseSynthesis(answer, roles.map((role) => reports.get(role)!), mask);
@@ -340,12 +437,16 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
   return final;
 }
 
-/** The failure a review that didn't complete ends the run with, after its report is saved: Nivra's words, and which stage. */
-export function incompleteFailure(final: ReviewReport): ModelFailure {
+/**
+ * The failure a review that didn't complete ends the run with, after its report is saved: Nivra's words, and which
+ * stage, named as its mode names it.
+ */
+export function incompleteFailure(final: ReviewReport, packet?: ReviewContext["packet"]): ModelFailure {
   const failed = final.stages.find((entry) => entry.status === "failed") ?? final.stages.find((entry) => entry.status === "skipped" && entry.reason !== "single-panel");
   const kind: ModelFailureKind = failed?.kind ?? (failed?.reason === "budget" ? "budget-exhausted" : failed?.reason === "deadline" ? "timeout" : "malformed");
   const kept = final.reviewers.length ? `What ${final.reviewers.length === 1 ? "the other reviewer" : "the reviewers"} found is kept. ` : "";
-  const what = failed?.message ?? `${failed ? ROLE_NOUN[failed.role] : "A stage"} didn't finish.`;
+  const noun = packet && isMission(packet) ? MISSION_NOUN : ROLE_NOUN;
+  const what = failed?.message ?? `${failed ? noun[failed.role] : "A stage"} didn't finish.`;
   const error = new ModelFailure(kind, `This review is incomplete. ${what} ${kept}Start a new review to try again.`.replace(/\s+/g, " ").trim());
   (error as ModelFailure & { stage?: string }).stage = failed?.stage === "chair" ? "chair" : failed?.role ?? "review";
   return error;
