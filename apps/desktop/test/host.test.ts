@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { after, describe, it } from "node:test";
-import { isTerminal, projectFingerprint, REF_FORMAT, taskBriefDigest, type EnvironmentRef, type RunEventsPage, type SecretName, type TaskBrief } from "@nivra/domain";
+import { isTerminal, projectFingerprint, REF_FORMAT, TASK_MODEL, taskBriefDigest, type EnvironmentRef, type RunEventsPage, type SecretName, type TaskBrief } from "@nivra/domain";
 import { Host } from "../src/main/host.ts";
 import { HostStore, NO_SHARING } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
@@ -2587,7 +2587,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const guest = new RealGuest(CHECK_IMAGE.uuid);
     guest.busybox = true;
     const sandbox = await startSandboxStub({ guest });
-    const model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: (_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }) });
+    const model = await startStub({ models: [{ id: TASK_MODEL, context_length: 131_072 }], chat: (_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }) });
     local.push(sandbox, model);
     return { sandbox, model, guest };
   }
@@ -2633,7 +2633,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     ]);
     assert.match(preview.keeps.nebius ?? "", /^Images are retained for 180 days.* Nebius keeps each operation's arguments in its records, so what the worker writes stays there too\.$/);
     // The one model the run may use is named before Start, so starting it approves that model (NIV-35).
-    assert.equal(preview.sends.tokenFactory.at(-1), "All of it to one model, nvidia/nemotron-3-super-120b-a12b. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in.");
+    assert.equal(preview.sends.tokenFactory.at(-1), `All of it to one model, ${TASK_MODEL}. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in.`);
     assert.deepEqual([sandbox.requests.length, model.chats().length], [0, 0], "a preview sends nothing");
     const started = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
     assert.ok(["submitting", "running"].includes(started.status));
@@ -2887,7 +2887,7 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     const sandbox = await startSandboxStub({ guest });
     // The script starts again with each run: its step is how many answers the request already holds.
     const step = (request: StubRequest) => Math.min((request.body?.messages ?? []).filter((message) => (message as { role?: string }).role === "assistant").length, calls.length - 1);
-    const model = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }], chat: (request, index) => toolCall(calls[step(request)]![0], calls[step(request)]![1], { id: `call_${index}` }) });
+    const model = await startStub({ models: [{ id: TASK_MODEL, context_length: 131_072 }], chat: (request, index) => toolCall(calls[step(request)]![0], calls[step(request)]![1], { id: `call_${index}` }) });
     local.push(sandbox, model);
     const parent = mkdtempSync(join(tmpdir(), "nivra apply repos "));
     dirs.push(parent);

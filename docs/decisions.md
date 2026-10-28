@@ -3378,3 +3378,67 @@ neither read nor be judged on.
 - The live checks (L1 a pnpm workspace on Node 22, L2 an npm project on the default Node, L3 an install that fails)
   each need Nate's approval of their own recipe and digest, with `task-live.ts`'s recipe kind v2.
 - Workspace migration 8 and protocol 16 are provisional numbers, taken from main when this merged.
+
+## D50. Nemotron 3.5 Super VL replaces Nemotron 3 Super, and every request's cap is sent as max_completion_tokens (2026-10-28)
+
+**Decision.** Nate's decision on the model switch, option A (28 Oct). It supersedes D46's choice of model; the rest of
+D46 stands.
+- **The model:** `TASK_MODEL` is `nvidia/Nemotron-3.5-Super-VL`, and it heads D22's order of Nemotron models
+  (`PREFERRED_NEMOTRON`), before Nemotron 3.5 Lightning and Nemotron 3 Ultra.
+  - Nemotron 3 Super leaves the order. Token Factory retires it from Serverless on 9 November 2026 and doesn't
+    reroute requests to deprecated models (its model deprecations page). While it is listed, it is still used when no
+    preferred model is, as any NVIDIA model is.
+  - A task run still uses only `TASK_MODEL`. It stops at its model step when the listing doesn't offer it, and its
+    preview names it (D46).
+- **What the listing shows,** in a listing-only check approved by Nate (28 Oct, 22:09 SGT). The key's
+  `GET /v1/models?verbose=true` lists it at the base URL Nivra already calls, with:
+  - context length 1,048,576, bf16, region us-north1;
+  - `tools` and `reasoning` among its features;
+  - no sampling parameters named. Nivra sends none.
+  - No inference request was made.
+- **Its prices** are 0.30 USD per million input tokens and 0.90 USD per million output tokens. Nebius's post of 16
+  October 2026 ("Three new open-weight models from US companies give builders more choice") gives them in USD. The
+  listing gives the same numbers per token, with no unit.
+- **No policy entry yet.** Its tool choice hasn't been checked live, so it runs on D22's default policy: `auto` tool
+  choice in a bounded loop, with no forced answer. That includes the task worker, whose hand-in isn't forced until a
+  check has seen the model honour it. The paid tool-choice check adds its entry, with that check as its evidence.
+- **The cap:** every request through `ModelClient` carries its output cap as `max_completion_tokens`, and no
+  `max_tokens`.
+  - Token Factory documents `max_completion_tokens` as the bound on what a completion generates, reasoning tokens
+    included. Its `max_tokens` is documented without them.
+  - Mastra's router builds the provider with no request hook, and its chat model writes `max_tokens` from
+    `maxOutputTokens`. So `capCompletionTokens` (`tokenfactory.ts`) moves each call's `maxOutputTokens`, a step's own
+    cap included, into the provider options, which the provider writes into the body as they are.
+  - It wraps the model the router builds, the production path. A model a test hands in is left as it is.
+  - `countAttempts` stays outermost, so it sees each call with its `maxOutputTokens` before the cap is moved. Next C's
+    budget journal, which works out each request's bound from it, relies on that order. Whichever PR merges second
+    combines the line as `countAttempts(options.model ? resolved : capCompletionTokens(resolved), slot, options.budget
+    ?? null)`.
+
+**Why.** Nemotron 3 Super is gone from Token Factory on 9 November, and nothing reroutes a request for it. A cap that
+leaves reasoning out doesn't bound what a request generates, and so neither its time nor its cost. And the evidence has
+to show what Nivra actually sends: a direct API probe that accepts a field isn't that.
+
+**Consequences.**
+- **Tests:**
+  - `tokenfactory.test.ts`, through the client's production adapter and a stub server: a call's cap, and a step's own
+    cap set through `prepareStep` as the hand-in sets it, arrive as `max_completion_tokens`, with no `max_tokens`; a
+    call without a cap passes unchanged; the task model heads the preferred order, and Super is no longer preferred.
+  - `task-engine.test.ts`: every request of a real engine's task run carries `max_completion_tokens` 8,000 and no
+    `max_tokens`. The heartbeat test's wait for the run's first request is now bounded: a run that ends first fails it
+    at once.
+  - Task tests list the task model themselves. Explain, chat, research and the coach keep Super in their stub
+    listings, where it keeps its checked policy.
+- **Not shown yet:**
+  - that Token Factory honours `max_completion_tokens` for this model;
+  - how its usage counts reasoning tokens;
+  - how it does with tools.
+  The paid tool-choice check comes first, then a candidate and a live task run, each with its own approved recipe.
+  That reasoning-inclusive usage reaches the budget ledger is Next C's, in the journal of NIV-66's PR 2a.
+- **Money:** until dollar budgets are established, the count-based limits stay, and costs are shown only as labelled
+  estimates (Nate, 28 Oct).
+- **Evidence is credited to its model.** The live scripts (`research-live.ts`, `research-check.ts`,
+  `mission-review-live.ts`) keep the model their recorded runs used until each is next run with a new recipe; none
+  can run on Super after 9 November. Recorded runs and their fixtures name the model they ran on, and
+  `docs/submission.md` keeps its model line until the release's build is chosen.
+- D50 is a provisional number: D48 is PR 36's, and D49 is PR 35's.

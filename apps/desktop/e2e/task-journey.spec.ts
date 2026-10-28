@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { TASK_MODEL } from "@nivra/domain";
 import { CHECK_IMAGE } from "../../engine/src/exec/check.ts";
 import { INSPECT_SCRIPT, READINESS_SCRIPT } from "../../engine/src/environment/scripts.ts";
 import { ENV_PREPARE_SCRIPT } from "../../engine/src/exec/nebius/sandbox.ts";
@@ -133,7 +134,7 @@ test.beforeAll(async ({}, testInfo) => {
     ["submit", { summary: "Defaulted the name to world." }],
   ];
   model = await startStub({
-    models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }],
+    models: [{ id: TASK_MODEL, context_length: 131_072 }],
     chat: (request) => {
       const step = (request.body?.messages ?? []).filter((message) => (message as { role?: string }).role === "tool").length;
       const [tool, input] = calls[Math.min(step, calls.length - 1)]!;

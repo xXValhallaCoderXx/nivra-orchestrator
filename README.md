@@ -66,7 +66,7 @@ reaches your checkout until you approve that exact change.
 
 ## How it uses NVIDIA and Nebius
 
-- **Every model call goes to NVIDIA Nemotron** (Nemotron 3 Super by default, `nvidia/nemotron-3-super-120b-a12b`)
+- **Every model call goes to NVIDIA Nemotron** (Nemotron 3.5 Super VL by default, `nvidia/Nemotron-3.5-Super-VL`)
   **through Nebius Token Factory**, at `https://api.tokenfactory.nebius.com/v1`: explanations, conversations, the
   council, research's assessment, and the task's worker. Every call has a deadline, and so does every run.
 - **Sandbox checks and task runs execute in Nebius Sandboxes**, one operation per step, with state carried from step
@@ -154,8 +154,8 @@ nothing installed, at commit `bbf62893cb699c6994cca9fa7219b66f87f5a30d`. The sam
 *Using another folder* below says, and Nivra treats the sample like any other.
 
 **What your credentials need.**
-- **Check Token Factory and Explain:** a Token Factory API key whose model listing offers an NVIDIA model. Nemotron 3
-  Super (`nvidia/nemotron-3-super-120b-a12b`) is preferred, and a task run uses only it.
+- **Check Token Factory and Explain:** a Token Factory API key whose model listing offers an NVIDIA model. Nemotron
+  3.5 Super VL (`nvidia/Nemotron-3.5-Super-VL`) is preferred, and a task run uses only it.
 - **The sandbox check:** the id of a Nebius project with Sandboxes access. Sandboxes is in beta, and Nebius enables it
   per project on request, on its [Sandboxes page](https://tokenfactory.nebius.com/sandboxes/about). With it, the key can
   start, list and cancel sandboxes in that project. Without it, Nebius turns the key down (HTTP 403), and Nivra says

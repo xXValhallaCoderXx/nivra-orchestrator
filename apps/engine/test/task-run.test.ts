@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
-import { PATCH_SHOWN_BYTES, taskBriefDigest, TaskReport, TaskStopCode, type EnvironmentContext, type TaskContext, type WorkflowId } from "@nivra/domain";
+import { PATCH_SHOWN_BYTES, TASK_MODEL, taskBriefDigest, TaskReport, TaskStopCode, type EnvironmentContext, type TaskContext, type WorkflowId } from "@nivra/domain";
 import { Database } from "../src/db/database.ts";
 import { MIGRATIONS } from "../src/db/migrations.ts";
 import type { ExecutionBackend, ExecutionSession } from "../src/exec/backend.ts";
@@ -295,7 +295,7 @@ describe("what a task run's report says (D39)", () => {
 
 describe("a task run's workflow, in process (D39)", () => {
   const FILES = Object.fromEntries(TASK_FIXTURE.map((file) => [file.path, String(file.bytes)]));
-  const MODEL = "nvidia/nemotron-3-super-120b-a12b";
+  const MODEL = TASK_MODEL;
   type Call = [string, Record<string, unknown>];
 
   async function workflow(options: { platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string>; keep?: (proposal: Proposal) => void } = {}) {

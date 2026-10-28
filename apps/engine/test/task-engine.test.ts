@@ -64,7 +64,7 @@ async function setup(options: { credentials?: boolean; calls?: Call[]; files?: R
   guest.busybox = true;
   const sandbox = await startSandboxStub({ guest });
   const calls = options.calls ?? WORK;
-  const model = await startStub({ ...(options.models ? { models: options.models } : {}), chat: options.chat ?? ((_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` })) });
+  const model = await startStub({ models: options.models ?? [{ id: TASK_MODEL }], chat: options.chat ?? ((_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` })) });
   stubs.push(sandbox, model);
   const root = tempDir("nivra task engine");
   dirs.push(root);
@@ -237,7 +237,12 @@ describe("a task run through a real engine (NIV-7)", () => {
     });
     const shown = ready(await preview(engine, repo));
     const run = await start(engine, repo, shown.snapshot.fingerprint);
-    await waiting;
+    // Bounded: a run that ends before its first model request (at its model step, say) fails here at once, and one that
+    // neither asks nor ends fails at the end's own limit, instead of the test waiting for a request that never comes.
+    const stopped = ended(engine, run.id).then((page) => page.status);
+    stopped.catch(() => undefined);
+    const first = await Promise.race([waiting.then(() => null), stopped]);
+    assert.equal(first, null, `the run ended ${String(first)} before its first model request`);
     // While the first request is held, the engine answers each ping as the supervisor would send it.
     const took: number[] = [];
     for (let n = 0; n < 3; n++) {
@@ -282,8 +287,10 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.deepEqual([done.route?.endpoint, done.cleanup?.unresolved, done.cleanup?.retained?.uploads], ["loopback-test", [], 1]);
     // The one model the preview names, as every request carried it and as the report names it (NIV-35).
     assert.deepEqual([[...new Set(model.chats().map((chat) => chat.body?.model))], done.route?.model, done.worker?.model], [[TASK_MODEL], TASK_MODEL, TASK_MODEL]);
-    // Every request's output cap, as Token Factory received it: the one its time is sized for (NIV-35).
-    assert.deepEqual([...new Set(model.chats().map((chat) => chat.body?.max_tokens))], [TASK_LIMITS.model.outputTokensPerRequest]);
+    // Every request's output cap, as Token Factory received it: the one its time is sized for (NIV-35), sent as
+    // max_completion_tokens, which Token Factory documents as counting reasoning tokens too, and never as max_tokens (D50).
+    const carried = model.chats().map((chat) => [chat.body?.max_completion_tokens, chat.body ? Object.hasOwn(chat.body, "max_tokens") : null]);
+    assert.deepEqual([...new Set(carried.map((cap) => JSON.stringify(cap)))], [JSON.stringify([TASK_LIMITS.model.outputTokensPerRequest, false])]);
     // The proposal, as the person reads it, and as it was kept.
     const proposal = (await engine.client.call("runs.proposal", { runId: run.id }))!;
     assert.deepEqual([proposal.hash, proposal.paths.map((path) => `${path.change} ${path.path} ${path.after?.mode}`), proposal.truncated], [done.proposal?.hash, ["changed greet.sh 100644"], false]);
@@ -342,7 +349,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     assert.equal((await ended(engine, run.id)).status, "failed");
     const shown = await report(engine, run.id);
     assert.deepEqual([shown.outcome, shown.stopped?.code, shown.stopped?.step, shown.route], ["failed", "model", "prepare", null]);
-    assert.equal(shown.stopped?.message, "Token Factory couldn't be reached, or doesn't offer this key nvidia/nemotron-3-super-120b-a12b, the only model task runs use, so the run stopped before anything from your repository was sent. Check the key in Settings, then run the task again.");
+    assert.equal(shown.stopped?.message, `Token Factory couldn't be reached, or doesn't offer this key ${TASK_MODEL}, the only model task runs use, so the run stopped before anything from your repository was sent. Check the key in Settings, then run the task again.`);
     // The listing was the one request Token Factory received: no model was asked anything, and nothing reached Nebius.
     assert.deepEqual([model.requests.map((request) => `${request.method} ${request.path}`), model.chats().length, sandbox.requests.length], [["GET /v1/models"], 0, 0]);
   });
@@ -363,7 +370,7 @@ describe("a task run through a real engine (NIV-7)", () => {
   });
 
   it("takes the model as Token Factory lists it, whatever its case, and sends that id (NIV-35)", async () => {
-    const listed = "NVIDIA/Nemotron-3-Super-120B-A12B";
+    const listed = TASK_MODEL.toUpperCase();
     const { model, engine, repo } = await setup({ models: [{ id: "nvidia/Nemotron-3_5-Lightning" }, { id: listed }] });
     const run = await start(engine, repo, ready(await preview(engine, repo)).snapshot.fingerprint);
     assert.equal((await ended(engine, run.id)).status, "succeeded");
