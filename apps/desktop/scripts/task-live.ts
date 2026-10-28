@@ -3,19 +3,31 @@
 // real repository task worked by Nemotron through Token Factory, its checks run in Nebius Sandboxes, its change approved
 // and accepted by the person. Never part of `pnpm verify`. Run from WSL, in apps/desktop:
 //
-//   node scripts/task-live.ts --freeze               the release candidate's unpacked Linux build, copied to a folder of
-//                                                    its own with its hashes; the checkout and its brief checked
-//   node scripts/task-live.ts --plan                 prints the recipe and its digest, for approval; no network
-//   node scripts/task-live.ts --rehearse             the journey on the frozen build with fake keys, to each preview
-//   node scripts/task-live.ts --live --approved D    the approved run: one preparation and one task run, then the
-//                                                    person's decisions; its log is printed
-//   node scripts/task-live.ts --cleanup              opens the last live profile, removes its keys, checks it
+//   node scripts/task-live.ts --check                   what a plan binds but the build, from the task file and
+//                                                       its checkout; no network, nothing written, no --state
+//   node scripts/task-live.ts --state S --freeze        the release candidate's unpacked Linux build, copied to a
+//                                                       folder of its own with its hashes; the checkout and its
+//                                                       brief checked
+//   node scripts/task-live.ts --state S --plan          prints the recipe and its digest, for approval; no network
+//   node scripts/task-live.ts --state S --rehearse      the journey on the frozen build with fake keys, to each
+//                                                       preview
+//   node scripts/task-live.ts --state S --live --approved D
+//                                                       the approved run: one preparation and one task run, then
+//                                                       the person's decisions; its log is printed
+//   node scripts/task-live.ts --state S --cleanup       opens the last live profile, removes its keys, checks it
+//
+// --state is required by every mode that writes, which is every mode but --check: the frozen build, the recipes, the
+// rehearsals and the runs go there (NIV-55). It can't be candidate 3's frozen take, ~/nivra-acceptance/task-live, or
+// inside it. Approvals are claimed in one folder for every state folder, ~/nivra-acceptance/claims/task-live, so one
+// approval is one run wherever it runs.
 //
 // The task is the brief file's (default ~/nivra-work/she65/task-live.json, outside the repository): the repository and
 // its baseline, the person's choices for its environment (none: {}), and the brief with its cases, baseline selections
-// and frozen files. Nothing
-// here names a repository. The keys are pasted into Settings by the person: this script never reads or prints them.
-// Nothing is sent before the approval is claimed, and then only by pressing Prepare and Start, once each.
+// and frozen files. A file may instead expect its preparation to stop (`expect.preparation`, a stop's code and step,
+// such as an install that fails), with no brief: the recipe names the stop, the run passes only on exactly that stop,
+// and no task is created. Nothing here names a repository. The keys are pasted into Settings by the person: this
+// script never reads or prints them. Nothing is sent before the approval is claimed, and then only by pressing Prepare
+// and Start, once each.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -23,10 +35,11 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { EnvironmentChoices, TASK_MODEL, TaskBrief, taskBriefDigest, type PreparedEnvironmentV2 } from "@nivra/domain";
+import { EnvironmentChoices, EnvironmentStopCode, TASK_MODEL, TaskBrief, taskBriefDigest, type PreparedEnvironmentV2 } from "@nivra/domain";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { claimApproval, claimOn, isDigest } from "../../engine/scripts/research-check/claim.ts";
 import { environmentResolutionOf } from "../../engine/src/environment/preview.ts";
+import { ENVIRONMENT_STOP_MESSAGES } from "../../engine/src/environment/report.ts";
 import { createLocalBackend } from "../../engine/src/exec/local.ts";
 import { RETENTION } from "../../engine/src/exec/nebius/sandbox.ts";
 import { compressSnapshot } from "../../engine/src/exec/nebius/session.ts";
@@ -35,13 +48,48 @@ import { takeSnapshot } from "../../engine/src/exec/snapshot.ts";
 import { runLimitsFor } from "../../engine/src/task/limits.ts";
 import type { BriefFields, ProjectView, SettingsView, TaskRunPreview } from "../src/shared/ipc.ts";
 import { addProject, attemptOf, createTask, environmentOf, followRun, keysSaved, prepareOnce, previewEnvironment, previewRun, startOnce, taskOf } from "./task-journey.ts";
-import { buildChanges, buildHashes, previewProblems, type BuildHashes } from "./task-live-checks.ts";
+import { buildChanges, buildHashes, liveFolders, previewProblems, stopProblems, type BuildHashes, type ExpectedStop } from "./task-live-checks.ts";
 import { RELEASE_HOME_STATE, releaseHomeChange } from "./test-homes.ts";
 
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = join(desktop, "..", "..");
-const STATE = join(homedir(), "nivra-acceptance", "task-live");
-const CLAIMS = join(homedir(), "nivra-acceptance", "claims", "task-live");
+
+// ---- the command line ---------------------------------------------------------------------------------------------
+
+const { values } = parseArgs({
+  options: {
+    freeze: { type: "boolean", default: false },
+    plan: { type: "boolean", default: false },
+    rehearse: { type: "boolean", default: false },
+    live: { type: "boolean", default: false },
+    cleanup: { type: "boolean", default: false },
+    check: { type: "boolean", default: false },
+    approved: { type: "string" },
+    state: { type: "string" },
+    task: { type: "string", default: join(homedir(), "nivra-work", "she65", "task-live.json") },
+  },
+  allowPositionals: false,
+});
+const modes = (["check", "freeze", "plan", "rehearse", "live", "cleanup"] as const).filter((mode) => values[mode]);
+if (modes.length !== 1) {
+  console.error("Choose one of --check, or with --state <folder> one of --freeze, --plan, --rehearse, --live --approved <digest> or --cleanup.");
+  process.exit(2);
+}
+// --check reads the task and its checkout and writes nothing, so it takes no state folder; every other mode writes there.
+let folders: ReturnType<typeof liveFolders> | null = null;
+if (!values.check) {
+  try {
+    folders = liveFolders(values.state, homedir(), repository);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(2);
+  }
+} else if (values.state !== undefined) {
+  console.error("--check reads the task and its checkout and writes nothing, so it takes no --state.");
+  process.exit(2);
+}
+const STATE = folders?.state ?? "";
+const CLAIMS = folders?.claims ?? "";
 
 const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 const run = (exe: string, args: string[], cwd: string): string => {
@@ -60,20 +108,34 @@ export interface LiveTask {
   /** The person's choices for the project's own recipe (NIV-55): none is {}, the project's declarations as they are. */
   environment: EnvironmentChoices;
   task: { title: string };
-  brief: TaskBrief;
+  /** The brief of the task the run works; none for a run whose preparation is expected to stop. */
+  brief?: TaskBrief;
   /** What the person checks in the proposal before deciding, beyond what the tests can show; in the recipe. */
   review?: string[];
+  /** The stop the preparation is expected to end with (NIV-55), such as an install that fails; then no task is created. */
+  expect?: { preparation: ExpectedStop };
 }
+
+/** A task file's task run: its brief, which a run that expects its preparation to stop doesn't have. */
+const briefOf = (task: LiveTask): TaskBrief => {
+  if (!task.brief) throw new Error("This run expects its preparation to stop, so it has no task to brief.");
+  return task.brief;
+};
 
 function readTask(path: string): LiveTask {
   const given = JSON.parse(readFileSync(path, "utf8")) as LiveTask;
-  const brief = TaskBrief.safeParse(given.brief);
-  if (!brief.success) throw new Error(`The brief in ${path} isn't one Nivra takes: ${brief.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+  if (given.expect !== undefined) {
+    const stop = given.expect?.preparation;
+    if (!stop || !EnvironmentStopCode.safeParse(stop.code).success || typeof stop.step !== "string" || stop.step.length === 0 || stop.step.length > 64) throw new Error(`${path}'s expect names the stop its preparation should end with, such as { "preparation": { "code": "install", "step": "install" } }.`);
+    if (given.brief !== undefined || given.review !== undefined) throw new Error(`${path} expects its preparation to stop, so no task is created: it takes no brief and no review points.`);
+  }
+  const brief = given.expect ? null : TaskBrief.safeParse(given.brief);
+  if (brief && !brief.success) throw new Error(`The brief in ${path} isn't one Nivra takes: ${brief.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
   if (!/^[0-9a-f]{40}$/.test(given.baseline)) throw new Error(`${path} names no baseline commit.`);
   if (given.review !== undefined && !(Array.isArray(given.review) && given.review.length <= 10 && given.review.every((point) => typeof point === "string" && point.length > 0 && point.length <= 600))) throw new Error(`${path}'s review is a list of at most 10 points, each a line of text.`);
   const choices = EnvironmentChoices.safeParse(given.environment ?? {});
   if (!choices.success) throw new Error(`${path}'s environment is the person's choices for the project's own recipe, such as {} or { "runtime": "24.21.0" }; packages chosen as D41's filters are no longer taken.`);
-  return { ...given, environment: choices.data, brief: brief.data };
+  return { ...given, environment: choices.data, ...(brief ? { brief: brief.data } : {}) };
 }
 
 /** The checkout at its baseline, clean, outside this repository. */
@@ -97,10 +159,10 @@ export interface Frozen extends BuildHashes {
   buildInfoSha256: string;
 }
 
-const frozenPath = join(STATE, "freeze.json");
+const frozenPath = () => join(STATE, "freeze.json");
 function readFrozen(): Frozen {
-  if (!existsSync(frozenPath)) throw new Error("Nothing is frozen yet: run this script with --freeze.");
-  return JSON.parse(readFileSync(frozenPath, "utf8")) as Frozen;
+  if (!existsSync(frozenPath())) throw new Error(`Nothing is frozen in ${STATE} yet: run this script with --freeze and this --state.`);
+  return JSON.parse(readFileSync(frozenPath(), "utf8")) as Frozen;
 }
 
 /** The frozen build, every file hashed again (`buildHashes`), as it was frozen. */
@@ -139,7 +201,7 @@ function freeze(): void {
   const original = buildHashes(join(release, "linux-unpacked"));
   if (JSON.stringify(hashes) !== JSON.stringify(original)) throw new Error("The copy differs from the build it was copied from.");
   const frozen: Frozen = { stamp: at, revision, version: info.version, folder, ...hashes, debName: deb.name, debSha256: deb.sha256, buildInfoSha256: sha256(join(release, "build-info.json")) };
-  writeFileSync(frozenPath, `${JSON.stringify(frozen, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(frozenPath(), `${JSON.stringify(frozen, null, 2)}\n`, { mode: 0o600 });
   console.log(`Frozen ${info.version} at ${revision.slice(0, 7)} in ${folder}: nivra ${hashes.nivraSha256.slice(0, 12)}, app.asar ${hashes.appAsarSha256.slice(0, 12)}, runtime ${hashes.runtimeContentHash}.`);
 }
 
@@ -157,7 +219,7 @@ async function bound(task: LiveTask) {
     if (environment.status === "refused") throw new Error(`The project's environment can't be prepared (${environment.code}): ${environment.message}`);
     if (environment.status === "needs-choice") throw new Error(`The project's environment needs a choice in the task's file: ${environment.choices.map((choice) => choice.message).join(" ")}`);
     const { recipe } = environment;
-    const frozen = (task.brief.frozen ?? []).map((path) => {
+    const frozen = (task.brief?.frozen ?? []).map((path) => {
       const file = snapshot.files.find((entry) => entry.path === path);
       if (!file) throw new Error(`The brief freezes ${path}, which the baseline doesn't hold.`);
       return { path, sha256: file.sha256 };
@@ -178,6 +240,7 @@ async function bound(task: LiveTask) {
         hosts: recipe.network.hosts,
         leftOut: environment.leftOut,
         limits: recipe.limits,
+        warnings: environment.warnings.map((warning) => `${warning.code}: ${warning.message}`),
       },
       frozen,
     };
@@ -189,15 +252,46 @@ async function bound(task: LiveTask) {
 /** What one approval covers, as data: its digest binds every field. `run` numbers the approvals of one recipe. */
 export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
   const shown = await bound(task);
-  const { brief } = task;
+  const expected = task.expect?.preparation ?? null;
   return {
-    kind: "nivra.task-live.v2",
+    kind: "nivra.task-live.v3",
     run,
     route: "the frozen Linux build, unpacked, with a profile and an engine home of its own",
     revision: frozen.revision,
     build: { version: frozen.version, nivraSha256: frozen.nivraSha256, appAsarSha256: frozen.appAsarSha256, runtimeContentHash: frozen.runtimeContentHash, runtimeSha256: frozen.runtimeSha256, treeSha256: frozen.treeSha256, treeFiles: frozen.treeFiles, debSha256: frozen.debSha256 },
     repository: { path: task.repository, baseline: task.baseline, ...shown.snapshot },
     environment: { choices: task.environment, ...shown.environment },
+    ...(expected ? expectedStopRecipe(expected) : await taskRecipe(task, shown)),
+  };
+}
+
+/** A preparation expected to stop (NIV-55): the stop, by code and step, and only the preparation's own steps and requests. */
+function expectedStopRecipe(expected: ExpectedStop) {
+  return {
+    expect: { preparation: { code: expected.code, step: expected.step, words: ENVIRONMENT_STOP_MESSAGES[expected.code] } },
+    task: null,
+    limits: null,
+    model: null,
+    steps: [
+      "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
+      "the script adds the repository as a project, and allows its uploads through their own dialog",
+      `the script previews the environment, the project's own recipe, and checks its fingerprint is the one above, claims the approval, and presses Prepare once; the run passes only if the preparation stops at ${expected.code} (step ${expected.step}), in Nivra's words for that stop${expected.code === "install" ? ", with the end of the install's log and Nivra's guidance kept" : ""}, and keeps no environment. Any other ending, a success included, is a failure`,
+      "no task is created or started",
+      "the script removes the keys through Settings' own calls and checks they are gone, closes the app, and checks that ~/.nivra and ~/.nivra-dev are unchanged",
+    ],
+    requests: ["Nebius: the image listing; an import of the image if the project has none; one inspect of it with networking off; one upload of the setup files; one preparation with networking on, and a readiness check with networking off only if the install got that far"],
+    keeps: { nebius: `${RETENTION} Nebius keeps each operation's arguments in its records.`, tokenFactory: "Nothing is sent to Token Factory." },
+    review: [] as string[],
+    never: ["a second Prepare", "a task created or started", "a retry or a retake", "a push, a PR or a ticket closed", "any command run on this machine against the repository"],
+    failure: "Whatever the preparation gives is recorded as it is; only the expected stop passes. No retake under this approval; another run needs another approval.",
+  };
+}
+
+/** A preparation, then one task run worked by the model, as NIV-35's live run is. */
+async function taskRecipe(task: LiveTask, shown: Awaited<ReturnType<typeof bound>>) {
+  const brief = briefOf(task);
+  return {
+    expect: null,
     task: { title: task.task.title, briefDigest: await taskBriefDigest(brief), cases: brief.acceptanceCases.map((given) => given.name), checks: brief.checks, baseline: (brief.baseline ?? []).map((given) => given.name), frozen: shown.frozen },
     limits: runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0),
     model: {
@@ -236,20 +330,29 @@ async function nextRecipe(frozen: Frozen, task: LiveTask) {
 
 function recipeText(recipe: Awaited<ReturnType<typeof recipeOf>>, digest: string): string {
   return [
-    `NIV-35's live run on Linux, run ${recipe.run} of this recipe.`,
+    `${recipe.expect ? "A live preparation expected to stop" : "A live task run"} on Linux, run ${recipe.run} of this recipe.`,
     "",
     `Revision ${recipe.revision}; Nivra ${recipe.build.version}: nivra ${recipe.build.nivraSha256}, app.asar ${recipe.build.appAsarSha256}, runtime ${recipe.build.runtimeContentHash} (files ${recipe.build.runtimeSha256}), every file of the build ${recipe.build.treeSha256} (${recipe.build.treeFiles}), deb ${recipe.build.debSha256}`,
     `Route: ${recipe.route}`,
     `Repository: ${recipe.repository.path} at ${recipe.repository.baseline}; ${recipe.repository.files} files, ${recipe.repository.sentBytes} bytes compressed; left out: ${recipe.repository.leftOut.join(", ") || "none"}; snapshot ${recipe.repository.fingerprint}`,
     `Environment: the project's own recipe ${recipe.environment.recipeDigest}, with ${JSON.stringify(recipe.environment.choices)}: ${recipe.environment.image}; ${recipe.environment.bootstrap.join(", ") || "nothing to bootstrap"}; ${recipe.environment.install}${Object.keys(recipe.environment.options).length ? ` with ${JSON.stringify(recipe.environment.options)}` : ""}; builds: ${recipe.environment.builds}; ${recipe.environment.files} setup files (${recipe.environment.configuration}), ${recipe.environment.sentBytes} bytes; never sent: ${recipe.environment.leftOut.join(", ") || "nothing"}; preview ${recipe.environment.fingerprint}`,
     `  Networking on for the preparation only, to ${recipe.environment.hosts.join(", ")}; every check and task run offline.`,
-    `Task "${recipe.task.title}", brief ${recipe.task.briefDigest}:`,
-    ...recipe.task.cases.map((name, index) => `  case ${index + 1}: ${name}`),
-    ...recipe.task.checks.map((check, index) => `  check ${index + 1}: ${check}`),
-    ...recipe.task.baseline.map((name, index) => `  baseline ${index + 1}: ${name}`),
-    ...recipe.task.frozen.map((file) => `  frozen: ${file.sha256}  ${file.path}`),
-    `Limits: ${JSON.stringify(recipe.limits)}; preparation ${recipe.environment.limits.importSeconds} s to import, ${recipe.environment.limits.prepareSeconds} s to install, ${recipe.environment.limits.probeSeconds} s for each check before and after`,
-    `Model: ${recipe.model.required} only. ${recipe.model.rule}`,
+    ...(recipe.environment.warnings.length ? ["  The resolution's warnings:", ...recipe.environment.warnings.map((warning) => `    ${warning}`)] : ["  The resolution gave no warnings."]),
+    ...(recipe.expect
+      ? [
+          `Expected: the preparation stops at ${recipe.expect.preparation.code} (step ${recipe.expect.preparation.step}), in Nivra's words "${recipe.expect.preparation.words}"${recipe.expect.preparation.code === "install" ? ", with the end of the install's log and Nivra's guidance kept" : ""}, and keeps no environment. No task is created. Any other ending, a success included, fails this run.`,
+          `Limits: preparation ${recipe.environment.limits.importSeconds} s to import, ${recipe.environment.limits.prepareSeconds} s to install, ${recipe.environment.limits.probeSeconds} s for each check before and after`,
+          "Model: none; no task is run.",
+        ]
+      : [
+          `Task "${recipe.task.title}", brief ${recipe.task.briefDigest}:`,
+          ...recipe.task.cases.map((name, index) => `  case ${index + 1}: ${name}`),
+          ...recipe.task.checks.map((check, index) => `  check ${index + 1}: ${check}`),
+          ...recipe.task.baseline.map((name, index) => `  baseline ${index + 1}: ${name}`),
+          ...recipe.task.frozen.map((file) => `  frozen: ${file.sha256}  ${file.path}`),
+          `Limits: ${JSON.stringify(recipe.limits)}; preparation ${recipe.environment.limits.importSeconds} s to import, ${recipe.environment.limits.prepareSeconds} s to install, ${recipe.environment.limits.probeSeconds} s for each check before and after`,
+          `Model: ${recipe.model.required} only. ${recipe.model.rule}`,
+        ]),
     "Steps:",
     ...recipe.steps.map((step) => `  - ${step}`),
     ...(recipe.review.length ? ["Before deciding, check in the proposal (what its tests can't show):", ...recipe.review.map((point) => `  - ${point}`)] : []),
@@ -261,6 +364,33 @@ function recipeText(recipe: Awaited<ReturnType<typeof recipeOf>>, digest: string
     recipe.failure,
     "",
     `Digest: ${digest}`,
+  ].join("\n");
+}
+
+/**
+ * What --check prints (NIV-55): everything a plan binds that isn't the build, worked out from the task file and its
+ * checkout with no network, so the task and its environment can be read before a build is frozen. Nothing is written.
+ */
+async function checkText(task: LiveTask): Promise<string> {
+  const shown = await bound(task);
+  const brief = task.brief ?? null;
+  return [
+    `Checked offline, with no build bound: ${task.repository} at ${task.baseline}; ${shown.snapshot.files} files, ${shown.snapshot.sentBytes} bytes compressed; left out: ${shown.snapshot.leftOut.join(", ") || "none"}; snapshot ${shown.snapshot.fingerprint}`,
+    `Environment: the project's own recipe ${shown.environment.recipeDigest}, with ${JSON.stringify(task.environment)}: ${shown.environment.image}; ${shown.environment.bootstrap.join(", ") || "nothing to bootstrap"}; ${shown.environment.install}; builds: ${shown.environment.builds}; ${shown.environment.files} setup files (${shown.environment.configuration}), ${shown.environment.sentBytes} bytes; preview ${shown.environment.fingerprint}; hosts ${shown.environment.hosts.join(", ")}`,
+    ...(shown.environment.warnings.length ? ["  The resolution's warnings:", ...shown.environment.warnings.map((warning) => `    ${warning}`)] : ["  The resolution gave no warnings."]),
+    ...(task.expect
+      ? [`Expected: the preparation stops at ${task.expect.preparation.code} (step ${task.expect.preparation.step}), in Nivra's words "${ENVIRONMENT_STOP_MESSAGES[task.expect.preparation.code]}"; no task is created.`]
+      : brief
+        ? [
+            `Task "${task.task.title}", brief ${await taskBriefDigest(brief)}:`,
+            ...brief.acceptanceCases.map((given, index) => `  case ${index + 1}: ${given.name}: ${given.command}`),
+            ...brief.checks.map((check, index) => `  check ${index + 1}: ${check}`),
+            ...(brief.baseline ?? []).map((given, index) => `  baseline ${index + 1}: ${given.name}: ${given.command}`),
+            ...shown.frozen.map((file) => `  frozen: ${file.sha256}  ${file.path}`),
+            ...(task.review ?? []).map((point) => `  review: ${point}`),
+          ]
+        : []),
+    "No build is bound yet: --plan, after --freeze, adds the frozen build and prints the digest to approve. Nothing was written or sent.",
   ].join("\n");
 }
 
@@ -304,10 +434,11 @@ async function removeKeys(page: Page): Promise<void> {
   if (settings.nebiusKey !== "none" || settings.nebiusProjectId !== "none") throw new Error("A key is still saved in the profile: remove it in Settings.");
 }
 
-const fieldsOf = (task: LiveTask): BriefFields => ({ ...task.brief, assumptions: [] });
+const fieldsOf = (task: LiveTask): BriefFields => ({ ...briefOf(task), assumptions: [] });
 
 /** Why the run the window would start isn't the recipe's (`previewProblems`), read from the app as it stands. */
 async function runPreviewProblems(page: Page, recipe: Awaited<ReturnType<typeof recipeOf>>, ids: { taskId: string; projectId: string }, prepared: PreparedEnvironmentV2 | null, shownExpected: string): Promise<string[]> {
+  if (recipe.expect) return ["the recipe expects its preparation to stop, so it has no task run"];
   const view = await taskOf(page, ids.taskId);
   const project = (await call<ProjectView[]>(page, "window.nivra.listProjects()")).find((one) => one.id === ids.projectId);
   if (!project) return ["the project isn't in the app"];
@@ -340,6 +471,12 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
     if (shown.fingerprint !== recipe.environment.fingerprint) throw new Error(`The environment's preview is ${shown.fingerprint}, not the recipe's ${recipe.environment.fingerprint}.`);
     log(`Environment preview: ${shown.recipe.configuration.files.length} setup files, ${shown.sentBytes} bytes, ${[shown.recipe.install.tool, ...shown.recipe.install.args].join(" ")} on ${shown.recipe.image.tag}; the recipe's fingerprint.`);
     await shot(page, folder, "1-environment-preview.png", log);
+    if (task.expect) {
+      log(`The recipe expects the preparation to stop at ${task.expect.preparation.code}: no task is created, so the rehearsal ends here.`);
+      writeFileSync(join(folder, "rehearsal.json"), `${JSON.stringify({ recipe: digest, environment: shown }, null, 2)}\n`, { mode: 0o600 });
+      await removeKeys(page);
+      return finishRehearsal();
+    }
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
     log(`Run preview: ${run.baseline}; frozen ${run.frozen.length}; ${run.limits.slice(0, 160)}`);
@@ -354,9 +491,13 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
   } finally {
     await app.close();
   }
-  const after = homesAfter(homes);
-  for (const line of after.lines) log(line);
-  return after.unchanged ? 0 : 1;
+  return finishRehearsal();
+
+  function finishRehearsal(): number {
+    const after = homesAfter(homes);
+    for (const line of after.lines) log(line);
+    return after.unchanged ? 0 : 1;
+  }
 }
 
 /**
@@ -393,6 +534,16 @@ async function live(frozen: Frozen, task: LiveTask, approved: string): Promise<n
     log(`Approval ${digest.slice(0, 12)} claimed. Pressing Prepare, once.`);
     const environment = await prepareOnce(page, projectId, 30 * 60_000, log);
     save("environment.json", environment);
+    if (task.expect) {
+      const problems = stopProblems(task.expect.preparation, environment);
+      const stopped = environment.preparation?.report?.stopped ?? null;
+      log(`The preparation ended ${environment.preparation?.status ?? "unknown"}${stopped ? `, stopped at ${stopped.code} (step ${stopped.step ?? "none"}): ${stopped.message}${stopped.detail ? ` ${stopped.detail}` : ""}` : ""}.`);
+      save("expected-stop.json", { expected: task.expect.preparation, problems, stopped, install: environment.preparation?.report?.install ?? null });
+      log(problems.length ? `It isn't the expected stop: ${problems.join("; ")}.` : `It is the expected stop, ${task.expect.preparation.code} at ${task.expect.preparation.step}: Nivra's words, the install's log and its guidance kept, and no environment kept. No task is created.`);
+      await shot(page, folder, "1-environment-stopped.png", log);
+      return finish(problems.length ? 1 : 0);
+    }
+    if (recipe.expect) throw new Error("The recipe expects its preparation to stop, but its task file doesn't. Nothing more is started.");
     if (!environment.prepared || environment.preparation?.status !== "answered") {
       log(`The preparation ended ${environment.preparation?.status ?? "unknown"}: ${environment.preparation?.report?.stopped?.message ?? environment.preparation?.note ?? ""}. No task run is started under this approval.`);
       return finish(1);
@@ -465,24 +616,13 @@ async function cleanup(frozen: Frozen): Promise<number> {
   return 0;
 }
 
-// ---- the command line ---------------------------------------------------------------------------------------------
+// ---- the run ------------------------------------------------------------------------------------------------------
 
-const { values } = parseArgs({
-  options: {
-    freeze: { type: "boolean", default: false },
-    plan: { type: "boolean", default: false },
-    rehearse: { type: "boolean", default: false },
-    live: { type: "boolean", default: false },
-    cleanup: { type: "boolean", default: false },
-    approved: { type: "string" },
-    task: { type: "string", default: join(homedir(), "nivra-work", "she65", "task-live.json") },
-  },
-  allowPositionals: false,
-});
-const modes = (["freeze", "plan", "rehearse", "live", "cleanup"] as const).filter((mode) => values[mode]);
-if (modes.length !== 1) {
-  console.error("Choose one of --freeze, --plan, --rehearse, --live --approved <digest> or --cleanup.");
-  process.exit(2);
+if (values.check) {
+  const task = readTask(values.task!);
+  checkCheckout(task);
+  console.log(await checkText(task));
+  process.exit(0);
 }
 mkdirSync(STATE, { recursive: true, mode: 0o700 });
 if (values.cleanup) {

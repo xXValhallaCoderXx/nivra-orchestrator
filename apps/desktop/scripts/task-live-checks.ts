@@ -1,11 +1,13 @@
 // What task-live.ts checks before it trusts a frozen build or presses Start (NIV-35), apart from its command line so
-// tests can run them: the build's files hashed again, never taken from its manifest, and a run's preview compared field
-// by field with what the recipe approved.
+// tests can run them: the folders a run may write, the build's files hashed again (never taken from its manifest), a
+// run's preview compared field by field with what the recipe approved, and a preparation's ending against the stop a
+// recipe expects (NIV-55).
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { TASK_MODEL, type PreparedEnvironmentV2 } from "@nivra/domain";
-import type { TaskRunPreview } from "../src/shared/ipc.ts";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { TASK_MODEL, type EnvironmentStopCode, type PreparedEnvironmentV2 } from "@nivra/domain";
+import { ENVIRONMENT_STOP_MESSAGES } from "../../engine/src/environment/report.ts";
+import type { EnvironmentView, TaskRunPreview } from "../src/shared/ipc.ts";
 import { environmentRefOf } from "../src/main/host.ts";
 import { taskRunFingerprint } from "../src/main/tasks.ts";
 import { filesIn, hashRuntime } from "./runtime-files.ts";
@@ -100,5 +102,66 @@ export function previewProblems(input: {
   if (prepared === null ? structured.environment !== null : structured.environment?.image !== prepared.verified.images.prepared || structured.environment.verified !== prepared.verifiedDigest) problems.push("the run doesn't start from the environment just prepared");
   if (structured.environment && structured.environment.configuration !== approved.configuration) problems.push("the environment's setup files aren't the approved ones");
   if (!structured.sends.tokenFactory.some((line) => line.includes(TASK_MODEL))) problems.push(`the app's preview doesn't name ${TASK_MODEL}, the one model the recipe allows`);
+  return problems;
+}
+
+// ---- the folders a run writes (NIV-55) ----------------------------------------------------------------------------
+
+/** A path with its links followed as far as it exists, so a link can't lead into a folder it mustn't. */
+const real = (path: string) => {
+  let existing = path;
+  while (!existsSync(existing) && resolve(existing, "..") !== existing) existing = resolve(existing, "..");
+  return join(realpathSync.native(existing), relative(existing, path));
+};
+const within = (path: string, root: string) => {
+  const rel = relative(real(root), real(path));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+
+/**
+ * Where a live run keeps its state (its frozen build, recipes, rehearsals and runs), given with --state and required
+ * for every mode, since each writes there; and where its approvals are claimed, one folder for every state folder, so
+ * an approval claimed under one can't run again under another. The state folder may be neither candidate 3's frozen
+ * take, ~/nivra-acceptance/task-live, nor anything inside it, the claims or this repository.
+ */
+export function liveFolders(given: string | undefined, home: string, repository: string): { state: string; claims: string } {
+  const claims = join(home, "nivra-acceptance", "claims", "task-live");
+  const instead = join(home, "nivra-acceptance", "niv55-live");
+  if (!given) throw new Error(`--state <folder> is required: the folder this run's frozen build, recipes and evidence go to, such as ${instead}.`);
+  const state = resolve(given);
+  const take = join(home, "nivra-acceptance", "task-live");
+  if (within(state, take) || within(take, state)) throw new Error(`${state} would write into candidate 3's frozen take, ${take}, which nothing may change. Give a state folder of its own, such as ${instead}.`);
+  if (within(state, join(home, "nivra-acceptance", "claims")) || within(claims, state)) throw new Error(`${state} would hold or sit in the approvals' claims, ${claims}, which only claiming writes. Give a state folder of its own, such as ${instead}.`);
+  if (within(state, repository) || within(repository, state)) throw new Error(`${state} would put a run's evidence in Nivra's own checkout. Give a state folder outside it, such as ${instead}.`);
+  return { state, claims };
+}
+
+// ---- a preparation expected to stop (NIV-55) ---------------------------------------------------------------------
+
+/** The stop a recipe expects a preparation to end with, by its code and step: named in the recipe, so its digest covers it. */
+export interface ExpectedStop {
+  code: EnvironmentStopCode;
+  step: string;
+}
+
+/**
+ * Why a preparation's ending isn't exactly the stop the recipe expected; none when it is. Only that stop passes: its
+ * code and step, Nivra's words for the code, and no environment kept; an install's stop also keeps the end of its log
+ * and Nivra's guidance for what to change. Any other ending, a success included, is a failure.
+ */
+export function stopProblems(expected: ExpectedStop, view: Pick<EnvironmentView, "prepared" | "preparation">): string[] {
+  const report = view.preparation?.report ?? null;
+  const problems: string[] = [];
+  if (view.prepared !== null || report?.environment || report?.prepared) problems.push("an environment was kept");
+  if (report === null) return [...problems, `the preparation ended ${view.preparation?.status ?? "without starting"}, with no report`];
+  if (report.outcome === "prepared") problems.push("the preparation succeeded");
+  const stopped = report.stopped;
+  if (!stopped) return [...problems, `the preparation ended ${report.outcome} without a stop`];
+  if (stopped.code !== expected.code || stopped.step !== expected.step) problems.push(`it stopped at ${stopped.code} (step ${stopped.step ?? "none"}), not the expected ${expected.code} (step ${expected.step})`);
+  if (stopped.message !== ENVIRONMENT_STOP_MESSAGES[expected.code]) problems.push(`its words aren't Nivra's for the ${expected.code} stop`);
+  if (expected.code === "install") {
+    if (!report.install?.logTail) problems.push("the end of the install's log wasn't kept");
+    if (!stopped.detail) problems.push("it gave no guidance for what to change");
+  }
   return problems;
 }

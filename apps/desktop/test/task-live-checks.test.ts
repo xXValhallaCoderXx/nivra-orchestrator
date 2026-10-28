@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -7,7 +7,10 @@ import { environmentRefOf } from "../src/main/host.ts";
 import { taskRunFingerprint } from "../src/main/tasks.ts";
 import { preparedOf } from "./fixtures/environment-recipe.ts";
 import { hashRuntime } from "../scripts/runtime-files.ts";
-import { buildChanges, buildHashes, previewProblems, type ApprovedRun } from "../scripts/task-live-checks.ts";
+import { claimApproval, claimOn } from "../../engine/scripts/research-check/claim.ts";
+import { ENVIRONMENT_STOP_MESSAGES } from "../../engine/src/environment/report.ts";
+import type { EnvironmentView } from "../src/shared/ipc.ts";
+import { buildChanges, buildHashes, liveFolders, previewProblems, stopProblems, type ApprovedRun, type ExpectedStop } from "../scripts/task-live-checks.ts";
 
 /**
  * What the live run's script checks before it trusts a frozen build or presses Start (NIV-35): every file of the build
@@ -113,3 +116,64 @@ describe("the live run's preview, before Start (NIV-35)", () => {
     assert.deepEqual(problems(hostExpected({}), structured({ sends: { tokenFactory: ["The brief."], nebius: ["The commit's files."] } })), ["the app's preview doesn't name nvidia/nemotron-3-super-120b-a12b, the one model the recipe allows"]);
   });
 });
+
+describe("the folders a live run writes (NIV-55)", () => {
+  // A home of the test's own, so nothing here comes near the real ~/nivra-acceptance.
+  const home = mkdtempSync(join(tmpdir(), "nivra live home "));
+  const repository = mkdtempSync(join(tmpdir(), "nivra live repository "));
+  dirs.push(home, repository);
+  const take = join(home, "nivra-acceptance", "task-live");
+  const claims = join(home, "nivra-acceptance", "claims", "task-live");
+  mkdirSync(take, { recursive: true });
+
+  it("needs a state folder of its own, never candidate 3's take, the claims or Nivra's checkout", () => {
+    assert.throws(() => liveFolders(undefined, home, repository), /--state <folder> is required/);
+    for (const folder of [take, join(take, "frozen-x"), join(home, "nivra-acceptance")]) assert.throws(() => liveFolders(folder, home, repository), /candidate 3's frozen take/, folder);
+    for (const folder of [claims, join(claims, "x"), join(home, "nivra-acceptance", "claims")]) assert.throws(() => liveFolders(folder, home, repository), /the approvals' claims/, folder);
+    assert.throws(() => liveFolders(join(repository, "evidence"), home, repository), /Nivra's own checkout/);
+    // A link that leads into the take is the take.
+    symlinkSync(take, join(home, "a link"));
+    assert.throws(() => liveFolders(join(home, "a link", "x"), home, repository), /candidate 3's frozen take/);
+    assert.deepEqual(liveFolders(join(home, "nivra-acceptance", "niv55-live"), home, repository), { state: join(home, "nivra-acceptance", "niv55-live"), claims });
+  });
+
+  it("claims approvals in one folder for every state folder, so a digest claimed under one is refused under a second", () => {
+    const first = liveFolders(join(home, "nivra-acceptance", "niv55-live"), home, repository);
+    const second = liveFolders(join(home, "nivra-acceptance", "task-live-c4"), home, repository);
+    assert.equal(first.claims, second.claims);
+    const digest = "5".repeat(64);
+    const claim = (state: string) => ({ digest, run: 1, revision: null, out: state, pid: process.pid, claimedAt: "2026-10-28T15:00:00.000Z" });
+    assert.equal(claimApproval(first.claims, claim(first.state)).ok, true);
+    assert.equal(claimApproval(second.claims, claim(second.state)).ok, false, "the same approval ran again under another state folder");
+    assert.equal(claimOn(second.claims, digest).claimed, true);
+  });
+});
+
+describe("a preparation the recipe expects to stop (NIV-55)", () => {
+  const expected: ExpectedStop = { code: "install", step: "install" };
+  const report = (over: Record<string, unknown> = {}, stopped: Record<string, unknown> = {}) => ({
+    outcome: "failed",
+    stopped: { code: "install", step: "install", message: ENVIRONMENT_STOP_MESSAGES.install, detail: "The lockfile doesn't match package.json. Run npm install in the repository, commit the lockfile, then prepare again.", ...stopped },
+    prepared: null,
+    environment: null,
+    install: { exitCode: 1, logTail: "npm error `npm ci` can only install packages when your package.json and package-lock.json are in sync." },
+    ...over,
+  });
+  const view = (given: ReturnType<typeof report> | null, prepared: unknown = null) => ({ prepared, preparation: { status: "answered", report: given } }) as unknown as Pick<EnvironmentView, "prepared" | "preparation">;
+
+  it("passes only on exactly the expected stop: its code and step, Nivra's words, the install's log and guidance, nothing kept", () => {
+    assert.deepEqual(stopProblems(expected, view(report())), []);
+  });
+
+  it("fails on any other ending: another stop code or step, a success, or a stop that keeps too little", () => {
+    assert.match(stopProblems(expected, view(report({}, { code: "readiness", step: "readiness", message: ENVIRONMENT_STOP_MESSAGES.readiness }))).join("; "), /stopped at readiness \(step readiness\), not the expected install \(step install\)/);
+    assert.match(stopProblems(expected, view(report({}, { step: "upload" }))).join("; "), /not the expected install \(step install\)/);
+    const success = stopProblems(expected, view(report({ outcome: "prepared", stopped: null, environment: PREPARED }), PREPARED));
+    assert.ok(success.includes("an environment was kept") && success.includes("the preparation succeeded"), success.join("; "));
+    assert.match(stopProblems(expected, view(report({ install: { exitCode: 1, logTail: "" } }))).join("; "), /the end of the install's log wasn't kept/);
+    assert.match(stopProblems(expected, view(report({}, { detail: null }))).join("; "), /no guidance/);
+    assert.match(stopProblems(expected, view(report({}, { message: "Something else." }))).join("; "), /words aren't Nivra's/);
+    assert.match(stopProblems(expected, view(null)).join("; "), /with no report/);
+  });
+});
+
