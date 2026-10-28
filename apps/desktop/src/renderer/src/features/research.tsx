@@ -863,7 +863,7 @@ function AmendDialog({ research, plan, actions, onClose, onSaved }: { research: 
   }
 
   return (
-    <Modal opened onClose={onClose} title={`Save plan v${research.planVersion + 1}`} size="lg" data-testid="research-amend-dialog">
+    <Modal opened onClose={onClose} closeOnEscape={false} title={`Save plan v${research.planVersion + 1}`} size="lg" data-testid="research-amend-dialog">
       <Stack gap="sm">
         {choices.length === 0 ? (
           <Text size="sm">This research offers no amendments. You can still edit the plan and save its next version.</Text>

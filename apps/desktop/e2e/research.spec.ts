@@ -274,6 +274,22 @@ test("research of a general plan keeps the model's conclusion, the quotations fo
   expect(leaked).toEqual([]);
 });
 
+test("Esc leaves the Save plan dialog open with the plan text as edited, so no edit is lost by a key", async () => {
+  test.skip(packaged, "a packaged app ignores the stand-in switches");
+  const card = page.getByTestId("research").first();
+  await card.getByTestId("research-amend").click();
+  const text = page.getByTestId("research-amend-text");
+  await expect(text).toBeVisible();
+  await text.fill("A plan edited by hand, not saved yet.");
+  await page.keyboard.press("Escape");
+  await expect(text).toBeVisible();
+  await expect(text).toHaveValue("A plan edited by hand, not saved yet.");
+  // Its own Cancel still closes it, and nothing was saved.
+  await page.getByTestId("research-amend-dialog").getByRole("button", { name: "Cancel" }).click();
+  await expect(text).toBeHidden();
+  await expect(page.getByTestId("plan-version")).toHaveText("Plan · v1");
+});
+
 test("an amended version is saved from the research once; a second save is refused and saves nothing", async () => {
   test.skip(packaged, "a packaged app ignores the stand-in switches");
   const card = page.getByTestId("research").first();
