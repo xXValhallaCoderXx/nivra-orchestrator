@@ -221,7 +221,8 @@ describe("a task request's time (NIV-35)", () => {
     }
     // The whole run still fits its phases, and the window holds requests with tools besides the reserve.
     assert.ok(TASK_LIMITS.snapshotMs + TASK_LIMITS.sessionMs + AFTER_SESSION_MS <= TASK_LIMITS.runMs);
-    // With the most final checks a brief may have, requests with tools can still start for ten minutes or more.
+    // With the most final checks a brief may have, and before the session's own setup (the toolchain probe and any
+    // baseline selections), requests with tools can still start for ten minutes or more.
     assert.ok(TASK_LIMITS.sessionMs - reserveMs(TASK_BRIEF_LIMITS.finalChecks) - (stepMs + handIn.stepMs) >= 10 * 60_000, "the session leaves too little room for requests of their whole time");
     const run = await attempt();
     assert.equal(run.result.outcome, "proposed");

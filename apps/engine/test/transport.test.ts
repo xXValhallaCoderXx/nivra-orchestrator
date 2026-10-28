@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { after, describe, it } from "node:test";
 import { COACH_RUN_LIMITS, RESEARCH_LIMITS } from "@nivra/domain";
-import { Agent, setGlobalDispatcher } from "undici";
+import { Agent, EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
 import { EXPLAIN_LIMITS } from "../src/explain/limits.ts";
 import { createModelClient, ModelFailure } from "../src/providers/model.ts";
 import { CHECK_DEADLINE_MS } from "../src/providers/tool-call.ts";
-import { FETCH_HEADERS_MS, useEngineTransport } from "../src/providers/transport.ts";
+import { engineDispatcher, FETCH_HEADERS_MS, useEngineTransport } from "../src/providers/transport.ts";
 import { REVIEW_REQUEST_MS } from "../src/review/run.ts";
 import { TASK_LIMITS } from "../src/task/limits.ts";
 import { GENERAL_LIMITS } from "../src/workflows/chat.ts";
@@ -22,11 +22,15 @@ import { startStub, text } from "./stub-token-factory.ts";
  */
 after(() => setGlobalDispatcher(new Agent()));
 
-/** A server that answers each request after `delayMs`, and notes when a client hung up first. */
-async function slowServer(delayMs: number): Promise<{ url: string; closedEarly: () => number; close: () => Promise<void> }> {
+/**
+ * A server that answers each request after `delayMs`, and notes when a client hung up first. With `body`, it sends the
+ * headers at once and holds the body for `delayMs` instead.
+ */
+async function slowServer(delayMs: number, options: { body?: boolean } = {}): Promise<{ url: string; closedEarly: () => number; close: () => Promise<void> }> {
   let closedEarly = 0;
   const server: Server = createServer((request: IncomingMessage, response) => {
     request.resume();
+    if (options.body) response.writeHead(200, { "content-type": "application/json" }).flushHeaders();
     const timer = setTimeout(() => response.end('{"ok":true}'), delayMs);
     response.on("close", () => {
       if (!response.writableEnded) {
@@ -72,6 +76,19 @@ describe("the engine's fetch (NIV-35)", () => {
     }
   });
 
+  it("waits as long for the rest of a reply's body, once its headers have come", async () => {
+    const server = await slowServer(3_000, { body: true });
+    try {
+      useEngineTransport(1_000);
+      const cut = await fetch(server.url);
+      assert.equal(await failureCode(cut.text()), "UND_ERR_BODY_TIMEOUT");
+      useEngineTransport(6_000);
+      assert.equal(await (await fetch(server.url)).text(), '{"ok":true}');
+    } finally {
+      await server.close();
+    }
+  });
+
   it("is what a model call's request goes through: Mastra's provider uses Node's own fetch", async () => {
     const stub = await startStub({ chat: () => ({ ...text("late but whole"), delayMs: 3_000 }) });
     try {
@@ -85,6 +102,50 @@ describe("the engine's fetch (NIV-35)", () => {
       assert.equal(stub.chats().length, 2, "a request was sent again");
     } finally {
       await stub.close();
+    }
+  });
+
+  it("hangs up on a model request that reaches its own deadline, rather than leaving it to fetch's wait", async () => {
+    const server = await slowServer(30_000);
+    try {
+      useEngineTransport();
+      const client = createModelClient({ apiKey: "test-key-0123456789", endpoint: { url: server.url, kind: "loopback-test" } });
+      const started = performance.now();
+      const failure = await client.call(client.agent({ id: "t", name: "T", modelId: "nvidia/stub-model", instructions: "Answer.", tools: {} }), "Hello", { maxSteps: 1, deadlines: { stepMs: 1_000, totalMs: 10_000 }, maxOutputTokens: 50 }).catch((error: unknown) => error);
+      const tookMs = performance.now() - started;
+      assert.ok(failure instanceof ModelFailure && failure.kind === "timeout", String(failure));
+      assert.ok(tookMs < 5_000, `the deadline took ${Math.round(tookMs)} ms`);
+      for (let tries = 0; tries < 50 && server.closedEarly() === 0; tries++) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(server.closedEarly(), 1, "the request was left open");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("takes the proxy from the environment where Node itself would, with the same waits", async () => {
+    // A proxy that notes what it was asked for and refuses it: undici asks a proxy to tunnel (CONNECT), even for http.
+    const seen: string[] = [];
+    const proxy: Server = createServer((request, response) => {
+      seen.push(String(request.url));
+      request.resume();
+      response.writeHead(403).end();
+    });
+    proxy.on("connect", (request: IncomingMessage, socket: Socket) => {
+      seen.push(String(request.url));
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    try {
+      const at = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+      assert.ok(engineDispatcher(FETCH_HEADERS_MS, { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: at }) instanceof EnvHttpProxyAgent);
+      assert.ok(!(engineDispatcher(FETCH_HEADERS_MS, { NODE_USE_ENV_PROXY: "true", HTTP_PROXY: at }) instanceof EnvHttpProxyAgent), "only Node's own value turns it on");
+      const dispatcher = engineDispatcher(FETCH_HEADERS_MS, { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: at });
+      await fetch("http://nivra-proxy-check.invalid/models", { dispatcher, signal: AbortSignal.timeout(5_000) } as RequestInit).then((answer) => answer.text()).catch(() => undefined);
+      // The request went to the proxy, never straight to the address it named.
+      assert.equal(seen.length, 1, JSON.stringify(seen));
+      assert.match(seen[0]!, /nivra-proxy-check\.invalid/);
+    } finally {
+      await new Promise<void>((resolve) => (proxy.closeAllConnections(), proxy.close(() => resolve())));
     }
   });
 
