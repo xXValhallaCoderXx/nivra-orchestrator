@@ -1,5 +1,4 @@
 import { Alert, Badge, Button, Checkbox, Code, Collapse, Group, List, Modal, NumberInput, Paper, SegmentedControl, SimpleGrid, Stack, Text, TextInput, Textarea, UnstyledButton, VisuallyHidden } from "@mantine/core";
-import { useMediaQuery } from "@mantine/hooks";
 import type { BaselineSelection, TaskBaselineCheck, TaskCheck, TaskProposal, TaskReport } from "@nivra/domain";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AcceptanceCaseView, BriefContent, TaskAttemptView, TaskRunPreview, TaskView, TurnStatus } from "../../../shared/ipc";
@@ -8,6 +7,7 @@ import { diffFilesOf, type DiffFile } from "../../../shared/task-diff";
 import { outcomeLookOf, verdictText } from "../../../shared/task-verdict";
 import { CONSENT_COVERS } from "../shared/evidence";
 import { errorMessage, usePoll } from "../shared/ui";
+import { useNarrow } from "./narrow";
 import { applyGoing } from "./task-apply";
 
 /**
@@ -338,9 +338,6 @@ function checkFilesText(check: TaskCheck): string {
   return check.kind === "case" ? `${said}: Nivra judged only what it printed.` : `${said}.`;
 }
 
-/** Whether the window is narrower than the design's breakpoint (48em): dialogs fill it, and columns stack (NW1, NW3). */
-export const useNarrow = () => useMediaQuery("(max-width: 48em)") ?? false;
-
 /**
  * A task's way into a run (NIV-56, G3: P1g, RS3): "Preview the run", with what it does or, when a run can't start, why
  * in visible words; the preview of what a run would send and where, from the repository's own engine; and the start
@@ -373,8 +370,12 @@ export function RunLauncher({
   const projectId = view.summary.projectId;
   const blocked = view.runBlocked;
 
+  // Only a press made while this is shown opens the preview: one counted before it was shown again doesn't.
+  const seenAsk = useRef(asked);
   useEffect(() => {
-    if (asked > 0) void previewIt();
+    if (asked === seenAsk.current) return;
+    seenAsk.current = asked;
+    void previewIt();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asked]);
 
@@ -1351,11 +1352,12 @@ export function RunWorker({ report }: { report: TaskReport }) {
  * Everything a run found (RS1, P1i), as cards: its result, the checks, the change, and the worker. The group carries the
  * report's outcome, and whether its change is verified.
  */
-export function RunReview({ value, number, task, content }: { value: TaskAttemptView; number: number; task: { label: string; color: string }; content: BriefContent | null }) {
+export function RunReview({ value, number, task, content, decision = null }: { value: TaskAttemptView; number: number; task: { label: string; color: string }; content: BriefContent | null; /** The decision, right after the result when the columns stack (NW3). */ decision?: ReactNode }) {
   const report = value.report;
   return (
     <Stack gap="md" data-testid={report ? "task-attempt-report" : undefined} data-outcome={report?.outcome} data-verified={report ? report.verified : undefined}>
       <RunResult value={value} number={number} task={task} />
+      {decision}
       {report && <RunChecks report={report} content={content} />}
       {value.proposal && <RunChanges proposal={value.proposal} />}
       {report && <RunWorker report={report} />}

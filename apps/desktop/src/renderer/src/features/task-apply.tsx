@@ -1,8 +1,9 @@
 import { Alert, Anchor, Badge, Button, Code, Group, List, Modal, Paper, Stack, Text, Textarea } from "@mantine/core";
 import type { ApplyPath, ApplyResolution, ApplyStatus, TaskReport } from "@nivra/domain";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { AttemptDecision, BriefContent, TaskApplyView, TaskAttemptView, TaskView, TurnStatus } from "../../../shared/ipc";
 import { decisionLead, failingReportedChecks, outcomeLookOf, unapprovableText } from "../../../shared/task-verdict";
+import { useNarrow } from "./narrow";
 
 /**
  * Deciding on a run's change, and what applying it did (D40). The window offers exactly what the host says the person
@@ -120,8 +121,29 @@ export const applyGoing = (value: Pick<TaskAttemptView, "decision" | "apply">) =
  * verified change whose reported check failed says so first, and approving it stays possible. `act` runs one of the
  * host's calls and reads the run again. Once decided, it says what was decided.
  */
-export function DecisionCard({ value, busy, act, content }: { value: TaskAttemptView; busy: boolean; act(work: () => Promise<TaskAttemptView>): void; content: BriefContent | null }) {
+export function DecisionCard({
+  value,
+  busy,
+  act,
+  content,
+  confirmAsked = 0,
+}: {
+  value: TaskAttemptView;
+  busy: boolean;
+  act(work: () => Promise<TaskAttemptView>): void;
+  content: BriefContent | null;
+  /** Raised when Approve is pressed elsewhere, such as the narrow window's bar (NW3): the same confirmation opens. */
+  confirmAsked?: number;
+}) {
   const [confirming, setConfirming] = useState(false);
+  const narrow = useNarrow();
+  // Only a press made while this card is shown opens the confirmation, not one counted before it moved columns.
+  const seenAsk = useRef(confirmAsked);
+  useEffect(() => {
+    if (confirmAsked === seenAsk.current) return;
+    seenAsk.current = confirmAsked;
+    setConfirming(true);
+  }, [confirmAsked]);
   const [revising, setRevising] = useState(false);
   const [note, setNote] = useState("");
   const warningId = useId();
@@ -166,7 +188,7 @@ export function DecisionCard({ value, busy, act, content }: { value: TaskAttempt
     </Stack>
   );
   return (
-    <Paper withBorder p="md" radius="md">
+    <Paper withBorder p="md" radius="md" id={`decision-${value.id}`}>
       <Stack gap="sm" data-testid="task-attempt-decision-ask">
         <Stack gap={2}>
           <Text fw={600}>Your decision</Text>
@@ -234,7 +256,16 @@ export function DecisionCard({ value, busy, act, content }: { value: TaskAttempt
         )}
       </Stack>
       {proposal && (
-        <Modal opened={confirming} onClose={() => setConfirming(false)} title="Apply this change?" size="lg" data-testid="task-apply-confirm">
+        <Modal
+          opened={confirming}
+          onClose={() => setConfirming(false)}
+          title="Apply this change?"
+          size="lg"
+          fullScreen={narrow}
+          styles={{ content: { display: "flex", flexDirection: "column", overflow: "hidden" }, body: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, padding: 0 } }}
+          data-testid="task-apply-confirm"
+        >
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--mantine-spacing-md)" }}>
           <Stack gap="sm">
             <Text size="sm">
               Nivra applies change <Code>{short(proposal.hash)}</Code> to your checkout, which must still be at commit <Code>{short(proposal.baseline)}</Code>.
@@ -267,7 +298,9 @@ export function DecisionCard({ value, busy, act, content }: { value: TaskAttempt
             <Text size="sm" c="var(--nivra-text-2)">
               Afterwards the change is in your checkout, unstaged, for you to look at before you accept it.
             </Text>
-            <Group justify="flex-end" gap="sm">
+          </Stack>
+          </div>
+            <Group justify="flex-end" gap="sm" p="md" style={{ borderTop: "1px solid var(--nivra-border)", flexShrink: 0 }} data-testid="task-apply-confirm-footer">
               <Button variant="default" onClick={() => setConfirming(false)}>
                 Cancel
               </Button>
@@ -282,7 +315,6 @@ export function DecisionCard({ value, busy, act, content }: { value: TaskAttempt
                 Apply the change
               </Button>
             </Group>
-          </Stack>
         </Modal>
       )}
     </Paper>

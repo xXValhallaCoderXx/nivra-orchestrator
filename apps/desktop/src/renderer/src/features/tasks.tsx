@@ -6,11 +6,13 @@ import type { BriefContent, BriefFields, EngineView, EnvironmentView, PlanView, 
 import { initialRepositoryOf } from "../../../shared/task-form";
 import { environmentRowOf, readinessOf, type ReadinessAction } from "../../../shared/task-readiness";
 import { environmentStepOf, latestHolds, stripItemsOf, type StripItem } from "../../../shared/task-strip";
+import { decisionLead, outcomeLookOf } from "../../../shared/task-verdict";
 import { errorMessage, Section, usePoll } from "../shared/ui";
 import { EngineNotices } from "./engine";
 import { KeyPrompt } from "./key-prompt";
+import { useNarrow } from "./narrow";
 import { ApplyCard, applyMarks, AttemptsList, CompletedCards, DecisionCard, RunSummary, SettleCard } from "./task-apply";
-import { isOpenCoaching, TaskCoach } from "./task-coach";
+import { CoachAside, CoachMain, isOpenCoaching } from "./task-coach";
 import { CheckGroup, CheckLine, ReadinessCard } from "./task-readiness";
 import { BaselineInput, BaselineRead, baselineDraftOf, baselineOf, caseDraftOf, caseOf, CasesInput, CasesRead, RunGoing, RunLauncher, RunReview, useRun, type BaselineDraft, type CaseDraft } from "./task-run";
 
@@ -652,6 +654,11 @@ export function TaskDetail({
   useEffect(() => setReviewing(false), [shownId]);
   // "Preview the run" pressed from the page's next step, not the header.
   const [previewAsked, setPreviewAsked] = useState(0);
+  // The coach's preview, shown in the main column while the person decides whether to ask (P1y).
+  const [asking, setAsking] = useState(false);
+  // Narrow (NW3): the decision follows the result, and a bar keeps Approve in view; its press opens the same confirmation.
+  const narrow = useNarrow();
+  const [confirmAsked, setConfirmAsked] = useState(0);
 
   const view = task.value;
   if (!view) {
@@ -766,6 +773,8 @@ export function TaskDetail({
   const ranContent = value && value.briefVersion === brief.version ? brief.content : null;
   const marks = value ? applyMarks(value) : null;
   // Nothing to decide on the latest run (RS1): the page says so, with the next step.
+  const decisionCard = phase === "review" && value ? <DecisionCard value={value} busy={run.busy} act={run.act} content={ranContent} confirmAsked={confirmAsked} /> : null;
+  const leads = value ? decisionLead(value.report, value.actions.includes("approve"), value.proposal !== null) : null;
   const settledQuietly = phase === "review" && value !== null && value.id === latest?.id && value.decision === null && !value.actions.some((action) => action === "approve" || action === "reject" || action === "revise");
   // Readiness leads until the latest run goes or waits on the person; a draft always shows it, with Mark ready.
   const leading = summary.state === "draft" || !latestHolds(latest);
@@ -820,7 +829,12 @@ export function TaskDetail({
           </Group>
         </Stack>
         <Group gap="xs" align="flex-start" wrap="nowrap">
-          {!going && (
+          {tab === "coach" && (
+            <Button variant="default" onClick={() => setTab("brief")} data-testid="task-coach-back">
+              Back to readiness
+            </Button>
+          )}
+          {!going && tab !== "coach" && (
             <RunLauncher
               view={view}
               asked={previewAsked}
@@ -991,6 +1005,45 @@ export function TaskDetail({
                 </Group>
               </Stack>
             )}
+            <div hidden={tab !== "coach"} data-testid="task-coach-column">
+              <CoachMain
+                asking={asking}
+                onAsk={() => setAsking(true)}
+                onAskEnd={() => setAsking(false)}
+                task={view}
+                coachings={coachings.value}
+                editing={editing === "brief"}
+                onPrepare={(selection) => window.nivra.prepareCoach(taskId, selection)}
+                onStart={async (selection, expected) => {
+                  const started = await window.nivra.startCoach(taskId, selection, expected);
+                  reread();
+                  return started;
+                }}
+                onCancel={async (coachingId) => {
+                  await window.nivra.cancelCoach(taskId, coachingId);
+                  reread();
+                }}
+                onAccept={async (coachingId, fields) => {
+                  try {
+                    await window.nivra.acceptCoachChanges(taskId, revision, coachingId, fields);
+                  } finally {
+                    reread();
+                  }
+                }}
+                onUpdateField={updateField}
+                updateBlocked={
+                  completed
+                    ? "A completed task's brief can't change. Reopen it to change it."
+                    : coachSaving
+                      ? "Wait for the coach's changes to be saved."
+                      : editing === "title" || editing === "repository"
+                        ? "Save or cancel your other edit first."
+                        : null
+                }
+                onSavingChange={setCoachSaving}
+              />
+            </div>
+            <Stack gap="md" display={tab === "coach" ? "none" : undefined} data-testid="task-main">
             {run.error && (
               <Alert color="red" variant="light" data-testid="task-attempt-error">
                 <Text size="sm">{run.error}</Text>
@@ -1015,9 +1068,31 @@ export function TaskDetail({
             {phase === "going" && value && <RunGoing run={run} number={shownNumber!} />}
             {phase === "review" && value && (
               <>
-                <RunReview value={value} number={shownNumber!} task={STATE_LOOK[summary.state]} content={ranContent} />
+                <RunReview value={value} number={shownNumber!} task={STATE_LOOK[summary.state]} content={ranContent} decision={narrow ? decisionCard : null} />
                 {value.apply && <ApplyCard value={value} />}
               </>
+            )}
+            {narrow && phase === "review" && value && value.decision === null && value.proposal && leads?.approve && (
+              <Paper withBorder p="xs" radius="md" style={{ position: "sticky", bottom: 0, zIndex: 5 }} data-testid="task-attempt-bar">
+                <Group justify="space-between" wrap="nowrap" gap="xs">
+                  <Group gap="xs" wrap="nowrap" style={{ minWidth: 0 }}>
+                    <Badge color={outcomeLookOf(value).color} variant="light">
+                      {outcomeLookOf(value).label}
+                    </Badge>
+                    <Text size="xs" ff="monospace" c="var(--nivra-text-3)">
+                      {value.proposal.hash.slice(0, 12)}
+                    </Text>
+                  </Group>
+                  <Group gap="xs" wrap="nowrap">
+                    <Button size="xs" variant="default" onClick={() => document.getElementById(`decision-${value.id}`)?.scrollIntoView({ block: "start" })} data-testid="task-attempt-bar-choices">
+                      Other choices
+                    </Button>
+                    <Button size="xs" variant={leads.lead === "approve" ? "filled" : "default"} onClick={() => setConfirmAsked((n) => n + 1)} disabled={run.busy} data-testid="task-attempt-approve-bar">
+                      {leads.approve}
+                    </Button>
+                  </Group>
+                </Group>
+              </Paper>
             )}
             {phase === "applied" && value && (
               <>
@@ -1060,11 +1135,12 @@ export function TaskDetail({
               </Paper>
             )}
             {leading && phase !== "completed" && !(summary.state === "draft" || shown === null) && <ReadinessCard readiness={readiness} busy={busy || coachSaving} onAction={onReadiness} />}
+            </Stack>
           </Stack>
         </Grid.Col>
         <Grid.Col span={{ base: 12, md: 4 }}>
           <Stack gap="md">
-            {phase === "review" && value && <DecisionCard value={value} busy={run.busy} act={run.act} content={ranContent} />}
+            {!narrow && decisionCard}
             {phase === "applied" && value && (
               <>
                 <SettleCard value={value} busy={run.busy} act={run.act} briefVersion={brief.version} />
@@ -1114,44 +1190,7 @@ export function TaskDetail({
                   </Stack>
                 </Tabs.Panel>
                 <Tabs.Panel value="coach" p="md">
-                  <Stack gap="sm">
-                    <Text size="sm" c="var(--nivra-text-2)">
-                      What the brief may be missing, and a coach to ask if you want one. Nothing here changes the brief until you save.
-                    </Text>
-                    <TaskCoach
-                      task={view}
-                      coachings={coachings.value}
-                      editing={editing === "brief"}
-                      onPrepare={(selection) => window.nivra.prepareCoach(taskId, selection)}
-                      onStart={async (selection, expected) => {
-                        const started = await window.nivra.startCoach(taskId, selection, expected);
-                        reread();
-                        return started;
-                      }}
-                      onCancel={async (coachingId) => {
-                        await window.nivra.cancelCoach(taskId, coachingId);
-                        reread();
-                      }}
-                      onAccept={async (coachingId, fields) => {
-                        try {
-                          await window.nivra.acceptCoachChanges(taskId, revision, coachingId, fields);
-                        } finally {
-                          reread();
-                        }
-                      }}
-                      onUpdateField={updateField}
-                      updateBlocked={
-                        completed
-                          ? "A completed task's brief can't change. Reopen it to change it."
-                          : coachSaving
-                            ? "Wait for the coach's changes to be saved."
-                            : editing === "title" || editing === "repository"
-                              ? "Save or cancel your other edit first."
-                              : null
-                      }
-                      onSavingChange={setCoachSaving}
-                    />
-                  </Stack>
+                  <CoachAside task={view} coachings={coachings.value} onAsk={() => setAsking(true)} />
                 </Tabs.Panel>
                 <Tabs.Panel value="runs" p="md">
                   {view.attempts.length ? (
