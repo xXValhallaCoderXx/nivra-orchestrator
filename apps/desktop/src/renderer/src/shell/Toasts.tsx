@@ -3,9 +3,13 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState, type
 
 /**
  * Small notes over the page, in the bottom right (SH6): built from Mantine's Notification, so there is no new
- * dependency. A toast takes no focus and is announced politely. It stays until it is dismissed, so nothing the person
- * should read vanishes by itself; the newest three show.
+ * dependency. A toast only confirms what the person just did; it takes no focus, is announced politely, and closes by
+ * itself after six seconds (or on Dismiss), so it never sits over the page's own controls. Anything to act on is never a
+ * toast: a warning stays in the page until it is dismissed, and a refusal is a dialog. The newest three show.
  */
+
+/** How long a toast shows before it closes by itself. */
+export const TOAST_MS = 6_000;
 
 export interface Toast {
   id: number;
@@ -34,11 +38,16 @@ const INFO = (
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const next = useRef(1);
-  const show = useCallback((text: string, tone: Toast["tone"] = "done") => {
-    const id = next.current++;
-    setToasts((current) => [...current, { id, text, tone }].slice(-3));
-  }, []);
-  const dismiss = (id: number) => setToasts((current) => current.filter((toast) => toast.id !== id));
+  const dismiss = useCallback((id: number) => setToasts((current) => current.filter((toast) => toast.id !== id)), []);
+  const show = useCallback(
+    (text: string, tone: Toast["tone"] = "done") => {
+      const id = next.current++;
+      setToasts((current) => [...current, { id, text, tone }].slice(-3));
+      // Each closes by itself, six seconds after it showed.
+      setTimeout(() => dismiss(id), TOAST_MS);
+    },
+    [dismiss],
+  );
   const value = useMemo(() => show, [show]);
   return (
     <ToastContext.Provider value={value}>
