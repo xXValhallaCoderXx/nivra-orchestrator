@@ -2639,8 +2639,9 @@ of up to five selected tasks by the council's specialists, findings that open th
 ### NIV-35's live runs, and the candidates they ran on (D46, D47)
 
 The live packaged journey on SHE-65, on Linux, each run approved by Nate by its recipe's whole digest. Evidence is
-credited to the exact build it ran on: no run below is evidence for a later candidate. SHE-65 is in Nate's private
-repository: this record names its files and hashes, never its content.
+credited to the exact build it ran on: no run below is evidence for a later candidate. These runs used an unpublished
+revision of Nate's own public repository, including frozen acceptance tests: this record names its files and hashes,
+never the unpublished changes or the frozen tests.
 
 **The candidates** (version 0.2.0, unpublished; each built once by `pnpm release:candidate`, with `pnpm verify`
 inside it, then checked file for file against its build-info and frozen before use):
@@ -2649,7 +2650,7 @@ inside it, then checked file for file against its build-info and frozen before u
 |---|---|---|---|---|---|
 | 1 | `570dd14` | Version 0.2.0; the task model rule (D46) | `8c33d15babccc77c79dd9593cb793ea7c452ae09d67129872b618f2e3623742c` | `ba17bd774132e95ca7e084aa9733a9031f1115b95ac73e7006a5fddc4b54b50e` | `c44a978d73784914f3af22839529556f474053263d91a551deeecce6d451aeed` |
 | 2 | `77558d9` | Search, the allowances raised together and told (D47's first half) | `22b142a66586649fdfc098b2f84bde146516498f2f8e0a952f78bffa7d478cc6` | `ff43e88a21ffdf78bf95da8f18cf0d75b130543ed9ea4adaaba1d76494d9a544` | `1327104795be397e0400c57b2623f00e51f60f2f9494ba9b2e9fd281c591e7dd` |
-| 3 | pending | Each request's whole answer's time, the engine's fetch (D47); D42 to D44 from main | pending | pending | pending |
+| 3 | `c99fe9d` | Each request's whole answer's time, the engine's fetch (D47); D42 to D44 from main; staging that matches the packager | `e022ed4fb3c009999a50eb0782f8e35c049c655f67c89f04e331ee5622b1b2d1` | `0f385b638be6992909da286a835daaac50786ad276e74b0c911fd9644950484a` | `2e0724a3216c25b9a86dbd2f2fe24a0c2c7ef8efe619723ccb9e0345248a4019` |
 
 Checks on each, at its own commit:
 - Candidate 1: verify 1,078 (domain 75, engine 689, desktop 314), none skipped; the correspondence check 18 of 18;
@@ -2658,6 +2659,13 @@ Checks on each, at its own commit:
 - Candidate 2: verify 1,093 (75, 704, 314), none skipped; the correspondence check 18 of 18; the rehearsal;
   `test:packaged` 27 passed and 49 skipped; the built e2e 75 passed and 1 skipped; `verify:windows --zip` 37 of 37;
   `test:windows` 12 of 12. Mutations: 18 of 18 caught.
+- Candidate 3: verify 1,279 (100, 779, 400), none skipped. Staging left out only undici's empty
+  `lib/llhttp/.gitkeep`, which the packager never copies, and the check that what was packaged is what was staged
+  passed for both runtimes (Linux `243e80bf38451c39`, Windows `982edbd3e39bd053`). The correspondence check 18 of 18;
+  the rehearsal on the frozen build (3,943 files, `df85337178b9…`); `test:packaged` 32 passed and 63 skipped, with the
+  build hashed again afterwards and unchanged; the built e2e 94 passed and 1 skipped; `verify:windows --zip` 37 of 37;
+  the zip as Windows' `tar.exe` extracts it holds the built `Nivra.exe` and `app.asar`, byte for byte; `test:windows`
+  13 of 13. Mutations, on its change at `986f50c`: 23 of 24 caught, and the one missed changes no behaviour.
 
 **The live runs** (each one preparation and one task run; nothing retried; each window's keys removed and both homes
 checked unchanged afterwards):
@@ -2667,10 +2675,11 @@ checked unchanged afterwards):
 | 1 | 1 | `494869740e251708f04fc3b2dd9957c41874e0fbf1b328b0bb7779c7f6c9939a` | 01:48 to 01:52 | Unchanged. The worker used all 12 requests finding its way and handed in with no write. |
 | 2 | 2 | `9a3061b2969e242228773440737f521f2cfb1bb581a8f2764ff44dd6a35433f3` | 03:12 to 03:17 | Unchanged. Six requests found and read the code in 18 s; the seventh had no answer at 150 s, so the attempt ended for time, with no hand-in and no write. |
 | 3 | 2 (its recipe's second run) | `761f963bf547aecb6a3481ee91a716bae45938e290db3ab7b53204af169814c9` | 03:26 to 03:35 | Proposed, not verified: case 1 failed with the same five SHE-65 assertion errors as the baseline. The eleventh request had no answer at 150 s. Nate rejected proposal `fcacce1dd2c701b466e513a9e0b2e7cecfa88510bc9518fa7743eba264a7958c` at 08:12:41. |
+| 4 | 3 | `fa9c532399cd03df6b43c3f23cf9c44ad349951385b781418a363580abba2017` | 18:20 to 18:32 | Proposed, and verified by the acceptance cases alone. The configured acceptance suites passed, but the repository typecheck failed with three new errors. An AI review identified the broken caller before Nate's decision. He rejected proposal `8a689c333e771ffca51c9267de1916a436f2419dd870082c4028535e2829b6e7` at 18:48:10, and his checkout remained unchanged. Not a fix. |
 
 - **Each run:**
   - The preparation was real: images `e3caf555-4e63-446c-87d5-0d2854c0e02f`, `1981de1c-7489-4275-bfa8-e6f05d1a343f`
-    and `d2278a86-7d3b-4f8b-a872-844eaed4a162`.
+    and `d2278a86-7d3b-4f8b-a872-844eaed4a162` for runs 1 to 3; run 4's is in its evidence.
   - The model was `nvidia/nemotron-3-super-120b-a12b`.
   - Baselines A, B and C came out as the brief expects.
   - The frozen files came back unchanged.
@@ -2678,18 +2687,32 @@ checked unchanged afterwards):
   - Run 1: 133,304 input and 2,062 output tokens.
   - Runs 2 and 3: unknown, since one request in each never reported. Run 3's ten reported requests come to 157,697
     and 3,935.
+  - Run 4: 436,012 input and 7,395 output tokens, all 20 requests reported.
   - Cost: never reported, so it isn't shown.
 - **Run 3's timing, from the engine's events:**
   - Requests 8 and 9 wrote code: 1,573 tokens in 85.7 s and 634 in 58.5 s. Request 4 had given 580 in 3.8 s.
   - The 11th request's 150 s, and 11.7 s that the record doesn't account for, ran from 19:31:38.118Z to 19:34:19.856Z.
-- **What isn't known:** whether those requests were producing long answers or were held up before they began.
-  Requests aren't streamed, and a stopped one reports nothing.
-- **Reject, shown live:** after run 3's Reject, `git status` and `git diff` of the checkout were empty, and it stayed
-  at `0341b253` on `nivra/she-65-baseline`.
-- **Evidence:** `~/nivra-acceptance/task-live/live-20261027T174800Z`, `…191225Z` and `…192632Z`, each with the
-  recipe, the previews, the attempt, the final views and the stores copied with their WAL. A shape scan of each,
-  outside its profile and engine home, found no credential; a Token Factory key has no shape, so Nate checks for his
-  key himself.
+- **Run 4's timing:** a work window of 1,939 s, with 730 s kept for collect and the final checks. Its longest request
+  answered 3,086 tokens in 156.1 s and completed, past the 150 s at which runs 2 and 3 stopped. The worker handed in
+  when the input budget had room for the hand-in only.
+- **What isn't known:** whether runs 2 and 3's last requests were producing long answers or were held up before they
+  began. Requests aren't streamed, and a stopped one reports nothing. A request held for candidate 3's full 830 s
+  hasn't been seen: run 4's longest took 156.1 s.
+- **Run 4's review, what its cases couldn't show:** the change added a parameter to the function that reads earlier
+  bests and converted each earlier load into it, but left the one existing call as it was. When it runs, that
+  parameter is missing, so a load in the same unit would be converted anyway and give wrong records. SHE-65's
+  acceptance tests all mix units, so they passed. The repository typecheck caught it: three new errors in
+  `completion.ts` (TS2339, TS2322 and TS2554, the last at the unchanged call). Repository checks are reported and
+  never decide (D39), so the change counted as verified. Recorded as NIV-67: verification that counts required
+  repository checks.
+- **Reject, shown live:** after the Rejects of runs 3 and 4, `git status` and `git diff` of the checkout were empty,
+  and it stayed at `0341b253` on `nivra/she-65-baseline`. After run 4's there was no stash and no recovery folder
+  either.
+- **Evidence:** `~/nivra-acceptance/task-live/live-20261027T174800Z`, `…191225Z`, `…192632Z` and
+  `…20261028T102049Z`, each with the recipe, the previews, the attempt, the final views and the stores: copied with
+  their WAL for runs 1 to 3, and for run 4 as the closed app left them, its final views captured off-screen from a
+  copy. A shape scan of each, outside its profile and engine home, found no credential; a Token Factory key has no
+  shape, so Nate checks for his key himself.
 
 **Offline, for candidate 3's change (D47):**
 - Node 24.21.0's own fetch: a reply at 285 s came back, and one at 310 s failed at 301.2 s with
@@ -2702,9 +2725,9 @@ checked unchanged afterwards):
 
 | Criterion | Shown | Still to show |
 |---|---|---|
-| One small change and its regression check through the UI | Offline (above); live runs 1 to 3 reached the proposal, unverified | A verified SHE-65 change, approved by its hash, applied by its engine and accepted, on the packaged build |
-| Reject leaves the checkout untouched | Offline, and live after run 3 | Nothing more |
-| Linux and Windows-to-WSL evidence naming the packaged revision and backend | Linux: runs 1 to 3, on candidates 1 and 2, with Nebius Sandboxes | Windows to WSL live needs its own recipe and approval; native Windows refuses task runs (D39, D41) |
+| One small change and its regression check through the UI | Offline (above); live runs 1 to 3 reached the proposal, unverified; run 4's proposal passed every acceptance case, but the repository typecheck failed and review found the broken caller, so it was rejected | A verified SHE-65 change, approved by its hash, applied by its engine and accepted, on the packaged build |
+| Reject leaves the checkout untouched | Offline, and live after runs 3 and 4 | Nothing more |
+| Linux and Windows-to-WSL evidence naming the packaged revision and backend | Linux: runs 1 to 4, on candidates 1 to 3, with Nebius Sandboxes | Windows to WSL live needs its own recipe and approval; native Windows refuses task runs (D39, D41) |
 
 ### Project-driven environments, PR 2 (D48, NIV-55, NIV-58, NIV-59)
 
