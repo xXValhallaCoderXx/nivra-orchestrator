@@ -6,7 +6,22 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { CODING_WORKER_PROFILE, NO_SUBLIMITS, TOKEN_FACTORY_PRICES, type BudgetPolicyDraft, type GrantRequest, type PriceCatalogue } from "@nivra/domain";
 import { BudgetGuard, checkHistory, type GuardRecord, type LedgerView } from "../src/main/budget-guard.ts";
-import { answeredRecovery, chainAt, getGrant, ledgerState, markDispatching, recordJournal, releaseGrant, setPolicy, startNewHistory, writeGrant, type LedgerState } from "../src/main/budget-store.ts";
+import {
+  answeredRecovery,
+  chainAt,
+  confirmMonth,
+  currentPeriod,
+  getGrant,
+  ledgerState,
+  markDispatching,
+  observeProviderTime,
+  recordJournal,
+  releaseGrant,
+  setPolicy,
+  startNewHistory,
+  writeGrant,
+  type LedgerState,
+} from "../src/main/budget-store.ts";
 import { openWorkspace, type WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 
 /**
@@ -25,6 +40,8 @@ after(() => {
 });
 
 const OCT = Date.parse("2026-10-28T01:00:00Z");
+const NOV = Date.parse("2026-11-02T01:00:00Z");
+const DEC = Date.parse("2026-12-03T01:00:00Z");
 const AT = new Date(OCT).toISOString();
 const HOME = "home-1";
 const ESTABLISHED: PriceCatalogue = {
@@ -406,5 +423,55 @@ describe("a new history after a ledger behind its guard", () => {
     assert.deepEqual(check(db, guard), { state: "ok", append: record(authority) });
     assert.equal(Number(db.db.prepare("SELECT count(*) AS n FROM budget_adjustments").get()?.["n"]), 1);
     assert.equal(check(db, guard).state, "ok");
+  });
+});
+
+describe("a backup from an older month put back after the real month began", () => {
+  /** October's history is backed up; November opens on the provider's clock and is spent in; then October's copy is put back. */
+  function restoredFromOctober() {
+    const { dbPath, guard, dir } = profile();
+    let db = opening(dbPath).db;
+    guard.append(record(setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT).authority!));
+    const id = written(db, guard);
+    backup(db, join(dir, "october.db"));
+    guard.append(record(observeProviderTime(db, NOV, NOV, "UTC").authority!));
+    dispatched(db, guard, id);
+    db = restore(db, join(dir, "october.db")).db;
+    const found = check(db, guard);
+    assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-behind");
+    assert.equal(currentPeriod(db)?.label, "2026-10");
+    return { db, guard, recovery: found.recovery };
+  }
+  const ask = (db: WorkspaceDb, over: Partial<GrantRequest> = {}, now = NOV) =>
+    writeGrant(db, { ...request(), ...over }, { now, catalogue: ESTABLISHED, timezone: "UTC", verified: ledgerState(db) });
+  const operations = (count: number): Partial<GrantRequest> => ({
+    models: [],
+    productive: { requests: 0, outputTokens: 0 },
+    finalisation: { requests: 0, outputTokens: 0 },
+    allowances: { sandboxOperations: count, sandboxSeconds: 0, researchCredits: 0 },
+  });
+  const code = (result: ReturnType<typeof ask>) => ("refused" in result ? result.refused.code : "granted");
+
+  it("keeps a wait through November once November is confirmed, for money and Nebius operations alike", () => {
+    const { db, guard, recovery } = restoredFromOctober();
+    guard.append(record(startNewHistory(db, { recovery, remaining: null, now: NOV, timezone: "UTC" })));
+    assert.equal(check(db, guard).state, "ok");
+    assert.deepEqual([code(ask(db)), code(ask(db, operations(1)))], ["history-wait", "history-wait"]);
+    assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
+    assert.deepEqual([code(ask(db)), code(ask(db, operations(1)))], ["history-wait", "history-wait"]);
+    assert.ok("opened" in confirmMonth(db, "2026-12", DEC, "UTC"));
+    assert.equal(code(ask(db, {}, DEC)), "granted");
+  });
+
+  it("keeps a finite allowance, money and Nebius operations, through November once November is confirmed", () => {
+    const { db, guard, recovery } = restoredFromOctober();
+    const left = { micros: 100_000, allowances: { sandboxOperations: 2, sandboxSeconds: 0, researchCredits: 0 } };
+    guard.append(record(startNewHistory(db, { recovery, remaining: left, now: NOV, timezone: "UTC" })));
+    assert.deepEqual([code(ask(db)), code(ask(db, operations(2)))], ["granted", "granted"]);
+    assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
+    // What was admitted before November was confirmed still counts against what the person said was left.
+    assert.deepEqual([code(ask(db)), code(ask(db, operations(1)))], ["pool", "counted"]);
+    assert.ok("opened" in confirmMonth(db, "2026-12", DEC, "UTC"));
+    assert.deepEqual([code(ask(db, {}, DEC)), code(ask(db, operations(1), DEC))], ["granted", "granted"]);
   });
 });

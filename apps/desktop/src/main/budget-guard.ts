@@ -181,7 +181,7 @@ export function checkHistory(guard: GuardRecord | null, ledger: LedgerView | nul
   const recovery: BudgetRecovery = {
     reason,
     detectedAt: at,
-    guard: { ledgerId: guard.ledgerId, revision: guard.revision, chain: guard.chain },
+    guard: { ledgerId: guard.ledgerId, revision: guard.revision, chain: guard.chain, at: guard.at },
     ledger: ledger === null ? null : { ledgerId: ledger.ledgerId, revision: ledger.revision },
   };
   return { state: "needs-recovery", recovery, append: { ledgerId: guard.ledgerId, revision: guard.revision, chain: guard.chain, recovery, at } };

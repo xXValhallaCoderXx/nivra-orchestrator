@@ -103,10 +103,13 @@ const spentDollars = (micros: number) => (Math.ceil(micros / 10_000) / 100).toFi
 const limitDollars = (micros: number) => (Math.floor(micros / 10_000) / 100).toFixed(2);
 
 const CONFIRM_NEXT = "wait for next month, and confirm it in your budget when it begins";
+/** A month's label from its index (year * 12 + month - 1). */
+const monthLabel = (index: number) => `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, "0")}`;
+/** After a loss: wait for the month after the one the loss holds through, by its label. */
+const waitFor = (loss: Loss) => `wait for ${monthLabel(loss.throughIndex + 1)}, and confirm it in your budget when it begins`;
 /** Thrown when a write that depends on the guard finds a ledger that isn't the one the guard last verified. */
 export const BUDGET_UNVERIFIED =
   "Nivra's budget history doesn't match what its guard last checked, so nothing was granted, sent or released. Open Nivra again to check it.";
-const HISTORY_WAIT = `Nivra lost this month's budget history, and you chose to wait for next month, so nothing more is admitted until then. When it begins, confirm it in your budget.`;
 const UNESTABLISHED =
   "Your monthly budget is in dollars, but Nivra hasn't yet established this model's price limits, or its price list's currency, so it can't keep this call within your budget. Turn the monthly budget off to use today's fixed allowances, or wait until Nivra has established them.";
 const UNPRICED_SPEND = `This month holds spend Nivra couldn't price, from before your monthly budget could count it, so it can't tell how much of your budget is left. Turn the monthly budget off to use today's fixed allowances, or ${CONFIRM_NEXT}.`;
@@ -490,17 +493,48 @@ function periodGrants(db: DatabaseSync, periodIndex: number): GrantRecord[] {
   return db.prepare("SELECT * FROM budget_grants WHERE period_idx = ? ORDER BY created_at, rowid").all(periodIndex).map(grantOf);
 }
 
-/** A history lost in a month: the revision it was recorded at, and what the person said was left (null: wait). */
+/**
+ * A history lost: the revision it was recorded at, the ledger's month then, the recovery month it holds through, and
+ * what the person said was left (null: wait for the month after).
+ */
 interface Loss {
   revision: number;
+  periodIndex: number;
+  throughIndex: number;
   remaining: BudgetRemaining | null;
   createdAt: string;
 }
 
+/**
+ * The loss that binds a ledger month: the latest recorded in that month or before it whose recovery month is that one
+ * or later. A loss holds through its recovery month however many of the ledger's months that spans, so a history put
+ * back from an older month, and then moved on to the real one, can't leave it behind.
+ */
 function lossIn(db: DatabaseSync, periodIndex: number): Loss | null {
-  const row = db.prepare("SELECT remaining_json, revision, created_at FROM budget_adjustments WHERE kind = 'history-lost' AND period_idx = ? ORDER BY revision DESC LIMIT 1").get(periodIndex);
-  const remaining = row ? strOrNull(row["remaining_json"]) : null;
-  return row ? { revision: num(row["revision"]), remaining: remaining === null ? null : (JSON.parse(remaining) as BudgetRemaining), createdAt: str(row["created_at"]) } : null;
+  const row = db
+    .prepare("SELECT period_idx, through_idx, remaining_json, revision, created_at FROM budget_adjustments WHERE kind = 'history-lost' AND period_idx <= ?1 AND through_idx >= ?1 ORDER BY revision DESC LIMIT 1")
+    .get(periodIndex);
+  if (!row) return null;
+  const remaining = strOrNull(row["remaining_json"]);
+  return {
+    revision: num(row["revision"]),
+    periodIndex: num(row["period_idx"]),
+    throughIndex: num(row["through_idx"]),
+    remaining: remaining === null ? null : (JSON.parse(remaining) as BudgetRemaining),
+    createdAt: str(row["created_at"]),
+  };
+}
+
+/** Whether a grant's spend is what a loss's statement covers: written before the loss, in a month the loss holds. */
+const coveredBy = (loss: Loss | null) => (grant: GrantRecord) =>
+  loss !== null && grant.writtenRevision <= loss.revision && grant.periodIndex >= loss.periodIndex && grant.periodIndex <= loss.throughIndex;
+
+/** The grants written since a loss, in every ledger month it holds through: what the person said was left counts them all. */
+function grantsSince(db: DatabaseSync, loss: Loss): GrantRecord[] {
+  return db
+    .prepare("SELECT * FROM budget_grants WHERE written_revision > ? AND period_idx >= ? AND period_idx <= ? ORDER BY created_at, rowid")
+    .all(loss.revision, loss.periodIndex, loss.throughIndex)
+    .map(grantOf);
 }
 
 /** Whether using `asked` more than `used` would go past `allowed`, for any counted service. */
@@ -635,17 +669,20 @@ function admission(db: DatabaseSync, input: { policy: BudgetPolicy | null; perio
   const loss = lossIn(db, periodIndex);
   if (loss) {
     const remaining = loss.remaining;
-    if (remaining === null) return { code: "history-wait", message: HISTORY_WAIT };
-    if (need === null) {
-      return { code: "unestablished", message: `After Nivra lost this month's budget history you set ${limitDollars(remaining.micros)} dollars for the rest of the month, but Nivra can't price this model yet, so it can't keep the call within that. Please ${CONFIRM_NEXT}.` };
+    const month = monthLabel(loss.throughIndex);
+    if (remaining === null) {
+      return { code: "history-wait", message: `Nivra lost its budget history in ${month}, and you chose to wait for the month after, so nothing more is admitted before ${monthLabel(loss.throughIndex + 1)}. When it begins, confirm it in your budget.` };
     }
-    const after = grants.filter((grant) => grant.writtenRevision > loss.revision);
+    if (need === null) {
+      return { code: "unestablished", message: `After Nivra lost its budget history you set ${limitDollars(remaining.micros)} dollars for the rest of ${month}, but Nivra can't price this model yet, so it can't keep the call within that. Please ${waitFor(loss)}.` };
+    }
+    const after = grantsSince(db, loss);
     const since = moneyOf(db, after);
     if (since === null || since + need > remaining.micros) {
-      return { code: "pool", message: `This would go past the ${limitDollars(remaining.micros)} dollars you set for the rest of this month after Nivra lost its budget history. Please ${CONFIRM_NEXT}.` };
+      return { code: "pool", message: `This would go past the ${limitDollars(remaining.micros)} dollars you set for the rest of ${month} after Nivra lost its budget history. Please ${waitFor(loss)}.` };
     }
     if (pastAllowance(countedOf(db, after), request.allowances, remaining.allowances)) {
-      return { code: "counted", message: `This would go past the sandbox operations, sandbox time or research credits you said were left this month after Nivra lost its budget history. Please ${CONFIRM_NEXT}.` };
+      return { code: "counted", message: `This would go past the sandbox operations, sandbox time or research credits you said were left for ${month} after Nivra lost its budget history. Please ${waitFor(loss)}.` };
     }
   }
   if (!policy) return null;
@@ -666,10 +703,10 @@ function admission(db: DatabaseSync, input: { policy: BudgetPolicy | null; perio
  */
 function moneyAdmission(
   db: DatabaseSync,
-  input: { policy: BudgetPolicy; grants: readonly GrantRecord[]; loss: Loss | null; periodIndex: number; dayIndex: number; request: GrantRequest; need: number },
+  input: { policy: BudgetPolicy; grants: readonly GrantRecord[]; loss: Loss | null; dayIndex: number; request: GrantRequest; need: number },
 ): GrantRefusal | null {
-  const { policy, grants, loss, periodIndex, dayIndex, request, need } = input;
-  const covered = (grant: GrantRecord) => loss !== null && grant.periodIndex === periodIndex && grant.writtenRevision <= loss.revision;
+  const { policy, grants, loss, dayIndex, request, need } = input;
+  const covered = coveredBy(loss);
   const used = moneyOf(db, grants, covered);
   if (used === null) return { code: "unpriced-spend", message: UNPRICED_SPEND };
   if (used + need > policy.monthlyMicros) {
@@ -835,9 +872,11 @@ export function recordJournal(workspace: WorkspaceDb, id: string, rows: readonly
 /**
  * Starts a new budget history after a loss, as the person chose. The ledger takes a new id, at a revision past both its
  * own and the guard's last, so no copy of the lost history can later pass for this one; the loss is recorded with what
- * was lost and what the person said was left of the current month, money and counted services (null: wait for the
- * next); and every grant still open becomes uncertain, since whether it was sent can't be known. The month stays the
- * current one; a ledger with none opens its first. Spend before the loss is unknown, never zero. The caller records
+ * was lost and what the person said was left, money and counted services (null: wait for the month after); and every
+ * grant still open becomes uncertain, since whether it was sent can't be known. The ledger's month stays as it is (a
+ * ledger with none opens its first), and the restriction holds through the recovery month: the latest month that the
+ * ledger, this computer's clock or the guard's last record shows, so a history put back from an older month can't
+ * leave it behind when the real month is confirmed. Spend before the loss is unknown, never zero. The caller records
  * the returned revision in the guard, with the recovery cleared.
  */
 export function startNewHistory(workspace: WorkspaceDb, input: { recovery: BudgetRecovery; remaining: BudgetRemaining | null; now: number; timezone: string }): LedgerState {
@@ -849,10 +888,14 @@ export function startNewHistory(workspace: WorkspaceDb, input: { recovery: Budge
     const chain = chainNext(previous?.chain ?? null, ledgerId, revision);
     const current = currentPeriodIn(db);
     const month = monthOf(input.now, input.timezone);
-    db.prepare("INSERT INTO budget_adjustments (id, kind, ledger_id, period_idx, reason, recovery_json, remaining_json, revision, created_at) VALUES (?, 'history-lost', ?, ?, ?, ?, ?, ?, ?)").run(
+    const periodIdx = current?.index ?? month.index;
+    // The recovery month: the latest the ledger, this computer's clock, or the guard's last record of the lost history shows.
+    const throughIdx = Math.max(periodIdx, month.index, monthOf(Date.parse(input.recovery.guard.at), input.timezone).index);
+    db.prepare("INSERT INTO budget_adjustments (id, kind, ledger_id, period_idx, through_idx, reason, recovery_json, remaining_json, revision, created_at) VALUES (?, 'history-lost', ?, ?, ?, ?, ?, ?, ?, ?)").run(
       randomUUID(),
       ledgerId,
-      current?.index ?? month.index,
+      periodIdx,
+      throughIdx,
       input.recovery.reason,
       JSON.stringify(input.recovery),
       input.remaining === null ? null : JSON.stringify(input.remaining),
@@ -940,8 +983,8 @@ export function budgetSummary(workspace: WorkspaceDb, context: { now: number; ca
   // What a new grant could take: the pool less this month's spend, and after a loss no more than what is left of what
   // the person said then. Spend that couldn't be priced leaves it unknown, except from before a loss; so does a history
   // that needs recovery.
-  const covered = (grant: GrantRecord) => loss !== null && grant.writtenRevision <= loss.revision;
-  const after = grants.filter((grant) => !covered(grant));
+  const covered = coveredBy(loss);
+  const after = loss ? grantsSince(db, loss) : [];
   const since = loss ? moneyOf(db, after) : null;
   const caps: (number | null)[] = [];
   if (policy) {
@@ -964,7 +1007,7 @@ export function budgetSummary(workspace: WorkspaceDb, context: { now: number; ca
     gaps,
     thresholdsCrossed: !known || pool === null || pool === 0 ? [] : (policy?.thresholds ?? []).filter((threshold) => committed * 100 >= threshold * pool),
     breakdown: whole ? breakdown.slice(0, 400) : [],
-    afterLoss: loss === null ? null : { at: loss.createdAt, remaining: loss.remaining, since: { micros: since, counted: countedOf(db, after) } },
+    afterLoss: loss === null ? null : { at: loss.createdAt, through: monthLabel(loss.throughIndex), remaining: loss.remaining, since: { micros: since, counted: countedOf(db, after) } },
     clock: { computerMonth: monthOf(context.now, policy?.timezone ?? context.timezone).label, jumps: jumpsSince(db, period?.openedAt ?? null) },
   };
 }

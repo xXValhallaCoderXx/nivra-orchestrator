@@ -11,6 +11,7 @@ import {
   type BudgetOperation,
   type BudgetPolicyDraft,
   type BudgetRecovery,
+  type BudgetRemaining,
   type GrantRequest,
   type JournalSeal,
   type PriceCatalogue,
@@ -159,7 +160,7 @@ const money = (db: WorkspaceDb, now = OCT) => {
 const lost = (db: WorkspaceDb): BudgetRecovery => ({
   reason: "ledger-behind",
   detectedAt: new Date(OCT).toISOString(),
-  guard: { ledgerId: ledgerState(db)?.ledgerId ?? randomUUID(), revision: (ledgerState(db)?.revision ?? 0) + 5, chain: "0".repeat(64) },
+  guard: { ledgerId: ledgerState(db)?.ledgerId ?? randomUUID(), revision: (ledgerState(db)?.revision ?? 0) + 5, chain: "0".repeat(64), at: new Date(OCT).toISOString() },
   ledger: ledgerState(db) && { ledgerId: ledgerState(db)!.ledgerId, revision: ledgerState(db)!.revision },
 });
 
@@ -655,7 +656,7 @@ describe("a lost history and the counted services", () => {
     granted(db, service(10));
     const refused = refusal(db, service(1));
     assert.equal(refused.code, "counted");
-    assert.match(refused.message, /you said were left this month/);
+    assert.match(refused.message, /you said were left for 2026-10/);
     assert.deepEqual(summary(db).afterLoss?.since.counted, { sandboxOperations: 10, sandboxSeconds: 0, researchCredits: 0 });
     setPolicy(db, null, OCT);
     assert.equal(refusal(db, service(1)).code, "counted");
@@ -674,6 +675,78 @@ describe("a lost history and the counted services", () => {
     const service = (seq: number, over: Partial<BudgetOperation>) => row(grant.id, seq, { model: null, usage: null, amountMicros: null, boundMicros: null, ...over });
     sent(db, grant.id, [service(1, { kind: "sandbox-operation", units: 30 }), service(2, { kind: "sandbox-operation", state: "unknown", units: null })]);
     assert.deepEqual(summary(db).counted.used, { sandboxOperations: 2, sandboxSeconds: 600, researchCredits: 0 });
+  });
+});
+
+describe("a lost history's recovery month", () => {
+  /** A request for Nebius operations alone: no model, no money. */
+  const operations = (count: number): Partial<GrantRequest> => ({
+    models: [],
+    productive: { requests: 0, outputTokens: 0 },
+    finalisation: { requests: 0, outputTokens: 0 },
+    allowances: { sandboxOperations: count, sandboxSeconds: 0, researchCredits: 0 },
+  });
+
+  /** The ledger's month is October and this computer says November: as when October's backup is put back in November. */
+  function restoredInNovember(remaining: BudgetRemaining | null) {
+    const db = workspace();
+    setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT);
+    granted(db, {}, OCT);
+    startNewHistory(db, { recovery: lost(db), remaining, now: NOV, timezone: "UTC" });
+    assert.equal(currentPeriod(db)?.label, "2026-10");
+    return db;
+  }
+
+  it("holds a wait through the real month, before and after that month is confirmed, for money and counted services", () => {
+    const db = restoredInNovember(null);
+    const waiting = refusal(db, {}, NOV);
+    assert.equal(waiting.code, "history-wait");
+    assert.match(waiting.message, /in 2026-11.*before 2026-12/);
+    assert.equal(refusal(db, operations(1), NOV).code, "history-wait");
+    assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
+    assert.equal(refusal(db, {}, NOV).code, "history-wait");
+    assert.equal(refusal(db, operations(1), NOV).code, "history-wait");
+    const totals = summary(db, NOV);
+    assert.deepEqual([totals.period?.label, totals.afterLoss?.through, totals.availableMicros, totals.settledMicros], ["2026-11", "2026-11", 0, null]);
+    assert.ok("opened" in confirmMonth(db, "2026-12", DEC, "UTC"));
+    granted(db, {}, DEC);
+  });
+
+  it("holds a finite allowance through the real month once it is confirmed, counting the money and operations admitted before", () => {
+    const db = restoredInNovember(left(GRANT_TOTAL + 1_000, { sandboxOperations: 3, sandboxSeconds: 0, researchCredits: 0 }));
+    granted(db, {}, NOV);
+    granted(db, operations(2), NOV);
+    assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
+    const pool = refusal(db, {}, NOV);
+    assert.equal(pool.code, "pool");
+    assert.match(pool.message, /rest of 2026-11.*wait for 2026-12/);
+    assert.equal(refusal(db, operations(2), NOV).code, "counted");
+    granted(db, operations(1), NOV);
+    const totals = summary(db, NOV);
+    assert.deepEqual([totals.afterLoss?.since.micros, totals.afterLoss?.since.counted.sandboxOperations, totals.availableMicros], [GRANT_TOTAL, 3, 1_000]);
+    assert.ok("opened" in confirmMonth(db, "2026-12", DEC, "UTC"));
+    granted(db, {}, DEC);
+    granted(db, operations(5), DEC);
+  });
+
+  it("excuses only spend from the loss's own months: a task's unpriced spend from the month before still can't be checked", () => {
+    const db = workspace();
+    const ofTask = { attribution: { ...request().attribution, attemptId: randomUUID() } };
+    granted(db, ofTask, OCT, TOKEN_FACTORY_PRICES);
+    observeProviderTime(db, NOV, NOV, "UTC");
+    startNewHistory(db, { recovery: lost(db), remaining: left(10_000_000), now: NOV, timezone: "UTC" });
+    setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000, sublimits: { ...NO_SUBLIMITS, perTaskMicros: 2 * GRANT_TOTAL } }, NOV);
+    assert.equal(refusal(db, ofTask, NOV).code, "unpriced-spend");
+    granted(db, {}, NOV);
+  });
+
+  it("takes the guard's last record of the lost history as evidence of the month, with this computer's clock behind", () => {
+    const db = workspace();
+    granted(db, {}, OCT);
+    const recovery = lost(db);
+    startNewHistory(db, { recovery: { ...recovery, guard: { ...recovery.guard, at: new Date(NOV).toISOString() } }, remaining: null, now: OCT, timezone: "UTC" });
+    assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
+    assert.equal(refusal(db, {}, NOV).code, "history-wait");
   });
 });
 

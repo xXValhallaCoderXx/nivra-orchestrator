@@ -327,8 +327,11 @@ export type BudgetRecoveryReason = z.infer<typeof BudgetRecoveryReason>;
 export const BudgetRecovery = z.strictObject({
   reason: BudgetRecoveryReason,
   detectedAt: z.iso.datetime(),
-  /** What the guard last recorded: the ledger's id, its revision, and the chained digest of its history to there. */
-  guard: z.strictObject({ ledgerId: z.uuid(), revision: count, chain: Sha256Hex }),
+  /**
+   * What the guard last recorded: the ledger's id, its revision, the chained digest of its history to there, and when
+   * it was recorded, the latest time the lost history is known to have been in use.
+   */
+  guard: z.strictObject({ ledgerId: z.uuid(), revision: count, chain: Sha256Hex, at: z.iso.datetime() }),
   /** What the workspace holds now; null when it holds no ledger. */
   ledger: z.strictObject({ ledgerId: z.uuid(), revision: count }).nullable(),
 });
@@ -412,12 +415,14 @@ export const BudgetSummary = z.strictObject({
   thresholdsCrossed: z.array(z.number().int().min(1).max(100)).max(5),
   breakdown: z.array(BudgetBreakdownLine).max(400),
   /**
-   * After a history lost this month: when, what the person said was left of it (null: wait for the next), and what was
+   * After a history lost this month: when, the last month its restriction holds (the recovery month, however many of
+   * the ledger's months it spans), what the person said was left of it (null: wait for the month after), and what was
    * admitted since, its money null when that couldn't be priced.
    */
   afterLoss: z
     .strictObject({
       at: z.iso.datetime(),
+      through: BudgetMonthLabel,
       remaining: BudgetRemaining.nullable(),
       since: z.strictObject({ micros: Micros.nullable(), counted: BudgetAllowances }),
     })

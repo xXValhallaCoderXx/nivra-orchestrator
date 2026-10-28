@@ -411,18 +411,21 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   ) STRICT;
 
   -- A history the person chose to start again after a loss: when, why, what was lost, the new ledger id it started
-  -- under, and what they said was left of that month, money and counted services (null: wait for the next). Spend
-  -- before it is unknown, never zero.
+  -- under, the ledger's month then and the recovery month it holds through (the latest month any evidence shows,
+  -- however many of the ledger's months that spans), and what they said was left of it, money and counted services
+  -- (null: wait for the month after). Spend before it is unknown, never zero.
   CREATE TABLE budget_adjustments (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('history-lost')),
     ledger_id TEXT NOT NULL,
     period_idx INTEGER NOT NULL,
+    through_idx INTEGER NOT NULL,
     reason TEXT NOT NULL,
     recovery_json TEXT NOT NULL,
     remaining_json TEXT,
     revision INTEGER NOT NULL CHECK (revision >= 1),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    CHECK (through_idx >= period_idx)
   ) STRICT;
   CREATE TRIGGER budget_adjustments_kept BEFORE UPDATE ON budget_adjustments BEGIN SELECT RAISE(ABORT, 'a recorded loss is kept as written'); END;
   CREATE TRIGGER budget_adjustments_not_removed BEFORE DELETE ON budget_adjustments BEGIN SELECT RAISE(ABORT, 'recorded losses are kept'); END;
