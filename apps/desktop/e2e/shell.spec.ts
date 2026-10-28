@@ -249,6 +249,84 @@ test("a task page shows the strip at its step, brings the brief editor's draft b
   await expect(page.getByTestId("nav-draft")).toHaveCount(0);
 });
 
+test("a bare New task's draft and one the Home composer started are kept apart: both listed, each reopened with its text, context included", async () => {
+  const drafts = () => page.locator('[data-testid="nav-draft"][data-draft-key^="new-task:"]');
+  await page.getByTestId("nav-tasks").click();
+  await page.getByTestId("tasks-new").click();
+  await page.getByTestId("task-form-title").fill("Bare draft");
+  await page.getByTestId("brief-more").click();
+  await page.getByTestId("brief-context").fill("Context kept with the draft");
+  await expect(drafts()).toHaveCount(1);
+  await goTo(page, "home");
+  await composer().fill("Composer draft");
+  await page.getByTestId("home-create-task").click();
+  await page.getByTestId("brief-goal").fill("Started from the composer");
+  await expect(drafts()).toHaveCount(2);
+
+  await page.locator('[data-testid="nav-draft"][data-draft-key$=":home"]').click();
+  await expect(page.getByTestId("task-form-title")).toHaveValue("Composer draft");
+  await expect(page.getByTestId("brief-goal")).toHaveValue("Started from the composer");
+  await page.getByTestId("task-form-cancel").click();
+  await expect(drafts()).toHaveCount(1);
+  await drafts().click();
+  await expect(page.getByTestId("task-form-title")).toHaveValue("Bare draft");
+  await expect(page.getByTestId("brief-context")).toBeVisible();
+  await expect(page.getByTestId("brief-context")).toHaveValue("Context kept with the draft");
+  await page.getByTestId("task-form-cancel").click();
+  await expect(drafts()).toHaveCount(0);
+  await goTo(page, "home");
+  await composer().fill("");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+});
+
+test("the brief editor's draft stays with the version it was begun on: a newer brief never reopens with it, and Discard my edit removes it", async () => {
+  const drafts = () => page.locator('[data-testid="nav-draft"][data-draft-key^="brief:"]');
+  const openTask = async () => {
+    await page.getByTestId("nav-tasks").click();
+    await page.getByTestId("task-row").filter({ hasText: "Export invoices as CSV" }).getByTestId("task-open").click();
+    await expect(page.getByTestId("task-edit-brief")).toBeVisible();
+  };
+  // Another save, from the task as it is now: the brief's next version.
+  const saveElsewhere = (id: string) =>
+    page.evaluate(async (taskId) => {
+      const task = await window.nivra.getTask(taskId);
+      const { goal: _goal, acceptanceCriteria, scope, exclusions, context, assumptions, checks, acceptanceCases, baseline, frozen } = task.brief.content;
+      await window.nivra.reviseBrief(taskId, task.revision, { goal: `Saved elsewhere as v${task.brief.version + 1}`, acceptanceCriteria, scope, exclusions, context, assumptions, checks, acceptanceCases, baseline, frozen });
+    }, id);
+
+  await openTask();
+  await page.getByTestId("task-edit-brief").click();
+  await page.getByTestId("brief-goal").fill("Begun on the first version");
+  await expect(drafts()).toHaveCount(1);
+  const key = (await drafts().getAttribute("data-draft-key"))!;
+  const taskId = key.split(":")[1]!;
+  await saveElsewhere(taskId);
+  await page.getByTestId("task-brief-save").click();
+  await expect(page.getByTestId("task-edit-conflict")).toBeVisible();
+  await page.getByTestId("brief-goal").fill("Typed again after the conflict");
+  await expect.poll(async () => (await stored()).includes("Typed again after the conflict")).toBe(true);
+  await expect(drafts()).toHaveAttribute("data-draft-key", key);
+  await goTo(page, "home");
+  await openTask();
+  await expect(page.getByTestId("task-brief-editor")).toHaveCount(0);
+
+  await page.getByTestId("task-edit-brief").click();
+  await page.getByTestId("brief-goal").fill("Begun on the second version");
+  await expect(drafts()).toHaveCount(2);
+  await saveElsewhere(taskId);
+  await page.getByTestId("task-brief-save").click();
+  await expect(page.getByTestId("task-edit-conflict")).toBeVisible();
+  await page.getByTestId("task-edit-discard").click();
+  await expect(page.getByTestId("task-brief-editor")).toHaveCount(0);
+  await expect(drafts()).toHaveCount(1);
+  await expect(drafts()).toHaveAttribute("data-draft-key", key);
+  // Nothing on the page restores or removes the first version's draft: the test removes it.
+  await page.evaluate((name) => window.localStorage.removeItem(`nivra.drafts.v1:${name}`), key);
+  await page.reload();
+  await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+});
+
 test("Ctrl+K opens the switcher on the project in view, Esc closes it and leaves the typed text, F6 moves between the sidebar and the page, Ctrl+comma opens Settings", async () => {
   await composer().fill(TITLE);
   await page.getByTestId("main").focus();

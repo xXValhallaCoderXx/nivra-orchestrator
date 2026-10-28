@@ -306,7 +306,7 @@ function Shell() {
                       running={busyIds.includes(project.id)}
                       onNavigate={navigate}
                       onCreateTask={(title) => {
-                        navigate({ kind: "new-task", draftKey: newTaskDraftKey(scope), plan: null, title });
+                        navigate({ kind: "new-task", draftKey: newTaskDraftKey(scope, true), plan: null, title });
                         setComposerOrigin(composerDraftKey(scope));
                       }}
                       onStartConversation={async () => opened(await window.nivra.createConversation({ kind: "project", projectId: project.id }))}

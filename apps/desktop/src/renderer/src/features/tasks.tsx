@@ -142,6 +142,11 @@ function Chevron({ open }: { open: boolean }) {
 function BriefInputs({ draft, onChange, reveal = null }: { draft: Draft; onChange(next: Draft): void; reveal?: CoachQuestionField | null }) {
   const bind = (key: Exclude<keyof Draft, "cases" | "baseline">) => ({ value: draft[key], onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...draft, [key]: event.currentTarget.value }) });
   const [more, setMore] = useState(() => draft.context.trim() !== "" || draft.assumptions.trim() !== "");
+  // A draft restored after the form opened, holding context or assumptions, shows them too.
+  const holdsMore = draft.context.trim() !== "" || draft.assumptions.trim() !== "";
+  useEffect(() => {
+    if (holdsMore) setMore(true);
+  }, [holdsMore]);
   const revealing = reveal === "context" || reveal === "assumptions";
   useEffect(() => {
     if (revealing) setMore(true);
@@ -588,6 +593,7 @@ export function NewTask({
                     onCancel();
                   }}
                   disabled={busy !== null}
+                  data-testid="task-form-cancel"
                 >
                   Cancel
                 </Button>
@@ -705,10 +711,11 @@ export function TaskDetail({
   // Narrow (NW3): the decision follows the result, and a bar keeps Approve in view; its press opens the same confirmation.
   const narrow = useNarrow();
   const [confirmAsked, setConfirmAsked] = useState(0);
-  // The brief editor's draft (NIV-56), by task and brief version: when the page opens again with one, the editor opens
-  // with it (never over another edit or typed text), and it goes once the edit is saved or cancelled.
+  // The brief editor's draft (NIV-56), by task and the brief version the edit began on, so it is restored only over that
+  // version: when the page opens again with one, the editor opens with it (never over another edit or typed text), and
+  // it goes once the edit is saved or discarded. One begun on an older version stays listed, and isn't restored.
   const briefVersion = task.value?.brief.version ?? null;
-  const briefDraft = useDraft<Draft>(`brief:${taskId}:${briefVersion ?? "unread"}`);
+  const briefDraft = useDraft<Draft>(`brief:${taskId}:${editing === "brief" && base ? base.version : (briefVersion ?? "unread")}`);
   useEffect(() => {
     const view = task.value;
     if (!briefDraft.restore || !view || editing !== null || view.summary.state === "completed") return;
@@ -972,7 +979,15 @@ export function TaskDetail({
               what you need, then discard your edit and start again from what is saved.
             </Text>
             <Group>
-              <Button size="xs" variant="default" onClick={stopEdit} data-testid="task-edit-discard">
+              <Button
+                size="xs"
+                variant="default"
+                onClick={() => {
+                  if (editing === "brief") briefDraft.discard();
+                  stopEdit();
+                }}
+                data-testid="task-edit-discard"
+              >
                 Discard my edit
               </Button>
             </Group>

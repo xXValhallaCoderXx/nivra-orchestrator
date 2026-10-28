@@ -80,8 +80,11 @@ export const shownSection = (section: SettingsSection): SettingsSection => (SETT
 /** The Home composer's draft for a scope: the title typed there, before a task exists. */
 export const composerDraftKey = (scope: Scope): string => `home-composer:${scopeKey(scope)}`;
 
-/** The draft of a new task's brief in a scope, which the new task page keeps (see DraftStore in routes.ts). */
-export const newTaskDraftKey = (scope: Scope): string => `new-task:${scopeKey(scope)}`;
+/**
+ * The draft of a new task's brief in a scope, which the new task page keeps (see DraftStore in routes.ts). A form the
+ * Home composer started keeps its own (`:home`), so it never takes the place of a draft begun from New task.
+ */
+export const newTaskDraftKey = (scope: Scope, fromHome = false): string => `new-task:${scopeKey(scope)}${fromHome ? ":home" : ""}`;
 
 function scopeOfKey(text: string): Scope | null {
   if (text === "general") return { kind: "general" };
@@ -100,7 +103,7 @@ export function placeOfDraft(key: string): { kind: string; scope: Scope | null; 
     return scope ? { kind: "New task", scope, route: { kind: "home" } } : null;
   }
   if (prefix === "new-task") {
-    const scope = scopeOfKey(rest);
+    const scope = scopeOfKey(rest.endsWith(":home") ? rest.slice(0, -":home".length) : rest);
     return scope ? { kind: "New task", scope, route: { kind: "new-task", draftKey: key, plan: null, title: "" } } : null;
   }
   if (prefix === "brief") {

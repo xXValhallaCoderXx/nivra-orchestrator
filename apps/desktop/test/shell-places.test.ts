@@ -55,6 +55,11 @@ describe("the shell's places (NIV-56)", () => {
   it("finds where each kind of draft is edited from its key, and nothing for a key it doesn't know", () => {
     assert.deepEqual(placeOfDraft(composerDraftKey(alpha)), { kind: "New task", scope: alpha, route: { kind: "home" } });
     assert.deepEqual(placeOfDraft(newTaskDraftKey(general)), { kind: "New task", scope: general, route: { kind: "new-task", draftKey: "new-task:general", plan: null, title: "" } });
+    // A form the Home composer started keeps its own key, and opens the same form with it.
+    assert.deepEqual([newTaskDraftKey(alpha, true), placeOfDraft(newTaskDraftKey(alpha, true))], [
+      `${newTaskDraftKey(alpha)}:home`,
+      { kind: "New task", scope: alpha, route: { kind: "new-task", draftKey: `${newTaskDraftKey(alpha)}:home`, plan: null, title: "" } },
+    ]);
     assert.deepEqual(placeOfDraft("brief:t-42:3"), { kind: "Brief", scope: null, route: { kind: "task", id: "t-42", tab: "brief" } });
     assert.deepEqual([placeOfDraft("mission:m1"), placeOfDraft("home-composer:elsewhere"), placeOfDraft("no-colon"), placeOfDraft("new-task:project:")], [null, null, null, null]);
   });
