@@ -58,6 +58,8 @@ export interface StripItem {
  */
 export interface TaskStripProps {
   items: readonly StripItem[];
+  /** Names the task for screen readers, for example "Where Add CSV export for invoices is". */
+  label?: string;
 }
 
 /**
@@ -67,8 +69,23 @@ export interface TaskStripProps {
  */
 export interface DraftStore {
   read<T>(key: string): T | null;
-  write<T>(key: string, value: T): { kept: true } | { kept: false; refused: "credential" };
+  /** `label` is the line the sidebar's "Unsaved drafts" shows, such as the brief's title: the page knows it best. */
+  write<T>(key: string, value: T, label: string): { kept: true } | { kept: false; refused: "credential" };
   discard(key: string): void;
   /** The drafts that exist, newest first, for the sidebar's "Unsaved drafts" list. */
   list(): ReadonlyArray<{ key: string; label: string; savedAt: string }>;
 }
+
+/**
+ * Theme tokens the shell defines in theme.ts (light, and dark as approved in DK1), for pages to use by name instead of
+ * literal colours. Each is a CSS variable set by the theme's cssVariablesResolver.
+ */
+export const THEME_TOKENS = {
+  /** The border of an outlined control (default buttons, inputs, the switcher): 3.45:1 on white. */
+  controlBorder: "--nivra-control-border",
+  /** Rows of a diff: an added line and a removed one. The +/- sign carries the meaning too. */
+  diffAdded: "--nivra-diff-added",
+  diffRemoved: "--nivra-diff-removed",
+  /** A light badge's background and text, by tone: `--nivra-badge-<tone>-bg` and `--nivra-badge-<tone>-fg`. */
+  badgeTones: ["gray", "blue", "yellow", "green", "red", "indigo", "orange"],
+} as const;
