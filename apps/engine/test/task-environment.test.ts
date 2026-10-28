@@ -279,6 +279,17 @@ describe("a task run from a recipe's environment (NIV-55)", () => {
     assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.guest.ran.length, run.requests()], ["refused", "environment", 0, 0]);
   });
 
+  it("refuses, before anything is sent, a commit whose setup file is a link, though its setup digest matches the recipe's", async () => {
+    // Nate's review of PR 36: a package.json holding {} and a package.json linking to a file named {} digest alike, and
+    // the worker could then edit the effective manifest through the link's target, which isn't a setup file.
+    const plain = { ...FILES, "package.json": "{}" };
+    const linked = { ...FILES, "package.json": { link: "{}" }, "{}": json({ name: "greet", private: true, scripts: { postinstall: "node build.js" } }) };
+    const environment = await refFor(plain, "base-image");
+    assert.equal(setupConfiguration(await snap(repoWith(linked)), isNodeSetupPath).digest, environment.configuration, "the two commits' setup digests match");
+    const run = await attempt({ files: linked, brief: ENV_BRIEF, setup: prepared, extra: { environment } });
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.guest.ran.length, run.requests()], ["refused", "environment", 0, 0]);
+  });
+
   it("refuses, before anything is sent, a commit that tracks files in the recipe's dependency folders", async () => {
     const files = { ...FILES, "node_modules/left/index.js": "module.exports = 1;\n" };
     const run = await attempt({ files, brief: ENV_BRIEF, setup: prepared, extra: { environment: await refFor(files, "base-image") } });

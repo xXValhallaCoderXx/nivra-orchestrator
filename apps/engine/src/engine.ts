@@ -511,7 +511,12 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
    */
   const environmentProblem = async (snapshot: Parameters<typeof environmentInputs>[0], environment: TaskEnvironment | EnvironmentRef): Promise<string | null> => {
     if (isEnvironmentRef(environment)) {
-      if (setupConfiguration(snapshot, isNodeSetupPath).digest !== environment.configuration) return "This commit's setup files (its package.json files, lockfile, workspace file or version files) aren't the ones the project's environment was prepared from. Prepare the environment again, then preview the run.";
+      const configuration = setupConfiguration(snapshot, isNodeSetupPath);
+      // A setup file must be a file: a link's digest is its target's name, so a link could stand in for a manifest that
+      // the worker then edits through its target, unseen by the setup checks.
+      const link = configuration.files.find((file) => file.kind !== "file");
+      if (link) return `This commit's ${JSON.stringify(link.path.length > 200 ? `${link.path.slice(0, 199)}\u2026` : link.path)} is a link. Nivra reads a project's setup files only as files, so a run can't be bound to its environment: commit the file itself, then preview the run.`;
+      if (configuration.digest !== environment.configuration) return "This commit's setup files (its package.json files, lockfile, workspace file or version files) aren't the ones the project's environment was prepared from. Prepare the environment again, then preview the run.";
     } else {
       let digest: string;
       try {

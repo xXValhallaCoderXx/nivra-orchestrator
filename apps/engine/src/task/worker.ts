@@ -836,7 +836,10 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     admit: (snapshot) => {
       const environment = run.environment ?? null;
       if (environment && isEnvironmentRef(environment)) {
-        if (setupConfiguration(snapshot, isNodeSetupPath).digest !== environment.configuration) return { code: "environment", message: "snapshot: this commit's setup files aren't the ones its environment was prepared from, so nothing was sent." };
+        const configuration = setupConfiguration(snapshot, isNodeSetupPath);
+        // A setup file that is a link is refused too: its digest is its target's name, whatever the target holds.
+        if (configuration.files.some((file) => file.kind !== "file")) return { code: "environment", message: "snapshot: one of this commit's setup files is a link, which its environment can't be bound to, so nothing was sent." };
+        if (configuration.digest !== environment.configuration) return { code: "environment", message: "snapshot: this commit's setup files aren't the ones its environment was prepared from, so nothing was sent." };
       } else if (environment) {
         let digest: string | null = null;
         try {

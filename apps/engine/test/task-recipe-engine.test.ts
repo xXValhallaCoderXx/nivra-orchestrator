@@ -118,6 +118,17 @@ describe("a task run from a recipe's environment, through a real engine (NIV-55)
     assert.deepEqual([mixed.code, mixed.message], ["environment", 'This commit tracks files in node_modules, such as "node_modules/left/index.js", where the project\'s environment keeps what it installed, so a run would mix the two. Stop tracking node_modules, commit, then preview the run.']);
   });
 
+  it("refuses a commit whose setup file is a link, though its setup digest matches the environment's", async () => {
+    // Nate's review of PR 36: a package.json holding {} and a package.json linking to a file named {} digest alike.
+    const plain = { ...FILES, "package.json": "{}" };
+    const linked = { ...FILES, "package.json": { link: "{}" }, "{}": json({ name: "greet", private: true, scripts: { postinstall: "node build.js" } }) };
+    const { engine } = await setup(plain);
+    const environment = await refFor(plain);
+    assert.equal(setupConfiguration(await snap(repoWith(linked)), isNodeSetupPath).digest, environment.configuration, "the two commits' setup digests match");
+    const shown = refused(await preview(engine, repoWith(linked), environment));
+    assert.deepEqual([shown.code, shown.message], ["environment", 'This commit\'s "package.json" is a link. Nivra reads a project\'s setup files only as files, so a run can\'t be bound to its environment: commit the file itself, then preview the run.']);
+  });
+
   it("starts from the environment's image with its task variables and dependency folders, and proposes the fix", async () => {
     const { sandbox, engine, repo } = await setup();
     const environment = await refFor(FILES);

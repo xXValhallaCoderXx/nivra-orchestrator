@@ -11,7 +11,7 @@ import { operationsForBrief, runWorker, type TaskBrief, type WorkerRun } from ".
 import { TASK_BRIEF, TASK_FIX, TASK_FIXTURE } from "../scripts/task-fixture.ts";
 import { clock } from "./fake-sandboxes.ts";
 import { RealGuest } from "./real-guest.ts";
-import { changedSince, folderState, GIT, localSession, repoWith, scratch, snap } from "./workspace-fixtures.ts";
+import { changedSince, folderState, GIT, localSession, repoWith, scratch, snap, type Content } from "./workspace-fixtures.ts";
 
 /**
  * A task attempt for the worker's tests (NIV-7, D39): the fixture repository, the production session and prescribed
@@ -48,7 +48,7 @@ export interface Attempt {
   /** Wraps the fake service's transport, to watch or change requests. */
   wrap?: (transport: Transport, guest: RealGuest) => Transport;
   brief?: TaskBrief;
-  files?: Record<string, string>;
+  files?: Record<string, Content>;
   setup?: (guest: RealGuest) => void;
   extra?: Partial<WorkerRun>;
   signal?: AbortSignal;
