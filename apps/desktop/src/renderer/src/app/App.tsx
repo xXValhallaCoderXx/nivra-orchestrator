@@ -103,7 +103,10 @@ function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [navOpen]);
 
-  const projects = usePoll<ProjectView[]>(() => window.nivra.listProjects(), () => null, [projectsVersion]);
+  // Home and Settings show what other pages change (a task page allows sharing, a research dialog turns research on),
+  // so while either is in view, the projects and the settings are read again, slowly.
+  const watching = route.kind === "home" || route.kind === "settings";
+  const projects = usePoll<ProjectView[]>(() => window.nivra.listProjects(), () => (watching ? 5_000 : null), [projectsVersion, watching]);
   const engines = usePoll<EngineView[]>(
     () => window.nivra.listEngines(),
     (list) => (list === null || list.some((e) => e.state.status === "starting") ? 700 : 2_500),
@@ -117,7 +120,7 @@ function Shell() {
   // For the sidebar's open-task count and the project's Home.
   const tasks = usePoll<TasksView>(() => window.nivra.listTasks(), () => 5_000, [projectsVersion]);
   // Whether the keys are saved, for the Homes' setup rows; read again after each save in Settings.
-  const settings = usePoll<SettingsView>(() => window.nivra.getSettings(), () => null, [credentialsSaved]);
+  const settings = usePoll<SettingsView>(() => window.nivra.getSettings(), () => (watching ? 5_000 : null), [credentialsSaved, watching]);
   const appInfo = usePoll<AppInfo>(() => window.nivra.getAppInfo(), () => null, []);
 
   const list = projects.value ?? [];
@@ -134,7 +137,8 @@ function Shell() {
 
   const engine = project ? (engines.value?.find((e) => e.targetId === project.targetId) ?? null) : null;
   const online = engine?.state.status === "online";
-  const hostError = projects.error ?? engines.error ?? wsl.error ?? preferences.error ?? conversations.error;
+  // Any read that failed shows, rather than an empty list or a wait that never ends.
+  const hostError = projects.error ?? engines.error ?? wsl.error ?? preferences.error ?? conversations.error ?? tasks.error ?? settings.error ?? appInfo.error;
   const workspace = conversations.value?.workspace;
   const notice = workspace?.state === "ready" ? workspace.notice : null;
   // A project's own place, with no project in view, shows General's Home.
@@ -282,8 +286,11 @@ function Shell() {
                       key={project.id}
                       project={project}
                       engine={engine}
+                      enginesError={engines.error}
                       settings={settings.value}
+                      settingsError={settings.error}
                       tasks={tasks.value}
+                      tasksError={tasks.error}
                       running={busyIds.includes(project.id)}
                       onNavigate={navigate}
                       onCreateTask={(title) => {
@@ -314,6 +321,7 @@ function Shell() {
                     <GeneralHome
                       projects={list}
                       settings={settings.value}
+                      settingsError={settings.error}
                       wsl={wsl.value}
                       adding={adding.busy}
                       onAdd={() => void adding.add()}
@@ -415,8 +423,11 @@ function Shell() {
                 onSection={(section) => navigate({ kind: "settings", section })}
                 narrow={narrow}
                 engines={engines.value ?? []}
+                enginesError={engines.error}
                 appInfo={appInfo.value}
+                appInfoError={appInfo.error}
                 settings={settings.value}
+                visible={shown.kind === "settings"}
                 project={project}
                 projects={list}
                 engine={engine}

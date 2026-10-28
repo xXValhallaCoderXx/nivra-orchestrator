@@ -62,8 +62,8 @@ function SetupRow({ state, title, children, action, testId }: { state: "ok" | "a
   );
 }
 
-const keyWords = (settings: SettingsView | null) => {
-  if (!settings) return { state: "off" as const, title: "Nebius key and project ID: checking…" };
+const keyWords = (settings: SettingsView | null, error: string | null) => {
+  if (!settings) return error ? { state: "attention" as const, title: "Nebius key and project ID: couldn't be read" } : { state: "off" as const, title: "Nebius key and project ID: checking…" };
   const key = settings.nebiusKey === "encrypted" || settings.nebiusKey === "unencrypted";
   const id = settings.nebiusProjectId === "set";
   if (settings.nebiusKey === "unreadable") return { state: "attention" as const, title: "Nebius key: can't be read here" };
@@ -80,8 +80,11 @@ const keyWords = (settings: SettingsView | null) => {
 export function ProjectHome({
   project,
   engine,
+  enginesError,
   settings,
+  settingsError,
   tasks,
+  tasksError,
   running,
   onNavigate,
   onCreateTask,
@@ -90,8 +93,12 @@ export function ProjectHome({
 }: {
   project: ProjectView;
   engine: EngineView | null;
+  /** A failed read of the engines, of the settings and of the tasks: each shows where its figures would. */
+  enginesError: string | null;
   settings: SettingsView | null;
+  settingsError: string | null;
   tasks: TasksView | null;
+  tasksError: string | null;
   /** A hello or explain run of this window is going for this project. */
   running: boolean;
   onNavigate: Navigate;
@@ -111,7 +118,7 @@ export function ProjectHome({
   const own = (tasks?.tasks ?? []).filter((task) => task.projectId === project.id);
   const open = own.filter((task) => task.state !== "completed");
   const workspaceReady = tasks?.workspace.state === "ready";
-  const key = keyWords(settings);
+  const key = keyWords(settings, settingsError);
   const env = environment.value;
 
   return (
@@ -120,7 +127,7 @@ export function ProjectHome({
         <Title order={1} style={{ overflowWrap: "anywhere" }} data-testid="home-title">
           {project.label}
         </Title>
-        <EngineBadge project={project} engine={engine} />
+        <EngineBadge project={project} engine={engine} unknown={enginesError} />
       </Stack>
       <EngineNotices engine={engine} onRestart={() => window.nivra.restartEngine(project.id)} testId="home-engine" />
       <ProjectNotice project={project} />
@@ -162,7 +169,9 @@ export function ProjectHome({
           <Text size="xs" c="var(--nivra-text-3)">
             {tasks?.workspace.state === "unavailable"
               ? `Tasks can't be written now: ${tasks.workspace.reason}`
-              : "Next you write its brief: the goal, how you'll know it worked, and a check that must pass. Nothing is sent."}
+              : !tasks && tasksError
+                ? "Tasks can't be written until Nivra can read them again: it tries by itself."
+                : "Next you write its brief: the goal, how you'll know it worked, and a check that must pass. Nothing is sent."}
           </Text>
         </Stack>
       </Paper>
@@ -181,7 +190,11 @@ export function ProjectHome({
           }
           testId="home-tasks"
         >
-          {own.length === 0 ? (
+          {!tasks ? (
+            <Text size="sm" c={tasksError ? "var(--nivra-error)" : "var(--nivra-text-3)"} role={tasksError ? undefined : "status"} data-testid="home-tasks-state">
+              {tasksError ? `Nivra couldn't read the tasks: ${tasksError}` : "Reading the tasks…"}
+            </Text>
+          ) : own.length === 0 ? (
             <Text size="sm" c="var(--nivra-text-2)">
               No tasks in {project.label} yet. Name one above to start its brief, or talk it through first in a conversation.
             </Text>
@@ -311,6 +324,7 @@ const STATE_CELL = { textAlign: "right", whiteSpace: "nowrap", width: 1 } as con
 export function GeneralHome({
   projects,
   settings,
+  settingsError,
   wsl,
   adding,
   onAdd,
@@ -320,6 +334,8 @@ export function GeneralHome({
 }: {
   projects: ProjectView[];
   settings: SettingsView | null;
+  /** A failed read of the settings: the needs table says so instead of showing what is saved. */
+  settingsError: string | null;
   wsl: WslView | null;
   adding: boolean;
   onAdd(): void;
@@ -460,6 +476,11 @@ export function GeneralHome({
             </Table.Tbody>
           </Table>
         </Paper>
+        {!settings && settingsError && (
+          <Text size="sm" c="var(--nivra-error)" data-testid="home-needs-error">
+            Nivra couldn't read which keys are saved: {settingsError}
+          </Text>
+        )}
         <Anchor component="button" type="button" size="sm" fw={500} c="var(--mantine-color-text)" td="underline" style={{ alignSelf: "flex-start" }} onClick={() => onNavigate({ kind: "settings", section: "connections" })} data-testid="home-keys">
           Add keys now in Settings
         </Anchor>

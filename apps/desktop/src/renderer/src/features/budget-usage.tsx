@@ -45,7 +45,7 @@ export function BudgetAndUsage() {
       ) : (
         <>
           <Text size="sm" c="var(--nivra-text-2)">
-            The engine stops every task run at these, whatever its brief:
+            Every task run has these bounds, whatever its brief:
           </Text>
           <Stack gap={10} data-testid="budget-usage-limits">
             {runLimitLines(limits).map((line) => (

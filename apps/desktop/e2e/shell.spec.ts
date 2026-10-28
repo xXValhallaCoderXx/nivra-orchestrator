@@ -232,6 +232,32 @@ test("a copy button puts exactly the shown text on the clipboard, through main, 
   await goTo(page, "home");
 });
 
+test("Home and Settings show what another place changed: sharing and uploads allowed, research turned on", async () => {
+  const projectId = (await page.evaluate(() => window.nivra.listProjects()))[0]!.id;
+  // As a task page and a research dialog would, while another place is in view.
+  await goTo(page, "tasks");
+  await page.evaluate(async (id) => {
+    await window.nivra.setSharing(id, true);
+    await window.nivra.setCloudExecution(id, true);
+    await window.nivra.setWebResearch(true);
+  }, projectId);
+  await goTo(page, "home");
+  await expect(page.getByTestId("home-setup-sharing")).toHaveAttribute("data-state", "ok");
+  await expect(page.getByTestId("home-setup-uploads")).toHaveAttribute("data-state", "ok");
+  await goTo(page, "settings-sharing");
+  await expect(page.getByTestId("sharing-model-context")).toBeChecked();
+  await expect(page.getByTestId("sharing-uploads")).toBeChecked();
+  await expect(page.getByTestId("web-research-switch")).toBeChecked();
+  // Put back as they were.
+  await page.evaluate(async (id) => {
+    await window.nivra.setSharing(id, false);
+    await window.nivra.setCloudExecution(id, false);
+    await window.nivra.setWebResearch(false);
+  }, projectId);
+  await goTo(page, "home");
+  await expect(page.getByTestId("home-setup-sharing")).toHaveAttribute("data-state", "off");
+});
+
 test("a narrow window folds the sidebar behind the menu button; Settings and a dialog scroll inside themselves, their actions in reach, and nothing scrolls sideways", async () => {
   // 820 by 900 at 150% zoom, then the window's least height: 547 by 600, then 547 by 373 CSS px.
   await app.evaluate(({ BrowserWindow }) => {
@@ -330,4 +356,24 @@ test("storage that refuses every write: a draft says it couldn't be kept and kee
   await expect(page.locator("html")).toHaveAttribute("data-mantine-color-scheme", "dark");
   await expect(page.getByTestId("appearance-not-kept")).toHaveText("Nivra couldn't keep this choice on this computer. It applies until Nivra closes.");
   expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe("rgb(10, 10, 10)");
+});
+
+test("a read that fails shows as a failure, never as an empty list or a wait that doesn't end", async () => {
+  // Stand-ins for failing reads, in this app only, then the page loaded again so every read is made afresh.
+  await app.evaluate(({ ipcMain }) => {
+    for (const channel of ["tasks:list", "settings:get"]) {
+      ipcMain.removeHandler(channel);
+      ipcMain.handle(channel, () => {
+        throw new Error("The test made this read fail.");
+      });
+    }
+  });
+  await page.reload();
+  await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
+  await expect(page.getByTestId("host-error")).toContainText("The test made this read fail.");
+  await expect(page.getByTestId("home-tasks-state")).toContainText("Nivra couldn't read the tasks");
+  await expect(page.getByText(`No tasks in ${PROJECT} yet`)).toHaveCount(0);
+  await expect(page.getByTestId("home-setup-key")).toContainText("Nebius key and project ID: couldn't be read");
+  await expect(page.getByTestId("home-create-task")).toBeDisabled();
+  await expect(page.getByTestId("main")).toContainText("Tasks can't be written until Nivra can read them again");
 });

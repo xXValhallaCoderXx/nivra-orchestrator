@@ -39,7 +39,7 @@ export function SettingsCard({ title, description, children, testId }: { title: 
  * and a field clears once it is saved. `onCredentialsSaved` follows each save, once the engines have them. Check Token
  * Factory runs from the engine of the project in view, and makes paid calls.
  */
-export function NebiusConnection({ project, online, onCredentialsSaved }: { project: ProjectView | null; online: boolean; onCredentialsSaved(): void }) {
+export function NebiusConnection({ project, online, onCredentialsSaved, freshness = 0 }: { project: ProjectView | null; online: boolean; onCredentialsSaved(): void; freshness?: number }) {
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [check, setCheck] = useState<ProviderCheck | null>(null);
   const [checking, setChecking] = useState(false);
@@ -50,9 +50,10 @@ export function NebiusConnection({ project, online, onCredentialsSaved }: { proj
   const projectId = project?.id ?? null;
   const usableKey = settings !== null && (settings.nebiusKey === "encrypted" || settings.nebiusKey === "unencrypted");
 
+  // Read again each time Settings is opened (`freshness`): another place may have changed them.
   useEffect(() => {
     void window.nivra.getSettings().then(setSettings, (reason: unknown) => setError(errorMessage(reason)));
-  }, []);
+  }, [freshness]);
 
   async function runCheck() {
     if (!projectId) return;
@@ -224,7 +225,7 @@ export function NebiusConnection({ project, online, onCredentialsSaved }: { proj
 }
 
 /** Settings › Connections, Tavily (D37): the key research needs, kept like the Nebius key and shown only as saved or not. */
-export function TavilyConnection() {
+export function TavilyConnection({ freshness = 0 }: { freshness?: number }) {
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
@@ -232,7 +233,7 @@ export function TavilyConnection() {
 
   useEffect(() => {
     void window.nivra.getSettings().then(setSettings, (reason: unknown) => setError(errorMessage(reason)));
-  }, []);
+  }, [freshness]);
 
   async function act(change: () => Promise<SettingsView>) {
     setBusy(true);
@@ -425,14 +426,14 @@ export function SharingTable({ projects, windowsHost, onChanged }: { projects: P
  * Settings › Sharing, Everywhere (D37): the app-wide permission to send research queries to Tavily, with what Tavily and
  * Nivra keep. Each run still waits for its own "Start research".
  */
-export function ResearchSwitch() {
+export function ResearchSwitch({ freshness = 0 }: { freshness?: number }) {
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void window.nivra.getSettings().then(setSettings, (reason: unknown) => setError(errorMessage(reason)));
-  }, []);
+  }, [freshness]);
 
   async function act(change: () => Promise<SettingsView>) {
     setBusy(true);

@@ -1,5 +1,5 @@
 import { Badge, Box, Code, Grid, Group, ScrollArea, Stack, Text, Title, UnstyledButton } from "@mantine/core";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AppInfo, EngineView, PreferencesView, ProjectView, SettingsView, WslView } from "../../../shared/ipc";
 import { BudgetAndUsage } from "../features/budget-usage";
 import { Doctor } from "../features/doctor";
@@ -57,6 +57,9 @@ export function SettingsPage({
   onCredentialsSaved,
   appInfo,
   settings,
+  enginesError,
+  appInfoError,
+  visible,
 }: {
   section: SettingsSection;
   onSection(section: SettingsSection): void;
@@ -76,7 +79,17 @@ export function SettingsPage({
   onCredentialsSaved(): void;
   appInfo: AppInfo | null;
   settings: SettingsView | null;
+  /** Failed reads, shown where their figures would be. */
+  enginesError: string | null;
+  appInfoError: string | null;
+  /** Settings is the place in view: its sections read the settings again each time it is opened. */
+  visible: boolean;
 }) {
+  // Other places change settings too (research turned on in a conversation, say): each opening reads them again.
+  const [opened, setOpened] = useState(0);
+  useEffect(() => {
+    if (visible) setOpened((count) => count + 1);
+  }, [visible]);
   const online = engine?.state.status === "online";
   const windowsHost = appInfo?.platform === "win32";
   const shown = (name: SettingsSection) => (section === name ? undefined : "none");
@@ -94,8 +107,8 @@ export function SettingsPage({
         <Grid gap="md" align="flex-start">
           <Grid.Col span={{ base: 12, md: 8 }}>
             <Stack gap="md">
-              <NebiusConnection key={`nebius:${project?.targetId ?? "none"}`} project={project} online={online} onCredentialsSaved={onCredentialsSaved} />
-              <TavilyConnection />
+              <NebiusConnection key={`nebius:${project?.targetId ?? "none"}`} project={project} online={online} onCredentialsSaved={onCredentialsSaved} freshness={opened} />
+              <TavilyConnection freshness={opened} />
             </Stack>
           </Grid.Col>
           <Grid.Col span={{ base: 12, md: 4 }}>
@@ -107,7 +120,7 @@ export function SettingsPage({
       <Box display={shown("sharing")} data-testid="settings-sharing">
         <Stack gap="md">
           <SharingTable projects={projects} windowsHost={windowsHost} onChanged={onProjectsChanged} />
-          <ResearchSwitch />
+          <ResearchSwitch freshness={opened} />
         </Stack>
       </Box>
 
@@ -142,7 +155,13 @@ export function SettingsPage({
           >
             {project && <EngineNotices engine={engine} onRestart={() => window.nivra.restartEngine(project.id)} />}
             {engine?.state.status === "online" && <TechnicalDetails text={engineDetails(engine)} label="Copy the engine's technical details" testId="engine-details" />}
-            <EngineList engines={engines} projects={projects} />
+            {enginesError ? (
+              <Text size="sm" c="var(--nivra-error)" data-testid="diagnostics-engines-error">
+                Nivra couldn't read its engines' state: {enginesError}
+              </Text>
+            ) : (
+              <EngineList engines={engines} projects={projects} />
+            )}
           </SettingsCard>
           <Doctor key={`doctor:${project?.targetId ?? "none"}`} projectId={project?.id ?? null} online={online} targetLabel={project?.targetLabel ?? null} />
           <HelloRun key={`hello:${project?.id ?? "none"}`} project={project} online={online} run={helloRun} onRun={onHelloRun} />
@@ -156,8 +175,8 @@ export function SettingsPage({
                 testId="app-details"
               />
             ) : (
-              <Text size="sm" c="var(--nivra-text-2)">
-                Reading…
+              <Text size="sm" c={appInfoError ? "var(--nivra-error)" : "var(--nivra-text-2)"} data-testid="app-details-state">
+                {appInfoError ? `Nivra couldn't read this app's details: ${appInfoError}` : "Reading…"}
               </Text>
             )}
           </SettingsCard>
