@@ -7,8 +7,9 @@ import type { BudgetPolicyDraft } from "@nivra/domain";
 
 /**
  * The shared budget's API in the built app (NIV-66): the calls the budget screen and the development harness both use,
- * through the preload, the trusted-sender check and the argument check. A policy is saved and survives a relaunch; bad
- * input never reaches the host; and a damaged history opens with the budget needing recovery and changes refused.
+ * through the preload, the trusted-sender check and the argument check. A policy is saved and survives a relaunch, and
+ * can be turned off; bad input never reaches the host; a month is confirmed only by the label shown; and a damaged
+ * history opens with the budget needing recovery and changes refused.
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 let root: string;
@@ -54,11 +55,27 @@ test("the budget's calls set a policy, refuse bad input, keep it across a relaun
     }
   }, DRAFT);
   expect(refused).toMatch(/Invalid arguments for budget:set-policy/);
+  const months = await page.evaluate(async (shown) => {
+    const outcome = async (month: string) => {
+      try {
+        await window.nivra.confirmBudgetMonth(month);
+        return "confirmed";
+      } catch (error) {
+        return String(error);
+      }
+    };
+    return [await outcome("next month"), await outcome(shown)];
+  }, saved.clock.computerMonth);
+  expect(months[0]).toMatch(/Invalid arguments for budget:confirm-month/);
+  expect(months[1]).toMatch(/still the same budget month/);
   expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
   await app.close();
 
   ({ app, page } = await launch(testInfo, userData));
   expect((await page.evaluate(() => window.nivra.getBudgetPolicy()))?.version).toBe(1);
+  const off = await page.evaluate(() => window.nivra.setBudgetPolicy(null));
+  expect([off.policy, off.poolMicros]).toEqual([null, null]);
+  expect(await page.evaluate(() => window.nivra.getBudgetPolicy())).toBeNull();
   await app.close();
 
   writeFileSync(join(userData, "workspace.db"), "this is not a database ".repeat(40));

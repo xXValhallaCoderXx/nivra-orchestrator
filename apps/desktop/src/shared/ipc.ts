@@ -1008,14 +1008,14 @@ export interface NivraApi {
   acceptCoachChanges(taskId: string, revision: number, coachingId: string, fields: CoachField[]): Promise<TaskView>;
   /** The person's monthly budget policy (NIV-66), or null before they chose one. */
   getBudgetPolicy(): Promise<BudgetPolicy | null>;
-  /** Saves a monthly budget as the next policy version. What was already spent or reserved stays as it was. */
-  setBudgetPolicy(draft: BudgetPolicyDraft): Promise<BudgetSummary>;
+  /** Saves a monthly budget as the next policy version, or with null turns it off. What was already spent or reserved stays as it was. */
+  setBudgetPolicy(draft: BudgetPolicyDraft | null): Promise<BudgetSummary>;
   /** This month's budget as Nivra counts it, with every reason its totals can't be read as complete. */
   budgetSummary(): Promise<BudgetSummary>;
   /** The price list Nivra counts with, and what about it isn't established yet. */
   budgetPrices(): Promise<PriceCatalogue>;
-  /** Confirms that a new budget month has begun by this computer's clock, when the provider's clock hasn't shown it yet. */
-  confirmBudgetMonth(): Promise<BudgetSummary>;
+  /** Confirms the new budget month the summary showed by this computer's clock (its label, such as 2026-11), when the provider's clock hasn't shown it yet. */
+  confirmBudgetMonth(month: string): Promise<BudgetSummary>;
   /** Starts a new budget history after a loss, with this month's remaining allowance in micro-units, or null to wait for next month. */
   startNewBudgetHistory(remainingMicros: number | null): Promise<BudgetSummary>;
 }

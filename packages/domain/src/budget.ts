@@ -84,7 +84,10 @@ export const BudgetPolicyDraft = z.strictObject({
   thresholds: z.array(z.number().int().min(1).max(100)).max(5),
   sublimits: BudgetSublimits,
   allowances: BudgetAllowances,
-  /** What one Tavily credit costs on the person's plan, when they say; null keeps research counted, not priced. */
+  /**
+   * What one Tavily credit costs on the person's plan, when they say; null keeps research counted, not priced. Kept with
+   * the policy now, and applied once research calls are journalled.
+   */
   researchCreditMicros: Micros.nullable(),
 });
 export type BudgetPolicyDraft = z.infer<typeof BudgetPolicyDraft>;
@@ -172,14 +175,15 @@ export type BudgetAttribution = z.infer<typeof BudgetAttribution>;
  * - accepted: the engine's store shows it accepted the grant.
  * - settled: a complete seal's rows were recorded once, and the unused remainder released.
  * - released: it never left written, in a ledger that wasn't rolled back.
- * - uncertain: no affirmative evidence of what was spent, so the whole grant stays counted.
+ * - uncertain: no affirmative evidence of what was spent, so the whole grant stays counted. A grant still written when
+ *   a new history is started after a loss becomes uncertain too: whether it was sent can't be known.
  * - written-off: the person's choice for an uncertain grant: counted in full as unknown spend, never as zero.
  * Age never settles a grant.
  */
 export const GrantState = z.enum(["written", "dispatching", "accepted", "settled", "released", "uncertain", "written-off"]);
 export type GrantState = z.infer<typeof GrantState>;
 export const GRANT_TRANSITIONS: Readonly<Record<GrantState, readonly GrantState[]>> = Object.freeze({
-  written: ["dispatching", "released"],
+  written: ["dispatching", "released", "uncertain"],
   dispatching: ["accepted", "settled", "uncertain"],
   accepted: ["settled", "uncertain"],
   uncertain: ["settled", "written-off"],
@@ -209,7 +213,7 @@ export const GrantRequest = z.strictObject({
   /** For an extension: the first grant of the same work, and the one need it answers. */
   extends: z.uuid().nullable(),
   need: z.string().min(1).max(80).nullable(),
-});
+}).refine((request) => (request.extends === null) === (request.need === null), "An extension names the grant it extends and the one need it answers, together.");
 export type GrantRequest = z.infer<typeof GrantRequest>;
 
 /** What an engine receives with a call: its finite share, never the pool. It travels in memory, never in a workflow. */
@@ -295,10 +299,13 @@ export type JournalSeal = z.infer<typeof JournalSeal>;
 export const PeriodOpenedBy = z.enum(["first", "corroborated", "confirmed"]);
 export type PeriodOpenedBy = z.infer<typeof PeriodOpenedBy>;
 
+/** A calendar month's label, such as 2026-11. */
+export const BudgetMonthLabel = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
+
 export const BudgetPeriod = z.strictObject({
   /** year * 12 + month - 1, in the policy's time zone: it only ever moves forward. */
   index: z.number().int().nonnegative(),
-  label: z.string().regex(/^\d{4}-\d{2}$/),
+  label: BudgetMonthLabel,
   startsAt: z.iso.datetime(),
   endsAt: z.iso.datetime(),
   timezone: TimeZone,
@@ -308,33 +315,62 @@ export const BudgetPeriod = z.strictObject({
 export type BudgetPeriod = z.infer<typeof BudgetPeriod>;
 
 /**
- * Why the budget history needs recovery: the ledger is missing, was replaced by another, or is behind the guard's last
- * revision (a backup put back, even with the same number of grants); or the workspace was just kept aside. While set,
- * every spendable call is refused, whatever the policy mode, until the person restores the history or starts a new one.
+ * Why the budget history needs recovery: the ledger is missing, was replaced by another, is behind the guard's last
+ * revision (a backup put back, even with the same number of grants), or diverged from it (it reached the guard's
+ * revision by another history: a copy put back and changed since, or one from elsewhere); or the workspace was just
+ * kept aside. While set, every spendable call is refused, whatever the policy mode, until the person restores the
+ * history or starts a new one.
  */
-export const BudgetRecoveryReason = z.enum(["ledger-missing", "ledger-replaced", "ledger-behind", "workspace-kept-aside"]);
+export const BudgetRecoveryReason = z.enum(["ledger-missing", "ledger-replaced", "ledger-behind", "ledger-diverged", "workspace-kept-aside"]);
 export type BudgetRecoveryReason = z.infer<typeof BudgetRecoveryReason>;
 export const BudgetRecovery = z.strictObject({
   reason: BudgetRecoveryReason,
   detectedAt: z.iso.datetime(),
-  /** What the guard last recorded. */
-  guard: z.strictObject({ ledgerId: z.uuid(), revision: count }),
+  /** What the guard last recorded: the ledger's id, its revision, and the chained digest of its history to there. */
+  guard: z.strictObject({ ledgerId: z.uuid(), revision: count, chain: Sha256Hex }),
   /** What the workspace holds now; null when it holds no ledger. */
   ledger: z.strictObject({ ledgerId: z.uuid(), revision: count }).nullable(),
 });
 export type BudgetRecovery = z.infer<typeof BudgetRecovery>;
 
 /** Why a total can't be read as complete. Each is said in the summary, never smoothed over. */
-export const BudgetGap = z.enum(["currency-unconfirmed", "bounds-unestablished", "unpriced-usage", "uncertain-grants", "listings-unpriced", "stale-catalogue", "history-lost"]);
+export const BudgetGap = z.enum([
+  "currency-unconfirmed",
+  "bounds-unestablished",
+  "unpriced-usage",
+  "uncertain-grants",
+  "listings-unpriced",
+  "stale-catalogue",
+  "history-lost",
+  "breakdown-cut",
+]);
 export type BudgetGap = z.infer<typeof BudgetGap>;
 
-/** One breakdown line: leaf operations and grants only, so a council and its members are never counted twice. */
+/** Model requests as their journals reported them, priced or not. */
+export const BudgetUsage = z.strictObject({
+  /** Requests whose usage came back. */
+  requests: count,
+  /** Requests sent whose usage didn't come back. */
+  unknownRequests: count,
+  inputTokens: count,
+  /** Part of inputTokens, where it was reported. */
+  cachedInputTokens: count,
+  /** Reasoning included. */
+  outputTokens: count,
+});
+export type BudgetUsage = z.infer<typeof BudgetUsage>;
+
+/**
+ * One breakdown line: leaf grants and rows only, so a council and its members are never counted twice. Its money is
+ * null when any grant in it couldn't be priced.
+ */
 export const BudgetBreakdownLine = z.strictObject({
   dimension: z.enum(["feature", "project", "profile", "model"]),
   key: z.string().max(200),
-  settledMicros: Micros,
-  unknownMicros: Micros,
-  reservedMicros: Micros,
+  settledMicros: Micros.nullable(),
+  unknownMicros: Micros.nullable(),
+  reservedMicros: Micros.nullable(),
+  usage: BudgetUsage,
 });
 export type BudgetBreakdownLine = z.infer<typeof BudgetBreakdownLine>;
 
@@ -343,18 +379,40 @@ export const BudgetSummary = z.strictObject({
   period: BudgetPeriod.nullable(),
   recovery: BudgetRecovery.nullable(),
   poolMicros: Micros.nullable(),
-  /** Reported and partial operations of settled grants. */
-  settledMicros: Micros,
-  /** Unknown operations at their bounds, and uncertain or written-off grants in full. */
-  unknownMicros: Micros,
-  /** Open grants, counted in full. */
-  reservedMicros: Micros,
-  /** The pool less all three; negative when reported usage ran over its bounds. Null without a policy. */
+  /**
+   * This month's money, from leaf records. All three are null when it can't be known: any of this month's spend that
+   * couldn't be priced, or a history lost this month. Never 0 for spend that wasn't priced.
+   * - settled: reported and partial operations of settled grants;
+   * - unknown: unknown operations at their bounds, and uncertain or written-off grants in full;
+   * - reserved: open grants, counted in full.
+   */
+  settledMicros: Micros.nullable(),
+  unknownMicros: Micros.nullable(),
+  reservedMicros: Micros.nullable(),
+  /**
+   * The most a new grant could take now: the pool less what this month holds, and after a loss no more than what is
+   * left of the allowance the person set (0 while they chose to wait). Null with neither, or while this month holds
+   * spend that couldn't be priced. Negative when reported usage ran over its bounds.
+   */
   availableMicros: z.number().int().nullable(),
+  usage: BudgetUsage,
   counted: z.strictObject({ used: BudgetAllowances, allowed: BudgetAllowances.nullable() }),
   gaps: z.array(BudgetGap).max(BudgetGap.options.length),
   thresholdsCrossed: z.array(z.number().int().min(1).max(100)).max(5),
   breakdown: z.array(BudgetBreakdownLine).max(400),
+  /**
+   * After a history lost this month: when, the allowance the person set for the rest of it (null: wait), and what was
+   * admitted since (null when that couldn't be priced).
+   */
+  afterLoss: z.strictObject({ at: z.iso.datetime(), remainingMicros: Micros.nullable(), sinceMicros: Micros.nullable() }).nullable(),
+  /**
+   * The computer's clock as the budget sees it, for confirming a month: its month in the budget's zone, and the jumps
+   * recorded since this budget month opened, newest first. A month is confirmed by its label, as shown.
+   */
+  clock: z.strictObject({
+    computerMonth: BudgetMonthLabel,
+    jumps: z.array(z.strictObject({ kind: z.enum(["jump-forward", "jump-back"]), at: z.iso.datetime(), deltaMs: z.number().int() })).max(20),
+  }),
 });
 export type BudgetSummary = z.infer<typeof BudgetSummary>;
 
@@ -368,13 +426,14 @@ export function priceTokens(tokens: number, microsPerMillion: number): number {
 }
 
 /**
- * The reservation for one request to `rate`'s model with output cap `outputTokens`: its most input at the full input
- * rate, plus the cap at the output rate. Null while the model's bounds aren't established: then there is no ceiling to
- * reserve, and the request isn't priced.
+ * The reservation for one request to `rate`'s model with output cap `outputTokens`: its most input, in full, at the
+ * full input rate, plus the cap at the output rate. A context window that input and output share would allow less
+ * input, but only a source that establishes that may lower it. Null while the model's bounds aren't established: then
+ * there is no ceiling to reserve, and the request isn't priced.
  */
 export function requestBound(rate: ModelRate, outputTokens: number): { inputTokens: number; outputTokens: number; micros: number } | null {
   if (!rate.bounds) return null;
-  const inputTokens = Math.max(0, rate.bounds.inputTokens - outputTokens);
+  const inputTokens = rate.bounds.inputTokens;
   return { inputTokens, outputTokens, micros: priceTokens(inputTokens, rate.inputMicrosPerMillion) + priceTokens(outputTokens, rate.outputMicrosPerMillion) };
 }
 

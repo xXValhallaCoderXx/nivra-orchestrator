@@ -106,7 +106,7 @@ const api = {
   setBudgetPolicy: (draft) => ipcRenderer.invoke(IPC.setBudgetPolicy, draft),
   budgetSummary: () => ipcRenderer.invoke(IPC.budgetSummary),
   budgetPrices: () => ipcRenderer.invoke(IPC.budgetPrices),
-  confirmBudgetMonth: () => ipcRenderer.invoke(IPC.confirmBudgetMonth),
+  confirmBudgetMonth: (month) => ipcRenderer.invoke(IPC.confirmBudgetMonth, month),
   startNewBudgetHistory: (remainingMicros) => ipcRenderer.invoke(IPC.startNewBudgetHistory, remainingMicros),
 } satisfies NivraApi;
 

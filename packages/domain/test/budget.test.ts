@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   BUDGET_PRESETS,
+  BudgetMonthLabel,
   BudgetPolicyDraft,
   canMoveGrant,
   GRANT_TRANSITIONS,
+  GrantRequest,
   GrantState,
   isTimeZone,
   monthOf,
@@ -61,10 +63,12 @@ describe("a request's reservation", () => {
     assert.equal(requestBound(SUPER, 8_000), null);
   });
 
-  it("is the most input at the full rate plus the output cap at the output rate, once they are", () => {
+  it("is all of the most input at the full rate plus the output cap at the output rate, once they are", () => {
     const bound = requestBound(BOUNDED, 8_000);
-    assert.deepEqual(bound, { inputTokens: 120_000, outputTokens: 8_000, micros: priceTokens(120_000, 300_000) + priceTokens(8_000, 900_000) });
-    assert.equal(bound?.micros, 36_000 + 7_200);
+    assert.deepEqual(bound, { inputTokens: 128_000, outputTokens: 8_000, micros: priceTokens(128_000, 300_000) + priceTokens(8_000, 900_000) });
+    assert.equal(bound?.micros, 38_400 + 7_200);
+    // A smaller output cap never frees more input: the input bound stands whole.
+    assert.equal(requestBound(BOUNDED, 1_500)?.inputTokens, 128_000);
   });
 });
 
@@ -177,8 +181,36 @@ describe("grant states", () => {
     assert.equal(canMoveGrant("uncertain", "released"), false);
     assert.equal(canMoveGrant("uncertain", "settled"), true);
     assert.equal(canMoveGrant("uncertain", "written-off"), true);
+    // A grant still written when a new history is started can't be known unsent: it becomes uncertain, never released.
+    assert.equal(canMoveGrant("written", "uncertain"), true);
     for (const terminal of ["settled", "released", "written-off"] as const) assert.deepEqual(GRANT_TRANSITIONS[terminal], []);
     assert.deepEqual(Object.keys(GRANT_TRANSITIONS).sort(), [...GrantState.options].sort());
+  });
+});
+
+describe("a grant request", () => {
+  it("names an extension's first grant and its one need together, or neither", () => {
+    const base = {
+      requestId: "0b8f3c2e-4a71-4c1e-9d6b-2f5a8e9c7d10",
+      workflow: "task",
+      targetId: "local",
+      attribution: { feature: "task", projectId: null, taskId: null, attemptId: null, queueId: null, queueItemId: null, profile: null },
+      models: [],
+      productive: { requests: 0, outputTokens: 0 },
+      finalisation: { requests: 0, outputTokens: 0 },
+      allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 },
+    };
+    assert.equal(GrantRequest.safeParse({ ...base, extends: null, need: null }).success, true);
+    assert.equal(GrantRequest.safeParse({ ...base, extends: base.requestId, need: "segment-2" }).success, true);
+    assert.equal(GrantRequest.safeParse({ ...base, extends: base.requestId, need: null }).success, false);
+    assert.equal(GrantRequest.safeParse({ ...base, extends: null, need: "segment-2" }).success, false);
+  });
+});
+
+describe("a month's label", () => {
+  it("is a year and a calendar month", () => {
+    assert.deepEqual(["2026-11", "2026-12", "2027-01"].map((label) => BudgetMonthLabel.safeParse(label).success), [true, true, true]);
+    assert.deepEqual(["2026-13", "2026-00", "2026-1", "next month"].map((label) => BudgetMonthLabel.safeParse(label).success), [false, false, false, false]);
   });
 });
 

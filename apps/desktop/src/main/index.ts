@@ -4,7 +4,7 @@ import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
-import { BudgetPolicyDraft, Micros } from "@nivra/domain";
+import { BudgetMonthLabel, BudgetPolicyDraft, Micros } from "@nivra/domain";
 import { z } from "zod";
 import { IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
@@ -330,10 +330,10 @@ function start(): void {
   handle(IPC.acceptCoachChanges, z.tuple([Id, Revision, Id, z.array(CoachField).max(CoachField.options.length)]), (_event, id, revision, coachingId, fields) => host.acceptCoachChanges(id, revision, coachingId, fields));
   // The shared monthly budget (NIV-66).
   handle(IPC.getBudgetPolicy, none, () => host.getBudgetPolicy());
-  handle(IPC.setBudgetPolicy, z.tuple([BudgetPolicyDraft]), (_event, draft) => host.setBudgetPolicy(draft));
+  handle(IPC.setBudgetPolicy, z.tuple([BudgetPolicyDraft.nullable()]), (_event, draft) => host.setBudgetPolicy(draft));
   handle(IPC.budgetSummary, none, () => host.budgetSummary());
   handle(IPC.budgetPrices, none, () => host.budgetPrices());
-  handle(IPC.confirmBudgetMonth, none, () => host.confirmBudgetMonth());
+  handle(IPC.confirmBudgetMonth, z.tuple([BudgetMonthLabel]), (_event, month) => host.confirmBudgetMonth(month));
   handle(IPC.startNewBudgetHistory, z.tuple([Micros.nullable()]), (_event, remainingMicros) => host.startNewBudgetHistory(remainingMicros));
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));

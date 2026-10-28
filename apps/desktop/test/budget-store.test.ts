@@ -10,6 +10,7 @@ import {
   TOKEN_FACTORY_PRICES,
   type BudgetOperation,
   type BudgetPolicyDraft,
+  type BudgetRecovery,
   type GrantRequest,
   type JournalSeal,
   type PriceCatalogue,
@@ -18,12 +19,15 @@ import {
   budgetSummary,
   confirmMonth,
   currentPeriod,
+  currentPolicy,
+  ensureDurable,
   getGrant,
   ledgerState,
   markAccepted,
   markDispatching,
   markUncertain,
   observeProviderTime,
+  recordClockJump,
   recordJournal,
   registerCatalogue,
   releaseGrant,
@@ -36,9 +40,10 @@ import { openWorkspace, type WorkspaceDb, type WorkspaceOpening } from "../src/m
 
 /**
  * The shared monthly budget's ledger (NIV-66), on a real workspace: grants written and counted in one transaction, so
- * two callers can't both take the last of the pool; unused allowance released only on affirmative evidence; unknown
- * spend counted at its bound and never as zero; months that only move forward; and a history nothing can quietly
- * rewrite.
+ * two callers can't both take the last of the pool; unused allowance released only on affirmative evidence; each
+ * journal row counted as the ledger works it out, never on the engine's word alone; unknown spend counted at its bound
+ * and never as zero; a lost history binding in every mode; months that only move forward; and a history nothing can
+ * quietly rewrite.
  */
 
 const dirs: string[] = [];
@@ -59,10 +64,12 @@ function workspace(): WorkspaceDb {
 }
 
 const SUPER = "nvidia/nemotron-3-super-120b-a12b";
+const LIGHTNING = "nvidia/Nemotron-3_5-Lightning";
 const PROJECT = randomUUID();
 const OCT = Date.parse("2026-10-28T01:00:00Z");
 const NOV = Date.parse("2026-11-02T01:00:00Z");
 const DEC = Date.parse("2026-12-03T01:00:00Z");
+const DAY = 24 * 60 * 60 * 1000;
 const HOME = "home-1";
 
 /** A price list whose currency and bounds are established, as checkpoint 1 would make one. */
@@ -72,10 +79,10 @@ const ESTABLISHED: PriceCatalogue = {
   currency: { code: "USD", source: "a written answer from the provider (test)" },
   models: TOKEN_FACTORY_PRICES.models.map((rate) => ({ ...rate, bounds: { inputTokens: 128_000, outputCappedByMaxTokens: true as const, source: "test", establishedOn: "2026-10-28" } })),
 };
-// One request with Super's bounds: 120,000 input at 0.30 a million and 8,000 output at 0.90 a million.
-const WORK_REQUEST = 36_000 + 7_200;
-// The hand-in: 126,500 input and 1,500 output.
-const HAND_IN = 37_950 + 1_350;
+// One request with Super's bounds: all 128,000 input at 0.30 a million, and 8,000 output at 0.90 a million.
+const WORK_REQUEST = 38_400 + 7_200;
+// The hand-in: 128,000 input and 1,500 output.
+const HAND_IN = 38_400 + 1_350;
 const GRANT_TOTAL = 2 * WORK_REQUEST + HAND_IN;
 
 const DRAFT: BudgetPolicyDraft = {
@@ -113,6 +120,13 @@ function granted(db: WorkspaceDb, over: Partial<GrantRequest> = {}, now = OCT, c
   return result.grant;
 }
 
+function refusal(db: WorkspaceDb, over: Partial<GrantRequest> = {}, now = OCT, catalogue: PriceCatalogue = ESTABLISHED) {
+  const result = writeGrant(db, request(over), context(now, catalogue));
+  assert.ok("refused" in result, "the grant was written");
+  return result.refused;
+}
+
+// A reported request: 10,000 input (none of it cached) at 0.30 a million, and 1,000 output at 0.90 a million.
 const row = (grantId: string, seq: number, over: Partial<BudgetOperation> = {}): BudgetOperation => ({
   id: randomUUID(),
   grantId,
@@ -123,7 +137,7 @@ const row = (grantId: string, seq: number, over: Partial<BudgetOperation> = {}):
   instructionsSha256: null,
   state: "reported",
   boundMicros: WORK_REQUEST,
-  usage: { inputTokens: 10_000, cachedInputTokens: null, outputTokens: 1_000 },
+  usage: { inputTokens: 10_000, cachedInputTokens: 0, outputTokens: 1_000 },
   units: null,
   amountMicros: 3_900,
   ...over,
@@ -131,7 +145,24 @@ const row = (grantId: string, seq: number, over: Partial<BudgetOperation> = {}):
 
 const seal = (grantId: string, kind: JournalSeal["kind"], rows: number): JournalSeal => ({ grantId, kind, rows, instanceId: randomUUID(), sealedAt: new Date(OCT).toISOString() });
 
-const summary = (db: WorkspaceDb, now = OCT, catalogue: PriceCatalogue = ESTABLISHED) => budgetSummary(db, { now, catalogue, recovery: null });
+const summary = (db: WorkspaceDb, now = OCT, catalogue: PriceCatalogue = ESTABLISHED) => budgetSummary(db, { now, catalogue, recovery: null, timezone: "UTC" });
+const money = (db: WorkspaceDb, now = OCT) => {
+  const totals = summary(db, now);
+  return [totals.settledMicros, totals.unknownMicros, totals.reservedMicros];
+};
+
+/** A loss as the guard would have found it, for starting a new history. */
+const lost = (db: WorkspaceDb): BudgetRecovery => ({
+  reason: "ledger-behind",
+  detectedAt: new Date(OCT).toISOString(),
+  guard: { ledgerId: ledgerState(db)?.ledgerId ?? randomUUID(), revision: (ledgerState(db)?.revision ?? 0) + 5, chain: "0".repeat(64) },
+  ledger: ledgerState(db) && { ledgerId: ledgerState(db)!.ledgerId, revision: ledgerState(db)!.revision },
+});
+
+function sent(db: WorkspaceDb, id: string, rows: BudgetOperation[], kind: JournalSeal["kind"] = "complete") {
+  if (getGrant(db, id)?.state === "written") markDispatching(db, id, HOME, OCT);
+  return recordJournal(db, id, rows, seal(id, kind, rows.length), OCT);
+}
 
 describe("writing grants", () => {
   it("writes the ledger's id and first month with its first grant, and moves the revision forward with each change", () => {
@@ -144,8 +175,10 @@ describe("writing grants", () => {
     assert.equal(grant.productiveMicros, 2 * WORK_REQUEST);
     assert.equal(grant.finalisationMicros, HAND_IN);
     assert.equal(getGrant(db, grant.id)?.state, "written");
+    const chain = ledgerState(db)?.chain;
     assert.ok(markDispatching(db, grant.id, HOME, OCT));
     assert.equal(ledgerState(db)?.revision, 2);
+    assert.notEqual(ledgerState(db)?.chain, chain);
   });
 
   it("admits only one of two callers asking for the last of the pool, and writes nothing for the other", () => {
@@ -153,52 +186,61 @@ describe("writing grants", () => {
     setPolicy(db, DRAFT, OCT);
     granted(db);
     const before = ledgerState(db);
-    const second = writeGrant(db, request({ attribution: { ...request().attribution, feature: "review" } }), context());
-    assert.ok("refused" in second);
-    assert.equal(second.refused.code, "pool");
-    assert.match(second.refused.message, /monthly budget of 0\.20 dollars/);
+    const second = refusal(db, { attribution: { ...request().attribution, feature: "review" } });
+    assert.equal(second.code, "pool");
+    assert.match(second.message, /monthly budget of 0\.20 dollars: 0\.14 is already spent or reserved/);
     assert.deepEqual(ledgerState(db), before, "a refusal changes nothing");
     assert.equal(summary(db).reservedMicros, GRANT_TOTAL);
   });
 
   it("refuses a model with no price, names it, and writes nothing", () => {
     const db = workspace();
-    const refused = writeGrant(db, request({ models: ["nvidia/some-other-model"] }), context());
-    assert.ok("refused" in refused);
-    assert.equal(refused.refused.code, "no-price");
-    assert.match(refused.refused.message, /nvidia\/some-other-model/);
+    const refused = refusal(db, { models: ["nvidia/some-other-model"] });
+    assert.equal(refused.code, "no-price");
+    assert.match(refused.message, /nvidia\/some-other-model/);
     assert.equal(ledgerState(db), null);
   });
 
-  it("refuses every model under a money policy until its bounds and the list's currency are established", () => {
+  it("refuses every model under a money policy until its bounds and the list's currency are established, and says how to go on", () => {
     const db = workspace();
     setPolicy(db, DRAFT, OCT);
-    const refused = writeGrant(db, request(), context(OCT, TOKEN_FACTORY_PRICES));
-    assert.ok("refused" in refused);
-    assert.equal(refused.refused.code, "unestablished");
+    const refused = refusal(db, {}, OCT, TOKEN_FACTORY_PRICES);
+    assert.equal(refused.code, "unestablished");
+    assert.match(refused.message, /Turn the monthly budget off/);
   });
 
-  it("without a policy, writes and counts an unpriced grant, and says the money total is incomplete", () => {
+  it("admits a call that reaches no model under a money policy before anything is established, at no money", () => {
+    const db = workspace();
+    setPolicy(db, DRAFT, OCT);
+    const grant = granted(db, { models: [], productive: { requests: 0, outputTokens: 0 }, finalisation: { requests: 0, outputTokens: 0 }, allowances: { sandboxOperations: 2, sandboxSeconds: 60, researchCredits: 0 } }, OCT, TOKEN_FACTORY_PRICES);
+    assert.deepEqual([grant.productiveMicros, grant.finalisationMicros], [0, 0]);
+    assert.deepEqual(summary(db, OCT).counted.used, { sandboxOperations: 2, sandboxSeconds: 60, researchCredits: 0 });
+  });
+
+  it("without a policy, writes and counts an unpriced grant, and shows its money as unknown, never 0", () => {
     const db = workspace();
     const grant = granted(db, {}, OCT, TOKEN_FACTORY_PRICES);
     assert.equal(grant.productiveMicros, null);
     const totals = summary(db, OCT, TOKEN_FACTORY_PRICES);
-    assert.equal(totals.poolMicros, null);
-    assert.equal(totals.availableMicros, null);
+    assert.deepEqual([totals.settledMicros, totals.unknownMicros, totals.reservedMicros, totals.availableMicros, totals.poolMicros], [null, null, null, null, null]);
     for (const gap of ["currency-unconfirmed", "bounds-unestablished", "unpriced-usage", "listings-unpriced"] as const) assert.ok(totals.gaps.includes(gap), gap);
+    assert.deepEqual(totals.breakdown.find((line) => line.dimension === "feature")?.settledMicros, null);
   });
 
-  it("rolls back everything when the transaction around it fails", () => {
+  it("rolls back everything it wrote when its own transaction fails partway", () => {
     const db = workspace();
-    assert.throws(() =>
-      db.tx(() => {
-        granted(db);
-        throw new Error("injected");
-      }),
-    );
+    db.db.exec("CREATE TEMP TRIGGER fail_grant BEFORE INSERT ON budget_grants BEGIN SELECT RAISE(ABORT, 'injected'); END;");
+    assert.throws(() => writeGrant(db, request(), context()), /injected/);
+    db.db.exec("DROP TRIGGER fail_grant");
+    assert.equal(ledgerState(db), null, "the revision it bumped was rolled back");
+    assert.equal(currentPeriod(db), null, "the month it opened was rolled back");
+    assert.equal(Number(db.db.prepare("SELECT count(*) AS n FROM budget_revisions").get()?.["n"]), 0);
+  });
+
+  it("refuses an extension that doesn't name its need", () => {
+    const db = workspace();
+    assert.throws(() => writeGrant(db, request({ extends: randomUUID(), need: null }), context()), /names the grant it extends and the one need/);
     assert.equal(ledgerState(db), null);
-    assert.equal(currentPeriod(db), null);
-    assert.equal(summary(db).reservedMicros, 0);
   });
 });
 
@@ -208,34 +250,55 @@ describe("settling grants", () => {
     const unsent = granted(db);
     assert.ok(releaseGrant(db, unsent.id, OCT));
     assert.equal(getGrant(db, unsent.id)?.state, "released");
-    const sent = granted(db);
-    markDispatching(db, sent.id, HOME, OCT);
-    assert.equal(releaseGrant(db, sent.id, OCT), null);
-    markAccepted(db, sent.id, OCT);
-    assert.equal(releaseGrant(db, sent.id, OCT), null);
+    const sentGrant = granted(db);
+    markDispatching(db, sentGrant.id, HOME, OCT);
+    assert.equal(releaseGrant(db, sentGrant.id, OCT), null);
+    markAccepted(db, sentGrant.id, OCT);
+    assert.equal(releaseGrant(db, sentGrant.id, OCT), null);
     assert.equal(summary(db).reservedMicros, GRANT_TOTAL);
   });
 
-  it("settles a complete seal: reported rows count, unknown rows count at their bound, and the rest is released", () => {
+  it("settles a complete seal: reported rows count at the grant's prices, unknown rows at its bound whatever the engine said, and the rest is released", () => {
     const db = workspace();
     const grant = granted(db);
-    markDispatching(db, grant.id, HOME, OCT);
-    const rows = [row(grant.id, 1), row(grant.id, 2, { state: "unknown", usage: null, amountMicros: WORK_REQUEST })];
-    const settled = recordJournal(db, grant.id, rows, seal(grant.id, "complete", 2), OCT);
+    const settled = sent(db, grant.id, [row(grant.id, 1), row(grant.id, 2, { state: "unknown", usage: null, boundMicros: null, amountMicros: 0 })]);
     assert.ok("state" in settled && settled.state === "settled");
+    assert.deepEqual(money(db), [3_900, WORK_REQUEST, 0]);
     const totals = summary(db);
-    assert.deepEqual([totals.settledMicros, totals.unknownMicros, totals.reservedMicros], [3_900, WORK_REQUEST, 0]);
+    assert.deepEqual([totals.usage.requests, totals.usage.unknownRequests, totals.usage.inputTokens, totals.usage.outputTokens], [1, 1, 10_000, 1_000]);
+  });
+
+  it("prices a request whose cached input wasn't reported as partial, all its input at the full rate", () => {
+    const db = workspace();
+    const grant = granted(db);
+    const partial = row(grant.id, 1, { state: "partial", usage: { inputTokens: 10_000, cachedInputTokens: null, outputTokens: 1_000 } });
+    assert.ok("state" in sent(db, grant.id, [partial]));
+    assert.equal(summary(db).settledMicros, 3_900);
+  });
+
+  it("refuses a journal whose rows don't add up: an amount that isn't its usage at the grant's prices, a state its usage doesn't bear out, or a model the grant doesn't cover", () => {
+    const db = workspace();
+    for (const bad of [
+      { amountMicros: 1 },
+      { state: "reported" as const, usage: { inputTokens: 10_000, cachedInputTokens: null, outputTokens: 1_000 } },
+      { state: "reported" as const, usage: null },
+      { model: LIGHTNING },
+      { model: null },
+    ]) {
+      const grant = granted(db);
+      const result = sent(db, grant.id, [row(grant.id, 1, bad)]);
+      assert.ok("refused" in result, JSON.stringify(bad));
+      assert.equal(getGrant(db, grant.id)?.state, "dispatching", "a refused journal settles nothing");
+    }
   });
 
   it("keeps an interrupted seal's remainder counted: the rows it holds settle, the rest stays reserved as unknown", () => {
     const db = workspace();
     const grant = granted(db);
-    markDispatching(db, grant.id, HOME, OCT);
-    const result = recordJournal(db, grant.id, [row(grant.id, 1)], seal(grant.id, "interrupted", 1), OCT);
+    const result = sent(db, grant.id, [row(grant.id, 1)], "interrupted");
     assert.ok("state" in result && result.state === "uncertain");
-    const totals = summary(db);
-    assert.deepEqual([totals.settledMicros, totals.unknownMicros, totals.reservedMicros], [3_900, GRANT_TOTAL - 3_900, 0]);
-    assert.ok(totals.gaps.includes("uncertain-grants"));
+    assert.deepEqual(money(db), [3_900, GRANT_TOTAL - 3_900, 0]);
+    assert.ok(summary(db).gaps.includes("uncertain-grants"));
     assert.equal(releaseGrant(db, grant.id, OCT), null, "an uncertain grant is never released");
   });
 
@@ -245,16 +308,14 @@ describe("settling grants", () => {
     markDispatching(db, grant.id, HOME, OCT);
     markUncertain(db, grant.id, OCT);
     assert.ok(writeOff(db, grant.id, OCT));
-    const totals = summary(db);
-    assert.deepEqual([totals.settledMicros, totals.unknownMicros, totals.reservedMicros], [0, GRANT_TOTAL, 0]);
+    assert.deepEqual(money(db), [0, GRANT_TOTAL, 0]);
   });
 
   it("records a journal once: the same journal again changes nothing, and a different one is refused", () => {
     const db = workspace();
     const grant = granted(db);
-    markDispatching(db, grant.id, HOME, OCT);
     const rows = [row(grant.id, 2), row(grant.id, 1)];
-    assert.ok("state" in recordJournal(db, grant.id, rows, seal(grant.id, "complete", 2), OCT));
+    assert.ok("state" in sent(db, grant.id, rows));
     const revision = ledgerState(db)?.revision;
     const again = recordJournal(db, grant.id, [rows[1]!, rows[0]!], seal(grant.id, "complete", 2), OCT);
     assert.ok("state" in again && again.authority === null);
@@ -278,6 +339,20 @@ describe("settling grants", () => {
     }
     assert.equal(getGrant(db, grant.id)?.state, "dispatching");
   });
+
+  it("counts a counted service any of whose rows has no reported size at the grant's whole allowance, and every upload as an operation", () => {
+    const db = workspace();
+    const grant = granted(db, { models: [], productive: { requests: 0, outputTokens: 0 }, finalisation: { requests: 0, outputTokens: 0 }, allowances: { sandboxOperations: 5, sandboxSeconds: 600, researchCredits: 10 } });
+    const service = (seq: number, over: Partial<BudgetOperation>) => row(grant.id, seq, { model: null, usage: null, amountMicros: null, boundMicros: null, ...over });
+    const result = sent(db, grant.id, [
+      service(1, { kind: "sandbox-operation", units: 30 }),
+      service(2, { kind: "sandbox-transfer", units: null }),
+      service(3, { kind: "research-search", state: "unknown", units: null }),
+    ]);
+    assert.ok("state" in result && result.state === "settled");
+    assert.deepEqual(summary(db).counted.used, { sandboxOperations: 2, sandboxSeconds: 30, researchCredits: 10 });
+    assert.deepEqual(money(db), [0, 0, 0]);
+  });
 });
 
 describe("policies", () => {
@@ -285,13 +360,45 @@ describe("policies", () => {
     const db = workspace();
     setPolicy(db, { ...DRAFT, monthlyMicros: 1_000_000 }, OCT);
     const grant = granted(db);
-    const lowered = setPolicy(db, { ...DRAFT, monthlyMicros: 100_000 }, OCT).policy;
+    const lowered = setPolicy(db, { ...DRAFT, monthlyMicros: 100_000 }, OCT).policy!;
     assert.deepEqual([lowered.version, lowered.replaces], [2, 1]);
     assert.equal(getGrant(db, grant.id)?.state, "written");
     assert.equal(summary(db).reservedMicros, GRANT_TOTAL);
     assert.equal(summary(db).availableMicros, 100_000 - GRANT_TOTAL);
-    const refused = writeGrant(db, request(), context());
-    assert.ok("refused" in refused && refused.refused.code === "pool");
+    assert.equal(refusal(db).code, "pool");
+  });
+
+  it("turns the monthly budget off as a version of its own, keeping what was spent, and turning it off again changes nothing", () => {
+    const db = workspace();
+    assert.deepEqual(setPolicy(db, null, OCT), { policy: null, authority: null });
+    setPolicy(db, DRAFT, OCT);
+    granted(db);
+    const off = setPolicy(db, null, OCT);
+    assert.ok(off.authority && off.policy === null);
+    assert.equal(currentPolicy(db), null);
+    assert.equal(setPolicy(db, null, OCT).authority, null);
+    // With the budget off, the pool no longer binds, and the grant written under it still counts.
+    granted(db);
+    assert.equal(summary(db).reservedMicros, 2 * GRANT_TOTAL);
+    assert.equal(setPolicy(db, DRAFT, OCT).policy?.version, 3);
+    assert.equal(refusal(db).code, "pool");
+  });
+
+  it("refuses money admission while this month holds spend that couldn't be priced, and admits again with the budget off or in a later month", () => {
+    const db = workspace();
+    const unpriced = granted(db, {}, OCT, TOKEN_FACTORY_PRICES);
+    assert.ok("state" in sent(db, unpriced.id, [row(unpriced.id, 1)]));
+    // What the unpriced request reported still shows, though its money can't.
+    const totals = summary(db);
+    assert.deepEqual([totals.settledMicros, totals.usage.requests, totals.usage.inputTokens], [null, 1, 10_000]);
+    setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT);
+    const refused = refusal(db);
+    assert.equal(refused.code, "unpriced-spend");
+    assert.match(refused.message, /couldn't price/);
+    assert.equal(summary(db).availableMicros, null);
+    observeProviderTime(db, NOV, NOV, "UTC");
+    granted(db, {}, NOV);
+    assert.equal(summary(db, NOV).availableMicros, 10_000_000 - GRANT_TOTAL);
   });
 
   it("keeps each sublimit inside the pool: project, per-task and daily", () => {
@@ -299,22 +406,35 @@ describe("policies", () => {
     const attemptId = randomUUID();
     setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000, sublimits: { ...NO_SUBLIMITS, projects: [{ projectId: PROJECT, monthlyMicros: GRANT_TOTAL }], perTaskMicros: GRANT_TOTAL, dailyMicros: 3 * GRANT_TOTAL } }, OCT);
     granted(db, { attribution: { ...request().attribution, attemptId } });
-    const project = writeGrant(db, request(), context());
-    assert.ok("refused" in project && project.refused.code === "sublimit" && /project/.test(project.refused.message));
+    const project = refusal(db);
+    assert.ok(project.code === "sublimit" && /project/.test(project.message));
     const elsewhere = { ...request().attribution, projectId: randomUUID() };
-    const task = writeGrant(db, request({ attribution: { ...elsewhere, attemptId } }), context());
-    assert.ok("refused" in task && /per-task/.test(task.refused.message));
+    assert.match(refusal(db, { attribution: { ...elsewhere, attemptId } }).message, /per-task/);
     granted(db, { attribution: elsewhere });
     granted(db, { attribution: { ...elsewhere, projectId: randomUUID() } });
-    const daily = writeGrant(db, request({ attribution: { ...elsewhere, projectId: randomUUID() } }), context());
-    assert.ok("refused" in daily && /daily/.test(daily.refused.message));
+    assert.match(refusal(db, { attribution: { ...elsewhere, projectId: randomUUID() } }).message, /daily limit .* or wait for tomorrow/);
+  });
+
+  it("holds the daily limit when the computer's clock moves back a day", () => {
+    const db = workspace();
+    setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000, sublimits: { ...NO_SUBLIMITS, dailyMicros: GRANT_TOTAL } }, OCT);
+    granted(db, {}, OCT);
+    assert.match(refusal(db, {}, OCT - DAY).message, /daily/);
+  });
+
+  it("holds a task's limit across a month's end", () => {
+    const db = workspace();
+    const attemptId = randomUUID();
+    setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000, sublimits: { ...NO_SUBLIMITS, perTaskMicros: GRANT_TOTAL } }, OCT);
+    granted(db, { attribution: { ...request().attribution, attemptId } }, OCT);
+    observeProviderTime(db, NOV, NOV, "UTC");
+    assert.match(refusal(db, { attribution: { ...request().attribution, attemptId } }, NOV).message, /per-task/);
   });
 
   it("holds counted services to their monthly allowance", () => {
     const db = workspace();
     setPolicy(db, DRAFT, OCT);
-    const refused = writeGrant(db, request({ models: [], allowances: { sandboxOperations: 101, sandboxSeconds: 0, researchCredits: 0 } }), context());
-    assert.ok("refused" in refused && refused.refused.code === "counted");
+    assert.equal(refusal(db, { models: [], allowances: { sandboxOperations: 101, sandboxSeconds: 0, researchCredits: 0 } }).code, "counted");
   });
 });
 
@@ -338,13 +458,23 @@ describe("budget months", () => {
     assert.equal(currentPeriod(db)?.label, "2026-11");
   });
 
-  it("open on the person's confirmation, and refuse one in the same month", () => {
+  it("open on the person's confirmation of the month they were shown, and refuse another month or the same one", () => {
     const db = workspace();
     granted(db, {}, OCT);
-    assert.deepEqual(confirmMonth(db, OCT, "UTC"), { refused: "not-later" });
-    const confirmed = confirmMonth(db, DEC, "UTC");
+    assert.equal(summary(db, DEC).clock.computerMonth, "2026-12");
+    assert.deepEqual(confirmMonth(db, "2026-10", OCT, "UTC"), { refused: "not-later" });
+    assert.deepEqual(confirmMonth(db, "2026-11", DEC, "UTC"), { refused: "not-shown" });
+    const confirmed = confirmMonth(db, "2026-12", DEC, "UTC");
     assert.ok("opened" in confirmed);
     assert.deepEqual([confirmed.opened.label, confirmed.opened.openedBy], ["2026-12", "confirmed"]);
+  });
+
+  it("show the clock's recorded jumps since the month opened, newest first", () => {
+    const db = workspace();
+    granted(db, {}, OCT);
+    recordClockJump(db, "jump-forward", OCT + 1_000, 7 * DAY);
+    recordClockJump(db, "jump-back", OCT + 2_000, -2 * DAY);
+    assert.deepEqual(summary(db).clock.jumps.map((jump) => [jump.kind, jump.deltaMs]), [["jump-back", -2 * DAY], ["jump-forward", 7 * DAY]]);
   });
 
   it("jump months without carrying anything over, and keep an open grant, and its late journal, in its own month", () => {
@@ -356,8 +486,7 @@ describe("budget months", () => {
     assert.equal(currentPeriod(db)?.label, "2026-12");
     // December has its own pool, no more: November's allowance wasn't added to it.
     granted(db, {}, DEC);
-    const over = writeGrant(db, request(), context(DEC));
-    assert.ok("refused" in over && over.refused.code === "pool");
+    assert.equal(refusal(db, {}, DEC).code, "pool");
     recordJournal(db, october.id, [row(october.id, 1)], seal(october.id, "complete", 1), DEC);
     assert.equal(getGrant(db, october.id)?.state, "settled");
     assert.equal(summary(db, DEC).settledMicros, 0, "October's late journal settles in October, not December");
@@ -379,19 +508,26 @@ describe("price lists", () => {
 });
 
 describe("extensions", () => {
-  it("answer one need once, refuse another shape for it, and refuse work that has ended", () => {
+  it("answer one need once, refuse any other request for it, and refuse work that has ended", () => {
     const db = workspace();
     const first = granted(db);
     markDispatching(db, first.id, HOME, OCT);
-    const need = { extends: first.id, need: "segment-2", requestId: first.requestId };
-    const extension = granted(db, need);
-    const again = writeGrant(db, request(need), context());
-    assert.ok("grant" in again && again.grant.id === extension.id && again.authority === null);
-    const other = writeGrant(db, request({ ...need, productive: { requests: 3, outputTokens: 8_000 } }), context());
-    assert.ok("refused" in other && other.refused.code === "duplicate-need");
+    const asked = request({ extends: first.id, need: "segment-2", requestId: first.requestId });
+    const extension = writeGrant(db, asked, context());
+    assert.ok("grant" in extension);
+    const again = writeGrant(db, { ...asked }, context());
+    assert.ok("grant" in again && again.grant.id === extension.grant.id && again.authority === null);
+    for (const other of [
+      { productive: { requests: 3, outputTokens: 8_000 } },
+      { allowances: { sandboxOperations: 1, sandboxSeconds: 0, researchCredits: 0 } },
+      { attribution: { ...asked.attribution, feature: "review" as const } },
+      { finalisation: { requests: 2, outputTokens: 1_500 } },
+    ]) {
+      const result = writeGrant(db, { ...asked, ...other }, context());
+      assert.ok("refused" in result && result.refused.code === "duplicate-need", JSON.stringify(other));
+    }
     recordJournal(db, first.id, [], seal(first.id, "complete", 0), OCT);
-    const late = writeGrant(db, request({ ...need, need: "segment-3" }), context());
-    assert.ok("refused" in late && late.refused.code === "closed");
+    assert.equal(refusal(db, { extends: first.id, need: "segment-3", requestId: first.requestId }).code, "closed");
   });
 });
 
@@ -399,14 +535,60 @@ describe("a history started again after a loss", () => {
   it("records the loss, holds spending to the allowance the person set, or to none while they wait", () => {
     const db = workspace();
     setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT);
-    startNewHistory(db, { reason: "ledger-behind", remainingMicros: GRANT_TOTAL, now: OCT, timezone: "UTC" });
+    startNewHistory(db, { recovery: lost(db), remainingMicros: GRANT_TOTAL + 1_000, now: OCT, timezone: "UTC" });
     granted(db);
-    const past = writeGrant(db, request(), context());
-    assert.ok("refused" in past && past.refused.code === "pool" && /lost this month's history/.test(past.refused.message));
-    assert.ok(summary(db).gaps.includes("history-lost"));
-    startNewHistory(db, { reason: "ledger-behind", remainingMicros: null, now: OCT, timezone: "UTC" });
-    const waiting = writeGrant(db, request(), context());
-    assert.ok("refused" in waiting && waiting.refused.code === "history-wait");
+    const totals = summary(db);
+    assert.deepEqual([totals.settledMicros, totals.availableMicros, totals.afterLoss?.remainingMicros, totals.afterLoss?.sinceMicros], [null, 1_000, GRANT_TOTAL + 1_000, GRANT_TOTAL]);
+    assert.ok(totals.gaps.includes("history-lost"));
+    const past = refusal(db);
+    assert.ok(past.code === "pool" && /after Nivra lost its budget history/.test(past.message) && /confirm it in your budget/.test(past.message));
+    startNewHistory(db, { recovery: lost(db), remainingMicros: null, now: OCT, timezone: "UTC" });
+    assert.equal(refusal(db).code, "history-wait");
+    assert.equal(summary(db).availableMicros, 0);
+  });
+
+  it("binds without a policy too: waiting admits nothing, and an allowance admits only priced grants that fit it", () => {
+    const db = workspace();
+    startNewHistory(db, { recovery: lost(db), remainingMicros: null, now: OCT, timezone: "UTC" });
+    assert.equal(refusal(db, {}, OCT, TOKEN_FACTORY_PRICES).code, "history-wait");
+    assert.equal(refusal(db, { models: [], allowances: { sandboxOperations: 1, sandboxSeconds: 0, researchCredits: 0 } }).code, "history-wait");
+    startNewHistory(db, { recovery: lost(db), remainingMicros: GRANT_TOTAL, now: OCT, timezone: "UTC" });
+    assert.equal(refusal(db, {}, OCT, TOKEN_FACTORY_PRICES).code, "unestablished");
+    granted(db);
+    assert.equal(refusal(db).code, "pool");
+  });
+
+  it("counts every grant written after the loss against its allowance, even with the computer's clock moved back past it", () => {
+    const db = workspace();
+    setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT);
+    startNewHistory(db, { recovery: lost(db), remainingMicros: GRANT_TOTAL, now: OCT, timezone: "UTC" });
+    granted(db, {}, OCT - 2 * DAY);
+    assert.equal(refusal(db, {}, OCT - 2 * DAY).code, "pool");
+  });
+
+  it("takes a new ledger id past the guard's revision, keeps the month, and makes every open grant uncertain", () => {
+    const db = workspace();
+    const written = granted(db);
+    const dispatching = granted(db);
+    markDispatching(db, dispatching.id, HOME, OCT);
+    const before = ledgerState(db)!;
+    const recovery = lost(db);
+    const authority = startNewHistory(db, { recovery, remainingMicros: null, now: DEC, timezone: "UTC" });
+    assert.notEqual(authority.ledgerId, before.ledgerId);
+    assert.equal(authority.revision, recovery.guard.revision + 1);
+    assert.deepEqual(ledgerState(db), authority);
+    assert.equal(currentPeriod(db)?.label, "2026-10", "a new history keeps the month; it doesn't open one by the computer's clock");
+    assert.deepEqual([getGrant(db, written.id)?.state, getGrant(db, dispatching.id)?.state], ["uncertain", "uncertain"]);
+    assert.equal(releaseGrant(db, written.id, OCT), null);
+  });
+});
+
+describe("durability", () => {
+  it("keeps each commit durable when it returns, as the guard's order needs", () => {
+    const db = workspace();
+    db.db.exec("PRAGMA synchronous = NORMAL");
+    ensureDurable(db);
+    assert.equal(Number(db.db.prepare("PRAGMA synchronous").get()?.["synchronous"]), 2);
   });
 });
 
@@ -414,23 +596,45 @@ describe("what the ledger refuses outright", () => {
   it("never lets a recorded change be edited or removed by hand", () => {
     const db = workspace();
     setPolicy(db, DRAFT, OCT);
-    const grant = granted(db);
-    markDispatching(db, grant.id, HOME, OCT);
-    recordJournal(db, grant.id, [row(grant.id, 1)], seal(grant.id, "complete", 1), OCT);
+    const written = granted(db);
+    const grant = granted(db, { models: [], productive: { requests: 0, outputTokens: 0 }, finalisation: { requests: 0, outputTokens: 0 } });
+    sent(db, grant.id, [row(grant.id, 1, { kind: "sandbox-operation", model: null, usage: null, amountMicros: null, units: 1 })]);
+    recordClockJump(db, "jump-forward", OCT, 2 * 60_000);
     const sql = db.db;
     for (const statement of [
-      `UPDATE budget_grants SET state = 'released', revision = revision + 1 WHERE id = '${grant.id}'`,
-      `UPDATE budget_grants SET productive_micros = 0, revision = revision + 1 WHERE id = '${grant.id}'`,
       `DELETE FROM budget_grants WHERE id = '${grant.id}'`,
       "UPDATE budget_operations SET amount_micros = 0",
       "DELETE FROM budget_operations",
       "UPDATE budget_policies SET policy_json = '{}'",
       "UPDATE budget_authority SET revision = 1",
+      "UPDATE budget_authority SET ledger_id = 'another', revision = revision + 1",
       "DELETE FROM budget_authority",
-      "INSERT INTO budget_periods (idx, label, starts_at, ends_at, timezone, opened_by, evidence_json, opened_at, revision) VALUES (0, '0000-01', 'x', 'x', 'UTC', 'confirmed', '{}', 'x', 99)",
+      "UPDATE budget_revisions SET chain = 'x'",
+      "DELETE FROM budget_revisions",
+      "INSERT INTO budget_revisions (ledger_id, revision, chain, at) VALUES ('another', 99, 'x', 'x')",
+      "DELETE FROM budget_clock",
+      "DELETE FROM price_catalogues",
+      "INSERT INTO budget_policies (version, policy_json, replaces, revision, created_at) VALUES (9, NULL, 8, 99, 'x')",
     ]) {
       assert.throws(() => sql.exec(statement), Error, statement);
     }
-    assert.equal(getGrant(db, grant.id)?.state, "settled");
+    // Edits made the way a write path would make them, the revision moved forward first, so that each is refused only
+    // for what it changes: a settled grant released, what a grant was written with changed, a written grant made
+    // uncertain with no new history, a grant inserted already settled, and a month opened behind the current one.
+    const current = "(SELECT revision FROM budget_authority)";
+    const byHand = (statement: string) => () => sql.exec(`UPDATE budget_authority SET revision = revision + 1; ${statement}`);
+    for (const statement of [
+      `UPDATE budget_grants SET state = 'released', revision = ${current} WHERE id = '${grant.id}'`,
+      `UPDATE budget_grants SET productive_micros = 1, revision = ${current} WHERE id = '${grant.id}'`,
+      `UPDATE budget_grants SET written_revision = 1, revision = ${current} WHERE id = '${written.id}'`,
+      `UPDATE budget_grants SET state = 'uncertain', revision = ${current} WHERE id = '${written.id}'`,
+      `INSERT INTO budget_grants SELECT '${randomUUID()}', request_id, request_sha256, workflow, target_id, 'home-x', period_idx, policy_version, catalogue_version, grant_json,
+        attribution_json, feature, project_id, attempt_id, queue_id, profile_id, model, productive_micros, finalisation_micros, extends_id, need, 'settled', 'complete', 0,
+        ${current}, ${current}, created_at, updated_at FROM budget_grants WHERE id = '${written.id}'`,
+      `INSERT INTO budget_periods (idx, label, starts_at, ends_at, timezone, opened_by, evidence_json, opened_at, revision) VALUES (0, '0000-01', 'x', 'x', 'UTC', 'confirmed', '{}', 'x', ${current})`,
+    ]) {
+      assert.throws(byHand(statement), Error, statement);
+    }
+    assert.deepEqual([getGrant(db, grant.id)?.state, getGrant(db, written.id)?.state], ["settled", "written"]);
   });
 });
