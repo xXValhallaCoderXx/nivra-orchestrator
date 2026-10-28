@@ -2729,7 +2729,97 @@ checked unchanged afterwards):
 | Reject leaves the checkout untouched | Offline, and live after runs 3 and 4 | Nothing more |
 | Linux and Windows-to-WSL evidence naming the packaged revision and backend | Linux: runs 1 to 4, on candidates 1 to 3, with Nebius Sandboxes | Windows to WSL live needs its own recipe and approval; native Windows refuses task runs (D39, D41) |
 
-### The shared monthly budget's ledger, PR 1 (D48, NIV-66)
+### Project-driven environments, PR 2 (D48, NIV-55, NIV-58, NIV-59)
+
+A project's own recipe prepared in Nebius and used by its task runs, through the engine, the task touch points, the
+host, the store and the window, offline. On `feature/env-node`, stacked on PR 31 (`feature/env-recipe`, the recipe
+contract and Node's resolver, with both of Nate's reviews of it fixed), with main `ab82e91` merged in through it. An
+independent review of the engine half came before the host half, and Nate's second review is fixed here.
+
+| Commit | What |
+|---|---|
+| `f1ffabf` | The recipe's preparation: `environment.resolve`, the inspect step before any upload, the bootstrap and frozen install, the builds pnpm reports, readiness offline, the verified record; protocol 16 |
+| `ff62fbf` | Task runs from a recipe's environment: sessions from its image with its task variables, setup files held and digested after collect, environment-missing; a tracked file is source wherever it is |
+| `7fc1ac3` | The independent review's twelve findings, each with a test |
+| `2d3e875` | The store: a recipe's setup and environment, D41's as legacy, workspace migration 8 for an acceptance of missing builds |
+| `a158563` | The host: resolve, prepare with choices, readiness, legacy, fingerprint v3 |
+| `a433abd` | The window's calls: `resolveEnvironment`, `prepareEnvironment(choices)`, `acceptMissingBuilds` |
+| `b61d95c` | The environment panel, the run preview and card; the journey shared by the e2e test and the live run |
+| `1e5043f` | The live run's recipe kind v2 |
+| `4ee0749`, `3f97abd`, `3426c83` | The stand-ins list the workspace as readiness does; a chosen version kept as the person's; the environment e2e journey through the recipe panel |
+| `39f0d30` | The panel says plainly why a preview's recipe differs from the environment prepared |
+| `f069d22`, `14868f2`, `040c09a` | PR 31's head merged in: with main `a902bc8`; then with Nate's review of PR 31 fixed (`63c9467`); then with main `ab82e91` (`9fbb673`) |
+| `665716e` | Nate's second review: a setup file that is a link is refused at the task preview and before a run sends anything |
+| `de135f2` | Nate's answer on the wording: a preparation stopped by a rule for what task runs send says so, after the file it names |
+| `06c9e3a` | PR 31's head with its second review fixed (`f80ea3e`, brace expansion's work limited) merged in |
+| `d3ca694` | Main `0ac03d3` (PR 31 merged) merged in, with no file changed: its tree is `06c9e3a`'s |
+| this record | D48, `AGENTS.md`'s boundary rule, the development notes and this section |
+
+**What it shows, offline:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| Another ordinary Node project prepares with no code written for it | `environment-recipe-engine.test.ts`, `host.test.ts` | A pnpm workspace on the Node its `.nvmrc` pins and an npm project on another Node, with the npm its image bundles, go through the same flow and nothing in Nivra names either |
+| Missing declarations, conflicts and incompatible requirements | `environment-node.test.ts` (PR 1), `host.test.ts`, the window | A labelled default, a choice the person makes (never made for them), or a refusal that says what to do; a chosen pnpm that differs from the pin is installed with npm, where corepack can't swap the pin back in |
+| A setup failure, told in Nivra's words | `environment-recipe-engine.test.ts`, `environment-prepare.test.ts` | An install that fails keeps nothing and keeps its log's end; a known failure (ERESOLVE, a lockfile out of step, unapproved pnpm builds) says what to change; an image that doesn't hold the recipe's Node or libc stops before any upload; a readiness check that fails offline keeps nothing |
+| No installs during tasks or checks | `environment-recipe-engine.test.ts`, `task-environment.test.ts` | Readiness confirms pnpm reads the switches that stop installs before a run and version changes; every task command carries them, with corepack's downloads off |
+| Builds the policy didn't run are found before an environment is ready | `environment-recipe-engine.test.ts`, `host.test.ts`, `environment-store.test.ts` | pnpm's own report (10.1 and later), or npm's install scripts under ignore-scripts; no task run starts until the person accepts it without them, for that verified record, or prepares again |
+| Requested and verified identity bound to runs | `task-recipe-engine.test.ts`, `tasks.test.ts`, `host.test.ts` | Fingerprint v3 binds both digests, the image, the setup files, the Nebius project and the target; a different verification makes a new record and a new fingerprint |
+| Tracked files are never hidden by an output folder's name | `snapshot.test.ts`, `patch.test.ts`, `prepared-image.test.ts`, `task-environment.test.ts` | A tracked `dist/` is sent, editable, and its new files enter the change; an untracked one's are generated; a commit that tracks files in a folder its environment leaves out is refused before anything is sent. The secrets deny list and the engine-home exclusion are unchanged, inside such folders too; the preferences store is the host's own and never in a commit Nivra reads |
+| D41's records | `environment-store.test.ts`, `host.test.ts`, `workspace-store.test.ts` | Read as legacy, "Prepared by an earlier version of Nivra. Prepare it again to use it.", and never a run's environment; migration 8 keeps every row |
+| A setup file is a file when a run starts (Nate's second review) | `task-recipe-engine.test.ts`, `task-environment.test.ts` | A commit whose package.json is a link to a file named `{}`, whose setup digest matches an environment prepared from a package.json holding `{}`, is refused at the task preview ("This commit's "package.json" is a link…") and before a run sends anything (nothing run, no model request) |
+| A preparation's refusal names its stage | `environment-recipe-engine.test.ts` | A credential-shaped string or a file over 2 MiB stops `environment.resolve` with the file named and "Task runs send the whole commit, and this one can't be sent: … Preparing the environment would upload only its setup files, but no task run could start from this commit, so Nivra doesn't prepare it either." Other refusals keep their words |
+| Setup files read as the package managers write them (PR 31, with Nate's review) | `environment-node.test.ts`, `environment-releases.test.ts` | Workspace patterns with brace lists and `?`; lockfile entries in either YAML style; a chosen version checked against the project's Node and lockfile as a pin is; each pnpm 10 build setting from the version that reads it, where it reads it. A pattern or an entry Nivra can't read is refused, never passed over |
+
+**Through a real engine** (`apps/engine/scripts/rpc.ts` at `040c09a`, offline, in a home of its own under
+`~/.nivra-dev-niv55`; nothing installed, no repository script run): `environment.resolve` on nine local repositories,
+each a clone at its commit. Two are ready. humin (`1712af4`) resolves to Node 24.22.1 from its `engines.node` (`>=20`)
+and Nivra's labelled default of pnpm 11.28.9, recipe digest
+`cd775674cff7867acf6ae5be8c30bdf6bb5be6e115cd93c8022c4d0582aac322`. valhalla-fitness (`3c3c5d7`), a pnpm workspace of
+six packages, resolves to Node 22.23.4 from its `.node-version` (`22`) and its packages' ranges, and pnpm 11.5.3 from
+its `packageManager`, with esbuild's build allowed, recipe digest
+`6c0d7474c67c4877f0d4c51651ca15d4f4ff6fd81e5fc225a7dc54580f0eb0a3`. Seven are refused, each saying what to do: three
+because test files hold credential-shaped strings (sentiment-hound, hird-orchestration and Nivra itself), two because
+one file is over the 2 MiB Nivra sends (xc-mvp, portfolio-website), and two because they have no lockfile (nivra-sample,
+nivra-demo-timer). These are resolutions, what preparing would send; nothing was prepared. The answers are in
+`~/nivra-acceptance/niv55/survey-040c09a/`, and the same nine gave the same answers at `39f0d30`, before PR 31's fixes.
+
+**Checks**, at `06c9e3a`, the code this records, under the shared lock:
+- `pnpm verify`: exit 0, 1,396 tests passed (domain 105, engine 883, desktop 408), none failed, skipped, cancelled or
+  todo, and all three typechecks clean.
+- The built app's end-to-end suite under xvfb: 94 passed and none failed; 1 skipped, `explain.spec.ts`'s "a packaged app
+  ignores the test endpoint switch…", which runs only against a packaged app.
+- `test:packaged`, after `stage:runtime linux-x64` and `package:dir`: 32 passed and none failed; 63 skipped, each
+  needing a test-only switch (a stand-in endpoint or engine) that a packaged app ignores by design: task-coach 10,
+  research 9, workspace 7, review 7, task-recovery 5, explain 5, missions 4, task-apply 3, sandbox 3, research-journey
+  2, research-cancel 2, environment 2, and task-run, task-journey, task-apply-partial and d20 one each.
+- Neither `~/.nivra` nor `~/.nivra-dev` changed during them.
+- Mutation checks on the guards: `mutate-pr36-review.mjs` (sha256
+  cfb26adc08607067b6e1e11858a5d67786711c3be9efd5cc24142114302a3b04), 3 of 3 caught; `mutate-pr2b.mjs` (sha256
+  93b22612432ab78547bfddd4ac8e6ce84a36acadbc7d8b31e2261214108f184e, its two targets on the lines this review changed
+  updated), 22 of 23 caught, the one missed ("a changed setup file still verifies") unreachable through a run;
+  `mutate-pr2c.mjs` (sha256 5b6858ccb5e9a1d414388a51bb039e22f00c5f998ea0ba68891fcbfa574bb405), 14 of 14 caught at
+  `040c09a`, with no host or window change since.
+- Each fix of Nate's second review was first shown failing on the code before it: the preview was ready and the run
+  proposed a change after 9 commands and 4 model requests (`~/nivra-acceptance/niv55/pr36-symlink-before-fix.log`); the
+  wording test failed on the old words (`pr36-stage-wording-before.log`).
+- The Windows checks (`verify:windows`, `test:windows`), approved by Nate on this revision: at `d3ca694`, whose tree is
+  `06c9e3a`'s with main merged in: `stage:runtime all`, then `verify:windows --skip-stage`, 37 of 37 checks passed on
+  Windows (the native and WSL engines); `dev:win --skip-stage --no-launch`, then `test:windows`, 13 passed, none
+  skipped, none failed; no `Nivra.exe` was left running, and nothing under `~/.nivra` changed.
+
+**Still to show:** the live checks, each on Nate's approval of its own recipe and digest (`task-live.ts`'s recipe kind
+v2): L1 a pnpm workspace on Node 22, L2 an npm project on the default Node, L3 an install that fails. L2's planned
+repository, portfolio-website at `e981144`, holds five files over the 2 MiB a task run sends for one (three demo videos,
+`game-ui-update.html` and a 2.4 MB test fixture; the refusal names the first it meets), so Nate chose another npm
+repository, preflighted offline. A candidate: tj/commander.js at `ba6d13ddb4243e5913367734f8c159089ffe7834` resolves
+ready at `06c9e3a`: Node 24.22.1 from its `engines.node` (`>=22.12.0`), the npm that Node bundles, `package-lock.json`
+format 3, `npm ci`, registry.npmjs.org only; recipe digest
+`29cefc6366d725dd17f58f78e3dab1c3c021cde653b9a480f8fc8fef2fca80ce` (`~/nivra-acceptance/niv55/l2-preflight/`), to be
+computed again by `task-live.ts` on the build that runs it. PR 3 (source-dependent setup, system
+packages, Debian) is a decision for Nate.
+
+### The shared monthly budget's ledger, PR 1 (D49, NIV-66)
 
 Lane C's PR 1 for NIV-57: the budget's contract, the host's ledger, its guard and the six calls the budget screen and
 the evaluation harness will both use. Backend only, and nothing spends through it yet. On `feature/budget-ledger`, from
@@ -2738,10 +2828,10 @@ docs) merged in. The commit after it adds only docs.
 
 | Commit | What |
 |---|---|
-| `5ed855a` | The contract and today's price list; the ledger (migration 8), the guard, the host's block and the six calls; the tests; the schema pins move to 8 |
+| `5ed855a` | The contract and today's price list; the ledger (migration 8 then; 9 since main took 8), the guard, the host's block and the six calls; the tests; the schema pins move to 8 (now 9) |
 | `b796823` | The first independent review's fixes, each with its test |
 | `42c9c47` | The second independent review's fixes, each with its test |
-| `40b7564` | D48, AGENTS.md's rules, the development notes and this record, with the checks at `42c9c47` |
+| `40b7564` | D48 (now D49), AGENTS.md's rules, the development notes and this record, with the checks at `42c9c47` |
 | `bb451ee` | Nate's review of `40b7564`: a lost history's restriction holds through its recovery month, with regression tests |
 | `662efbc` | Main (`ab82e91`) merged in |
 
@@ -2758,7 +2848,7 @@ NIV-66's checkpoints, as this PR leaves them:
 
 Nate's finding at `40b7564`, and its fix in `bb451ee`: a backup from an older month, put back, took the new history's
 restriction to that old month, and confirming the real month bypassed it. The restriction now holds through the
-recovery month (D48). Its regression tests:
+recovery month (D49). Its regression tests:
 - `budget-store.test.ts`, "a lost history's recovery month": a wait, and a finite allowance with Nebius operations, each
   refused in the history's old month and again once the real month is confirmed, counting what was admitted before the
   confirmation, and freed in the month after; the guard's last record as evidence with the computer's clock behind;
@@ -2813,7 +2903,7 @@ Earlier runs:
 Reviews:
 - An independent review of `5ed855a` found three blocking holes and eight significant ones, all fixed in `b796823`.
 - A second independent review, of `b796823`, found two blocking holes and four significant ones, all fixed in
-  `42c9c47`. D48 lists both reviews' findings.
+  `42c9c47`. D49 lists both reviews' findings.
 
 ### Deferred to a later milestone (kept, not dropped)
 

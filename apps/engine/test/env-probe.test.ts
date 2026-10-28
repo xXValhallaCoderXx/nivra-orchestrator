@@ -6,6 +6,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { SandboxApi } from "../src/exec/nebius/api.ts";
 import { ENV_PREPARE_SCRIPT, Journal } from "../src/exec/nebius/sandbox.ts";
 import { createNebiusBackend } from "../src/exec/nebius/session.ts";
+import { OUTPUT_DIRS } from "../src/repo/deny.ts";
 import { readTar, writeTar } from "../src/exec/tar.ts";
 import { matches, runEnvProbe, type EnvProbeInput, type Selection } from "../scripts/env-probe-run.ts";
 import { clock, spawned, succeed, type Behaviour } from "./fake-sandboxes.ts";
@@ -68,7 +69,7 @@ async function rehearsal(options: { publicImages?: Array<{ uuid: string; tag: st
   const input: EnvProbeInput = {
     api: new SandboxApi(guest.service.transport, { requestTimeoutMs: 30_000, now: time.now, sleep: time.sleep }),
     journal: new Journal(),
-    backendFor: (image) => createNebiusBackend({ credentials, baseImage: image, journalDir: scratch("journals"), transport: () => guest.service.transport, applets: "", limits: { maxOperations: 5, maxTimeoutSeconds: 300, prepareTimeoutSeconds: 180, pollMs: 10 }, now: time.now, sleep: time.sleep }),
+    backendFor: (image) => createNebiusBackend({ credentials, baseImage: image, dependencyFolders: OUTPUT_DIRS, journalDir: scratch("journals"), transport: () => guest.service.transport, applets: "", limits: { maxOperations: 5, maxTimeoutSeconds: 300, prepareTimeoutSeconds: 180, pollMs: 10 }, now: time.now, sleep: time.sleep }),
     snapshot,
     inputs,
     pin: PIN,

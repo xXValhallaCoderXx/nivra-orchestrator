@@ -31,9 +31,10 @@ import { byBytes, caseKey, snapshotPathProblem } from "./workspace-rules.ts";
  *   - remotes, lazy fetches and replace refs are switched off (`GIT_SAFE_ENV`).
  * - **Before anything is sent:**
  *   - the included paths are checked, and the picked folder's own path;
- *   - left out, and counted by reason: secret-named paths and dependency or build output (by the shared deny rules,
- *     against the path in the folder and in the repository), submodules, and folders the caller excludes (the engine
- *     home, if it sits inside the repository);
+ *   - left out, and counted by reason: secret-named paths (by the shared deny rules, against the path in the folder
+ *     and in the repository), submodules, and folders the caller excludes (the engine home, if it sits inside the
+ *     repository). A tracked file under a folder named like dependency or build output is sent like any other
+ *     (NIV-55): a tracked file is source;
  *   - every included file's content is scanned, text or binary, for credential shapes, private keys and the vault's
  *     own values, in UTF-16 and inside base64 too (a vault value by its encodings, however the encoding was broken up).
  *     An unsafe snapshot is refused, never redacted. The refusal names the path and the kind of credential, never the
@@ -527,11 +528,11 @@ export async function takeSnapshot(options: SnapshotOptions): Promise<Snapshot> 
       leave(leftOut.excluded, rel);
       continue;
     }
-    // Both ways: `.ssh/config` is a secret even when `.ssh` is the picked folder.
-    const hidden = [hiddenReason(rel), hiddenReason(entry.path)];
-    const reason = hidden.includes("secret") ? "secret" : hidden.includes("output") ? "output" : null;
-    if (reason) {
-      leave(leftOut[reason], rel);
+    // Both ways: `.ssh/config` is a secret even when `.ssh` is the picked folder. A tracked file is source wherever it
+    // is (NIV-55): one under a folder named like build output is sent like any other, so only the secrets deny list
+    // leaves a tracked file out. `leftOut.output` stays in the shape, at 0.
+    if (hiddenReason(rel) === "secret" || hiddenReason(entry.path) === "secret") {
+      leave(leftOut.secret, rel);
       continue;
     }
     const problem = snapshotPathProblem(rel);

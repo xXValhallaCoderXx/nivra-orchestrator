@@ -113,17 +113,17 @@ export interface GuestFiles {
  * The guest, simulated: the prepare step extracts the snapshot as the session uploads it (compressed), `edit` changes
  * the workspace, the collect step runs.
  */
-export function guestRun(snapshot: Snapshot, edit: (workspace: string) => void = () => {}): GuestFiles {
+export function guestRun(snapshot: Snapshot, edit: (workspace: string) => void = () => {}, leftOut: readonly string[] = []): GuestFiles {
   const guest = scratch("guest");
   const workspace = join(guest, "workspace");
   writeFileSync(join(guest, "snapshot.tar"), compressSnapshot(snapshot.archive.archive));
-  const prepared = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", workspace, join(guest, "snapshot.tar"), "", join(guest, "listing")], { encoding: "utf8" });
+  const prepared = spawnSync("/bin/sh", ["-c", PREPARE_SCRIPT, "nivra-prepare", workspace, join(guest, "snapshot.tar"), "", join(guest, "listing"), ...leftOut], { encoding: "utf8" });
   assert.equal(prepared.status, 0, prepared.stderr);
   assert.equal(prepared.stdout.split("\n")[1], `digest ${snapshot.archive.listingDigest}`);
   edit(workspace);
   const archive = join(guest, "result.tar");
   const listing = join(guest, "result-listing");
-  const collected = spawnSync("/bin/sh", ["-c", COLLECT_SCRIPT, "nivra-collect", workspace, archive, "", listing], { encoding: "utf8" });
+  const collected = spawnSync("/bin/sh", ["-c", COLLECT_SCRIPT, "nivra-collect", workspace, archive, "", listing, ...leftOut], { encoding: "utf8" });
   assert.equal(collected.status, 0, collected.stderr);
   const read = (path: string) => {
     const bytes = new Uint8Array(readFileSync(path));

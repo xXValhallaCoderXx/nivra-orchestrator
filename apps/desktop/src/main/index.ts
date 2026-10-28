@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
+import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, type EnvironmentChoices } from "@nivra/domain";
 import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining } from "@nivra/domain";
 import { z } from "zod";
 import { IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
@@ -210,12 +210,15 @@ function start(): void {
   handle(IPC.cancelSandboxCheck, project, (_event, id) => host.cancelSandboxCheck(id));
   handle(IPC.getSandboxCheck, project, (_event, id) => host.sandboxCheck(id));
   handle(IPC.getSandboxStatus, project, (_event, id) => host.sandboxStatus(id));
-  // A project's environment (D41): packages chosen as pnpm filters, which the host checks with the domain's own schema,
-  // saying in words what to change; a preparation bound to its preview's fingerprint (SHA-256 in hex).
-  const Spec = z.strictObject({ filters: z.array(z.string().max(1_000)).max(100) });
+  // A project's environment (D41, NIV-55): the person's choices, an object of a bounded size here, which the host checks
+  // with the domain's own schema, saying in words what to change; a preparation bound to its preview's fingerprint, and
+  // an acceptance of missing builds to the verified record's digest (each SHA-256 in hex).
+  const Choices = z.custom<EnvironmentChoices>((value) => typeof value === "object" && value !== null && !Array.isArray(value) && JSON.stringify(value).length <= 8_000);
+  const Digest = z.string().regex(/^[0-9a-f]{64}$/);
   handle(IPC.getEnvironment, project, (_event, id) => host.environment(id));
-  handle(IPC.previewEnvironment, z.tuple([z.uuid(), Spec]), (_event, id, spec) => host.previewEnvironment(id, spec));
-  handle(IPC.prepareEnvironment, z.tuple([z.uuid(), Spec, z.string().regex(/^[0-9a-f]{64}$/)]), (_event, id, spec, expected) => host.prepareEnvironment(id, spec, expected));
+  handle(IPC.resolveEnvironment, z.tuple([z.uuid(), Choices]), (_event, id, choices) => host.resolveEnvironment(id, choices));
+  handle(IPC.prepareEnvironment, z.tuple([z.uuid(), Choices, Digest]), (_event, id, choices, expected) => host.prepareEnvironment(id, choices, expected));
+  handle(IPC.acceptMissingBuilds, z.tuple([z.uuid(), Digest]), (_event, id, verified) => host.acceptMissingBuilds(id, verified));
   handle(IPC.cancelPreparation, project, (_event, id) => host.cancelPreparation(id));
   // The choices are required, so a caller that drops them fails here rather than explaining without them. The host
   // checks them again, with messages a person can act on (D23).

@@ -59,8 +59,11 @@ export const TASK_STOP_MESSAGES: Readonly<Record<TaskStopCode, string>> = {
   "native-windows": "Running tasks on Windows itself isn't available yet, so nothing was sent. Add the repository from a WSL distribution, then run the task there.",
   baseline:
     "The brief's baseline selections didn't give what it expects on the commit as it is, so the run stopped before the worker started: your commit was uploaded to Nebius, and nothing from your repository went to Token Factory. The baseline below says which selection differed, and how.",
-  environment: "This project's environment wasn't prepared from this commit's manifests, or was prepared in another Nebius project, so nothing was sent. Prepare the environment again, then run the task.",
+  environment:
+    "This project's environment doesn't fit this run, so nothing was sent: it was prepared from other setup files, in another Nebius project or for another target, or the commit tracks files in a folder the environment leaves out. Preview the run to see which, then prepare the environment again and run the task.",
   frozen: "The brief freezes a file this commit doesn't have, so nothing was sent. Preview the run to see which, correct the brief, then run the task again.",
+  "environment-missing":
+    "The project's prepared environment is no longer in your Nebius project, so the run stopped and nothing was proposed. Your commit was uploaded, and what Nebius keeps is listed with the run. Prepare the environment again, then run the task again.",
 };
 
 /**
@@ -125,6 +128,8 @@ export function taskReport(input: { result: PrescribedResult; core: TaskReportCo
     snapshot: result.snapshot,
     toolchain: (core?.toolchain ?? []).map((tool) => ({ program: kept(tool.program, 128, mask), finding: tool.finding })),
     environment: core?.environment ?? null,
+    environmentRef: core?.environmentRef ?? null,
+    setup: core?.setup ? { unchanged: core.setup.unchanged, changed: core.setup.changed.slice(0, 20).map((path) => kept(path, 1_024, mask)) } : null,
     limits: input.limits ?? null,
     baseline: (core?.baselineChecks ?? []).map((check) => ({ ...check, name: kept(check.name, 200, mask), reason: check.reason === null ? null : kept(check.reason, 600, mask), stdoutTail: kept(check.stdoutTail, 4_000, mask, "end"), stderrTail: kept(check.stderrTail, 4_000, mask, "end") })),
     frozen: (core?.frozen ?? []).map((file) => ({ path: kept(file.path, 1_024, mask), unchanged: file.unchanged })),

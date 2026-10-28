@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { projectFingerprint, type TaskEnvironment } from "@nivra/domain";
-import { environmentInputs } from "../src/environment/inputs.ts";
+import { projectFingerprint, REF_FORMAT, type EnvironmentRef, type TaskEnvironment } from "@nivra/domain";
+import { environmentInputs, setupConfiguration } from "../src/environment/inputs.ts";
+import { isNodeSetupPath } from "../src/environment/node-files.ts";
+import { ENV_PATH } from "../src/exec/nebius/sandbox.ts";
+import { taskStopWords } from "../src/task/report.ts";
 import type { ExecResult } from "../src/exec/backend.ts";
 import { judgeBaseline, notRun, type CheckResult } from "../src/task/harness.ts";
 import { reserveMs, runNeedsMs, TASK_LIMITS } from "../src/task/limits.ts";
@@ -185,6 +188,12 @@ describe("a task run from a prepared environment (NIV-49, D41)", () => {
     assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.guest.ran.length, run.requests()], ["refused", "environment", 0, 0]);
   });
 
+  it("refuses, before anything is sent, a commit that tracks files in a folder D41's sessions leave out, which a snapshot once left out without a word (NIV-55)", async () => {
+    const files = { ...FILES, "dist/greet.js": "export const built = true;\n" };
+    const run = await attempt({ files, brief: ENV_BRIEF, setup: prepared, extra: { environment: await environmentFor(files, "base-image") } });
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.guest.ran.length, run.requests()], ["refused", "environment", 0, 0]);
+  });
+
   it("refuses, before anything is sent, a brief that freezes a file the commit doesn't hold", async () => {
     const run = await attempt({ files: FILES, brief: { ...ENV_BRIEF, frozen: ["tests/missing.test.ts"] }, setup: prepared, extra: { environment: await environmentFor(FILES, "base-image") } });
     assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.guest.ran.length], ["refused", "frozen", 0]);
@@ -206,5 +215,111 @@ describe("a task run from a prepared environment (NIV-49, D41)", () => {
     });
     assert.notEqual(run.result.outcome, "proposed");
     assert.equal(run.result.proposal, null);
+  });
+});
+
+/** A recipe's environment for a commit with these files (NIV-55), as its preparation would bind it. */
+async function refFor(files: Record<string, string>, image: string): Promise<EnvironmentRef> {
+  return {
+    format: REF_FORMAT,
+    recipe: "a".repeat(64),
+    verified: "b".repeat(64),
+    configuration: setupConfiguration(await snap(repoWith(files)), isNodeSetupPath).digest,
+    image,
+    projectFingerprint: await projectFingerprint(PROJECT),
+    target: "local",
+    tools: [
+      { name: "node", version: "24.21.0" },
+      { name: "pnpm", version: "11.5.3" },
+    ],
+    platform: { arch: "x86_64", libc: "musl" },
+    env: { PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_NETWORK: "0", pnpm_config_verify_deps_before_run: "false", pnpm_config_pm_on_fail: "ignore" },
+    dependencyFolders: ["node_modules"],
+    builds: null,
+    preparedAt: "2026-10-28T10:00:00.000Z",
+  };
+}
+
+describe("a task run from a recipe's environment (NIV-55)", () => {
+  const spawns = (run: Awaited<ReturnType<typeof attempt>>) => run.guest.service.operations.map((operation) => operation.body);
+
+  it("starts from its image with the recipe's task variables, leaves its dependency folders out, and proposes a verified change with the setup files unchanged", async () => {
+    const environment = await refFor(FILES, "base-image");
+    const run = await attempt({ files: FILES, brief: ENV_BRIEF, setup: prepared, extra: { environment } });
+    assert.deepEqual([run.result.outcome, run.result.stopped], ["proposed", null]);
+    assert.deepEqual([run.core!.environment, run.core!.environmentRef, run.core!.setup, run.core!.verified], [null, environment, { unchanged: true, changed: [] }, true]);
+    // Every command the run sent carries the switches that stop installs and version changes.
+    const commands = spawns(run).filter((body) => (body["args"] as string[] | undefined)?.[2] === undefined || !String((body["args"] as string[])[2]).startsWith("nivra-prepare"));
+    assert.ok(commands.length > 2, "no commands were sent");
+    assert.ok(
+      commands.every((body) => (body["env"] as Record<string, string> | undefined)?.["COREPACK_ENABLE_NETWORK"] === "0"),
+      "a command ran without the recipe's task variables",
+    );
+    assert.deepEqual((spawns(run)[0]!["args"] as string[]).slice(7), ["node_modules"], "the prepare step wasn't told to leave the dependency folder out");
+    assert.deepEqual(run.result.proposal?.binding.paths.map((path) => path.path), ["greet.sh"]);
+  });
+
+  it("refuses the worker's writes to a setup file, a new one included, saying why", async () => {
+    const environment = await refFor(FILES, "base-image");
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["create_file", { path: "packages/extra/package.json", content: '{ "name": "extra" }\n' }],
+      ["create_file", { path: ".nvmrc", content: "24.20.0\n" }],
+      ["edit_file", { path: "package.json", old_text: '"private": true', new_text: '"private": false' }],
+      ["edit_file", FIX],
+      ["run_case", { number: 1 }],
+    ];
+    const run = await attempt({ files: FILES, brief: ENV_BRIEF, setup: prepared, extra: { environment }, calls });
+    assert.deepEqual([run.result.outcome, run.core!.worker.tools.refused, run.core!.worker.written, run.core!.verified], ["proposed", 3, ["greet.sh"], true]);
+    assert.ok(run.prompts().some((prompt) => prompt.includes("is one of the setup files the project's environment was prepared from, so a task can't create or change it")), "the refusal's words didn't reach the worker");
+  });
+
+  it("refuses, before anything is sent, a commit whose setup files aren't the ones its recipe was prepared from", async () => {
+    const environment = await refFor(FILES, "base-image");
+    const run = await attempt({ files: { ...FILES, ".nvmrc": "24.20.0\n" }, brief: ENV_BRIEF, setup: prepared, extra: { environment } });
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.guest.ran.length, run.requests()], ["refused", "environment", 0, 0]);
+  });
+
+  it("refuses, before anything is sent, a commit whose setup file is a link, though its setup digest matches the recipe's", async () => {
+    // Nate's review of PR 36: a package.json holding {} and a package.json linking to a file named {} digest alike, and
+    // the worker could then edit the effective manifest through the link's target, which isn't a setup file.
+    const plain = { ...FILES, "package.json": "{}" };
+    const linked = { ...FILES, "package.json": { link: "{}" }, "{}": json({ name: "greet", private: true, scripts: { postinstall: "node build.js" } }) };
+    const environment = await refFor(plain, "base-image");
+    assert.equal(setupConfiguration(await snap(repoWith(linked)), isNodeSetupPath).digest, environment.configuration, "the two commits' setup digests match");
+    const run = await attempt({ files: linked, brief: ENV_BRIEF, setup: prepared, extra: { environment } });
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.guest.ran.length, run.requests()], ["refused", "environment", 0, 0]);
+  });
+
+  it("refuses, before anything is sent, a commit that tracks files in the recipe's dependency folders", async () => {
+    const files = { ...FILES, "node_modules/left/index.js": "module.exports = 1;\n" };
+    const run = await attempt({ files, brief: ENV_BRIEF, setup: prepared, extra: { environment: await refFor(files, "base-image") } });
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.guest.ran.length, run.requests()], ["refused", "environment", 0, 0]);
+  });
+
+  it("lets the worker edit a tracked file under a folder named like build output, which the change then holds", async () => {
+    const files = { ...FILES, "dist/greet.txt": "Hello, world\n" };
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["edit_file", { path: "dist/greet.txt", old_text: "world", new_text: "everyone" }],
+      ["edit_file", FIX],
+      ["run_case", { number: 1 }],
+    ];
+    const run = await attempt({ files, brief: ENV_BRIEF, setup: prepared, extra: { environment: await refFor(files, "base-image") }, calls });
+    assert.deepEqual([run.result.outcome, run.core!.worker.written, run.core!.verified], ["proposed", ["dist/greet.txt", "greet.sh"], true]);
+    assert.deepEqual(run.result.proposal?.binding.paths.map((path) => path.path), ["dist/greet.txt", "greet.sh"]);
+  });
+
+  it("stops when the recipe's image is gone from Nebius, before the model, and says to prepare the environment again", async () => {
+    const environment = await refFor(FILES, "base-image");
+    const run = await attempt({
+      files: FILES,
+      brief: ENV_BRIEF,
+      setup: (guest) => {
+        prepared(guest);
+        guest.service.expiredImages.add(guest.baseImage);
+      },
+      extra: { environment },
+    });
+    assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.result.stopped?.step, run.requests(), run.result.proposal], ["failed", "environment-missing", "open", 0, null]);
+    assert.match(taskStopWords("environment-missing", "open"), /^The project's prepared environment is no longer in your Nebius project, so the run stopped and nothing was proposed\. .*Prepare the environment again, then run the task again\.$/);
   });
 });

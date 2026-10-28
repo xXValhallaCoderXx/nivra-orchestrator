@@ -3302,13 +3302,90 @@ undici approved as an exactly pinned engine dependency.
 - **Mutations:** 23 of 24 caught, each part broken on purpose in turn. The one not caught changes no behaviour: a
   request with tools held for the hand-in's time, which the whole-time rule already gates.
 
-## D48. One budget for every paid call: the host keeps the ledger, money counts only where its bounds are established, and a guard that a lost, restored or diverged history can't get past (2026-10-28)
+## D48. Project-driven environments: each project's own recipe, resolved from its setup files with labelled defaults and the person's choices, inspected before anything is sent and checked offline after; and a tracked file is source wherever it is (2026-10-28)
+
+**Decision.** NIV-55 (Next A), plan revision 3, approved by Nate on 28 October after two review rounds. It supersedes
+D41's single setup (one pinned Node 22 and pnpm, for every project) and the part of D34 and D41 that left tracked
+files under folders named like build output out of a snapshot. The decision's number is provisional: whoever merges
+after another decision lands renumbers it.
+
+- **The recipe.** A project's environment is the recipe its own setup files resolve to, on the engine that owns the
+  checkout, with no network: its version files (`.nvmrc`, `.node-version`, `.tool-versions`, `volta`), `engines` and
+  `devEngines`, `packageManager`, its lockfile and its workspace file. An exact pin is honoured exactly; a range
+  resolves to the newest LTS release in Nivra's index that meets every range, preferring what dependencies' engines
+  admit; nothing declared takes a labelled default. Declarations that conflict, or that Nivra can't read, are put to
+  the person as a choice, never picked for them. The recipe never takes a fact from the release index (npm stays the
+  one the Node image bundles unless pinned), and the versions a preparation settled on are kept while the setup files
+  are unchanged, unless the person had chosen them. Refreshing the index invalidates nothing. Workspace patterns and
+  lockfile entries are read as the package managers write them (brace lists, and either YAML style); one Nivra can't
+  read is refused, never passed over. A choice settles which declaration to follow, never compatibility: a chosen
+  version is checked against the project's Node and lockfile as a pin is.
+- **Identity.** The recipe's digest is what the person approves; a preparation writes what it verified (the tools'
+  versions, the OS release and platform, the images, the builds that didn't run) once, as a record of its own, and a
+  task run carries both digests (`EnvironmentRef`). The run preview's fingerprint v3 binds both, the image, the setup
+  files' digest, the Nebius project and the target; v1 and v2 are unchanged.
+- **The preparation**, in Nebius: the base image (a public one with the recipe's exact tag, else imported); an
+  inspect step with networking off, before anything is uploaded, which stops on an image whose Node, npm, corepack,
+  machine or libc isn't the recipe's; the setup files uploaded, and nothing else; the bootstrap (pnpm through
+  corepack at the project's own pin, or installed with npm when the person chose another version, since corepack
+  runs the pin inside the project; an npm pin with npm) and the frozen install, the one operation with networking on;
+  pnpm 10.1 and later asked which dependency builds it didn't run; and a readiness step with networking off and the
+  task operations' own variables, which checks the session's tools, the versions, that pnpm reads the switches that
+  keep it from installing or changing version, and that the workspace holds the setup files and the install's
+  folders and nothing else. Any mismatch keeps nothing, and the stop says what was found, in Nivra's words; a known
+  install failure (npm's ERESOLVE, a lockfile out of step, pnpm's unapproved builds, an engine mismatch, a build tool
+  missing, the registry out of reach) says what to change.
+- **Builds.** Each package manager's own build policy is honoured, never widened, as the pinned version applies it: a
+  pnpm setting counts only from the version that reads it, and only where it reads it. An environment whose builds
+  didn't all run, or whose builds Nivra can't tell, starts no task run until the person changes the project's policy and
+  prepares again, or accepts it without them; the acceptance is bound to that verified record (workspace migration 8,
+  `environments.builds_json`) and ends when another preparation leaves an environment.
+- **Task runs.** A run starts from the project's environment only when it is ready, and never from Nivra's own image
+  instead while the project has one: an environment D41 prepared reads "Prepared by an earlier version of Nivra. Prepare
+  it again to use it." Its sessions start from the environment's image with the recipe's task variables (corepack's
+  downloads off, pnpm's installs before a run and version switches off), and leave out only the recipe's dependency
+  folders. A commit whose setup file is a link is refused at the run's preview and before anything is sent, since a
+  link's digest is its target's name. The worker can't create or change a setup file; after collect the setup files are
+  digested again, and any difference leaves the change unverified. A gone image (Nebius answers 404 or 410) stops the
+  run as environment-missing, saying to prepare the environment again.
+- **A tracked file is source wherever it is.** Snapshots keep tracked files under folders named like build output
+  (`dist`, `build`, `vendor` and the rest); only the secrets deny list and the caller's exclusions (the engine home)
+  leave a tracked file out, inside such folders too. A session leaves out only the folders it is given: a recipe's
+  dependency folders, D41's output folders as before, or none without an environment; collect reads the same list
+  from the session. A commit that tracks files in a folder its environment leaves out is refused before anything is
+  sent, and so is a D41 preview of one. A new file is generated, left out of a change, under a dependency folder,
+  with a cache or compiled name, or under a folder named like build output that holds no tracked file; a tracked
+  `dist/` is editable and its new files enter the change.
+- **Protocol 16:** `environment.resolve`; `EnvironmentReport.environment` and `TaskReport.environmentRef`/`setup`
+  beside D41's fields, which stay for the records written before; the stop codes `inspect`, `bootstrap`,
+  `readiness` and `environment-missing`. In the window, `resolveEnvironment` replaces `previewEnvironment`,
+  `prepareEnvironment` takes choices, and `acceptMissingBuilds` is new.
+
+**Why.** D41's one setup proved too narrow: Nate called the fixed Node 22 and pnpm shape "our first mistake". A
+project says what it needs; Nivra's own toolchain, and the repositories it was tried on, are examples, never the limit
+of what it prepares. Tracked files hidden by their folder's name were left out without a word, which a run could
+neither read nor be judged on.
+
+**Consequences.**
+- Only Node projects with npm or pnpm are prepared, on x86_64 Alpine (musl). yarn and bun, private registries, git
+  dependencies, layouts whose install needs the sources (a project's own lifecycle scripts, pnpm patches and
+  pnpmfiles, local file dependencies) and native Windows are refused, each saying what to do; source-dependent setups,
+  system packages and Debian are planned (NIV-59's PR 3), and Python and Rust are deferred (NIV-64, NIV-65).
+- The window offers npm's legacy-peer-deps and ignore-scripts as install options, and a choice for each conflict; the
+  engine also takes a scope of pnpm workspace packages, which the window doesn't offer yet. The panel follows the
+  plan's states; its visual design is NIV-56's.
+- Some repositories now hit the snapshot's size limits, since tracked build output is sent.
+- The live checks (L1 a pnpm workspace on Node 22, L2 an npm project on the default Node, L3 an install that fails)
+  each need Nate's approval of their own recipe and digest, with `task-live.ts`'s recipe kind v2.
+- Workspace migration 8 and protocol 16 are provisional numbers, taken from main when this merged.
+
+## D49. One budget for every paid call: the host keeps the ledger, money counts only where its bounds are established, and a guard that a lost, restored or diverged history can't get past (2026-10-28)
 
 **Decision.** NIV-66, checkpoint 1 and the core of checkpoint 2: lane C's PR 1, from the approved NIV-57 plan
 (revision 3, after Nate's two review rounds), with an independent review's fixes. Nothing spends through the ledger
 yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and Nebius.
 - **One authority.** The host keeps one ledger for every paid activity this installation sends, in workspace.db
-  (migration 8): policy versions, budget months, price lists, grants, and the operations their sealed journals report.
+  (migration 9): policy versions, budget months, price lists, grants, and the operations their sealed journals report.
   Engines never see the pool. Each spendable call gets a finite grant, written before it is sent. No database is opened
   from two operating systems (D7).
 - **What it claims.** An admission policy for spend made through this installation, never a cap on a provider's
@@ -3414,7 +3491,7 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
   through the recovery month.
 
 **Consequences.**
-- A workspace this build writes (v8) is refused by older builds, so this lane's app profile is never one a release
+- A workspace this build writes (v9) is refused by older builds, so this lane's app profile is never one a release
   uses.
 - The guard costs one fsynced append before each send.
 - Under a money policy, a month that began with unpriced spend (before the price list's bounds were established, or

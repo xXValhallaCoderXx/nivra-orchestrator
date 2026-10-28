@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { ENVIRONMENT_BASE, ENVIRONMENT_LIMITS, type EnvironmentSpec } from "@nivra/domain";
+import { ENVIRONMENT_BASE, ENVIRONMENT_LIMITS, isEnvironmentRef, type EnvironmentRef, type EnvironmentSpec, type TaskEnvironment } from "@nivra/domain";
 import { compressSnapshot } from "../exec/nebius/session.ts";
+import { OUTPUT_DIRS } from "../repo/deny.ts";
 import type { Snapshot, SnapshotFile } from "../exec/snapshot.ts";
 import { writeTar } from "../exec/tar.ts";
 
@@ -122,21 +123,76 @@ export function environmentFingerprint(parts: { baseline: string; prefix: string
 }
 
 /**
+ * The setup configuration (NIV-55): the committed files that decide an environment, chosen by the ecosystem's own rule,
+ * and their digest. It is what a task holds frozen and digests again after collect; sources are never part of it.
+ */
+export function setupConfiguration(snapshot: Pick<Snapshot, "files">, isSetupPath: (path: string) => boolean): { files: SnapshotFile[]; digest: string } {
+  const files = snapshot.files.filter((file) => isSetupPath(file.path));
+  return { files, digest: configurationDigest(files) };
+}
+
+/**
+ * The folder names a task run's sessions leave out of their listings and collect, by the environment the run starts
+ * from: a recipe's dependency folders (NIV-55), or D41's output folders as its sessions always left them out. A run's
+ * commit may track no file under one, since neither listing would see it.
+ */
+export function leftOutFor(environment: TaskEnvironment | EnvironmentRef): readonly string[] {
+  return isEnvironmentRef(environment) ? environment.dependencyFolders : OUTPUT_DIRS;
+}
+
+/** The first tracked file under one of `folders`, at any depth, with that folder's name; null when there is none. */
+export function trackedUnder(snapshot: Pick<Snapshot, "files">, folders: readonly string[]): { path: string; folder: string } | null {
+  for (const file of snapshot.files) {
+    const folder = file.path.split("/").slice(0, -1).find((segment) => folders.includes(segment));
+    if (folder !== undefined) return { path: file.path, folder };
+  }
+  return null;
+}
+
+/**
+ * The setup files as a collected workspace holds them, against the commit's (NIV-55): unchanged, or the paths that
+ * differ, one added or removed included, sorted by their bytes. Each is compared by its kind and its hash, a link's
+ * hash being its target's, as a snapshot hashes it: a file come back as a link is a change.
+ */
+export function setupCheck(snapshot: Pick<Snapshot, "files">, entries: ReadonlyArray<{ path: string; kind: "file"; sha256: string } | { path: string; kind: "link"; target: string }>, isSetupPath: (path: string) => boolean): { unchanged: boolean; changed: string[] } {
+  const before = new Map(setupConfiguration(snapshot, isSetupPath).files.map((file) => [file.path, `${file.kind} ${file.sha256}`] as const));
+  const after = new Map(entries.flatMap((entry) => (isSetupPath(entry.path) ? [[entry.path, entry.kind === "file" ? `file ${entry.sha256}` : `link ${sha256(entry.target)}`] as const] : [])));
+  const changed = [...new Set([...before.keys(), ...after.keys()])].filter((path) => before.get(path) !== after.get(path)).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+  return { unchanged: changed.length === 0, changed: changed.slice(0, 20) };
+}
+
+/** A setup configuration's digest: its paths and hashes, sorted by the path's bytes. */
+export function configurationDigest(files: ReadonlyArray<Pick<SnapshotFile, "path" | "sha256">>): string {
+  const lines = [...files].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path))).map((file) => `${file.sha256}  ${file.path}\n`);
+  return sha256(`nivra.environment-configuration.v1\n${lines.join("")}`);
+}
+
+/**
  * Whether `version` (x.y.z) meets a semver range as package.json's engines write it: comparators joined by spaces,
- * alternatives by `||`, with `^`, `~`, `x` and `*`. Null when Nivra can't read the range: it is then shown as written.
+ * alternatives by `||`, with `^`, `~`, `x`, `*` and hyphen ranges (`1.2.3 - 2.3`). An operator written apart from its
+ * version (`>= 22`) is read as one. Null when Nivra can't read the range, such as a prerelease tag: it is then shown as
+ * written, and never counted as met.
  */
 export function satisfies(version: string, range: string): boolean | null {
   const have = version.split(".").map(Number);
   const alternatives = range.split("||").map((part) => part.trim());
   let unknown = false;
   for (const alternative of alternatives) {
-    const comparators = alternative === "" || alternative === "*" ? [] : alternative.split(/\s+/);
+    const comparators = comparatorsOf(alternative);
     // One comparator Nivra can't read makes the whole alternative unknown, wherever it is.
     const met = comparators.map((comparator) => comparatorMet(have, comparator));
     if (met.includes(null)) unknown = true;
     else if (met.every(Boolean)) return true;
   }
   return unknown ? null : false;
+}
+
+/** An alternative's comparators: a hyphen range becomes its two bounds, and an operator is joined to its version. */
+function comparatorsOf(alternative: string): string[] {
+  if (alternative === "" || alternative === "*") return [];
+  const hyphen = /^(\S+)\s+-\s+(\S+)$/.exec(alternative);
+  if (hyphen) return [`>=${hyphen[1]}`, `<=${hyphen[2]}`];
+  return alternative.replace(/(>=|<=|>|<|=|\^|~)\s+/g, "$1").split(/\s+/);
 }
 
 function comparatorMet(have: number[], comparator: string): boolean | null {

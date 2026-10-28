@@ -1,7 +1,7 @@
 import { BoundaryUnavailableError, ExecRefusedError, ExecUncertainError, SessionOpenError, type CloseReport, type ExecRequest, type ExecResult, type ExecutionBackend, type ExecutionSession, type SessionStep } from "./backend.ts";
 import { WorkspaceCancelled, WorkspaceRefusal, type RefusalCode } from "./git-tool.ts";
 import { SandboxHttpError, SandboxNetworkError, SandboxTooLargeError } from "./nebius/api.ts";
-import { SandboxOperationError } from "./nebius/session.ts";
+import { EnvironmentMissingError, SandboxOperationError } from "./nebius/session.ts";
 import { buildPatch, collectResult, type Collected, type PatchPolicy, type PatchResult } from "./patch.ts";
 import { buildReport, makeProposal, stepRecord, stoppedStepRecord, type Proposal, type StepRecord } from "./proposal.ts";
 import { takeSnapshot, type Snapshot } from "./snapshot.ts";
@@ -83,7 +83,9 @@ export type PrescribedStopCode =
   /** A task's: its environment wasn't prepared from this commit's manifests (D41). Nothing was sent. */
   | "environment"
   /** A task's: the brief freezes a file the commit doesn't hold (D41). Nothing was sent. */
-  | "frozen";
+  | "frozen"
+  /** A task's: its prepared environment's image is gone from Nebius (NIV-55), found once the commit was sent. */
+  | "environment-missing";
 
 export interface PrescribedResult {
   outcome: PrescribedOutcome;
@@ -202,6 +204,7 @@ function stopOf(error: unknown, cancelled: boolean): { outcome: PrescribedOutcom
   // Something that may still be running outranks a cancel: closing's record says what stays open.
   if (error instanceof ExecUncertainError || (error instanceof SessionOpenError && error.report.unresolved.length)) return { outcome: "uncertain", code: "uncertain" };
   if (cancelled) return { outcome: "cancelled", code: "cancelled" };
+  if (error instanceof EnvironmentMissingError) return { outcome: "failed", code: "environment-missing" };
   if (error instanceof SessionOpenError) return { outcome: "failed", code: "sandbox-failed" };
   if (error instanceof ExecRefusedError) return { outcome: "failed", code: "sandbox-refused" };
   // An operation that failed, or a read of what it left (a download) that the service answered with an error.

@@ -14,6 +14,7 @@ import { _electron as electron, expect, test, type ElectronApplication, type Pag
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_API = [
   "acceptCoachChanges",
+  "acceptMissingBuilds",
   "addMissionTask",
   "addPreference",
   "addProject",
@@ -73,7 +74,6 @@ const EXPECTED_API = [
   "prepareMissionReview",
   "prepareResearch",
   "prepareReview",
-  "previewEnvironment",
   "previewImport",
   "previewSandboxCheck",
   "previewTaskRun",
@@ -83,6 +83,7 @@ const EXPECTED_API = [
   "removeProject",
   "renameTask",
   "requestTaskRevision",
+  "resolveEnvironment",
   "restartConversationEngine",
   "restartEngine",
   "restoreTaskChange",

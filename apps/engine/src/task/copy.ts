@@ -37,12 +37,15 @@ function excerpt(line: string, at: number, length: number, max: number): string 
 
 export class WorkspaceCopy {
   readonly snapshot: Snapshot;
+  /** The folder names the session's listings leave out (NIV-55): collect never brings back a write under one. */
+  readonly leftOut: readonly string[];
   readonly #nodes = new Map<string, Node>();
   /** Paths the worker wrote, in the order it first wrote them. */
   readonly written: string[] = [];
 
-  constructor(snapshot: Snapshot) {
+  constructor(snapshot: Snapshot, leftOut: readonly string[] = []) {
     this.snapshot = snapshot;
+    this.leftOut = leftOut;
     for (const file of snapshot.files) {
       this.#nodes.set(file.path, file.kind === "link" ? { kind: "link", target: new TextDecoder().decode(file.bytes) } : { kind: "file", bytes: file.bytes, executable: file.mode === "100755", sha256: sha256(file.bytes) });
     }
@@ -125,8 +128,11 @@ export class WorkspaceCopy {
     const node = this.#nodes.get(path);
     if (node?.kind === "link") return `${quoted(path)} is a link, which this task can't write`;
     if (!node && this.paths(path).length) return `${quoted(path)} is a folder`;
-    // Collect leaves output folders out, and a patch leaves new generated files out: such a write would never be proposed.
-    if (!node && isGenerated(path, this.snapshot.prefix ? `${this.snapshot.prefix}/${path}` : path)) return `${quoted(path)} is dependency, build or generated output, which a change leaves out`;
+    // Collect leaves the session's dependency folders out, and a patch leaves new generated files out: such a write
+    // would never be proposed.
+    const leftOut = parts.slice(0, -1).find((segment) => this.leftOut.includes(segment));
+    if (leftOut !== undefined) return `${quoted(path)} is under ${leftOut}, a folder the project's environment leaves out of the workspace, so a change can't hold it`;
+    if (!node && isGenerated(path, this.snapshot.prefix ? `${this.snapshot.prefix}/${path}` : path, this.snapshot)) return `${quoted(path)} is dependency, cache or build output (in a folder the commit doesn't track), which a change leaves out`;
     try {
       findChanges(this.snapshot, this.#collected(path, bytes), { knownValues });
     } catch (error) {

@@ -137,7 +137,7 @@ export function safeUnresolved(item: string): string {
 }
 
 /** A stop's code as a check reports it: a code only a task's run gives can't happen here, and reads as a fault. */
-export const sandboxCode = (code: PrescribedStopCode): SandboxStopCode => (code === "toolchain" || code === "time" || code === "baseline" || code === "environment" || code === "frozen" ? "fault" : code);
+export const sandboxCode = (code: PrescribedStopCode): SandboxStopCode => (code === "toolchain" || code === "time" || code === "baseline" || code === "environment" || code === "frozen" || code === "environment-missing" ? "fault" : code);
 
 /** A step's record as a report gives it: what it did, its provider's status and usage, and the end of its output. */
 export function stepOf(step: PrescribedResult["steps"][number]): SandboxStep {

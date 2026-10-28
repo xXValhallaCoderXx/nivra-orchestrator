@@ -28,7 +28,7 @@ const request = async (overrides: { input?: Record<string, unknown>; context?: u
 describe("a task run's request (NIV-7)", () => {
   it("takes the checkout, its project and target, the preview's fingerprint, the task and its brief by version and digest, with both consents and the brief in its context", async () => {
     const parsed = StartRunParams.parse(await request());
-    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 15]);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 16]);
     assert.equal(StartRunParams.safeParse(await request({ input: { target: "local" } })).success, true);
     assert.deepEqual(
       ["runs.task", "runs.proposal", "task.preview"].map((name) => [Object.hasOwn(Methods, name), name.startsWith("runs.") ? Methods[name as "runs.task"].result.safeParse(null).success : null]),
@@ -151,6 +151,6 @@ describe("what a task run gives back (NIV-7)", () => {
     assert.equal(TaskReport.safeParse({ ...report, stopped: { code: "something-else", step: null, message: "x" } }).success, false);
     assert.equal(TaskReport.safeParse({ ...report, checks: Array.from({ length: 5 }, () => report.checks[0]) }).success, false, "four cases and checks at most");
     assert.equal(TaskReport.safeParse({ ...report, checks: [{ ...report.checks[0], verdict: "skipped" }] }).success, false);
-    assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 9, true]);
+    assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 10, true]);
   });
 });

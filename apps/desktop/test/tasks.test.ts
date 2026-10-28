@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
-import { taskBriefDigest, type ChatResult } from "@nivra/domain";
+import { REF_FORMAT, taskBriefDigest, type ChatResult, type EnvironmentRef } from "@nivra/domain";
 import { BriefContentSchema, briefForRepository, briefFrom, nextState, NO_CASE, planFromAnswer, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
 
 const fields = { goal: "Add a CSV export", acceptanceCriteria: ["The list exports as CSV"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] };
@@ -47,6 +47,22 @@ describe("native tasks and plans (D26, NIV-32)", () => {
     ].map(taskRunFingerprint);
     assert.equal(new Set([one, ...others]).size, 7);
     assert.equal(taskRunFingerprint({ ...parts }), one);
+  });
+
+  it("binds a run from a recipe's environment by both its digests, its image, its setup files, the Nebius project and the target, and leaves v1 and v2 as they were (NIV-55)", () => {
+    const parts = { taskId: "t", briefId: "b", briefVersion: 2, briefDigest: "d".repeat(64), projectId: "p", targetId: "wsl:Ubuntu", sharing: { modelContext: true, cloudExecution: true }, snapshot: "f".repeat(64) };
+    const canonical = (form: unknown[]) => createHash("sha256").update(JSON.stringify(form)).digest("hex");
+    const bound = ["t", "b", 2, "d".repeat(64), "p", "wsl:Ubuntu", true, true, "f".repeat(64)];
+    const d41 = { image: "img-d41", inputsDigest: "c".repeat(64), projectFingerprint: "9".repeat(64) };
+    // The forms before NIV-55, exactly: a run with no environment, and one from D41's.
+    assert.deepEqual([taskRunFingerprint(parts), taskRunFingerprint({ ...parts, environment: d41 })], [canonical(["nivra.task-run-preview.v1", ...bound]), canonical(["nivra.task-run-preview.v2", ...bound, "img-d41", "c".repeat(64), "9".repeat(64)])]);
+    const ref: EnvironmentRef = { format: REF_FORMAT, recipe: "1".repeat(64), verified: "2".repeat(64), configuration: "3".repeat(64), image: "img-recipe", projectFingerprint: "4".repeat(64), target: "wsl:Ubuntu", tools: [{ name: "node", version: "24.21.0" }], platform: { arch: "x86_64", libc: "musl" }, env: { CI: "1" }, dependencyFolders: ["node_modules"], builds: null, preparedAt: "2026-10-28T10:00:00.000Z" };
+    const v3 = taskRunFingerprint({ ...parts, environment: ref });
+    assert.equal(v3, canonical(["nivra.task-run-preview.v3", ...bound, "1".repeat(64), "2".repeat(64), "img-recipe", "3".repeat(64), "4".repeat(64), "wsl:Ubuntu"]));
+    const changed = [{ recipe: "5".repeat(64) }, { verified: "5".repeat(64) }, { image: "img-other" }, { configuration: "5".repeat(64) }, { projectFingerprint: "5".repeat(64) }, { target: "local" }].map((change) => taskRunFingerprint({ ...parts, environment: { ...ref, ...change } }));
+    assert.equal(new Set([v3, ...changed]).size, 7);
+    // What a run carries only for display isn't bound: the versions shown, and when it was prepared.
+    assert.equal(taskRunFingerprint({ ...parts, environment: { ...ref, tools: [{ name: "node", version: "24.20.0" }], preparedAt: "2026-10-29T10:00:00.000Z" } }), v3);
   });
 
   it("reads a brief saved before baseline checks and frozen files as having neither, and sends a run them only when it has them (D41)", async () => {

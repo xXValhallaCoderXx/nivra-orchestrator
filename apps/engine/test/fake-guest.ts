@@ -4,7 +4,6 @@ import { PROBE_SCRIPT } from "../src/exec/check.ts";
 import { listingDigest, PREPARE_SCRIPT, type ListingEntry } from "../src/exec/nebius/session.ts";
 import { COLLECT_SCRIPT, RESULT_ARCHIVE, RESULT_LISTING } from "../src/exec/patch.ts";
 import { readTar, writeTar, type TarEntry } from "../src/exec/tar.ts";
-import { OUTPUT_DIRS } from "../src/repo/deny.ts";
 import { applyFixedEdit, CHECK_SCRIPT, checkOutcome, EDIT_SCRIPT, FAIL_SCRIPT, NETWORK_SCRIPT, type GuestNode } from "../scripts/sandbox-fixture.ts";
 import { FakeService, succeed, type Behaviour } from "./fake-sandboxes.ts";
 
@@ -18,6 +17,9 @@ export type Workspace = Map<string, GuestNode>;
 
 const sha = (data: Uint8Array | string) => createHash("sha256").update(data).digest("hex");
 const ordered = (a: string, b: string) => Buffer.compare(Buffer.from(`./${a}`), Buffer.from(`./${b}`));
+
+/** Whether a path is under a folder a prepare or collect step leaves out: the names after the script's own four arguments. */
+const leftOutBy = (args: readonly string[], path: string) => path.split("/").slice(0, -1).some((segment) => args.slice(7).includes(segment));
 
 export class FakeGuest {
   readonly baseImage: string;
@@ -55,7 +57,7 @@ export class FakeGuest {
   #run(program: string, args: readonly string[], workspace: Workspace, body: Record<string, unknown>): Behaviour {
     const script = args[0] === "-c" ? args[1] : undefined;
     if (program === "/bin/sh" && script === PREPARE_SCRIPT) return this.#prepare(args, workspace, body);
-    if (program === "/bin/sh" && script === COLLECT_SCRIPT) return this.#collect(workspace);
+    if (program === "/bin/sh" && script === COLLECT_SCRIPT) return this.#collect(args, workspace);
     if (program === "/bin/sh" && script === EDIT_SCRIPT) {
       applyFixedEdit(workspace);
       return succeed();
@@ -81,23 +83,21 @@ export class FakeGuest {
     } catch {
       return succeed({ exitCode: 1, stderr: "tar: invalid gzip magic\n" });
     }
-    const listing: ListingEntry[] = [];
     for (const entry of readTar(archive, { maxEntries: 100_000, maxBytes: 64 * 1024 * 1024, maxEntryBytes: 16 * 1024 * 1024, maxPathBytes: 4_096 })) {
-      if (entry.kind === "file") {
-        workspace.set(entry.path, { kind: "file", bytes: entry.bytes, executable: entry.executable });
-        listing.push({ path: entry.path, kind: "file", executable: entry.executable, sha256: sha(entry.bytes) });
-      } else if (entry.kind === "link") {
-        workspace.set(entry.path, { kind: "link", target: entry.target });
-        listing.push({ path: entry.path, kind: "link", target: entry.target });
-      }
+      if (entry.kind === "file") workspace.set(entry.path, { kind: "file", bytes: entry.bytes, executable: entry.executable });
+      else if (entry.kind === "link") workspace.set(entry.path, { kind: "link", target: entry.target });
     }
+    // As the script lists it: the whole workspace, but the folders named after its own arguments (NIV-55).
+    const listing = [...workspace.entries()]
+      .filter(([path]) => !leftOutBy(args, path))
+      .map(([path, node]): ListingEntry => (node.kind === "link" ? { path, kind: "link", target: node.target } : { path, kind: "file", executable: node.executable, sha256: sha(node.bytes) }));
     const { digest, entries } = listingDigest(listing);
     return succeed({ stdout: `entries ${entries}\ndigest ${digest}\n` });
   }
 
-  /** The collect step: the workspace's archive and listing, output folders left out, both kept in the result image. */
-  #collect(workspace: Workspace): Behaviour {
-    const kept = [...workspace.entries()].filter(([path]) => !path.split("/").slice(0, -1).some((segment) => OUTPUT_DIRS.includes(segment))).sort(([a], [b]) => ordered(a, b));
+  /** The collect step: the workspace's archive and listing, the folders its arguments name left out, both kept in the result image. */
+  #collect(args: readonly string[], workspace: Workspace): Behaviour {
+    const kept = [...workspace.entries()].filter(([path]) => !leftOutBy(args, path)).sort(([a], [b]) => ordered(a, b));
     const listing = new TextEncoder().encode(kept.map(([path, node]) => (node.kind === "link" ? `l ${node.target} ./${path}\n` : `f ${sha(node.bytes)} ./${path}\n`)).join(""));
     const archive = writeTar(kept.map(([path, node]): TarEntry => (node.kind === "link" ? { path, kind: "link", target: node.target } : { path, kind: "file", executable: node.executable, bytes: node.bytes })));
     return succeed({ stdout: `entries ${kept.length}\nlisting ${sha(listing)}\narchive ${sha(archive)}\n`, files: { [RESULT_ARCHIVE]: archive, [RESULT_LISTING]: listing } });

@@ -30,7 +30,7 @@ import {
 import { num, str, strOrNull, type Row, type WorkspaceDb } from "./workspace-db.ts";
 
 /**
- * The shared monthly budget's ledger (NIV-66), in the workspace (its eighth migration). The host is its one authority:
+ * The shared monthly budget's ledger (NIV-66), in the workspace (its ninth migration). The host is its one authority:
  * engines get finite grants and never see the pool. Every function here is synchronous, so a grant's availability is
  * checked and its row written in one transaction, and two features asking for the last of the allowance can't both be
  * admitted.

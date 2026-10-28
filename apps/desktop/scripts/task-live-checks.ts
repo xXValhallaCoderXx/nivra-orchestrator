@@ -4,8 +4,9 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { TASK_MODEL, type PreparedEnvironment } from "@nivra/domain";
+import { TASK_MODEL, type PreparedEnvironmentV2 } from "@nivra/domain";
 import type { TaskRunPreview } from "../src/shared/ipc.ts";
+import { environmentRefOf } from "../src/main/host.ts";
 import { taskRunFingerprint } from "../src/main/tasks.ts";
 import { filesIn, hashRuntime } from "./runtime-files.ts";
 
@@ -65,8 +66,8 @@ export interface ApprovedRun {
   snapshotFingerprint: string;
   briefDigest: string;
   frozen: Array<{ path: string; sha256: string }>;
-  /** The environment's inputs, as the recipe bound them; null for a run with no environment. */
-  inputsDigest: string | null;
+  /** The environment's setup files, as the recipe bound them by their digest (NIV-55); null for a run with no environment. */
+  configuration: string | null;
 }
 
 /**
@@ -80,12 +81,15 @@ export interface ApprovedRun {
 export function previewProblems(input: {
   approved: ApprovedRun;
   ids: { taskId: string; briefId: string; briefVersion: number; projectId: string; targetId: string };
-  prepared: Pick<PreparedEnvironment, "image" | "inputsDigest" | "projectFingerprint"> | null;
+  /** The recipe's environment just prepared, as the app's view holds it; null for a run with none. */
+  prepared: PreparedEnvironmentV2 | null;
   shownExpected: string;
   structured: Pick<TaskRunPreview, "expected" | "snapshotFingerprint" | "snapshot" | "frozen" | "environment" | "sends">;
 }): string[] {
   const { approved, ids, prepared, structured } = input;
-  const expected = taskRunFingerprint({ ...ids, briefDigest: approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: approved.snapshotFingerprint, environment: prepared });
+  // What the host binds a run from it to (fingerprint v3): its own ref for this target, worked out here again.
+  const environment = prepared ? environmentRefOf(prepared, null, ids.targetId) : null;
+  const expected = taskRunFingerprint({ ...ids, briefDigest: approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: approved.snapshotFingerprint, environment });
   const problems: string[] = [];
   if (input.shownExpected !== expected) problems.push("the window's preview isn't bound to the approved brief, commit and environment");
   if (structured.expected !== expected) problems.push("the app's preview isn't bound to the approved brief, commit and environment");
@@ -93,8 +97,8 @@ export function previewProblems(input: {
   if (structured.snapshot?.baseline !== approved.baseline) problems.push(`the commit is ${String(structured.snapshot?.baseline)}, not the approved ${approved.baseline}`);
   const frozen = structured.frozen.map((file) => `${file.sha256}  ${file.path}`).join("\n");
   if (frozen !== approved.frozen.map((file) => `${file.sha256}  ${file.path}`).join("\n")) problems.push("the frozen files or their hashes aren't the approved ones");
-  if (prepared === null ? structured.environment !== null : structured.environment?.image !== prepared.image) problems.push("the run doesn't start from the environment just prepared");
-  if (structured.environment && structured.environment.inputsDigest !== approved.inputsDigest) problems.push("the environment's inputs aren't the approved ones");
+  if (prepared === null ? structured.environment !== null : structured.environment?.image !== prepared.verified.images.prepared || structured.environment.verified !== prepared.verifiedDigest) problems.push("the run doesn't start from the environment just prepared");
+  if (structured.environment && structured.environment.configuration !== approved.configuration) problems.push("the environment's setup files aren't the approved ones");
   if (!structured.sends.tokenFactory.some((line) => line.includes(TASK_MODEL))) problems.push(`the app's preview doesn't name ${TASK_MODEL}, the one model the recipe allows`);
   return problems;
 }

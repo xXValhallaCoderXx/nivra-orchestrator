@@ -34,7 +34,8 @@ import {
   type ConversationRecord,
 } from "../src/main/workspace.ts";
 import { classifyWorkspaceError, openWorkspace, WORKSPACE_MIGRATIONS, WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
-import { environmentOf, insertPreparation, latestPreparation } from "../src/main/environment-store.ts";
+import { acceptBuilds, environmentOf, insertPreparation, latestPreparation } from "../src/main/environment-store.ts";
+import { setupOf } from "./fixtures/environment-recipe.ts";
 
 const dirs: string[] = [];
 const open: WorkspaceOpening[] = [];
@@ -65,6 +66,8 @@ function ready(path: string) {
 }
 
 const sha = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+/** What a recipe-driven preparation is started with (NIV-55), as the store keeps it. */
+const SETUP = await setupOf();
 const AT = "2026-10-20T10:00:00.000Z";
 const general = (id = randomUUID()): ConversationRecord => ({ id, kind: "general", projectId: null, projectLabel: null, targetId: "local", title: "New conversation", createdAt: AT, updatedAt: AT });
 
@@ -112,7 +115,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v8\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v9\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -587,12 +590,44 @@ describe("coachings of tasks (NIV-53)", () => {
     assert.deepEqual(before.rows.map((rows) => rows.length), [1, 1, 1, 0, 0, 0]);
     v6.close();
 
+    // On to the latest: v7, then v8 (NIV-55), which changes none of these tables.
     const migrated = ready(path);
     assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
     assert.deepEqual(dump(migrated.db.db), before);
     assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM coachings").get()?.["n"]), 0);
     // The task's runs are still its only attempts.
     assert.deepEqual(attemptsOf(migrated.db, taskId).map((one) => one.id), [attempt]);
+  });
+});
+
+describe("an acceptance of missing builds (NIV-55)", () => {
+  it("moves a v7 file to v8 with every environment row as it was and no acceptance yet, then takes one for the environment kept now", async () => {
+    // v7's text is pinned too, now that v8 (the acceptance of missing builds, NIV-55) follows it.
+    assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[6]!).digest("hex"), "9e430b4dd824bf2180bc1f2f93e6ed163c0877993fbd6c83dc4e3940c236e6aa");
+    const path = join(folder(), "workspace.db");
+    // A v7 file, written as v7 wrote one: its schema alone, then D41's rows as they were written.
+    const raw = new DatabaseSync(path);
+    raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+    raw.exec("BEGIN IMMEDIATE");
+    for (const migration of WORKSPACE_MIGRATIONS.slice(0, 7)) raw.exec(migration);
+    raw.exec("PRAGMA user_version = 7; COMMIT;");
+    const project = randomUUID();
+    const preparation = randomUUID();
+    raw.prepare("INSERT INTO preparations (id, project_id, session_id, target_id, status, spec_json, preview, report_json, reported_at, created_at, settled_at) VALUES (?, ?, 's', 'local', 'answered', '{\"filters\":[]}', 'x', '{}', ?, ?, ?)").run(preparation, project, AT, AT, AT);
+    raw.prepare("INSERT INTO environments (project_id, spec_json, prepared_json, prepared_by, updated_at) VALUES (?, '{\"filters\":[]}', '{\"image\":\"img-d41\"}', ?, ?)").run(project, preparation, AT);
+    const COLUMNS = "project_id, spec_json, prepared_json, prepared_by, updated_at";
+    const before = [raw.prepare(`SELECT ${COLUMNS} FROM environments ORDER BY rowid`).all(), raw.prepare("SELECT * FROM preparations ORDER BY rowid").all()];
+    raw.close();
+
+    const migrated = ready(path);
+    // On to the latest: v8, then v9 (the budget, NIV-66), which changes none of these tables.
+    assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
+    const db = migrated.db.db;
+    assert.deepEqual([db.prepare(`SELECT ${COLUMNS} FROM environments ORDER BY rowid`).all(), db.prepare("SELECT * FROM preparations ORDER BY rowid").all()], before);
+    assert.deepEqual(db.prepare("SELECT builds_json FROM environments").all().map((row) => row["builds_json"]), [null]);
+    // D41's environment reads as legacy, and takes no acceptance: there is no verified record to bind one to.
+    assert.equal(environmentOf(migrated.db, project)?.legacy, true);
+    assert.equal(acceptBuilds(migrated.db, project, { verified: "0".repeat(64), missing: [], acceptedAt: AT }, AT), false);
   });
 });
 
@@ -640,8 +675,8 @@ describe("a project's environment (D41)", () => {
     const projectId = randomUUID();
     assert.deepEqual([environmentOf(migrated.db, projectId), latestPreparation(migrated.db, projectId)], [null, null]);
     const id = randomUUID();
-    assert.equal(insertPreparation(migrated.db, { id, projectId, sessionId: "s", targetId: "wsl:Ubuntu", spec: { filters: [] }, preview: "e".repeat(64), createdAt: AT }), true);
-    assert.deepEqual([environmentOf(migrated.db, projectId)?.spec, environmentOf(migrated.db, projectId)?.prepared, latestPreparation(migrated.db, projectId)?.id], [{ filters: [] }, null, id]);
+    assert.equal(insertPreparation(migrated.db, { id, projectId, sessionId: "s", targetId: "wsl:Ubuntu", setup: SETUP, preview: "e".repeat(64), createdAt: AT }), true);
+    assert.deepEqual([environmentOf(migrated.db, projectId)?.setup, environmentOf(migrated.db, projectId)?.prepared, latestPreparation(migrated.db, projectId)?.id], [SETUP, null, id]);
   });
 
   it("moves a v5 file to v6 (missions, NIV-52) with every row and every earlier table as it was, and no mission yet", () => {
@@ -657,7 +692,7 @@ describe("a project's environment (D41)", () => {
     insertConversation(v5, chat);
     insertTurn(v5, { id: randomUUID(), conversationId: chat.id, sessionId: "s", targetId: "local", preferences: [], history: null, createdAt: AT }, { id: randomUUID(), text: "How do I stage this?" });
     insertTask(v5, { id: randomUUID(), title: "Stage", projectId: null, createdAt: AT, updatedAt: AT }, { id: randomUUID(), content: { goal: "Stage" }, derivedFrom: null });
-    insertPreparation(v5, { id: randomUUID(), projectId: randomUUID(), sessionId: "s", targetId: "wsl:Ubuntu", spec: { filters: [] }, preview: "e".repeat(64), createdAt: AT });
+    insertPreparation(v5, { id: randomUUID(), projectId: randomUUID(), sessionId: "s", targetId: "wsl:Ubuntu", setup: SETUP, preview: "e".repeat(64), createdAt: AT });
     const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages", "reviews", "research", "attempt_records", "environments", "preparations"];
     const dump = (db: DatabaseSync) => ({
       rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
@@ -668,9 +703,17 @@ describe("a project's environment (D41)", () => {
     v5.close();
 
     const migrated = ready(path);
-    // On to the latest: v6, then v7 (coachings, NIV-53), which changes none of these tables.
+    // On to the latest: v6, then v7 (coachings, NIV-53), which changes none of these tables, and v8 (NIV-55), which adds
+    // only an empty builds_json column to environments, and its two triggers.
     assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
-    assert.deepEqual(dump(migrated.db.db), before);
+    const after = dump(migrated.db.db);
+    // Plain objects on both sides: a row SQLite gives has no prototype, and a copy of one does.
+    const plain = (rows: readonly unknown[]) => rows.map((row) => ({ ...(row as Record<string, unknown>) }));
+    const environments = TABLES.indexOf("environments");
+    const withoutBuilds = (rows: readonly unknown[]) => plain(rows).map(({ builds_json, ...rest }) => (assert.equal(builds_json, null), rest));
+    assert.deepEqual(after.rows.map((rows, index) => (index === environments ? withoutBuilds(rows) : plain(rows))), before.rows.map(plain));
+    const v8 = new Set(["environments_builds", "environments_builds_new"]);
+    assert.deepEqual(plain(after.schema.filter((row) => !v8.has(String(row["name"])))).map((row) => (row["name"] === "environments" ? { ...row, sql: String(row["sql"]).replace(", builds_json TEXT", "") } : row)), plain(before.schema));
     const count = (table: string) => Number(migrated.db.db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"]);
     assert.deepEqual([count("missions"), count("mission_versions"), count("mission_tasks")], [0, 0, 0]);
     assert.deepEqual(listConversations(migrated.db).map((conversation) => conversation.id), [chat.id], "an existing conversation stays listed");
