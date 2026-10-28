@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
+import { TASK_MODEL } from "@nivra/domain";
 import { environmentRefOf } from "../src/main/host.ts";
 import { taskRunFingerprint } from "../src/main/tasks.ts";
 import { preparedOf } from "./fixtures/environment-recipe.ts";
@@ -75,7 +76,7 @@ describe("the live run's preview, before Start (NIV-35)", () => {
   const hostExpected = (parts: { briefDigest?: string; snapshot?: string; environment?: typeof ref | null }) =>
     taskRunFingerprint({ ...ids, briefDigest: parts.briefDigest ?? approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: parts.snapshot ?? approved.snapshotFingerprint, environment: parts.environment === undefined ? ref : parts.environment });
   /** What the app's preview says goes to each service: the build's own words, the model among them. */
-  const SENDS = { tokenFactory: ["The brief.", "All of it to one model, nvidia/nemotron-3-super-120b-a12b. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in."], nebius: ["The commit's files."] };
+  const SENDS = { tokenFactory: ["The brief.", `All of it to one model, ${TASK_MODEL}. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in.`], nebius: ["The commit's files."] };
   const structured = (change: Partial<{ expected: string; snapshotFingerprint: string; baseline: string; frozen: Array<{ path: string; sha256: string | null }>; environment: Partial<typeof ref> | null; sends: typeof SENDS }> = {}) => ({
     expected: change.expected ?? hostExpected({}),
     snapshotFingerprint: change.snapshotFingerprint ?? approved.snapshotFingerprint,
@@ -113,7 +114,7 @@ describe("the live run's preview, before Start (NIV-35)", () => {
   });
 
   it("refuses a build whose own preview doesn't name the one model the recipe allows: a build from before that rule would take whichever model the listing offered", () => {
-    assert.deepEqual(problems(hostExpected({}), structured({ sends: { tokenFactory: ["The brief."], nebius: ["The commit's files."] } })), ["the app's preview doesn't name nvidia/nemotron-3-super-120b-a12b, the one model the recipe allows"]);
+    assert.deepEqual(problems(hostExpected({}), structured({ sends: { tokenFactory: ["The brief."], nebius: ["The commit's files."] } })), [`the app's preview doesn't name ${TASK_MODEL}, the one model the recipe allows`]);
   });
 });
 

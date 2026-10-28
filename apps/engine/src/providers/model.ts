@@ -4,7 +4,7 @@ import { noopLogger } from "@mastra/core/logger";
 import { isMastraTimeoutError } from "@mastra/core/loop";
 import type { ModelEndpoint, ModelFailureKind } from "@nivra/domain";
 import { errorFacts, internalMessage, safeClass, type DiagnosticCode, type FailureFacts } from "../diagnostics.ts";
-import { listModels as fetchModels, TOKEN_FACTORY_BASE_URL, TokenFactoryError, type ModelEntry } from "./tokenfactory.ts";
+import { capCompletionTokens, listModels as fetchModels, TOKEN_FACTORY_BASE_URL, TokenFactoryError, type ModelEntry } from "./tokenfactory.ts";
 
 /**
  * Every model call goes through here (D22): the only place that builds a Mastra `Agent`. Agents are standalone, never
@@ -219,7 +219,12 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
         name: spec.name,
         instructions: spec.instructions,
         // Resolved as the Agent would resolve it, then watched, so every provider request is known when it starts.
-        model: (async () => countAttempts((await resolveModelConfig(configured as never)) as object, slot)) as never,
+        // The router's model sends each request's cap as max_completion_tokens (D50); a model a test hands in is left as
+        // it is. countAttempts stays outermost, so it sees each call with its maxOutputTokens before the cap is moved.
+        model: (async () => {
+          const resolved = (await resolveModelConfig(configured as never)) as object;
+          return countAttempts(options.model ? resolved : capCompletionTokens(resolved), slot);
+        }) as never,
         tools: spec.tools as never,
         maxRetries: 0,
         errorProcessorDefaults: false,
