@@ -4,7 +4,9 @@ import type { EngineView, EnvironmentView, ProjectView, SettingsView, TaskState,
 import { EngineBadge, EngineNotices } from "../features/engine";
 import { ProjectNotice, RemoveProject } from "../features/projects";
 import { usePoll } from "../shared/ui";
-import type { Navigate } from "./routes";
+import { DraftNotice, useDrafts } from "../shell/drafts";
+import { composerDraftKey } from "../shell/places";
+import type { DraftWrite, Navigate } from "./routes";
 
 /** A task's state in words, as the Tasks page shows it. */
 const STATE_LOOK: Record<TaskState, { label: string; color: string }> = {
@@ -97,7 +99,12 @@ export function ProjectHome({
   onStartConversation(): Promise<void>;
   onRemoved(label: string, preferencesRemoved: number): void;
 }) {
-  const [title, setTitle] = useState("");
+  // The title typed here is a draft (R30): kept on this computer across navigation and restarts until the task is
+  // created, never one that looks like it holds a credential, and never sent anywhere.
+  const drafts = useDrafts();
+  const draftKey = composerDraftKey({ kind: "project", projectId: project.id });
+  const [title, setTitle] = useState(() => drafts.read<{ title: string }>(draftKey)?.title ?? "");
+  const [kept, setKept] = useState<DraftWrite | null>(null);
   const [starting, setStarting] = useState(false);
   const online = engine?.state.status === "online";
   const environment = usePoll<EnvironmentView>(() => window.nivra.getEnvironment(project.id), () => null, [project.id], online);
@@ -118,17 +125,33 @@ export function ProjectHome({
       <EngineNotices engine={engine} onRestart={() => window.nivra.restartEngine(project.id)} testId="home-engine" />
       <ProjectNotice project={project} />
 
-      <Paper withBorder p="lg" component="form" onSubmit={(event) => {
-        event.preventDefault();
-        if (workspaceReady) onCreateTask(title.trim());
-      }}>
+      <Paper
+        withBorder
+        p="lg"
+        component="form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!workspaceReady) return;
+          // The title moves on to the new task's brief, which keeps its own draft.
+          drafts.discard(draftKey);
+          onCreateTask(title.trim());
+        }}
+      >
         <Stack gap={8}>
           <Group gap="sm" align="flex-end" wrap="nowrap">
             <TextInput
               label={`New task in ${project.label}`}
               placeholder="What should change?"
               value={title}
-              onChange={(event) => setTitle(event.currentTarget.value)}
+              onChange={(event) => {
+                const next = event.currentTarget.value;
+                setTitle(next);
+                if (next.trim()) setKept(drafts.write(draftKey, { title: next }, next.trim()));
+                else {
+                  drafts.discard(draftKey);
+                  setKept(null);
+                }
+              }}
               style={{ flex: "1 1 auto", minWidth: 0 }}
               data-testid="home-composer"
             />
@@ -136,6 +159,7 @@ export function ProjectHome({
               Create task
             </Button>
           </Group>
+          <DraftNotice result={kept} />
           <Text size="xs" c="var(--nivra-text-3)">
             {tasks?.workspace.state === "unavailable"
               ? `Tasks can't be written now: ${tasks.workspace.reason}`

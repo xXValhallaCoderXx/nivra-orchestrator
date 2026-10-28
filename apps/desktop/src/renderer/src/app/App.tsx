@@ -11,8 +11,8 @@ import { PlanningHome } from "../features/navigation";
 import { AddedWarning, useAddProject, type AddOutcome } from "../features/projects";
 import { NewTask, TaskDetail, TasksPage } from "../features/tasks";
 import { errorMessage, usePoll } from "../shared/ui";
-import { browserStorage, DraftsProvider } from "../shell/drafts";
-import { newTaskDraftKey, openTaskCount, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
+import { browserStorage, DraftsProvider, useDraftList } from "../shell/drafts";
+import { newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
 import { Sidebar } from "../shell/Sidebar";
 import { NARROW_QUERY, SIDEBAR_WIDTH } from "../shell/layout";
 import { Switcher, type SwitcherHandle } from "../shell/Switcher";
@@ -59,6 +59,7 @@ function Page({ shown, testId, children }: { shown: boolean; testId: string; chi
 
 function Shell() {
   const toast = useToast();
+  const drafts = useDraftList();
   const [projectsVersion, setProjectsVersion] = useState(0);
   const [preferencesVersion, setPreferencesVersion] = useState(0);
   const [conversationsVersion, setConversationsVersion] = useState(0);
@@ -215,10 +216,15 @@ function Shell() {
         openTasks={tasks.value?.workspace.state === "ready" ? openTaskCount(tasks.value.tasks, scope) : null}
         conversations={conversations.value}
         projects={list}
-        drafts={{ available: true, list: [] }}
+        drafts={drafts}
         onNavigate={navigate}
         onOpenSettings={openSettings}
-        onOpenDraft={() => undefined}
+        onOpenDraft={(key) => {
+          const place = placeOfDraft(key);
+          if (!place) return;
+          if (place.scope) setChosen(place.scope);
+          navigate(place.route);
+        }}
         onConversationCreated={opened}
       />
       <AppShell.Main id="page" tabIndex={-1} style={{ outline: "none" }}>
