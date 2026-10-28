@@ -26,6 +26,8 @@ export type Route =
   | { kind: "conversations" }
   | { kind: "conversation"; id: string }
   | { kind: "environment" }
+  /** Today's Explain, on its own page until the conversation version is built (P1x). Project scope only. */
+  | { kind: "explain" }
   | { kind: "missions" }
   | { kind: "mission"; id: string }
   | { kind: "settings"; section: SettingsSection };
