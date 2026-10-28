@@ -22,7 +22,7 @@ A requirement counts as met only when its evidence exists. A plan or a design is
 | 8 | A public YouTube demonstration, under three minutes | Rules | The video link | Nate records and uploads | PENDING-TAKE |
 | 9 | Technology feedback | Rules | The submission form's text | Nate, with a draft from Claude | **Draft below** |
 | 10 | An explanation of pre-existing work and significant new work | Rules, FAQ | [provenance.md](provenance.md), and *Significant new work* below | Claude | Draft below |
-| 11 | Free judge access until judging ends (16 December, 04:00 SGT) | Rules | The testing instructions: judges enter their own Token Factory key and Nebius project id, as any user does; no credentials are given (Nate, 28 October). The sandbox check needs a project with Sandboxes (beta) access | Nate | Decided on 28 October: judges bring their own credentials. Whether that meets the rules' free-access requirement is for Nate to confirm against the official rules: PENDING-NATE. Our own credentials checked on 28 October at `7a0acbe` (J0 and J1, each approved once): Sandboxes access with the permissions a sandbox check uses and the `alpine:3.20` image it starts from; Token Factory listing NVIDIA models, and Nemotron 3 Super calling the tool to answer. Through the app: PENDING-TAKE |
+| 11 | Free judge access until judging ends (16 December, 04:00 SGT) | Rules | The testing instructions: judges enter their own Token Factory key and Nebius project id, as any user does; no credentials are given (Nate, 28 October). The sandbox check needs a project with Sandboxes (beta) access | Nate | Decided on 28 October: judges bring their own credentials. **Unresolved:** the rules require free testing access, but don't clearly establish whether requiring judges' own API credentials satisfies it. Our own credentials checked on 28 October at `7a0acbe` (J0 and J1, each approved once): Sandboxes access with the permissions a sandbox check uses and the `alpine:3.20` image it starts from; Token Factory listing NVIDIA models, and Nemotron 3 Super calling the tool to answer. Through the app: PENDING-TAKE |
 | 12 | Eligibility and licensing (entrant eligibility, third-party licences) | Rules | — | Nate | To check; not presumed |
 
 ## The demonstration
@@ -39,9 +39,9 @@ Long waits are cut in the edit, with a caption saying so, never sped up or simul
 
 ## Track
 
-**Coding and Agentic Engineering**, chosen by Nate on 27 October 2026 after the execution path was built. The track
-asks for coding agents and developer tools that work inside Token Factory Sandboxes (PENDING-NATE: the track's exact
-wording, from the official page). Nivra's worker is such an agent:
+**Coding and Agentic Engineering**, chosen by Nate on 27 October 2026 after the execution path was built. The official
+rules describe the track as: "Build coding agents and developer tools: agents that write, run, and test code in Token
+Factory." Nivra's worker is such an agent:
 - NVIDIA Nemotron, through Token Factory, makes a change in a Nebius sandbox, on a copy of one commit, with networking
   off;
 - the repository's own tests run there before the model starts and after it hands in, and acceptance cases it can't
