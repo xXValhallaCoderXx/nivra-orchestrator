@@ -5,6 +5,7 @@ import {
   BudgetMonthLabel,
   BudgetPolicyDraft,
   canMoveGrant,
+  dayOf,
   GRANT_TRANSITIONS,
   GrantRequest,
   GrantState,
@@ -113,6 +114,15 @@ describe("budget months", () => {
     // New York's clocks go back at 02:00 on 1 November 2026, so its November starts in daylight time.
     assert.equal(iso(november.startsAt), "2026-11-01T04:00:00.000Z");
     assert.equal(iso(november.endsAt), "2026-12-01T05:00:00.000Z");
+  });
+
+  it("numbers local days one after another, across local midnight and a change of summer time", () => {
+    const before = dayOf(Date.parse("2026-10-28T15:59:59Z"), "Asia/Singapore");
+    const after = dayOf(Date.parse("2026-10-28T16:00:00Z"), "Asia/Singapore");
+    assert.deepEqual([before.label, after.label, after.index - before.index], ["2026-10-28", "2026-10-29", 1]);
+    const saturday = dayOf(Date.parse("2026-10-24T12:00:00Z"), "Europe/London");
+    const monday = dayOf(Date.parse("2026-10-26T12:00:00Z"), "Europe/London");
+    assert.equal(monday.index - saturday.index, 2);
   });
 
   it("counts on across a year's end and a leap February", () => {

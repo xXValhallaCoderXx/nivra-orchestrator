@@ -57,7 +57,7 @@ import {
   type TaskInput,
   type TaskReport,
 } from "@nivra/domain";
-import { BudgetMonthLabel, BudgetPolicyDraft, CURRENT_PRICES, monthOf, type BudgetPolicy, type BudgetRecovery, type BudgetSummary, type PriceCatalogue } from "@nivra/domain";
+import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining, CURRENT_PRICES, monthOf, type BudgetPolicy, type BudgetRecovery, type BudgetSummary, type PriceCatalogue } from "@nivra/domain";
 import type {
   AddProjectResult,
   AttemptAction,
@@ -96,8 +96,18 @@ import type {
 } from "../shared/ipc.ts";
 import type { CoachingView, CoachPreview, CoachSelection } from "../shared/coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView, StopCause } from "../shared/research.ts";
-import { BUDGET_GUARD_FAILED, BUDGET_GUARD_FAILED_AFTER_SAVE, BUDGET_NEEDS_RECOVERY, BudgetGuard, checkHistory, CLOCK_TOLERANCE_MS, guardErrorCode } from "./budget-guard.ts";
-import { budgetSummary, chainAt, confirmMonth, currentPolicy, ensureDurable, latestLedgerTime, ledgerState, recordClockJump, setPolicy, startNewHistory, type LedgerState } from "./budget-store.ts";
+import {
+  BUDGET_GUARD_FAILED,
+  BUDGET_GUARD_FAILED_AFTER_SAVE,
+  BUDGET_HISTORY_UNREADABLE,
+  BUDGET_NEEDS_RECOVERY,
+  BudgetGuard,
+  checkHistory,
+  CLOCK_TOLERANCE_MS,
+  guardErrorCode,
+  type LedgerView,
+} from "./budget-guard.ts";
+import { answeredRecovery, budgetSummary, chainAt, confirmMonth, currentPolicy, ensureDurable, latestLedgerTime, ledgerState, recordClockJump, setPolicy, startNewHistory, type LedgerState } from "./budget-store.ts";
 import {
   environmentOf,
   getPreparation,
@@ -4828,7 +4838,7 @@ export class Host {
   // ------------------------------------------------------------------------------------------------ the shared budget (NIV-66)
 
   /** The budget this session: checked once, before the first budget call, against the guard beside the workspace. */
-  #budgetState: { kind: "ready" } | { kind: "needs-recovery"; recovery: BudgetRecovery } | { kind: "unavailable" } | null = null;
+  #budgetState: { kind: "ready" } | { kind: "needs-recovery"; recovery: BudgetRecovery } | { kind: "unavailable"; message: string } | null = null;
   #budgetGuard: BudgetGuard | null = null;
   /** The wall clock and the monotonic clock when the budget was first checked, for noting a clock that jumps. */
   #budgetClock: { wall: number; mono: number } | null = null;
@@ -4846,19 +4856,21 @@ export class Host {
     if (this.#budgetState === null) {
       try {
         ensureDurable(opening.db);
-        const last = guard.last();
         const ledger = ledgerState(opening.db);
-        const view = ledger === null ? null : { ...ledger, chainAtGuard: last === null ? null : chainAt(opening.db, last.ledgerId, last.revision) };
+        const last = guard.last();
+        const view: LedgerView | null = ledger === null ? null : { ...ledger, chainAtGuard: last === null ? null : chainAt(opening.db, last.ledgerId, last.revision), answered: answeredRecovery(opening.db) };
         const check = checkHistory(last, view, opening.notice !== null, Date.now());
         if (check.append) guard.append(check.append);
         this.#budgetState = check.state === "needs-recovery" ? { kind: "needs-recovery", recovery: check.recovery } : { kind: "ready" };
         if (check.state === "needs-recovery") this.#options.log(`Budget: the history needs recovery (${check.recovery.reason}).`);
       } catch (error) {
-        this.#budgetState = { kind: "unavailable" };
-        this.#options.log(`Budget: the guard couldn't be read or written (${guardErrorCode(error)}).`);
+        // A file system error is the guard's; anything else, such as SQLite's, is the history's own.
+        const guardFailed = typeof (error as NodeJS.ErrnoException | null)?.code === "string" && !String((error as NodeJS.ErrnoException).code).startsWith("ERR_SQLITE");
+        this.#budgetState = { kind: "unavailable", message: guardFailed ? BUDGET_GUARD_FAILED : BUDGET_HISTORY_UNREADABLE };
+        this.#options.log(`Budget: ${guardFailed ? "the guard" : "the history"} couldn't be read or written (${guardErrorCode(error)}).`);
       }
     }
-    if (this.#budgetState.kind === "unavailable") throw new Error(BUDGET_GUARD_FAILED);
+    if (this.#budgetState.kind === "unavailable") throw new Error(this.#budgetState.message);
     this.#noteBudgetClock(opening.db);
     return { workspace: opening.db, guard, recovery: this.#budgetState.kind === "needs-recovery" ? this.#budgetState.recovery : null };
   }
@@ -4871,7 +4883,7 @@ export class Host {
     try {
       guard.append({ ledgerId: authority.ledgerId, revision: authority.revision, chain: authority.chain, recovery: null, at: new Date(now).toISOString() });
     } catch (error) {
-      this.#budgetState = { kind: "unavailable" };
+      this.#budgetState = { kind: "unavailable", message: BUDGET_GUARD_FAILED };
       this.#options.log(`Budget: the guard couldn't be written (${guardErrorCode(error)}).`);
       throw new Error(BUDGET_GUARD_FAILED_AFTER_SAVE);
     }
@@ -4952,16 +4964,18 @@ export class Host {
   }
 
   /**
-   * Starts a new budget history after a loss, with the allowance the person sets for the rest of this month, or null to
-   * wait for the next. The ledger takes a new id, so no copy of the lost history can later pass for it, and every grant
-   * still open becomes uncertain. Spend before it stays unknown, never zero. Only while the budget history needs recovery.
+   * Starts a new budget history after a loss, with what the person says is left of this month (money, and each counted
+   * service), or null to wait for the next. The ledger takes a new id, so no copy of the lost history can later pass for
+   * it, and every grant still open becomes uncertain. Spend before it stays unknown, never zero. Only while the budget
+   * history needs recovery.
    */
-  async startNewBudgetHistory(remainingMicros: number | null): Promise<BudgetSummary> {
+  async startNewBudgetHistory(remaining: BudgetRemaining | null): Promise<BudgetSummary> {
+    const left = remaining === null ? null : BudgetRemaining.parse(remaining);
     const { workspace, guard, recovery } = this.#budget();
     if (!recovery) throw new Error("Nivra's budget history doesn't need recovery, so there's nothing to start again.");
     const now = Date.now();
     const zone = this.#budgetZone(workspace);
-    this.#guardBudget(guard, startNewHistory(workspace, { recovery, remainingMicros, now, timezone: zone }), now);
+    this.#guardBudget(guard, startNewHistory(workspace, { recovery, remaining: left, now, timezone: zone }), now);
     this.#budgetState = { kind: "ready" };
     return budgetSummary(workspace, { now, catalogue: CURRENT_PRICES, recovery: null, timezone: zone });
   }

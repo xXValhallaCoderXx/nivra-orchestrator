@@ -35,7 +35,7 @@ import type {
 } from "@nivra/domain";
 import type { CoachingView, CoachPreview, CoachSelection } from "./coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView } from "./research.ts";
-import type { BudgetPolicy, BudgetPolicyDraft, BudgetSummary, PriceCatalogue } from "@nivra/domain";
+import type { BudgetPolicy, BudgetPolicyDraft, BudgetRemaining, BudgetSummary, PriceCatalogue } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -1016,6 +1016,6 @@ export interface NivraApi {
   budgetPrices(): Promise<PriceCatalogue>;
   /** Confirms the new budget month the summary showed by this computer's clock (its label, such as 2026-11), when the provider's clock hasn't shown it yet. */
   confirmBudgetMonth(month: string): Promise<BudgetSummary>;
-  /** Starts a new budget history after a loss, with this month's remaining allowance in micro-units, or null to wait for next month. */
-  startNewBudgetHistory(remainingMicros: number | null): Promise<BudgetSummary>;
+  /** Starts a new budget history after a loss, with what is left of this month (money in micro-units, and each counted service), or null to wait for next month. */
+  startNewBudgetHistory(remaining: BudgetRemaining | null): Promise<BudgetSummary>;
 }

@@ -411,8 +411,8 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   ) STRICT;
 
   -- A history the person chose to start again after a loss: when, why, what was lost, the new ledger id it started
-  -- under, and the allowance they set for the rest of that month (null: wait for the next). Spend before it is
-  -- unknown, never zero.
+  -- under, and what they said was left of that month, money and counted services (null: wait for the next). Spend
+  -- before it is unknown, never zero.
   CREATE TABLE budget_adjustments (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('history-lost')),
@@ -420,7 +420,7 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
     period_idx INTEGER NOT NULL,
     reason TEXT NOT NULL,
     recovery_json TEXT NOT NULL,
-    remaining_micros INTEGER CHECK (remaining_micros >= 0),
+    remaining_json TEXT,
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at TEXT NOT NULL
   ) STRICT;
@@ -512,8 +512,9 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   CREATE TRIGGER price_catalogues_not_removed BEFORE DELETE ON price_catalogues BEGIN SELECT RAISE(ABORT, 'price list versions are kept'); END;
 
   -- Every spendable call's grant, written before anything is sent, with the request id it is sent under, the digest of
-  -- what was asked, the revision it was written at, and the engine store (home id) recorded when it is marked
-  -- dispatching. What it was written with never changes; its state only moves forward; and its journal's rows are
+  -- what was asked, the revision it was written at, its day (the local date, never earlier than any grant before it,
+  -- so a clock moved back or forward and back can't free a daily limit), and the engine store (home id) recorded when
+  -- it is marked dispatching. What it was written with never changes; its state only moves forward; and its journal's rows are
   -- recorded once, with its seal. A grant still written when a new history is started becomes uncertain, so it is never
   -- released or sent again.
   CREATE TABLE budget_grants (
@@ -542,6 +543,7 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
     seal_kind TEXT CHECK (seal_kind IN ('complete', 'interrupted')),
     recorded_micros INTEGER CHECK (recorded_micros >= 0),
     written_revision INTEGER NOT NULL CHECK (written_revision >= 1),
+    day_idx INTEGER NOT NULL,
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -553,13 +555,14 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   ) STRICT;
   CREATE INDEX budget_grants_period ON budget_grants(period_idx, state);
   CREATE INDEX budget_grants_request ON budget_grants(request_id);
-  CREATE INDEX budget_grants_created ON budget_grants(created_at);
+  CREATE INDEX budget_grants_day ON budget_grants(day_idx);
   CREATE INDEX budget_grants_attempt ON budget_grants(attempt_id) WHERE attempt_id IS NOT NULL;
   CREATE INDEX budget_grants_queue ON budget_grants(queue_id) WHERE queue_id IS NOT NULL;
   CREATE UNIQUE INDEX budget_grants_one_per_need ON budget_grants(extends_id, need) WHERE extends_id IS NOT NULL;
   CREATE TRIGGER budget_grants_written BEFORE INSERT ON budget_grants
   WHEN NEW.state IS NOT 'written' OR NEW.home_id IS NOT NULL OR NEW.seal_kind IS NOT NULL OR NEW.recorded_micros IS NOT NULL
     OR NEW.written_revision IS NOT NEW.revision OR NEW.revision IS NOT (SELECT revision FROM budget_authority WHERE singleton = 1)
+    OR NEW.day_idx < (SELECT coalesce(max(day_idx), NEW.day_idx) FROM budget_grants)
   BEGIN SELECT RAISE(ABORT, 'a grant is written before anything is sent, with the revision that records it'); END;
   CREATE TRIGGER budget_grants_moves BEFORE UPDATE ON budget_grants
   WHEN NEW.id IS NOT OLD.id OR NEW.request_id IS NOT OLD.request_id OR NEW.request_sha256 IS NOT OLD.request_sha256
@@ -570,7 +573,7 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
     OR NEW.profile_id IS NOT OLD.profile_id OR NEW.model IS NOT OLD.model
     OR NEW.productive_micros IS NOT OLD.productive_micros OR NEW.finalisation_micros IS NOT OLD.finalisation_micros
     OR NEW.extends_id IS NOT OLD.extends_id OR NEW.need IS NOT OLD.need OR NEW.created_at IS NOT OLD.created_at
-    OR NEW.written_revision IS NOT OLD.written_revision
+    OR NEW.written_revision IS NOT OLD.written_revision OR NEW.day_idx IS NOT OLD.day_idx
     OR (OLD.home_id IS NOT NULL AND NEW.home_id IS NOT OLD.home_id)
     OR (OLD.seal_kind IS NOT NULL AND (NEW.seal_kind IS NOT OLD.seal_kind OR NEW.recorded_micros IS NOT OLD.recorded_micros))
     OR NEW.revision <= OLD.revision OR NEW.revision IS NOT (SELECT revision FROM budget_authority WHERE singleton = 1)

@@ -42,6 +42,9 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 /** Said when the guard can't be read or written: nothing is spent until it can be. */
 export const BUDGET_GUARD_FAILED =
   "Nivra couldn't read or write its budget guard beside your history, so it can't protect your budget's records and won't spend anything. Check that the disk has space and that Nivra's data folder can be written, then open Nivra again.";
+/** Said when the history's own budget records can't be read: nothing is spent until they can be. */
+export const BUDGET_HISTORY_UNREADABLE =
+  "Nivra couldn't read its budget's records in your history, so it can't protect your budget and won't spend anything. Open Nivra again, and if this keeps happening, put back a copy of your history.";
 /** Said while the budget history needs recovery. */
 export const BUDGET_NEEDS_RECOVERY =
   "Nivra's budget history needs recovery first: it's missing, or doesn't match Nivra's last record of it. Put back the matching copy of your history and open Nivra again, or start a new budget history.";
@@ -131,10 +134,18 @@ function syncFolder(folder: string): void {
   }
 }
 
-/** The workspace's ledger as the check sees it: its state, and its chained digest at the guard's last revision, if it holds one. */
+/**
+ * The workspace's ledger as the check sees it: its state; its chained digest at the guard's last revision, if it holds
+ * one; and the loss its current history was started for, with the revision it started at, if it began with one.
+ */
 export interface LedgerView extends LedgerState {
   chainAtGuard: string | null;
+  answered: { recovery: BudgetRecovery; revision: number } | null;
 }
+
+/** Whether two recoveries are the same one: the same reason, found at the same time, against the same guard record. */
+const sameRecovery = (a: BudgetRecovery, b: BudgetRecovery) =>
+  a.reason === b.reason && a.detectedAt === b.detectedAt && a.guard.ledgerId === b.guard.ledgerId && a.guard.revision === b.guard.revision && a.guard.chain === b.guard.chain;
 
 /** What the start-of-session check found, and the record to append for it, if any. */
 export type HistoryCheck = { state: "fresh" | "ok"; append: GuardRecord | null } | { state: "needs-recovery"; recovery: BudgetRecovery; append: GuardRecord | null };
@@ -145,7 +156,8 @@ export type HistoryCheck = { state: "fresh" | "ok"; append: GuardRecord | null }
  * - No guard and no ledger: a fresh install, with nothing to protect yet.
  * - No guard but a ledger: the guard is rebuilt from the ledger, which is the authority.
  * - A recovery already recorded: it stands until the ledger holds the guard's history again (the matching copy was put
- *   back), and then it is cleared.
+ *   back), or holds the new history the person started for that very recovery, unchanged since (its guard record was
+ *   never written), and then it is cleared.
  * - Otherwise a ledger that holds the guard's history is fine, and the guard catches up. A missing ledger, another id, a
  *   lower revision, or the guard's revision reached along another history (whatever the number of grants) needs
  *   recovery; a workspace just kept aside is named as the reason when its ledger is gone. The recovery is recorded in
@@ -156,7 +168,10 @@ export function checkHistory(guard: GuardRecord | null, ledger: LedgerView | nul
   const recordOf = (state: LedgerState): GuardRecord => ({ ledgerId: state.ledgerId, revision: state.revision, chain: state.chain, recovery: null, at });
   if (guard === null) return ledger === null ? { state: "fresh", append: null } : { state: "ok", append: recordOf(ledger) };
   const holds = ledger !== null && ledger.ledgerId === guard.ledgerId && ledger.revision >= guard.revision && ledger.chainAtGuard === guard.chain;
-  if (guard.recovery !== null) return holds ? { state: "ok", append: recordOf(ledger!) } : { state: "needs-recovery", recovery: guard.recovery, append: null };
+  if (guard.recovery !== null) {
+    const answered = ledger !== null && ledger.answered !== null && ledger.revision === ledger.answered.revision && sameRecovery(ledger.answered.recovery, guard.recovery);
+    return holds || answered ? { state: "ok", append: recordOf(ledger!) } : { state: "needs-recovery", recovery: guard.recovery, append: null };
+  }
   if (holds) return { state: "ok", append: ledger!.revision > guard.revision ? recordOf(ledger!) : null };
   let reason: BudgetRecoveryReason;
   if (ledger === null) reason = keptAside ? "workspace-kept-aside" : "ledger-missing";

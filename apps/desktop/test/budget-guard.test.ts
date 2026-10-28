@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { CODING_WORKER_PROFILE, NO_SUBLIMITS, TOKEN_FACTORY_PRICES, type BudgetPolicyDraft, type GrantRequest, type PriceCatalogue } from "@nivra/domain";
 import { BudgetGuard, checkHistory, type GuardRecord, type LedgerView } from "../src/main/budget-guard.ts";
-import { chainAt, getGrant, ledgerState, markDispatching, recordJournal, releaseGrant, setPolicy, startNewHistory, writeGrant, type LedgerState } from "../src/main/budget-store.ts";
+import { answeredRecovery, chainAt, getGrant, ledgerState, markDispatching, recordJournal, releaseGrant, setPolicy, startNewHistory, writeGrant, type LedgerState } from "../src/main/budget-store.ts";
 import { openWorkspace, type WorkspaceDb, type WorkspaceOpening } from "../src/main/workspace-db.ts";
 
 /**
@@ -81,7 +81,7 @@ const record = (state: LedgerState, recovery: GuardRecord["recovery"] = null): G
 function view(db: WorkspaceDb, guard: BudgetGuard): LedgerView | null {
   const ledger = ledgerState(db);
   const last = guard.last();
-  return ledger === null ? null : { ...ledger, chainAtGuard: last === null ? null : chainAt(db, last.ledgerId, last.revision) };
+  return ledger === null ? null : { ...ledger, chainAtGuard: last === null ? null : chainAt(db, last.ledgerId, last.revision), answered: answeredRecovery(db) };
 }
 
 /** What the host does at the first budget call of a session: check, and record what the check says to. */
@@ -108,7 +108,7 @@ function request(): GrantRequest {
 
 /** Writes a grant and records its revision, as the host does. A written grant isn't sent until it is marked dispatching. */
 function written(db: WorkspaceDb, guard: BudgetGuard): string {
-  const result = writeGrant(db, request(), { now: OCT, catalogue: ESTABLISHED, timezone: "UTC" });
+  const result = writeGrant(db, request(), { now: OCT, catalogue: ESTABLISHED, timezone: "UTC", verified: ledgerState(db) });
   assert.ok("grant" in result && result.authority);
   guard.append(record(result.authority));
   return result.grant.id;
@@ -116,7 +116,7 @@ function written(db: WorkspaceDb, guard: BudgetGuard): string {
 
 /** Marks a grant dispatching and records that revision in the guard, as the host does before it sends. */
 function dispatched(db: WorkspaceDb, guard: BudgetGuard, id: string): void {
-  const authority = markDispatching(db, id, HOME, OCT);
+  const authority = markDispatching(db, id, HOME, OCT, ledgerState(db));
   assert.ok(authority);
   guard.append(record(authority));
 }
@@ -169,16 +169,16 @@ describe("the guard log", () => {
 
 describe("comparing a ledger with its guard", () => {
   const ledger: LedgerState = { ledgerId: randomUUID(), revision: 5, chain: digest() };
-  const at5 = { ...ledger, chainAtGuard: ledger.chain };
+  const at5 = { ...ledger, chainAtGuard: ledger.chain, answered: null };
 
   it("finds nothing to protect on a fresh install, and rebuilds a missing guard from the ledger", () => {
     assert.deepEqual(checkHistory(null, null, false, OCT), { state: "fresh", append: null });
-    assert.deepEqual(checkHistory(null, { ...ledger, chainAtGuard: null }, false, OCT), { state: "ok", append: record(ledger) });
+    assert.deepEqual(checkHistory(null, { ...ledger, chainAtGuard: null, answered: null }, false, OCT), { state: "ok", append: record(ledger) });
   });
 
   it("lets a guard behind its ledger catch up when the ledger holds the guard's history, with no alarm", () => {
     const earlier = { ledgerId: ledger.ledgerId, revision: 4, chain: digest() };
-    assert.deepEqual(checkHistory(record(earlier), { ...ledger, chainAtGuard: earlier.chain }, false, OCT), { state: "ok", append: record(ledger) });
+    assert.deepEqual(checkHistory(record(earlier), { ...ledger, chainAtGuard: earlier.chain, answered: null }, false, OCT), { state: "ok", append: record(ledger) });
     assert.deepEqual(checkHistory(record(ledger), at5, false, OCT), { state: "ok", append: null });
   });
 
@@ -187,10 +187,10 @@ describe("comparing a ledger with its guard", () => {
     for (const [found, kept, reason] of [
       [null, false, "ledger-missing"],
       [null, true, "workspace-kept-aside"],
-      [{ ledgerId: randomUUID(), revision: 9, chain: digest(), chainAtGuard: null }, false, "ledger-replaced"],
-      [{ ...ledger, revision: 4, chainAtGuard: null }, false, "ledger-behind"],
-      [{ ...ledger, revision: 7, chain: digest(), chainAtGuard: digest() }, false, "ledger-diverged"],
-      [{ ...ledger, chainAtGuard: digest() }, false, "ledger-diverged"],
+      [{ ledgerId: randomUUID(), revision: 9, chain: digest(), chainAtGuard: null, answered: null }, false, "ledger-replaced"],
+      [{ ...ledger, revision: 4, chainAtGuard: null, answered: null }, false, "ledger-behind"],
+      [{ ...ledger, revision: 7, chain: digest(), chainAtGuard: digest(), answered: null }, false, "ledger-diverged"],
+      [{ ...ledger, chainAtGuard: digest(), answered: null }, false, "ledger-diverged"],
     ] as const) {
       const found_ = checkHistory(guard, found, kept, OCT);
       assert.equal(found_.state, "needs-recovery", reason);
@@ -199,14 +199,27 @@ describe("comparing a ledger with its guard", () => {
   });
 
   it("keeps a recorded recovery until the ledger holds the guard's history again, whatever its revision reaches", () => {
-    const found = checkHistory(record(ledger), { ...ledger, revision: 2, chainAtGuard: null }, false, OCT);
+    const found = checkHistory(record(ledger), { ...ledger, revision: 2, chainAtGuard: null, answered: null }, false, OCT);
     assert.ok(found.state === "needs-recovery" && found.append);
     const persisted = found.append;
-    assert.equal(checkHistory(persisted, { ...ledger, revision: 2, chainAtGuard: null }, false, OCT).state, "needs-recovery");
+    assert.equal(checkHistory(persisted, { ...ledger, revision: 2, chainAtGuard: null, answered: null }, false, OCT).state, "needs-recovery");
     assert.equal(checkHistory(persisted, null, false, OCT).state, "needs-recovery");
     // The rolled-back copy, changed until its revision passes the guard's, still doesn't hold the guard's history.
-    assert.equal(checkHistory(persisted, { ...ledger, revision: 9, chain: digest(), chainAtGuard: digest() }, false, OCT).state, "needs-recovery");
+    assert.equal(checkHistory(persisted, { ...ledger, revision: 9, chain: digest(), chainAtGuard: digest(), answered: null }, false, OCT).state, "needs-recovery");
     assert.deepEqual(checkHistory(persisted, at5, false, OCT), { state: "ok", append: record(ledger) });
+  });
+
+  it("clears a recorded recovery for the new history started for it, unchanged since, and for no other", () => {
+    const found = checkHistory(record(ledger), { ...ledger, revision: 2, chainAtGuard: null, answered: null }, false, OCT);
+    assert.ok(found.state === "needs-recovery" && found.append);
+    const persisted = found.append;
+    const fresh: LedgerState = { ledgerId: randomUUID(), revision: 6, chain: digest() };
+    const started = { ...fresh, chainAtGuard: null, answered: { recovery: found.recovery, revision: 6 } };
+    assert.deepEqual(checkHistory(persisted, started, false, OCT), { state: "ok", append: record(fresh) });
+    // Started for another loss, or changed since it started: the recovery stands.
+    const other = { ...found.recovery, detectedAt: new Date(OCT + 1).toISOString() };
+    assert.equal(checkHistory(persisted, { ...started, answered: { recovery: other, revision: 6 } }, false, OCT).state, "needs-recovery");
+    assert.equal(checkHistory(persisted, { ...started, revision: 7 }, false, OCT).state, "needs-recovery");
   });
 });
 
@@ -274,7 +287,7 @@ describe("crashes around a guard update", () => {
     const db = opening(dbPath).db;
     const id = written(db, guard);
     // The dispatch mark commits; the process dies before its guard record, and so before anything was sent.
-    markDispatching(db, id, HOME, OCT);
+    markDispatching(db, id, HOME, OCT, ledgerState(db));
     assert.deepEqual(checkHistory(guard.last(), view(db, guard), false, OCT), { state: "ok", append: record(ledgerState(db)!) });
   });
 
@@ -284,7 +297,7 @@ describe("crashes around a guard update", () => {
     const id = written(db, guard);
     dispatched(db, guard, id);
     assert.deepEqual(checkHistory(guard.last(), view(db, guard), false, OCT), { state: "ok", append: null });
-    assert.equal(releaseGrant(db, id, OCT), null);
+    assert.equal(releaseGrant(db, id, OCT, ledgerState(db)), null);
     assert.equal(getGrant(db, id)?.state, "dispatching");
   });
 
@@ -292,7 +305,7 @@ describe("crashes around a guard update", () => {
     const { dbPath, guard } = profile();
     const db = opening(dbPath).db;
     const id = written(db, guard);
-    const authority = markDispatching(db, id, HOME, OCT)!;
+    const authority = markDispatching(db, id, HOME, OCT, ledgerState(db))!;
     const line = JSON.stringify({ v: 1, ...record(authority) });
     appendFileSync(guard.path, line.slice(0, line.length - 7));
     assert.equal(guard.last()?.revision, authority.revision - 1);
@@ -343,7 +356,7 @@ describe("a damaged workspace after spend", () => {
     const reopened = opening(dbPath);
     const found = check(reopened.db, guard, true);
     assert.ok(found.state === "needs-recovery");
-    const authority = startNewHistory(reopened.db, { recovery: found.recovery, remainingMicros: null, now: OCT, timezone: "UTC" });
+    const authority = startNewHistory(reopened.db, { recovery: found.recovery, remaining: null, now: OCT, timezone: "UTC" });
     assert.ok(authority.revision > found.recovery.guard.revision);
     assert.notEqual(authority.ledgerId, found.recovery.guard.ledgerId);
     guard.append(record(authority));
@@ -367,11 +380,11 @@ describe("a new history after a ledger behind its guard", () => {
     assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-behind");
     // Before: both grants read written in the restored copy, though one of them was sent.
     assert.deepEqual([getGrant(db, kept)?.state, getGrant(db, sentLater)?.state], ["written", "written"]);
-    const authority = startNewHistory(db, { recovery: found.recovery, remainingMicros: 10_000_000, now: OCT, timezone: "UTC" });
+    const authority = startNewHistory(db, { recovery: found.recovery, remaining: { micros: 10_000_000, allowances: DRAFT.allowances }, now: OCT, timezone: "UTC" });
     guard.append(record(authority));
     assert.deepEqual([getGrant(db, kept)?.state, getGrant(db, sentLater)?.state], ["uncertain", "uncertain"]);
-    assert.equal(releaseGrant(db, sentLater, OCT), null);
-    assert.equal(markDispatching(db, kept, HOME, OCT), null);
+    assert.equal(releaseGrant(db, sentLater, OCT, ledgerState(db)), null);
+    assert.equal(markDispatching(db, kept, HOME, OCT, ledgerState(db)), null);
     assert.equal(check(db, guard).state, "ok");
     // A copy of the lost history, taken past the new history's starting revision, is another ledger now.
     db = restore(db, join(dir, "later.db")).db;
@@ -379,7 +392,7 @@ describe("a new history after a ledger behind its guard", () => {
     assert.ok(later.state === "needs-recovery" && later.recovery.reason === "ledger-replaced");
   });
 
-  it("keeps a recovery whose new history couldn't be recorded in the guard: the ledger's new id doesn't match it", () => {
+  it("clears a recovery whose new history couldn't be recorded in the guard at the next start, with no second loss", () => {
     const { dbPath, guard, dir } = profile();
     let db = opening(dbPath).db;
     const id = written(db, guard);
@@ -389,8 +402,9 @@ describe("a new history after a ledger behind its guard", () => {
     const found = check(db, guard);
     assert.ok(found.state === "needs-recovery");
     // The new history commits, but its guard record is never written.
-    startNewHistory(db, { recovery: found.recovery, remainingMicros: null, now: OCT, timezone: "UTC" });
-    const again = check(db, guard);
-    assert.ok(again.state === "needs-recovery" && again.recovery.reason === "ledger-behind");
+    const authority = startNewHistory(db, { recovery: found.recovery, remaining: null, now: OCT, timezone: "UTC" });
+    assert.deepEqual(check(db, guard), { state: "ok", append: record(authority) });
+    assert.equal(Number(db.db.prepare("SELECT count(*) AS n FROM budget_adjustments").get()?.["n"]), 1);
+    assert.equal(check(db, guard).state, "ok");
   });
 });

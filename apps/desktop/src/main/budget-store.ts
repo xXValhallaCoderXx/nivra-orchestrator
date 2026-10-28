@@ -19,6 +19,7 @@ import {
   type BudgetPeriod,
   type BudgetPolicyDraft,
   type BudgetRecovery,
+  type BudgetRemaining,
   type BudgetSummary,
   type BudgetUsage,
   type GrantState,
@@ -43,6 +44,11 @@ import { num, str, strOrNull, type Row, type WorkspaceDb } from "./workspace-db.
  * complete seal says what was spent, and the ledger works each row's amount out again from its usage at the grant's
  * prices. A journal sealed after an interruption settles the rows it holds and keeps the rest counted. Nothing here
  * ever turns unknown usage into zero, and age never settles a grant.
+ *
+ * Writing a grant, marking it dispatching and releasing it depend on the guard having found the ledger whole, so each
+ * takes the ledger state the guard last verified (the host's start-of-session check, or its latest append) and is
+ * refused inside its transaction unless the ledger still holds that history: a caller that skipped the check can't
+ * spend or release on a ledger that was put back or diverged.
  */
 
 export interface LedgerState {
@@ -75,6 +81,8 @@ export interface GrantRecord {
   recordedMicros: number | null;
   /** The revision the grant was written at: never changes, so a loss recorded later can tell what came before it. */
   writtenRevision: number;
+  /** Its day for a daily limit: the local date, never earlier than any grant before it. */
+  dayIndex: number;
   revision: number;
   createdAt: string;
   updatedAt: string;
@@ -95,6 +103,9 @@ const spentDollars = (micros: number) => (Math.ceil(micros / 10_000) / 100).toFi
 const limitDollars = (micros: number) => (Math.floor(micros / 10_000) / 100).toFixed(2);
 
 const CONFIRM_NEXT = "wait for next month, and confirm it in your budget when it begins";
+/** Thrown when a write that depends on the guard finds a ledger that isn't the one the guard last verified. */
+export const BUDGET_UNVERIFIED =
+  "Nivra's budget history doesn't match what its guard last checked, so nothing was granted, sent or released. Open Nivra again to check it.";
 const HISTORY_WAIT = `Nivra lost this month's budget history, and you chose to wait for next month, so nothing more is admitted until then. When it begins, confirm it in your budget.`;
 const UNESTABLISHED =
   "Your monthly budget is in dollars, but Nivra hasn't yet established this model's price limits, or its price list's currency, so it can't keep this call within your budget. Turn the monthly budget off to use today's fixed allowances, or wait until Nivra has established them.";
@@ -112,8 +123,33 @@ function ledgerStateIn(db: DatabaseSync): LedgerState | null {
 
 /** The chained digest the ledger recorded at `revision` of ledger `ledgerId`, or null when it holds no such revision. */
 export function chainAt(workspace: WorkspaceDb, ledgerId: string, revision: number): string | null {
-  const row = workspace.db.prepare("SELECT chain FROM budget_revisions WHERE ledger_id = ? AND revision = ?").get(ledgerId, revision);
+  return chainAtIn(workspace.db, ledgerId, revision);
+}
+
+function chainAtIn(db: DatabaseSync, ledgerId: string, revision: number): string | null {
+  const row = db.prepare("SELECT chain FROM budget_revisions WHERE ledger_id = ? AND revision = ?").get(ledgerId, revision);
   return row ? str(row["chain"]) : null;
+}
+
+/**
+ * Whether the ledger still holds the history the guard last verified: the same id, at that revision or past it, with
+ * the same digest there. Null means the guard verified that there was no ledger yet.
+ */
+function holdsVerified(db: DatabaseSync, verified: LedgerState | null): boolean {
+  const current = ledgerStateIn(db);
+  if (verified === null) return current === null;
+  return current !== null && current.ledgerId === verified.ledgerId && current.revision >= verified.revision && chainAtIn(db, verified.ledgerId, verified.revision) === verified.chain;
+}
+
+/**
+ * The loss the ledger's current history answered, if it began with one: the recovery it was started for, and the
+ * revision it started at. The guard's check uses it to clear a recovery whose new history couldn't be recorded there.
+ */
+export function answeredRecovery(workspace: WorkspaceDb): { recovery: BudgetRecovery; revision: number } | null {
+  const current = ledgerStateIn(workspace.db);
+  if (!current) return null;
+  const row = workspace.db.prepare("SELECT recovery_json, revision FROM budget_adjustments WHERE kind = 'history-lost' AND ledger_id = ? ORDER BY revision DESC LIMIT 1").get(current.ledgerId);
+  return row ? { recovery: JSON.parse(str(row["recovery_json"])) as BudgetRecovery, revision: num(row["revision"]) } : null;
 }
 
 /** The next digest in the chain. Its random part makes two histories that reach the same revision differ. */
@@ -322,6 +358,7 @@ const grantOf = (row: Row): GrantRecord => ({
   sealKind: strOrNull(row["seal_kind"]) as GrantRecord["sealKind"],
   recordedMicros: row["recorded_micros"] === null ? null : num(row["recorded_micros"]),
   writtenRevision: num(row["written_revision"]),
+  dayIndex: num(row["day_idx"]),
   revision: num(row["revision"]),
   createdAt: str(row["created_at"]),
   updatedAt: str(row["updated_at"]),
@@ -443,21 +480,34 @@ function countedOf(db: DatabaseSync, grants: readonly GrantRecord[]): BudgetAllo
   return used;
 }
 
+/** The latest day any grant was written on, or null before the first. */
+function latestDayIn(db: DatabaseSync): number | null {
+  const row = db.prepare("SELECT max(day_idx) AS day FROM budget_grants").get();
+  return row?.["day"] === null || row?.["day"] === undefined ? null : num(row["day"]);
+}
+
 function periodGrants(db: DatabaseSync, periodIndex: number): GrantRecord[] {
   return db.prepare("SELECT * FROM budget_grants WHERE period_idx = ? ORDER BY created_at, rowid").all(periodIndex).map(grantOf);
 }
 
-/** A history lost in a month: the revision it was recorded at, and the allowance the person set (null: wait). */
+/** A history lost in a month: the revision it was recorded at, and what the person said was left (null: wait). */
 interface Loss {
   revision: number;
-  remainingMicros: number | null;
+  remaining: BudgetRemaining | null;
   createdAt: string;
 }
 
 function lossIn(db: DatabaseSync, periodIndex: number): Loss | null {
-  const row = db.prepare("SELECT remaining_micros, revision, created_at FROM budget_adjustments WHERE kind = 'history-lost' AND period_idx = ? ORDER BY revision DESC LIMIT 1").get(periodIndex);
-  return row ? { revision: num(row["revision"]), remainingMicros: row["remaining_micros"] === null ? null : num(row["remaining_micros"]), createdAt: str(row["created_at"]) } : null;
+  const row = db.prepare("SELECT remaining_json, revision, created_at FROM budget_adjustments WHERE kind = 'history-lost' AND period_idx = ? ORDER BY revision DESC LIMIT 1").get(periodIndex);
+  const remaining = row ? strOrNull(row["remaining_json"]) : null;
+  return row ? { revision: num(row["revision"]), remaining: remaining === null ? null : (JSON.parse(remaining) as BudgetRemaining), createdAt: str(row["created_at"]) } : null;
 }
+
+/** Whether using `asked` more than `used` would go past `allowed`, for any counted service. */
+const pastAllowance = (used: BudgetAllowances, asked: BudgetAllowances, allowed: BudgetAllowances) =>
+  used.sandboxOperations + asked.sandboxOperations > allowed.sandboxOperations ||
+  used.sandboxSeconds + asked.sandboxSeconds > allowed.sandboxSeconds ||
+  used.researchCredits + asked.researchCredits > allowed.researchCredits;
 
 /** The most one request of shape `outputTokens` may cost across `rates`, or null when any of them isn't bounded. */
 function boundAcross(rates: readonly ModelRate[], outputTokens: number): number | null {
@@ -477,16 +527,18 @@ function boundAcross(rates: readonly ModelRate[], outputTokens: number): number 
  * policy the grant must also be priced, and fit the pool, every sublimit that applies, and the counted services.
  * Without one nothing else limits it, but it is still written, priced where it can be, and counted. An extension
  * answers one need once: asked again with the same request, the same grant comes back; with another, it is refused.
+ * `verified` is the ledger state the guard last verified; a ledger that no longer holds it throws BUDGET_UNVERIFIED.
  */
 export function writeGrant(
   workspace: WorkspaceDb,
   request: GrantRequest,
-  context: { now: number; catalogue: PriceCatalogue; timezone: string },
+  context: { now: number; catalogue: PriceCatalogue; timezone: string; verified: LedgerState | null },
 ): { grant: BudgetGrant; authority: LedgerState | null } | { refused: GrantRefusal } {
   const asked = GrantRequest.parse(request);
   const digest = sha256(JSON.stringify(asked));
   const at = iso(context.now);
   return workspace.tx((db) => {
+    if (!holdsVerified(db, context.verified)) throw new Error(BUDGET_UNVERIFIED);
     if (asked.extends !== null) {
       const existing = db.prepare("SELECT * FROM budget_grants WHERE extends_id = ? AND need = ?").get(asked.extends, asked.need);
       if (existing) {
@@ -516,8 +568,10 @@ export function writeGrant(
     const timezone = policy?.timezone ?? context.timezone;
     const period = currentPeriodIn(db);
     const periodIndex = period?.index ?? monthOf(context.now, timezone).index;
+    // Its day never goes back past a day a grant was already written on, whatever the clock says.
+    const dayIndex = Math.max(dayOf(context.now, timezone).index, latestDayIn(db) ?? Number.NEGATIVE_INFINITY);
     const need = productiveMicros === null ? null : productiveMicros + finalisationMicros!;
-    const refusal = admission(db, { policy, periodIndex, request: asked, need, now: context.now });
+    const refusal = admission(db, { policy, periodIndex, dayIndex, request: asked, need });
     if (refusal) return { refused: refusal };
     const authority = bump(db, at);
     if (!period) insertPeriod(db, monthOf(context.now, timezone), timezone, "first", null, authority.revision, at);
@@ -535,8 +589,8 @@ export function writeGrant(
     };
     db.prepare(
       `INSERT INTO budget_grants (id, request_id, request_sha256, workflow, target_id, period_idx, policy_version, catalogue_version, grant_json, attribution_json, feature, project_id,
-        attempt_id, queue_id, profile_id, model, productive_micros, finalisation_micros, extends_id, need, state, written_revision, revision, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'written', ?, ?, ?, ?)`,
+        attempt_id, queue_id, profile_id, model, productive_micros, finalisation_micros, extends_id, need, state, written_revision, day_idx, revision, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'written', ?, ?, ?, ?, ?)`,
     ).run(
       id,
       asked.requestId,
@@ -559,6 +613,7 @@ export function writeGrant(
       asked.extends,
       asked.need,
       authority.revision,
+      dayIndex,
       authority.revision,
       at,
       at,
@@ -569,27 +624,51 @@ export function writeGrant(
 
 /**
  * Whether a grant needing `need` (null: it couldn't be priced) may be written. Null when it may. A history lost this
- * month binds first, in every mode: waiting admits nothing, and an allowance set then admits only priced grants that
- * fit what is left of it. Under a money policy the grant must be priced, and fit the pool, each sublimit that applies
- * and the counted services; spend in any of those that couldn't be priced can't be counted as nothing, so it refuses
- * too, except spend from before a loss, which the allowance set then covers.
+ * month binds first, in every mode: waiting admits nothing, and what the person said was left admits only priced
+ * grants whose money and counted services fit what is left of it. Under a money policy the grant must also be priced,
+ * and fit the pool, each sublimit that applies and the counted services; a call that reaches no model needs no money,
+ * so only its counted services are checked.
  */
-function admission(db: DatabaseSync, input: { policy: BudgetPolicy | null; periodIndex: number; request: GrantRequest; need: number | null; now: number }): GrantRefusal | null {
+function admission(db: DatabaseSync, input: { policy: BudgetPolicy | null; periodIndex: number; dayIndex: number; request: GrantRequest; need: number | null }): GrantRefusal | null {
   const { policy, periodIndex, request, need } = input;
   const grants = periodGrants(db, periodIndex);
   const loss = lossIn(db, periodIndex);
   if (loss) {
-    if (loss.remainingMicros === null) return { code: "history-wait", message: HISTORY_WAIT };
+    const remaining = loss.remaining;
+    if (remaining === null) return { code: "history-wait", message: HISTORY_WAIT };
     if (need === null) {
-      return { code: "unestablished", message: `After Nivra lost this month's budget history you set ${limitDollars(loss.remainingMicros)} dollars for the rest of the month, but Nivra can't price this model yet, so it can't keep the call within that. Please ${CONFIRM_NEXT}.` };
+      return { code: "unestablished", message: `After Nivra lost this month's budget history you set ${limitDollars(remaining.micros)} dollars for the rest of the month, but Nivra can't price this model yet, so it can't keep the call within that. Please ${CONFIRM_NEXT}.` };
     }
-    const since = moneyOf(db, grants.filter((grant) => grant.writtenRevision > loss.revision));
-    if (since === null || since + need > loss.remainingMicros) {
-      return { code: "pool", message: `This would go past the ${limitDollars(loss.remainingMicros)} dollars you set for the rest of this month after Nivra lost its budget history. Please ${CONFIRM_NEXT}.` };
+    const after = grants.filter((grant) => grant.writtenRevision > loss.revision);
+    const since = moneyOf(db, after);
+    if (since === null || since + need > remaining.micros) {
+      return { code: "pool", message: `This would go past the ${limitDollars(remaining.micros)} dollars you set for the rest of this month after Nivra lost its budget history. Please ${CONFIRM_NEXT}.` };
+    }
+    if (pastAllowance(countedOf(db, after), request.allowances, remaining.allowances)) {
+      return { code: "counted", message: `This would go past the sandbox operations, sandbox time or research credits you said were left this month after Nivra lost its budget history. Please ${CONFIRM_NEXT}.` };
     }
   }
   if (!policy) return null;
   if (need === null) return { code: "unestablished", message: UNESTABLISHED };
+  if (need > 0) {
+    const refusal = moneyAdmission(db, { ...input, policy, grants, loss, need });
+    if (refusal) return refusal;
+  }
+  if (pastAllowance(countedOf(db, grants), request.allowances, policy.allowances)) {
+    return { code: "counted", message: `This would go past this month's allowance of sandbox operations, sandbox time or research credits in your budget. Raise it, or ${CONFIRM_NEXT}.` };
+  }
+  return null;
+}
+
+/**
+ * The pool and the money sublimits, for a grant that needs money. Spend in a scope that couldn't be priced can't be
+ * counted as nothing, so it refuses, except spend from before a loss, which what the person said then covers.
+ */
+function moneyAdmission(
+  db: DatabaseSync,
+  input: { policy: BudgetPolicy; grants: readonly GrantRecord[]; loss: Loss | null; periodIndex: number; dayIndex: number; request: GrantRequest; need: number },
+): GrantRefusal | null {
+  const { policy, grants, loss, periodIndex, dayIndex, request, need } = input;
   const covered = (grant: GrantRecord) => loss !== null && grant.periodIndex === periodIndex && grant.writtenRevision <= loss.revision;
   const used = moneyOf(db, grants, covered);
   if (used === null) return { code: "unpriced-spend", message: UNPRICED_SPEND };
@@ -597,47 +676,48 @@ function admission(db: DatabaseSync, input: { policy: BudgetPolicy | null; perio
     return { code: "pool", message: `This would go past your monthly budget of ${limitDollars(policy.monthlyMicros)} dollars: ${spentDollars(used)} is already spent or reserved this month. Raise your budget, or ${CONFIRM_NEXT}.` };
   }
   const sublimits = policy.sublimits;
-  const check = (limit: number | null, scope: readonly GrantRecord[], name: string, then: string): GrantRefusal | null => {
+  const check = (limit: number | null, scope: readonly GrantRecord[], name: string, then: string, unpriced: string): GrantRefusal | null => {
     if (limit === null) return null;
     const total = moneyOf(db, scope, covered);
-    if (total === null) return { code: "unpriced-spend", message: UNPRICED_SPEND };
+    if (total === null) return { code: "unpriced-spend", message: unpriced };
     return total + need > limit ? { code: "sublimit", message: `This would go past the ${name} limit of ${limitDollars(limit)} dollars in your budget. Raise it, ${then}.` } : null;
   };
-  // The day by the latest time either the ledger or this computer's clock has shown, so a clock moved back doesn't free it.
-  const day = dayOf(Math.max(input.now, latestLedgerTimeIn(db) ?? input.now), policy.timezone);
-  const today = db.prepare("SELECT * FROM budget_grants WHERE created_at >= ? ORDER BY created_at, rowid").all(iso(day.startsAt)).map(grantOf);
+  // A day's grants are those written on its date, which never goes back, so a clock moved back frees nothing.
+  const today = db.prepare("SELECT * FROM budget_grants WHERE day_idx = ? ORDER BY created_at, rowid").all(dayIndex).map(grantOf);
   // A task's or a queue's limit holds across a month's end: its grants are counted wherever they fall.
   const ofAttempt = request.attribution.attemptId === null ? [] : db.prepare("SELECT * FROM budget_grants WHERE attempt_id = ?").all(request.attribution.attemptId).map(grantOf);
   const ofQueue = request.attribution.queueId === null ? [] : db.prepare("SELECT * FROM budget_grants WHERE queue_id = ?").all(request.attribution.queueId).map(grantOf);
+  const whose = (what: string) =>
+    `This ${what}'s spend includes some Nivra couldn't price, so it can't tell how much of the ${what}'s limit is left. Turn the monthly budget off to use today's fixed allowances, or remove the ${what} limit from your budget.`;
   const refusals = [
-    check(sublimits.dailyMicros, today, "daily", "or wait for tomorrow"),
-    request.attribution.attemptId === null ? null : check(sublimits.perTaskMicros, ofAttempt, "per-task", "or end this task's work here"),
-    request.attribution.queueId === null ? null : check(sublimits.perQueueMicros, ofQueue, "per-queue", "or end this queue's work here"),
+    check(sublimits.dailyMicros, today, "daily", "or wait for tomorrow", UNPRICED_SPEND),
+    request.attribution.attemptId === null ? null : check(sublimits.perTaskMicros, ofAttempt, "per-task", "or end this task's work here", whose("task")),
+    request.attribution.queueId === null ? null : check(sublimits.perQueueMicros, ofQueue, "per-queue", "or end this queue's work here", whose("queue")),
     ...sublimits.projects
       .filter((limit) => limit.projectId === request.attribution.projectId)
-      .map((limit) => check(limit.monthlyMicros, grants.filter((grant) => grant.attribution.projectId === limit.projectId), "project", `or ${CONFIRM_NEXT}`)),
+      .map((limit) => check(limit.monthlyMicros, grants.filter((grant) => grant.attribution.projectId === limit.projectId), "project", `or ${CONFIRM_NEXT}`, UNPRICED_SPEND)),
     ...sublimits.profiles
       .filter((limit) => limit.profileId === request.attribution.profile?.id)
-      .map((limit) => check(limit.monthlyMicros, grants.filter((grant) => grant.attribution.profile?.id === limit.profileId), "agent", `or ${CONFIRM_NEXT}`)),
+      .map((limit) => check(limit.monthlyMicros, grants.filter((grant) => grant.attribution.profile?.id === limit.profileId), "agent", `or ${CONFIRM_NEXT}`, UNPRICED_SPEND)),
   ];
-  const refused = refusals.find((refusal) => refusal !== null);
-  if (refused) return refused;
-  const counted = countedOf(db, grants);
-  const allowed = policy.allowances;
-  if (
-    counted.sandboxOperations + request.allowances.sandboxOperations > allowed.sandboxOperations ||
-    counted.sandboxSeconds + request.allowances.sandboxSeconds > allowed.sandboxSeconds ||
-    counted.researchCredits + request.allowances.researchCredits > allowed.researchCredits
-  ) {
-    return { code: "counted", message: `This would go past this month's allowance of sandbox operations, sandbox time or research credits in your budget. Raise it, or ${CONFIRM_NEXT}.` };
-  }
-  return null;
+  return refusals.find((refusal) => refusal !== null) ?? null;
 }
 
-/** Moves a grant from one state to the next, bumping the revision; null when it isn't in a state it can move from. */
-function move(workspace: WorkspaceDb, id: string, from: readonly GrantState[], to: GrantState, now: number, extra: { homeId?: string } = {}): LedgerState | null {
+/**
+ * Moves a grant from one state to the next, bumping the revision; null when it isn't in a state it can move from. With
+ * `verified`, the ledger must still hold the history the guard last verified, or it throws BUDGET_UNVERIFIED.
+ */
+function move(
+  workspace: WorkspaceDb,
+  id: string,
+  from: readonly GrantState[],
+  to: GrantState,
+  now: number,
+  extra: { homeId?: string; verified?: LedgerState | null } = {},
+): LedgerState | null {
   const at = iso(now);
   return workspace.tx((db) => {
+    if (extra.verified !== undefined && !holdsVerified(db, extra.verified)) throw new Error(BUDGET_UNVERIFIED);
     const row = db.prepare("SELECT state FROM budget_grants WHERE id = ?").get(id);
     if (!row || !from.includes(str(row["state"]) as GrantState)) return null;
     const authority = bump(db, at);
@@ -650,16 +730,19 @@ function move(workspace: WorkspaceDb, id: string, from: readonly GrantState[], t
 /**
  * Marks a written grant dispatching, with the engine store that would record it, before the send begins. From here on
  * the call may have been sent, so the grant is never released. The caller records the returned revision in the guard,
- * and only then sends.
+ * and only then sends. Only on the ledger the guard last verified.
  */
-export const markDispatching = (workspace: WorkspaceDb, id: string, homeId: string, now: number): LedgerState | null => move(workspace, id, ["written"], "dispatching", now, { homeId });
+export const markDispatching = (workspace: WorkspaceDb, id: string, homeId: string, now: number, verified: LedgerState | null): LedgerState | null =>
+  move(workspace, id, ["written"], "dispatching", now, { homeId, verified });
 /** The engine's store shows it accepted the grant. */
 export const markAccepted = (workspace: WorkspaceDb, id: string, now: number): LedgerState | null => move(workspace, id, ["dispatching"], "accepted", now);
 /**
- * Releases a grant the host never began sending. Nothing else is ever released without its engine's complete seal, and
- * a grant written before a lost history was replaced is uncertain, never written, so it can't be released either.
+ * Releases a grant the host never began sending, in a ledger that still holds the history the guard last verified, so
+ * it wasn't rolled back. Nothing else is ever released without its engine's complete seal, and a grant written before
+ * a lost history was replaced is uncertain, never written, so it can't be released either.
  */
-export const releaseGrant = (workspace: WorkspaceDb, id: string, now: number): LedgerState | null => move(workspace, id, ["written"], "released", now);
+export const releaseGrant = (workspace: WorkspaceDb, id: string, now: number, verified: LedgerState | null): LedgerState | null =>
+  move(workspace, id, ["written"], "released", now, { verified });
 /** No affirmative evidence of what was spent: the whole grant stays counted. */
 export const markUncertain = (workspace: WorkspaceDb, id: string, now: number): LedgerState | null => move(workspace, id, ["dispatching", "accepted"], "uncertain", now);
 /** The person's choice for an uncertain grant: counted in full as unknown spend from now on, never as zero. */
@@ -752,12 +835,12 @@ export function recordJournal(workspace: WorkspaceDb, id: string, rows: readonly
 /**
  * Starts a new budget history after a loss, as the person chose. The ledger takes a new id, at a revision past both its
  * own and the guard's last, so no copy of the lost history can later pass for this one; the loss is recorded with what
- * was lost and the allowance the person set for the rest of the current month (null: wait for the next); and every
- * grant still open becomes uncertain, since whether it was sent can't be known. The month stays the current one; a
- * ledger with none opens its first. Spend before the loss is unknown, never zero. The caller records the returned
- * revision in the guard, with the recovery cleared.
+ * was lost and what the person said was left of the current month, money and counted services (null: wait for the
+ * next); and every grant still open becomes uncertain, since whether it was sent can't be known. The month stays the
+ * current one; a ledger with none opens its first. Spend before the loss is unknown, never zero. The caller records
+ * the returned revision in the guard, with the recovery cleared.
  */
-export function startNewHistory(workspace: WorkspaceDb, input: { recovery: BudgetRecovery; remainingMicros: number | null; now: number; timezone: string }): LedgerState {
+export function startNewHistory(workspace: WorkspaceDb, input: { recovery: BudgetRecovery; remaining: BudgetRemaining | null; now: number; timezone: string }): LedgerState {
   const at = iso(input.now);
   return workspace.tx((db) => {
     const previous = ledgerStateIn(db);
@@ -766,13 +849,13 @@ export function startNewHistory(workspace: WorkspaceDb, input: { recovery: Budge
     const chain = chainNext(previous?.chain ?? null, ledgerId, revision);
     const current = currentPeriodIn(db);
     const month = monthOf(input.now, input.timezone);
-    db.prepare("INSERT INTO budget_adjustments (id, kind, ledger_id, period_idx, reason, recovery_json, remaining_micros, revision, created_at) VALUES (?, 'history-lost', ?, ?, ?, ?, ?, ?, ?)").run(
+    db.prepare("INSERT INTO budget_adjustments (id, kind, ledger_id, period_idx, reason, recovery_json, remaining_json, revision, created_at) VALUES (?, 'history-lost', ?, ?, ?, ?, ?, ?, ?)").run(
       randomUUID(),
       ledgerId,
       current?.index ?? month.index,
       input.recovery.reason,
       JSON.stringify(input.recovery),
-      input.remainingMicros,
+      input.remaining === null ? null : JSON.stringify(input.remaining),
       revision,
       at,
     );
@@ -789,9 +872,10 @@ export function startNewHistory(workspace: WorkspaceDb, input: { recovery: Budge
 
 /**
  * The current month as the ledger counts it. Every total comes from leaf grants and rows, so a council and its members
- * are never counted twice; unknown spend is counted at its bounds and named as unknown; money that couldn't be priced,
- * or a month whose history was lost, makes the money totals null rather than 0; and every reason the totals can't be
- * read as complete is listed. `timezone` is the zone months count in when there is no policy.
+ * are never counted twice; unknown spend is counted at its bounds and named as unknown; and every reason the totals
+ * can't be read as complete is listed. Money that couldn't be priced makes the money totals null rather than 0; a
+ * month whose history was lost, or one whose history needs recovery, has no month-wide figures at all, only what was
+ * admitted since a loss. `timezone` is the zone months count in when there is no policy.
  */
 export function budgetSummary(workspace: WorkspaceDb, context: { now: number; catalogue: PriceCatalogue; recovery: BudgetRecovery | null; timezone: string }): BudgetSummary {
   const db = workspace.db;
@@ -799,13 +883,15 @@ export function budgetSummary(workspace: WorkspaceDb, context: { now: number; ca
   const period = currentPeriodIn(db);
   const grants = period ? periodGrants(db, period.index) : [];
   const loss = period ? lossIn(db, period.index) : null;
+  // The month-wide figures stand only for a history that is whole: none lost this month, and none needing recovery.
+  const whole = loss === null && context.recovery === null;
   let settled = 0;
   let unknown = 0;
   let reserved = 0;
   let priced = true;
   let uncertain = false;
   const usage = noUsage();
-  const lines = new Map<string, BudgetBreakdownLine>();
+  const lines = new Map<string, BudgetBreakdownLine & { usage: BudgetUsage }>();
   const add = (dimension: BudgetBreakdownLine["dimension"], key: string, counts: GrantCounts) => {
     const id = `${dimension}\u0000${key}`;
     const line = lines.get(id) ?? { dimension, key, settledMicros: 0, unknownMicros: 0, reservedMicros: 0, usage: noUsage() };
@@ -836,6 +922,7 @@ export function budgetSummary(workspace: WorkspaceDb, context: { now: number; ca
     add("model", rates.length === 1 ? rates[0]!.model : rates.length === 0 ? "none" : "several", counts);
   }
   const breakdown = [...lines.values()];
+  const counted = countedOf(db, grants);
   const gaps: BudgetGap[] = [];
   if (context.catalogue.currency === null) gaps.push("currency-unconfirmed");
   if (context.catalogue.models.some((rate) => rate.bounds === null)) gaps.push("bounds-unestablished");
@@ -844,21 +931,25 @@ export function budgetSummary(workspace: WorkspaceDb, context: { now: number; ca
   if (context.catalogue.listings === "unknown") gaps.push("listings-unpriced");
   if (context.now - Date.parse(`${context.catalogue.retrievedOn}T00:00:00Z`) > 30 * 24 * 60 * 60 * 1000) gaps.push("stale-catalogue");
   if (loss) gaps.push("history-lost");
-  if (breakdown.length > 400) gaps.push("breakdown-cut");
-  const known = priced && loss === null;
+  if (context.recovery) gaps.push("needs-recovery");
+  if (whole && breakdown.length > 400) gaps.push("breakdown-cut");
+  if (counted.sandboxOperations > 0 || counted.sandboxSeconds > 0 || counted.researchCredits > 0) gaps.push("services-unpriced");
+  const known = priced && whole;
   const pool = policy?.monthlyMicros ?? null;
   const committed = settled + unknown + reserved;
-  // What a new grant could take: the pool less this month's spend, and after a loss no more than what is left of the
-  // allowance set then. Spend that couldn't be priced leaves it unknown, except from before a loss.
+  // What a new grant could take: the pool less this month's spend, and after a loss no more than what is left of what
+  // the person said then. Spend that couldn't be priced leaves it unknown, except from before a loss; so does a history
+  // that needs recovery.
   const covered = (grant: GrantRecord) => loss !== null && grant.writtenRevision <= loss.revision;
-  const since = loss ? moneyOf(db, grants.filter((grant) => !covered(grant))) : null;
+  const after = grants.filter((grant) => !covered(grant));
+  const since = loss ? moneyOf(db, after) : null;
   const caps: (number | null)[] = [];
   if (policy) {
     const used = moneyOf(db, grants, covered);
     caps.push(used === null ? null : policy.monthlyMicros - used);
   }
-  if (loss) caps.push(loss.remainingMicros === null ? 0 : since === null ? null : loss.remainingMicros - since);
-  const available = caps.length === 0 || caps.includes(null) ? null : Math.min(...(caps as number[]));
+  if (loss) caps.push(loss.remaining === null ? 0 : since === null ? null : loss.remaining.micros - since);
+  const available = context.recovery !== null || caps.length === 0 || caps.includes(null) ? null : Math.min(...(caps as number[]));
   return {
     policy,
     period,
@@ -868,12 +959,12 @@ export function budgetSummary(workspace: WorkspaceDb, context: { now: number; ca
     unknownMicros: known ? unknown : null,
     reservedMicros: known ? reserved : null,
     availableMicros: available,
-    usage,
-    counted: { used: countedOf(db, grants), allowed: policy?.allowances ?? null },
+    usage: whole ? usage : null,
+    counted: { used: whole ? counted : null, allowed: policy?.allowances ?? null },
     gaps,
     thresholdsCrossed: !known || pool === null || pool === 0 ? [] : (policy?.thresholds ?? []).filter((threshold) => committed * 100 >= threshold * pool),
-    breakdown: breakdown.slice(0, 400),
-    afterLoss: loss === null ? null : { at: loss.createdAt, remainingMicros: loss.remainingMicros, sinceMicros: since },
+    breakdown: whole ? breakdown.slice(0, 400) : [],
+    afterLoss: loss === null ? null : { at: loss.createdAt, remaining: loss.remaining, since: { micros: since, counted: countedOf(db, after) } },
     clock: { computerMonth: monthOf(context.now, policy?.timezone ?? context.timezone).label, jumps: jumpsSince(db, period?.openedAt ?? null) },
   };
 }

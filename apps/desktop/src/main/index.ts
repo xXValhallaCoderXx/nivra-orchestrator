@@ -4,7 +4,7 @@ import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope } from "@nivra/domain";
-import { BudgetMonthLabel, BudgetPolicyDraft, Micros } from "@nivra/domain";
+import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining } from "@nivra/domain";
 import { z } from "zod";
 import { IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
@@ -334,7 +334,7 @@ function start(): void {
   handle(IPC.budgetSummary, none, () => host.budgetSummary());
   handle(IPC.budgetPrices, none, () => host.budgetPrices());
   handle(IPC.confirmBudgetMonth, z.tuple([BudgetMonthLabel]), (_event, month) => host.confirmBudgetMonth(month));
-  handle(IPC.startNewBudgetHistory, z.tuple([Micros.nullable()]), (_event, remainingMicros) => host.startNewBudgetHistory(remainingMicros));
+  handle(IPC.startNewBudgetHistory, z.tuple([BudgetRemaining.nullable()]), (_event, remaining) => host.startNewBudgetHistory(remaining));
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {

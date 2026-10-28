@@ -132,9 +132,11 @@ describe("the budget through the host", () => {
 
     // The state survives a restart: it is in the guard, not in the fresh workspace.
     const third = hostAt(at);
-    assert.equal((await third.budgetSummary()).recovery?.reason, "workspace-kept-aside");
+    const flagged = await third.budgetSummary();
+    assert.deepEqual([flagged.recovery?.reason, flagged.settledMicros, flagged.usage, flagged.gaps.includes("needs-recovery")], ["workspace-kept-aside", null, null, true]);
+    await assert.rejects(third.startNewBudgetHistory({ micros: -1, allowances: DRAFT.allowances }));
     const resumed = await third.startNewBudgetHistory(null);
-    assert.deepEqual([resumed.recovery, resumed.gaps.includes("history-lost"), resumed.availableMicros, resumed.afterLoss?.remainingMicros], [null, true, 0, null]);
+    assert.deepEqual([resumed.recovery, resumed.gaps.includes("history-lost"), resumed.availableMicros, resumed.afterLoss?.remaining], [null, true, 0, null]);
     const after = guardAt(at).last()!;
     assert.notEqual(after.ledgerId, before.ledgerId);
     assert.ok(after.revision > before.revision);

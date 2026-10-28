@@ -182,6 +182,7 @@ export type BudgetAttribution = z.infer<typeof BudgetAttribution>;
  */
 export const GrantState = z.enum(["written", "dispatching", "accepted", "settled", "released", "uncertain", "written-off"]);
 export type GrantState = z.infer<typeof GrantState>;
+/** Every move a grant can make. Written to uncertain is a new history's alone: the ledger refuses it otherwise. */
 export const GRANT_TRANSITIONS: Readonly<Record<GrantState, readonly GrantState[]>> = Object.freeze({
   written: ["dispatching", "released", "uncertain"],
   dispatching: ["accepted", "settled", "uncertain"],
@@ -333,6 +334,10 @@ export const BudgetRecovery = z.strictObject({
 });
 export type BudgetRecovery = z.infer<typeof BudgetRecovery>;
 
+/** What the person says is left of the current month after a loss: money, and each counted service. */
+export const BudgetRemaining = z.strictObject({ micros: Micros, allowances: BudgetAllowances });
+export type BudgetRemaining = z.infer<typeof BudgetRemaining>;
+
 /** Why a total can't be read as complete. Each is said in the summary, never smoothed over. */
 export const BudgetGap = z.enum([
   "currency-unconfirmed",
@@ -343,6 +348,10 @@ export const BudgetGap = z.enum([
   "stale-catalogue",
   "history-lost",
   "breakdown-cut",
+  /** Nebius and Tavily use is counted, not priced: the money totals leave it out. */
+  "services-unpriced",
+  /** The history doesn't match the guard's record of it, so nothing in it can be read as this month's. */
+  "needs-recovery",
 ]);
 export type BudgetGap = z.infer<typeof BudgetGap>;
 
@@ -362,7 +371,7 @@ export type BudgetUsage = z.infer<typeof BudgetUsage>;
 
 /**
  * One breakdown line: leaf grants and rows only, so a council and its members are never counted twice. Its money is
- * null when any grant in it couldn't be priced.
+ * null when any grant in it couldn't be priced. There are none while the month's history is lost or needs recovery.
  */
 export const BudgetBreakdownLine = z.strictObject({
   dimension: z.enum(["feature", "project", "profile", "model"]),
@@ -381,7 +390,7 @@ export const BudgetSummary = z.strictObject({
   poolMicros: Micros.nullable(),
   /**
    * This month's money, from leaf records. All three are null when it can't be known: any of this month's spend that
-   * couldn't be priced, or a history lost this month. Never 0 for spend that wasn't priced.
+   * couldn't be priced, a history lost this month, or one that needs recovery. Never 0 for spend that wasn't priced.
    * - settled: reported and partial operations of settled grants;
    * - unknown: unknown operations at their bounds, and uncertain or written-off grants in full;
    * - reserved: open grants, counted in full.
@@ -391,20 +400,28 @@ export const BudgetSummary = z.strictObject({
   reservedMicros: Micros.nullable(),
   /**
    * The most a new grant could take now: the pool less what this month holds, and after a loss no more than what is
-   * left of the allowance the person set (0 while they chose to wait). Null with neither, or while this month holds
-   * spend that couldn't be priced. Negative when reported usage ran over its bounds.
+   * left of the allowance the person set (0 while they chose to wait). Null with neither, while this month holds spend
+   * that couldn't be priced, or while the history needs recovery. Negative when reported usage ran over its bounds.
    */
   availableMicros: z.number().int().nullable(),
-  usage: BudgetUsage,
-  counted: z.strictObject({ used: BudgetAllowances, allowed: BudgetAllowances.nullable() }),
+  /** This month's model requests as reported; null when the month's history was lost or needs recovery. */
+  usage: BudgetUsage.nullable(),
+  /** This month's counted services; what was used is null when the month's history was lost or needs recovery. */
+  counted: z.strictObject({ used: BudgetAllowances.nullable(), allowed: BudgetAllowances.nullable() }),
   gaps: z.array(BudgetGap).max(BudgetGap.options.length),
   thresholdsCrossed: z.array(z.number().int().min(1).max(100)).max(5),
   breakdown: z.array(BudgetBreakdownLine).max(400),
   /**
-   * After a history lost this month: when, the allowance the person set for the rest of it (null: wait), and what was
-   * admitted since (null when that couldn't be priced).
+   * After a history lost this month: when, what the person said was left of it (null: wait for the next), and what was
+   * admitted since, its money null when that couldn't be priced.
    */
-  afterLoss: z.strictObject({ at: z.iso.datetime(), remainingMicros: Micros.nullable(), sinceMicros: Micros.nullable() }).nullable(),
+  afterLoss: z
+    .strictObject({
+      at: z.iso.datetime(),
+      remaining: BudgetRemaining.nullable(),
+      since: z.strictObject({ micros: Micros.nullable(), counted: BudgetAllowances }),
+    })
+    .nullable(),
   /**
    * The computer's clock as the budget sees it, for confirming a month: its month in the budget's zone, and the jumps
    * recorded since this budget month opened, newest first. A month is confirmed by its label, as shown.
@@ -489,11 +506,15 @@ function startOfLocalDay(year: number, month: number, day: number, timeZone: str
   return wall - offsetAt(first, timeZone);
 }
 
-/** The local calendar day holding `at`, in `timeZone`: its label and its bounds, for a daily sublimit. */
-export function dayOf(at: number, timeZone: string): { label: string; startsAt: number; endsAt: number } {
+/**
+ * The local calendar day holding `at`, in `timeZone`, for a daily sublimit: its index (days from 1970-01-01 to that
+ * local date), its label and its bounds.
+ */
+export function dayOf(at: number, timeZone: string): { index: number; label: string; startsAt: number; endsAt: number } {
   const { year, month, day } = wallClock(at, timeZone);
   const next = new Date(Date.UTC(year, month - 1, day + 1));
   return {
+    index: Date.UTC(year, month - 1, day) / 86_400_000,
     label: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
     startsAt: startOfLocalDay(year, month, day, timeZone),
     endsAt: startOfLocalDay(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate(), timeZone),

@@ -107,7 +107,7 @@ const api = {
   budgetSummary: () => ipcRenderer.invoke(IPC.budgetSummary),
   budgetPrices: () => ipcRenderer.invoke(IPC.budgetPrices),
   confirmBudgetMonth: (month) => ipcRenderer.invoke(IPC.confirmBudgetMonth, month),
-  startNewBudgetHistory: (remainingMicros) => ipcRenderer.invoke(IPC.startNewBudgetHistory, remainingMicros),
+  startNewBudgetHistory: (remaining) => ipcRenderer.invoke(IPC.startNewBudgetHistory, remaining),
 } satisfies NivraApi;
 
 contextBridge.exposeInMainWorld("nivra", api);
