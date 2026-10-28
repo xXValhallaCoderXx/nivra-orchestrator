@@ -467,6 +467,14 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e task-run.spec.ts
   `task-run.spec.ts` writes an acceptance case into a brief, gives both consents in the Run preview, runs the task,
   and reads what Nivra found, with the checkout untouched. The host's tests run the WSL stand-in target, since a host
   on Windows refuses a task on the local one; `wslEntry` puts the gated engine there for lost answers.
+- **The task page's hooks** (NIV-56, G3). The shown run's area carries `task-attempt` (its status and id) and, once
+  approved, `task-apply` (its status and resolution) around both columns, so a spec finds a run's parts inside them
+  wherever the layout puts them: the result, checks and change in the main column, the decision in the aside, or
+  after the result in a narrow window. Rename, Change repository and Delete sit behind `task-more`; the aside's tabs
+  are `task-tab-brief`, `task-tab-coach` and `task-tab-runs`, and choosing the coach's gives it the main column.
+  Every tab and the coach stay mounted when hidden, so a count or a text can be read without opening them; a press
+  needs them open. The narrow-window test runs at 656 px (820 at 125%), below the page's 48em breakpoint: at 547 px
+  the shell's navigation covers the page until it collapses below its own breakpoint.
 - **The live toolchain probe** (`apps/engine/scripts/task-probe.ts`): five operations on Nebius with no model, the
   fixture only. `--plan` prints the recipe with no network; `--run --credentials <file>` needs an approval of that
   recipe, and refuses a fixture or write that isn't the pinned one; `--recover <folder>` settles what a cut-short

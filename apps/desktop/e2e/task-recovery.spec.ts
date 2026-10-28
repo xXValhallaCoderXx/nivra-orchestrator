@@ -191,6 +191,10 @@ test("cancels a run while its worker waits on the model: it ends cancelled, and 
   const card = await startRun();
   await expect.poll(() => model.chats().length, { timeout: 60_000 }).toBe(chats + 1);
   const sent = { spawns: spawns(), uploads: uploads(), chats: model.chats().length };
+  // Esc never stops a run: only Stop does (NIV-56, G3).
+  await page.keyboard.press("Escape");
+  await expect(card).toHaveAttribute("data-status", "running");
+  await expect(card.getByTestId("task-attempt-cancel")).toHaveText("Stop");
   await card.getByTestId("task-attempt-cancel").click();
   await expect(card).toHaveAttribute("data-status", "cancelled", { timeout: 60_000 });
   // The held request may still answer; nothing after the cancel was admitted: no operation, upload or model request.

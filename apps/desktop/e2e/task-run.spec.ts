@@ -105,6 +105,12 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   await page.getByTestId("task-run").click();
   const preview = page.getByTestId("task-run-preview-body");
   await expect(preview.getByTestId("task-run-preview-snapshot")).toContainText("2 files");
+  // Esc closes the preview and sends nothing; previewing again works it out afresh (NIV-56, G3).
+  await page.keyboard.press("Escape");
+  await expect(preview).toBeHidden();
+  expect([sandbox.requests.length, model.chats().length]).toEqual([0, 0]);
+  await page.getByTestId("task-run").click();
+  await expect(preview.getByTestId("task-run-preview-snapshot")).toContainText("2 files");
   await expect(preview).toContainText("To Token Factory, as the project's sharing allows (off)");
   await expect(preview.getByTestId("task-run-ask-uploads")).toContainText("it is for this project only: its sandbox checks, its environment and its task runs");
   await expect(page.getByTestId("task-run-start")).toBeDisabled();

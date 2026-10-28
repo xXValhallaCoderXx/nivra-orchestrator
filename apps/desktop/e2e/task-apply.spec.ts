@@ -215,3 +215,53 @@ test("sends a third run's change back for a revision: the note goes into the bri
   await expect(rows).toHaveCount(3);
   await expect(rows.first()).toHaveAttribute("data-decision", "revision");
 });
+
+test("in a narrow window the preview and the apply dialog fill it with their buttons in view, and the decision follows the result", async () => {
+  test.skip(packaged, "a packaged app ignores the test endpoint switches");
+  // Narrower than the page's 48em breakpoint (NIV-56, G3: NW1, NW3): 820 by 900, the window's least width, at 125% zoom.
+  // The design's 547 by 600 (150%) needs the shell's navigation to collapse below its own breakpoint, which today's
+  // doesn't: the branch that lands second with Next B's shell checks that width too.
+  const was = await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0]!;
+    return { size: win.getContentSize(), zoom: win.webContents.getZoomFactor() };
+  });
+  await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0]!;
+    win.setContentSize(820, 900);
+    win.webContents.setZoomFactor(1.25);
+  });
+  try {
+    await expect.poll(() => page.evaluate(() => Math.round(window.innerWidth))).toBe(656);
+    const card = page.getByTestId("task-attempt");
+    const previous = await card.getAttribute("data-attempt-id");
+    await page.getByTestId("task-run").click();
+    const start = page.getByTestId("task-run-start");
+    await expect(start).toBeEnabled({ timeout: 30_000 });
+    await expect(start).toBeInViewport();
+    await start.click();
+    await expect(card).not.toHaveAttribute("data-attempt-id", previous ?? "", { timeout: 30_000 });
+    await expect(card).toHaveAttribute("data-status", "answered", { timeout: 60_000 });
+    // The decision comes right after the result, before the checks and the change; the bar keeps Approve in view.
+    const order = await page.evaluate(() => {
+      const at = (id: string) => document.querySelector(`[data-testid="${id}"]`)!;
+      const before = (a: string, b: string) => Boolean(at(a).compareDocumentPosition(at(b)) & Node.DOCUMENT_POSITION_FOLLOWING);
+      return [before("task-attempt-result", "task-attempt-decision-ask"), before("task-attempt-decision-ask", "task-attempt-change")];
+    });
+    expect(order).toEqual([true, true]);
+    await expect(page.getByTestId("task-attempt-approve-bar")).toBeInViewport();
+    // The bar's Approve opens the same confirmation, filling the window with Apply in view; Esc closes it, and nothing is written.
+    await page.getByTestId("task-attempt-approve-bar").click();
+    await expect(page.getByTestId("task-apply-confirm-go")).toBeInViewport();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("task-apply-confirm-go")).toBeHidden();
+    expect([greet(), git(["status", "--porcelain"])]).toEqual([ORIGINAL, ""]);
+    await card.getByTestId("task-attempt-reject").click();
+    await expect(card.getByTestId("task-attempt-decision")).toHaveAttribute("data-decision", "rejected");
+  } finally {
+    await app.evaluate(({ BrowserWindow }, { size, zoom }) => {
+      const win = BrowserWindow.getAllWindows()[0]!;
+      win.webContents.setZoomFactor(zoom);
+      win.setContentSize(size[0]!, size[1]!);
+    }, was);
+  }
+});

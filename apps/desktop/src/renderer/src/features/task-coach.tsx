@@ -1,4 +1,4 @@
-import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, Paper, Stack, Text } from "@mantine/core";
+import { Alert, Badge, Button, Checkbox, Code, Group, List, Paper, Stack, Text } from "@mantine/core";
 import type { CoachField, CoachQuestionField, CoachReport, PreferenceIntent, PreferenceScope } from "@nivra/domain";
 import { useEffect, useRef, useState } from "react";
 import { COACH_FIELD_LABELS, COACH_FINDINGS_LIMIT, type CoachChangeView, type CoachingView, type CoachPreview, type CoachSelection } from "../../../shared/coach";
@@ -80,48 +80,119 @@ function droppedText(dropped: CoachReport["dropped"]): string | null {
   return parts.length ? `Nivra set aside ${joined(parts)} from the coach's answer: they didn't fit its form, or named something the brief doesn't have.` : null;
 }
 
-/** The brief's guidance, an Ask the coach button, and the task's coachings, newest first. */
-export function TaskCoach({ task, coachings, editing, onPrepare, onStart, onCancel, onAccept, onUpdateField, updateBlocked, onSavingChange }: TaskCoachProps) {
-  const [dialog, setDialog] = useState(false);
-  const open = coachings?.find(isOpenCoaching) ?? null;
-  const askBlocked =
-    task.summary.state === "completed" ? "Reopen the task to ask the coach about it." : open ? "The coach is still answering. Wait for it, or cancel it, then ask again." : null;
+/** Why the coach can't be asked now, in the person's words; null when it can. */
+const askBlockedOf = (task: TaskView, coachings: CoachingView[] | null) =>
+  task.summary.state === "completed" ? "Reopen the task to ask the coach about it." : coachings?.some(isOpenCoaching) ? "The coach is still answering. Wait for it, or cancel it, then ask again." : null;
+
+/**
+ * The Coach tab (NIV-56, G3: P1y): Nivra's own checks of the brief, without a model, then the task's coachings in short
+ * and Ask the coach. A coaching's answer, and the preview before asking, are in the page's main column.
+ */
+export function CoachAside({ task, coachings, onAsk }: { task: TaskView; coachings: CoachingView[] | null; onAsk(): void }) {
+  const askBlocked = askBlockedOf(task, coachings);
   return (
-    <Stack gap="sm" data-testid="task-coach">
-      <Guidance brief={task.brief.content} />
-      <Group gap="sm">
-        <Button size="xs" variant="default" onClick={() => setDialog(true)} disabled={askBlocked !== null} title={askBlocked ?? undefined} data-testid="coach-ask">
-          Ask the coach…
-        </Button>
+    <Stack gap="md" data-testid="task-coach">
+      <Stack gap="xs">
+        <Stack gap={2}>
+          <Text size="sm" fw={600}>
+            Nivra's own checks
+          </Text>
+          <Text size="xs" c="var(--nivra-text-3)">
+            Without a model, on the brief as saved. Sent to the coach with it.
+          </Text>
+        </Stack>
+        <Guidance brief={task.brief.content} />
+      </Stack>
+      <Stack gap="xs">
+        <Text size="sm" fw={600}>
+          Coachings
+        </Text>
+        {coachings === null ? (
+          <Text size="sm" c="var(--nivra-text-3)">
+            Reading this task's coaching…
+          </Text>
+        ) : coachings.length === 0 ? (
+          <Text size="xs" c="var(--nivra-text-3)">
+            None yet. The coach is optional: it checks the brief for gaps and suggests changes you choose from.
+          </Text>
+        ) : (
+          coachings.map((coaching) => (
+            <Group key={coaching.id} justify="space-between" wrap="nowrap" gap="sm" data-testid="coach-history-row" data-coaching-id={coaching.id}>
+              <Text size="sm">Read brief v{coaching.briefVersion}</Text>
+              <Badge size="sm" variant="light" color={STATUS_LOOK[coaching.status].color}>
+                {STATUS_LOOK[coaching.status].label}
+              </Badge>
+            </Group>
+          ))
+        )}
+        <Text size="xs" c="var(--nivra-text-3)">
+          Each one is a new paid request. Ask again after you change the brief.
+        </Text>
+        <Group gap="sm">
+          <Button size="xs" variant="default" onClick={onAsk} disabled={askBlocked !== null} title={askBlocked ?? undefined} data-testid="coach-ask">
+            {coachings?.length ? "Ask the coach again…" : "Ask the coach…"}
+          </Button>
+        </Group>
         {askBlocked && (
           <Text size="xs" c="var(--nivra-text-3)" data-testid="coach-ask-blocked">
             {askBlocked}
           </Text>
         )}
-      </Group>
-      {coachings === null ? (
-        <Text size="sm" c="var(--nivra-text-3)">
-          Reading this task's coaching…
-        </Text>
-      ) : (
-        coachings.map((coaching, index) => (
-          <CoachingCard
-            key={coaching.id}
-            coaching={coaching}
-            collapsed={index > 0}
-            editing={editing}
-            completed={task.summary.state === "completed"}
-            askBlocked={askBlocked}
-            onAskAgain={() => setDialog(true)}
-            onCancel={onCancel}
-            onAccept={onAccept}
-            onUpdateField={onUpdateField}
-            updateBlocked={updateBlocked}
-            onSavingChange={onSavingChange}
-          />
-        ))
+      </Stack>
+    </Stack>
+  );
+}
+
+/**
+ * The coach in the page's main column (P1y): "1. What the coach read", the preview before asking, which sends nothing
+ * until Ask the coach is pressed; then "2. The coach's answer", each coaching newest first.
+ */
+export function CoachMain({ task, coachings, editing, asking, onAsk, onAskEnd, onPrepare, onStart, onCancel, onAccept, onUpdateField, updateBlocked, onSavingChange }: TaskCoachProps & { asking: boolean; onAsk(): void; onAskEnd(): void }) {
+  const askBlocked = askBlockedOf(task, coachings);
+  return (
+    <Stack gap="md" data-testid="task-coach-main">
+      <CoachAsk opened={asking} briefVersion={task.brief.version} projectId={task.summary.projectId} editing={editing} onClose={onAskEnd} onPrepare={onPrepare} onStart={onStart} />
+      {coachings !== null && coachings.length > 0 && (
+        <Stack gap="md">
+          {coachings.map((coaching, index) => (
+            <CoachingCard
+              key={coaching.id}
+              coaching={coaching}
+              collapsed={index > 0}
+              editing={editing}
+              completed={task.summary.state === "completed"}
+              askBlocked={askBlocked}
+              onAskAgain={onAsk}
+              onCancel={onCancel}
+              onAccept={onAccept}
+              onUpdateField={onUpdateField}
+              updateBlocked={updateBlocked}
+              onSavingChange={onSavingChange}
+            />
+          ))}
+        </Stack>
       )}
-      <CoachDialog opened={dialog} briefVersion={task.brief.version} projectId={task.summary.projectId} editing={editing} onClose={() => setDialog(false)} onPrepare={onPrepare} onStart={onStart} />
+      {!asking && coachings !== null && coachings.length === 0 && (
+        <Paper withBorder p="md" radius="md">
+          <Stack gap="xs">
+            <Text fw={600}>The coach</Text>
+            <Text size="sm" c="var(--nivra-text-2)">
+              The coach reads the brief and Nivra's own checks of it, asks at most three questions and proposes changes you choose from. It runs nothing and changes nothing by
+              itself. Asking it sends one paid request, and you see exactly what it reads first.
+            </Text>
+            <Group>
+              <Button size="xs" onClick={onAsk} disabled={askBlocked !== null} data-testid="coach-ask-main">
+                Ask the coach…
+              </Button>
+            </Group>
+            {askBlocked && (
+              <Text size="xs" c="var(--nivra-text-3)">
+                {askBlocked}
+              </Text>
+            )}
+          </Stack>
+        </Paper>
+      )}
     </Stack>
   );
 }
@@ -188,7 +259,7 @@ function GuidanceRow({ item }: { item: GuidanceItem }) {
  * preferences that go with it, and its bounds. Start sends exactly what the preview showed: when that changed
  * meanwhile, starting is refused, and the new preview is shown.
  */
-function CoachDialog({
+function CoachAsk({
   opened,
   briefVersion,
   projectId,
@@ -310,9 +381,34 @@ function CoachDialog({
         )}
       </Stack>
     ) : null;
+  if (!opened) return null;
   return (
-    <Modal opened={opened} onClose={onClose} title={`Ask the coach about brief v${preview?.briefVersion ?? briefVersion}`} size="lg" data-testid="coach-dialog">
+    <Paper
+      withBorder
+      p="md"
+      radius="md"
+      role="region"
+      aria-label={`What the coach would read: brief v${preview?.briefVersion ?? briefVersion}`}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") onClose();
+      }}
+      data-testid="coach-dialog"
+    >
       <Stack gap="sm">
+        <Stack gap={2}>
+          <Group gap="sm" align="baseline">
+            <Text fw={600}>1. What the coach read</Text>
+            <Badge size="sm" variant="light" color="gray">
+              1 paid model request
+            </Badge>
+            <Text size="xs" c="var(--nivra-text-3)">
+              Brief v{preview?.briefVersion ?? briefVersion}
+            </Text>
+          </Group>
+          <Text size="sm" c="var(--nivra-text-2)">
+            Nothing is sent until you press Ask the coach.
+          </Text>
+        </Stack>
         {preview ? (
           <Stack gap="xs" data-testid="coach-preview" data-brief-version={preview.briefVersion}>
             <Text size="sm" c="var(--nivra-text-2)" data-testid="coach-preview-scope">
@@ -411,7 +507,7 @@ function CoachDialog({
           </Button>
         </Group>
       </Stack>
-    </Modal>
+    </Paper>
   );
 }
 
