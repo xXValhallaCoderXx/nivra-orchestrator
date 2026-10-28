@@ -117,6 +117,7 @@ export const IPC = {
   setTaskState: "tasks:state",
   renameTask: "tasks:rename",
   deleteTask: "tasks:delete",
+  getRunLimits: "tasks:run-limits",
   previewTaskRun: "tasks:preview-run",
   startTaskRun: "tasks:start-run",
   cancelTaskRun: "tasks:cancel-run",
@@ -604,6 +605,16 @@ export interface TaskView {
  * What a run of a task would send, and where, worked out from its brief and its repository's commit as they are now
  * (D39). Nothing is sent. `expected` binds a start to this preview: starting is refused when anything here changed.
  */
+/**
+ * A task run's bounds that no brief changes, as the engine enforces them (Settings › Budget and usage): the
+ * brief-independent fields of TaskRunLimits, read by main from the domain's one source (TASK_RUN_BOUNDS). The ones a
+ * brief changes, its Nebius operations and baseline checks, are in each run's preview.
+ */
+export type RunLimitsView = Pick<
+  TaskRunLimits,
+  "modelRequests" | "requestSeconds" | "outputTokensPerRequest" | "estimatedInputTokens" | "toolCalls" | "writes" | "runs" | "checkSeconds" | "sessionMinutes" | "runMinutes"
+>;
+
 export interface TaskRunPreview {
   taskId: string;
   briefVersion: number;
@@ -969,6 +980,8 @@ export interface NivraApi {
   /** Deletes a task with its brief versions and runs; refused while a run of it goes. */
   deleteTask(taskId: string): Promise<void>;
   /** What a run of the task would send, and where, with its fingerprint. Nothing is sent or stored. */
+  /** A task run's bounds that no brief changes, from the domain's one source; nothing is asked of an engine. */
+  getRunLimits(): Promise<RunLimitsView>;
   previewTaskRun(taskId: string): Promise<TaskRunPreview>;
   /** Starts the run previewed; refused when anything it would send changed since (`expected`, `snapshot`). */
   startTaskRun(taskId: string, expected: string, snapshot: string): Promise<TaskAttemptView>;

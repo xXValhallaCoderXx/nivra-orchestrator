@@ -657,7 +657,8 @@ A task run's bounds that no brief changes live in `packages/domain/src/task.ts`:
 output cap, the hand-in's cap, the rate, a request's input time, the input estimate, tool calls, writes, runs, a check's
 seconds, and the session's and the run's minutes), with `requestMsFor` (a request's time from its cap: 830 s for 8,000
 tokens, 180 s for the hand-in's 1,500) and `minutesMs`. The engine's `TASK_LIMITS` (`apps/engine/src/task/limits.ts`)
-reads them as it reads `TASK_BRIEF_LIMITS`, and copies none. The tests still pin each number on its own.
+reads them as it reads `TASK_BRIEF_LIMITS`, and copies none; so does main's `getRunLimits`, which Settings › Budget and
+usage shows. The engine is the only one that enforces them. The tests still pin each number on its own.
 
 The engine's fetch (D47): at start, before any request, the engine makes undici's agent, with 15 minutes' waits for a
 reply's headers and body, the global dispatcher that Node's own fetch reads (`apps/engine/src/providers/transport.ts`),

@@ -48,8 +48,8 @@ describe("the shell's places (NIV-56)", () => {
     );
   });
 
-  it("opens Connections for a Settings section this build has no page for", () => {
-    assert.deepEqual([shownSection("budget"), shownSection("agents"), shownSection("diagnostics")], ["connections", "connections", "diagnostics"]);
+  it("opens Connections for a Settings section this build has no page for, and Budget and usage now that it has one", () => {
+    assert.deepEqual([shownSection("agents"), shownSection("budget"), shownSection("diagnostics")], ["connections", "budget", "diagnostics"]);
   });
 
   it("finds where each kind of draft is edited from its key, and nothing for a key it doesn't know", () => {

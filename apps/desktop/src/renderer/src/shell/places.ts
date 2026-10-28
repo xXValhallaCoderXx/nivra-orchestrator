@@ -65,11 +65,12 @@ export function routeAfterSwitch(route: Route, scope: Scope): Route {
   }
 }
 
-/** Settings' sections in this build, in reading order. Budget and usage, and Agents, come later: no tab yet. */
+/** Settings' sections in this build, in reading order. Agents and council defaults come later: no tab yet. */
 export const SETTINGS_TABS: ReadonlyArray<{ section: SettingsSection; label: string }> = [
   { section: "connections", label: "Connections" },
   { section: "sharing", label: "Sharing" },
   { section: "preferences", label: "Preferences" },
+  { section: "budget", label: "Budget and usage" },
   { section: "diagnostics", label: "Advanced diagnostics" },
 ];
 

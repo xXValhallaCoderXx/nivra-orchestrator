@@ -15,6 +15,7 @@ export type Place =
   | "settings-connections"
   | "settings-sharing"
   | "settings-preferences"
+  | "settings-budget"
   | "settings-diagnostics";
 
 /** The sidebar link of each place that has one. */
@@ -25,6 +26,7 @@ export async function goTo(page: Page, place: Place): Promise<void> {
     case "settings-connections":
     case "settings-sharing":
     case "settings-preferences":
+    case "settings-budget":
     case "settings-diagnostics": {
       const section = place.slice("settings-".length);
       await page.getByTestId("nav-settings").click();

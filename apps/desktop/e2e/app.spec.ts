@@ -46,6 +46,7 @@ const EXPECTED_API = [
   "getConversation",
   "getEnvironment",
   "getMission",
+  "getRunLimits",
   "getSandboxCheck",
   "getSandboxStatus",
   "getSettings",

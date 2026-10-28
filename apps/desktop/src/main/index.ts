@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, type EnvironmentChoices } from "@nivra/domain";
+import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, requestMsFor, TASK_RUN_BOUNDS, type EnvironmentChoices } from "@nivra/domain";
 import { z } from "zod";
-import { COPY_TEXT_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
+import { COPY_TEXT_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
@@ -303,6 +303,20 @@ function start(): void {
   handle(IPC.setTaskState, z.tuple([Id, Revision, z.enum(TASK_STATES)]), (_event, id, revision, state) => host.setTaskState(id, revision, state));
   handle(IPC.renameTask, z.tuple([Id, Revision, LongText]), (_event, id, revision, title) => host.renameTask(id, revision, title));
   handle(IPC.deleteTask, z.tuple([Id]), (_event, id) => host.deleteTask(id));
+  // The bounds no brief changes (Settings › Budget and usage): the domain's own values and derivations, as the engine
+  // reads them; none is copied or worked out again here, and the engine stays the one that enforces them.
+  handle(IPC.getRunLimits, none, (): RunLimitsView => ({
+    modelRequests: TASK_RUN_BOUNDS.modelRequests,
+    requestSeconds: requestMsFor(TASK_RUN_BOUNDS.outputTokensPerRequest) / 1000,
+    outputTokensPerRequest: TASK_RUN_BOUNDS.outputTokensPerRequest,
+    estimatedInputTokens: TASK_RUN_BOUNDS.estimatedInputTokens,
+    toolCalls: TASK_RUN_BOUNDS.toolCalls,
+    writes: TASK_RUN_BOUNDS.writes,
+    runs: TASK_RUN_BOUNDS.runs,
+    checkSeconds: TASK_RUN_BOUNDS.checkSeconds,
+    sessionMinutes: TASK_RUN_BOUNDS.sessionMinutes,
+    runMinutes: TASK_RUN_BOUNDS.runMinutes,
+  }));
   handle(IPC.previewTaskRun, z.tuple([Id]), (_event, id) => host.previewTaskRun(id));
   handle(IPC.startTaskRun, z.tuple([Id, Fingerprint, Fingerprint]), (_event, id, expected, snapshot) => host.startTaskRun(id, expected, snapshot));
   handle(IPC.cancelTaskRun, z.tuple([Id, Id]), (_event, id, attemptId) => host.cancelTaskRun(id, attemptId));

@@ -1,6 +1,7 @@
 import { Badge, Box, Code, Grid, Group, ScrollArea, Stack, Text, Title, UnstyledButton } from "@mantine/core";
 import { useEffect, useRef, type ReactNode } from "react";
 import type { AppInfo, EngineView, PreferencesView, ProjectView, SettingsView, WslView } from "../../../shared/ipc";
+import { BudgetAndUsage } from "../features/budget-usage";
 import { Doctor } from "../features/doctor";
 import { EngineNotices } from "../features/engine";
 import { HelloRun, type RunRef } from "../features/hello";
@@ -31,8 +32,8 @@ const ENGINE_WORDS: Record<EngineView["state"]["status"], { label: string; color
 };
 
 /**
- * Settings (SH8): Connections, Sharing, Preferences and Advanced diagnostics, one shown at a time, each with its own
- * link (a nav of links: these are pages, not tabs of one panel). Budget and usage, and Agents and council defaults, come
+ * Settings (SH8): Connections, Sharing, Preferences, Budget and usage, and Advanced diagnostics, one shown at a time,
+ * each with its own link (a nav of links: these are pages, not tabs of one panel). Agents and council defaults come
  * later. Every section stays mounted while another is shown, and Settings stays mounted while another place is, as
  * Projects & settings did, so a run and what was typed are still there on the way back. The checks run on the engine of
  * the project in view.
@@ -121,6 +122,11 @@ export function SettingsPage({
             </SettingsCard>
           </Grid.Col>
         </Grid>
+      </Box>
+
+      {/* A slot: the working budget screen takes BudgetAndUsage's place. */}
+      <Box display={shown("budget")} data-testid="settings-budget">
+        <BudgetAndUsage />
       </Box>
 
       <Box display={shown("diagnostics")} data-testid="settings-diagnostics">
