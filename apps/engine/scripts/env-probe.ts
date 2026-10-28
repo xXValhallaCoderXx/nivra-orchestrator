@@ -412,7 +412,8 @@ log(`Revision ${plan.at.head}. Recipe ${plan.digest.slice(0, 12)}, run ${plan.re
 const outcome = await runEnvProbe({
   api,
   journal: new Journal(join(folder, "journals", "environment.jsonl")),
-  backendFor: (image) => createNebiusBackend({ credentials: () => keys, baseImage: image, journalDir: join(folder!, "journals"), limits: LIMITS(operations), transport: (given) => watched(fetchTransport(given)) }),
+  // D41's sessions leave its output folders out of their listings, as they always did (NIV-55 made it explicit).
+  backendFor: (image) => createNebiusBackend({ credentials: () => keys, baseImage: image, dependencyFolders: OUTPUT_DIRS, journalDir: join(folder!, "journals"), limits: LIMITS(operations), transport: (given) => watched(fetchTransport(given)) }),
   snapshot: plan.snapshot,
   inputs: plan.inputs.gzip.archive,
   pin: { tag: plan.config.image.tag, tagPrefix: plan.config.image.tagPrefix, registryUrl: plan.config.image.registryUrl, node: plan.config.image.node, packageManager: plan.config.packageManager, installArgs: plan.config.installArgs },

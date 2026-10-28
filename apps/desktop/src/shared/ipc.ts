@@ -4,19 +4,21 @@ import type {
   ApplyResolution,
   ApplyStatus,
   BaselineSelection,
+  BuildsAcceptance,
   ChatResult,
   CoachField,
   DoctorReport,
   EngineInfo,
-  EnvironmentPreview,
+  EnvironmentChoices,
+  EnvironmentPreviewV2,
+  EnvironmentRef,
   EnvironmentReport,
-  EnvironmentSpec,
   ExplainResult,
   HistoryRecord,
   MissionContent,
   PreferenceIntent,
   PreferenceScope,
-  PreparedEnvironment,
+  PreparedEnvironmentV2,
   ProviderCheck,
   ReviewPanel,
   ReviewReport,
@@ -28,7 +30,6 @@ import type {
   SandboxStatus,
   SnapshotPreview,
   SpecialistId,
-  TaskEnvironment,
   TaskProposal,
   TaskReport,
   TaskRunLimits,
@@ -62,8 +63,9 @@ export const IPC = {
   getSandboxCheck: "sandbox:get",
   getSandboxStatus: "sandbox:status",
   getEnvironment: "environment:get",
-  previewEnvironment: "environment:preview",
+  resolveEnvironment: "environment:resolve",
   prepareEnvironment: "environment:prepare",
+  acceptMissingBuilds: "environment:accept-builds",
   cancelPreparation: "environment:cancel",
   listPreferences: "preferences:list",
   addPreference: "preferences:add",
@@ -235,8 +237,8 @@ export interface PreparationView {
   /** Why its engine can't be read now, while that lasts. */
   unresolved: string | null;
   cancelRequested: boolean;
-  /** The packages it installs, as pnpm filters; none is the whole workspace. */
-  spec: EnvironmentSpec;
+  /** What the person chose when it was started (NIV-55); null for one an earlier version of Nivra started. */
+  choices: EnvironmentChoices | null;
   /** Its engine's report: kept when it ended, read from its engine while it goes; null until there is one. */
   report: EnvironmentReport | null;
   /** Its latest progress, oldest first. */
@@ -246,15 +248,21 @@ export interface PreparationView {
 }
 
 /**
- * A project's environment (D41): the packages chosen with its last preparation, what its last successful preparation
- * left, which its task runs start from, and its latest preparation.
+ * A project's environment (D41, NIV-55): what the person chose with its last preparation, what its last successful
+ * preparation left and whether its task runs may start from it, and its latest preparation.
  */
 export interface EnvironmentView {
   projectId: string;
-  /** The spec accepted when its last preparation was started; null before the first. */
-  spec: EnvironmentSpec | null;
-  /** What its task runs start from; null until a preparation ends prepared. */
-  prepared: PreparedEnvironment | null;
+  /** The choices made with its last preparation; null before the first, or when an earlier version of Nivra started it. */
+  choices: EnvironmentChoices | null;
+  /** What its task runs start from once it is ready; null until a preparation ends prepared. */
+  prepared: PreparedEnvironmentV2 | null;
+  /** Whether its task runs may start from it: every dependency build ran, or the person accepted those that didn't. */
+  ready: boolean;
+  /** The person's acceptance of the dependency builds that didn't run, for this environment; null when there is none. */
+  builds: BuildsAcceptance | null;
+  /** Its environment was prepared by an earlier version of Nivra, which task runs no longer start from. */
+  legacy: boolean;
   preparation: PreparationView | null;
   /** Why Prepare can't be pressed now, in plain words; null when it can. Uploads, when off, are asked for when it is pressed. */
   blocked: string | null;
@@ -611,8 +619,8 @@ export interface TaskRunPreview {
   baseline: Array<BaselineSelection & { number: number }>;
   /** The brief's frozen files, with their SHA-256 in the commit once its engine has read them (null before). */
   frozen: Array<{ path: string; sha256: string | null }>;
-  /** The prepared environment the run starts from, as its engine checked it against the commit; null without one. */
-  environment: (TaskEnvironment & { preparedAt: string }) | null;
+  /** The prepared environment the run starts from, as its engine checked it against the commit's setup files (NIV-55); null without one. */
+  environment: EnvironmentRef | null;
   /** The programs the run looks for before the model starts, and how many commands start with something it can't read. */
   programs: string[];
   unprobed: number;
@@ -858,15 +866,20 @@ export interface NivraApi {
   getSandboxCheck(projectId: string): Promise<SandboxCheckView | null>;
   /** What the project's engine has left open in Nebius from earlier sessions, and its recovery pass. */
   getSandboxStatus(projectId: string): Promise<SandboxStatus>;
-  /** The project's environment (D41): its chosen packages, what its task runs start from, and its latest preparation. */
+  /** The project's environment (D41, NIV-55): the choices made, what its task runs start from and whether it is ready, and its latest preparation. */
   getEnvironment(projectId: string): Promise<EnvironmentView>;
-  /** What preparing the project's environment with these packages would send and run, from its own engine with no network. Nothing is stored. */
-  previewEnvironment(projectId: string, spec: EnvironmentSpec): Promise<EnvironmentPreview>;
   /**
-   * Prepares the environment previewed (D41); refused when uploads are off, the key or project id is missing, on Windows
-   * itself, or when what it would send changed since the preview (`expected`).
+   * The project's own setup resolved into a recipe with these choices (NIV-55), from its own engine with no network:
+   * refused, waiting for a choice, or ready with what preparing it would send and run. Nothing is stored.
    */
-  prepareEnvironment(projectId: string, spec: EnvironmentSpec, expected: string): Promise<EnvironmentView>;
+  resolveEnvironment(projectId: string, choices: EnvironmentChoices): Promise<EnvironmentPreviewV2>;
+  /**
+   * Prepares the environment previewed (D41, NIV-55); refused when uploads are off, the key or project id is missing, on
+   * Windows itself, or when what it would send changed since the preview (`expected`).
+   */
+  prepareEnvironment(projectId: string, choices: EnvironmentChoices, expected: string): Promise<EnvironmentView>;
+  /** Accepts the environment without the dependency builds its preparation didn't run, for the verified record shown (`verified`). */
+  acceptMissingBuilds(projectId: string, verified: string): Promise<EnvironmentView>;
   /** Stops the project's preparation; what it uploaded stays with Nebius. */
   cancelPreparation(projectId: string): Promise<EnvironmentView>;
   /**

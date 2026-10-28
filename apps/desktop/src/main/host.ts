@@ -5,10 +5,11 @@ import {
   CHAT_LIMITS,
   COACH_PROFILE,
   CoachReport,
-  ENVIRONMENT_LIMITS,
-  EnvironmentSpec,
+  EnvironmentChoices,
   ErrorCode,
-  PreparedEnvironment,
+  PreparedEnvironmentV2,
+  REF_FORMAT,
+  SETUP_FORMAT,
   TASK_BRIEF_LIMITS,
   isTerminal,
   packetDigest,
@@ -22,19 +23,24 @@ import {
   type ApplyResolution,
   type ApplyView,
   type BaselineSelection,
+  type BuildsAcceptance,
   type ChatContext,
   type ChatInput,
   type CoachContext,
   type CoachField,
   type CoachInput,
   type DoctorReport,
-  type EnvironmentContext,
+  type EnvironmentContextV2,
   type EnvironmentInput,
-  type EnvironmentPreview,
+  type EnvironmentPreviewV2,
+  type EnvironmentRecipe,
+  type EnvironmentRef,
   type EnvironmentReport,
+  type EnvironmentSetup,
   type ExplainResult,
   type MissionContent,
   type PreferenceIntent,
+  type PreviousSettlement,
   type ProviderCheck,
   type ResearchContext,
   type ResearchInput,
@@ -52,7 +58,6 @@ import {
   type SpecialistId,
   type TaskBrief,
   type TaskContext,
-  type TaskEnvironment,
   type TaskInput,
   type TaskReport,
 } from "@nivra/domain";
@@ -95,6 +100,7 @@ import type {
 import type { CoachingView, CoachPreview, CoachSelection } from "../shared/coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView, StopCause } from "../shared/research.ts";
 import {
+  acceptBuilds,
   environmentOf,
   getPreparation,
   insertPreparation,
@@ -320,6 +326,12 @@ const PREPARATION_GOING = "This project's environment is being prepared. Wait fo
 const PREPARATION_CHANGED = "What preparing this environment would send has changed since you previewed it. Check the new preview, then prepare it again.";
 const PREPARED_ELSEWHERE =
   "This environment was prepared in another Nebius project than the one in Settings, and an image can be used only in its own project, so task runs will refuse it. Prepare it again.";
+/** Why a project's environment isn't one its task runs start from (NIV-55): a run never starts without it instead. */
+const PREPARED_LEGACY = "Prepared by an earlier version of Nivra. Prepare it again to use it.";
+const BUILDS_MISSING =
+  "Some dependency builds didn't run when this environment was prepared, so task runs won't start from it yet. Change the project's build policy and prepare it again, or accept the environment without them.";
+const BUILDS_CHANGED = "This environment was prepared again since you looked at its builds, so nothing was accepted. Look at them again.";
+const BUILDS_NOTHING = "Every dependency build ran when this environment was prepared, so there is nothing to accept.";
 /** What nothing sent means for a preparation. */
 const PREPARATION_NOTHING = "nothing was uploaded";
 
@@ -1573,10 +1585,11 @@ export class Host {
     const early = this.#runBlocked(task, content);
     if (early || !project) return stopped(early ?? "Choose the repository this task runs on first.");
     const packet = (taskBriefOf(content) as { brief: TaskBrief }).brief;
-    // A project with a prepared environment runs from it (D41): its engine checks it against this commit's manifests and
-    // the saved Nebius project, and refuses a preview it doesn't fit.
-    const prepared = this.#preparedFor(project.id);
-    const environment = prepared ? { ...taskEnvironmentOf(prepared), preparedAt: prepared.preparedAt } : null;
+    // A project with a prepared environment runs from it (D41, NIV-55): its engine checks it against this commit's setup
+    // files and the saved Nebius project, and refuses a preview it doesn't fit. One it can't run from stops the preview.
+    const prepared = this.#preparedFor(project);
+    if (prepared && "refused" in prepared) return stopped(prepared.refused);
+    const environment = prepared;
     const engine = await this.#started(project.targetId);
     const shown = await engine.supervisor.call("task.preview", { repoPath: project.nativePath, brief: packet, ...(environment ? { environment } : {}) }, { timeoutMs: SANDBOX_PREVIEW_MS });
     if (shown.status === "refused") return stopped(shown.message);
@@ -1598,7 +1611,7 @@ export class Host {
       keeps: { tokenFactory: TOKEN_FACTORY_KEEPS, nebius: nebiusKeeps(shown.snapshot.retention) },
       snapshot: shown.snapshot,
       frozen: shown.frozen,
-      environment: shown.environment,
+      environment: shown.environmentRef ?? null,
       programs: shown.programs,
       unprobed: shown.unprobed,
       caseFiles: shown.caseFiles,
@@ -2311,29 +2324,31 @@ export class Host {
   }
 
   /**
-   * What preparing the project's environment with `spec` would send and run (D41), worked out on the project's own
-   * engine with no network, for the person to see before anything is uploaded. It needs no consent, and nothing is stored.
+   * What preparing the project's environment with these choices would send and run (NIV-55): the project's own setup
+   * resolved into a recipe on its own engine with no network, keeping the versions its last preparation settled on while
+   * its setup files are unchanged. Refused, waiting for a choice, or ready with what preparing it sends, for the person
+   * to see before anything is uploaded. It needs no consent, and nothing is stored.
    */
-  async previewEnvironment(projectId: string, spec: EnvironmentSpec): Promise<EnvironmentPreview> {
+  async resolveEnvironment(projectId: string, choices: EnvironmentChoices): Promise<EnvironmentPreviewV2> {
     const project = this.#project(projectId);
     if (this.#removing.has(projectId)) throw new Error(PREPARE_REMOVING);
-    const chosen = environmentSpecOf(spec);
+    const chosen = environmentChoicesOf(choices);
     const engine = await this.#started(project.targetId);
-    return engine.supervisor.call("environment.preview", { repoPath: project.nativePath, spec: chosen }, { timeoutMs: SANDBOX_PREVIEW_MS });
+    return engine.supervisor.call("environment.resolve", { repoPath: project.nativePath, choices: chosen, previous: this.#previousFor(project.id) }, { timeoutMs: SANDBOX_PREVIEW_MS });
   }
 
   /**
-   * Prepares the environment the person previewed (D41). Refused, before any engine starts, on Windows itself and while
-   * uploads are off; then without both the key and the project id, or while a preparation of the project goes. The
-   * preview is worked out again on the project's engine and refused when its fingerprint isn't the one shown, so the
+   * Prepares the environment the person previewed (D41, NIV-55). Refused, before any engine starts, on Windows itself
+   * and while uploads are off; then without both the key and the project id, or while a preparation of the project goes.
+   * The recipe is resolved again on the project's engine and refused when its fingerprint isn't the one shown, so the
    * preparation sends what was shown, and its engine checks that once more before sending. Upload consent and its epoch
    * are checked again after those waits, and when the request is out: one started while uploads were being turned off
-   * stops at once. It is stored first, its spec becoming the project's, then sent in the background on the project's
+   * stops at once. It is stored first, its choices becoming the project's, then sent in the background on the project's
    * engine, and found by its request id if the answer is lost. Its environment is kept only when it ends prepared.
    */
-  async prepareEnvironment(projectId: string, spec: EnvironmentSpec, expected: string): Promise<EnvironmentView> {
+  async prepareEnvironment(projectId: string, choices: EnvironmentChoices, expected: string): Promise<EnvironmentView> {
     const project = this.#project(projectId);
-    const chosen = environmentSpecOf(spec);
+    const chosen = environmentChoicesOf(choices);
     if (this.#removing.has(projectId)) throw new Error(PREPARE_REMOVING);
     if (this.#nativeWindows(project)) throw new Error(PREPARE_NATIVE_WINDOWS);
     if (!project.sharing.cloudExecution) throw new Error(PREPARE_UPLOADS_OFF);
@@ -2345,6 +2360,22 @@ export class Host {
     } finally {
       this.#preparing.delete(projectId);
     }
+  }
+
+  /**
+   * Accepts the project's environment without the dependency builds its preparation didn't run (NIV-55), for the
+   * verified record the person looked at: one prepared again since then is refused, and nothing is accepted. The
+   * acceptance lasts until another preparation leaves an environment.
+   */
+  async acceptMissingBuilds(projectId: string, verified: string): Promise<EnvironmentView> {
+    const project = this.#project(projectId);
+    const workspace = this.#workspaceDb();
+    const prepared = environmentOf(workspace, project.id)?.prepared ?? null;
+    if (!prepared || prepared.verifiedDigest !== verified) throw new Error(BUILDS_CHANGED);
+    if (prepared.verified.builds.state === "complete") throw new Error(BUILDS_NOTHING);
+    const at = new Date().toISOString();
+    if (!acceptBuilds(workspace, project.id, { verified, missing: prepared.verified.builds.missing, acceptedAt: at }, at)) throw new Error(BUILDS_CHANGED);
+    return this.#environmentView(project);
   }
 
   /** Stops the project's preparation, or marks one whose run isn't known yet so it stops once it is; what it uploaded stays. */
@@ -2637,7 +2668,8 @@ export class Host {
     for (const [field, text] of briefTexts(packet)) refuseCredentials(field, text, known, "send");
     const briefDigest = await taskBriefDigest(packet);
     // The prepared environment the preview was bound to, if any (D41): one prepared again since then changes the fingerprint.
-    const prepared = this.#preparedFor(project.id);
+    const prepared = this.#preparedFor(project);
+    if (prepared && "refused" in prepared) throw new Error(prepared.refused);
     const current = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot, environment: prepared });
     if (current !== expected) throw new Error("What this run would send has changed since you previewed it. Preview it again, then start.");
     // Checked again after the waits: consent, and the project itself, can change while the keys are read.
@@ -2649,7 +2681,7 @@ export class Host {
     if (!insertAttempt(workspace, { id, taskId, briefId: brief.id, sessionId: this.#sessionId, targetId: project.targetId, createdAt: new Date().toISOString() })) throw new Error(TASK_RUNNING);
     this.#taskRuns.set(id, { projectId: project.id, ...epochs });
     this.#submissions.set(id, { cancel: null });
-    const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest, ...(prepared ? { environment: taskEnvironmentOf(prepared) } : {}) };
+    const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest, ...(prepared ? { environment: prepared } : {}) };
     const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: packet };
     void this.#submitAttempt(id, project, input, context).catch((error: unknown) => this.#options.log(`A task run couldn't be sent: ${errorText(error)}`));
     return this.#attemptView(getAttempt(workspace, id)!);
@@ -3391,13 +3423,30 @@ export class Host {
     return Boolean(keys.NEBIUS_API_KEY && keys.NEBIUS_PROJECT_ID);
   }
 
-  /** The project's prepared environment, which its task runs start from (D41); null without one. */
-  #preparedFor(projectId: string): PreparedEnvironment | null {
-    return this.#workspace.state === "ready" ? (environmentOf(this.#workspace.db, projectId)?.prepared ?? null) : null;
+  /**
+   * The environment the project's task runs start from, as a run carries it (NIV-55): its recipe's, once ready; null
+   * without one. One its runs can't start from, D41's or one whose missing builds aren't accepted, is a refusal instead:
+   * a run never starts from Nivra's own image while its project has an environment.
+   */
+  #preparedFor(project: ProjectRecord): EnvironmentRef | { refused: string } | null {
+    const record = this.#workspace.state === "ready" ? environmentOf(this.#workspace.db, project.id) : null;
+    if (!record || (!record.prepared && !record.legacy)) return null;
+    if (!record.prepared) return { refused: PREPARED_LEGACY };
+    if (!buildsReady(record.prepared, record.builds)) return { refused: BUILDS_MISSING };
+    return environmentRefOf(record.prepared, record.builds, project.targetId);
   }
 
-  /** A preparation's start, once its starting slot is claimed (D41): see `prepareEnvironment`. */
-  async #startPreparation(project: ProjectRecord, spec: EnvironmentSpec, expected: string): Promise<EnvironmentView> {
+  /** The versions the project's last preparation settled on (NIV-55), which the next resolution keeps while its setup files are unchanged. */
+  #previousFor(projectId: string): PreviousSettlement | null {
+    if (this.#workspace.state !== "ready") return null;
+    const record = environmentOf(this.#workspace.db, projectId);
+    if (!record?.prepared) return null;
+    const started = record.preparedBy ? getPreparation(this.#workspace.db, record.preparedBy)?.setup : null;
+    return settlementOf(record.prepared.recipe, started?.choices ?? {});
+  }
+
+  /** A preparation's start, once its starting slot is claimed (D41, NIV-55): see `prepareEnvironment`. */
+  async #startPreparation(project: ProjectRecord, choices: EnvironmentChoices, expected: string): Promise<EnvironmentView> {
     const workspace = this.#workspaceDb();
     if (!(await this.#keysSet())) throw new Error(PREPARE_KEYS_MISSING);
     const going = openPreparations(workspace, { projectId: project.id });
@@ -3410,20 +3459,22 @@ export class Host {
     const label = this.#labelOf(project.targetId);
     const engine = await this.#started(project.targetId);
     if (engine.supervisor.state.status !== "online") throw new Error(`The engine on ${label} isn't running, so nothing was sent.`);
-    const shown = await engine.supervisor.call("environment.preview", { repoPath: project.nativePath, spec }, { timeoutMs: SANDBOX_PREVIEW_MS });
+    const previous = this.#previousFor(project.id);
+    const shown = await engine.supervisor.call("environment.resolve", { repoPath: project.nativePath, choices, previous }, { timeoutMs: SANDBOX_PREVIEW_MS });
     if (shown.status === "refused") throw new Error(shown.message);
-    if (shown.fingerprint !== expected) throw new Error(PREPARATION_CHANGED);
+    if (shown.status !== "ready" || shown.fingerprint !== expected) throw new Error(PREPARATION_CHANGED);
     // Checked again after the waits: the keys can be removed, uploads turned off and the project removed meanwhile.
     if (!(await this.#keysSet())) throw new Error(PREPARE_KEYS_MISSING);
     const current = this.#options.store.data.projects.find((p) => p.id === project.id);
     if (!current || this.#removing.has(project.id)) throw new Error("The project was removed, so its environment wasn't prepared.");
     if (!this.#uploadsAllowed(project.id, epoch)) throw new Error("Uploads for this project were turned off, so the preparation wasn't started.");
     const id = randomUUID();
-    if (!insertPreparation(workspace, { id, projectId: current.id, sessionId: this.#sessionId, targetId: current.targetId, spec, preview: expected, createdAt: new Date().toISOString() })) throw new Error(PREPARATION_GOING);
+    const setup: EnvironmentSetup = { format: SETUP_FORMAT, choices, previous, recipeDigest: shown.recipeDigest };
+    if (!insertPreparation(workspace, { id, projectId: current.id, sessionId: this.#sessionId, targetId: current.targetId, setup, preview: expected, createdAt: new Date().toISOString() })) throw new Error(PREPARATION_GOING);
     this.#preparationRuns.set(id, { projectId: current.id, cloudEpoch: epoch });
     this.#preparationSubmissions.set(id, { cancel: null });
     const input: EnvironmentInput = { repoPath: current.nativePath, project: current.id, target: current.targetId, preview: expected };
-    const context: EnvironmentContext = { sharing: { cloudExecution: true }, spec };
+    const context: EnvironmentContextV2 = { sharing: { cloudExecution: true }, choices, previous };
     void this.#submitPreparation(id, current, input, context).catch((error: unknown) => this.#options.log(`A preparation couldn't be sent: ${errorText(error)}`));
     return this.#environmentView(current);
   }
@@ -3445,7 +3496,7 @@ export class Host {
    * recorded with it, so one with none was never sent. A failure known to come before writing is "not sent"; anything
    * after it leaves the preparation to be found by its request id, never sent again.
    */
-  async #submitPreparation(id: string, project: ProjectRecord, input: EnvironmentInput, context: EnvironmentContext): Promise<void> {
+  async #submitPreparation(id: string, project: ProjectRecord, input: EnvironmentInput, context: EnvironmentContextV2): Promise<void> {
     const workspace = this.#workspaceDb();
     const label = this.#labelOf(project.targetId);
     const settle = (outcome: Parameters<typeof settlePreparation>[2]) => {
@@ -3613,7 +3664,7 @@ export class Host {
       this.#options.log(`A preparation's report couldn't be read yet (${errorText(error)}); Nivra reads it again.`);
       return false;
     }
-    const end = (outcome: Parameters<typeof settlePreparation>[2], kept: EnvironmentReport | null, prepared: PreparedEnvironment | null = null) => {
+    const end = (outcome: Parameters<typeof settlePreparation>[2], kept: EnvironmentReport | null, prepared: PreparedEnvironmentV2 | null = null) => {
       if (this.#workspace.state === "ready") settlePreparation(this.#workspace.db, preparation.id, outcome, { report: kept, prepared }, new Date().toISOString());
     };
     if (report && !preparationReportMatches(report, preparation, summary.id)) {
@@ -3627,8 +3678,9 @@ export class Host {
         end({ status: "unknown", errorMessage: "its run finished, but its engine has no report stored for it" }, null);
         return true;
       }
-      // Identifiers and digests, never text from the repository: kept as the engine reported them.
-      const prepared = report.outcome === "prepared" ? PreparedEnvironment.safeParse(report.prepared) : null;
+      // Identifiers, digests and versions, never text from the repository: kept as the engine reported them. A recipe's
+      // environment only (NIV-55): one shaped as D41's isn't kept.
+      const prepared = report.outcome === "prepared" ? PreparedEnvironmentV2.safeParse(report.environment) : null;
       end({ status: "answered" }, kept, prepared?.success ? prepared.data : null);
       return true;
     }
@@ -3681,7 +3733,7 @@ export class Host {
     if (failed.length) throw new Error(refusal(failed[0]!));
   }
 
-  /** A project's environment as the window shows it (D41). */
+  /** A project's environment as the window shows it (D41, NIV-55). */
   async #environmentView(project: ProjectRecord): Promise<EnvironmentView> {
     const workspace = this.#workspaceDb();
     const record = environmentOf(workspace, project.id);
@@ -3694,7 +3746,11 @@ export class Host {
     // Its image can be used only in the Nebius project it was made in: one made in another is said to be, here.
     const savedProject = keys.NEBIUS_PROJECT_ID;
     const elsewhere = prepared !== null && savedProject !== undefined && savedProject.length > 0 && (await projectFingerprint(savedProject)) !== prepared.projectFingerprint;
-    return { projectId: project.id, spec: record?.spec ?? null, prepared, preparation: latest ? await this.#preparationView(latest) : null, blocked, notice: elsewhere ? PREPARED_ELSEWHERE : null };
+    const builds = record?.builds ?? null;
+    const ready = prepared !== null && buildsReady(prepared, builds);
+    const legacy = record?.legacy ?? false;
+    const notice = legacy ? PREPARED_LEGACY : elsewhere ? PREPARED_ELSEWHERE : prepared && !ready ? BUILDS_MISSING : null;
+    return { projectId: project.id, choices: record?.setup?.choices ?? null, prepared, ready, builds, legacy, preparation: latest ? await this.#preparationView(latest) : null, blocked, notice };
   }
 
   /**
@@ -3710,7 +3766,7 @@ export class Host {
       note: preparationNote(preparation),
       unresolved: null,
       cancelRequested: preparation.cancelRequested,
-      spec: preparation.spec,
+      choices: preparation.setup?.choices ?? null,
       report: preparation.report,
       progress: [],
       createdAt: preparation.createdAt,
@@ -4925,25 +4981,62 @@ function preparationNote(preparation: PreparationRecord): string | null {
   }
 }
 
-/** What a task run is bound to of a prepared environment (D41): its image, what binds that, and its versions. */
-function taskEnvironmentOf(prepared: PreparedEnvironment): TaskEnvironment {
-  return { image: prepared.image, inputsDigest: prepared.inputsDigest, projectFingerprint: prepared.projectFingerprint, node: prepared.node, pnpm: prepared.pnpm, arch: prepared.arch };
+/**
+ * What a task run carries of a recipe's prepared environment (NIV-55): both digests and what binds them, the image,
+ * the verified versions for display, the recipe's task variables and dependency folders, and the person's acceptance
+ * of missing builds, if any.
+ */
+export function environmentRefOf(prepared: PreparedEnvironmentV2, builds: BuildsAcceptance | null, target: string): EnvironmentRef {
+  return {
+    format: REF_FORMAT,
+    recipe: prepared.recipeDigest,
+    verified: prepared.verifiedDigest,
+    configuration: prepared.recipe.configuration.digest,
+    image: prepared.verified.images.prepared,
+    projectFingerprint: prepared.projectFingerprint,
+    target,
+    tools: prepared.verified.tools,
+    platform: { arch: prepared.verified.platform.arch, libc: prepared.verified.platform.libc },
+    env: prepared.recipe.env.task,
+    dependencyFolders: prepared.recipe.artifacts.dependency,
+    builds: builds && builds.verified === prepared.verifiedDigest ? builds : null,
+    preparedAt: prepared.preparedAt,
+  };
 }
 
-/** Whether a preparation's report is about this preparation: its request, its run, and the spec it was sent (D41). */
+/** Whether task runs may start from an environment (NIV-55): every dependency build ran, or the person accepted those that didn't, for this verified record. */
+function buildsReady(prepared: PreparedEnvironmentV2, accepted: BuildsAcceptance | null): boolean {
+  const builds = prepared.verified.builds;
+  if (builds.state === "complete") return true;
+  return accepted !== null && accepted.verified === prepared.verifiedDigest && builds.missing.every((name) => accepted.missing.includes(name));
+}
+
+/**
+ * The versions a recipe settled on (NIV-55), for the next resolution to keep while the setup files are unchanged, each
+ * marked when the person chose it, so a choice they stop making isn't kept. Node's: the only ecosystem Nivra prepares.
+ */
+function settlementOf(recipe: EnvironmentRecipe, choices: EnvironmentChoices): PreviousSettlement | null {
+  const version = (name: string) => recipe.tools.find((tool) => tool.name === name)?.version ?? null;
+  const exact = (name: string) => {
+    const found = version(name);
+    return found?.kind === "exact" ? found.version : null;
+  };
+  const runtime = exact("node");
+  const manager = recipe.install.tool;
+  const managerVersion = exact(manager) ?? (version(manager)?.kind === "bundled" ? "bundled" : null);
+  if (runtime === null || managerVersion === null) return null;
+  return { configuration: recipe.configuration.digest, runtime, manager, managerVersion, chosen: { runtime: choices.runtime !== undefined, managerVersion: choices.managerVersion !== undefined } };
+}
+
+/** Whether a preparation's report is about this preparation: its request, its run, and the recipe it was started with (NIV-55). */
 function preparationReportMatches(report: EnvironmentReport, preparation: PreparationRecord, runId: string): boolean {
-  return report.request.clientRequestId === preparation.id && report.request.runId === runId && (report.prepared === null || JSON.stringify(report.prepared.spec) === JSON.stringify(preparation.spec));
+  return report.request.clientRequestId === preparation.id && report.request.runId === runId && (report.environment == null || report.environment.recipeDigest === preparation.setup?.recipeDigest);
 }
 
-/** The packages chosen, as the domain takes them (D41), or why not, in the person's words. */
-function environmentSpecOf(spec: EnvironmentSpec): EnvironmentSpec {
-  if (spec.filters.length > ENVIRONMENT_LIMITS.filters) {
-    throw new Error(`${spec.filters.length} packages are chosen, and a preparation takes at most ${ENVIRONMENT_LIMITS.filters}. Choose fewer, or the whole workspace, then preview again.`);
-  }
-  const wrong = spec.filters.find((filter) => !EnvironmentSpec.safeParse({ filters: [filter] }).success);
-  if (wrong !== undefined) throw new Error(`"${wrong.slice(0, 200)}" isn't a pnpm workspace selector Nivra can send, such as @scope/data... Choose the packages again, then preview again.`);
-  const parsed = EnvironmentSpec.safeParse(spec);
-  if (!parsed.success) throw new Error("Those packages can't be sent as they are. Choose them again, then preview again.");
+/** The person's choices, as the domain takes them (NIV-55), or why not, in their words. */
+function environmentChoicesOf(choices: EnvironmentChoices): EnvironmentChoices {
+  const parsed = EnvironmentChoices.safeParse(choices);
+  if (!parsed.success) throw new Error("Those choices can't be sent as they are: a version is exact, such as 24.21.0, and an option is one the preview offers. Preview the environment again.");
   return parsed.data;
 }
 

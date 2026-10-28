@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
-import { canonicalJson, ENVIRONMENT_BASE, EnvironmentPreview, EnvironmentRecipe, EnvironmentRef, EnvironmentReport, EnvironmentSpec, InvalidationReason, PreparedEnvironment, projectFingerprint, RECIPE_FORMAT, recipeDigest, REF_FORMAT, VERIFIED_FORMAT, verifiedDigest, VerifiedToolRecord, type EnvironmentRecipe as Recipe } from "../src/environment.ts";
+import { canonicalJson, ENVIRONMENT_BASE, EnvironmentPreview, EnvironmentRecipe, EnvironmentRef, EnvironmentReport, EnvironmentSetup, EnvironmentSpec, InvalidationReason, PreparedEnvironment, projectFingerprint, RECIPE_FORMAT, recipeDigest, REF_FORMAT, SETUP_FORMAT, VERIFIED_FORMAT, verifiedDigest, VerifiedToolRecord, type EnvironmentRecipe as Recipe } from "../src/environment.ts";
 import { StartRunParams } from "../src/methods.ts";
 import { baselinePattern, TaskBrief, taskBriefDigest, TaskInput, TaskReport, type TaskBrief as Brief } from "../src/task.ts";
 
@@ -214,12 +214,26 @@ describe("a project-driven environment's contract (NIV-55)", () => {
       target: "wsl:Ubuntu",
       tools: record.tools,
       platform: { arch: "x86_64", libc: "glibc" },
+      env: { TOY_OFFLINE: "1" },
+      dependencyFolders: ["target"],
       builds: { verified, missing: ["native-thing"], acceptedAt: new Date().toISOString() },
       preparedAt: new Date().toISOString(),
     };
     assert.equal(EnvironmentRef.safeParse(ref).success, true);
     const { verified: _, ...unbound } = ref;
     assert.equal(EnvironmentRef.safeParse(unbound).success, false, "a run is bound to what was verified, not only to what was asked for");
+    const { env: __, ...bare } = ref;
+    assert.equal(EnvironmentRef.safeParse(bare).success, false, "a run carries the task operations' own variables");
+    assert.equal(EnvironmentRef.safeParse({ ...ref, env: { TOKEN: "a b" } }).success, false, "no free text in a task variable");
+    for (const folder of [".", "..", "a/b", ""]) assert.equal(EnvironmentRef.safeParse({ ...ref, dependencyFolders: [folder] }).success, false, `a dependency folder is a plain name, never ${JSON.stringify(folder)}`);
+  });
+
+  it("keeps what a preparation was started with as the person's choices, the versions kept and the recipe's digest, and nothing else", () => {
+    const setup = { format: SETUP_FORMAT, choices: { runtime: "24.21.0" }, previous: null, recipeDigest: "a".repeat(64) };
+    assert.equal(EnvironmentSetup.safeParse(setup).success, true);
+    assert.equal(EnvironmentSetup.safeParse({ ...setup, spec: { filters: [] } }).success, false, "nothing beyond the contract");
+    assert.equal(EnvironmentSetup.safeParse({ filters: [] }).success, false, "D41's spec is no recipe's setup");
+    assert.equal(EnvironmentSetup.safeParse({ ...setup, choices: { runtime: "24" } }).success, false, "a chosen version is exact");
   });
 
   it("never lists a release-index refresh as a reason to prepare again", () => {

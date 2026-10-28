@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
-import { hiddenReason } from "../repo/deny.ts";
+import { hiddenReason, OUTPUT_DIRS } from "../repo/deny.ts";
 import { ExecRefusedError, type ExecRequest, type ExecResult, type ExecutionSession } from "./backend.ts";
 import { runGitBytes, WorkspaceCancelled, WorkspaceRefusal, type GitTool, type PhaseDeadline, type RefusalCode } from "./git-tool.ts";
-import { OUTPUT_PRUNE } from "./nebius/session.ts";
+import { PRUNE_LINES } from "./nebius/session.ts";
 import { credentialKinds, isLfsPointer, type Counted, type Snapshot, type SnapshotFile } from "./snapshot.ts";
 import { readTar, TarRefusal, type TarLimits } from "./tar.ts";
 import { byBytes, caseKey, isGitControlFile, proposedPathProblem } from "./workspace-rules.ts";
@@ -53,32 +53,33 @@ export const RESULT_LISTING = "/nivra/result-listing";
 
 /**
  * The collect step: a fixed script, given everything as positional arguments. $1 the workspace, $2 the archive, $3
- * what runs the tools (busybox), $4 the listing. It lists every file, link and anything else under the workspace,
- * output folders left out (`OUTPUT_PRUNE`, as the prepare step's listing: dependency and build output is never
- * collected, as a snapshot never holds it), sorted by bytes; archives exactly that list; and prints the listing's line
- * count, the listing's digest and the archive's digest.
+ * what runs the tools (busybox), $4 the listing, then the folder names to leave out: the session's own (`leftOut`, a
+ * prepared environment's dependency folders), so it finds exactly what the prepare step listed. It lists every file,
+ * link and anything else under the workspace but those, sorted by bytes; archives exactly that list; and prints the
+ * listing's line count, the listing's digest and the archive's digest.
  */
 export const COLLECT_SCRIPT = [
   "set -e",
-  'bb="$3"',
-  'cd "$1"',
-  `$bb find . ${OUTPUT_PRUNE} ! -type d -print > "$4.paths"`,
-  'LC_ALL=C $bb sort "$4.paths" > "$4.sorted"',
-  ': > "$4"',
+  'ws="$1"; archive="$2"; bb="$3"; list="$4"; shift 4',
+  'cd "$ws"',
+  ...PRUNE_LINES,
+  '$bb find . "$@" ! -type d -print > "$list.paths"',
+  'LC_ALL=C $bb sort "$list.paths" > "$list.sorted"',
+  ': > "$list"',
   "while IFS= read -r p; do",
   '  if [ -L "$p" ]; then',
-  '    printf \'l %s %s\\n\' "$($bb readlink "$p")" "$p" >> "$4"',
+  '    printf \'l %s %s\\n\' "$($bb readlink "$p")" "$p" >> "$list"',
   '  elif [ -f "$p" ]; then',
-  '    printf \'f %s %s\\n\' "$($bb sha256sum < "$p" | $bb cut -d \' \' -f 1)" "$p" >> "$4"',
+  '    printf \'f %s %s\\n\' "$($bb sha256sum < "$p" | $bb cut -d \' \' -f 1)" "$p" >> "$list"',
   "  else",
-  '    printf \'o %s\\n\' "$p" >> "$4"',
+  '    printf \'o %s\\n\' "$p" >> "$list"',
   "  fi",
-  'done < "$4.sorted"',
-  'if [ -s "$4.sorted" ]; then $bb tar -c -f "$2" -T "$4.sorted"; else $bb dd if=/dev/zero of="$2" bs=512 count=2 2>/dev/null; fi',
-  '$bb rm -f "$4.paths" "$4.sorted"',
-  'echo "entries $($bb wc -l < "$4")"',
-  'echo "listing $($bb sha256sum < "$4" | $bb cut -d \' \' -f 1)"',
-  'echo "archive $($bb sha256sum < "$2" | $bb cut -d \' \' -f 1)"',
+  'done < "$list.sorted"',
+  'if [ -s "$list.sorted" ]; then $bb tar -c -f "$archive" -T "$list.sorted"; else $bb dd if=/dev/zero of="$archive" bs=512 count=2 2>/dev/null; fi',
+  '$bb rm -f "$list.paths" "$list.sorted"',
+  'echo "entries $($bb wc -l < "$list")"',
+  'echo "listing $($bb sha256sum < "$list" | $bb cut -d \' \' -f 1)"',
+  'echo "archive $($bb sha256sum < "$archive" | $bb cut -d \' \' -f 1)"',
 ].join("\n");
 
 export interface CollectLimits extends TarLimits {
@@ -91,16 +92,16 @@ export const COLLECT_LIMITS: Readonly<CollectLimits> = Object.freeze({ maxEntrie
 export type CollectedEntry = { path: string; kind: "file"; executable: boolean; bytes: Uint8Array; sha256: string } | { path: string; kind: "link"; target: string };
 
 export interface Collected {
-  /** Every file and link in the workspace, output folders left out, sorted by `./<path>`'s bytes. */
+  /** Every file and link in the workspace, the session's left-out folders left out, sorted by `./<path>`'s bytes. */
   entries: CollectedEntry[];
   archiveSha256: string;
   listingSha256: string;
 }
 
 /** The collect step, persisted, so its archive and listing can be read from the image it leaves. */
-export function collectRequest(workspace: string, options: { applets?: string; timeoutMs?: number } = {}): ExecRequest {
+export function collectRequest(workspace: string, options: { applets?: string; timeoutMs?: number; leftOut?: readonly string[] } = {}): ExecRequest {
   return {
-    argv: ["/bin/sh", "-c", COLLECT_SCRIPT, "nivra-collect", workspace, RESULT_ARCHIVE, options.applets ?? "/bin/busybox", RESULT_LISTING],
+    argv: ["/bin/sh", "-c", COLLECT_SCRIPT, "nivra-collect", workspace, RESULT_ARCHIVE, options.applets ?? "/bin/busybox", RESULT_LISTING, ...(options.leftOut ?? [])],
     cwd: workspace,
     timeoutMs: options.timeoutMs ?? 120_000,
     maxOutputBytes: 4_096,
@@ -174,7 +175,7 @@ export function checkCollected(stdout: string, archive: { bytes: Uint8Array; sha
 export async function collectResult(session: ExecutionSession, options: { workspace: string; applets?: string; timeoutMs?: number; downloadTimeoutMs?: number; limits?: Partial<CollectLimits>; signal?: AbortSignal }): Promise<{ collected: Collected; ran: ExecResult }> {
   const limits: CollectLimits = { ...COLLECT_LIMITS, ...options.limits };
   if (!session.download) throw new WorkspaceRefusal("This execution session can't hand files back, so the result can't be collected.", "collect");
-  const ran = await session.exec({ ...collectRequest(options.workspace, options), ...(options.signal ? { signal: options.signal } : {}) });
+  const ran = await session.exec({ ...collectRequest(options.workspace, { ...options, leftOut: session.leftOut ?? [] }), ...(options.signal ? { signal: options.signal } : {}) });
   if (ran.cancelled) throw new WorkspaceCancelled();
   if (ran.timedOut || ran.exitCode !== 0 || !ran.persisted) {
     const why = ran.timedOut ? "it ran out of time" : ran.exitCode !== 0 ? `it exited ${String(ran.exitCode)}` : "its files weren't kept";
@@ -201,15 +202,46 @@ export interface PatchPolicy {
 
 export const PATCH_POLICY: Readonly<PatchPolicy> = Object.freeze({ version: 1, maxChangedFiles: 500, maxFileBytes: 2 * 1024 * 1024, maxPatchBytes: 8 * 1024 * 1024 });
 
-/** New generated output, besides dependency and build output: left out of a change and listed. */
+/** Folders an install writes, never source wherever they are. */
+const DEPENDENCY_DIRS = new Set(["node_modules"]);
+/** New generated output besides dependency and build output: left out of a change and listed. */
 const GENERATED_DIRS = new Set(["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"]);
 const GENERATED_NAMES = /^(\.ds_store|thumbs\.db|.*\.pyc|.*\.pyo|.*\.tsbuildinfo)$/;
+const trackedFolders = new WeakMap<object, Set<string>>();
 
-/** Whether a new file is generated output: under a dependency or build folder, or a cache or a compiled file. */
-export function isGenerated(rel: string, full: string): boolean {
-  if (hiddenReason(rel) === "output" || hiddenReason(full) === "output") return true;
-  const segments = rel.toLowerCase().split("/");
-  return segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment)) || GENERATED_NAMES.test(segments.at(-1) ?? "");
+/** Every folder of the snapshot that holds a tracked file, at any depth. */
+function foldersOf(snapshot: Pick<Snapshot, "files">): Set<string> {
+  let folders = trackedFolders.get(snapshot);
+  if (!folders) {
+    folders = new Set();
+    for (const file of snapshot.files) {
+      const parts = file.path.split("/");
+      for (let depth = 1; depth < parts.length; depth++) folders.add(parts.slice(0, depth).join("/"));
+    }
+    trackedFolders.set(snapshot, folders);
+  }
+  return folders;
+}
+
+/**
+ * Whether a new file is generated output, left out of a change and listed (NIV-55): under a dependency folder, a cache
+ * or a compiled file, or under a folder named like build output (`OUTPUT_DIRS`) when none of those folders above it
+ * holds a tracked file. A tracked file is source wherever it is, so a committed dist/ stays editable and the new files
+ * in it are part of a change; a dist/ the commit doesn't track holds only build output.
+ */
+export function isGenerated(rel: string, full: string, snapshot: Pick<Snapshot, "files">): boolean {
+  if (full.toLowerCase().split("/").slice(0, -1).some((segment) => DEPENDENCY_DIRS.has(segment))) return true;
+  const segments = rel.split("/");
+  const lower = segments.map((segment) => segment.toLowerCase());
+  if (lower.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment)) || GENERATED_NAMES.test(lower.at(-1) ?? "")) return true;
+  const folders = foldersOf(snapshot);
+  let output = false;
+  for (let depth = 1; depth < segments.length; depth++) {
+    if (!OUTPUT_DIRS.includes(lower[depth - 1]!)) continue;
+    if (folders.has(segments.slice(0, depth).join("/"))) return false;
+    output = true;
+  }
+  return output;
 }
 
 export interface Change {
@@ -369,7 +401,7 @@ export function findChanges(snapshot: Snapshot, collected: Collected, options: {
 
   for (const entry of collected.entries) {
     const before = manifest.get(entry.path);
-    if (!before && isGenerated(entry.path, full(entry.path)) && hiddenReason(entry.path) !== "secret" && hiddenReason(full(entry.path)) !== "secret") {
+    if (!before && isGenerated(entry.path, full(entry.path), snapshot) && hiddenReason(entry.path) !== "secret" && hiddenReason(full(entry.path)) !== "secret") {
       generated.count++;
       if (generated.sample.length < 10) generated.sample.push(entry.path);
       continue;

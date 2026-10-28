@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { after, describe, it } from "node:test";
-import { isTerminal, projectFingerprint, taskBriefDigest, type RunEventsPage, type SecretName, type TaskBrief } from "@nivra/domain";
+import { isTerminal, projectFingerprint, REF_FORMAT, taskBriefDigest, type EnvironmentRef, type RunEventsPage, type SecretName, type TaskBrief } from "@nivra/domain";
 import { Host } from "../src/main/host.ts";
 import { HostStore, NO_SHARING } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
@@ -25,6 +25,7 @@ import { CHECK_IMAGE, PROBE_SCRIPT } from "../../engine/src/exec/check.ts";
 import { RealGuest } from "../../engine/test/real-guest.ts";
 import { succeed } from "../../engine/test/fake-sandboxes.ts";
 import { ENV_PREPARE_SCRIPT } from "../../engine/src/exec/nebius/sandbox.ts";
+import { INSPECT_SCRIPT, READINESS_SCRIPT } from "../../engine/src/environment/scripts.ts";
 import { readTar } from "../../engine/src/exec/tar.ts";
 import { changedSince, folderState } from "../../engine/test/workspace-fixtures.ts";
 import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
@@ -3191,16 +3192,18 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
   });
 });
 
-describe("Host: a project's environment, prepared in Nebius and bound to its task runs (D41)", () => {
+describe("Host: a project's environment, prepared in Nebius from its own recipe and bound to its task runs (D41, NIV-55)", () => {
   const KEY = "test-key-0123456789";
   const PROJECT_ID = "project-e00hostenviron01";
   const SECRETS = { NEBIUS_API_KEY: KEY, NEBIUS_PROJECT_ID: PROJECT_ID };
-  const SPEC = { filters: ["@mono/data..."] };
+  const CHOICES = {};
   const UPLOADS_OFF = "This project doesn't allow uploading to Nebius Sandboxes, where its environment is prepared. Allow uploads for it, then prepare the environment again.";
   const KEYS_MISSING = "Preparing an environment needs your Nebius key and project id, and they aren't both set. Add them in Settings, then prepare it again.";
   const NATIVE = "Preparing an environment on Windows itself isn't available yet. Add the repository from a WSL distribution, then prepare it there.";
   const CHANGED = "What preparing this environment would send has changed since you previewed it. Check the new preview, then prepare it again.";
   const GOING = "This project's environment is being prepared. Wait for it to end, or cancel it, then prepare it again.";
+  const LEGACY = "Prepared by an earlier version of Nivra. Prepare it again to use it.";
+  const BUILDS_MISSING = "Some dependency builds didn't run when this environment was prepared, so task runs won't start from it yet. Change the project's build policy and prepare it again, or accept the environment without them.";
   const lines = (home: string, file: string) => (existsSync(join(home, file)) ? readFileSync(join(home, file), "utf8").split("\n").filter(Boolean) : []);
   const calls = (home: string, method: string) => lines(home, "calls.log").filter((call) => call === method).length;
   /** A `<id> <json>` log line's JSON. */
@@ -3220,8 +3223,8 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     for (const flag of flags) writeFileSync(join(home, flag), "");
     return { ...made, home };
   }
-  const fingerprintOf = async (host: Host, projectId: string, spec = SPEC) => {
-    const preview = await host.previewEnvironment(projectId, spec);
+  const fingerprintOf = async (host: Host, projectId: string, choices = CHOICES) => {
+    const preview = await host.resolveEnvironment(projectId, choices);
     assert.equal(preview.status, "ready", JSON.stringify(preview).slice(0, 300));
     return preview.status === "ready" ? preview.fingerprint : "";
   };
@@ -3240,62 +3243,67 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
       const view = await host.environment(projectId);
       return view.preparation?.status === "running" && view.preparation.runId ? view : null;
     }, "the preparation to be going");
+  const imageOf = (view: { prepared: { verified: { images: { prepared: string } } } | null }) => view.prepared?.verified.images.prepared;
 
   it("refuses a preparation while uploads are off, without both keys, or on Windows itself, before any engine starts, and the view says why", async () => {
     const { host, ids, keys } = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }, { targetId: "local", path: "/nowhere/native" }] });
     const [linux, native] = [ids[0]!, ids[1]!];
     const fingerprint = "e".repeat(64);
-    await assert.rejects(host.prepareEnvironment(linux, SPEC, fingerprint), { message: UPLOADS_OFF });
+    await assert.rejects(host.prepareEnvironment(linux, CHOICES, fingerprint), { message: UPLOADS_OFF });
     await host.setCloudExecution(linux, true);
-    await assert.rejects(host.prepareEnvironment(linux, SPEC, fingerprint), { message: KEYS_MISSING });
+    await assert.rejects(host.prepareEnvironment(linux, CHOICES, fingerprint), { message: KEYS_MISSING });
     keys.current = { NEBIUS_API_KEY: KEY };
-    await assert.rejects(host.prepareEnvironment(linux, SPEC, fingerprint), { message: KEYS_MISSING });
+    await assert.rejects(host.prepareEnvironment(linux, CHOICES, fingerprint), { message: KEYS_MISSING });
     const waiting = await host.environment(linux);
-    assert.deepEqual([waiting.spec, waiting.prepared, waiting.preparation, waiting.blocked, waiting.notice], [null, null, null, KEYS_MISSING, null]);
+    assert.deepEqual([waiting.choices, waiting.prepared, waiting.ready, waiting.legacy, waiting.preparation, waiting.blocked, waiting.notice], [null, null, false, false, null, KEYS_MISSING, null]);
     keys.current = SECRETS;
     assert.equal((await host.environment(linux)).blocked, null);
     // A folder on Windows itself: refused whatever else holds.
     await host.setCloudExecution(native, true);
-    await assert.rejects(host.prepareEnvironment(native, SPEC, fingerprint), { message: NATIVE });
+    await assert.rejects(host.prepareEnvironment(native, CHOICES, fingerprint), { message: NATIVE });
     assert.equal((await host.environment(native)).blocked, NATIVE);
-    // Packages the domain wouldn't take are refused in words, before any engine starts.
-    await assert.rejects(host.prepareEnvironment(linux, { filters: ["@mono/data...; rm -rf /"] }, fingerprint), /^Error: "@mono\/data\.\.\.; rm -rf \/" isn't a pnpm workspace selector Nivra can send, such as @scope\/data\.\.\. Choose the packages again, then preview again\.$/);
-    await assert.rejects(host.previewEnvironment(linux, { filters: Array.from({ length: 9 }, (_, index) => `@mono/p${index}...`) }), /^Error: 9 packages are chosen, and a preparation takes at most 8\. Choose fewer, or the whole workspace, then preview again\.$/);
+    // Choices the domain wouldn't take are refused in words, before any engine starts.
+    const WRONG = /^Error: Those choices can't be sent as they are: a version is exact, such as 24\.21\.0, and an option is one the preview offers\. Preview the environment again\.$/;
+    await assert.rejects(host.prepareEnvironment(linux, { runtime: "24; rm -rf /" }, fingerprint), WRONG);
+    await assert.rejects(host.resolveEnvironment(linux, { runtime: "latest" }), WRONG);
     assert.deepEqual([stateOf(host, "wsl:Test")?.status, stateOf(host, "local")?.status], ["stopped", "stopped"]);
   });
 
-  it("prepares on the project's own engine exactly what its preview showed, refuses a start whose preview changed, and keeps the environment only when it ends prepared", async () => {
+  it("prepares on the project's own engine exactly the recipe its preview showed, refuses a start whose preview changed, keeps the environment only when it ends prepared, and keeps its versions for the next resolution", async () => {
     const { host, ids, home, keys } = await gatedHost();
     const id = ids[0]!;
     const fingerprint = await fingerprintOf(host, id);
-    assert.deepEqual(JSON.parse(lines(home, "env-previews.log")[0]!), { repoPath: "/nowhere/gated", spec: SPEC }, "the preview was worked out on the project's own engine");
-    // The commit changed after the preview, or other packages were chosen: what it would send isn't what was shown.
+    assert.deepEqual(JSON.parse(lines(home, "env-resolves.log")[0]!), { repoPath: "/nowhere/gated", choices: CHOICES, previous: null }, "the recipe was resolved on the project's own engine, with nothing kept from before");
+    // The commit changed after the preview, or another version was chosen: what it would send isn't what was shown.
     writeFileSync(join(home, "env-changed"), "");
-    await assert.rejects(host.prepareEnvironment(id, SPEC, fingerprint), { message: CHANGED });
+    await assert.rejects(host.prepareEnvironment(id, CHOICES, fingerprint), { message: CHANGED });
     rmSync(join(home, "env-changed"));
-    await assert.rejects(host.prepareEnvironment(id, { filters: [] }, fingerprint), { message: CHANGED });
-    assert.deepEqual([calls(home, "runs.start"), (await host.environment(id)).spec], [0, null], "nothing was sent, and no spec was kept");
+    await assert.rejects(host.prepareEnvironment(id, { runtime: "22.23.4" }, fingerprint), { message: CHANGED });
+    assert.deepEqual([calls(home, "runs.start"), (await host.environment(id)).choices], [0, null], "nothing was sent, and no choices were kept");
     // An install that fails keeps no environment, even one its report holds.
     writeFileSync(join(home, "environment-outcome"), "failed");
     writeFileSync(join(home, "environment-prepared-anyway"), "");
-    const started = await host.prepareEnvironment(id, SPEC, fingerprint);
-    assert.deepEqual([started.spec, started.preparation?.spec, started.blocked], [SPEC, SPEC, GOING]);
+    const started = await host.prepareEnvironment(id, CHOICES, fingerprint);
+    assert.deepEqual([started.choices, started.preparation?.choices, started.blocked], [CHOICES, CHOICES, GOING]);
     const failed = await ended(host, id);
     assert.deepEqual([failed.preparation?.status, failed.preparation?.report?.outcome, failed.preparation?.report?.stopped?.code, failed.prepared, failed.blocked], ["failed", "failed", "install", null, null]);
     assert.match(failed.preparation?.report?.install?.logTail ?? "", /ERR_PNPM_OUTDATED_LOCKFILE/);
     // A run that succeeded with a report that isn't prepared keeps none either.
     writeFileSync(join(home, "environment-run-succeeds"), "");
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, fingerprint);
     const unprepared = await ended(host, id);
     assert.deepEqual([unprepared.preparation?.status, unprepared.preparation?.report?.outcome, unprepared.prepared], ["answered", "failed", null]);
-    // Prepared: kept, bound to what was sent.
+    // Prepared: kept, bound to what was sent, and ready, every build having run.
     rmSync(join(home, "environment-outcome"));
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, fingerprint);
     const prepared = await ended(host, id);
     const runId = prepared.preparation!.runId!;
-    assert.deepEqual([prepared.preparation?.status, prepared.prepared?.image, prepared.prepared?.spec, prepared.blocked, prepared.notice], ["answered", `image-${runId.slice(0, 8)}`, SPEC, null, null]);
+    assert.deepEqual([prepared.preparation?.status, imageOf(prepared), prepared.ready, prepared.legacy, prepared.blocked, prepared.notice], ["answered", `image-${runId.slice(0, 8)}`, true, false, null, null]);
     const sent = after_(lines(home, "environments.log").at(-1)!);
-    assert.deepEqual([sent.clientRequestId, sent.input, sent.context], [prepared.preparation?.id, { repoPath: "/nowhere/gated", project: id, target: "wsl:Test", preview: fingerprint }, { sharing: { cloudExecution: true }, spec: SPEC }]);
+    assert.deepEqual([sent.clientRequestId, sent.input, sent.context], [prepared.preparation?.id, { repoPath: "/nowhere/gated", project: id, target: "wsl:Test", preview: fingerprint }, { sharing: { cloudExecution: true }, choices: CHOICES, previous: null }]);
+    // The next resolution keeps the versions this one settled on, none of them chosen.
+    await fingerprintOf(host, id);
+    assert.deepEqual(JSON.parse(lines(home, "env-resolves.log").at(-1)!).previous, { configuration: "2".repeat(64), runtime: "24.21.0", manager: "pnpm", managerVersion: "11.5.3", chosen: { runtime: false, managerVersion: false } });
     // Made in one Nebius project, it can't be used from another: the view says so.
     keys.current = { ...SECRETS, NEBIUS_PROJECT_ID: "project-e00another00001" };
     assert.match((await host.environment(id)).notice ?? "", /^This environment was prepared in another Nebius project than the one in Settings/);
@@ -3303,15 +3311,15 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     // A later preparation that fails leaves the prepared one as it was.
     writeFileSync(join(home, "environment-outcome"), "failed");
     rmSync(join(home, "environment-run-succeeds"));
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, await fingerprintOf(host, id));
     const kept = await ended(host, id);
-    assert.deepEqual([kept.preparation?.status, kept.prepared?.image, calls(home, "runs.start")], ["failed", `image-${runId.slice(0, 8)}`, 4]);
+    assert.deepEqual([kept.preparation?.status, imageOf(kept), calls(home, "runs.start")], ["failed", `image-${runId.slice(0, 8)}`, 4]);
   });
 
   it("reads a preparation back after a restart by its request and run ids, keeps what it prepared, and sends nothing again", async () => {
     const { host, ids, home, root } = await gatedHost(["accept", "release", "running"]);
     const id = ids[0]!;
-    await host.prepareEnvironment(id, SPEC, await fingerprintOf(host, id));
+    await host.prepareEnvironment(id, CHOICES, await fingerprintOf(host, id));
     const before = await going(host, id);
     assert.deepEqual([before.preparation?.report?.outcome, before.blocked, before.prepared], ["in-progress", GOING, null]);
     // Nivra quits while it goes; its engine goes with it, and its records stay.
@@ -3321,7 +3329,7 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     again.keys.current = SECRETS;
     const read = await ended(again.host, id, "the preparation to be read back");
     const runId = before.preparation!.runId!;
-    assert.deepEqual([read.spec, read.preparation?.id, read.preparation?.runId, read.preparation?.status, read.prepared?.image], [SPEC, before.preparation?.id, runId, "answered", `image-${runId.slice(0, 8)}`]);
+    assert.deepEqual([read.choices, read.preparation?.id, read.preparation?.runId, read.preparation?.status, imageOf(read)], [CHOICES, before.preparation?.id, runId, "answered", `image-${runId.slice(0, 8)}`]);
     assert.equal(calls(home, "runs.start"), 1);
   });
 
@@ -3329,20 +3337,20 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     const { host, ids, home } = await gatedHost(["accept", "release", "error-start"]);
     const id = ids[0]!;
     const fingerprint = await fingerprintOf(host, id);
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, fingerprint);
     const found = await ended(host, id, "the lost preparation to be found");
-    assert.deepEqual([found.preparation?.status, found.preparation?.runId === lines(home, "accepted.log")[0]?.split(" ")[1], found.prepared?.spec, calls(home, "runs.start")], ["answered", true, SPEC, 1]);
+    assert.deepEqual([found.preparation?.status, found.preparation?.runId === lines(home, "accepted.log")[0]?.split(" ")[1], found.ready, calls(home, "runs.start")], ["answered", true, true, 1]);
     rmSync(join(home, "accept"));
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, fingerprint);
     const notSent = await ended(host, id, "the refused preparation to settle");
-    assert.deepEqual([notSent.preparation?.status, notSent.preparation?.note, notSent.prepared?.image], ["not-sent", "The engine didn't start the preparation, so nothing was uploaded. The engine refused the run.", found.prepared?.image]);
+    assert.deepEqual([notSent.preparation?.status, notSent.preparation?.note, imageOf(notSent)], ["not-sent", "The engine didn't start the preparation, so nothing was uploaded. The engine refused the run.", imageOf(found)]);
   });
 
   it("stops a preparation under way when uploads are turned off and says so, says when it couldn't, and stops one when its project is removed", async () => {
     const { host, ids, home } = await gatedHost(["accept", "release", "running"]);
     const id = ids[0]!;
     const fingerprint = await fingerprintOf(host, id);
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, fingerprint);
     const first = (await going(host, id)).preparation!;
     await host.setCloudExecution(id, false);
     const stopped = await ended(host, id, "the preparation to stop");
@@ -3352,7 +3360,7 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     );
     // A stop its engine turns down is reported, never passed over, and a later cancel reaches it.
     await host.setCloudExecution(id, true);
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, fingerprint);
     const second = (await going(host, id)).preparation!;
     writeFileSync(join(home, "fail-cancel"), "");
     await assert.rejects(host.setCloudExecution(id, false), {
@@ -3368,7 +3376,7 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     await assert.rejects(host.cancelPreparation(id), { message: "No preparation of this project's environment is going." });
     // Removing the project stops its preparation too.
     await host.setCloudExecution(id, true);
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, fingerprint);
     const third = (await going(host, id)).preparation!;
     await host.removeProject(id);
     assert.deepEqual([host.projects().length, lines(home, "cancelled.log")], [0, [first.runId, second.runId, third.runId]]);
@@ -3378,7 +3386,7 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     const { host, ids, home } = await gatedHost(["accept"]);
     const id = ids[0]!;
     const fingerprint = await fingerprintOf(host, id);
-    await host.prepareEnvironment(id, SPEC, fingerprint);
+    await host.prepareEnvironment(id, CHOICES, fingerprint);
     await waitFor(() => calls(home, "runs.start") === 1, "the preparation's request to reach the engine");
     await host.setCloudExecution(id, false);
     writeFileSync(join(home, "release"), "");
@@ -3390,7 +3398,28 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     );
   });
 
-  it("binds a task run to the prepared environment: its preview carries it to the engine, its start sends it, and its fingerprint is v1 without one and v2 with one", async () => {
+  it("asks for the person's choice when the project's declarations conflict, and refuses what it can't prepare, in the engine's words", async () => {
+    const { host, ids, home } = await gatedHost();
+    const id = ids[0]!;
+    writeFileSync(join(home, "env-needs-choice"), "");
+    const asked = await host.resolveEnvironment(id, CHOICES);
+    assert.deepEqual([asked.status, asked.status === "needs-choice" ? asked.choices.map((choice) => [choice.id, choice.options.map((option) => option.value)]) : null], ["needs-choice", [["runtime", ["24.21.0", "22.23.4"]]]]);
+    // Choosing one makes the recipe ready, on the Node chosen.
+    const chosen = await host.resolveEnvironment(id, { runtime: "22.23.4" });
+    assert.deepEqual([chosen.status, chosen.status === "ready" ? chosen.recipe.image.tag : null], ["ready", "node:22.23.4-alpine"]);
+    // Prepared on the Node chosen: the next resolution keeps it, marked as the person's choice, so it isn't kept once they stop choosing it.
+    await host.prepareEnvironment(id, { runtime: "22.23.4" }, await fingerprintOf(host, id, { runtime: "22.23.4" }));
+    const prepared = await ended(host, id);
+    assert.deepEqual([prepared.choices, prepared.prepared?.recipe.image.tag], [{ runtime: "22.23.4" }, "node:22.23.4-alpine"]);
+    await host.resolveEnvironment(id, { runtime: "22.23.4" });
+    assert.deepEqual(JSON.parse(lines(home, "env-resolves.log").at(-1)!).previous, { configuration: "2".repeat(64), runtime: "22.23.4", manager: "pnpm", managerVersion: "11.5.3", chosen: { runtime: true, managerVersion: false } });
+    writeFileSync(join(home, "env-refused"), "");
+    const refused = await host.resolveEnvironment(id, CHOICES);
+    assert.deepEqual([refused.status, refused.status === "refused" ? refused.code : null], ["refused", "unsupported-manager"]);
+    assert.equal(calls(home, "runs.start"), 1);
+  });
+
+  it("binds a task run to the prepared environment: its preview carries it to the engine, its start sends it, and its fingerprint is v1 without one and v3 with a recipe's", async () => {
     const { host, ids, home } = await gatedHost(["accept", "release", "task-report"]);
     const id = ids[0]!;
     await host.setSharing(id, true);
@@ -3410,29 +3439,100 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
       [[{ number: 1, ...REPRODUCED }], [{ path: "check.sh", sha256: createHash("sha256").update("check.sh").digest("hex") }], 1, [REPRODUCED], ["check.sh"]],
     );
     // Prepared: the preview carries it to the engine, which checks it, and the run is bound to it.
-    await host.prepareEnvironment(id, SPEC, await fingerprintOf(host, id));
+    await host.prepareEnvironment(id, CHOICES, await fingerprintOf(host, id));
     const prepared = (await ended(host, id)).prepared!;
-    const bound = { image: prepared.image, inputsDigest: prepared.inputsDigest, projectFingerprint: prepared.projectFingerprint, node: prepared.node, pnpm: prepared.pnpm, arch: prepared.arch };
+    const ref: EnvironmentRef = {
+      format: REF_FORMAT,
+      recipe: prepared.recipeDigest,
+      verified: prepared.verifiedDigest,
+      configuration: prepared.recipe.configuration.digest,
+      image: prepared.verified.images.prepared,
+      projectFingerprint: prepared.projectFingerprint,
+      target: "wsl:Test",
+      tools: prepared.verified.tools,
+      platform: { arch: "x86_64", libc: "musl" },
+      env: prepared.recipe.env.task,
+      dependencyFolders: ["node_modules"],
+      builds: null,
+      preparedAt: prepared.preparedAt,
+    };
     const withIt = await host.previewTaskRun(task.summary.id);
-    assert.deepEqual([withIt.blocked, asked().environment, withIt.environment, withIt.expected], [null, { ...bound, preparedAt: prepared.preparedAt }, { ...bound, preparedAt: prepared.preparedAt }, taskRunFingerprint({ ...parts, environment: bound })]);
+    assert.deepEqual([withIt.blocked, asked().environment, withIt.environment, withIt.expected], [null, ref, ref, taskRunFingerprint({ ...parts, environment: ref })]);
     assert.notEqual(withIt.expected, plain.expected);
     // A preview made before it was prepared no longer starts a run; this one does, and sends it.
     await assert.rejects(host.startTaskRun(task.summary.id, plain.expected, plain.snapshotFingerprint!), /^Error: What this run would send has changed since you previewed it\. Preview it again, then start\.$/);
     const started = await host.startTaskRun(task.summary.id, withIt.expected, withIt.snapshotFingerprint!);
     await waitFor(() => lines(home, "tasks.log").length === 1, "the run to reach the engine");
     const sent = after_(lines(home, "tasks.log")[0]!);
-    assert.deepEqual([sent.clientRequestId, sent.input.environment], [started.id, bound]);
+    assert.deepEqual([sent.clientRequestId, sent.input.environment], [started.id, ref]);
   });
 
-  it("prepares through a real engine against the stand-in for Nebius: .npmrc stays here, the environment is kept, and task previews are bound to it until the manifests change", async () => {
-    // The stand-in's guest takes the uploaded inputs for the preparation and adds what an install leaves: nothing is
-    // installed on this machine (the engine's own environment test does the same).
+  it("starts no task run from an environment whose builds didn't all run until the person accepts it without them, for that environment only", async () => {
+    const { host, ids, home } = await gatedHost(["accept", "release", "environment-builds-missing"]);
+    const id = ids[0]!;
+    await host.setSharing(id, true);
+    const CASE = { name: "greet", command: ". ./greet.sh; greet Ada", expectedOutput: "Hello, Ada\n", expectedExitCode: 0 };
+    const created = await host.createTask({ title: "Greet", fields: { goal: "greet", acceptanceCriteria: ["it greets"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [CASE] }, projectId: id, planId: null });
+    const task = host.setTaskState(created.summary.id, created.revision, "ready");
+    await host.prepareEnvironment(id, CHOICES, await fingerprintOf(host, id));
+    const view = await ended(host, id);
+    assert.deepEqual([view.ready, view.notice, view.prepared?.verified.builds], [false, BUILDS_MISSING, { state: "missing", missing: ["esbuild"] }]);
+    // Not ready: the preview says why, and nothing reaches the engine; never a run from Nivra's own image instead.
+    const blocked = await host.previewTaskRun(task.summary.id);
+    assert.deepEqual([blocked.blocked, blocked.expected, lines(home, "task-previews.log").length], [BUILDS_MISSING, "", 0]);
+    // An acceptance for another environment is refused; for this one, it makes the environment ready.
+    await assert.rejects(host.acceptMissingBuilds(id, "0".repeat(64)), { message: "This environment was prepared again since you looked at its builds, so nothing was accepted. Look at them again." });
+    const accepted = await host.acceptMissingBuilds(id, view.prepared!.verifiedDigest);
+    assert.deepEqual([accepted.ready, accepted.notice, accepted.builds?.missing], [true, null, ["esbuild"]]);
+    const shown = await host.previewTaskRun(task.summary.id);
+    assert.deepEqual([shown.blocked, shown.environment?.builds?.missing], [null, ["esbuild"]]);
+    // Prepared again: the acceptance was for the one before, and ends with it.
+    await host.prepareEnvironment(id, CHOICES, await fingerprintOf(host, id));
+    const again = await ended(host, id);
+    assert.deepEqual([again.ready, again.builds], [false, null]);
+    rmSync(join(home, "environment-builds-missing"));
+    await host.prepareEnvironment(id, CHOICES, await fingerprintOf(host, id));
+    await assert.rejects(host.acceptMissingBuilds(id, (await ended(host, id)).prepared!.verifiedDigest), { message: "Every dependency build ran when this environment was prepared, so there is nothing to accept." });
+  });
+
+  it("reads an environment an earlier version of Nivra prepared as one to prepare again, and starts no task run from it", async () => {
+    // A workspace written before NIV-55: D41's spec and prepared environment, as its tables held them.
+    const root = mkdtempSync(join(tmpdir(), "nivra host legacy "));
+    dirs.push(root);
+    const id = randomUUID();
+    new HostStore(join(root, "nivra.json")).update((data) => ({ ...data, projects: [{ id, targetId: "wsl:Test", nativePath: "/nowhere/gated", label: "gated", addedAt: new Date().toISOString(), sharing: { ...NO_SHARING, modelContext: true, cloudExecution: true } }] }));
+    const opening = openWorkspace(join(root, "workspace.db"));
+    assert.equal(opening.state, "ready");
+    if (opening.state !== "ready") return;
+    const at = new Date().toISOString();
+    const preparation = randomUUID();
+    const d41 = JSON.stringify({ image: "img-d41", base: { tag: "node:22.23.4-alpine3.24", image: "img-imported", imported: true }, node: "v22.23.4", pnpm: "11.5.3", arch: "x86_64", baseline: "a".repeat(40), inputsDigest: "b".repeat(64), spec: { filters: [] }, installArgs: ["--frozen-lockfile"], projectFingerprint: "f".repeat(64), preparedAt: at });
+    opening.db.db.prepare("INSERT INTO preparations (id, project_id, session_id, target_id, status, spec_json, preview, report_json, reported_at, created_at, settled_at) VALUES (?, ?, 's', 'wsl:Test', 'answered', '{\"filters\":[]}', 'x', '{}', ?, ?, ?)").run(preparation, id, at, at, at);
+    opening.db.db.prepare("INSERT INTO environments (project_id, spec_json, prepared_json, prepared_by, updated_at) VALUES (?, '{\"filters\":[]}', ?, ?, ?)").run(id, d41, preparation, at);
+    opening.db.close();
+    const { host, keys } = hostAt(root, { wslEntry: GATED });
+    keys.current = SECRETS;
+    const view = await host.environment(id);
+    assert.deepEqual([view.legacy, view.prepared, view.ready, view.choices, view.notice], [true, null, false, null, LEGACY]);
+    const created = await host.createTask({ title: "Greet", fields: { goal: "greet", acceptanceCriteria: ["it greets"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [{ name: "greet", command: "true", expectedOutput: "", expectedExitCode: 0 }] }, projectId: id, planId: null });
+    const task = host.setTaskState(created.summary.id, created.revision, "ready");
+    assert.equal((await host.previewTaskRun(task.summary.id)).blocked, LEGACY);
+    await assert.rejects(host.startTaskRun(task.summary.id, "e".repeat(64), "c".repeat(64)), { message: LEGACY });
+  });
+
+  it("prepares through a real engine against the stand-in for Nebius: .npmrc stays here, the environment is kept, and task previews are bound to it until a setup file changes", async () => {
+    // The stand-in's guest answers the inspect, preparation and readiness steps as an image would, and adds what an
+    // install leaves: nothing is installed on this machine (the engine's own recipe test does the same).
     const guest = new RealGuest();
     const imported = mkdtempSync(join(tmpdir(), "nivra imported image "));
     dirs.push(imported);
     guest.images.set("img-imported", imported);
     const received: string[][] = [];
+    const done = (stdout: string) => ({ ...succeed({ stdout }), statuses: ["SUCCESS" as const] });
     guest.intercept = ({ args, body }, folder) => {
+      if (args[1] === INSPECT_SCRIPT) return done("node v24.21.0\nnpm 11.19.0\ncorepack 0.34.0\narch x86_64\nos Alpine Linux v3.22\nlibc musl\n");
+      // Readiness lists the workspace as the step does: the setup files the preparation was sent, and nothing else.
+      if (args[1] === READINESS_SCRIPT) return done(`node v24.21.0\nnpm 11.19.0\npnpm 11.5.3\n${["sh", "tar", "find", "sha256sum", "gzip", "sort"].map((tool) => `tool ${tool} ok`).join("\n")}\nsetting verify-deps-before-run false\nsetting pm-on-fail ignore\n${(received.at(-1) ?? []).map((path) => `file ./${path}`).join("\n")}\nlisted\n`);
       if (args[1] !== ENV_PREPARE_SCRIPT) return undefined;
       const reference = (body["files"] as Record<string, { uuid: string }>)["/nivra/env-inputs.tar.gz"]!;
       const entries = readTar(new Uint8Array(gunzipSync(guest.service.uploadsById.get(reference.uuid)!)), { maxEntries: 100, maxBytes: 1 << 22, maxEntryBytes: 1 << 22, maxPathBytes: 1024 });
@@ -3444,7 +3544,7 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
       }
       mkdirSync(join(folder, "workspace", "node_modules", "dep"), { recursive: true });
       writeFileSync(join(folder, "workspace", "node_modules", "dep", "index.js"), "module.exports = 1;\n");
-      return succeed({ stdout: "node v22.23.4\npnpm 11.5.3\narch x86_64\nDone in 7.7s using pnpm v11.5.3\ninstalled\n" });
+      return done("via corepack\nnode v24.21.0\nnpm 11.19.0\npnpm 11.5.3\narch x86_64\nDone in 7.7s using pnpm v11.5.3\ninstalled\nbuilds-begin\nAutomatically ignored builds during installation:\n  None\nbuilds-end\n");
     };
     const sandbox = await startSandboxStub({ guest });
     closing.push(sandbox);
@@ -3453,7 +3553,8 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     dirs.push(parent);
     const repo = join(parent, "mono");
     for (const [path, content] of Object.entries({
-      "package.json": json({ name: "mono", private: true, packageManager: "pnpm@11.5.3", engines: { node: ">=22" } }),
+      "package.json": json({ name: "mono", private: true, packageManager: "pnpm@11.5.3" }),
+      ".nvmrc": "24.21.0\n",
       "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
       "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
       ".npmrc": "node-linker=hoisted\n",
@@ -3469,15 +3570,12 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
     const id = ids[0]!;
     await host.setSharing(id, true);
     await host.setCloudExecution(id, true);
-    const shown = await host.previewEnvironment(id, SPEC);
+    const shown = await host.resolveEnvironment(id, CHOICES);
     assert.equal(shown.status, "ready", JSON.stringify(shown).slice(0, 300));
     if (shown.status !== "ready") return;
-    assert.deepEqual(
-      [shown.packageManager, shown.nodeRequirement, shown.packages, shown.leftOut, shown.installArgs],
-      ["pnpm@11.5.3", ">=22", [{ name: "@mono/data", path: "packages/data" }], [".npmrc"], ["--frozen-lockfile", "--filter", "@mono/data..."]],
-    );
-    await host.prepareEnvironment(id, SPEC, shown.fingerprint);
-    const done = await waitFor(
+    assert.deepEqual([shown.recipe.image.tag, shown.recipe.install.args, shown.leftOut], ["node:24.21.0-alpine", ["install", "--frozen-lockfile"], [".npmrc"]]);
+    await host.prepareEnvironment(id, CHOICES, shown.fingerprint);
+    const finished = await waitFor(
       async () => {
         const view = await host.environment(id);
         const status = view.preparation?.status;
@@ -3486,19 +3584,19 @@ describe("Host: a project's environment, prepared in Nebius and bound to its tas
       "the real preparation to end",
       90_000,
     );
-    assert.deepEqual([done.preparation?.status, done.preparation?.report?.outcome, done.preparation?.note], ["answered", "prepared", null], JSON.stringify(done.preparation?.report?.stopped));
-    assert.deepEqual(received, [["package.json", "packages/data/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]], "the preparation was sent something besides the manifests");
-    const prepared = done.prepared!;
-    assert.deepEqual([prepared.node, prepared.pnpm, prepared.inputsDigest, prepared.spec, prepared.projectFingerprint], ["v22.23.4", "11.5.3", shown.inputsDigest, SPEC, await projectFingerprint(PROJECT_ID)]);
+    assert.deepEqual([finished.preparation?.status, finished.preparation?.report?.outcome, finished.preparation?.note], ["answered", "prepared", null], JSON.stringify(finished.preparation?.report?.stopped));
+    assert.deepEqual(received, [[".nvmrc", "package.json", "packages/data/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]], "the preparation was sent something besides the setup files");
+    const prepared = finished.prepared!;
+    assert.deepEqual([prepared.recipeDigest, prepared.verified.tools.map((tool) => `${tool.name} ${tool.version}`), prepared.projectFingerprint, finished.ready], [shown.recipeDigest, ["node 24.21.0", "npm 11.19.0", "pnpm 11.5.3", "corepack 0.34.0"], await projectFingerprint(PROJECT_ID), true]);
     // A task run of this commit is previewed from the prepared environment, which its engine checked.
     const CASE = { name: "the package is private", command: "grep -c private package.json", expectedOutput: "1\n", expectedExitCode: 0 };
     const created = await host.createTask({ title: "Mono", fields: { goal: "Keep it private", acceptanceCriteria: ["It stays private"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [CASE] }, projectId: id, planId: null });
     const task = host.setTaskState(created.summary.id, created.revision, "ready");
     const bound = await host.previewTaskRun(task.summary.id);
-    assert.deepEqual([bound.blocked, bound.environment?.image, bound.environment?.preparedAt], [null, prepared.image, prepared.preparedAt]);
-    // A manifest committed since: the engine refuses the environment, in its own words, and nothing is sent.
-    writeFileSync(join(repo, "package.json"), json({ name: "mono", private: true, packageManager: "pnpm@11.5.3", engines: { node: ">=22" }, description: "changed" }));
-    spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "commit", "-qam", "change a manifest"], { cwd: repo });
+    assert.deepEqual([bound.blocked, bound.environment?.image, bound.environment?.verified, bound.environment?.preparedAt], [null, prepared.verified.images.prepared, prepared.verifiedDigest, prepared.preparedAt]);
+    // A setup file committed since: the engine refuses the environment, in its own words, and nothing is sent.
+    writeFileSync(join(repo, ".nvmrc"), "24.20.0\n");
+    spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "commit", "-qam", "change the Node pin"], { cwd: repo });
     const refused = await host.previewTaskRun(task.summary.id);
     assert.deepEqual([refused.environment, refused.expected], [null, ""]);
     assert.match(refused.blocked ?? "", /aren't the ones the project's environment was prepared from\. Prepare the environment again, then preview the run\.$/);

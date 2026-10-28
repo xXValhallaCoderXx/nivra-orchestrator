@@ -123,6 +123,11 @@ export interface CloseReport {
 
 export interface ExecutionSession {
   readonly capabilities: ExecutionCapabilities;
+  /**
+   * The folder names this session's listings leave out at any depth (NIV-55): a prepared environment's dependency
+   * folders, such as node_modules. Collect leaves out the same, so it finds what the prepare step listed. Unset: none.
+   */
+  readonly leftOut?: readonly string[];
   exec(request: ExecRequest): Promise<ExecResult>;
   /**
    * A file from the workspace's machine as it now stands, refused past `maxBytes`, with its sha256. `timeoutMs` is its

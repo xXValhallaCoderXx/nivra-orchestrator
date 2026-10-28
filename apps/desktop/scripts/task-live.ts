@@ -1,4 +1,5 @@
-// NIV-35's live run of a real task through the packaged Linux app (D41): a project's environment prepared in Nebius, a
+// NIV-35's live run of a real task through the packaged Linux app (D41, NIV-55): a project's environment prepared in
+// Nebius from its own recipe, a
 // real repository task worked by Nemotron through Token Factory, its checks run in Nebius Sandboxes, its change approved
 // and accepted by the person. Never part of `pnpm verify`. Run from WSL, in apps/desktop:
 //
@@ -11,7 +12,8 @@
 //   node scripts/task-live.ts --cleanup              opens the last live profile, removes its keys, checks it
 //
 // The task is the brief file's (default ~/nivra-work/she65/task-live.json, outside the repository): the repository and
-// its baseline, the environment's filters, and the brief with its cases, baseline selections and frozen files. Nothing
+// its baseline, the person's choices for its environment (none: {}), and the brief with its cases, baseline selections
+// and frozen files. Nothing
 // here names a repository. The keys are pasted into Settings by the person: this script never reads or prints them.
 // Nothing is sent before the approval is claimed, and then only by pressing Prepare and Start, once each.
 import { spawnSync } from "node:child_process";
@@ -21,10 +23,10 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { ENVIRONMENT_BASE, TASK_MODEL, TaskBrief, taskBriefDigest, type EnvironmentSpec, type PreparedEnvironment } from "@nivra/domain";
+import { EnvironmentChoices, TASK_MODEL, TaskBrief, taskBriefDigest, type PreparedEnvironmentV2 } from "@nivra/domain";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { claimApproval, claimOn, isDigest } from "../../engine/scripts/research-check/claim.ts";
-import { environmentPreviewOf, ENVIRONMENT_NETWORK, PREPARE_LIMITS } from "../../engine/src/environment/preview.ts";
+import { environmentResolutionOf } from "../../engine/src/environment/preview.ts";
 import { createLocalBackend } from "../../engine/src/exec/local.ts";
 import { RETENTION } from "../../engine/src/exec/nebius/sandbox.ts";
 import { compressSnapshot } from "../../engine/src/exec/nebius/session.ts";
@@ -55,7 +57,8 @@ const stamp = () => new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+
 export interface LiveTask {
   repository: string;
   baseline: string;
-  environment: EnvironmentSpec;
+  /** The person's choices for the project's own recipe (NIV-55): none is {}, the project's declarations as they are. */
+  environment: EnvironmentChoices;
   task: { title: string };
   brief: TaskBrief;
   /** What the person checks in the proposal before deciding, beyond what the tests can show; in the recipe. */
@@ -68,7 +71,9 @@ function readTask(path: string): LiveTask {
   if (!brief.success) throw new Error(`The brief in ${path} isn't one Nivra takes: ${brief.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
   if (!/^[0-9a-f]{40}$/.test(given.baseline)) throw new Error(`${path} names no baseline commit.`);
   if (given.review !== undefined && !(Array.isArray(given.review) && given.review.length <= 10 && given.review.every((point) => typeof point === "string" && point.length > 0 && point.length <= 600))) throw new Error(`${path}'s review is a list of at most 10 points, each a line of text.`);
-  return { ...given, brief: brief.data };
+  const choices = EnvironmentChoices.safeParse(given.environment ?? {});
+  if (!choices.success) throw new Error(`${path}'s environment is the person's choices for the project's own recipe, such as {} or { "runtime": "24.21.0" }; packages chosen as D41's filters are no longer taken.`);
+  return { ...given, environment: choices.data, brief: brief.data };
 }
 
 /** The checkout at its baseline, clean, outside this repository. */
@@ -147,7 +152,11 @@ async function bound(task: LiveTask) {
   const local = await createLocalBackend({ baseEnv: process.env }).open({ workspace: task.repository });
   try {
     const snapshot = await takeSnapshot({ folder: task.repository, session: local, git, baseline: task.baseline });
-    const environment = environmentPreviewOf(snapshot, task.environment);
+    // As the app's engine resolves it for a project with no environment yet: the choices, and nothing kept from before.
+    const environment = await environmentResolutionOf(snapshot, task.environment, null);
+    if (environment.status === "refused") throw new Error(`The project's environment can't be prepared (${environment.code}): ${environment.message}`);
+    if (environment.status === "needs-choice") throw new Error(`The project's environment needs a choice in the task's file: ${environment.choices.map((choice) => choice.message).join(" ")}`);
+    const { recipe } = environment;
     const frozen = (task.brief.frozen ?? []).map((path) => {
       const file = snapshot.files.find((entry) => entry.path === path);
       if (!file) throw new Error(`The brief freezes ${path}, which the baseline doesn't hold.`);
@@ -155,7 +164,21 @@ async function bound(task: LiveTask) {
     });
     return {
       snapshot: { fingerprint: snapshot.fingerprint, files: snapshot.files.length, sentBytes: compressSnapshot(snapshot.archive.archive).byteLength, leftOut: snapshot.leftOut.secret.sample },
-      environment: { fingerprint: environment.fingerprint, inputsDigest: environment.inputsDigest, inputs: environment.inputs.length, sentBytes: environment.sentBytes, installArgs: environment.installArgs, packageManager: environment.packageManager, leftOut: environment.leftOut },
+      environment: {
+        fingerprint: environment.fingerprint,
+        recipeDigest: environment.recipeDigest,
+        configuration: recipe.configuration.digest,
+        files: recipe.configuration.files.length,
+        sentBytes: environment.sentBytes,
+        image: recipe.image.tag,
+        bootstrap: recipe.bootstrap.map((step) => `${step.tool} ${step.version} (${step.via})`),
+        install: [recipe.install.tool, ...recipe.install.args].join(" "),
+        options: recipe.install.options,
+        builds: recipe.builds.runs,
+        hosts: recipe.network.hosts,
+        leftOut: environment.leftOut,
+        limits: recipe.limits,
+      },
       frozen,
     };
   } finally {
@@ -168,13 +191,13 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
   const shown = await bound(task);
   const { brief } = task;
   return {
-    kind: "nivra.task-live.v1",
+    kind: "nivra.task-live.v2",
     run,
     route: "the frozen Linux build, unpacked, with a profile and an engine home of its own",
     revision: frozen.revision,
     build: { version: frozen.version, nivraSha256: frozen.nivraSha256, appAsarSha256: frozen.appAsarSha256, runtimeContentHash: frozen.runtimeContentHash, runtimeSha256: frozen.runtimeSha256, treeSha256: frozen.treeSha256, treeFiles: frozen.treeFiles, debSha256: frozen.debSha256 },
     repository: { path: task.repository, baseline: task.baseline, ...shown.snapshot },
-    environment: { spec: task.environment, base: ENVIRONMENT_BASE, ...shown.environment, network: ENVIRONMENT_NETWORK, limits: { importSeconds: PREPARE_LIMITS.importSeconds, prepareSeconds: PREPARE_LIMITS.prepareSeconds } },
+    environment: { choices: task.environment, ...shown.environment },
     task: { title: task.task.title, briefDigest: await taskBriefDigest(brief), cases: brief.acceptanceCases.map((given) => given.name), checks: brief.checks, baseline: (brief.baseline ?? []).map((given) => given.name), frozen: shown.frozen },
     limits: runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0),
     model: {
@@ -184,13 +207,13 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
     steps: [
       "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
       "the script adds the repository as a project, and allows its model sharing and its uploads, each through its own dialog",
-      "the script previews the environment and checks its fingerprint is the one above, claims the approval, and presses Prepare once",
+      "the script previews the environment, the project's own recipe, and checks its fingerprint is the one above, claims the approval, and presses Prepare once; the environment must end prepared with every dependency build run, or nothing more is started under this approval",
       "once it is prepared, the script creates the task with the brief above, marks it ready, and previews the run. It checks the preview is bound to this brief's digest, this commit's snapshot and the environment just prepared (the fingerprint Start sends, which the app checks again), shows the frozen files above with their hashes, and names the model above in the app's own words, then presses Start once",
       "Nate reads the proposal and its checks, with the review points below, and decides: Approve and then Accept, Reject, or a revision (which this approval doesn't run)",
       "on Nate's go-ahead, the script removes the keys through Settings' own calls and checks they are gone, closes the app, and checks that ~/.nivra and ~/.nivra-dev are unchanged",
     ],
     requests: [
-      `Nebius: the image listing; an import of ${ENVIRONMENT_BASE.tag} if the project has none; one upload of the environment's inputs (${shown.environment.sentBytes} bytes); one preparation with networking on`,
+      `Nebius: the image listing; an import of ${shown.environment.image} if the project has none; one inspect of it with networking off; one upload of the setup files (${shown.environment.sentBytes} bytes); one preparation with networking on; one readiness check with networking off`,
       `Nebius: one upload of the commit (${shown.snapshot.sentBytes} bytes compressed); at most ${runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0).operations} operations with networking off, and cleanup's cancels`,
       "Token Factory: one model listing; at most the run's model requests, each with the brief, the files the worker reads, the lines its searches find and the output of what it runs",
     ],
@@ -218,14 +241,14 @@ function recipeText(recipe: Awaited<ReturnType<typeof recipeOf>>, digest: string
     `Revision ${recipe.revision}; Nivra ${recipe.build.version}: nivra ${recipe.build.nivraSha256}, app.asar ${recipe.build.appAsarSha256}, runtime ${recipe.build.runtimeContentHash} (files ${recipe.build.runtimeSha256}), every file of the build ${recipe.build.treeSha256} (${recipe.build.treeFiles}), deb ${recipe.build.debSha256}`,
     `Route: ${recipe.route}`,
     `Repository: ${recipe.repository.path} at ${recipe.repository.baseline}; ${recipe.repository.files} files, ${recipe.repository.sentBytes} bytes compressed; left out: ${recipe.repository.leftOut.join(", ") || "none"}; snapshot ${recipe.repository.fingerprint}`,
-    `Environment: ${recipe.environment.base.tag}, ${recipe.environment.packageManager}, pnpm install ${recipe.environment.installArgs.join(" ")}; ${recipe.environment.inputs} inputs, ${recipe.environment.sentBytes} bytes; preview ${recipe.environment.fingerprint}`,
-    `  ${recipe.environment.network}`,
+    `Environment: the project's own recipe ${recipe.environment.recipeDigest}, with ${JSON.stringify(recipe.environment.choices)}: ${recipe.environment.image}; ${recipe.environment.bootstrap.join(", ") || "nothing to bootstrap"}; ${recipe.environment.install}${Object.keys(recipe.environment.options).length ? ` with ${JSON.stringify(recipe.environment.options)}` : ""}; builds: ${recipe.environment.builds}; ${recipe.environment.files} setup files (${recipe.environment.configuration}), ${recipe.environment.sentBytes} bytes; never sent: ${recipe.environment.leftOut.join(", ") || "nothing"}; preview ${recipe.environment.fingerprint}`,
+    `  Networking on for the preparation only, to ${recipe.environment.hosts.join(", ")}; every check and task run offline.`,
     `Task "${recipe.task.title}", brief ${recipe.task.briefDigest}:`,
     ...recipe.task.cases.map((name, index) => `  case ${index + 1}: ${name}`),
     ...recipe.task.checks.map((check, index) => `  check ${index + 1}: ${check}`),
     ...recipe.task.baseline.map((name, index) => `  baseline ${index + 1}: ${name}`),
     ...recipe.task.frozen.map((file) => `  frozen: ${file.sha256}  ${file.path}`),
-    `Limits: ${JSON.stringify(recipe.limits)}; preparation ${recipe.environment.limits.importSeconds} s to import, ${recipe.environment.limits.prepareSeconds} s to install`,
+    `Limits: ${JSON.stringify(recipe.limits)}; preparation ${recipe.environment.limits.importSeconds} s to import, ${recipe.environment.limits.prepareSeconds} s to install, ${recipe.environment.limits.probeSeconds} s for each check before and after`,
     `Model: ${recipe.model.required} only. ${recipe.model.rule}`,
     "Steps:",
     ...recipe.steps.map((step) => `  - ${step}`),
@@ -284,13 +307,13 @@ async function removeKeys(page: Page): Promise<void> {
 const fieldsOf = (task: LiveTask): BriefFields => ({ ...task.brief, assumptions: [] });
 
 /** Why the run the window would start isn't the recipe's (`previewProblems`), read from the app as it stands. */
-async function runPreviewProblems(page: Page, recipe: Awaited<ReturnType<typeof recipeOf>>, ids: { taskId: string; projectId: string }, prepared: PreparedEnvironment | null, shownExpected: string): Promise<string[]> {
+async function runPreviewProblems(page: Page, recipe: Awaited<ReturnType<typeof recipeOf>>, ids: { taskId: string; projectId: string }, prepared: PreparedEnvironmentV2 | null, shownExpected: string): Promise<string[]> {
   const view = await taskOf(page, ids.taskId);
   const project = (await call<ProjectView[]>(page, "window.nivra.listProjects()")).find((one) => one.id === ids.projectId);
   if (!project) return ["the project isn't in the app"];
   const structured = await call<TaskRunPreview>(page, `window.nivra.previewTaskRun(${JSON.stringify(ids.taskId)})`);
   return previewProblems({
-    approved: { baseline: recipe.repository.baseline, snapshotFingerprint: recipe.repository.fingerprint, briefDigest: recipe.task.briefDigest, frozen: recipe.task.frozen, inputsDigest: recipe.environment.inputsDigest },
+    approved: { baseline: recipe.repository.baseline, snapshotFingerprint: recipe.repository.fingerprint, briefDigest: recipe.task.briefDigest, frozen: recipe.task.frozen, configuration: recipe.environment.configuration },
     ids: { taskId: ids.taskId, briefId: view.brief.id, briefVersion: view.brief.version, projectId: project.id, targetId: project.targetId },
     prepared,
     shownExpected,
@@ -315,7 +338,7 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
     const projectId = await addProject(app, page, task.repository);
     const shown = await previewEnvironment(page, projectId, task.environment);
     if (shown.fingerprint !== recipe.environment.fingerprint) throw new Error(`The environment's preview is ${shown.fingerprint}, not the recipe's ${recipe.environment.fingerprint}.`);
-    log(`Environment preview: ${shown.inputs.length} inputs, ${shown.sentBytes} bytes, pnpm install ${shown.installArgs.join(" ")}; the recipe's fingerprint.`);
+    log(`Environment preview: ${shown.recipe.configuration.files.length} setup files, ${shown.sentBytes} bytes, ${[shown.recipe.install.tool, ...shown.recipe.install.args].join(" ")} on ${shown.recipe.image.tag}; the recipe's fingerprint.`);
     await shot(page, folder, "1-environment-preview.png", log);
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
@@ -374,7 +397,12 @@ async function live(frozen: Frozen, task: LiveTask, approved: string): Promise<n
       log(`The preparation ended ${environment.preparation?.status ?? "unknown"}: ${environment.preparation?.report?.stopped?.message ?? environment.preparation?.note ?? ""}. No task run is started under this approval.`);
       return finish(1);
     }
-    log(`Prepared: Node ${environment.prepared.node}, pnpm ${environment.prepared.pnpm}, ${environment.prepared.arch}, image ${environment.prepared.image}.`);
+    if (!environment.ready) {
+      const builds = environment.prepared.verified.builds;
+      log(`The environment was prepared, but ${builds.state === "missing" ? `these dependency builds didn't run: ${builds.missing.join(", ")}` : "Nivra couldn't tell which dependency builds ran"}. Accepting it without them isn't part of this approval, so no task run is started under it.`);
+      return finish(1);
+    }
+    log(`Prepared: ${environment.prepared.verified.tools.map((tool) => `${tool.name} ${tool.version}`).join(", ")}, ${environment.prepared.verified.platform.release}, image ${environment.prepared.verified.images.prepared}; builds ${environment.prepared.verified.builds.state}.`);
     await shot(page, folder, "1-environment-prepared.png", log);
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);

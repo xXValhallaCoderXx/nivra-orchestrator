@@ -545,8 +545,8 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e environment.spec.ts
   engine writes `<file>.held` when it holds.
 
 Project-driven environments (NIV-55, NIV-58), the first part: a recipe contract that names no runtime or package
-manager, and Node's resolver, which reads a project's own declarations into it. Nothing is wired into the engine's
-methods yet, so this part is exercised by its tests alone:
+manager, and Node's resolver, which reads a project's own declarations into it. The second part, below, wires them
+into the engine, the host and the window; this part's own tests are:
 
 ```bash
 cd apps/engine && node --test test/environment-node.test.ts test/environment-releases.test.ts test/environment-inputs.test.ts
@@ -562,14 +562,47 @@ cd apps/engine && node scripts/environment-releases.ts --write   # write it: rev
 - **The resolver** (`apps/engine/src/environment/node.ts`, with its file readers in `node-files.ts`) honours exact pins,
   resolves ranges to an exact release, takes a labelled default when nothing is declared, and puts conflicting or
   unreadable declarations to the person as choices. It refuses, naming the file, the layouts that need the project's
-  sources to install, until preparing from the sources is built.
+  sources to install, until preparing from the sources is built. It reads workspace patterns with `*`, `**`, `?` and
+  brace lists, and lockfile entries in either YAML style; a pattern or an entry it can't read is refused, never passed
+  over. A chosen version is checked against the project's Node and lockfile as a pin is, and each pnpm build setting
+  counts only from the pnpm version that reads it, where it reads it (`BUILD_SETTINGS`, from pnpm's changelog).
 - **The release index** (`releases.ts`, with generated rows in `release-data.ts`) is the Node, npm and pnpm releases known
   when this Nivra was built, from nodejs.org and the npm registry, with each source's SHA-256 and the time it was
   fetched. The engine never fetches it: ranges resolve only within it, and a pin newer than it is checked when
   preparing. Refreshing it doesn't change an unchanged project's recipe: given the exact versions its last preparation
-  settled on, the resolver keeps them while the project's setup configuration is the same. (The host passes them in
-  from the next part.)
+  settled on, the resolver keeps them while the project's setup configuration is the same. (The host passes them in.)
 - **Tests** use a small fixed index of their own, so each answer is known whatever the shipped index holds.
+
+Project-driven environments, the second part (NIV-55, NIV-59, D48): the engine resolves a project's recipe
+(`environment.resolve`) and prepares it in Nebius, and the host, the store and the window use it; a task run starts
+only from a ready environment, and carries an `EnvironmentRef`. The engine's half runs against the stand-in for Nebius
+Sandboxes, whose guest answers the inspect, preparation and readiness steps as an image would: nothing is installed on
+this machine.
+
+```bash
+cd apps/engine && node --test test/environment-recipe-engine.test.ts test/environment-prepare.test.ts test/task-recipe-engine.test.ts test/task-environment.test.ts
+cd apps/engine && node --test test/snapshot.test.ts test/patch.test.ts test/prepared-image.test.ts test/nebius-session.test.ts
+cd apps/desktop && node --test test/environment-store.test.ts test/tasks.test.ts test/task-started.test.ts test/task-live-checks.test.ts
+cd apps/desktop && node --test --test-name-pattern="from its own recipe" test/host.test.ts
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e environment.spec.ts task-journey.spec.ts
+```
+
+- **The preparation** (`environment/prepare.ts`, its scripts and readers in `environment/scripts.ts`): the base image;
+  an inspect step with networking off before any upload; the setup files uploaded; the bootstrap and the frozen
+  install with networking on; pnpm's report of the builds it didn't run (10.1 and later); and readiness with networking
+  off, which also lists what the workspace holds besides the install's folders. A stop's words are chosen by its code,
+  and its detail says what was found, in Nivra's words.
+- **Task runs**: sessions start from the environment's image with its task variables, and leave out only its
+  dependency folders (`ExecutionSession.leftOut`, which collect reads too). The worker can't write a setup file, and
+  the setup files are digested again after collect. A tracked file is source wherever it is: only the secrets deny
+  list and the engine home leave one out of a snapshot.
+- **The host and the store**: `resolveEnvironment`, `prepareEnvironment(choices)` and `acceptMissingBuilds`. The store
+  reads its rows with the domain's schemas, D41's as legacy, and workspace migration 8 keeps an acceptance of missing
+  builds bound to one verified record. The run preview's fingerprint v3 binds a run to the environment.
+- **Live runs**: `task-live.ts`'s recipe kind v2 takes the person's choices for the project's own recipe in the task
+  file's `environment` (`{}` for none), and binds the resolution's fingerprint, the recipe's digest and the setup
+  files' digest. Each live run needs Nate's approval of its own recipe and digest. Run the window's e2e through
+  `pnpm --filter @nivra/desktop test:e2e`: the development engine runs on the Node that started pnpm's script.
 
 A task's journey and its recovery, through the real host and engine (NIV-35): the built app with the production engine
 against the stand-ins, through the unpackaged-only switches. A packaged app ignores the switches, so these skip there.

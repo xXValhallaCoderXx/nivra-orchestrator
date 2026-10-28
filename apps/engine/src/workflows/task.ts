@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { projectFingerprint, TASK_MODEL, TaskOutcome, taskBriefDigest, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskEnvironment, type TaskReport, type TaskStopCode } from "@nivra/domain";
+import { isEnvironmentRef, projectFingerprint, TASK_MODEL, TaskOutcome, taskBriefDigest, type EnvironmentRef, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskEnvironment, type TaskReport, type TaskStopCode } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import { Refusal } from "../diagnostics.ts";
@@ -36,7 +36,7 @@ export interface TaskDeps {
    * A Nebius backend for one run, its operations limited to `operations`, its journals in the engine's home; its
    * sessions start from the prepared environment's image when the run is bound to one (D41).
    */
-  sandbox: (operations: number, environment: TaskEnvironment | null) => ExecutionBackend;
+  sandbox: (operations: number, environment: TaskEnvironment | EnvironmentRef | null) => ExecutionBackend;
   /** The engine's own `Local` backend, for its git on the checkout. */
   local: ExecutionBackend;
   findGit: () => string | null;
@@ -112,8 +112,13 @@ export function createTaskWorkflow(deps: TaskDeps) {
     const credentials = deps.credentials();
     if (!credentials) throw refuse("credentials");
     if ((await taskBriefDigest(context.brief)) !== task.briefDigest) throw refuse("brief");
-    // An environment's image is reachable only from the Nebius project it was prepared in (D41).
+    // An environment's image is reachable only from the Nebius project it was prepared in (D41), and a recipe's
+    // environment serves only the target it was prepared on (NIV-55).
     if (task.environment && (await projectFingerprint(credentials.project)) !== task.environment.projectFingerprint) throw refuse("environment");
+    if (task.environment && isEnvironmentRef(task.environment) && task.environment.target !== task.target) throw refuse("environment");
+    // Its task variables go to Nebius with every command: none may carry a value the vault keeps.
+    const known = deps.knownValues().filter((value) => value.length > 0);
+    if (task.environment && isEnvironmentRef(task.environment) && Object.values(task.environment.env).some((value) => known.some((secret) => value.includes(secret)))) throw refuse("environment");
     return { task, context, credentials };
   };
 
@@ -223,7 +228,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
           const git = deps.findGit();
           if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
           const { brief } = context;
-          const environment: TaskEnvironment | null = task.environment ?? null;
+          const environment: TaskEnvironment | EnvironmentRef | null = task.environment ?? null;
           const local = await deps.local.open({ workspace: task.repoPath });
           let outcome;
           try {

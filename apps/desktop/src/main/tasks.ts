@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AcceptanceCase, TASK_BRIEF_LIMITS, TASK_MODEL, TaskBrief, type ChatResult, type TaskEnvironment } from "@nivra/domain";
+import { AcceptanceCase, TASK_BRIEF_LIMITS, TASK_MODEL, TaskBrief, type ChatResult, type EnvironmentRef, type TaskEnvironment } from "@nivra/domain";
 import { z } from "zod";
 import { TASK_LIMITS, type BriefContent, type BriefFields, type BriefSource, type TaskState } from "../shared/ipc.ts";
 import { planText } from "../shared/plans.ts";
@@ -187,8 +187,9 @@ export function taskBriefOf(content: BriefContent): { brief: TaskBrief } | { blo
 /**
  * A run preview's fingerprint (D39): SHA-256 of a fixed-order, versioned JSON array of what the run would be bound to.
  * The host works it out from its records as they are and the snapshot's own fingerprint, which the engine checks again.
- * A run from a prepared environment is bound to it too, by its image and what binds that (D41): the v2 form. A run with
- * none keeps the v1 form exactly.
+ * A run from a prepared environment is bound to it too, by its image and what binds that (D41): the v2 form. A run from
+ * a recipe's environment is bound by both its digests, its image, its setup files' digest, the Nebius project and the
+ * target (NIV-55): the v3 form. A run with none keeps the v1 form exactly, and one from D41's the v2 form.
  */
 export function taskRunFingerprint(parts: {
   taskId: string;
@@ -199,11 +200,15 @@ export function taskRunFingerprint(parts: {
   targetId: string;
   sharing: { modelContext: boolean; cloudExecution: boolean };
   snapshot: string;
-  environment?: Pick<TaskEnvironment, "image" | "inputsDigest" | "projectFingerprint"> | null;
+  environment?: Pick<TaskEnvironment, "image" | "inputsDigest" | "projectFingerprint"> | EnvironmentRef | null;
 }): string {
   const bound = [parts.taskId, parts.briefId, parts.briefVersion, parts.briefDigest, parts.projectId, parts.targetId, parts.sharing.modelContext, parts.sharing.cloudExecution, parts.snapshot];
   const { environment } = parts;
-  const canonical = environment ? ["nivra.task-run-preview.v2", ...bound, environment.image, environment.inputsDigest, environment.projectFingerprint] : ["nivra.task-run-preview.v1", ...bound];
+  const canonical = !environment
+    ? ["nivra.task-run-preview.v1", ...bound]
+    : "format" in environment
+      ? ["nivra.task-run-preview.v3", ...bound, environment.recipe, environment.verified, environment.image, environment.configuration, environment.projectFingerprint, environment.target]
+      : ["nivra.task-run-preview.v2", ...bound, environment.image, environment.inputsDigest, environment.projectFingerprint];
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 

@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join, posix } from "node:path";
 import { gzipSync } from "node:zlib";
-import { OUTPUT_DIRS } from "../../repo/deny.ts";
 import { BoundaryUnavailableError, checkRequirements, ExecRefusedError, ExecUncertainError, SessionOpenError, type CloseReport, type ExecRequest, type ExecResult, type ExecutionBackend, type ExecutionCapabilities, type ExecutionSession, type SessionSnapshot, type SessionSpec, type SessionStep } from "../backend.ts";
 import { fetchTransport, SandboxApi, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, SandboxTooLargeError, sleepFor, type Transport } from "./api.ts";
 import { Journal, RETENTION, Sandbox, SandboxLateSpawnError, SandboxRefusal, type JournalEntry, type Outcome, type SandboxOptions, type StepSpec } from "./sandbox.ts";
@@ -93,12 +92,19 @@ export interface NebiusBackendOptions {
   /** The key and project id, read from the engine's memory (D8); null when they haven't been given. */
   credentials: () => NebiusCredentials | null;
   /**
-   * The image every session starts from, by its id: a public one (chosen from stage 0's list), or one prepared from
-   * it whose workspace already holds dependency or build output folders (`OUTPUT_DIRS`, such as `node_modules` at any
-   * depth). The snapshot is extracted over that workspace, never into an emptied one. The prepare step's listing leaves
-   * those folders out, as a snapshot does, so everything else there must be exactly the snapshot.
+   * The image every session starts from, by its id: a public one (chosen from stage 0's list), or a prepared
+   * environment's, whose workspace already holds what its install wrote (`dependencyFolders`). The snapshot is extracted
+   * over that workspace, never into an emptied one, so everything there but those folders must be exactly the snapshot.
    */
   baseImage: string;
+  /**
+   * The folder names a prepared environment's install wrote in the workspace, such as node_modules (NIV-55): the
+   * prepare step's listing and collect leave them out at any depth. Without an environment, nothing is left out: the
+   * base image's workspace is empty, and a snapshot holds tracked files wherever they are.
+   */
+  dependencyFolders?: readonly string[];
+  /** The prepared environment's image, when the base image is one (NIV-55): a 404 or 410 on it means it is gone. */
+  environmentImage?: string;
   /** Where each session's journal goes: one file per session, 0600, in a 0700 folder. */
   journalDir: string;
   limits?: Partial<NebiusLimits>;
@@ -116,6 +122,21 @@ export interface NebiusBackendOptions {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   wallNow?: () => Date;
 }
+
+/**
+ * The prepared environment a session starts from is gone from Nebius (NIV-55): its image answered 404 or 410 at the
+ * prepare step, after the snapshot was sent. An open that failed like any other, with its own type, so a run can say
+ * to prepare the environment again.
+ */
+export class EnvironmentMissingError extends SessionOpenError {
+  constructor(message: string, report: CloseReport) {
+    super(message, report);
+    this.name = "EnvironmentMissingError";
+  }
+}
+
+/** The prepare step's spawn refused because the environment's image is gone: what `start` turns into the open's error. */
+class EnvironmentImageGone extends ExecRefusedError {}
 
 /** The sandbox couldn't run the command: its operation failed, so nothing is known about what the command did. */
 export class SandboxOperationError extends Error {
@@ -156,12 +177,15 @@ export function compressSnapshot(archive: Uint8Array): Uint8Array {
   return compressed;
 }
 
+/** A folder name a listing may leave out: one plain name, never a path or a pattern. */
+export const LEFT_OUT_NAME = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,64}$/;
+
 /**
- * find's expression for the dependency and build output folders (`OUTPUT_DIRS`), at any depth: each one met is left
- * out with all it holds. A snapshot never holds a file under one, so in the prepare step it leaves out only what the
- * base image brings (a prepared image's `node_modules`), and the collect step never brings such a folder back.
+ * The shell lines that turn the positional arguments left after a script's own into find's expression for those
+ * folder names, at any depth: each one met is left out with all it holds. Nothing is interpolated: each name stays one
+ * argument, and with none, nothing is left out.
  */
-export const OUTPUT_PRUNE = OUTPUT_DIRS.map((name) => `-type d -name ${name} -prune -o`).join(" ");
+export const PRUNE_LINES = ['n="$#"', 'for name in "$@"; do set -- "$@" -type d -name "$name" -prune -o; done', 'shift "$n"'];
 
 /** Where the snapshot and the listing go on the sandbox's machine: outside the workspace, so neither is in it. */
 const ARCHIVE = "/nivra/snapshot.tar";
@@ -169,31 +193,33 @@ const LISTING = "/nivra/listing";
 
 /**
  * The prepare step: a fixed script, given everything as positional arguments, so nothing is interpolated into it. $1
- * the workspace, $2 the archive (compressed), $3 what runs the tools (busybox), $4 the listing. It extracts the archive
- * over what the workspace already holds, removes it, and prints the line count and digest of the workspace's listing,
- * output folders left out. Paths with a newline in them are refused before anything is sent.
+ * the workspace, $2 the archive (compressed), $3 what runs the tools (busybox), $4 the listing, then the folder names
+ * to leave out (`dependencyFolders`). It extracts the archive over what the workspace already holds, removes it, and
+ * prints the line count and digest of the workspace's listing, those folders left out. Paths with a newline in them
+ * are refused before anything is sent.
  */
 export const PREPARE_SCRIPT = [
   "set -e",
-  'bb="$3"',
-  '$bb mkdir -p "$1"',
-  '$bb tar -x -z -f "$2" -C "$1"',
-  '$bb rm -f "$2"',
-  'cd "$1"',
-  `$bb find . ${OUTPUT_PRUNE} \\( -type f -o -type l \\) -print > "$4.paths"`,
-  'LC_ALL=C $bb sort "$4.paths" > "$4.sorted"',
-  ': > "$4"',
+  'ws="$1"; archive="$2"; bb="$3"; list="$4"; shift 4',
+  '$bb mkdir -p "$ws"',
+  '$bb tar -x -z -f "$archive" -C "$ws"',
+  '$bb rm -f "$archive"',
+  'cd "$ws"',
+  ...PRUNE_LINES,
+  '$bb find . "$@" \\( -type f -o -type l \\) -print > "$list.paths"',
+  'LC_ALL=C $bb sort "$list.paths" > "$list.sorted"',
+  ': > "$list"',
   "while IFS= read -r p; do",
   '  if [ -L "$p" ]; then',
-  '    printf \'l %s %s\\n\' "$($bb readlink "$p")" "$p" >> "$4"',
+  '    printf \'l %s %s\\n\' "$($bb readlink "$p")" "$p" >> "$list"',
   "  else",
   '    if [ -x "$p" ]; then x=x; else x=-; fi',
-  '    printf \'f %s %s %s\\n\' "$x" "$($bb sha256sum < "$p" | $bb cut -d \' \' -f 1)" "$p" >> "$4"',
+  '    printf \'f %s %s %s\\n\' "$x" "$($bb sha256sum < "$p" | $bb cut -d \' \' -f 1)" "$p" >> "$list"',
   "  fi",
-  'done < "$4.sorted"',
-  '$bb rm -f "$4.paths" "$4.sorted"',
-  'echo "entries $($bb wc -l < "$4")"',
-  'echo "digest $($bb sha256sum < "$4" | $bb cut -d \' \' -f 1)"',
+  'done < "$list.sorted"',
+  '$bb rm -f "$list.paths" "$list.sorted"',
+  'echo "entries $($bb wc -l < "$list")"',
+  'echo "digest $($bb sha256sum < "$list" | $bb cut -d \' \' -f 1)"',
 ].join("\n");
 
 const sha256 = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
@@ -300,6 +326,8 @@ interface Ran {
 
 export function createNebiusBackend(options: NebiusBackendOptions): ExecutionBackend {
   const limits: NebiusLimits = { ...NEBIUS_LIMITS, ...options.limits };
+  const leftOut = options.dependencyFolders ?? [];
+  if (leftOut.length > 16 || leftOut.some((name) => !LEFT_OUT_NAME.test(name))) throw new Error("A session leaves out at most 16 folders, each by a plain name such as node_modules.");
   const backend: ExecutionBackend = {
     id: "nebius-sandbox",
     label: "Nebius Sandboxes (remote, network off)",
@@ -326,6 +354,7 @@ export function createNebiusBackend(options: NebiusBackendOptions): ExecutionBac
 
 class NebiusSession implements ExecutionSession {
   readonly capabilities = NEBIUS_CAPABILITIES;
+  readonly leftOut: readonly string[];
   readonly #options: NebiusBackendOptions;
   readonly #limits: NebiusLimits;
   readonly #credentials: NebiusCredentials;
@@ -358,6 +387,7 @@ class NebiusSession implements ExecutionSession {
 
   constructor(options: NebiusBackendOptions, limits: NebiusLimits, credentials: NebiusCredentials, spec: SessionSpec) {
     this.#options = options;
+    this.leftOut = [...(options.dependencyFolders ?? [])];
     this.#limits = limits;
     this.#credentials = credentials;
     this.#transport = (options.transport ?? ((given) => fetchTransport(given)))(credentials);
@@ -429,7 +459,7 @@ class NebiusSession implements ExecutionSession {
     const step: StepSpec = {
       label: "prepare",
       command: "/bin/sh",
-      args: ["-c", PREPARE_SCRIPT, "nivra-prepare", this.#workspace, ARCHIVE, this.#options.applets ?? "/bin/busybox", LISTING],
+      args: ["-c", PREPARE_SCRIPT, "nivra-prepare", this.#workspace, ARCHIVE, this.#options.applets ?? "/bin/busybox", LISTING, ...this.leftOut],
       image: this.#options.baseImage,
       disposable: false,
       timeoutSeconds: this.#limits.prepareTimeoutSeconds,
@@ -441,7 +471,7 @@ class NebiusSession implements ExecutionSession {
       ran = await this.#runStep(step, this.#work.signal);
     } catch (error) {
       const why = error instanceof NotStarted ? "the run was cancelled before it began." : error instanceof Error ? error.message : String(error);
-      throw await this.#failOpen(`Preparing the workspace in the sandbox failed: ${why}`);
+      throw await this.#failOpen(`Preparing the workspace in the sandbox failed: ${why}`, error instanceof EnvironmentImageGone);
     }
     const { outcome } = ran;
     const image = this.#keep(ran, true, "prepare");
@@ -452,8 +482,9 @@ class NebiusSession implements ExecutionSession {
   }
 
   /** Closes the session after a failed start, on the spec's closing signal and budget, and gives the error that carries its report. */
-  async #failOpen(message: string): Promise<SessionOpenError> {
-    return new SessionOpenError(message, await this.close(this.#openClosing));
+  async #failOpen(message: string, environmentGone = false): Promise<SessionOpenError> {
+    const report = await this.close(this.#openClosing);
+    return environmentGone ? new EnvironmentMissingError(message, report) : new SessionOpenError(message, report);
   }
 
   exec(request: ExecRequest): Promise<ExecResult> {
@@ -643,6 +674,10 @@ class NebiusSession implements ExecutionSession {
     if (error instanceof SandboxCancelledError || (error instanceof SandboxNotSentError && error.reason === "cancelled")) return new NotStarted();
     if (error instanceof SandboxNotSentError) return new ExecRefusedError(`There isn't enough time left in this run to start ${step.command}, so it wasn't sent.`);
     if (error instanceof SandboxHttpError) {
+      // A prepared environment's own image gone (NIV-55): only the prepare step starts from it.
+      if ((error.status === 404 || error.status === 410) && this.#options.environmentImage !== undefined && step.image === this.#options.environmentImage) {
+        return new EnvironmentImageGone(`The project's prepared environment is no longer in Nebius (HTTP ${error.status}), so ${step.command} wasn't started.`);
+      }
       if ((error.status === 404 || error.status === 410) && step.image !== this.#options.baseImage) {
         this.#state = { kind: "lost", why: `its image answered HTTP ${error.status}` };
         return new ExecRefusedError(`The sandbox no longer has this workspace's saved state (HTTP ${error.status}), so ${step.command} wasn't run and nothing more can run in this session. Start again from the commit.`);

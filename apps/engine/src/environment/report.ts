@@ -26,6 +26,9 @@ export const ENVIRONMENT_STOP_MESSAGES: Readonly<Record<EnvironmentStopCode, str
   uncertain: "It isn't known whether part of the preparation started in Nebius, so it was never sent again, and no environment was made. Anything still open is listed below, for you to follow up.",
   "sandbox-failed": "Nebius Sandboxes couldn't run the preparation, so no environment was made. Try again later; what Nebius keeps is listed below.",
   fault: "Something inside Nivra failed during the preparation, so no environment was made. Try again; if it keeps happening, report it with the engine log.",
+  inspect: "The base image doesn't hold what the recipe asks for, so nothing was uploaded and no environment was made. What it found is below: preview the environment again, and choose a version the image has.",
+  bootstrap: "The sandbox couldn't install the package manager the recipe pins, so no environment was made. The end of its log is below: check the version exists, then prepare the environment again.",
+  readiness: "The prepared environment didn't pass its checks with networking off, so it wasn't kept. What failed is below: prepare it again, and if it keeps happening, report it.",
 };
 
 /** A report for a preparation that stopped before anything was sent, or one still going, in the same shape. */

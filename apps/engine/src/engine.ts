@@ -6,6 +6,7 @@ import {
   CoachReport,
   combinedMask,
   EnvironmentReport,
+  isEnvironmentRef,
   projectFingerprint,
   ReviewReport,
   ErrorCode,
@@ -22,8 +23,12 @@ import {
   type EngineInfo,
   type ChatContext,
   type CoachContext,
+  type EnvironmentChoices,
+  type EnvironmentRef,
   type EnvironmentPreview,
+  type EnvironmentPreviewV2,
   type EnvironmentSpec,
+  type PreviousSettlement,
   type JsonObject,
   type ResearchContext,
   type ReviewContext,
@@ -66,8 +71,9 @@ import { useEngineTransport } from "./providers/transport.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
-import { EnvironmentRefusal, environmentInputs } from "./environment/inputs.ts";
-import { environmentPreviewOf, PREPARE_LIMITS } from "./environment/preview.ts";
+import { EnvironmentRefusal, environmentInputs, leftOutFor, setupConfiguration, trackedUnder } from "./environment/inputs.ts";
+import { isNodeSetupPath } from "./environment/node-files.ts";
+import { environmentPreviewOf, environmentResolutionOf, PREPARE_LIMITS } from "./environment/preview.ts";
 import { readEnvironmentInput } from "./environment/report.ts";
 import { TASK_LIMITS } from "./task/limits.ts";
 import { proposalView, readTaskInput, taskPreviewOf } from "./task/report.ts";
@@ -397,12 +403,18 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const sandboxTransport = (given: NebiusCredentials): Transport => fetchTransport(given, options.sandboxesUrl ?? SANDBOXES_BASE_URL);
   const sandboxBackend = () => createNebiusBackend({ credentials: sandboxCredentials, baseImage: CHECK_IMAGE.uuid, journalDir: journals, limits: sandboxLimits, transport: sandboxTransport });
   // A task run's backend (D39): its operations limited to what its brief needs, its commands to the longest it runs.
-  // Bound to a prepared environment (D41), its sessions start from that image, every command with the image's path.
-  const taskBackend = (operations: number, environment: TaskEnvironment | null) =>
+  // Bound to a prepared environment, its sessions start from that image. D41's: every command with the image's path,
+  // and its output folders left out as they always were. A recipe's (NIV-55): every command with the recipe's task
+  // variables, its dependency folders left out, and a 404 or 410 on its image read as the environment gone.
+  const taskBackend = (operations: number, environment: TaskEnvironment | EnvironmentRef | null) =>
     createNebiusBackend({
       credentials: sandboxCredentials,
       baseImage: environment?.image ?? CHECK_IMAGE.uuid,
-      ...(environment ? { env: ENV_COMMAND_ENV } : {}),
+      ...(environment && isEnvironmentRef(environment)
+        ? { env: environment.env, dependencyFolders: environment.dependencyFolders, environmentImage: environment.image }
+        : environment
+          ? { env: ENV_COMMAND_ENV, dependencyFolders: leftOutFor(environment) }
+          : {}),
       journalDir: journals,
       limits: { ...NEBIUS_LIMITS, maxOperations: operations, maxTimeoutSeconds: TASK_LIMITS.checks.timeoutMs / 1000, prepareTimeoutSeconds: TASK_LIMITS.prepareTimeoutSeconds, sessionBudgetMs: TASK_LIMITS.sessionMs, cleanupBudgetMs: TASK_LIMITS.closeMs },
       transport: sandboxTransport,
@@ -493,17 +505,35 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
 
   /**
    * Why a prepared environment can't be used with this commit and these credentials, in Nivra's words; null when it
-   * can (D41). The credentials are checked only when they are set: a run checks them again as it starts.
+   * can (D41). A recipe's (NIV-55) is checked against the commit's setup files. Either way, the commit may track no file
+   * where the environment's sessions leave folders out. The credentials are checked only when they are set: a run checks
+   * them again as it starts.
    */
-  const environmentProblem = async (snapshot: Parameters<typeof environmentInputs>[0], environment: TaskEnvironment): Promise<string | null> => {
-    let digest: string;
-    try {
-      digest = environmentInputs(snapshot).digest;
-    } catch (error) {
-      if (error instanceof EnvironmentRefusal) return `This commit's manifests can't be prepared from any more: ${error.message}`;
-      throw error;
+  const environmentProblem = async (snapshot: Parameters<typeof environmentInputs>[0], environment: TaskEnvironment | EnvironmentRef): Promise<string | null> => {
+    if (isEnvironmentRef(environment)) {
+      const configuration = setupConfiguration(snapshot, isNodeSetupPath);
+      // A setup file must be a file: a link's digest is its target's name, so a link could stand in for a manifest that
+      // the worker then edits through its target, unseen by the setup checks.
+      const link = configuration.files.find((file) => file.kind !== "file");
+      if (link) return `This commit's ${JSON.stringify(link.path.length > 200 ? `${link.path.slice(0, 199)}\u2026` : link.path)} is a link. Nivra reads a project's setup files only as files, so a run can't be bound to its environment: commit the file itself, then preview the run.`;
+      if (configuration.digest !== environment.configuration) return "This commit's setup files (its package.json files, lockfile, workspace file or version files) aren't the ones the project's environment was prepared from. Prepare the environment again, then preview the run.";
+    } else {
+      let digest: string;
+      try {
+        digest = environmentInputs(snapshot).digest;
+      } catch (error) {
+        if (error instanceof EnvironmentRefusal) return `This commit's manifests can't be prepared from any more: ${error.message}`;
+        throw error;
+      }
+      if (digest !== environment.inputsDigest) return "This commit's manifests, lockfile or workspace file aren't the ones the project's environment was prepared from. Prepare the environment again, then preview the run.";
     }
-    if (digest !== environment.inputsDigest) return "This commit's manifests, lockfile or workspace file aren't the ones the project's environment was prepared from. Prepare the environment again, then preview the run.";
+    const tracked = trackedUnder(snapshot, leftOutFor(environment));
+    if (tracked) {
+      const named = JSON.stringify(tracked.path.length > 200 ? `${tracked.path.slice(0, 199)}\u2026` : tracked.path);
+      return isEnvironmentRef(environment)
+        ? `This commit tracks files in ${tracked.folder}, such as ${named}, where the project's environment keeps what it installed, so a run would mix the two. Stop tracking ${tracked.folder}, commit, then preview the run.`
+        : `This commit tracks files in ${tracked.folder}, such as ${named}, which this environment's sandbox leaves out, so a run would miss them. Prepare the environment again, then preview the run.`;
+    }
     const credentials = sandboxCredentials();
     if (credentials && (await projectFingerprint(credentials.project)) !== environment.projectFingerprint) {
       return "The project's environment was prepared in another Nebius project than the one in Settings, and an image can only be used in its own project. Prepare the environment again, then preview the run.";
@@ -511,7 +541,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     return null;
   };
   /** What a task run of this checkout would send to Nebius, with no network, and the bounds of a run of this brief. */
-  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | undefined): Promise<TaskPreview> => {
+  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | EnvironmentRef | undefined): Promise<TaskPreview> => {
     const git = locateGit();
     if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
     const session = await backend.open({ workspace: repoPath });
@@ -519,12 +549,40 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       const snapshot = await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() });
       if (environment) {
         const problem = await environmentProblem(snapshot, environment);
-        if (problem) return { status: "refused", code: "environment", message: problem };
+        if (problem) return { status: "refused", code: "environment", message: mask(problem).slice(0, 2_000) };
+      }
+      // A recipe's environment (NIV-55) in its own field, D41's left empty.
+      if (environment && isEnvironmentRef(environment)) {
+        const shown = taskPreviewOf(snapshot, brief, null);
+        return shown.status === "ready" ? { ...shown, environmentRef: environment } : shown;
       }
       return taskPreviewOf(snapshot, brief, environment ?? null);
     } catch (error) {
       // It names the file it is about: a preview is shown to the person, and never stored (D36).
       if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
+      throw error;
+    } finally {
+      await session.close();
+    }
+  };
+
+  /** A project's own setup resolved into a recipe, with no network (NIV-55); a refusal names the file and says why. */
+  /** The snapshot's rules for what a task run sends (NIV-55): what the commit holds, its sizes, and paths Nivra won't send. */
+  const TASK_SEND_RULES: readonly string[] = ["content", "limit", "path"];
+  const environmentResolve = async (repoPath: string, choices: EnvironmentChoices, previous: PreviousSettlement | null): Promise<EnvironmentPreviewV2> => {
+    const git = locateGit();
+    if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
+    const session = await backend.open({ workspace: repoPath });
+    try {
+      const shown = await environmentResolutionOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() }), choices, previous);
+      return shown.status === "refused" ? { ...shown, message: mask(shown.message).slice(0, 2_000) } : shown;
+    } catch (error) {
+      if (error instanceof WorkspaceRefusal) {
+        // A rule for what a task run sends stops a preparation too, though preparing sends only the setup files: the
+        // refusal says which stage the rule is for, after the file it names.
+        const message = TASK_SEND_RULES.includes(error.code) ? `Task runs send the whole commit, and this one can't be sent: ${error.message.slice(0, 1_500)} Preparing the environment would upload only its setup files, but no task run could start from this commit, so Nivra doesn't prepare it either.` : error.message;
+        return { status: "refused", code: error.code, message: mask(message).slice(0, 2_000), rows: [] };
+      }
       throw error;
     } finally {
       await session.close();
@@ -857,6 +915,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       },
       "task.preview": ({ repoPath, brief, environment }) => taskPreview(repoPath, brief, environment),
       "environment.preview": ({ repoPath, spec }) => environmentPreview(repoPath, spec),
+      "environment.resolve": ({ repoPath, choices, previous }) => environmentResolve(repoPath, choices, previous),
       "runs.coach": ({ runId }) => {
         const status = store.status(runId);
         if (!status) notFound(runId);

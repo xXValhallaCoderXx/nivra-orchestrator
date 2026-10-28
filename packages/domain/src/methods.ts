@@ -3,7 +3,7 @@ import { ApplyParams, ApplyResolution, ApplyView } from "./apply.ts";
 import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { CoachContext, CoachInput, CoachReport } from "./coach.ts";
 import { RunContext } from "./context.ts";
-import { EnvironmentContext, EnvironmentInput, EnvironmentPreview, EnvironmentReport, EnvironmentSpec, TaskEnvironment } from "./environment.ts";
+import { EnvironmentChoices, EnvironmentContext, EnvironmentContextV2, EnvironmentInput, EnvironmentPreview, EnvironmentPreviewV2, EnvironmentRef, EnvironmentReport, EnvironmentSpec, PreviousSettlement, TaskEnvironment } from "./environment.ts";
 import { ExplainResult } from "./explain.ts";
 import { ModelEndpoint, ModelFailureKind } from "./models.ts";
 import { ResearchContext, ResearchInput, ResearchReport } from "./research.ts";
@@ -95,8 +95,9 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   // A task run carries its frozen brief and both consents, model sharing and uploads, held in memory like the snapshot
   // (D39): neither consent stands in for the other.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: TaskContext, workflowId: z.literal("task"), input: TaskInput }),
-  // An environment's preparation carries its upload consent and the spec the person chose (D41): no model is involved.
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: EnvironmentContext, workflowId: z.literal("environment"), input: EnvironmentInput }),
+  // An environment's preparation carries its upload consent and what the person chose: D41's spec, or a project-driven
+  // recipe's choices and the versions its last preparation settled on (NIV-55). No model is involved.
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: z.union([EnvironmentContext, EnvironmentContextV2]), workflowId: z.literal("environment"), input: EnvironmentInput }),
   // A coaching of one task carries its frozen packet, the preferences and the project's model sharing (NIV-53), held in
   // memory like the snapshot: the run stores ids and fingerprints only.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: CoachContext, workflowId: z.literal("coach"), input: CoachInput }),
@@ -220,9 +221,14 @@ export const Methods = {
    * What a task run of this checkout would send to Nebius, with no network, and the bounds it runs under (D39). With an
    * environment, the commit's manifests are checked against the one it was prepared from (D41).
    */
-  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief, environment: TaskEnvironment.extend({ preparedAt: z.iso.datetime() }).optional() }), result: TaskPreview },
+  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief, environment: z.union([TaskEnvironment.extend({ preparedAt: z.iso.datetime() }), EnvironmentRef]).optional() }), result: TaskPreview },
   /** What preparing this checkout's environment would send and run, with no network (D41). */
   "environment.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), spec: EnvironmentSpec }), result: EnvironmentPreview },
+  /**
+   * A project's own setup resolved into a recipe, with no network (NIV-55): refused, waiting for the person's choices,
+   * or ready with what preparing it would send. It replaces environment.preview once the host uses it.
+   */
+  "environment.resolve": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), choices: EnvironmentChoices, previous: PreviousSettlement.nullable() }), result: EnvironmentPreviewV2 },
   /**
    * Applies a task's proposal (D40): the approval itself, bound to the hash and the attempt, checked again, then
    * written. Idempotent by its request id: a repeat gets the apply it started. A refusal is a result, not an error.

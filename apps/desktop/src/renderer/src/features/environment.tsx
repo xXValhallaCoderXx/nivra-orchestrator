@@ -1,27 +1,26 @@
 import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, Radio, Stack, Text } from "@mantine/core";
-import type { EnvironmentPreview, EnvironmentReport, PreparedEnvironment } from "@nivra/domain";
+import type { ChoiceNeeded, EnvironmentChoices, EnvironmentPreviewV2, EnvironmentReport, PreparedEnvironmentV2, ResolutionRow } from "@nivra/domain";
 import { useRef, useState } from "react";
 import type { EnvironmentView, PreparationView, ProjectView, TurnStatus } from "../../../shared/ipc";
 import { errorMessage, Section, usePoll } from "../shared/ui";
 
 /**
- * A project's environment (D41): its dependencies, installed once in a Nebius sandbox from the commit's manifests and
- * lockfile, kept as an image its task runs start from with networking off. The person chooses which packages to install,
- * sees what preparing sends and runs, previewed on the project's own engine, and prepares it; uploads are asked for, as
- * the sandbox check asks, when they aren't allowed. The install's log is shown as text, never as markup.
- * `credentialsSaved` changes each time the key or project id is saved: what keeps Prepare from being pressed is read again.
+ * A project's environment (D41, NIV-55): its dependencies, installed once in a Nebius sandbox as its own setup files say
+ * (its Node version, its package manager and its lockfile), kept as an image its task runs start from with networking
+ * off. The person sees the setup Nivra found, each value with where it came from, makes the choices the project leaves
+ * open, sees what preparing sends and runs, worked out on the project's own engine, and prepares it; uploads are asked
+ * for, as the sandbox check asks, when they aren't allowed. Builds the preparation didn't run are shown, and the person
+ * either changes the project's policy or accepts the environment without them. The install's log is shown as text, never
+ * as markup. `credentialsSaved` changes each time the key or project id is saved: what keeps Prepare from being pressed
+ * is read again.
  */
 
-type Ready = Extract<EnvironmentPreview, { status: "ready" }>;
+type Ready = Extract<EnvironmentPreviewV2, { status: "ready" }>;
 
 const plural = (count: number, one: string, many = `${one}s`) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
 const sizeText = (bytes: number) => (bytes < 1024 ? plural(bytes, "byte") : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`);
 const minutes = (seconds: number) => plural(Math.round(seconds / 60), "minute");
 const going = (status: TurnStatus) => status === "submitting" || status === "running";
-/** A preparation takes at most this many filters (`ENVIRONMENT_LIMITS.filters`): the window counts them before the host does. */
-const MAX_FILTERS = 8;
-/** One package of the workspace, with the packages it depends on, as pnpm selects it. */
-const filterOf = (name: string) => `${name}...`;
 
 const STATUS_LOOK: Record<TurnStatus, { label: string; color: string }> = {
   submitting: { label: "Sending", color: "blue" },
@@ -45,8 +44,31 @@ const OUTCOME: Record<EnvironmentReport["outcome"], string> = {
   interrupted: "The preparation was interrupted when its engine stopped.",
 };
 
-/** The packages a spec installs, in words. */
-const packagesText = (filters: readonly string[]) => (filters.length === 0 ? "the whole workspace" : filters.join(", "));
+/** Where a resolved value came from, as a row says it. */
+const SOURCE: Record<ResolutionRow["source"], string> = {
+  declared: "from the project",
+  resolved: "resolved from its range",
+  default: "Nivra's default",
+  choice: "your choice",
+  "checked-when-preparing": "checked when preparing",
+};
+
+/** npm's install options the window offers (NIV-55): the ones a lockfile may need, since .npmrc is never read. */
+const NPM_OPTIONS: ReadonlyArray<{ name: string; label: string }> = [
+  { name: "legacy-peer-deps", label: "legacy-peer-deps: install as npm does with that setting on, for a lockfile made with it" },
+  { name: "ignore-scripts", label: "ignore-scripts: run no dependency's install scripts; the builds they would make are listed after" },
+];
+
+/** The choices, in words. */
+const choicesText = (choices: EnvironmentChoices | null) => {
+  const said = [choices?.runtime ? `Node ${choices.runtime}` : null, choices?.manager ? choices.manager : null, choices?.managerVersion ? `version ${choices.managerVersion}` : null, ...Object.entries(choices?.options ?? {}).filter(([, value]) => value !== false).map(([name]) => name)].filter((item): item is string => item !== null);
+  return said.length ? `with your choices: ${said.join(", ")}` : "as the project declares";
+};
+
+/** A choice's answer, where the choices keep it. */
+const answerOf = (choices: EnvironmentChoices, id: ChoiceNeeded["id"]) => (id === "runtime" ? choices.runtime : id === "manager" ? choices.manager : choices.managerVersion);
+const answered = (choices: EnvironmentChoices, id: ChoiceNeeded["id"], value: string): EnvironmentChoices =>
+  id === "runtime" ? { ...choices, runtime: value } : id === "manager" ? { ...choices, manager: value } : { ...choices, managerVersion: value };
 
 export function Environment({ project, online, credentialsSaved, onProjectChanged }: { project: ProjectView | null; online: boolean; credentialsSaved: number; onProjectChanged(): void }) {
   const projectId = project?.id ?? null;
@@ -57,9 +79,9 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
     projectId !== null && online,
   );
   const view = state.value;
-  // The packages chosen here, until the person changes them: the ones accepted with the last preparation.
-  const [choice, setChoice] = useState<{ whole: boolean; filters: string[] } | null>(null);
-  const [preview, setPreview] = useState<EnvironmentPreview | null>(null);
+  // The choices made here, until the person changes them: the ones made with the last preparation.
+  const [edited, setEdited] = useState<EnvironmentChoices | null>(null);
+  const [preview, setPreview] = useState<EnvironmentPreviewV2 | null>(null);
   const [previewed, setPreviewed] = useState<string | null>(null);
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -67,15 +89,12 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
   // The consent dialog stays on screen while it fades out, so a second press must not start a second preparation.
   const allowing = useRef(false);
 
-  const accepted = view?.spec?.filters ?? [];
-  const chosen = choice ?? { whole: accepted.length === 0, filters: accepted };
-  const filters = chosen.whole ? [] : chosen.filters;
-  const key = JSON.stringify(filters);
+  const choices = edited ?? view?.choices ?? {};
+  const key = JSON.stringify(choices);
   const ready = preview?.status === "ready" ? preview : null;
   const preparation = view?.preparation ?? null;
   const underway = preparation !== null && going(preparation.status);
-  const stale = ready !== null && previewed !== key;
-  const noneChosen = !chosen.whole && chosen.filters.length === 0;
+  const stale = preview !== null && previewed !== key;
 
   async function act(body: () => Promise<void>) {
     setBusy(true);
@@ -94,14 +113,14 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
     act(async () => {
       if (!projectId) return;
       setPreview(null);
-      setPreview(await window.nivra.previewEnvironment(projectId, { filters }));
+      setPreview(await window.nivra.resolveEnvironment(projectId, choices));
       setPreviewed(key);
       state.refresh();
     });
 
   const start = async () => {
     if (!projectId || !ready) return;
-    await window.nivra.prepareEnvironment(projectId, { filters }, ready.fingerprint);
+    await window.nivra.prepareEnvironment(projectId, choices, ready.fingerprint);
     state.refresh();
   };
 
@@ -128,11 +147,18 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
       state.refresh();
     });
 
-  const prepareBlocked = !ready || stale || noneChosen || underway || busy || !online || view?.blocked !== null;
+  const accept = () =>
+    act(async () => {
+      if (!projectId || !view?.prepared) return;
+      await window.nivra.acceptMissingBuilds(projectId, view.prepared.verifiedDigest);
+      state.refresh();
+    });
+
+  const prepareBlocked = !ready || stale || underway || busy || !online || view?.blocked !== null;
   return (
     <Section
       title="Environment"
-      description="Install this project's dependencies once, in a Nebius sandbox, from its commit's manifests and lockfile. Its task runs then start from the result, with networking off."
+      description="Install this project's dependencies once, in a Nebius sandbox, as its own setup files say: its Node version, its package manager and its lockfile. Its task runs then start from the result, with networking off."
     >
       <Stack gap="sm" data-testid="environment">
         {!projectId && (
@@ -145,8 +171,8 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
             {state.error}
           </Text>
         )}
-        {view?.prepared && <Prepared prepared={view.prepared} />}
-        {view && !view.prepared && !underway && (
+        {view?.prepared && <Prepared prepared={view.prepared} accepted={view.builds !== null} ready={view.ready} busy={busy} online={online} onAccept={() => void accept()} />}
+        {view && !view.prepared && !view.legacy && !underway && (
           <Text size="sm" c="var(--nivra-text-2)" data-testid="environment-none">
             No environment is prepared for this project yet, so its task runs start from Nivra's own base image, with nothing installed.
           </Text>
@@ -158,11 +184,11 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
         )}
         {preparation && <Preparation preparation={preparation} />}
         <Group gap="sm">
-          <Button variant="default" onClick={() => void previewIt()} loading={busy && !consent && !underway} disabled={!projectId || !online || underway || noneChosen} data-testid="environment-preview">
-            {ready && stale ? "Preview this choice" : view?.prepared || preparation ? "Preview preparing again" : "Preview the preparation"}
+          <Button variant="default" onClick={() => void previewIt()} loading={busy && !consent && !underway} disabled={!projectId || !online || underway} data-testid="environment-preview">
+            {preview && stale ? "Preview this choice" : view?.prepared || view?.legacy || preparation ? "Preview preparing again" : "Preview the preparation"}
           </Button>
           <Button onClick={() => (project?.sharing.cloudExecution ? void act(start) : setConsent(true))} disabled={prepareBlocked} data-testid="environment-prepare">
-            {view?.prepared || preparation ? "Prepare again" : "Prepare"}
+            {view?.prepared || view?.legacy || preparation ? "Prepare again" : "Prepare"}
           </Button>
           {underway && (
             <Button variant="default" onClick={() => void cancel()} disabled={!online || preparation.cancelRequested} data-testid="environment-cancel">
@@ -187,19 +213,40 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
         )}
         {preview?.status === "refused" && (
           <Alert color="yellow" variant="light" data-testid="environment-preview-refused">
-            <Text size="sm">{preview.message}</Text>
+            <Stack gap={4}>
+              <Text size="sm">{preview.message}</Text>
+              <Rows rows={preview.rows} />
+            </Stack>
           </Alert>
         )}
-        {ready && (
-          <PreviewPanel
-            ready={ready}
-            chosen={chosen}
-            stale={stale}
-            onChoose={(next) => setChoice(next)}
-          />
+        {preview?.status === "needs-choice" && (
+          <Stack gap="xs" data-testid="environment-needs-choice">
+            <Rows rows={preview.rows} />
+            {preview.choices.map((choice) => (
+              <Radio.Group
+                key={choice.id}
+                label={choice.message}
+                value={answerOf(choices, choice.id) ?? null}
+                onChange={(value) => setEdited(answered(choices, choice.id, value))}
+                data-testid={`environment-choice-${choice.id}`}
+              >
+                <Stack gap={4} mt={4}>
+                  {choice.options.map((option) => (
+                    <Radio key={option.value} value={option.value} label={option.note ? `${option.label} (${option.note})` : option.label} data-testid="environment-option" />
+                  ))}
+                </Stack>
+              </Radio.Group>
+            ))}
+            {!stale && (
+              <Text size="xs" c="var(--nivra-text-3)">
+                Choose, then preview the choice to see what preparing it sends.
+              </Text>
+            )}
+          </Stack>
         )}
+        {ready && <PreviewPanel ready={ready} choices={choices} stale={stale} prepared={view?.prepared ?? null} onChoose={(next) => setEdited(next)} />}
       </Stack>
-      <Modal opened={consent} onClose={() => setConsent(false)} title="Upload this project's manifests to Nebius Sandboxes?" data-testid="environment-consent">
+      <Modal opened={consent} onClose={() => setConsent(false)} title="Upload this project's setup files to Nebius Sandboxes?" data-testid="environment-consent">
         {ready && (
           <Stack gap="sm">
             <Text size="sm">
@@ -208,12 +255,13 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
             </Text>
             <List size="sm">
               <List.Item>
-                {plural(ready.inputs.length, "file")}, {sizeText(ready.sentBytes)} compressed: the manifests, the lockfile and the workspace file;
+                {plural(ready.recipe.configuration.files.length, "file")}, {sizeText(ready.sentBytes)} compressed: the package manifests, the lockfile, the workspace file and the version
+                files;
               </List.Item>
               {ready.leftOut.length > 0 && <List.Item>never sent: {ready.leftOut.join(", ")};</List.Item>}
               <List.Item>none of the commit's sources, and none of your uncommitted or untracked work.</List.Item>
             </List>
-            <Text size="sm">{ready.network}</Text>
+            <Text size="sm">{networkText(ready)}</Text>
             <Text size="sm">What Nebius keeps: {ready.retention}</Text>
             <Text size="sm">
               This is separate from sending content to Token Factory, and it is for this project only: its sandbox checks, its environment and its task runs. You can turn it off at
@@ -234,72 +282,69 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
   );
 }
 
+/** What networking reaches during the preparation, and that nothing after it has any. */
+const networkText = (ready: Ready) =>
+  `Networking is on for the preparation only, to reach ${ready.recipe.network.hosts.join(", ") || "the package registry"} and to bring the base image from ${ready.recipe.network.imageRegistry}. Every check and task run is offline.`;
+
+/** The setup Nivra found: each value, where it came from, and the declarations behind it. */
+function Rows({ rows }: { rows: ResolutionRow[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <Stack gap={2} data-testid="environment-rows">
+      {rows.map((row) => (
+        <Stack key={row.fact} gap={0} data-testid="environment-row" data-fact={row.fact} data-source={row.source}>
+          <Text size="sm">
+            {row.label}: {row.value === null ? "not decided" : <Code>{row.value}</Code>} <Text span size="xs" c="var(--nivra-text-3)">({SOURCE[row.source]})</Text>
+          </Text>
+          {row.declarations.length > 0 && (
+            <Text size="xs" c="var(--nivra-text-3)">
+              {row.declarations.map((declaration) => `${declaration.file}${declaration.field ? ` (${declaration.field})` : ""}: ${declaration.value}`).join("; ")}
+            </Text>
+          )}
+          {row.note && (
+            <Text size="xs" c="var(--nivra-text-3)">
+              {row.note}
+            </Text>
+          )}
+        </Stack>
+      ))}
+    </Stack>
+  );
+}
+
 /**
- * What preparing would send and run, as the project's engine worked it out: the commit's pins, the packages to install,
- * the files sent and those never sent, the install itself, what it reaches with networking on, what Nebius keeps, and
- * its bounds.
+ * What preparing would send and run, as the project's engine worked it out: the setup it found, each value with where it
+ * came from, the image, the install and its options, the files sent and those never sent, what networking reaches, how
+ * dependency builds run, what Nebius keeps, and the bounds.
  */
-function PreviewPanel({ ready, chosen, stale, onChoose }: { ready: Ready; chosen: { whole: boolean; filters: string[] }; stale: boolean; onChoose(next: { whole: boolean; filters: string[] }): void }) {
-  const toggle = (filter: string, on: boolean) => onChoose({ whole: false, filters: on ? [...chosen.filters, filter] : chosen.filters.filter((one) => one !== filter) });
-  // Filters accepted before, for packages this commit no longer lists, stay visible so they can be taken off.
-  const known = new Set(ready.packages.map((one) => filterOf(one.name)));
-  const others = chosen.filters.filter((filter) => !known.has(filter));
+function PreviewPanel({ ready, choices, stale, prepared, onChoose }: { ready: Ready; choices: EnvironmentChoices; stale: boolean; prepared: PreparedEnvironmentV2 | null; onChoose(next: EnvironmentChoices): void }) {
+  const { recipe } = ready;
+  const options = choices.options ?? {};
+  const toggle = (name: string, on: boolean) => {
+    const next = { ...options };
+    if (on) next[name] = true;
+    else delete next[name];
+    onChoose({ ...choices, options: next });
+  };
+  const bootstrap = recipe.bootstrap.map((step) => `${step.tool} ${step.version}${step.via === "npm-global" ? ", installed with npm" : step.via === "corepack" ? ", through corepack" : ", through corepack where the image has it, else with npm"}`);
+  const set = Object.entries(recipe.install.options).filter(([, value]) => value !== false);
+  const differs = prepared !== null && prepared.recipeDigest !== ready.recipeDigest;
   return (
     <Stack gap="xs" data-testid="environment-preview-panel">
-      <Text size="sm" data-testid="environment-pins">
-        Commit <Code>{ready.baseline.slice(0, 12)}</Code> pins <Code>{ready.packageManager}</Code>, and{" "}
-        {ready.nodeRequirement ? (
-          <>
-            asks for Node <Code>{ready.nodeRequirement}</Code>
-          </>
-        ) : (
-          "doesn't say which Node it needs"
-        )}
-        . The environment starts from <Code>{ready.base.tag}</Code>, with Node {ready.base.node}.
-      </Text>
-      <Radio.Group
-        label="What to install"
-        value={chosen.whole ? "whole" : "chosen"}
-        onChange={(value) => onChoose({ whole: value === "whole", filters: chosen.filters })}
-        data-testid="environment-choice"
-      >
-        <Stack gap={4} mt={4}>
-          <Radio value="whole" label="The whole workspace" data-testid="environment-whole" />
-          <Radio value="chosen" label="Chosen packages, each with the packages it depends on" data-testid="environment-chosen" />
-        </Stack>
-      </Radio.Group>
-      {!chosen.whole && (
-        <Stack gap={4} pl="md" data-testid="environment-packages">
-          {ready.packages.map((one) => {
-            const filter = filterOf(one.name);
-            const on = chosen.filters.includes(filter);
-            return (
-              <Checkbox
-                key={one.name}
-                label={`${one.name} (${one.path})`}
-                checked={on}
-                disabled={!on && chosen.filters.length >= MAX_FILTERS}
-                onChange={(event) => toggle(filter, event.currentTarget.checked)}
-                data-testid="environment-package"
-              />
-            );
-          })}
-          {others.map((filter) => (
-            <Checkbox key={filter} label={filter} checked onChange={() => toggle(filter, false)} data-testid="environment-package" />
+      <Rows rows={ready.rows} />
+      {differs && (
+        <Text size="sm" c="var(--nivra-warning)" data-testid="environment-differs">
+          {prepared.recipe.configuration.digest !== recipe.configuration.digest
+            ? "This commit's setup files aren't the ones the environment was prepared from, so its task runs won't start from it. Prepare it again."
+            : "Preparing now would make a different environment from the one prepared: your choices, or how this version of Nivra prepares it, changed. Prepare it again to use it."}
+        </Text>
+      )}
+      {recipe.install.tool === "npm" && (
+        <Stack gap={4} data-testid="environment-options">
+          <Text size="sm">Install options:</Text>
+          {NPM_OPTIONS.map((option) => (
+            <Checkbox key={option.name} label={option.label} checked={options[option.name] === true} onChange={(event) => toggle(option.name, event.currentTarget.checked)} data-testid="environment-option-toggle" />
           ))}
-          {ready.packages.length === 0 && (
-            <Text size="sm" c="var(--nivra-text-3)">
-              This commit lists no workspace packages: install the whole workspace.
-            </Text>
-          )}
-          {chosen.filters.length === 0 && (
-            <Text size="xs" c="var(--nivra-text-3)">
-              Choose at least one package, or the whole workspace.
-            </Text>
-          )}
-          <Text size="xs" c="var(--nivra-text-3)">
-            At most {MAX_FILTERS} packages.
-          </Text>
         </Stack>
       )}
       {stale ? (
@@ -309,21 +354,51 @@ function PreviewPanel({ ready, chosen, stale, onChoose }: { ready: Ready; chosen
       ) : (
         <Stack gap={2} data-testid="environment-sends">
           <Text size="sm">
-            Sent: {plural(ready.inputs.length, "file")}, {sizeText(ready.sentBytes)} compressed ({ready.inputs.map((input) => input.path).join(", ")}).
-            {ready.leftOut.length > 0 ? ` ${ready.leftOut.join(", ")} ${ready.leftOut.length === 1 ? "is" : "are"} never sent.` : ""}
+            Starts from <Code>{recipe.image.tag}</Code> ({recipe.platform.arch}, {recipe.platform.libc}), from commit <Code>{ready.baseline.slice(0, 12)}</Code>.
+            {bootstrap.length ? ` First, ${bootstrap.join("; ")}.` : ""}
           </Text>
           <Text size="sm">
-            Then, in the sandbox: <Code>pnpm install {ready.installArgs.join(" ")}</Code>
+            Sent: {plural(recipe.configuration.files.length, "file")}, {sizeText(ready.sentBytes)} compressed ({recipe.configuration.files.map((file) => file.path).join(", ")}).
+          </Text>
+          {ready.leftOut.length > 0 && (
+            <Text size="sm" data-testid="environment-left-out">
+              {ready.leftOut.join(", ")} {ready.leftOut.length === 1 ? "is" : "are"} never read or sent. If its settings shape the lockfile, such as legacy-peer-deps, set the same install
+              option here.
+            </Text>
+          )}
+          <Text size="sm" data-testid="environment-install">
+            Then, in the sandbox: <Code>{[recipe.install.tool, ...recipe.install.args].join(" ")}</Code>
+            {set.length ? `, with ${set.map(([name, value]) => (value === true ? name : `${name}=${String(value)}`)).join(", ")}` : ""}
+          </Text>
+          <Text size="sm" data-testid="environment-builds-policy">
+            {recipe.builds.runs === "all"
+              ? "Dependency builds: every one runs."
+              : recipe.builds.runs === "allowed"
+                ? `Dependency builds: only those the project allows${recipe.builds.allowed.length ? ` (${recipe.builds.allowed.join(", ")})` : ""}.`
+                : recipe.builds.runs === "none"
+                  ? "Dependency builds: none run."
+                  : "Dependency builds: Nivra can't tell beforehand which ones run, so it lists them after the install."}{" "}
+            Any that don't run are listed before task runs may start from the environment.
           </Text>
           <Text size="sm" data-testid="environment-network">
-            {ready.network}
+            {networkText(ready)}
           </Text>
+          {ready.warnings.map((warning) => (
+            <Text key={warning.code} size="sm" c="var(--nivra-warning)" data-testid="environment-warning">
+              {warning.message}
+            </Text>
+          ))}
+          {ready.limitations.map((limitation, index) => (
+            <Text key={index} size="xs" c="var(--nivra-text-3)" data-testid="environment-limitation">
+              {limitation}
+            </Text>
+          ))}
           <Text size="xs" c="var(--nivra-text-3)" data-testid="environment-retention">
             What Nebius keeps: {ready.retention}
           </Text>
           <Text size="xs" c="var(--nivra-text-3)" data-testid="environment-limits">
-            Bounds: up to {minutes(ready.limits.importSeconds)} to import the image when your Nebius project doesn't have it yet, and up to {minutes(ready.limits.prepareSeconds)}{" "}
-            for the install; {plural(ready.limits.operations, "operation")} with networking on.
+            Bounds: up to {minutes(recipe.limits.importSeconds)} to import the image when your Nebius project doesn't have it yet, up to {minutes(recipe.limits.prepareSeconds)} for the
+            install, and up to {minutes(recipe.limits.probeSeconds)} for each check before and after it, with networking off.
           </Text>
         </Stack>
       )}
@@ -331,19 +406,41 @@ function PreviewPanel({ ready, chosen, stale, onChoose }: { ready: Ready; chosen
   );
 }
 
-/** The prepared environment: what its task runs start from. */
-function Prepared({ prepared }: { prepared: PreparedEnvironment }) {
+/** The prepared environment: what its task runs start from, as its preparation verified it, and the builds it didn't run. */
+function Prepared({ prepared, accepted, ready, busy, online, onAccept }: { prepared: PreparedEnvironmentV2; accepted: boolean; ready: boolean; busy: boolean; online: boolean; onAccept(): void }) {
+  const { verified } = prepared;
+  const tools = verified.tools.map((tool) => `${tool.name} ${tool.version}`).join(", ");
+  const builds = verified.builds;
   return (
-    <Alert color="green" variant="light" data-testid="environment-prepared">
-      <Stack gap={2}>
+    <Alert color={ready ? "green" : "yellow"} variant="light" data-testid="environment-prepared" data-ready={ready}>
+      <Stack gap={4}>
         <Text size="sm">
-          Prepared {new Date(prepared.preparedAt).toLocaleString()}: Node {prepared.node}, pnpm {prepared.pnpm}, {prepared.arch}. Image <Code>{prepared.image.slice(0, 12)}</Code>, from
-          commit <Code>{prepared.baseline.slice(0, 12)}</Code>, with {packagesText(prepared.spec.filters)} installed.
+          Prepared {new Date(prepared.preparedAt).toLocaleString()}: {tools}, on {verified.platform.release} ({verified.platform.arch}, {verified.platform.libc}). Image{" "}
+          <Code>{verified.images.prepared.slice(0, 12)}</Code>, from commit <Code>{prepared.baseline.slice(0, 12)}</Code>.
         </Text>
         <Text size="xs" c="var(--nivra-text-3)">
-          Its task runs start from it, with networking off, while the commit's manifests stay as they were. It was prepared from {prepared.base.tag}
-          {prepared.base.imported ? ", imported into your Nebius project" : ""}.
+          Its task runs start from it, with networking off, while the commit's setup files stay as they were. It was prepared from {prepared.recipe.image.tag}
+          {verified.images.imported ? ", imported into your Nebius project" : ""}.
         </Text>
+        {builds.state === "complete" ? (
+          <Text size="xs" c="var(--nivra-text-3)" data-testid="environment-builds">
+            Every dependency build ran.
+          </Text>
+        ) : (
+          <Stack gap={4} data-testid="environment-builds" data-state={builds.state}>
+            <Text size="sm">
+              {builds.state === "missing" ? `These dependency builds didn't run: ${builds.missing.join(", ")}.` : "Nivra couldn't tell which dependency builds ran."}{" "}
+              {accepted ? "You accepted the environment without them." : "Change the project's build policy and prepare again, or accept the environment without them."}
+            </Text>
+            {!accepted && (
+              <Group>
+                <Button size="xs" variant="default" onClick={onAccept} disabled={busy || !online} data-testid="environment-accept-builds">
+                  Accept without them
+                </Button>
+              </Group>
+            )}
+          </Stack>
+        )}
       </Stack>
     </Alert>
   );
@@ -361,7 +458,7 @@ function Preparation({ preparation }: { preparation: PreparationView }) {
           {STATUS_LOOK[preparation.status].label}
         </Badge>
         <Text size="xs" c="var(--nivra-text-3)">
-          {new Date(preparation.createdAt).toLocaleString()}, {packagesText(preparation.spec.filters)}
+          {new Date(preparation.createdAt).toLocaleString()}, {preparation.choices ? choicesText(preparation.choices) : "by an earlier version of Nivra"}
         </Text>
       </Group>
       {note && (
@@ -391,6 +488,11 @@ function Preparation({ preparation }: { preparation: PreparationView }) {
           {report.stopped && report.stopped.code !== "cancelled" && (
             <Text size="sm" data-testid="environment-stopped">
               {report.stopped.message}
+            </Text>
+          )}
+          {report.stopped?.detail && (
+            <Text size="sm" data-testid="environment-stopped-detail">
+              {report.stopped.detail}
             </Text>
           )}
           {report.install && report.outcome !== "prepared" && report.install.logTail && (
