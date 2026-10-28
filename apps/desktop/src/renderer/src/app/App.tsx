@@ -1,4 +1,4 @@
-import { ActionIcon, Alert, AppShell, Box, Overlay, Stack, Text } from "@mantine/core";
+import { ActionIcon, Alert, AppShell, Box, Overlay, Stack, Text, UnstyledButton } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AppInfo, ConversationsView, ConversationSummary, EngineView, PreferencesView, ProjectView, SettingsView, TasksView, WslView } from "../../../shared/ipc";
@@ -14,6 +14,7 @@ import { errorMessage, usePoll } from "../shared/ui";
 import { browserStorage, DraftsProvider, useDraftList } from "../shell/drafts";
 import { newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
 import { Sidebar } from "../shell/Sidebar";
+import { useShortcuts } from "../shell/keyboard";
 import { NARROW_QUERY, SIDEBAR_WIDTH } from "../shell/layout";
 import { Switcher, type SwitcherHandle } from "../shell/Switcher";
 import { ToastProvider, useToast } from "../shell/Toasts";
@@ -79,6 +80,8 @@ function Shell() {
   const [navOpen, setNavOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const sidebar = useRef<HTMLDivElement>(null);
+  const topBar = useRef<HTMLDivElement>(null);
+  const main = useRef<HTMLElement>(null);
   const closeNav = (refocus: boolean) => {
     setNavOpen(false);
     if (refocus) menuButton.current?.focus();
@@ -145,6 +148,15 @@ function Shell() {
     setRoute({ kind: "settings", section });
   };
   const openSettings = () => navigate({ kind: "settings", section: settingsSection });
+
+  useShortcuts({
+    openSwitcher: () => {
+      setNavOpen(false);
+      switcher.current?.open();
+    },
+    regions: () => [narrow ? topBar.current : sidebar.current, main.current],
+    openSettings,
+  });
   const switchTo = (next: Scope) => {
     setNavOpen(false);
     setChosen(next);
@@ -181,8 +193,12 @@ function Shell() {
 
   return (
     <AppShell header={{ height: 56, collapsed: !narrow }} navbar={{ width: SIDEBAR_WIDTH, breakpoint: "sm", collapsed: { mobile: !navOpen } }} padding={0}>
+      {/* The first stop of Tab: straight to the page, past the sidebar (PN5). */}
+      <UnstyledButton className="nivra-skip" onClick={() => main.current?.focus()} data-testid="skip-to-page">
+        Skip to the page
+      </UnstyledButton>
       {narrow && (
-        <AppShell.Header px={12} style={{ display: "flex", alignItems: "center", gap: 8 }} data-testid="top-bar">
+        <AppShell.Header ref={topBar} px={12} style={{ display: "flex", alignItems: "center", gap: 8 }} data-testid="top-bar">
           <ActionIcon
             ref={menuButton}
             variant="default"
@@ -227,7 +243,7 @@ function Shell() {
         }}
         onConversationCreated={opened}
       />
-      <AppShell.Main id="page" tabIndex={-1} style={{ outline: "none" }}>
+      <AppShell.Main ref={main} id="page" tabIndex={-1} aria-label="Page" style={{ outline: "none" }} data-testid="main">
         <Box px={{ base: 16, sm: 40 }} pt={28} pb={40} maw={1120}>
           <Stack gap="md">
             {hostError && (
