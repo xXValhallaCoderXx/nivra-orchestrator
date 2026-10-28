@@ -4,11 +4,14 @@ import type {
   ApplyResolution,
   ApplyStatus,
   BaselineSelection,
+  BuildsAcceptance,
   ChatResult,
   CoachField,
   DoctorReport,
   EngineInfo,
+  EnvironmentChoices,
   EnvironmentPreview,
+  EnvironmentRef,
   EnvironmentReport,
   EnvironmentSpec,
   ExplainResult,
@@ -16,7 +19,7 @@ import type {
   MissionContent,
   PreferenceIntent,
   PreferenceScope,
-  PreparedEnvironment,
+  PreparedEnvironmentV2,
   ProviderCheck,
   ReviewPanel,
   ReviewReport,
@@ -28,7 +31,6 @@ import type {
   SandboxStatus,
   SnapshotPreview,
   SpecialistId,
-  TaskEnvironment,
   TaskProposal,
   TaskReport,
   TaskRunLimits,
@@ -235,8 +237,8 @@ export interface PreparationView {
   /** Why its engine can't be read now, while that lasts. */
   unresolved: string | null;
   cancelRequested: boolean;
-  /** The packages it installs, as pnpm filters; none is the whole workspace. */
-  spec: EnvironmentSpec;
+  /** What the person chose when it was started (NIV-55); null for one an earlier version of Nivra started. */
+  choices: EnvironmentChoices | null;
   /** Its engine's report: kept when it ended, read from its engine while it goes; null until there is one. */
   report: EnvironmentReport | null;
   /** Its latest progress, oldest first. */
@@ -246,15 +248,21 @@ export interface PreparationView {
 }
 
 /**
- * A project's environment (D41): the packages chosen with its last preparation, what its last successful preparation
- * left, which its task runs start from, and its latest preparation.
+ * A project's environment (D41, NIV-55): what the person chose with its last preparation, what its last successful
+ * preparation left and whether its task runs may start from it, and its latest preparation.
  */
 export interface EnvironmentView {
   projectId: string;
-  /** The spec accepted when its last preparation was started; null before the first. */
-  spec: EnvironmentSpec | null;
-  /** What its task runs start from; null until a preparation ends prepared. */
-  prepared: PreparedEnvironment | null;
+  /** The choices made with its last preparation; null before the first, or when an earlier version of Nivra started it. */
+  choices: EnvironmentChoices | null;
+  /** What its task runs start from once it is ready; null until a preparation ends prepared. */
+  prepared: PreparedEnvironmentV2 | null;
+  /** Whether its task runs may start from it: every dependency build ran, or the person accepted those that didn't. */
+  ready: boolean;
+  /** The person's acceptance of the dependency builds that didn't run, for this environment; null when there is none. */
+  builds: BuildsAcceptance | null;
+  /** Its environment was prepared by an earlier version of Nivra, which task runs no longer start from. */
+  legacy: boolean;
   preparation: PreparationView | null;
   /** Why Prepare can't be pressed now, in plain words; null when it can. Uploads, when off, are asked for when it is pressed. */
   blocked: string | null;
@@ -611,8 +619,8 @@ export interface TaskRunPreview {
   baseline: Array<BaselineSelection & { number: number }>;
   /** The brief's frozen files, with their SHA-256 in the commit once its engine has read them (null before). */
   frozen: Array<{ path: string; sha256: string | null }>;
-  /** The prepared environment the run starts from, as its engine checked it against the commit; null without one. */
-  environment: (TaskEnvironment & { preparedAt: string }) | null;
+  /** The prepared environment the run starts from, as its engine checked it against the commit's setup files (NIV-55); null without one. */
+  environment: EnvironmentRef | null;
   /** The programs the run looks for before the model starts, and how many commands start with something it can't read. */
   programs: string[];
   unprobed: number;

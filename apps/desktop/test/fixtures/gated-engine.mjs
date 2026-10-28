@@ -34,15 +34,18 @@
 // request id, or null; task.restore takes one back to its originals and task.dismiss settles one, each kept in
 // `applies.log` so a later applyStatus reads it; with an `error-settle` file, either does its work, then answers with an
 // internal error, as an engine whose answer is lost, and with a `hold-settle` file, does its work and never answers.
-// For environments (D41): environment.preview records what it was asked (`env-previews.log`) and answers a ready preview
-// whose fingerprint covers the spec it was given, and also an `env-changed` file while one exists, as a commit that
-// changed would. runs.start records each preparation with its input and context (`environments.log`). runs.environment
-// answers with a report: in progress while a `running` file exists, cancelled for a run it was asked to cancel, else
-// the outcome an `environment-outcome` file names (prepared unless it says otherwise), with the prepared environment
-// only when it is prepared, or whatever it is while an `environment-prepared-anyway` file exists. Its project
-// fingerprint hashes the project id it was handed with the secrets. runs.get says a preparation whose outcome isn't
-// prepared failed, unless an `environment-run-succeeds` file exists. task.preview records what it was asked
-// (`task-previews.log`), and echoes the environment it was given, with the brief's frozen files.
+// For environments (D41, NIV-55): environment.resolve records what it was asked (`env-resolves.log`) and answers with
+// a ready recipe (a pnpm workspace on Node 24, on the Node a runtime choice names) whose fingerprint covers the choices
+// it was given, and also an `env-changed` file while one exists, as a commit that changed would; it asks for a choice
+// while an `env-needs-choice` file exists, and refuses while an `env-refused` one does. runs.start records each
+// preparation with its input and context (`environments.log`). runs.environment answers with a report: in progress
+// while a `running` file exists, cancelled for a run it was asked to cancel, else the outcome an `environment-outcome`
+// file names (prepared unless it says otherwise), with the recipe's environment only when it is prepared, or whatever
+// it is while an `environment-prepared-anyway` file exists; its builds are missing esbuild while an
+// `environment-builds-missing` file exists. Its project fingerprint hashes the project id it was handed with the
+// secrets. runs.get says a preparation whose outcome isn't prepared failed, unless an `environment-run-succeeds` file
+// exists. task.preview records what it was asked (`task-previews.log`), and echoes the environment it was given, a
+// recipe's in its own field, with the brief's frozen files.
 // It takes secrets.update, and turns down at once any other method it doesn't stand in for, so no caller waits out its
 // time limit. The window's tests run it as the local engine with --nivra-test-engine=gated (unpackaged only).
 import { createHash, randomUUID } from "node:crypto";
@@ -63,9 +66,41 @@ const cancelled = new Set();
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 /** The Nebius project id the host handed over with the secrets, as an engine keeps it in memory. */
 let nebiusProject = null;
-/** What a gated preview says the commit's manifests digest to. */
-const INPUTS_DIGEST = "b".repeat(64);
-/** A preparation's spec and its outcome, as the flags say. */
+/** A recipe as the gated engine resolves one (NIV-55): a pnpm workspace on Node 24, or on the Node the person chose. */
+const recipeFor = (choices) => {
+  const node = choices?.runtime ?? "24.21.0";
+  return {
+    format: "nivra.environment-recipe.v1",
+    profile: "node",
+    platform: { os: "linux", arch: "x86_64", libc: "musl" },
+    image: { registryUrl: `docker://docker.io/library/node:${node}-alpine`, tag: `node:${node}-alpine` },
+    tools: [
+      { name: "node", version: { kind: "exact", version: node }, from: "image" },
+      { name: "npm", version: { kind: "bundled", with: "node" }, from: "image" },
+      { name: "pnpm", version: { kind: "exact", version: "11.5.3" }, from: "bootstrap" },
+    ],
+    bootstrap: [{ tool: "pnpm", version: "11.5.3", via: "corepack-else-npm-global" }],
+    install: { tool: "pnpm", args: ["install", "--frozen-lockfile"], options: {} },
+    scope: { kind: "whole" },
+    builds: { tool: "pnpm", runs: "allowed", allowed: ["esbuild"], denied: [], strict: true, source: "pnpm-workspace.yaml", notes: [] },
+    configuration: { mode: "manifests", files: ["package.json", "packages/data/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].map((path) => ({ path, bytes: 100, sha256: sha256(path) })), digest: "2".repeat(64) },
+    systemPackages: [],
+    workdir: "/workspace",
+    env: { preparation: { CI: "1" }, task: { CI: "1", COREPACK_ENABLE_NETWORK: "0", pnpm_config_verify_deps_before_run: "false" } },
+    artifacts: { dependency: ["node_modules"], caches: ["/root/.cache"] },
+    network: { preparation: "on", tasks: "off", hosts: ["registry.npmjs.org"], imageRegistry: "docker.io" },
+    probes: ["tool-versions"],
+    limits: { importSeconds: 900, prepareSeconds: 600, probeSeconds: 120 },
+  };
+};
+/** A stand-in for a digest: the host never works one out again, it only compares them. */
+const digestOf = (value) => sha256(JSON.stringify(value));
+/** The rows a gated resolution shows, each with where its value came from. */
+const rowsFor = (choices, recipe) => [
+  { fact: "runtime", label: "Node", value: recipe.tools[0].version.version, source: choices?.runtime ? "choice" : "declared", declarations: [{ file: ".nvmrc", field: null, value: "24.21.0" }], note: null },
+  { fact: "manager", label: "Package manager", value: "pnpm 11.5.3", source: "declared", declarations: [{ file: "package.json", field: "packageManager", value: "pnpm@11.5.3" }], note: null },
+];
+/** A preparation's choices and its outcome, as the flags say. */
 const preparation = (runId) => logged("environments.log", runId);
 const environmentOutcome = () => (existsSync(join(home, "environment-outcome")) ? readFileSync(join(home, "environment-outcome"), "utf8").trim() : "prepared");
 /** A preparation's report, as an engine keeps one. */
@@ -75,17 +110,29 @@ const environmentReport = (runId) => {
   const now = new Date().toISOString();
   const going = !cancelled.has(runId) && existsSync(join(home, "running"));
   const outcome = cancelled.has(runId) ? "cancelled" : going ? "in-progress" : environmentOutcome();
-  const filters = run.context.spec.filters;
+  const recipe = recipeFor(run.context.choices);
+  const verified = {
+    format: "nivra.environment-verified.v1",
+    recipe: digestOf(recipe),
+    tools: [
+      { name: "node", version: recipe.tools[0].version.version },
+      { name: "npm", version: "11.19.0" },
+      { name: "pnpm", version: "11.5.3" },
+    ],
+    platform: { os: "linux", arch: "x86_64", libc: "musl", release: "Alpine Linux v3.22" },
+    images: { base: "img-imported", prepared: `image-${runId.slice(0, 8)}`, imported: true },
+    builds: existsSync(join(home, "environment-builds-missing")) ? { state: "missing", missing: ["esbuild"] } : { state: "complete", missing: [] },
+    generated: null,
+    probes: [{ name: "readiness", durationMs: 900 }],
+    verifiedAt: now,
+  };
   const prepared = {
-    image: `image-${runId.slice(0, 8)}`,
-    base: { tag: "node:22.23.4-alpine3.24", image: "img-imported", imported: true },
-    node: "v22.23.4",
-    pnpm: "11.5.3",
-    arch: "x86_64",
+    format: "nivra.environment-prepared.v2",
+    recipe,
+    recipeDigest: digestOf(recipe),
+    verified,
+    verifiedDigest: digestOf(verified),
     baseline: "a".repeat(40),
-    inputsDigest: INPUTS_DIGEST,
-    spec: run.context.spec,
-    installArgs: ["--frozen-lockfile", ...filters.flatMap((filter) => ["--filter", filter])],
     projectFingerprint: nebiusProject ? sha256(`nivra.nebius-project.v1\0${nebiusProject}`) : "f".repeat(64),
     preparedAt: now,
   };
@@ -93,7 +140,8 @@ const environmentReport = (runId) => {
   return {
     outcome,
     stopped,
-    prepared: outcome === "prepared" || existsSync(join(home, "environment-prepared-anyway")) ? prepared : null,
+    prepared: null,
+    environment: outcome === "prepared" || existsSync(join(home, "environment-prepared-anyway")) ? prepared : null,
     install: going ? null : { exitCode: outcome === "failed" ? 1 : 0, logTail: outcome === "failed" ? "ERR_PNPM_OUTDATED_LOCKFILE <b>Cannot install</b> with frozen-lockfile\n" : "installed\n" },
     steps: [],
     cleanup: null,
@@ -120,7 +168,10 @@ const taskReport = (runId) => {
     task: { taskId: run.input.taskId, attemptId: run.clientRequestId, briefVersion: run.input.briefVersion, briefDigest: run.input.briefDigest },
     snapshot: null,
     toolchain: [],
-    environment: run.input.environment ?? null,
+    // A recipe's environment in its own field (NIV-55), and the setup files as they came back, unchanged.
+    environment: run.input.environment?.format ? null : (run.input.environment ?? null),
+    environmentRef: run.input.environment?.format ? run.input.environment : null,
+    setup: run.input.environment?.format ? { unchanged: true, changed: [] } : null,
     baseline: (run.brief?.baseline ?? []).map((given, index) => ({ number: index + 1, name: given.name, matched: true, reason: null, exitCode: given.expectedExitCode, stdoutTail: given.expectedOutput ?? "", stderrTail: "", durationMs: 120 })),
     frozen: (run.brief?.frozen ?? []).map((path) => ({ path, unchanged: true })),
     worker: null,
@@ -329,32 +380,19 @@ process.stdin.on("data", (chunk) => {
       send({ id: request.id, result: null });
     } else if (request.method === "runs.environment") {
       send({ id: request.id, result: environmentReport(request.params.runId) });
-    } else if (request.method === "environment.preview") {
-      appendFileSync(join(home, "env-previews.log"), `${JSON.stringify(request.params)}\n`);
-      const filters = request.params.spec.filters;
-      send({
-        id: request.id,
-        result: {
-          status: "ready",
-          baseline: "a".repeat(40),
-          packageManager: "pnpm@11.5.3",
-          nodeRequirement: ">=22",
-          packages: [
-            { name: "@mono/data", path: "packages/data" },
-            { name: "@mono/web", path: "packages/web" },
-          ],
-          inputs: ["package.json", "packages/data/package.json", "packages/web/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].map((path) => ({ path, bytes: 100, sha256: sha256(path) })),
-          inputsDigest: INPUTS_DIGEST,
-          sentBytes: 900,
-          leftOut: [".npmrc"],
-          base: { tag: "node:22.23.4-alpine3.24", registryUrl: "docker://docker.io/library/node:22.23.4-alpine3.24", node: "v22.23.4" },
-          installArgs: ["--frozen-lockfile", ...filters.flatMap((filter) => ["--filter", filter])],
-          network: "Networking is on for the preparation only.",
-          retention: "Images are retained for 180 days.",
-          limits: { importSeconds: 900, prepareSeconds: 600, operations: 1 },
-          fingerprint: sha256(JSON.stringify([request.params.spec, existsSync(join(home, "env-changed"))])),
-        },
-      });
+    } else if (request.method === "environment.resolve") {
+      appendFileSync(join(home, "env-resolves.log"), `${JSON.stringify(request.params)}\n`);
+      const { choices } = request.params;
+      const recipe = recipeFor(choices);
+      const rows = rowsFor(choices, recipe);
+      if (existsSync(join(home, "env-refused"))) {
+        send({ id: request.id, result: { status: "refused", code: "unsupported-manager", message: "This project installs with yarn, which Nivra doesn't prepare yet. Use npm or pnpm, then preview the environment again.", rows } });
+      } else if (existsSync(join(home, "env-needs-choice")) && !choices.runtime) {
+        const options = ["24.21.0", "22.23.4"].map((value) => ({ value, label: `Node ${value}`, note: null }));
+        send({ id: request.id, result: { status: "needs-choice", rows, choices: [{ id: "runtime", why: "conflict", message: ".nvmrc pins Node 24.21.0, and .node-version pins 22.23.4. Choose the one this project uses.", declarations: [{ file: ".nvmrc", field: null, value: "24.21.0" }, { file: ".node-version", field: null, value: "22.23.4" }], options }], warnings: [], limitations: [] } });
+      } else {
+        send({ id: request.id, result: { status: "ready", rows, recipe, warnings: [], limitations: [], recipeDigest: digestOf(recipe), baseline: "a".repeat(40), sentBytes: 900, leftOut: [".npmrc"], retention: "Images are retained for 180 days.", fingerprint: sha256(JSON.stringify([choices, existsSync(join(home, "env-changed"))])) } });
+      }
     } else if (request.method === "runs.events") {
       send({ id: request.id, result: { events: [], next: request.params.after ?? 0, status: cancelled.has(request.params.runId) ? "cancelled" : "succeeded" } });
     } else if (request.method === "runs.result") {
@@ -417,7 +455,8 @@ process.stdin.on("data", (chunk) => {
           programs: ["."],
           unprobed: 0,
           caseFiles: [],
-          environment: request.params.environment ?? null,
+          environment: request.params.environment?.format ? null : (request.params.environment ?? null),
+          environmentRef: request.params.environment?.format ? request.params.environment : null,
           frozen: (request.params.brief.frozen ?? []).map((path) => ({ path, sha256: sha256(path) })),
           limits: { modelRequests: 12, requestSeconds: 150, outputTokensPerRequest: 8000, estimatedInputTokens: 160000, toolCalls: 24, writes: 8, writeBytes: 32768, runs: 4, baselineChecks, operations: 17 + baselineChecks, checkSeconds: 60, sessionMinutes: 20, runMinutes: 33 },
         },
