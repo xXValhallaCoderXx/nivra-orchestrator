@@ -2636,6 +2636,76 @@ of up to five selected tasks by the council's specialists, findings that open th
   to be tested are printed apart from this record, since a digest bound to a commit can't be written into it. The
   digest printed at `68a49df` is withdrawn. No paid call was made.
 
+### NIV-35's live runs, and the candidates they ran on (D46, D47)
+
+The live packaged journey on SHE-65, on Linux, each run approved by Nate by its recipe's whole digest. Evidence is
+credited to the exact build it ran on: no run below is evidence for a later candidate. SHE-65 is in Nate's private
+repository: this record names its files and hashes, never its content.
+
+**The candidates** (version 0.2.0, unpublished; each built once by `pnpm release:candidate`, with `pnpm verify`
+inside it, then checked file for file against its build-info and frozen before use):
+
+| Candidate | Commit | What it adds | deb | zip | build-info |
+|---|---|---|---|---|---|
+| 1 | `570dd14` | Version 0.2.0; the task model rule (D46) | `8c33d15babccc77c79dd9593cb793ea7c452ae09d67129872b618f2e3623742c` | `ba17bd774132e95ca7e084aa9733a9031f1115b95ac73e7006a5fddc4b54b50e` | `c44a978d73784914f3af22839529556f474053263d91a551deeecce6d451aeed` |
+| 2 | `77558d9` | Search, the allowances raised together and told (D47's first half) | `22b142a66586649fdfc098b2f84bde146516498f2f8e0a952f78bffa7d478cc6` | `ff43e88a21ffdf78bf95da8f18cf0d75b130543ed9ea4adaaba1d76494d9a544` | `1327104795be397e0400c57b2623f00e51f60f2f9494ba9b2e9fd281c591e7dd` |
+| 3 | pending | Each request's whole answer's time, the engine's fetch (D47); D42 to D44 from main | pending | pending | pending |
+
+Checks on each, at its own commit:
+- Candidate 1: verify 1,078 (domain 75, engine 689, desktop 314), none skipped; the correspondence check 18 of 18;
+  the rehearsal on the frozen build; `test:packaged` 27 passed and 49 skipped (the stand-in tests); the built e2e 75
+  passed and 1 skipped; `verify:windows --zip` 37 of 37; `test:windows` 12 of 12.
+- Candidate 2: verify 1,093 (75, 704, 314), none skipped; the correspondence check 18 of 18; the rehearsal;
+  `test:packaged` 27 passed and 49 skipped; the built e2e 75 passed and 1 skipped; `verify:windows --zip` 37 of 37;
+  `test:windows` 12 of 12. Mutations: 18 of 18 caught.
+
+**The live runs** (each one preparation and one task run; nothing retried; each window's keys removed and both homes
+checked unchanged afterwards):
+
+| Run | Candidate | Digest approved | When (SGT, 28 Oct) | Outcome |
+|---|---|---|---|---|
+| 1 | 1 | `494869740e251708f04fc3b2dd9957c41874e0fbf1b328b0bb7779c7f6c9939a` | 01:48 to 01:52 | Unchanged. The worker used all 12 requests finding its way and handed in with no write. |
+| 2 | 2 | `9a3061b2969e242228773440737f521f2cfb1bb581a8f2764ff44dd6a35433f3` | 03:12 to 03:17 | Unchanged. Six requests found and read the code in 18 s; the seventh had no answer at 150 s, so the attempt ended for time, with no hand-in and no write. |
+| 3 | 2 (its recipe's second run) | `761f963bf547aecb6a3481ee91a716bae45938e290db3ab7b53204af169814c9` | 03:26 to 03:35 | Proposed, not verified: case 1 failed with the same five SHE-65 assertion errors as the baseline. The eleventh request had no answer at 150 s. Nate rejected proposal `fcacce1dd2c701b466e513a9e0b2e7cecfa88510bc9518fa7743eba264a7958c` at 08:12:41. |
+
+- **Each run:**
+  - The preparation was real: images `e3caf555-4e63-446c-87d5-0d2854c0e02f`, `1981de1c-7489-4275-bfa8-e6f05d1a343f`
+    and `d2278a86-7d3b-4f8b-a872-844eaed4a162`.
+  - The model was `nvidia/nemotron-3-super-120b-a12b`.
+  - Baselines A, B and C came out as the brief expects.
+  - The frozen files came back unchanged.
+- **Usage, as reported:**
+  - Run 1: 133,304 input and 2,062 output tokens.
+  - Runs 2 and 3: unknown, since one request in each never reported. Run 3's ten reported requests come to 157,697
+    and 3,935.
+  - Cost: never reported, so it isn't shown.
+- **Run 3's timing, from the engine's events:**
+  - Requests 8 and 9 wrote code: 1,573 tokens in 85.7 s and 634 in 58.5 s. Request 4 had given 580 in 3.8 s.
+  - The 11th request's 150 s, and 11.7 s that the record doesn't account for, ran from 19:31:38.118Z to 19:34:19.856Z.
+- **What isn't known:** whether those requests were producing long answers or were held up before they began.
+  Requests aren't streamed, and a stopped one reports nothing.
+- **Reject, shown live:** after run 3's Reject, `git status` and `git diff` of the checkout were empty, and it stayed
+  at `0341b253` on `nivra/she-65-baseline`.
+- **Evidence:** `~/nivra-acceptance/task-live/live-20261027T174800Z`, `…191225Z` and `…192632Z`, each with the
+  recipe, the previews, the attempt, the final views and the stores copied with their WAL. A shape scan of each,
+  outside its profile and engine home, found no credential; a Token Factory key has no shape, so Nate checks for his
+  key himself.
+
+**Offline, for candidate 3's change (D47):**
+- Node 24.21.0's own fetch: a reply at 285 s came back, and one at 310 s failed at 301.2 s with
+  `UND_ERR_HEADERS_TIMEOUT`.
+- Through a real engine process at `672cd12`, with the stand-ins:
+  - a reply 310 s after the request was received, the step recorded at 310.1 s, and the run proposed;
+  - a cancel 5 s into a held request ended the run as cancelled at 5 s.
+
+**NIV-35's criteria, now:**
+
+| Criterion | Shown | Still to show |
+|---|---|---|
+| One small change and its regression check through the UI | Offline (above); live runs 1 to 3 reached the proposal, unverified | A verified SHE-65 change, approved by its hash, applied by its engine and accepted, on the packaged build |
+| Reject leaves the checkout untouched | Offline, and live after run 3 | Nothing more |
+| Linux and Windows-to-WSL evidence naming the packaged revision and backend | Linux: runs 1 to 3, on candidates 1 and 2, with Nebius Sandboxes | Windows to WSL live needs its own recipe and approval; native Windows refuses task runs (D39, D41) |
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

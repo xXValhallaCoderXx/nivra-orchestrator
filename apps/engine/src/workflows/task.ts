@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { projectFingerprint, TaskOutcome, taskBriefDigest, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskEnvironment, type TaskReport, type TaskStopCode } from "@nivra/domain";
+import { projectFingerprint, TASK_MODEL, TaskOutcome, taskBriefDigest, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskEnvironment, type TaskReport, type TaskStopCode } from "@nivra/domain";
 import { z } from "zod";
 import { installGitAdvice } from "../advice.ts";
 import { Refusal } from "../diagnostics.ts";
@@ -7,7 +7,6 @@ import type { ExecutionBackend } from "../exec/backend.ts";
 import type { Proposal } from "../exec/proposal.ts";
 import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
 import { policyFor } from "../providers/policy.ts";
-import { pickNemotron } from "../providers/tokenfactory.ts";
 import { RepoError } from "../repo/paths.ts";
 import { runLimitsFor, TASK_LIMITS } from "../task/limits.ts";
 import { earlyTaskReport, holdsValue, taskReport, taskStopWords, type TaskBound } from "../task/report.ts";
@@ -149,7 +148,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
 
   const prepare = createStep({
     id: "prepare",
-    description: "Pick the model the worker uses",
+    description: "Find the one model a task run uses in Token Factory's listing",
     inputSchema: Input,
     outputSchema: Prepared,
     execute: async ({ runId, abortSignal }) =>
@@ -175,11 +174,13 @@ export function createTaskWorkflow(deps: TaskDeps) {
             }
             throw error;
           }
-          const model = pickNemotron(models.ids);
+          // Only the model the preview names: no other stands in, so a key that isn't offered it stops the run here,
+          // before any request to a model and before the upload.
+          const model = models.ids.find((id) => id.toLowerCase() === TASK_MODEL.toLowerCase()) ?? null;
           if (!model) {
             early(runId, task, "failed", "model", "prepare", true);
             reported = true;
-            throw failure("model-unavailable", "no NVIDIA model is listed for this key");
+            throw failure("model-unavailable", `${TASK_MODEL} isn't listed for this key`);
           }
           const contextLength = models.contextLengths.get(model) ?? null;
           const route: RunRoute = { provider: "nebius", endpoint: deps.endpoint.kind, model };

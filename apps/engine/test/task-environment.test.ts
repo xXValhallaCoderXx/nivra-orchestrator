@@ -6,7 +6,7 @@ import { projectFingerprint, type TaskEnvironment } from "@nivra/domain";
 import { environmentInputs } from "../src/environment/inputs.ts";
 import type { ExecResult } from "../src/exec/backend.ts";
 import { judgeBaseline, notRun, type CheckResult } from "../src/task/harness.ts";
-import { reserveMs, TASK_LIMITS } from "../src/task/limits.ts";
+import { reserveMs, runNeedsMs, TASK_LIMITS } from "../src/task/limits.ts";
 import { verifiedWith } from "../src/task/worker.ts";
 import { attempt, BRIEF, FIX, FIXTURE, PROJECT, verdicts } from "./task-fixtures.ts";
 import { cleanUp, repoWith, scratch, snap } from "./workspace-fixtures.ts";
@@ -157,8 +157,9 @@ describe("a task run from a prepared environment (NIV-49, D41)", () => {
       time,
       extra: {
         environment,
-        // The first selection has taken 600 s: what is left before the reserve can't hold another operation.
-        progress: (message) => void (message.startsWith("Baseline 1:") && time.advance(600_000)),
+        // The first selection has taken all but a second less than an operation of the time before the reserve: what is
+        // left can't hold another, however long the session is.
+        progress: (message) => void (message.startsWith("Baseline 1:") && time.advance(TASK_LIMITS.sessionMs - reserveMs(2) - runNeedsMs() + 1_000)),
       },
     });
     assert.deepEqual([run.result.outcome, run.result.stopped?.code, run.result.stopped?.step, run.requests(), run.result.proposal], ["failed", "time", "baseline", 0, null]);

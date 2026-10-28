@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
+import { TASK_BRIEF_LIMITS } from "@nivra/domain";
 import type { ExecutionSession } from "../src/exec/backend.ts";
 import { NEBIUS_LIMITS } from "../src/exec/nebius/session.ts";
 import { RESULT_ARCHIVE, RESULT_LISTING } from "../src/exec/patch.ts";
-import { reserveMs, TASK_LIMITS } from "../src/task/limits.ts";
+import { FETCH_HEADERS_MS } from "../src/providers/transport.ts";
+import { AFTER_SESSION_MS, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "../src/task/limits.ts";
 import type { RealGuest } from "./real-guest.ts";
-import { attempt, FIX, labels, verdicts } from "./task-fixtures.ts";
+import { attempt, CUT_OFF, FIX, labels, verdicts, type Call } from "./task-fixtures.ts";
 import { cleanUp } from "./workspace-fixtures.ts";
 
 /**
@@ -122,8 +124,8 @@ describe("a task run's time (NIV-7, D39)", () => {
   });
 
   // A model request can't outlast the window: Mastra's own deadline, on the real clock, ends it there. A fake clock can't
-  // show that, so here each request takes 60 s, and every operation, read and git command the most it may: enough that
-  // the worker reaches the window's end, and a tool is refused for time.
+  // show that, so here each request takes its whole time (NIV-35), and every operation, read and git command the most it
+  // may: enough that the worker reaches the window's end, and a tool is refused for time.
   it("runs every final check when every operation, read and git command takes the most it may", async () => {
     const time = slowClock();
     const started = time.now();
@@ -131,10 +133,12 @@ describe("a task run's time (NIV-7, D39)", () => {
     let windowEnd = Number.POSITIVE_INFINITY;
     const run = await attempt({
       time,
-      calls: [["read_file", { path: "greet.sh" }], ["edit_file", FIX], ["run_case", { number: 1 }], ["run_check", { number: 1 }]],
+      // The edit comes first: with every request taking its whole time, a second request leaves no room for a write
+      // beside the hand-in's kept time (NIV-35).
+      calls: [["edit_file", FIX], ["run_case", { number: 1 }], ["run_check", { number: 1 }]],
       extra: { progress: (_message, data) => void (typeof data["windowMs"] === "number" && (windowEnd = time.now() + data["windowMs"])) },
-      // Each request takes 60 s, or what is left of the window: Mastra's deadline ends it there.
-      beforeRequest: () => time.advance(Math.max(0, Math.min(60_000, windowEnd - time.now()))),
+      // Each request takes its whole time, or what is left of the window: Mastra's deadline ends it there.
+      beforeRequest: () => time.advance(Math.max(0, Math.min(TASK_LIMITS.model.stepMs, windowEnd - time.now()))),
       wrap: (transport, guest) => async (request) => {
         const answer = await transport(request);
         const read = /^\/v1\/operations\/([^/]+)$/.exec(request.path);
@@ -152,7 +156,7 @@ describe("a task run's time (NIV-7, D39)", () => {
       // Patch construction, after collect, takes nearly its whole cap.
       wrapLocal: (session) => slowed(session, () => collected, () => time.advance(19_000)),
     });
-    assert.deepEqual([run.result.outcome, run.result.stopped], ["proposed", null]);
+    assert.deepEqual([run.result.outcome, run.result.stopped], ["proposed", null], JSON.stringify(run.core?.worker ?? null));
     assert.ok(run.core!.worker.tools.refused >= 1 || run.core!.worker.ended === "time" || run.core!.worker.handInDue === "time", `the worker never reached the window's end, so the reserve wasn't tested: ${JSON.stringify(run.core!.worker)}`);
     assert.deepEqual(verdicts(run.core), ["case 1 passed", "check 1 passed"]);
     assert.ok(time.now() - started <= TASK_LIMITS.runMs, `the run took ${Math.round((time.now() - started) / 1000)} s of a ${TASK_LIMITS.runMs / 1000} s deadline`);
@@ -191,6 +195,109 @@ describe("a task run's time (NIV-7, D39)", () => {
 });
 
 /** The engine's own session, each command taking `slow` once `when` holds. */
+/**
+ * A request's time (NIV-35): sized from its output cap, sent whole or not at all, with the hand-in's whole time kept
+ * from the start, so nothing but a request's own deadline cuts it off and the last request can always be sent.
+ */
+describe("a task request's time (NIV-35)", () => {
+  /** An attempt on the slow clock, with where its work window ends, read from the worker's own progress line. */
+  const timed = (options: Omit<Parameters<typeof attempt>[0] & object, "time" | "beforeRequest">, before: (index: number, windowEnd: number, time: ReturnType<typeof slowClock>) => void) => {
+    const time = slowClock();
+    let windowEnd = Number.NaN;
+    return attempt({
+      ...options,
+      time,
+      extra: { ...options.extra, progress: (_message, data) => void (typeof data["windowMs"] === "number" && (windowEnd = time.now() + data["windowMs"])) },
+      beforeRequest: (index) => before(index, windowEnd, time),
+    });
+  };
+
+  it("gives every request the time its whole answer takes at the planned rate, under fetch's wait for headers, and says the caps", async () => {
+    const { stepMs, outputTokensPerRequest, tokensPerSecond, handIn } = TASK_LIMITS.model;
+    assert.deepEqual([stepMs, outputTokensPerRequest, handIn.stepMs, handIn.outputTokens, tokensPerSecond], [830_000, 8_000, 180_000, 1_500, 10]);
+    for (const [ms, tokens] of [[stepMs, outputTokensPerRequest], [handIn.stepMs, handIn.outputTokens]] as const) {
+      assert.equal(ms, 30_000 + (tokens / tokensPerSecond) * 1000, `${ms} ms isn't ${tokens} tokens' time at the planned rate, with its input's time`);
+      assert.ok(ms < FETCH_HEADERS_MS, `a request's ${ms / 1000} s isn't under the ${FETCH_HEADERS_MS / 1000} s fetch waits for its reply's headers`);
+    }
+    // The whole run still fits its phases, and the window holds requests with tools besides the reserve.
+    assert.ok(TASK_LIMITS.snapshotMs + TASK_LIMITS.sessionMs + AFTER_SESSION_MS <= TASK_LIMITS.runMs);
+    // With the most final checks a brief may have, and before the session's own setup (the toolchain probe and any
+    // baseline selections), requests with tools can still start for ten minutes or more.
+    assert.ok(TASK_LIMITS.sessionMs - reserveMs(TASK_BRIEF_LIMITS.finalChecks) - (stepMs + handIn.stepMs) >= 10 * 60_000, "the session leaves too little room for requests of their whole time");
+    const run = await attempt();
+    assert.equal(run.result.outcome, "proposed");
+    assert.deepEqual(run.deadlines().map((given) => given.stepMs), [stepMs]);
+    assert.deepEqual([run.outputCaps().length, [...new Set(run.outputCaps())]], [4, [outputTokensPerRequest]]);
+    assert.ok(run.prompts()[0]!.includes("An answer may be at most 8,000 tokens long, and the hand-in's 1,500: a longer one is cut off before its tool call is made, and the attempt ends there, so make a large change as several smaller edit_file calls."), "the worker isn't told its answers' caps");
+  });
+
+  it("offers only the hand-in, with its own cap, once the window can't hold a request with tools and then the hand-in, each of its whole time", async () => {
+    const { stepMs, handIn, outputTokensPerRequest } = TASK_LIMITS.model;
+    // The first request answers with a second less than a request with tools and the hand-in need.
+    const run = await timed({ handInWhenAsked: true, calls: [["read_file", { path: "greet.sh" }], ["edit_file", FIX]] }, (index, windowEnd, time) => void (index === 0 && time.advance(windowEnd - time.now() - stepMs - handIn.stepMs + 1_000)));
+    assert.deepEqual(run.offered().map((tools) => (tools.includes("edit_file") ? "tools" : tools.join())), ["tools", "submit"]);
+    assert.deepEqual(run.outputCaps(), [outputTokensPerRequest, handIn.outputTokens]);
+    assert.deepEqual([run.core!.worker.ended, run.core!.worker.handedIn, run.core!.worker.handInDue, run.core!.worker.written], ["submitted", true, "time", []]);
+    assert.ok(run.prompts()[1]!.includes("Your next request can only hand in"), "the worker wasn't told only handing in was left");
+  });
+
+  it("sends the hand-in in its own time, and nothing the window can't hold whole: below the hand-in's time, the attempt ends for time", async () => {
+    const { stepMs, handIn } = TASK_LIMITS.model;
+    // Less than a request with tools needs, but the hand-in's time: the hand-in is sent.
+    const short = await timed({ handInWhenAsked: true, calls: [["read_file", { path: "greet.sh" }]] }, (index, windowEnd, time) => void (index === 0 && time.advance(windowEnd - time.now() - stepMs + 1_000)));
+    assert.deepEqual([short.requests(), short.offered()[1], short.core!.worker.handedIn], [2, ["submit"], true]);
+    // A second less than the hand-in's time: nothing more is sent.
+    const shorter = await timed({ handInWhenAsked: true, calls: [["read_file", { path: "greet.sh" }]] }, (index, windowEnd, time) => void (index === 0 && time.advance(windowEnd - time.now() - handIn.stepMs + 1_000)));
+    assert.deepEqual([shorter.requests(), shorter.core!.worker.ended, shorter.core!.worker.handedIn], [1, "time", false]);
+    // The reserve still holds collect and every final check.
+    assert.deepEqual([shorter.result.outcome, verdicts(shorter.core)], ["unchanged", ["case 1 failed", "check 1 failed"]]);
+  });
+
+  it("says an answer cut off at its output cap ended the attempt, never that requests ran out, and still runs every final check", async () => {
+    const lines: string[] = [];
+    const run = await attempt({ calls: [["read_file", { path: "greet.sh" }], CUT_OFF], extra: { progress: (message) => void lines.push(message) } });
+    assert.deepEqual([run.requests(), run.core!.worker.ended, run.core!.worker.handedIn, run.result.outcome], [2, "output-cap", false, "unchanged"]);
+    assert.ok(lines.includes("The worker stopped without handing in (output-cap): 0 files written."), lines.join(" | "));
+    assert.deepEqual(verdicts(run.core), ["case 1 failed", "check 1 failed"]);
+  });
+
+  for (const [tool, input, needs] of [
+    ["edit_file", FIX, writeNeedsMs()],
+    ["run_case", { number: 1 }, runNeedsMs()],
+  ] as const) {
+    it(`keeps the hand-in's whole time from every operation: ${tool} is refused when it would take it, and the hand-in is sent`, async () => {
+      const { handIn } = TASK_LIMITS.model;
+      // The request answers with a second less than its operation and the hand-in need.
+      const run = await timed({ handInWhenAsked: true, calls: [[tool, input]] }, (index, windowEnd, time) => void (index === 0 && time.advance(windowEnd - time.now() - handIn.stepMs - needs + 1_000)));
+      assert.deepEqual([run.core!.worker.tools.refused, run.core!.worker.written, run.core!.worker.handedIn, run.offered()[1]], [1, [], true, ["submit"]]);
+      assert.ok(!labels(run.guest).some((label) => label === "nivra-write" || label === "run"), `an operation was started: ${labels(run.guest).join(", ")}`);
+      assert.ok(run.prompts()[1]!.includes(`there isn't time left in this attempt for another ${tool === "edit_file" ? "write" : "run"}`));
+    });
+  }
+
+  it("says the time for tools is running out a request ahead when each request takes a long answer's time", async () => {
+    const time = slowClock();
+    // 200 s a request: 2,000 tokens at the slow rate.
+    const run = await attempt({ time, handInWhenAsked: true, beforeRequest: () => time.advance(200_000), calls: Array.from({ length: 23 }, (): Call => ["search_files", { text: "greet", in: "names" }]) });
+    const warned = run.prompts().findIndex((prompt) => /about \d+ seconds are left for tools/.test(prompt));
+    const handIn = run.offered().findIndex((tools) => tools.length === 1 && tools[0] === "submit");
+    assert.ok(warned > 0 && handIn > warned, `warned at ${warned}, only handing in from ${handIn}`);
+    assert.deepEqual([run.core!.worker.handInDue, run.core!.worker.handedIn], ["time", true]);
+  });
+
+  it("starts the worker only when the window holds one request with tools and the hand-in, each of its whole time", async () => {
+    const withTools = TASK_LIMITS.model.stepMs + TASK_LIMITS.model.handIn.stepMs;
+    // The run's deadline leaves the session its reserve and a second less than that, then 5 s more than that.
+    for (const [extraMs, requests, ended] of [[-1_000, 0, "no-time"], [5_000, 4, "submitted"]] as const) {
+      const time = slowClock();
+      const lines: string[] = [];
+      const run = await attempt({ time, extra: { deadline: time.now() + AFTER_SESSION_MS + reserveMs(2) + withTools + extraMs, progress: (message) => void lines.push(message) } });
+      assert.deepEqual([extraMs, run.requests(), run.core!.worker.ended], [extraMs, requests, ended]);
+      if (ended === "no-time") assert.ok(lines.includes("Too little time was left in the session for a request with tools and then the hand-in, so the worker didn't start."), lines.join(" | "));
+    }
+  });
+});
+
 function slowed(session: ExecutionSession, when: () => boolean, slow: () => void): ExecutionSession {
   return {
     capabilities: session.capabilities,

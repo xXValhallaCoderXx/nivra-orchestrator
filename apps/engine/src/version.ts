@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-export const ENGINE_VERSION = "0.1.0";
+export const ENGINE_VERSION = "0.2.0";
 
 /**
  * The staged runtime's content hash, read from the `manifest.json` that staging writes beside the bundle (D5). Null
