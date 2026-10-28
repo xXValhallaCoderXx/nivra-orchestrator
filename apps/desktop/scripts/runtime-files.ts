@@ -4,6 +4,15 @@ import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 
+/**
+ * The names electron-builder never copies into extra resources, where the runtime goes: builder-util's own walk skips
+ * them at every depth (26.15.3). Its longer lists for the app's own files (`excludedNames`, `excludedExts`) don't apply
+ * there. Staging leaves out the same, so the runtime staged is the runtime packaged, file for file, as the release
+ * candidate checks (NIV-35: undici 7.29.1 ships an empty `lib/llhttp/.gitkeep`). A test copies a folder through the
+ * packager's own walk to keep this so.
+ */
+export const PACKAGER_SKIPS: ReadonlySet<string> = new Set([".DS_Store", ".gitkeep"]);
+
 /** A DLL of the Visual C++ 2015–2022 runtime, by file name. */
 export const VC_RUNTIME_DLL = /^(?:vcruntime|msvcp|concrt|vcomp|vccorlib)140[a-z0-9_]*\.dll$/i;
 const VC_RUNTIME_NAME = /(?:vcruntime|msvcp|concrt|vcomp|vccorlib)140[a-z0-9_]*\.dll/gi;
