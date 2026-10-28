@@ -162,8 +162,9 @@ PENDING-SAMPLE.
    what Nebius keeps. Then press **Upload and check**, and **Allow uploads for this project**. A check runs Nivra's own
    fixed steps with networking off: at most 8 operations, each command up to 60 seconds, 10 minutes in all, then up to
    7 minutes to close. Nothing comes back to your checkout.
-8. *Optional, about PENDING-TAKE minutes:* run the real task, the sample's bug fixed by Nemotron in Nebius, then
-   approved and applied by you: [docs/judge-walkthrough.md](docs/judge-walkthrough.md).
+8. *Optional, about PENDING-TAKE minutes, once the public sample exists:* run a task on it. Nemotron makes a change in
+   Nebius, tests it can't edit decide whether it is verified, and only a verified change can be approved and applied
+   by you: [docs/judge-walkthrough.md](docs/judge-walkthrough.md).
 
 **Using another folder.** Any git repository with at least one commit works, from the commit only: uncommitted and
 untracked work is never sent.

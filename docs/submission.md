@@ -27,11 +27,13 @@ A requirement counts as met only when its evidence exists. A plan or a design is
 
 ## The demonstration
 
-One real bug in a real public repository, fixed through the packaged app. The bug is valhalla-fitness's
-finish-time personal-record detection, which compared old workouts' loads in the wrong units. NVIDIA Nemotron makes the
-change in a Nebius sandbox. Tests it can't edit judge it there, before and after. The person reviews the exact patch,
-approves it by its hash, and the engine applies it on the repository's own system. The script is
-[demo-script.md](demo-script.md).
+One recorded take on the build chosen for release, showing only what works in the take or in a labelled live run:
+explaining a repository with evidence, saved plans with their council review and research, the coach (if the build
+has it), a sandbox check, and a task run in Nebius. NVIDIA Nemotron makes the change in a Nebius sandbox, and tests it
+can't edit judge it there, before and after. Only a verified change can be approved, by its hash, and applied by the
+engine on the repository's own system. Whether the take ends with a verified change applied, or an unverified one
+refused with the checkout untouched, depends on the evidence by then: PENDING-TAKE. No private material is filmed. The
+script is [demo-script.md](demo-script.md).
 
 Long waits are cut in the edit, with a caption saying so, never sped up or simulated.
 
@@ -56,9 +58,9 @@ results not yet produced. Match the field names to the form when submitting.
 
 **Project name:** Nivra
 
-**Elevator pitch** (200 characters at most; this one is 172):
-> A desktop agent that turns a task into a verified code change: NVIDIA Nemotron writes it in a Nebius sandbox, tests
-> it can't edit judge it, and you approve the exact patch.
+**Elevator pitch** (200 characters at most; this one is 175):
+> A coding agent in a boundary: NVIDIA Nemotron changes your code in a Nebius sandbox, tests it can't edit judge the
+> change, and nothing lands until you approve the exact patch.
 
 **About the project**
 

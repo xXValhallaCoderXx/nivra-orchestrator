@@ -1,9 +1,9 @@
 # The full task, step by step
 
-An optional walkthrough, after the README's quick path. It runs one real task on the public sample: a bug in
-valhalla-fitness's workout records, fixed by NVIDIA Nemotron in a Nebius sandbox, judged by tests it can't edit, and
-applied to your copy only after you approve the exact change. It takes about PENDING-TAKE minutes, most of them waiting
-for Nebius and the model.
+An optional walkthrough, after the README's quick path, offered only once the public sample exists (PENDING-SAMPLE).
+It runs one task on that sample: NVIDIA Nemotron makes a change in a Nebius sandbox, tests it can't edit judge it, and
+only a verified change can be applied to your copy, after you approve that exact change. It takes about PENDING-TAKE
+minutes, most of them waiting for Nebius and the model.
 
 Nothing here pushes anything: the change stays in your clone.
 
