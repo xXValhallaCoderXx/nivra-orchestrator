@@ -573,9 +573,24 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-reco
     with the environment just prepared (the window's, which Start sends and the host checks again, and the app's),
     and show the approved commit, snapshot, frozen files with their hashes and environment inputs;
   - `--cleanup` removes the keys from the last live profile, whatever the task's checkout holds.
+  - The recipe binds the one model a task run may use (D46), and the run's preview must name it. `--live` follows a
+    run past its own deadline (the recipe's `runMinutes` and 10), and saves screenshots of the prepared environment,
+    the run's preview, its end and the final state (0600; they come out blank under WSLg, so evidence never rests on
+    them).
   The task, its repository and its brief are in a file outside the repository (by default
   `~/nivra-work/she65/task-live.json`), with any `review` points: what the person checks in the proposal that its
   tests can't show, which the recipe binds and lists. Nothing in the script names a repository.
+
+The engine's fetch (D47): at start, before any request, the engine makes undici's agent, with 15 minutes' waits for a
+reply's headers and body, the global dispatcher that Node's own fetch reads (`apps/engine/src/providers/transport.ts`),
+since a model's reply is not streamed and comes whole; with `NODE_USE_ENV_PROXY=1` it is undici's `EnvHttpProxyAgent`,
+as Node's own would be. Every request keeps its own, shorter deadline. Tests may shorten
+the wait with `--fetch-wait-ms` (never lengthen it); undici counts it in half-second ticks, so test waits are seconds.
+
+```bash
+(cd apps/engine && node --test test/transport.test.ts test/task-timing.test.ts)
+(cd apps/engine && node --test --test-name-pattern='heartbeat|fetch waits' test/task-engine.test.ts)
+```
 
 The task readiness coach (NIV-53, D43): what a brief is missing, worked out without a model; one bounded coach call
 when the person asks; and only the changes they tick, saved as the next brief version. The engine's half is checked in
