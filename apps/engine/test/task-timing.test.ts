@@ -133,7 +133,9 @@ describe("a task run's time (NIV-7, D39)", () => {
     let windowEnd = Number.POSITIVE_INFINITY;
     const run = await attempt({
       time,
-      calls: [["read_file", { path: "greet.sh" }], ["edit_file", FIX], ["run_case", { number: 1 }], ["run_check", { number: 1 }]],
+      // The edit comes first: with every request taking its whole time, a second request leaves no room for a write
+      // beside the hand-in's kept time (NIV-35).
+      calls: [["edit_file", FIX], ["run_case", { number: 1 }], ["run_check", { number: 1 }]],
       extra: { progress: (_message, data) => void (typeof data["windowMs"] === "number" && (windowEnd = time.now() + data["windowMs"])) },
       // Each request takes its whole time, or what is left of the window: Mastra's deadline ends it there.
       beforeRequest: () => time.advance(Math.max(0, Math.min(TASK_LIMITS.model.stepMs, windowEnd - time.now()))),
@@ -154,7 +156,7 @@ describe("a task run's time (NIV-7, D39)", () => {
       // Patch construction, after collect, takes nearly its whole cap.
       wrapLocal: (session) => slowed(session, () => collected, () => time.advance(19_000)),
     });
-    assert.deepEqual([run.result.outcome, run.result.stopped], ["proposed", null]);
+    assert.deepEqual([run.result.outcome, run.result.stopped], ["proposed", null], JSON.stringify(run.core?.worker ?? null));
     assert.ok(run.core!.worker.tools.refused >= 1 || run.core!.worker.ended === "time" || run.core!.worker.handInDue === "time", `the worker never reached the window's end, so the reserve wasn't tested: ${JSON.stringify(run.core!.worker)}`);
     assert.deepEqual(verdicts(run.core), ["case 1 passed", "check 1 passed"]);
     assert.ok(time.now() - started <= TASK_LIMITS.runMs, `the run took ${Math.round((time.now() - started) / 1000)} s of a ${TASK_LIMITS.runMs / 1000} s deadline`);

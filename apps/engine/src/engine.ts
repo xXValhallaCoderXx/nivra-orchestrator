@@ -998,7 +998,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   stripProviderEnv(process.env);
   // Before any request: fetch waits as long as a model's whole answer can take (NIV-35).
-  useEngineTransport();
+  useEngineTransport(args.fetchWaitMs);
 
   try {
     engine = await createEngine({ ...args, output, log, moduleUrl: import.meta.url });

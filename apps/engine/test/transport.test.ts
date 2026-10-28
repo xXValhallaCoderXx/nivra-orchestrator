@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, describe, it } from "node:test";
-import { RESEARCH_LIMITS } from "@nivra/domain";
+import { COACH_RUN_LIMITS, RESEARCH_LIMITS } from "@nivra/domain";
 import { Agent, setGlobalDispatcher } from "undici";
 import { EXPLAIN_LIMITS } from "../src/explain/limits.ts";
 import { createModelClient, ModelFailure } from "../src/providers/model.ts";
@@ -54,7 +54,7 @@ const failureCode = async (promise: Promise<unknown>): Promise<string> => {
 
 describe("the engine's fetch (NIV-35)", () => {
   it("waits longer than any model request's own deadline, from the task worker's 830 s down", () => {
-    const deadlines = { task: TASK_LIMITS.model.stepMs, handIn: TASK_LIMITS.model.handIn.stepMs, chat: GENERAL_LIMITS.stepMs, explain: EXPLAIN_LIMITS.stepMs, review: REVIEW_REQUEST_MS, research: RESEARCH_LIMITS.modelMs, check: CHECK_DEADLINE_MS };
+    const deadlines = { task: TASK_LIMITS.model.stepMs, handIn: TASK_LIMITS.model.handIn.stepMs, chat: GENERAL_LIMITS.stepMs, explain: EXPLAIN_LIMITS.stepMs, review: REVIEW_REQUEST_MS, coach: COACH_RUN_LIMITS.requestMs, research: RESEARCH_LIMITS.modelMs, check: CHECK_DEADLINE_MS };
     assert.deepEqual(Object.entries(deadlines).filter(([, ms]) => ms >= FETCH_HEADERS_MS), []);
     assert.equal(FETCH_HEADERS_MS, 900_000);
   });

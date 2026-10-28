@@ -59,7 +59,7 @@ function engineAt(home: string, sandbox: SandboxStub<RealGuest>, model: Stub, ex
   return engine;
 }
 
-async function setup(options: { credentials?: boolean; calls?: Call[]; files?: Record<string, string>; chat?: (request: StubRequest, index: number) => Reply | Promise<Reply>; models?: Array<{ id: string }> } = {}): Promise<Setup> {
+async function setup(options: { credentials?: boolean; calls?: Call[]; files?: Record<string, string>; chat?: (request: StubRequest, index: number) => Reply | Promise<Reply>; models?: Array<{ id: string }>; args?: string[] } = {}): Promise<Setup> {
   const guest = new RealGuest(CHECK_IMAGE.uuid);
   guest.busybox = true;
   const sandbox = await startSandboxStub({ guest });
@@ -69,7 +69,7 @@ async function setup(options: { credentials?: boolean; calls?: Call[]; files?: R
   const root = tempDir("nivra task engine");
   dirs.push(root);
   const home = join(root, "home");
-  const engine = engineAt(home, sandbox, model);
+  const engine = engineAt(home, sandbox, model, options.args);
   const info = await engine.initialize(options.credentials === false ? {} : CREDENTIALS);
   return { sandbox, model, guest, engine, info, home, repo: repoWith(options.files ?? FILES) };
 }
@@ -250,6 +250,21 @@ describe("a task run through a real engine (NIV-7)", () => {
     const page = await ended(engine, run.id);
     assert.deepEqual([page.status, (await report(engine, run.id)).outcome], ["succeeded", "proposed"]);
     assert.ok(Math.max(...took) < 1_000, `pings took ${took.join(", ")} ms`);
+  });
+
+  it("sets its fetch waits at start: a model reply later than --fetch-wait-ms is cut off, and the same reply inside the wait arrives (NIV-35)", async () => {
+    const late = (_request: StubRequest, index: number): Reply => {
+      const [tool, input] = WORK[Math.min(index, WORK.length - 1)]!;
+      return { ...toolCall(tool, input, { id: `call_${index}` }), ...(index === 0 ? { delayMs: 3_000 } : {}) };
+    };
+    for (const [args, worker, chats] of [[["--fetch-wait-ms", "1000"], "time", 1], [[], "submitted", 4]] as const) {
+      const { engine, repo, model } = await setup({ chat: late, args: [...args] });
+      const shown = ready(await preview(engine, repo));
+      const run = await start(engine, repo, shown.snapshot.fingerprint);
+      await ended(engine, run.id);
+      const done = await report(engine, run.id);
+      assert.deepEqual([args.join(" "), done.worker?.ended, model.chats().length], [args.join(" "), worker, chats]);
+    }
   });
 
   it("runs the worker on the production adapter: it fixes the fixture, Nivra judges every case and check, and the change is proposed and kept exactly, the checkout untouched", async () => {

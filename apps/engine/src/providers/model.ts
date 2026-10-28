@@ -453,6 +453,8 @@ function total(steps: readonly StepRecord[], field: "inputTokens" | "outputToken
 }
 
 const NETWORK_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"]);
+/** Fetch gave up waiting for a reply's headers or body (NIV-35): the reply was late, not the network down. */
+const WAIT_CODES = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
 const UNREADABLE = new Set(["AI_JSONParseError", "AI_TypeValidationError", "AI_InvalidResponseDataError", "AI_EmptyResponseBodyError", "AI_NoContentGeneratedError"]);
 
 function kindForStatus(status: number): ModelFailureKind {
@@ -518,6 +520,7 @@ export function toModelFailure(error: unknown, stage = "model.call"): ModelFailu
     }
     if (UNREADABLE.has(name)) return failure("bad-response", name.replace(/^AI_/, ""));
     if (typeof e.code === "string" && NETWORK_CODES.has(e.code)) return failure("network", e.code);
+    if (typeof e.code === "string" && WAIT_CODES.has(e.code)) return failure("timeout", "its reply took longer than the engine's fetch waits for one");
     if (name === "TypeError" && /fetch failed/i.test(message)) fetchFailed = true;
     current = e.cause;
   }

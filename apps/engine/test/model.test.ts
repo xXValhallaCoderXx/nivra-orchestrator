@@ -256,6 +256,9 @@ describe("toModelFailure", () => {
       [apiError(200, { message: "Invalid JSON response", cause: Object.assign(new Error("Unexpected token"), { name: "AI_JSONParseError" }) }), "bad-response"],
       [Object.assign(new Error("Invalid JSON response"), { name: "AI_JSONParseError" }), "bad-response"],
       [Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) }), "network"],
+      // As the AI SDK wraps fetch giving up on a late reply: its cause is undici's own error (NIV-35).
+      [apiError(0, { statusCode: undefined, message: "Cannot connect to API: Headers Timeout Error", cause: Object.assign(new Error("Headers Timeout Error"), { code: "UND_ERR_HEADERS_TIMEOUT" }) }), "timeout"],
+      [apiError(0, { statusCode: undefined, message: "Cannot connect to API: Body Timeout Error", cause: Object.assign(new Error("Body Timeout Error"), { code: "UND_ERR_BODY_TIMEOUT" }) }), "timeout"],
       [wrapped(new MastraTimeoutError({ timeoutType: "step", timeoutMs: 1_000 })), "timeout"],
       [new Error("something odd"), "internal"],
     ];

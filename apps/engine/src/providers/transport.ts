@@ -1,4 +1,4 @@
-import { Agent, setGlobalDispatcher } from "undici";
+import { Agent as HttpAgent, setGlobalDispatcher } from "undici";
 
 /**
  * How long the engine's fetch waits for a reply's headers, and between the parts of its body (NIV-35). Mastra's
@@ -9,13 +9,13 @@ import { Agent, setGlobalDispatcher } from "undici";
 export const FETCH_HEADERS_MS = 15 * 60_000;
 
 /** Node's fetch as the engine uses it: undici's own agent, with `waitMs` in place of its 300 s waits. */
-export const engineDispatcher = (waitMs = FETCH_HEADERS_MS): Agent => new Agent({ headersTimeout: waitMs, bodyTimeout: waitMs });
+export const engineDispatcher = (waitMs = FETCH_HEADERS_MS): HttpAgent => new HttpAgent({ headersTimeout: waitMs, bodyTimeout: waitMs });
 
 /**
  * Makes every fetch in this process wait `waitMs` (D22's deadlines stay each request's own). The engine does this once,
  * at start, before any request; undici's global dispatcher is the one Node's own fetch reads.
  */
-export function useEngineTransport(waitMs = FETCH_HEADERS_MS): Agent {
+export function useEngineTransport(waitMs = FETCH_HEADERS_MS): HttpAgent {
   const dispatcher = engineDispatcher(waitMs);
   setGlobalDispatcher(dispatcher);
   return dispatcher;
