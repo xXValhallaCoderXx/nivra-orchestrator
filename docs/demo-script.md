@@ -27,7 +27,7 @@ the person's approval.
 
 ## Before recording
 
-- **The build:** the one chosen at about 19:45, with its commit and checksums as the release page lists them: PENDING-H2.
+- **The build:** the one chosen for release, with its commit and checksums as the release page lists them: PENDING-H2.
   It is named on screen once. The route proven live is the Linux packaged build. Windows with WSL is recorded only if
   its own live run passed: PENDING-WSL.
 - **A fresh profile and engine home** for the take, so the opening scene starts empty and nothing touches `~/.nivra`.
