@@ -16,7 +16,7 @@ import { Sidebar } from "../shell/Sidebar";
 import { Switcher, type SwitcherHandle } from "../shell/Switcher";
 import { ToastProvider, useToast } from "../shell/Toasts";
 import { GeneralHome, ProjectHome } from "./Home";
-import type { Route, Scope } from "./routes";
+import type { Route, Scope, SettingsSection } from "./routes";
 import { SettingsPage } from "./SettingsPage";
 
 /**
@@ -68,6 +68,8 @@ function Shell() {
   const [helloRuns, setHelloRuns] = useState<Record<string, RunRef>>({});
   const [explainRuns, setExplainRuns] = useState<Record<string, RunRef>>({});
   const [addWarning, setAddWarning] = useState<{ projectId: string; text: string } | null>(null);
+  // Settings opens on the section last shown there.
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("connections");
   const switcher = useRef<SwitcherHandle>(null);
 
   const projects = usePoll<ProjectView[]>(() => window.nivra.listProjects(), () => null, [projectsVersion]);
@@ -110,7 +112,13 @@ function Shell() {
     .filter(([, ref]) => ref.status !== null && !TERMINAL.includes(ref.status))
     .map(([id]) => id);
 
-  const navigate = (next: Route) => setRoute(next.kind === "settings" ? { ...next, section: shownSection(next.section) } : next);
+  const navigate = (next: Route) => {
+    if (next.kind !== "settings") return setRoute(next);
+    const section = shownSection(next.section);
+    setSettingsSection(section);
+    setRoute({ kind: "settings", section });
+  };
+  const openSettings = () => navigate({ kind: "settings", section: settingsSection });
   const switchTo = (next: Scope) => {
     setChosen(next);
     setRoute((current) => routeAfterSwitch(current, next));
@@ -147,6 +155,7 @@ function Shell() {
         projects={list}
         drafts={{ available: true, list: [] }}
         onNavigate={navigate}
+        onOpenSettings={openSettings}
         onOpenDraft={() => undefined}
         onConversationCreated={opened}
       />
@@ -293,6 +302,12 @@ function Shell() {
             </Page>
             <Page shown={shown.kind === "settings"} testId="page-settings">
               <SettingsPage
+                section={shown.kind === "settings" ? shown.section : settingsSection}
+                onSection={(section) => navigate({ kind: "settings", section })}
+                narrow={false}
+                engines={engines.value ?? []}
+                appInfo={appInfo.value}
+                settings={settings.value}
                 project={project}
                 projects={list}
                 engine={engine}

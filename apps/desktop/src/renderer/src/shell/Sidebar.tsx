@@ -194,6 +194,7 @@ export function Sidebar({
   projects,
   drafts,
   onNavigate,
+  onOpenSettings,
   onOpenDraft,
   onConversationCreated,
 }: {
@@ -208,6 +209,8 @@ export function Sidebar({
   projects: ProjectView[];
   drafts: SidebarDrafts;
   onNavigate: Navigate;
+  /** Settings, on the section last shown there. */
+  onOpenSettings(): void;
   onOpenDraft(key: string): void;
   onConversationCreated(summary: ConversationSummary): void;
 }) {
@@ -270,7 +273,7 @@ export function Sidebar({
         </Box>
       </AppShell.Section>
       <AppShell.Section pt={8}>
-        <NavItem section="settings" label="Settings" active={section === "settings"} onClick={() => onNavigate({ kind: "settings", section: route.kind === "settings" ? route.section : "connections" })} testId="nav-settings" />
+        <NavItem section="settings" label="Settings" active={section === "settings"} onClick={onOpenSettings} testId="nav-settings" />
       </AppShell.Section>
     </AppShell.Navbar>
   );
