@@ -1,11 +1,13 @@
-import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, NumberInput, SegmentedControl, Stack, Table, Text, TextInput, Textarea } from "@mantine/core";
+import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, NumberInput, Paper, SegmentedControl, SimpleGrid, Stack, Table, Text, TextInput, Textarea } from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
 import type { BaselineSelection, TaskBaselineCheck, TaskCheck, TaskReport } from "@nivra/domain";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { AcceptanceCaseView, TaskAttemptView, TaskRunPreview, TaskView, TurnStatus } from "../../../shared/ipc";
 import { startedFrom } from "../../../shared/task-started";
+import { verdictText } from "../../../shared/task-verdict";
 import { CONSENT_COVERS } from "../shared/evidence";
-import { errorMessage, Section, usePoll } from "../shared/ui";
-import { applyGoing, ApplyResult, AttemptsList, Decision } from "./task-apply";
+import { errorMessage, usePoll } from "../shared/ui";
+import { applyGoing, ApplyResult, Decision } from "./task-apply";
 
 /**
  * A task's runs (D39): its acceptance cases, written with the brief; a preview of what a run would send and where, from
@@ -32,23 +34,16 @@ export const caseOf = (draft: CaseDraft): AcceptanceCaseView => ({ name: draft.n
 
 const EMPTY_CASE: CaseDraft = { name: "", command: "", output: "", newline: true, exitCode: 0 };
 
-/** The brief's acceptance cases, as the person writes them. Four cases and checks run at most. */
+/** The brief's acceptance cases, as the person writes them, under the card that says what they are. Four cases and checks run at most. */
 export function CasesInput({ cases, onChange }: { cases: CaseDraft[]; onChange(next: CaseDraft[]): void }) {
   const set = (index: number, change: Partial<CaseDraft>) => onChange(cases.map((draft, at) => (at === index ? { ...draft, ...change } : draft)));
   return (
     <Stack gap="xs" data-testid="brief-cases">
-      <Text size="sm" fw={500}>
-        Acceptance cases
-      </Text>
-      <Text size="xs" c="var(--nivra-text-3)">
-        How Nivra checks a run itself: a command, run in the sandbox, and exactly what it must print and the exit code it must give. The run's result comes from these
-        alone. A run takes at most four cases and checks in all.
-      </Text>
       {cases.map((draft, index) => (
         <Stack key={index} gap={4} p="xs" style={{ border: "1px solid var(--nivra-border)", borderRadius: 6 }} data-testid="brief-case">
           <Group justify="space-between" wrap="nowrap">
             <TextInput label={`Case ${index + 1}`} placeholder="What it checks" value={draft.name} onChange={(event) => set(index, { name: event.currentTarget.value })} style={{ flex: 1 }} data-testid="brief-case-name" />
-            <Button size="compact-xs" variant="subtle" color="red" onClick={() => onChange(cases.filter((_, at) => at !== index))} data-testid="brief-case-remove">
+            <Button size="compact-xs" variant="subtle" color="red" onClick={() => onChange(cases.filter((_, at) => at !== index))} aria-label={`Remove case ${index + 1}`} data-testid="brief-case-remove">
               Remove
             </Button>
           </Group>
@@ -119,25 +114,18 @@ const EMPTY_BASELINE: BaselineDraft = { name: "", command: "", mode: "output", o
 const MAX_BASELINE = 3;
 
 /**
- * The brief's baseline checks, as the person writes them (D41): commands run once before the worker, on the commit as it
- * is, each with what it must give there, which can be a failure.
+ * The brief's baseline checks, as the person writes them (D41), under the card that says what they are: commands run once
+ * before the worker, on the commit as it is, each with what it must give there, which can be a failure.
  */
 export function BaselineInput({ checks, onChange }: { checks: BaselineDraft[]; onChange(next: BaselineDraft[]): void }) {
   const set = (index: number, change: Partial<BaselineDraft>) => onChange(checks.map((draft, at) => (at === index ? { ...draft, ...change } : draft)));
   return (
     <Stack gap="xs" data-testid="brief-baseline">
-      <Text size="sm" fw={500}>
-        Baseline checks
-      </Text>
-      <Text size="xs" c="var(--nivra-text-3)">
-        Commands Nivra runs once before the worker starts, on the commit as it is, with networking off. Each must give what you write here, which can be a failure, such as a
-        test that fails for the bug this task fixes. If one doesn't, the run stops before the worker, and says which. At most three.
-      </Text>
       {checks.map((draft, index) => (
         <Stack key={index} gap={4} p="xs" style={{ border: "1px solid var(--nivra-border)", borderRadius: 6 }} data-testid="brief-baseline-check">
           <Group justify="space-between" wrap="nowrap">
             <TextInput label={`Baseline check ${index + 1}`} placeholder="What it shows" value={draft.name} onChange={(event) => set(index, { name: event.currentTarget.value })} style={{ flex: 1 }} data-testid="brief-baseline-name" />
-            <Button size="compact-xs" variant="subtle" color="red" onClick={() => onChange(checks.filter((_, at) => at !== index))} data-testid="brief-baseline-remove">
+            <Button size="compact-xs" variant="subtle" color="red" onClick={() => onChange(checks.filter((_, at) => at !== index))} aria-label={`Remove baseline check ${index + 1}`} data-testid="brief-baseline-remove">
               Remove
             </Button>
           </Group>
@@ -349,27 +337,35 @@ function checkFilesText(check: TaskCheck): string {
   return check.kind === "case" ? `${said}: Nivra judged only what it printed.` : `${said}.`;
 }
 
+/** Whether the window is narrower than the design's breakpoint (48em): dialogs fill it, and columns stack (NW1, NW3). */
+export const useNarrow = () => useMediaQuery("(max-width: 48em)") ?? false;
+
 /**
- * Running a task: Run, with why it can't when it can't; the preview of what a run would send, and the start bound to
- * it; and the latest run, or one chosen from the list, with its progress and what Nivra found.
+ * A task's way into a run (NIV-56, G3: P1g, RS3): "Preview the run", with what it does or, when a run can't start, why
+ * in visible words; the preview of what a run would send and where, from the repository's own engine; and the start
+ * bound to it. A consent the run needs is asked for in the preview, and its answer stays there as it was given.
  */
-export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void }) {
+export function RunLauncher({ view, primary, onStarted }: { view: TaskView; /** Whether it is the page's next useful step, and so its one primary. */ primary: boolean; onStarted(attemptId: string): void }) {
   const taskId = view.summary.id;
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<TaskRunPreview | null>(null);
-  const [chosen, setChosen] = useState<string | null>(null);
+  const [allowed, setAllowed] = useState<{ sharing: boolean; uploads: boolean }>({ sharing: false, uploads: false });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The preview's Start stays on screen while its dialog fades out, so a second press must not start a second run.
   const starting = useRef(false);
-  const latest = view.attempts.at(-1) ?? null;
-  const shown = chosen ?? latest?.id ?? null;
+  const narrow = useNarrow();
+  const says = useId();
+  const why = useId();
   const projectId = view.summary.projectId;
+  const blocked = view.runBlocked;
 
   async function previewIt() {
+    if (blocked !== null) return;
     setPreviewing(true);
     setPreview(null);
     setError(null);
+    setAllowed({ sharing: false, uploads: false });
     try {
       setPreview(await window.nivra.previewTaskRun(taskId));
     } catch (reason) {
@@ -386,6 +382,7 @@ export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void
     try {
       if (kind === "sharing") await window.nivra.setSharing(projectId, true);
       else await window.nivra.setCloudExecution(projectId, true);
+      setAllowed((was) => ({ ...was, [kind]: true }));
       setPreview(await window.nivra.previewTaskRun(taskId));
     } catch (reason) {
       setError(errorMessage(reason));
@@ -402,8 +399,7 @@ export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void
     try {
       const attempt = await window.nivra.startTaskRun(taskId, preview.expected, preview.snapshotFingerprint);
       setPreviewing(false);
-      setChosen(attempt.id);
-      onChanged();
+      onStarted(attempt.id);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -413,37 +409,36 @@ export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void
   }
 
   return (
-    <Stack gap="sm" data-testid="task-runs">
-      <Group gap="sm">
-        <Button size="xs" onClick={() => void previewIt()} disabled={view.runBlocked !== null} data-testid="task-run">
-          Run
-        </Button>
-      </Group>
-      {view.runBlocked && (
-        <Text size="sm" c="var(--nivra-text-2)" data-testid="task-run-blocked">
-          {view.runBlocked}
+    <Stack gap={4} align="flex-end" maw={380} data-testid="task-run-launcher">
+      <Button variant={primary && blocked === null ? "filled" : "default"} onClick={() => void previewIt()} aria-disabled={blocked !== null || undefined} data-disabled={blocked !== null || undefined} aria-describedby={blocked === null ? says : `${says} ${why}`} data-testid="task-run">
+        Preview the run
+      </Button>
+      <Text id={says} size="xs" c="var(--nivra-text-3)" ta="right">
+        {blocked === null ? "Shows what a run would send. Nothing is sent." : "Off until what's needed is done:"}
+      </Text>
+      {blocked !== null && (
+        <Text id={why} size="xs" c="var(--nivra-text-2)" ta="right" data-testid="task-run-blocked">
+          {blocked}
         </Text>
       )}
-      {error && (
-        <Text size="sm" c="var(--nivra-error)" data-testid="task-run-error">
+      {error && !previewing && (
+        <Text size="sm" c="var(--nivra-error)" ta="right" data-testid="task-run-error">
           {error}
         </Text>
       )}
-      <AttemptsList attempts={view.attempts} shown={shown} onChoose={setChosen} />
-      {shown && (
-        <Attempt
-          key={shown}
-          taskId={taskId}
-          attemptId={shown}
-          onEnded={onChanged}
-          onDecided={onChanged}
-        />
-      )}
-      <Modal opened={previewing} onClose={() => setPreviewing(false)} title="Run this task?" size="xl" data-testid="task-run-preview">
+      <Modal
+        opened={previewing}
+        onClose={() => setPreviewing(false)}
+        title="Preview the run"
+        size={narrow ? "100%" : "min(1080px, 94vw)"}
+        fullScreen={narrow}
+        styles={{ content: { display: "flex", flexDirection: "column", overflow: "hidden" }, body: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, padding: 0 } }}
+        data-testid="task-run-preview"
+      >
         {preview ? (
-          <RunPreview preview={preview} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={() => setPreviewing(false)} />
+          <RunPreview preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={() => setPreviewing(false)} />
         ) : (
-          <Text size="sm" c="var(--nivra-text-3)">
+          <Text size="sm" c="var(--nivra-text-3)" p="md">
             Working out what a run would send, on the repository's own engine. Nothing is sent.
           </Text>
         )}
@@ -456,12 +451,31 @@ export function TaskRun({ view, onChanged }: { view: TaskView; onChanged(): void
  * What a run would send to each service, what each keeps, how the result is judged, and the bounds it runs under. A
  * consent the run needs and the project hasn't given is asked for here, in the words its own dialog uses.
  */
-function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { preview: TaskRunPreview; busy: boolean; error: string | null; onAllow(kind: "sharing" | "uploads"): void; onStart(): void; onCancel(): void }) {
+function RunPreview({
+  preview,
+  allowed,
+  busy,
+  error,
+  onAllow,
+  onStart,
+  onCancel,
+}: {
+  preview: TaskRunPreview;
+  allowed: { sharing: boolean; uploads: boolean };
+  busy: boolean;
+  error: string | null;
+  onAllow(kind: "sharing" | "uploads"): void;
+  onStart(): void;
+  onCancel(): void;
+}) {
   const { snapshot, limits } = preview;
   const leftOut = snapshot ? Object.values(snapshot.leftOut).reduce((sum, counted) => sum + counted.count, 0) : 0;
   const asking = snapshot !== null && (!preview.consents.modelContext || !preview.consents.cloudExecution);
+  const startable = preview.blocked === null && preview.snapshotFingerprint !== null;
   return (
-    <Stack gap="sm" data-testid="task-run-preview-body" data-expected={preview.expected} data-snapshot={preview.snapshotFingerprint ?? ""}>
+    <Stack gap={0} style={{ flex: 1, minHeight: 0 }} data-testid="task-run-preview-body" data-expected={preview.expected} data-snapshot={preview.snapshotFingerprint ?? ""}>
+    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--mantine-spacing-md)" }}>
+    <Stack gap="sm">
       <Text size="sm">
         Brief v{preview.briefVersion}, on {preview.project.label}
         {preview.project.targetLabel ? ` · ${preview.project.targetLabel}` : ""}. A worker changes a copy of the commit in a Nebius sandbox, with networking off. It can read and
@@ -491,6 +505,11 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
             : "Starts from Nivra's own base image, with nothing installed."}
         </Text>
       )}
+      <Text size="sm" fw={600}>
+        What each service gets, and what it keeps
+      </Text>
+      <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
+      <Paper withBorder p="sm" radius="md">
       <Stack gap={2}>
         <Text size="sm" fw={500}>
           To Token Factory, as the project's sharing allows ({preview.consents.modelContext ? "on" : "off"})
@@ -503,7 +522,14 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
         <Text size="xs" c="var(--nivra-text-3)">
           {preview.keeps.tokenFactory}
         </Text>
+        {allowed.sharing && preview.consents.modelContext && (
+          <Text size="xs" c="var(--nivra-text-2)" role="status" data-testid="task-run-allowed-sharing">
+            Allowed for {preview.project.label}, just now.
+          </Text>
+        )}
       </Stack>
+      </Paper>
+      <Paper withBorder p="sm" radius="md">
       <Stack gap={2}>
         <Text size="sm" fw={500}>
           To Nebius Sandboxes, as the project's uploads allow ({preview.consents.cloudExecution ? "on" : "off"})
@@ -518,7 +544,14 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
             {preview.keeps.nebius}
           </Text>
         )}
+        {allowed.uploads && preview.consents.cloudExecution && (
+          <Text size="xs" c="var(--nivra-text-2)" role="status" data-testid="task-run-allowed-uploads">
+            Allowed for {preview.project.label}, just now.
+          </Text>
+        )}
       </Stack>
+      </Paper>
+      </SimpleGrid>
       {preview.baseline.length > 0 && (
         <Stack gap={2} data-testid="task-run-preview-baseline">
           <Text size="sm" fw={500}>
@@ -641,13 +674,24 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
           {error}
         </Text>
       )}
-      <Group justify="flex-end" gap="sm">
-        <Button variant="default" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button onClick={onStart} disabled={preview.blocked !== null || !preview.snapshotFingerprint || busy} loading={busy} data-testid="task-run-start">
-          Start the run
-        </Button>
+    </Stack>
+    </div>
+      <Group justify="space-between" align="center" gap="sm" wrap="wrap" p="md" style={{ borderTop: "1px solid var(--nivra-border)", flexShrink: 0 }} data-testid="task-run-preview-footer">
+        <Text size="xs" c="var(--nivra-text-3)" style={{ flex: "1 1 260px" }}>
+          {startable
+            ? "Start sends exactly what this preview shows. If anything changes first, Nivra asks you to preview it again."
+            : asking
+              ? "Start is off until you allow what's asked above."
+              : "Start is off: the preview says why above."}
+        </Text>
+        <Group gap="sm" wrap="nowrap">
+          <Button variant="default" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button onClick={onStart} disabled={!startable || busy} loading={busy} data-testid="task-run-start">
+            Start the run
+          </Button>
+        </Group>
       </Group>
     </Stack>
   );
@@ -657,7 +701,7 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
  * One run: its status, progress, and what Nivra found, read again while it goes; then the decision on its change and
  * what applying it did, read again while the apply goes or its engine can't be read.
  */
-function Attempt({ taskId, attemptId, onEnded, onDecided }: { taskId: string; attemptId: string; onEnded(): void; onDecided(): void }) {
+export function AttemptCard({ taskId, attemptId, number, onEnded, onDecided }: { taskId: string; attemptId: string; number: number; onEnded(): void; onDecided(): void }) {
   const attempt = usePoll<TaskAttemptView>(
     () => window.nivra.getTaskAttempt(taskId, attemptId),
     (value) => (value && open(value.status) ? 1_500 : value && applyGoing(value) ? (value.apply?.unresolved ? 5_000 : 1_500) : null),
@@ -665,6 +709,7 @@ function Attempt({ taskId, attemptId, onEnded, onDecided }: { taskId: string; at
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const stopSays = useId();
   const value = attempt.value;
   const ended = value !== null && !open(value.status);
   // The task's own view lists the run's end once it is known.
@@ -715,22 +760,35 @@ function Attempt({ taskId, attemptId, onEnded, onDecided }: { taskId: string; at
       )
       .finally(() => setBusy(false));
   };
+  const going = open(value.status);
+  const limits = report?.limits ?? null;
   return (
-    <Section title={`Run of brief v${value.briefVersion}`}>
+    <Paper withBorder p="md" radius="md">
       <Stack gap="sm" data-testid="task-attempt" data-status={value.status} data-attempt-id={value.id}>
-        <Group gap="sm">
-          <Badge color={STATUS_LOOK[value.status].color} variant="light" data-testid="task-attempt-status">
-            {STATUS_LOOK[value.status].label}
-          </Badge>
-          <Text size="xs" c="var(--nivra-text-3)">
-            {new Date(value.createdAt).toLocaleString()}
-          </Text>
-          {open(value.status) && (
-            <Button size="compact-xs" variant="default" onClick={() => void cancel()} loading={busy} disabled={value.cancelRequested} data-testid="task-attempt-cancel">
-              {value.cancelRequested ? "Stopping…" : "Cancel"}
+        <Group justify="space-between" align="flex-start" wrap="nowrap" gap="sm">
+          <Group gap="sm" style={{ minWidth: 0 }}>
+            <Text fw={600}>
+              Run {number} of brief v{value.briefVersion}
+            </Text>
+            <Badge color={STATUS_LOOK[value.status].color} variant="light" data-testid="task-attempt-status">
+              {STATUS_LOOK[value.status].label}
+            </Badge>
+            <Text size="xs" c="var(--nivra-text-3)">
+              Started {new Date(value.createdAt).toLocaleString()}
+              {going && limits ? ` · at most ${limits.runMinutes} minutes in all` : ""}
+            </Text>
+          </Group>
+          {going && (
+            <Button size="xs" variant="outline" color="red" onClick={() => void cancel()} loading={busy} disabled={value.cancelRequested} aria-describedby={stopSays} style={{ flexShrink: 0 }} data-testid="task-attempt-cancel">
+              {value.cancelRequested ? "Stopping…" : "Stop"}
             </Button>
           )}
         </Group>
+        {going && (
+          <Text size="sm" c="var(--nivra-text-2)">
+            The worker changes a copy of the commit in a Nebius sandbox, with networking off. Nothing reaches your checkout unless you approve the change.
+          </Text>
+        )}
         {error && (
           <Text size="sm" c="var(--nivra-error)" data-testid="task-attempt-error">
             {error}
@@ -747,19 +805,45 @@ function Attempt({ taskId, attemptId, onEnded, onDecided }: { taskId: string; at
           </Text>
         )}
         {value.progress.length > 0 && (
-          <Stack gap={0} data-testid="task-attempt-progress">
-            {value.progress.map((line, index) => (
-              <Text key={index} size="xs" c="var(--nivra-text-2)" ff="monospace" style={{ overflowWrap: "anywhere" }}>
-                {line}
+          <Stack gap={4}>
+            <Group justify="space-between" gap="xs">
+              <Text size="sm" fw={600}>
+                Progress, as the engine reports it
               </Text>
-            ))}
+              <Text size="xs" c="var(--nivra-text-3)">
+                The latest 20 lines
+              </Text>
+            </Group>
+            <Code block fz="xs" style={{ maxHeight: 320, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }} data-testid="task-attempt-progress">
+              {value.progress.join("\n")}
+            </Code>
+            <Text size="xs" c="var(--nivra-text-3)">
+              The worker's own run of a case only tells it how it's doing: Nivra's final checks decide the result.
+            </Text>
+          </Stack>
+        )}
+        {going && (
+          <Text id={stopSays} size="xs" c="var(--nivra-text-3)">
+            Stop ends the run, and nothing from it reaches your checkout. What was already sent stays where it went.
+          </Text>
+        )}
+        {going && limits && (
+          <Stack gap={2} data-testid="task-attempt-bounds">
+            <Text size="sm" fw={600}>
+              What this run may send, and its bounds
+            </Text>
+            <Text size="xs" c="var(--nivra-text-2)">
+              At most {plural(limits.modelRequests, "model request")} of up to {limits.requestSeconds} s and {limits.outputTokensPerRequest.toLocaleString()} output tokens each;{" "}
+              {plural(limits.toolCalls, "tool call")}, of which {plural(limits.writes, "write")} of up to {sizeText(limits.writeBytes)} and {plural(limits.runs, "run")} of a case or check; at most{" "}
+              {plural(limits.operations, "Nebius operation")}, each command up to {limits.checkSeconds} s; the sandbox for {limits.sessionMinutes} minutes, and the whole run for {limits.runMinutes} minutes.
+            </Text>
           </Stack>
         )}
         {report && <Found report={report} proposal={value.proposal} />}
         <Decision value={value} busy={busy} act={act} />
         <ApplyResult value={value} busy={busy} act={act} />
       </Stack>
-    </Section>
+    </Paper>
   );
 }
 
@@ -841,13 +925,7 @@ function Found({ report, proposal }: { report: TaskReport; proposal: TaskAttempt
       )}
       {report.outcome === "proposed" && (
         <Alert color={report.verified ? "green" : "yellow"} variant="light" data-testid="task-attempt-verdict">
-          <Text size="sm">
-            {report.verified
-              ? `Every acceptance case passed${report.frozen.length ? ", and every frozen file is unchanged" : ""}: the change is verified. It's kept with the run until you decide, and your checkout hasn't been touched by the run.`
-              : report.frozen.some((file) => file.unchanged !== true)
-                ? "A frozen file isn't shown to be unchanged, so the change isn't verified and can't be approved, whatever the cases printed. It's kept with the run, and your checkout hasn't been touched."
-                : "Not every acceptance case was shown to pass, so the change isn't verified and can't be approved. It's kept with the run, and your checkout hasn't been touched."}
-          </Text>
+          <Text size="sm">{verdictText(report)}</Text>
         </Alert>
       )}
       {report.checks.length > 0 && (

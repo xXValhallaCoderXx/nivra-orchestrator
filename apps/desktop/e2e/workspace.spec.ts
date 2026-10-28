@@ -375,6 +375,7 @@ test("deleting the conversation a plan came from keeps the task's brief, and mov
   await openTask("Plan a CSV export");
   await expect(page.getByTestId("task-plan-gone")).toBeVisible();
   await expect(page.getByTestId("task-brief-context")).toHaveText(/Export as CSV first, then add filters\.$/);
+  await page.getByTestId("task-more").click();
   await page.getByTestId("task-move").click();
   await page.getByTestId("task-move-repository").click();
   await page.getByRole("option", { name: /^beta/ }).click();

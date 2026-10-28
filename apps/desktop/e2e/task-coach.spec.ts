@@ -96,8 +96,9 @@ async function openTask(taskId: string) {
 
 const taskView = (taskId: string) => page.evaluate(async (id) => window.nivra.getTask(id), taskId) as Promise<TaskView>;
 
-/** Opens the coach's dialog, waits for its preview, and starts it. */
+/** Opens the coach's dialog from the page's Coach tab, waits for its preview, and starts it. */
 async function askTheCoach() {
+  await page.getByTestId("task-tab-coach").click();
   await page.getByTestId("coach-ask").click();
   await expect(page.getByTestId("coach-preview")).toBeVisible();
   await page.getByTestId("coach-start").click();
@@ -162,6 +163,7 @@ test("a clear small task shows that no basic gap was found, with its caveat, and
 test("a vague task: its gaps, the exact preview, one request, and only the ticked changes saved as v2, kept across a restart", async ({}, testInfo) => {
   test.skip(packaged, "a packaged app ignores the stub switches");
   const taskId = await createTask("Personal records use one unit", VAGUE);
+  await page.getByTestId("task-tab-coach").click();
   await expect(page.locator('[data-testid="coach-guidance-item"][data-code="criterion-vague"]')).toBeVisible();
   await expect(page.locator('[data-testid="coach-guidance-item"][data-code="current-behaviour"]')).toBeVisible();
   const sent = [listings(), coachRequests()];
@@ -174,6 +176,7 @@ test("a vague task: its gaps, the exact preview, one request, and only the ticke
   expect([listings() - sent[0]!, coachRequests() - sent[1]!]).toEqual([1, 1]);
 
   // With the title being edited, a question's Update waits and says why, and the title's edit is left as it is.
+  await page.getByTestId("task-more").click();
   await page.getByTestId("task-rename").click();
   await page.getByTestId("task-title-input").fill("A title being edited");
   await expect(page.locator('[data-testid="coach-update-field"][data-field="acceptanceCriteria"]')).toBeDisabled();
@@ -183,8 +186,10 @@ test("a vague task: its gaps, the exact preview, one request, and only the ticke
   await expect(page.locator('[data-testid="coach-update-field"][data-field="acceptanceCriteria"]')).toBeEnabled();
 
   // A question opens the editor at its field, and an edit already open keeps what the person typed.
+  await page.getByTestId("task-tab-brief").click();
   await page.getByTestId("task-edit-brief").click();
   await page.getByTestId("brief-goal").fill("My own goal, not saved yet");
+  await page.getByTestId("task-tab-coach").click();
   await page.locator('[data-testid="coach-update-field"][data-field="acceptanceCriteria"]').click();
   await expect(page.getByTestId("brief-goal")).toHaveValue("My own goal, not saved yet");
   await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute("data-testid"))).toBe("brief-criteria");
@@ -256,6 +261,7 @@ test("a stale answer can't be saved after a manual edit, and says so", async () 
   const taskId = await createTask("Edited after the answer", VAGUE);
   await askTheCoach();
   await expect(latestCoaching()).toHaveAttribute("data-status", "answered", { timeout: 30_000 });
+  await page.getByTestId("task-tab-brief").click();
   await page.getByTestId("task-edit-brief").click();
   await page.getByTestId("brief-scope").fill("The records page");
   await page.getByTestId("task-brief-save").click();
@@ -298,6 +304,7 @@ test("a project's task needs its sharing: the preview says so, Ask is off, and n
   const projectId = projects.find((project) => project.label === "records")!.id;
   const before = coachRequests();
   await createTask("A project's task", VAGUE, projectId);
+  await page.getByTestId("task-tab-coach").click();
   await page.getByTestId("coach-ask").click();
   await expect(page.getByTestId("coach-preview-blocked")).toContainText("doesn't allow sending its content to Token Factory");
   await expect(page.getByTestId("coach-start")).toBeDisabled();
@@ -309,6 +316,7 @@ test("findings to tick: a fourth can't be ticked, and one that can't be sent lea
   test.skip(packaged, "a packaged app ignores the stub switches");
   const before = coachRequests();
   await openTask(missionTaskId);
+  await page.getByTestId("task-tab-coach").click();
   await page.getByTestId("coach-ask").click();
   await expect(page.getByTestId("coach-preview")).toBeVisible();
   const finding = (id: string) => page.locator(`[data-testid="coach-option-finding"][data-finding-id="${id}"]`);
