@@ -57,7 +57,8 @@ const mark = (item: StripItem, index: number) => (item.state === "done" ? "✓" 
 
 export function TaskStrip({ items, label }: TaskStripProps) {
   const narrow = useMediaQuery(NARROW_QUERY, false, { getInitialValueInEffect: false });
-  // Exactly seven, in StripStep's order: anything else is the task page's mistake, shown as it is rather than hidden.
+  // Always the seven steps, in StripStep's order: a step the task page didn't give shows as still to come, with no line
+  // under it, and an item for a step given twice, or for no step at all, is left out.
   const shown = STEPS.map((step) => items.find((item) => item.step === step) ?? { step, state: "next" as const, sub: "" });
   const current = currentStep(shown);
   const name = label ?? "Where this task is";
