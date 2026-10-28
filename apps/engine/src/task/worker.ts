@@ -145,10 +145,12 @@ const MODEL_TAIL = 4_000;
 const tail = (text: string, max = MODEL_TAIL) => (max <= 0 ? "" : text.length > max ? text.slice(-max) : text);
 /**
  * When the end note starts: this few model requests left after the one under way, this few tool calls, this few
- * seconds left for requests with tools (one request's time), or room in the input budget for this few more requests
- * before the hand-in's.
+ * seconds left for requests with tools, or room in the input budget for this few more requests before the hand-in's.
+ * Five minutes is a long answer's time at the slow rate (NIV-35), so the note usually comes a request ahead; a request's
+ * whole time would say "near its end" from the window's start. One longer answer can pass it, and then the note says
+ * only handing in is left.
  */
-const ENDING = { requests: 4, toolCalls: 6, seconds: TASK_LIMITS.model.stepMs / 1000, inputRequests: 3 } as const;
+const ENDING = { requests: 4, toolCalls: 6, seconds: 300, inputRequests: 3 } as const;
 /**
  * A request is sent with its whole time or not at all, so only its own deadline can cut it off (NIV-35), and the
  * hand-in's whole time, for its own smaller answer, is kept from the work window's start, so the last request can

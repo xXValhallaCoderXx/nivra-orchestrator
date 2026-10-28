@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
+import { TASK_BRIEF_LIMITS } from "@nivra/domain";
 import type { ExecutionSession } from "../src/exec/backend.ts";
 import { NEBIUS_LIMITS } from "../src/exec/nebius/session.ts";
 import { RESULT_ARCHIVE, RESULT_LISTING } from "../src/exec/patch.ts";
-import { FETCH_HEADERS_MS } from "../src/providers/model.ts";
+import { FETCH_HEADERS_MS } from "../src/providers/transport.ts";
 import { AFTER_SESSION_MS, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "../src/task/limits.ts";
 import type { RealGuest } from "./real-guest.ts";
 import { attempt, CUT_OFF, FIX, labels, verdicts, type Call } from "./task-fixtures.ts";
@@ -211,19 +212,20 @@ describe("a task request's time (NIV-35)", () => {
 
   it("gives every request the time its whole answer takes at the planned rate, under fetch's wait for headers, and says the caps", async () => {
     const { stepMs, outputTokensPerRequest, tokensPerSecond, handIn } = TASK_LIMITS.model;
-    assert.deepEqual([stepMs, outputTokensPerRequest, handIn.stepMs, handIn.outputTokens, tokensPerSecond], [280_000, 2_500, 180_000, 1_500, 10]);
+    assert.deepEqual([stepMs, outputTokensPerRequest, handIn.stepMs, handIn.outputTokens, tokensPerSecond], [830_000, 8_000, 180_000, 1_500, 10]);
     for (const [ms, tokens] of [[stepMs, outputTokensPerRequest], [handIn.stepMs, handIn.outputTokens]] as const) {
       assert.equal(ms, 30_000 + (tokens / tokensPerSecond) * 1000, `${ms} ms isn't ${tokens} tokens' time at the planned rate, with its input's time`);
       assert.ok(ms < FETCH_HEADERS_MS, `a request's ${ms / 1000} s isn't under the ${FETCH_HEADERS_MS / 1000} s fetch waits for its reply's headers`);
     }
     // The whole run still fits its phases, and the window holds requests with tools besides the reserve.
     assert.ok(TASK_LIMITS.snapshotMs + TASK_LIMITS.sessionMs + AFTER_SESSION_MS <= TASK_LIMITS.runMs);
-    assert.ok(TASK_LIMITS.sessionMs - reserveMs(4) >= 3 * stepMs + handIn.stepMs, "the session leaves too little room for requests of their whole time");
+    // With the most final checks a brief may have, requests with tools can still start for ten minutes or more.
+    assert.ok(TASK_LIMITS.sessionMs - reserveMs(TASK_BRIEF_LIMITS.finalChecks) - (stepMs + handIn.stepMs) >= 10 * 60_000, "the session leaves too little room for requests of their whole time");
     const run = await attempt();
     assert.equal(run.result.outcome, "proposed");
     assert.deepEqual(run.deadlines().map((given) => given.stepMs), [stepMs]);
     assert.deepEqual([run.outputCaps().length, [...new Set(run.outputCaps())]], [4, [outputTokensPerRequest]]);
-    assert.ok(run.prompts()[0]!.includes("An answer may be at most 2,500 tokens long, and the hand-in's 1,500: a longer one is cut off before its tool call is made, and the attempt ends there, so make a large change as several smaller edit_file calls."), "the worker isn't told its answers' caps");
+    assert.ok(run.prompts()[0]!.includes("An answer may be at most 8,000 tokens long, and the hand-in's 1,500: a longer one is cut off before its tool call is made, and the attempt ends there, so make a large change as several smaller edit_file calls."), "the worker isn't told its answers' caps");
   });
 
   it("offers only the hand-in, with its own cap, once the window can't hold a request with tools and then the hand-in, each of its whole time", async () => {
@@ -270,9 +272,10 @@ describe("a task request's time (NIV-35)", () => {
     });
   }
 
-  it("says the time for tools is running out a request ahead, even when each request takes its whole time", async () => {
+  it("says the time for tools is running out a request ahead when each request takes a long answer's time", async () => {
     const time = slowClock();
-    const run = await attempt({ time, handInWhenAsked: true, beforeRequest: () => time.advance(TASK_LIMITS.model.stepMs), calls: Array.from({ length: 23 }, (): Call => ["search_files", { text: "greet", in: "names" }]) });
+    // 200 s a request: 2,000 tokens at the slow rate.
+    const run = await attempt({ time, handInWhenAsked: true, beforeRequest: () => time.advance(200_000), calls: Array.from({ length: 23 }, (): Call => ["search_files", { text: "greet", in: "names" }]) });
     const warned = run.prompts().findIndex((prompt) => /about \d+ seconds are left for tools/.test(prompt));
     const handIn = run.offered().findIndex((tools) => tools.length === 1 && tools[0] === "submit");
     assert.ok(warned > 0 && handIn > warned, `warned at ${warned}, only handing in from ${handIn}`);

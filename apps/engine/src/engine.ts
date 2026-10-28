@@ -59,6 +59,7 @@ import { asEnded, readReviewTask, ReviewUnreadable } from "./review/task.ts";
 import { launcherWrite, ProtocolOutput, type RawWrite } from "./rpc/output.ts";
 import { RpcFailure, RpcServer } from "./rpc/server.ts";
 import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
+import { useEngineTransport } from "./providers/transport.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
@@ -951,6 +952,8 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 4;
   }
   stripProviderEnv(process.env);
+  // Before any request: fetch waits as long as a model's whole answer can take (NIV-35).
+  useEngineTransport();
 
   try {
     engine = await createEngine({ ...args, output, log, moduleUrl: import.meta.url });

@@ -4,10 +4,10 @@ import { MAX_WRITE_BYTES } from "./scripts.ts";
 /**
  * A request's answer, its cap and its time, sized together (NIV-35): the time holds the whole of an answer of the cap
  * at the slowest rate the live runs saw, 10 tokens a second (run 3's ninth request gave 634 in 58.5 s), with time for
- * its input and the queue besides. A request isn't streamed, so its reply's headers come with its whole answer, and
- * Node's fetch gives up on headers after 300 s (`FETCH_HEADERS_MS`): the time stays under that.
+ * its input and the queue besides. A request isn't streamed, so its reply's headers come with its whole answer: the
+ * engine's fetch waits for them longer than any request's time (`FETCH_HEADERS_MS`, providers/transport.ts).
  */
-const OUTPUT_TOKENS_PER_REQUEST = 2_500;
+const OUTPUT_TOKENS_PER_REQUEST = 8_000;
 /** The hand-in only calls submit with a short summary: its answer has a cap, and so a time, of its own. */
 const HAND_IN_OUTPUT_TOKENS = 1_500;
 const TOKENS_PER_SECOND = 10;
@@ -49,11 +49,11 @@ export const TASK_LIMITS = {
   collect: { timeoutMs: 60_000, downloadMs: 60_000 },
   snapshotMs: 2 * 60_000,
   /** Room in the work window for requests of their whole time, the hand-in's kept besides (NIV-35), and the reserve. */
-  sessionMs: 35 * 60_000,
+  sessionMs: 45 * 60_000,
   closeMs: 7 * 60_000,
   patchMs: 3 * 60_000,
   reportMs: 15_000,
-  runMs: 48 * 60_000,
+  runMs: 58 * 60_000,
   /**
    * As the Nebius session counts them (D33): the request that starts an operation, which comes before its timeout does;
    * how long it is watched past its timeout; and what a write needs left to be sent.

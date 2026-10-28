@@ -59,7 +59,7 @@ function engineAt(home: string, sandbox: SandboxStub<RealGuest>, model: Stub, ex
   return engine;
 }
 
-async function setup(options: { credentials?: boolean; calls?: Call[]; files?: Record<string, string>; chat?: (request: StubRequest, index: number) => Reply; models?: Array<{ id: string }> } = {}): Promise<Setup> {
+async function setup(options: { credentials?: boolean; calls?: Call[]; files?: Record<string, string>; chat?: (request: StubRequest, index: number) => Reply | Promise<Reply>; models?: Array<{ id: string }> } = {}): Promise<Setup> {
   const guest = new RealGuest(CHECK_IMAGE.uuid);
   guest.busybox = true;
   const sandbox = await startSandboxStub({ guest });
@@ -205,7 +205,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     const { sandbox, model, engine, repo } = await setup();
     const shown = ready(await preview(engine, repo));
     assert.deepEqual([shown.snapshot.files, shown.programs, shown.unprobed, shown.caseFiles], [2, [".", "/bin/sh"], 0, [{ number: 1, files: ["greet.sh"], unclear: false }]]);
-    assert.deepEqual([shown.limits.operations, shown.limits.requestSeconds, shown.limits.outputTokensPerRequest, shown.limits.sessionMinutes, shown.limits.runMinutes, shown.limits.writes, shown.limits.writeBytes], [operationsFor(2), 280, 2_500, 35, 48, 8, 32_768]);
+    assert.deepEqual([shown.limits.operations, shown.limits.requestSeconds, shown.limits.outputTokensPerRequest, shown.limits.sessionMinutes, shown.limits.runMinutes, shown.limits.writes, shown.limits.writeBytes], [operationsFor(2), 830, 8_000, 45, 58, 8, 32_768]);
     assert.match(shown.snapshot.retention, /^Images are retained for 180 days/);
     // A first word that isn't a plain program is never guessed: it runs, and isn't looked for.
     const quoted = ready(await preview(engine, repo, { ...BRIEF, checks: ['"./check.sh"'] }));
@@ -218,6 +218,38 @@ describe("a task run through a real engine (NIV-7)", () => {
     const refused = await preview(engine, leaky);
     assert.deepEqual(refused.status === "refused" ? [refused.code, refused.message.includes(KEY)] : null, ["content", false]);
     assert.deepEqual([sandbox.requests.length, model.requests.length], [0, 0], "a preview sends nothing anywhere");
+  });
+
+  it("answers the host's heartbeat while a model request is held, and the run goes on when its answer comes (NIV-35)", async () => {
+    let release = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let asked = () => {};
+    const waiting = new Promise<void>((resolve) => (asked = resolve));
+    const { engine, repo } = await setup({
+      chat: async (_request, index) => {
+        if (index === 0) {
+          asked();
+          await held;
+        }
+        const [tool, input] = WORK[Math.min(index, WORK.length - 1)]!;
+        return toolCall(tool, input, { id: `call_${index}` });
+      },
+    });
+    const shown = ready(await preview(engine, repo));
+    const run = await start(engine, repo, shown.snapshot.fingerprint);
+    await waiting;
+    // While the first request is held, the engine answers each ping as the supervisor would send it.
+    const took: number[] = [];
+    for (let n = 0; n < 3; n++) {
+      const started = performance.now();
+      await engine.client.call("ping", {});
+      took.push(Math.round(performance.now() - started));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    release();
+    const page = await ended(engine, run.id);
+    assert.deepEqual([page.status, (await report(engine, run.id)).outcome], ["succeeded", "proposed"]);
+    assert.ok(Math.max(...took) < 1_000, `pings took ${took.join(", ")} ms`);
   });
 
   it("runs the worker on the production adapter: it fixes the fixture, Nivra judges every case and check, and the change is proposed and kept exactly, the checkout untouched", async () => {

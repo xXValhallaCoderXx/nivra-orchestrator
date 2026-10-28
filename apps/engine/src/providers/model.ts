@@ -22,13 +22,6 @@ export interface Endpoint {
 
 export const TOKEN_FACTORY: Endpoint = { url: TOKEN_FACTORY_BASE_URL, kind: "token-factory" };
 
-/**
- * How long Node's fetch waits for a reply's headers before it fails the request (undici's `headersTimeout`). Mastra's
- * `generate` doesn't stream, so a model's reply has its headers only once its whole answer is ready: a request's
- * deadline must stay under this, or fetch cuts the request off first (NIV-35).
- */
-export const FETCH_HEADERS_MS = 300_000;
-
 /** A model call failed. `kind` lets the app say what to do without reading the message. */
 export class ModelFailure extends Error {
   readonly kind: ModelFailureKind;
