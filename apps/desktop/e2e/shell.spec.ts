@@ -381,7 +381,7 @@ test("storage that refuses every write: a draft says it couldn't be kept and kee
 test("a read that fails shows as a failure, never as an empty list or a wait that doesn't end", async () => {
   // Stand-ins for failing reads, in this app only, then the page loaded again so every read is made afresh.
   await app.evaluate(({ ipcMain }) => {
-    for (const channel of ["tasks:list", "settings:get"]) {
+    for (const channel of ["tasks:list", "settings:get", "conversations:create"]) {
       ipcMain.removeHandler(channel);
       ipcMain.handle(channel, () => {
         throw new Error("The test made this read fail.");
@@ -396,4 +396,8 @@ test("a read that fails shows as a failure, never as an empty list or a wait tha
   await expect(page.getByTestId("home-setup-key")).toContainText("Nebius key and project ID: couldn't be read");
   await expect(page.getByTestId("home-create-task")).toBeDisabled();
   await expect(page.getByTestId("main")).toContainText("Tasks can't be written until Nivra can read them again");
+  // A conversation that couldn't start says so under its button, and stays said.
+  await page.getByTestId("home-conversation").click();
+  await expect(page.getByTestId("home-conversation-error")).toContainText("Nivra couldn't start the conversation: The test made this read fail.");
+  await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
 });

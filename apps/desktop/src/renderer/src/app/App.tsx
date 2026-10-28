@@ -10,7 +10,7 @@ import { MissionDetail, MissionsPage } from "../features/missions";
 import { PlanningHome } from "../features/navigation";
 import { AddedWarning, useAddProject, type AddOutcome } from "../features/projects";
 import { NewTask, TaskDetail, TasksPage } from "../features/tasks";
-import { errorMessage, usePoll } from "../shared/ui";
+import { usePoll } from "../shared/ui";
 import { browserStorage, DraftsProvider, useDraftList, useDrafts } from "../shell/drafts";
 import { composerDraftKey, newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
 import { Sidebar } from "../shell/Sidebar";
@@ -307,13 +307,7 @@ function Shell() {
                         navigate({ kind: "new-task", draftKey: newTaskDraftKey(scope), plan: null, title });
                         setComposerOrigin(composerDraftKey(scope));
                       }}
-                      onStartConversation={async () => {
-                        try {
-                          opened(await window.nivra.createConversation({ kind: "project", projectId: project.id }));
-                        } catch (reason) {
-                          toast(errorMessage(reason), "info");
-                        }
-                      }}
+                      onStartConversation={async () => opened(await window.nivra.createConversation({ kind: "project", projectId: project.id }))}
                       onRemoved={(label, preferencesRemoved) => {
                         // Its composer's draft goes with it: nothing would open it again.
                         draftStore.discard(composerDraftKey({ kind: "project", projectId: project.id }));

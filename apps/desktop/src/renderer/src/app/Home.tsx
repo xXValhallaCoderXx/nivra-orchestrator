@@ -3,7 +3,7 @@ import { useState, type ReactNode } from "react";
 import type { EngineView, EnvironmentView, ProjectView, SettingsView, TaskState, TasksView, WslView } from "../../../shared/ipc";
 import { EngineBadge, EngineNotices } from "../features/engine";
 import { ProjectNotice, RemoveProject } from "../features/projects";
-import { usePoll } from "../shared/ui";
+import { errorMessage, usePoll } from "../shared/ui";
 import { DraftNotice, useDrafts } from "../shell/drafts";
 import { composerDraftKey } from "../shell/places";
 import type { DraftWrite, Navigate } from "./routes";
@@ -103,6 +103,7 @@ export function ProjectHome({
   running: boolean;
   onNavigate: Navigate;
   onCreateTask(title: string): void;
+  /** Starts a conversation about the project and opens it; a failure is shown under its button. */
   onStartConversation(): Promise<void>;
   onRemoved(label: string, preferencesRemoved: number): void;
 }) {
@@ -113,6 +114,7 @@ export function ProjectHome({
   const [title, setTitle] = useState(() => drafts.read<{ title: string }>(draftKey)?.title ?? "");
   const [kept, setKept] = useState<DraftWrite | null>(null);
   const [starting, setStarting] = useState(false);
+  const [conversationError, setConversationError] = useState<string | null>(null);
   const online = engine?.state.status === "online";
   const environment = usePoll<EnvironmentView>(() => window.nivra.getEnvironment(project.id), () => null, [project.id], online);
   const own = (tasks?.tasks ?? []).filter((task) => task.projectId === project.id);
@@ -290,12 +292,20 @@ export function ProjectHome({
               loading={starting}
               onClick={() => {
                 setStarting(true);
-                void onStartConversation().finally(() => setStarting(false));
+                setConversationError(null);
+                void onStartConversation()
+                  .catch((reason: unknown) => setConversationError(errorMessage(reason)))
+                  .finally(() => setStarting(false));
               }}
               data-testid="home-conversation"
             >
               Start a conversation
             </Button>
+            {conversationError && (
+              <Text size="sm" c="var(--nivra-error)" role="alert" data-testid="home-conversation-error">
+                Nivra couldn't start the conversation: {conversationError}
+              </Text>
+            )}
             <Text size="sm" c="var(--nivra-text-2)">
               Talk a change through, then save it as a plan or turn it into a task.
             </Text>
