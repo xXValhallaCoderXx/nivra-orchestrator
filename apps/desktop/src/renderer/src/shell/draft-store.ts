@@ -234,8 +234,8 @@ export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: S
         try {
           holdsKey = await hasSavedKey(textOf(stored.label, stored.value));
         } catch {
-          // Kept, out of sight, until a check can be made.
-          if (raw(key) === text) hidden.add(key);
+          // Kept, out of sight, until a check can be made; a newer pass, or a write meanwhile, has the last word.
+          if (pass === rechecking && raw(key) === text) hidden.add(key);
           continue;
         }
         // A newer pass, or a write meanwhile, has the last word on this copy.
