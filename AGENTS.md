@@ -119,6 +119,10 @@ list.
 
 ## Agent write rules (D15, D40)
 
+- These rules govern Nivra's coding worker. A developer agent working on Nivra itself (for example in a git worktree
+  of this repository) edits Nivra's own source and runs Nivra's own checks locally, as Setup and commands describes.
+  It never installs, builds or runs an example or user repository's code on this machine: that happens only inside an
+  execution boundary, through Nivra.
 - A coding agent writes only into a workspace the engine made for its run (a copy of one commit), never into the
   person's checkout or a git worktree.
 - Its changes reach the checkout only as a proposal that the engine has checked and the person has approved by hash.
