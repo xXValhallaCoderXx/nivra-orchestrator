@@ -97,7 +97,9 @@ function Shell() {
     if (!navOpen) return;
     (sidebar.current?.querySelector<HTMLElement>('[aria-current="page"]') ?? sidebar.current?.querySelector<HTMLElement>("button"))?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented) closeNav(true);
+      // An Esc something open already took (the switcher in the top bar, say) closes only that.
+      const handled = event.defaultPrevented || (event.target instanceof Element && event.target.closest("[data-mantine-stop-propagation]") !== null);
+      if (event.key === "Escape" && !handled) closeNav(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -143,11 +145,18 @@ function Shell() {
   const notice = workspace?.state === "ready" ? workspace.notice : null;
   // A project's own place, with no project in view, shows General's Home.
   const shown: Route = projectOnly(route) && !project ? { kind: "home" } : route;
+  // A new place opens at its top.
+  const placeKey = `${shown.kind}:${shown.kind === "settings" ? shown.section : "id" in shown ? shown.id : ""}`;
+  useEffect(() => {
+    main.current?.scrollTo({ top: 0 });
+  }, [placeKey]);
   const busyIds = [...Object.entries(helloRuns), ...Object.entries(explainRuns)]
     .filter(([, ref]) => ref.status !== null && !TERMINAL.includes(ref.status))
     .map(([id]) => id);
 
   const navigate = (next: Route) => {
+    // From the sidebar over the page, the focus goes to the page it opened, never to nothing.
+    if (narrow && navOpen) requestAnimationFrame(() => main.current?.focus());
     setNavOpen(false);
     if (next.kind !== "new-task") setComposerOrigin(null);
     if (next.kind !== "settings") return setRoute(next);
@@ -263,7 +272,8 @@ function Shell() {
         onDiscardDraft={(key) => draftStore.discard(key)}
         onConversationCreated={opened}
       />
-      <AppShell.Main ref={main} id="page" tabIndex={-1} aria-label="Page" style={{ outline: "none" }} data-testid="main">
+      {/* The page scrolls inside the main area, never the window: the sidebar and the top bar stay where they are. */}
+      <AppShell.Main ref={main} id="page" tabIndex={-1} aria-label="Page" style={{ outline: "none", height: "100dvh", overflowY: "auto" }} data-testid="main">
         <Box px={{ base: 16, sm: 40 }} pt={28} pb={40} maw={1120}>
           <Stack gap="md">
             {hostError && (

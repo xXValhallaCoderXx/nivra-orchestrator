@@ -2,10 +2,10 @@ import { useEffect, useRef } from "react";
 
 /**
  * The window's shortcuts (R28, PN5): Ctrl+K (Cmd+K on a Mac) opens the project switcher, F6 and Shift+F6 move the focus
- * between the sidebar and the page, and Ctrl+comma opens Settings. Esc is left to what is open (the switcher, a menu, a
- * dialog, the sidebar over the page), which closes and keeps what was typed; no shortcut stops a run, approves, applies
- * or sends anything. Zoom keeps its own keys, which main handles before the page sees them: Ctrl with =, minus or 0, and
- * Ctrl with the wheel.
+ * between the sidebar and the page, and Ctrl+comma opens Settings. While a dialog is open they do nothing: the dialog
+ * keeps the focus, and nothing navigates away from it. Esc is left to what is open (the switcher, a menu, a dialog, the
+ * sidebar over the page), which closes; no shortcut stops a run, approves, applies or sends anything. Zoom keeps its own
+ * keys, which main handles before the page sees them: Ctrl with =, minus or 0, and Ctrl with the wheel.
  */
 export interface Shortcuts {
   openSwitcher(): void;
@@ -13,6 +13,9 @@ export interface Shortcuts {
   regions(): [HTMLElement | null, HTMLElement | null];
   openSettings(): void;
 }
+
+/** Whether a dialog that holds the focus (aria-modal) is open. */
+export const dialogOpen = (): boolean => document.querySelector('[role="dialog"][aria-modal="true"]') !== null;
 
 /** The first thing in a region the focus can go to, or the region itself. */
 function focusInto(region: HTMLElement) {
@@ -27,7 +30,7 @@ export function useShortcuts(shortcuts: Shortcuts) {
   current.current = shortcuts;
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing) return;
+      if (event.defaultPrevented || event.isComposing || dialogOpen()) return;
       const mod = event.ctrlKey || event.metaKey;
       if (mod && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "k") {
         event.preventDefault();

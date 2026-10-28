@@ -149,9 +149,17 @@ test("Ctrl+K opens the switcher on the project in view, Esc closes it and leaves
   await page.keyboard.press("Shift+F6");
   await expect(page.getByTestId("main")).toBeFocused();
 
-  // Esc closes a dialog, and what was typed is still there.
+  // While a dialog is open the shortcuts do nothing: nothing navigates away from it, and it keeps the focus.
   await page.getByTestId("project-remove").click();
   await expect(page.getByTestId("project-remove-confirm")).toBeVisible();
+  await page.keyboard.press("Control+Comma");
+  await page.keyboard.press("Control+K");
+  await page.keyboard.press("F6");
+  await expect(page.getByTestId("project-remove-confirm")).toBeVisible();
+  await expect(page.getByTestId("page-settings")).toBeHidden();
+  await expect(page.getByTestId("project-switcher-list")).toBeHidden();
+  await expect(page.getByTestId("main")).not.toBeFocused();
+  // Esc closes the dialog, and what was typed is still there.
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("project-remove-confirm")).toBeHidden();
   await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
@@ -282,21 +290,33 @@ test("a narrow window folds the sidebar behind the menu button; Settings and a d
   await expect(menu).toBeFocused();
   expect(await sideways()).toBeLessThanOrEqual(0);
 
+  // Esc in the top bar's switcher closes only the switcher, not the sidebar open beside it.
   await menu.click();
+  await expect(menu).toHaveAttribute("aria-expanded", "true");
+  await page.getByTestId("project-select").click();
+  await expect(page.getByTestId("project-switcher-list")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("project-switcher-list")).toBeHidden();
+  await expect(menu).toHaveAttribute("aria-expanded", "true");
+
+  // From the sidebar over the page, the place it opens takes the focus.
   await page.getByTestId("nav-settings").click();
   await expect(page.getByTestId("page-settings")).toBeVisible();
   await expect(page.getByTestId("nav-settings")).not.toBeInViewport();
-  // The section links scroll sideways in their own box; the page doesn't.
+  await expect(page.getByTestId("main")).toBeFocused();
+  // The section links overflow, and scroll sideways in their own box; the page doesn't.
   const links = page.getByTestId("settings-tabs-scroll");
   await expect(links).toBeVisible();
+  expect(await links.locator(".mantine-ScrollArea-viewport").evaluate((box) => box.scrollWidth > box.clientWidth)).toBe(true);
   await page.getByTestId("settings-tab-diagnostics").click();
   await expect(page.getByTestId("settings-tab-diagnostics")).toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("settings-tab-diagnostics")).toBeInViewport();
   expect(await sideways()).toBeLessThanOrEqual(0);
-  // The page scrolls inside the main area, under the top bar, which stays.
+  // The page scrolls inside the main area, never the window, under the top bar, which stays.
   await page.getByTestId("diagnostics-app").scrollIntoViewIfNeeded();
   await expect(page.getByTestId("diagnostics-app")).toBeInViewport();
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  expect(await page.getByTestId("main").evaluate((main) => main.scrollTop)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
   await expect(page.getByTestId("top-bar")).toBeInViewport();
   await page.getByTestId("settings-tab-connections").scrollIntoViewIfNeeded();
   await page.getByTestId("settings-tab-connections").click();
