@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isNvidiaModel, listModels, pickNemotron, TOKEN_FACTORY_BASE_URL, TokenFactoryError } from "../src/providers/tokenfactory.ts";
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
+import { TASK_MODEL } from "@nivra/domain";
+import { createModelClient, type CallOptions } from "../src/providers/model.ts";
+import { DEFAULT_POLICY, policyFor } from "../src/providers/policy.ts";
+import { capCompletionTokens, COMPLETION_CAP_FIELD, isNvidiaModel, listModels, pickNemotron, PREFERRED_NEMOTRON, TOKEN_FACTORY_BASE_URL, TokenFactoryError } from "../src/providers/tokenfactory.ts";
+import { startStub, text, toolCall, type Reply, type StubRequest } from "./stub-token-factory.ts";
 
 const respond = (status: number, body: unknown) => async () => new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
 
@@ -48,8 +54,19 @@ describe("listModels", () => {
 });
 
 describe("pickNemotron", () => {
-  it("prefers Nemotron 3 Super, whatever the case of the listed id", () => {
-    assert.equal(pickNemotron(["nvidia/Nemotron-3_5-Lightning", "NVIDIA/NEMOTRON-3-SUPER-120B-A12B"]), "NVIDIA/NEMOTRON-3-SUPER-120B-A12B");
+  it("prefers Nemotron 3.5 Super VL, whatever the case of the listed id, and no longer prefers Nemotron 3 Super (D50)", () => {
+    assert.equal(pickNemotron(["nvidia/Nemotron-3_5-Lightning", "NVIDIA/NEMOTRON-3.5-SUPER-VL"]), "NVIDIA/NEMOTRON-3.5-SUPER-VL");
+    assert.equal(pickNemotron(["nvidia/nemotron-3-super-120b-a12b", "nvidia/Nemotron-3_5-Lightning"]), "nvidia/Nemotron-3_5-Lightning");
+  });
+
+  it("puts the task model first, so explain, research and the coach use what a task run uses when the key offers it (D50)", () => {
+    assert.deepEqual([PREFERRED_NEMOTRON[0], TASK_MODEL], ["nvidia/Nemotron-3.5-Super-VL", "nvidia/Nemotron-3.5-Super-VL"]);
+  });
+
+  it("gives Nemotron 3.5 Super VL the checked policy, whatever its case, from D50's check, and other models the default", () => {
+    const policy = policyFor("NVIDIA/Nemotron-3.5-Super-VL");
+    assert.deepEqual([policy.explore, policy.forceAnswer, /D50's tool-choice check/.test(policy.evidence)], ["required", true, true]);
+    assert.equal(policyFor("nvidia/Nemotron-3_5-Lightning"), DEFAULT_POLICY);
   });
 
   it("falls back to any NVIDIA model, and to null when there is none", () => {
@@ -60,5 +77,37 @@ describe("pickNemotron", () => {
   it("recognises NVIDIA models by their organisation prefix", () => {
     assert.equal(isNvidiaModel("nvidia/x"), true);
     assert.equal(isNvidiaModel("meta-llama/nvidia-tuned"), false);
+  });
+});
+
+describe("the completion cap a request carries (D50)", () => {
+  /** What Token Factory would receive: each chat request's cap fields, through the client's production adapter. */
+  async function caps(replies: (index: number) => Reply, options: Partial<CallOptions>, tools: Record<string, unknown> = {}) {
+    const stub = await startStub({ chat: (_request: StubRequest, index: number) => replies(index) });
+    try {
+      const client = createModelClient({ apiKey: "test-key-0123456789", endpoint: { url: stub.url, kind: "loopback-test" } });
+      const agent = client.agent({ id: "cap", name: "Cap", modelId: "nvidia/Nemotron-3.5-Super-VL", instructions: "Answer briefly.", tools });
+      await client.call(agent, "Hello", { maxSteps: 2, deadlines: { stepMs: 10_000, totalMs: 20_000 }, maxOutputTokens: 321, ...options });
+      return stub.chats().map((chat) => [chat.body?.[COMPLETION_CAP_FIELD], chat.body ? Object.hasOwn(chat.body, "max_tokens") : null]);
+    } finally {
+      await stub.close();
+    }
+  }
+
+  it("sends a call's cap as max_completion_tokens, and no max_tokens, as Token Factory receives the request", async () => {
+    assert.deepEqual(await caps(() => text("Hello."), {}), [[321, false]]);
+  });
+
+  it("sends a step's own cap, set through prepareStep as the hand-in sets it, as that request's max_completion_tokens", async () => {
+    const tools = { probe: createTool({ id: "probe", description: "Probe", inputSchema: z.object({}), execute: async () => ({ ok: true }) }) };
+    const handIn = { prepareStep: ({ stepNumber }: { stepNumber: number }) => (stepNumber === 1 ? { maxOutputTokens: 150 } : undefined) };
+    assert.deepEqual(await caps((index) => (index === 0 ? toolCall("probe", {}) : text("Done.")), handIn, tools), [[321, false], [150, false]]);
+  });
+
+  it("leaves a call without a cap as it is, and keeps the provider's other options beside the cap", () => {
+    const model = capCompletionTokens({ doGenerate: (options: unknown) => options, doStream: (options: unknown) => options, name: () => "model" });
+    assert.deepEqual(model.doGenerate({ prompt: [] }), { prompt: [] });
+    assert.deepEqual(model.doStream({ maxOutputTokens: 9, providerOptions: { nebius: { user: "u" }, other: { x: 1 } } }), { providerOptions: { nebius: { user: "u", max_completion_tokens: 9 }, other: { x: 1 } } });
+    assert.equal(model.name(), "model");
   });
 });

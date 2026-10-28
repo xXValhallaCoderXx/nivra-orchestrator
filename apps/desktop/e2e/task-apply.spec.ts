@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { TASK_MODEL } from "@nivra/domain";
 import { openSwitcher } from "./places.ts";
 import { CHECK_IMAGE } from "../../engine/src/exec/check.ts";
 import { FIXED_GREET, TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
@@ -68,7 +69,7 @@ test.beforeAll(async ({}, testInfo) => {
   // Each run's worker, from its own first request: a step is one tool result back in the conversation.
   const calls: Array<[string, Record<string, unknown>]> = [["read_file", { path: "greet.sh" }], ["edit_file", TASK_FIX], ["run_case", { number: 1 }], ["submit", { summary: "Defaulted the name to world." }]];
   model = await startStub({
-    models: [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 131_072 }],
+    models: [{ id: TASK_MODEL, context_length: 131_072 }],
     chat: (request) => {
       const step = (request.body?.messages ?? []).filter((message) => (message as { role?: string }).role === "tool").length;
       const [tool, input] = calls[Math.min(step, calls.length - 1)]!;

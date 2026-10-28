@@ -115,6 +115,19 @@ const reportOf = async (engine: EngineProcess, runId: string) => (await engine.c
 const failure = (page: RunEventsPage) => page.events.find((event) => event.type === "run.failed");
 
 describe("a coaching over stdio (NIV-53)", () => {
+  it("coaches on Nemotron 3.5 Super VL, preferred over Super, with one forced request now that a check has seen it force an answer (D50)", async () => {
+    const models = [{ id: "nvidia/nemotron-3-super-120b-a12b", context_length: 262_144 }, { id: "nvidia/Nemotron-3.5-Super-VL", context_length: 1_048_576 }];
+    const { stub, engine } = await setup(() => toolCall(COACH_TOOL, ANSWER), { models });
+    const { run } = await startCoaching(engine);
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((event) => event.message).join(" | "));
+    const [chat] = stub.chats();
+    assert.deepEqual(
+      [stub.chats().length, chat?.body?.model, chat?.body?.tool_choice, typeof chat?.body?.max_completion_tokens, chat?.body ? Object.hasOwn(chat.body, "max_tokens") : null],
+      [1, "nvidia/Nemotron-3.5-Super-VL", { type: "function", function: { name: COACH_TOOL } }, "number", false],
+    );
+  });
+
   it("lists the models once, sends one forced request, and keeps a report bound to what was sent, under a title with no task words", async () => {
     const { stub, engine, home } = await setup(() => toolCall(COACH_TOOL, ANSWER));
     const { run, input, clientRequestId } = await startCoaching(engine);

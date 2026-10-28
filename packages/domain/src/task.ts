@@ -208,11 +208,12 @@ export const StoredTaskInput = z.object({
 export type StoredTaskInput = z.infer<typeof StoredTaskInput>;
 
 /**
- * The one model a task run uses (NIV-35): Nemotron 3 Super, whose tool choice Nivra has checked. The run takes it from
- * Token Factory's listing or stops at its model step, before any request to a model and before anything is uploaded:
- * no other model stands in. The run's preview names it.
+ * The one model a task run uses (NIV-35, D50): Nemotron 3.5 Super VL, which replaces Nemotron 3 Super when Token
+ * Factory retires it on 9 November 2026, and whose tool choice a check has seen honoured. The run takes it from Token
+ * Factory's listing or stops at its model step, before any request to a model and before anything is uploaded: no
+ * other model stands in. The run's preview names it.
  */
-export const TASK_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+export const TASK_MODEL = "nvidia/Nemotron-3.5-Super-VL";
 
 /**
  * A task run's bounds that no brief changes (D39, NIV-35): one source for the engine, which enforces them

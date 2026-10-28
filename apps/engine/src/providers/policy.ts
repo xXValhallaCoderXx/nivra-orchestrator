@@ -19,6 +19,11 @@ const SEEN: Readonly<Record<string, ModelPolicy>> = {
     forceAnswer: true,
     evidence: "Checkpoint 1, 17 Oct 2026 (Settings → Check Token Factory): required and forced tool choice honoured on tiny probes",
   },
+  "nvidia/nemotron-3.5-super-vl": {
+    explore: "required",
+    forceAnswer: true,
+    evidence: "D50's tool-choice check, 28 Oct 2026 (Check Token Factory at 77e3a45): required and forced tool choice honoured, and a forced answer valid, on tiny probes",
+  },
 };
 
 export const DEFAULT_POLICY: ModelPolicy = { explore: "auto", forceAnswer: false, evidence: "not checked: auto tool choice in a bounded loop" };
