@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { projectFingerprint, type EnvironmentContext, type EnvironmentReport, type EnvironmentStopCode, type Mask, type SandboxCleanup, type StoredEnvironmentInput } from "@nivra/domain";
+import { PREPARED_FORMAT, projectFingerprint, verifiedDigest, type EnvironmentContext, type EnvironmentContextV2, type EnvironmentReport, type EnvironmentStopCode, type Mask, type SandboxCleanup, type StoredEnvironmentInput } from "@nivra/domain";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { z } from "zod";
@@ -11,10 +11,11 @@ import { WorkspaceRefusal } from "../exec/git-tool.ts";
 import type { SandboxApi } from "../exec/nebius/api.ts";
 import { Journal, Sandbox } from "../exec/nebius/sandbox.ts";
 import { retainedIn, settleJournal, type NebiusCredentials, type RecoveryResult } from "../exec/nebius/session.ts";
-import { takeSnapshot } from "../exec/snapshot.ts";
+import { takeSnapshot, type Snapshot } from "../exec/snapshot.ts";
 import { EnvironmentRefusal, environmentInputs, inputsArchive } from "../environment/inputs.ts";
-import { prepareIn } from "../environment/prepare.ts";
-import { environmentPreviewOf, PREPARE_LIMITS } from "../environment/preview.ts";
+import { npmLockFacts, textOf } from "../environment/node-files.ts";
+import { prepareIn, prepareRecipe, type RecipeOutcome } from "../environment/prepare.ts";
+import { environmentPreviewOf, environmentResolutionOf, PREPARE_LIMITS } from "../environment/preview.ts";
 import { earlyEnvironmentReport, ENVIRONMENT_STOP_MESSAGES } from "../environment/report.ts";
 import { RepoError } from "../repo/paths.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -31,7 +32,8 @@ export const ENVIRONMENT_WORKFLOW_ID = "environment";
  */
 export interface EnvironmentDeps {
   recorder: Pick<ExplainRecorder, "output">;
-  context: (runId: string) => EnvironmentContext | null;
+  /** D41's spec, or a project-driven recipe's choices and kept versions (NIV-55). */
+  context: (runId: string) => EnvironmentContext | EnvironmentContextV2 | null;
   task: (runId: string) => StoredEnvironmentInput | null;
   requestId: (runId: string) => string | null;
   credentials: () => NebiusCredentials | null;
@@ -78,7 +80,7 @@ export function createEnvironmentWorkflow(deps: EnvironmentDeps) {
     deps.saveResult(runId, earlyEnvironmentReport({ outcome, code, step, request: requestOf(runId), now: now(), finished }));
 
   /** Upload consent, the credentials, this platform and a readable request: all checked before anything is sent. */
-  const allowed = (runId: string, step: string): { task: StoredEnvironmentInput; context: EnvironmentContext; credentials: NebiusCredentials } => {
+  const allowed = (runId: string, step: string): { task: StoredEnvironmentInput; context: EnvironmentContext | EnvironmentContextV2; credentials: NebiusCredentials } => {
     const task = deps.task(runId);
     if (!task) throw new Refusal("input-unreadable", "This preparation's request can't be read back from the engine's store, so it wasn't started. Prepare the environment again.");
     const context = deps.context(runId);
@@ -94,6 +96,87 @@ export function createEnvironmentWorkflow(deps: EnvironmentDeps) {
     return { task, context, credentials };
   };
 
+  /** What a preparation's journal left open, settled by the bounded pass recovery runs; what Nebius keeps, counted. */
+  const settleOpen = async (path: string, journal: Journal, credentials: NebiusCredentials): Promise<SandboxCleanup> => {
+    const open = journal.open();
+    if (open.operations.length || open.uncertain.length) {
+      const passes = await deps.settle(path, credentials).catch(() => [] as RecoveryResult[]);
+      const unresolved = passes.length ? passes.flatMap((pass) => pass.unresolved) : ["Something Nivra started in a sandbox couldn't be settled, and may still be running. It stays journaled, for the next recovery pass."];
+      return { stopped: passes.reduce((sum, pass) => sum + pass.stopped.length, 0), alreadyEnded: passes.reduce((sum, pass) => sum + pass.alreadyEnded.length, 0), unresolved: unresolved.slice(0, 50).map((item) => deps.mask(safeUnresolved(item)).slice(0, 400)), retained: retainedIn(entriesAt(path)) };
+    }
+    const cleanup = { stopped: 0, alreadyEnded: 0, unresolved: [], retained: retainedIn(entriesAt(path)) };
+    // A preparation stopped before anything was journaled leaves no journal to move.
+    if (existsSync(path)) settleJournal(path);
+    return cleanup;
+  };
+
+  /**
+   * A project-driven recipe's preparation (NIV-55): the commit's own setup resolved again from the person's choices and
+   * kept versions, checked against the preview they saw, then prepared, inspected and verified in Nebius. What it
+   * verified is written once, beside the recipe it was asked for.
+   */
+  const fromRecipe = async (runId: string, task: StoredEnvironmentInput, context: EnvironmentContextV2, credentials: NebiusCredentials, git: string, abortSignal: AbortSignal, report: (value: EnvironmentReport) => void) => {
+    const local = await deps.local.open({ workspace: task.repoPath });
+    let snapshot: Snapshot;
+    let shown;
+    try {
+      snapshot = await takeSnapshot({ folder: task.repoPath, session: local, git, exclude: deps.exclude, knownValues: deps.knownValues(), signal: abortSignal });
+      shown = await environmentResolutionOf(snapshot, context.choices, context.previous);
+    } catch (error) {
+      const code: EnvironmentStopCode = error instanceof WorkspaceRefusal ? (error.code === "git" || error.code === "git-version" ? "git" : "preview") : abortSignal.aborted ? "cancelled" : "fault";
+      report(earlyEnvironmentReport({ outcome: outcomeOf(code), code, step: "preview", request: requestOf(runId), now: now(), finished: true }));
+      throw stop(code);
+    } finally {
+      await local.close();
+    }
+    if (shown.status !== "ready" || shown.fingerprint !== task.preview) {
+      const code: EnvironmentStopCode = shown.status === "refused" ? "layout" : "preview";
+      report(earlyEnvironmentReport({ outcome: "refused", code, step: "preview", request: requestOf(runId), now: now(), finished: true }));
+      throw stop(code);
+    }
+    const recipe = shown.recipe;
+    const paths = new Set(recipe.configuration.files.map((file) => file.path));
+    const files = snapshot.files.filter((file) => paths.has(file.path));
+    const lockfile = files.find((file) => file.path === "npm-shrinkwrap.json") ?? files.find((file) => file.path === "package-lock.json");
+    const installScripts = recipe.install.tool === "npm" && lockfile ? (npmLockFacts(textOf(lockfile))?.installScripts ?? []) : [];
+    deps.recorder.output(runId, "run", `${files.length} setup files, ${shown.sentBytes} bytes to send; ${recipe.install.tool} on ${recipe.image.tag}; networking on for the preparation only.`, { inputs: files.length, sentBytes: shown.sentBytes });
+
+    const path = deps.journalPath(runId);
+    const journal = new Journal(path);
+    const limits = recipe.limits;
+    const deadline = performance.now() + (limits.importSeconds + limits.prepareSeconds + 2 * limits.probeSeconds) * 1000 + 6 * 60_000;
+    const api = deps.client(credentials, abortSignal);
+    const sandbox = new Sandbox(api, { journal, signal: abortSignal, pollMs: PREPARE_LIMITS.pollMs, cap: () => deadline, maxTimeoutSeconds: Math.max(limits.importSeconds, limits.prepareSeconds, limits.probeSeconds) });
+    const outcome: RecipeOutcome = await prepareRecipe({ api, sandbox, journal, archive: inputsArchive(files), recipe, recipeDigest: shown.recipeDigest, installScripts, until: () => deadline, signal: abortSignal, progress: (message) => deps.recorder.output(runId, "run", message, {}) });
+    const cleanup = await settleOpen(path, journal, credentials);
+
+    const finished = now().toISOString();
+    const install = outcome.install && { exitCode: outcome.install.exitCode, logTail: deps.mask(outcome.install.logTail).slice(-8_000) };
+    const steps = outcome.steps.map((step) => ({ ...step, stdoutTail: deps.mask(step.stdoutTail).slice(-2_000), stderrTail: deps.mask(step.stderrTail).slice(-2_000) }));
+    if (!outcome.prepared) {
+      const code = outcome.stopped?.code ?? "fault";
+      const detail = outcome.stopped?.detail ? deps.mask(outcome.stopped.detail).slice(0, 600) : null;
+      report({ outcome: outcomeOf(code), stopped: { code, step: outcome.stopped?.step ?? null, message: ENVIRONMENT_STOP_MESSAGES[code], detail }, prepared: null, environment: null, install, steps, cleanup, request: requestOf(runId), updatedAt: finished, finishedAt: finished });
+      deps.recorder.output(runId, "run", `Preparation ${outcomeOf(code)}.`, { code });
+      throw stop(code);
+    }
+    const verified = outcome.prepared.verified;
+    report({
+      outcome: "prepared",
+      stopped: null,
+      prepared: null,
+      environment: { format: PREPARED_FORMAT, recipe, recipeDigest: shown.recipeDigest, verified, verifiedDigest: await verifiedDigest(verified), baseline: snapshot.baseline, projectFingerprint: await projectFingerprint(credentials.project), preparedAt: finished },
+      install,
+      steps,
+      cleanup,
+      request: requestOf(runId),
+      updatedAt: finished,
+      finishedAt: finished,
+    });
+    deps.recorder.output(runId, "run", `Prepared: ${verified.tools.map((tool) => `${tool.name} ${tool.version}`).join(", ")}, ${verified.platform.arch}; builds ${verified.builds.state}.`, { builds: verified.builds.state });
+    return { outcome: "prepared" as const };
+  };
+
   const check = createStep({
     id: "check",
     description: "Check upload consent, the key and project id, this platform and the request, before anything is sent",
@@ -102,7 +185,7 @@ export function createEnvironmentWorkflow(deps: EnvironmentDeps) {
     execute: async ({ inputData, runId }) =>
       guard("environment.check", deps.mask, async () => {
         const { task, context } = allowed(runId, "check");
-        deps.recorder.output(runId, "check", "Upload allowed for this project; the key and project id are set.", { target: task.target, preview: task.preview, filters: context.spec.filters.length });
+        deps.recorder.output(runId, "check", "Upload allowed for this project; the key and project id are set.", { target: task.target, preview: task.preview, ...("spec" in context ? { filters: context.spec.filters.length } : { recipe: true }) });
         early(runId, "in-progress", null, null, false);
         return { repoPath: inputData.repoPath };
       }),
@@ -125,6 +208,7 @@ export function createEnvironmentWorkflow(deps: EnvironmentDeps) {
         try {
           const git = deps.findGit();
           if (!git) throw new RepoError("git-missing", `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(deps.platform)}`);
+          if ("choices" in context) return await fromRecipe(runId, task, context, credentials, git, abortSignal, report);
           // The commit as the preview showed it: anything different is refused before anything is sent.
           const local = await deps.local.open({ workspace: task.repoPath });
           let shown;
@@ -166,17 +250,7 @@ export function createEnvironmentWorkflow(deps: EnvironmentDeps) {
           });
 
           // What the import or the preparation left open, settled by the bounded pass recovery runs.
-          const open = journal.open();
-          let cleanup: SandboxCleanup;
-          if (open.operations.length || open.uncertain.length) {
-            const passes = await deps.settle(path, credentials).catch(() => [] as RecoveryResult[]);
-            const unresolved = passes.length ? passes.flatMap((pass) => pass.unresolved) : ["Something Nivra started in a sandbox couldn't be settled, and may still be running. It stays journaled, for the next recovery pass."];
-            cleanup = { stopped: passes.reduce((sum, pass) => sum + pass.stopped.length, 0), alreadyEnded: passes.reduce((sum, pass) => sum + pass.alreadyEnded.length, 0), unresolved: unresolved.slice(0, 50).map((item) => deps.mask(safeUnresolved(item)).slice(0, 400)), retained: retainedIn(entriesAt(path)) };
-          } else {
-            cleanup = { stopped: 0, alreadyEnded: 0, unresolved: [], retained: retainedIn(entriesAt(path)) };
-            // A preparation stopped before anything was journaled leaves no journal to move.
-            if (existsSync(path)) settleJournal(path);
-          }
+          const cleanup: SandboxCleanup = await settleOpen(path, journal, credentials);
 
           const finished = now().toISOString();
           const install = outcome.install && { exitCode: outcome.install.exitCode, logTail: deps.mask(outcome.install.logTail).slice(-8_000) };

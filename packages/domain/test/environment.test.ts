@@ -214,12 +214,17 @@ describe("a project-driven environment's contract (NIV-55)", () => {
       target: "wsl:Ubuntu",
       tools: record.tools,
       platform: { arch: "x86_64", libc: "glibc" },
+      env: { TOY_OFFLINE: "1" },
+      dependencyFolders: ["target"],
       builds: { verified, missing: ["native-thing"], acceptedAt: new Date().toISOString() },
       preparedAt: new Date().toISOString(),
     };
     assert.equal(EnvironmentRef.safeParse(ref).success, true);
     const { verified: _, ...unbound } = ref;
     assert.equal(EnvironmentRef.safeParse(unbound).success, false, "a run is bound to what was verified, not only to what was asked for");
+    const { env: __, ...bare } = ref;
+    assert.equal(EnvironmentRef.safeParse(bare).success, false, "a run carries the task operations' own variables");
+    assert.equal(EnvironmentRef.safeParse({ ...ref, env: { TOKEN: "a b" } }).success, false, "no free text in a task variable");
   });
 
   it("never lists a release-index refresh as a reason to prepare again", () => {

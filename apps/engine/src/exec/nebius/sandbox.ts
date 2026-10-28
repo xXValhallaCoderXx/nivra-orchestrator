@@ -295,39 +295,70 @@ export const ENV_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
  */
 export const ENV_COMMAND_ENV: Readonly<Record<string, string>> = Object.freeze({ PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" });
 
+/** npm's install flags a recipe may pass (NIV-55): each said exactly, off included. */
+const NPM_INSTALL_FLAG = /^--(legacy-peer-deps|install-links|strict-peer-deps|engine-strict|ignore-scripts)(=false)?$|^--install-strategy=(hoisted|nested|shallow|linked)$|^--omit=(dev|optional|peer)$|^--include=(prod|dev|optional|peer)$/;
+
 /**
- * Whether a preparation's install arguments are the only shape Nivra sends: `--frozen-lockfile`, then each filter as
- * `--filter <filter>`, every filter one the domain's spec takes (`ENVIRONMENT_FILTER`), so a preview and its preparation
- * agree on what runs.
+ * Whether a preparation's install arguments are the only shape Nivra sends, so a preview and its preparation agree on
+ * what runs. With no manager, D41's: `--frozen-lockfile`, then each filter as `--filter <filter>`. For a recipe (NIV-55):
+ * pnpm's `install --frozen-lockfile` with filters, every filter one `ENVIRONMENT_FILTER` takes; npm's `ci --no-audit
+ * --no-fund` with the install flags it may be given, each one exactly.
  */
-export function isInstallArgs(args: readonly string[]): boolean {
-  if (args[0] !== "--frozen-lockfile" || (args.length - 1) % 2 !== 0) return false;
-  for (let index = 1; index < args.length; index += 2) {
-    if (args[index] !== "--filter" || !ENVIRONMENT_FILTER.test(args[index + 1]!)) return false;
+export function isInstallArgs(args: readonly string[], manager?: "npm" | "pnpm"): boolean {
+  if (manager === "npm") return args[0] === "ci" && args[1] === "--no-audit" && args[2] === "--no-fund" && args.slice(3).every((arg) => NPM_INSTALL_FLAG.test(arg));
+  const rest = manager === "pnpm" ? (args[0] === "install" ? args.slice(1) : null) : args;
+  if (!rest || rest[0] !== "--frozen-lockfile" || (rest.length - 1) % 2 !== 0) return false;
+  for (let index = 1; index < rest.length; index += 2) {
+    if (rest[index] !== "--filter" || !ENVIRONMENT_FILTER.test(rest[index + 1]!)) return false;
   }
   return true;
 }
 
 /**
+ * The variables a recipe's preparation may carry, beneath the image's path (NIV-55): the switches that keep corepack and
+ * pnpm from asking, downloading or switching versions, and pnpm 10's install options. Nothing that names a registry, a
+ * proxy or a credential: an install with networking on reaches only what the lockfile names.
+ */
+const PREPARATION_ENV = /^(PATH|HOME|CI|COREPACK_ENABLE_DOWNLOAD_PROMPT|COREPACK_ENABLE_STRICT|npm_config_update_notifier|npm_config_manage_package_manager_versions|pnpm_config_pm_on_fail|npm_config_node_linker|npm_config_shamefully_hoist|npm_config_auto_install_peers|npm_config_strict_peer_dependencies)$/;
+const PREPARATION_VALUE = /^[A-Za-z0-9@._/:,=+-]{0,400}$/;
+
+/**
  * An environment's preparation: a fixed script, given everything as positional arguments, so nothing is interpolated
- * into it. $1 the workspace, $2 the inputs archive, $3 pnpm's exact version, then pnpm install's own arguments
- * (--frozen-lockfile first). It prints the versions and the machine it prepared, for the environment's binding. The
- * install's own log goes to a file outside the workspace, and only its end is printed, so the service's output cap
- * can't cut off the last line, which says whether the install finished.
+ * into it. $1 the workspace, $2 the inputs archive, $3 the package manager (npm or pnpm), $4 its exact version ("bundled"
+ * for the npm the image has), $5 how pnpm is activated (corepack, npm-global, corepack-else-npm-global, or none), $6
+ * npm's own exact version to install first ("none" to keep the image's), then the install's own arguments.
+ *
+ * It prints how pnpm was activated, the versions and the machine it prepared, for the environment's verified record;
+ * then the install. The install's own log goes to a file outside the workspace, and only its end is printed, so the
+ * service's output cap can't cut off the line that says whether the install finished. After it, pnpm is asked which
+ * dependency builds it didn't run, between markers. A bootstrap that fails exits 70 (npm) or 71 (pnpm).
  */
 export const ENV_PREPARE_SCRIPT = [
   "set -e",
-  'ws="$1"; inputs="$2"; pm="$3"; shift 3',
+  'ws="$1"; inputs="$2"; manager="$3"; version="$4"; via="$5"; npmpin="$6"; shift 6',
   'mkdir -p "$ws"',
   'tar -x -z -f "$inputs" -C "$ws"',
   'rm -f "$inputs"',
   'cd "$ws"',
-  "corepack enable",
-  'corepack prepare "pnpm@$pm" --activate',
+  'if [ "$npmpin" != "none" ]; then',
+  '  if ! npm install -g "npm@$npmpin" > /nivra/bootstrap.log 2>&1; then tail -c 4000 /nivra/bootstrap.log; echo "bootstrap-failed npm"; exit 70; fi',
+  "fi",
+  'if [ "$manager" = "pnpm" ]; then',
+  '  use="$via"',
+  '  if [ "$via" = "corepack-else-npm-global" ]; then if command -v corepack > /dev/null 2>&1; then use=corepack; else use=npm-global; fi; fi',
+  '  if [ "$use" = "corepack" ]; then',
+  '    if ! { corepack enable pnpm && corepack prepare "pnpm@$version" --activate; } > /nivra/bootstrap.log 2>&1; then tail -c 4000 /nivra/bootstrap.log; echo "bootstrap-failed pnpm"; exit 71; fi',
+  "  else",
+  '    if ! npm install -g "pnpm@$version" > /nivra/bootstrap.log 2>&1; then tail -c 4000 /nivra/bootstrap.log; echo "bootstrap-failed pnpm"; exit 71; fi',
+  "  fi",
+  '  echo "via $use"',
+  "fi",
   'echo "node $(node --version)"',
-  'echo "pnpm $(pnpm --version)"',
+  'echo "npm $(npm --version)"',
+  'if [ "$manager" = "pnpm" ]; then echo "pnpm $(pnpm --version)"; fi',
   'echo "arch $(uname -m)"',
-  'if pnpm install "$@" > /nivra/install.log 2>&1; then tail -c 8000 /nivra/install.log; echo "installed"; else status=$?; tail -c 16000 /nivra/install.log; exit "$status"; fi',
+  'if "$manager" "$@" > /nivra/install.log 2>&1; then tail -c 8000 /nivra/install.log; echo "installed"; else status=$?; tail -c 16000 /nivra/install.log; exit "$status"; fi',
+  'if [ "$manager" = "pnpm" ]; then echo "builds-begin"; pnpm ignored-builds 2>&1 | tail -c 4000 || true; echo "builds-end"; fi',
 ].join("\n");
 
 export class Sandbox {
@@ -450,17 +481,41 @@ export class Sandbox {
    * frozen lockfile with the pinned package manager. It is kept, so its result image is the environment; the worker's
    * work and every check then run on that image with networking off.
    */
-  async prepareEnvironment(input: { image: string; inputs: FileRef; packageManager: string; installArgs: string[]; timeoutSeconds: number }): Promise<{ operationId: string } | { uncertain: string }> {
-    if (!/^pnpm@\d+\.\d+\.\d+$/.test(input.packageManager)) throw new SandboxRefusal("An environment pins its package manager to an exact pnpm version, such as pnpm@11.5.3.");
-    if (!isInstallArgs(input.installArgs)) throw new SandboxRefusal("An environment installs only from its frozen lockfile, with plain arguments.");
+  async prepareEnvironment(
+    input: { image: string; inputs: FileRef; timeoutSeconds: number } & (
+      | { packageManager: string; installArgs: string[] }
+      | { recipe: { manager: "npm" | "pnpm"; version: string; via: string; npmPin: string | null; installArgs: string[]; env: Readonly<Record<string, string>> } }
+    ),
+  ): Promise<{ operationId: string } | { uncertain: string }> {
     if (!(input.timeoutSeconds > 0 && input.timeoutSeconds <= this.#maxTimeoutSeconds)) throw new SandboxRefusal(`A step's timeout must be between 1 and ${this.#maxTimeoutSeconds} s.`);
+    let positional: string[];
+    // The image's own environment isn't applied without a shell, so its path is given; nothing here is secret.
+    let env: Record<string, string> = { PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", npm_config_update_notifier: "false" };
+    if ("packageManager" in input) {
+      // D41's single setup: pnpm at the commit's exact pin, through corepack.
+      if (!/^pnpm@\d+\.\d+\.\d+$/.test(input.packageManager)) throw new SandboxRefusal("An environment pins its package manager to an exact pnpm version, such as pnpm@11.5.3.");
+      if (!isInstallArgs(input.installArgs)) throw new SandboxRefusal("An environment installs only from its frozen lockfile, with plain arguments.");
+      positional = ["pnpm", input.packageManager.slice("pnpm@".length), "corepack", "none", "install", ...input.installArgs];
+    } else {
+      // A project-driven recipe (NIV-55): its manager, version, activation and install, each in the one shape allowed.
+      const recipe = input.recipe;
+      const exact = /^\d+\.\d+\.\d+$/;
+      if (recipe.manager === "pnpm" ? !exact.test(recipe.version) : recipe.version !== "bundled" && !exact.test(recipe.version)) throw new SandboxRefusal("An environment pins its package manager to an exact version.");
+      if (recipe.manager === "pnpm" ? !["corepack", "npm-global", "corepack-else-npm-global"].includes(recipe.via) : recipe.via !== "none") throw new SandboxRefusal("An environment activates pnpm through corepack or npm, and npm through nothing.");
+      if (recipe.npmPin !== null && !exact.test(recipe.npmPin)) throw new SandboxRefusal("An environment installs npm only at an exact version.");
+      if (!isInstallArgs(recipe.installArgs, recipe.manager)) throw new SandboxRefusal("An environment installs only from its frozen lockfile, with the install options Nivra knows.");
+      for (const [key, value] of Object.entries(recipe.env)) {
+        if (!PREPARATION_ENV.test(key) || !PREPARATION_VALUE.test(value)) throw new SandboxRefusal(`An environment's preparation can't be given ${key}: only the switches and install options Nivra knows.`);
+      }
+      positional = [recipe.manager, recipe.version, recipe.via, recipe.npmPin ?? "none", ...recipe.installArgs];
+      env = { ...env, ...recipe.env, PATH: ENV_PATH };
+    }
     return this.#spawn("environment preparation", {
       command: "/bin/sh",
-      args: ["-c", ENV_PREPARE_SCRIPT, "nivra-env-prepare", ENV_WORKSPACE, ENV_INPUTS, input.packageManager.slice("pnpm@".length), ...input.installArgs],
+      args: ["-c", ENV_PREPARE_SCRIPT, "nivra-env-prepare", ENV_WORKSPACE, ENV_INPUTS, ...positional],
       image: input.image,
       shell: false,
-      // The image's own environment isn't applied without a shell, so its path is given; nothing here is secret.
-      env: { PATH: ENV_PATH, HOME: "/root", CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", npm_config_update_notifier: "false" },
+      env,
       disposable: false,
       networking: { enabled: true },
       timeout: input.timeoutSeconds,

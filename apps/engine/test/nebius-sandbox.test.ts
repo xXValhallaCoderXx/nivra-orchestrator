@@ -117,8 +117,43 @@ describe("Nebius Sandboxes, offline: spawning, one at a time, networking off (NI
     assert.deepEqual((spawned(other)[0] as unknown as { args: string[] }).args.slice(-4), ["--filter", "@scope/data...", "--filter", "!@scope/web"]);
     await sandbox.prepareEnvironment(given);
     const [body] = spawned(service) as unknown as Array<{ networking: { enabled: boolean }; disposable: boolean; image: string; args: string[]; files: Record<string, { uuid: string }> }>;
-    assert.deepEqual([body?.networking.enabled, body?.disposable, body?.image, body?.args.slice(2), Object.keys(body?.files ?? {})], [true, false, "img-node", ["nivra-env-prepare", "/workspace", "/nivra/env-inputs.tar.gz", "11.5.3", "--frozen-lockfile", "--filter", "@scope/data..."], ["/nivra/env-inputs.tar.gz"]]);
+    // D41's call runs the one preparation script as pnpm, its pin, through corepack, with npm as the image has it.
+    assert.deepEqual([body?.networking.enabled, body?.disposable, body?.image, body?.args.slice(2), Object.keys(body?.files ?? {})], [true, false, "img-node", ["nivra-env-prepare", "/workspace", "/nivra/env-inputs.tar.gz", "pnpm", "11.5.3", "corepack", "none", "install", "--frozen-lockfile", "--filter", "@scope/data..."], ["/nivra/env-inputs.tar.gz"]]);
     assert.equal(journal.spawnsOf("environment preparation"), 1);
+  });
+
+  it("runs a recipe's preparation only in the shapes Nivra allows, with no variable that could steer the install elsewhere (NIV-55)", async () => {
+    const service = new FakeService(() => succeed());
+    const { sandbox } = sandboxOn(service);
+    type Recipe = { manager: "npm" | "pnpm"; version: string; via: string; npmPin: string | null; installArgs: string[]; env: Record<string, string> };
+    const pnpm: Recipe = { manager: "pnpm", version: "11.5.3", via: "corepack-else-npm-global", npmPin: null, installArgs: ["install", "--frozen-lockfile", "--filter", "@w/data..."], env: { COREPACK_ENABLE_STRICT: "0", pnpm_config_pm_on_fail: "ignore" } };
+    const npm: Recipe = { manager: "npm", version: "bundled", via: "none", npmPin: "10.9.9", installArgs: ["ci", "--no-audit", "--no-fund", "--legacy-peer-deps", "--install-links=false", "--omit=dev"], env: {} };
+    const base = { image: "img-node", inputs: { uuid: "inputs" }, timeoutSeconds: 120 };
+    const refusals: Array<[Recipe, RegExp]> = [
+      [{ ...pnpm, version: "11" }, /exact version/],
+      [{ ...pnpm, version: "bundled" }, /exact version/],
+      [{ ...pnpm, via: "curl" }, /corepack or npm/],
+      [{ ...npm, via: "corepack" }, /corepack or npm/],
+      [{ ...npm, npmPin: "latest" }, /npm only at an exact version/],
+      [{ ...pnpm, installArgs: ["install", "--filter", "a"] }, /frozen lockfile/],
+      [{ ...pnpm, installArgs: ["add", "--frozen-lockfile"] }, /frozen lockfile/],
+      [{ ...npm, installArgs: ["install", "--no-audit", "--no-fund"] }, /frozen lockfile/],
+      [{ ...npm, installArgs: ["ci", "--no-audit", "--no-fund", "--registry=https://npm.example.com"] }, /frozen lockfile/],
+      [{ ...npm, installArgs: ["ci", "--no-audit", "--no-fund", "--omit=everything"] }, /frozen lockfile/],
+      [{ ...pnpm, env: { npm_config_registry: "https://npm.example.com" } }, /can't be given npm_config_registry/],
+      [{ ...pnpm, env: { HTTPS_PROXY: "http://proxy" } }, /can't be given HTTPS_PROXY/],
+      [{ ...pnpm, env: { COREPACK_ENABLE_STRICT: "0 && curl x" } }, /can't be given COREPACK_ENABLE_STRICT/],
+    ];
+    for (const [recipe, pattern] of refusals) await assert.rejects(sandbox.prepareEnvironment({ ...base, recipe }), pattern, JSON.stringify(recipe).slice(0, 120));
+    assert.equal(service.spawns, 0);
+    await sandbox.prepareEnvironment({ ...base, recipe: pnpm });
+    await sandboxOn(service).sandbox.prepareEnvironment({ ...base, recipe: npm });
+    const bodies = spawned(service) as unknown as Array<{ args: string[]; env: Record<string, string>; networking: { enabled: boolean } }>;
+    assert.deepEqual(bodies.map((body) => body.args.slice(5)), [
+      ["pnpm", "11.5.3", "corepack-else-npm-global", "none", "install", "--frozen-lockfile", "--filter", "@w/data..."],
+      ["npm", "bundled", "none", "10.9.9", "ci", "--no-audit", "--no-fund", "--legacy-peer-deps", "--install-links=false", "--omit=dev"],
+    ]);
+    assert.deepEqual([bodies[0]!.env["pnpm_config_pm_on_fail"], bodies[0]!.env["PATH"]?.startsWith("/usr/local/sbin"), bodies.every((body) => body.networking.enabled)], ["ignore", true, true]);
   });
 
   it("imports an image only by a registry address with an exact tag, journaled as an operation cleanup can settle (NIV-49)", async () => {

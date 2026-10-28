@@ -1,7 +1,10 @@
-import { ENVIRONMENT_BASE, type EnvironmentPreview, type EnvironmentSpec } from "@nivra/domain";
+import { createHash } from "node:crypto";
+import { ENVIRONMENT_BASE, recipeDigest, type EnvironmentChoices, type EnvironmentPreview, type EnvironmentPreviewV2, type EnvironmentSpec, type PreviousSettlement } from "@nivra/domain";
 import { RETENTION } from "../exec/nebius/sandbox.ts";
 import type { Snapshot } from "../exec/snapshot.ts";
 import { environmentFingerprint, environmentInputs, inputsArchive, installArgsFor } from "./inputs.ts";
+import { resolveNodeEnvironment } from "./node.ts";
+import type { ReleaseIndex } from "./releases.ts";
 
 /** A preparation's bounds (D41): the import's time, the install's, and its one operation with networking on. */
 export const PREPARE_LIMITS = {
@@ -37,5 +40,28 @@ export function environmentPreviewOf(snapshot: Snapshot, spec: EnvironmentSpec):
     retention: RETENTION,
     limits: { importSeconds: PREPARE_LIMITS.importSeconds, prepareSeconds: PREPARE_LIMITS.prepareSeconds, operations: 1 },
     fingerprint: environmentFingerprint({ baseline: snapshot.baseline, prefix: snapshot.prefix, inputsDigest: inputs.digest, spec, installArgs }),
+  };
+}
+
+/** A recipe preview's fingerprint: the commit, the folder and the recipe's digest, in a fixed, versioned order. */
+export const recipeFingerprint = (baseline: string, prefix: string, digest: string): string => createHash("sha256").update(JSON.stringify(["nivra.environment-preview.v2", baseline, prefix, digest])).digest("hex");
+
+/**
+ * A project's own setup resolved into a recipe (NIV-55), with no network: refused, waiting for the person's choices,
+ * or ready with what preparing it would send and the fingerprint the run is checked against.
+ */
+export async function environmentResolutionOf(snapshot: Snapshot, choices: EnvironmentChoices, previous: PreviousSettlement | null, releases?: ReleaseIndex): Promise<EnvironmentPreviewV2> {
+  const resolution = resolveNodeEnvironment({ snapshot, choices, previous, ...(releases ? { releases } : {}) });
+  if (resolution.status !== "ready") return resolution;
+  const digest = await recipeDigest(resolution.recipe);
+  const paths = new Set(resolution.recipe.configuration.files.map((file) => file.path));
+  return {
+    ...resolution,
+    recipeDigest: digest,
+    baseline: snapshot.baseline,
+    sentBytes: inputsArchive(snapshot.files.filter((file) => paths.has(file.path))).byteLength,
+    leftOut: snapshot.leftOutPaths.filter((path) => path === ".npmrc" || path.endsWith("/.npmrc")).slice(0, 20),
+    retention: RETENTION,
+    fingerprint: recipeFingerprint(snapshot.baseline, snapshot.prefix, digest),
   };
 }

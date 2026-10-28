@@ -136,7 +136,7 @@ export const PreparedEnvironment = z.strictObject({
 export type PreparedEnvironment = z.infer<typeof PreparedEnvironment>;
 
 /** What stopped a preparation, by kind. The words are chosen by the code. */
-export const EnvironmentStopCode = z.enum(["consent", "credentials", "native-windows", "preview", "layout", "git", "image", "install", "versions", "cancelled", "uncertain", "sandbox-failed", "fault"]);
+export const EnvironmentStopCode = z.enum(["consent", "credentials", "native-windows", "preview", "layout", "git", "image", "install", "versions", "cancelled", "uncertain", "sandbox-failed", "fault", "inspect", "bootstrap", "readiness"]);
 export type EnvironmentStopCode = z.infer<typeof EnvironmentStopCode>;
 
 /**
@@ -145,8 +145,19 @@ export type EnvironmentStopCode = z.infer<typeof EnvironmentStopCode>;
  */
 export const EnvironmentReport = z.strictObject({
   outcome: z.enum(["in-progress", "prepared", "refused", "cancelled", "failed", "uncertain", "interrupted"]),
-  stopped: z.strictObject({ code: EnvironmentStopCode, step: z.string().max(64).nullable(), message: z.string().max(600) }).nullable(),
+  stopped: z
+    .strictObject({
+      code: EnvironmentStopCode,
+      step: z.string().max(64).nullable(),
+      message: z.string().max(600),
+      /** What the check found, in Nivra's words, such as the Node an image holds against the one asked for (NIV-55). */
+      detail: z.string().max(600).nullable().optional(),
+    })
+    .nullable(),
+  /** D41's single setup. A recipe-driven preparation leaves it null and fills `environment`, so earlier readers still read. */
   prepared: PreparedEnvironment.nullable(),
+  /** A project-driven recipe and what its preparation verified (NIV-55). Absent from reports written before it. */
+  environment: z.lazy(() => PreparedEnvironmentV2).nullable().optional(),
   /** The end of the install's own log: text from the sandbox, never instructions. */
   install: z.strictObject({ exitCode: z.number().int().nullable(), logTail: z.string().max(8_000) }).nullable(),
   steps: z.array(SandboxStep).max(8),
@@ -383,6 +394,10 @@ export const EnvironmentRef = z.strictObject({
   target: TargetName,
   tools: z.array(VerifiedTool).min(1).max(8),
   platform: z.strictObject({ arch: z.string().max(32), libc: z.enum(["musl", "glibc"]) }),
+  /** What every task operation gets: the recipe's task variables. Nothing in them is secret. */
+  env: z.record(EnvName, EnvValue),
+  /** The folders the install writes in the workspace, which the session's listing and collect leave out. */
+  dependencyFolders: ArtifactFolders.shape.dependency,
   builds: BuildsAcceptance.nullable(),
   preparedAt: z.iso.datetime(),
 });
@@ -478,3 +493,61 @@ async function sha256Hex(text: string): Promise<string> {
 export const recipeDigest = (recipe: EnvironmentRecipe): Promise<string> => sha256Hex(`${RECIPE_FORMAT}\0${canonicalJson(recipe)}`);
 /** A verified record's digest. */
 export const verifiedDigest = (record: VerifiedToolRecord): Promise<string> => sha256Hex(`${VERIFIED_FORMAT}\0${canonicalJson(record)}`);
+
+/** The exact versions a project's last preparation settled on, and whether the person chose them then (NIV-55). */
+export const PreviousSettlement = z.strictObject({
+  configuration: Sha256Hex,
+  runtime: ExactVersion,
+  manager: ToolName,
+  /** An exact version, or bundled for npm taken from the Node image. */
+  managerVersion: z.union([ExactVersion, z.literal("bundled")]),
+  chosen: z.strictObject({ runtime: z.boolean().optional(), managerVersion: z.boolean().optional() }).optional(),
+});
+export type PreviousSettlement = z.infer<typeof PreviousSettlement>;
+
+const ReadyResolution = EnvironmentResolution.options[2];
+
+/**
+ * What preparing a project's environment would send and run (NIV-55), worked out on the engine that owns the checkout
+ * with no network: the resolution, and for a ready one what binds the run. Its fingerprint covers the commit, the
+ * folder and the recipe's digest, and the run checks it again before anything is sent.
+ */
+export const EnvironmentPreviewV2 = z.discriminatedUnion("status", [
+  EnvironmentResolution.options[0],
+  EnvironmentResolution.options[1],
+  ReadyResolution.extend({
+    recipeDigest: Sha256Hex,
+    baseline: Commit,
+    /** The setup configuration as one archive, compressed, as it is uploaded. */
+    sentBytes: count,
+    /** Setup files a snapshot leaves out, never sent: a secrets file such as .npmrc. */
+    leftOut: z.array(z.string().max(1_024)).max(20),
+    /** What Nebius keeps, in its own terms. */
+    retention: z.string().max(1_000),
+    fingerprint: Sha256Hex,
+  }),
+]);
+export type EnvironmentPreviewV2 = z.infer<typeof EnvironmentPreviewV2>;
+
+/** What a recipe-driven preparation gets besides its input (D21): held in the engine's memory for the run, never stored. */
+export const EnvironmentContextV2 = z.strictObject({
+  sharing: z.strictObject({ cloudExecution: z.boolean() }),
+  choices: EnvironmentChoices,
+  previous: PreviousSettlement.nullable(),
+});
+export type EnvironmentContextV2 = z.infer<typeof EnvironmentContextV2>;
+
+export const PREPARED_FORMAT = "nivra.environment-prepared.v2";
+
+/** A recipe-driven environment, as its preparation left it: what was asked for, what was verified, and what binds it. */
+export const PreparedEnvironmentV2 = z.strictObject({
+  format: z.literal(PREPARED_FORMAT),
+  recipe: EnvironmentRecipe,
+  recipeDigest: Sha256Hex,
+  verified: VerifiedToolRecord,
+  verifiedDigest: Sha256Hex,
+  baseline: Commit,
+  projectFingerprint: Sha256Hex,
+  preparedAt: z.iso.datetime(),
+});
+export type PreparedEnvironmentV2 = z.infer<typeof PreparedEnvironmentV2>;

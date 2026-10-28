@@ -22,8 +22,11 @@ import {
   type EngineInfo,
   type ChatContext,
   type CoachContext,
+  type EnvironmentChoices,
   type EnvironmentPreview,
+  type EnvironmentPreviewV2,
   type EnvironmentSpec,
+  type PreviousSettlement,
   type JsonObject,
   type ResearchContext,
   type ReviewContext,
@@ -67,7 +70,7 @@ import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/sc
 import { RunStore } from "./runs/store.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
 import { EnvironmentRefusal, environmentInputs } from "./environment/inputs.ts";
-import { environmentPreviewOf, PREPARE_LIMITS } from "./environment/preview.ts";
+import { environmentPreviewOf, environmentResolutionOf, PREPARE_LIMITS } from "./environment/preview.ts";
 import { readEnvironmentInput } from "./environment/report.ts";
 import { TASK_LIMITS } from "./task/limits.ts";
 import { proposalView, readTaskInput, taskPreviewOf } from "./task/report.ts";
@@ -531,6 +534,22 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     }
   };
 
+  /** A project's own setup resolved into a recipe, with no network (NIV-55); a refusal names the file and says why. */
+  const environmentResolve = async (repoPath: string, choices: EnvironmentChoices, previous: PreviousSettlement | null): Promise<EnvironmentPreviewV2> => {
+    const git = locateGit();
+    if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
+    const session = await backend.open({ workspace: repoPath });
+    try {
+      const shown = await environmentResolutionOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() }), choices, previous);
+      return shown.status === "refused" ? { ...shown, message: mask(shown.message).slice(0, 2_000) } : shown;
+    } catch (error) {
+      if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000), rows: [] };
+      throw error;
+    } finally {
+      await session.close();
+    }
+  };
+
   /** What preparing this checkout's environment would send and run, with no network (D41); a layout it can't prepare says why. */
   const environmentPreview = async (repoPath: string, spec: EnvironmentSpec): Promise<EnvironmentPreview> => {
     const git = locateGit();
@@ -857,6 +876,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       },
       "task.preview": ({ repoPath, brief, environment }) => taskPreview(repoPath, brief, environment),
       "environment.preview": ({ repoPath, spec }) => environmentPreview(repoPath, spec),
+      "environment.resolve": ({ repoPath, choices, previous }) => environmentResolve(repoPath, choices, previous),
       "runs.coach": ({ runId }) => {
         const status = store.status(runId);
         if (!status) notFound(runId);
