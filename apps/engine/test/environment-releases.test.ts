@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { RELEASE_DATA } from "../src/environment/release-data.ts";
 import { corepackBundled, releaseIndexOf, RELEASES, standing } from "../src/environment/releases.ts";
-import { globMatcher, pnpmLockFacts, simpleYaml, versionFileValue, workspaceMembers } from "../src/environment/node-files.ts";
+import { expandBraces, globMatcher, npmLockFacts, pnpmLockFacts, simpleYaml, unreadGlob, versionFileValue, workspaceMembers } from "../src/environment/node-files.ts";
 import { compareVersions, versionParts } from "../src/environment/versions.ts";
 
 /**
@@ -106,5 +106,72 @@ describe("Node file readers", () => {
       ].join("\n"),
     );
     assert.deepEqual([facts.format, facts.hosts, facts.git, facts.engines], ["9.0", ["npm.example.com"], ["b"], [{ name: "@scope/a", range: ">=18" }]]);
+  });
+});
+
+describe("Nate's review of PR 31: the readers, each finding kept fixed (NIV-55)", () => {
+  it("expands brace lists and matches ? in workspace globs, and names the syntax it can't read", () => {
+    const folders = ["packages/a", "packages/b", "packages/c", "apps/web", "apps/api", "tools/x1"];
+    assert.deepEqual(workspaceMembers(["packages/{a,b}"], folders), ["packages/a", "packages/b"], "pnpm and npm include both");
+    assert.deepEqual(workspaceMembers(["{apps,packages}/{web,a}"], folders), ["packages/a", "apps/web"]);
+    assert.deepEqual(workspaceMembers(["packages/*", "!packages/{b,c}"], folders), ["packages/a"], "a negated list removes each");
+    assert.deepEqual(workspaceMembers(["tools/x?"], folders), ["tools/x1"]);
+    assert.deepEqual(expandBraces("a/{b,{c,d}}/e"), ["a/b/e", "a/c/e", "a/d/e"], "nested lists");
+    assert.equal(globMatcher("packages/{a,b}").test("packages/{a,b}"), false, "never the braces as text");
+    for (const glob of ["packages/[ab]", "packages/@(a|b)", "packages/{1..3}", "packages/{a}", "packages/{a,b", "packages/a\\*", `${"{a,b}".repeat(9)}`]) {
+      assert.equal(unreadGlob(["apps/*", glob]), glob, glob);
+    }
+    assert.equal(unreadGlob(["apps/*", "!packages/{a,b}", "tools/x?"]), null);
+  });
+
+  it("reads a pnpm lockfile's resolution, engines and libc written as blocks, and lists what it can't read", () => {
+    const facts = pnpmLockFacts(
+      [
+        "lockfileVersion: '9.0'",
+        "packages:",
+        "  a@1.0.0:",
+        "    resolution:",
+        "      integrity: sha512-x",
+        "      tarball: https://npm.example.com/a/-/a-1.0.0.tgz",
+        "    engines:",
+        "      node: '>=18'",
+        "    libc:",
+        "    - musl",
+        "  b@2.0.0:",
+        "    resolution: {integrity: sha512-y,",
+        "      tarball: 'https://other.example.com/b.tgz'}",
+        "  c@3.0.0:",
+        "    resolution:",
+        "      type: git",
+        "      repo: https://github.com/o/c.git",
+        "      commit: abc",
+        "  d@4.0.0:",
+        "    resolution:",
+        "      type: directory",
+        "      directory: ../d",
+      ].join("\n"),
+    );
+    assert.deepEqual([facts.hosts, facts.git, facts.local, facts.unreadable], [["npm.example.com", "other.example.com"], ["c"], ["d"], []]);
+    assert.deepEqual([facts.engines, facts.libc], [[{ name: "a", range: ">=18" }], [{ name: "a", libc: ["musl"] }]]);
+    // As pnpm 11 writes its own packages, through a formatter: a flow mapping beneath its key, across lines, in a second document.
+    const formatted = pnpmLockFacts(['---', 'lockfileVersion: "9.0"', "packages:", '  "@pnpm/exe@11.5.3":', "    resolution:", "      {", "        integrity: sha512-x,", "        tarball: https://npm.example.com/exe.tgz,", "      }", "    libc:", "      [", "        musl,", "      ]", "---", "lockfileVersion: '9.0'", "packages:", "  b@1.0.0:", "    resolution: {integrity: sha512-y}"].join("\n"));
+    assert.deepEqual([formatted.hosts, formatted.libc, formatted.unreadable], [["npm.example.com"], [{ name: "@pnpm/exe", libc: ["musl"] }], []]);
+    const unread = (lines: string[]) => pnpmLockFacts(["lockfileVersion: '9.0'", ...lines].join("\n")).unreadable;
+    assert.deepEqual(unread(["packages:", "  a@1.0.0:", "    resolution: &r {tarball: https://npm.example.com/a.tgz}"]), ["a@1.0.0 (resolution)"], "an anchor");
+    assert.deepEqual(unread(["packages:", "  a@1.0.0:", "    resolution:", "      tarball: >-", "        https://npm.example.com/a.tgz"]), ["a@1.0.0 (resolution)"], "a block scalar");
+    assert.deepEqual(unread(["packages:", "  a@1.0.0:", "    resolution: {type: binary, url: https://nodejs.org/x.tgz}"]), ["a@1.0.0 (resolution)"], "a kind Nivra doesn't know");
+    assert.deepEqual(unread(["packages:", "  a@1.0.0:", "    resolution: {tarball: ftp://npm.example.com/a.tgz}"]), ["a@1.0.0 (resolution)"], "an address that isn't http");
+    assert.deepEqual(unread(["packages:", "  a@1.0.0:", "    resolution: {integrity: x}", "    resolution: {tarball: https://npm.example.com/a.tgz}"]), ["a@1.0.0 (resolution)"], "a field given twice");
+    assert.deepEqual(unread(["packages:", "  a@1.0.0:", "    engines:", "      node:", "        - '>=18'"]), ["a@1.0.0 (engines)"]);
+    assert.deepEqual(unread(["packages: {a@1.0.0: {resolution: {tarball: https://npm.example.com/a.tgz}}}"]), ["the packages section"], "a section in flow style");
+    assert.deepEqual(unread(["packages:", "    a@1.0.0:", "      resolution: {integrity: x}", "  b@1.0.0:", "      resolution: {integrity: y}"]), ["the packages section"], "an entry out of line");
+    assert.deepEqual(unread(['"packages":', "  a@1.0.0:", "    resolution: {tarball: https://npm.example.com/a.tgz}"]), ["a line outside any section"]);
+  });
+
+  it("refuses an npm lockfile entry whose address it can't read", () => {
+    const lock = (resolved: unknown) => JSON.stringify({ lockfileVersion: 3, packages: { "": {}, "node_modules/a": { version: "1.0.0", resolved } } });
+    assert.deepEqual(npmLockFacts(lock(["https://npm.example.com/a.tgz"]))!.unreadable, ["node_modules/a (resolved)"]);
+    assert.deepEqual(npmLockFacts(lock("ftp://npm.example.com/a.tgz"))!.unreadable, ["node_modules/a (resolved)"]);
+    assert.deepEqual(npmLockFacts(lock("https://registry.npmjs.org/a/-/a-1.0.0.tgz"))!.unreadable, []);
   });
 });

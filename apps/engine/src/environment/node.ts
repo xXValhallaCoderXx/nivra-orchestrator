@@ -2,7 +2,7 @@ import { EnvironmentResolution, RECIPE_FORMAT, RECIPE_LIMITS, type BootstrapStep
 import { ENV_PATH } from "../exec/nebius/sandbox.ts";
 import type { Snapshot, SnapshotFile } from "../exec/snapshot.ts";
 import { satisfies, setupConfiguration } from "./inputs.ts";
-import { dependencySpecs, INSTALL_HOOKS, isLocalSpec, isNodeSetupPath, LOCKFILES, npmLockFacts, objectAt, PNPMFILES, pnpmLockFacts, simpleYaml, stringAt, SUPPORTED_MANAGERS, textOf, VERSION_FILES, versionFileValue, workspaceMembers, type LockfileFacts, type Manifest, type YamlValue } from "./node-files.ts";
+import { dependencySpecs, INSTALL_HOOKS, isLocalSpec, isNodeSetupPath, LOCKFILES, npmLockFacts, objectAt, PNPMFILES, pnpmLockFacts, simpleYaml, stringAt, SUPPORTED_MANAGERS, textOf, unreadGlob, VERSION_FILES, versionFileValue, workspaceMembers, type LockfileFacts, type Manifest, type YamlValue } from "./node-files.ts";
 import { advisoryFor, RELEASES, standing, type NodeRelease, type ReleaseIndex, type ToolRelease } from "./releases.ts";
 import { versionParts } from "./versions.ts";
 
@@ -70,10 +70,32 @@ const PNPM_OPTIONS: Readonly<Record<string, OptionRule>> = {
   "strict-peer-dependencies": { values: "boolean" },
 };
 const BUILD_KEYS = ["allowBuilds", "onlyBuiltDependencies", "onlyBuiltDependenciesFile", "neverBuiltDependencies", "ignoredBuiltDependencies", "dangerouslyAllowAllBuilds", "strictDepBuilds"];
+type MinorVersion = readonly [number, number];
+/**
+ * Where pnpm 10 reads each build setting, and from which version (pnpm's changelog and its settings page): package.json's
+ * pnpm field, and pnpm-workspace.yaml, which holds the pnpm field's settings from 10.5 and every other setting from 10.6.
+ * Null where it never reads it. A setting where the project's pnpm doesn't read it is left out of the policy, and said.
+ */
+const BUILD_SETTINGS: Readonly<Record<string, { field: MinorVersion | null; workspace: MinorVersion | null }>> = {
+  neverBuiltDependencies: { field: [5, 16], workspace: [10, 5] },
+  onlyBuiltDependencies: { field: [6, 32], workspace: [10, 5] },
+  onlyBuiltDependenciesFile: { field: [8, 9], workspace: [10, 5] },
+  ignoredBuiltDependencies: { field: [10, 1], workspace: [10, 5] },
+  allowBuilds: { field: [10, 26], workspace: [10, 26] },
+  strictDepBuilds: { field: null, workspace: [10, 6] },
+  dangerouslyAllowAllBuilds: { field: null, workspace: [10, 9] },
+};
+/** From pnpm 10.19 an onlyBuiltDependencies entry can name versions (esbuild@0.25.1); before, such an entry names no package. */
+const VERSIONED_BUILDS: MinorVersion = [10, 19];
 
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 const quoted = (text: string) => clip(text, 200);
 const majorOf = (version: string) => versionParts(version)?.[0] ?? -1;
+/** Whether a version is at least a major and minor: settings arrive within a major. */
+const atLeast = (version: string, [major, minor]: MinorVersion) => {
+  const parts = versionParts(version);
+  return parts !== null && (parts[0] > major || (parts[0] === major && parts[1] >= minor));
+};
 const decl = (file: string, field: string | null, value: string): Declaration => ({ file: clip(file, 1_024), field, value: quoted(value) });
 const unique = <T>(items: readonly T[]) => [...new Set(items)];
 const readable = (range: string) => satisfies("1.0.0", range) !== null;
@@ -149,7 +171,8 @@ const answered = (choice: ChoiceNeeded, value: string | undefined) => (value !==
 /** A choice the person can answer, or, when there is nothing to offer, a refusal that says what to do instead. */
 function choiceOf(id: ChoiceNeeded["id"], why: ChoiceNeeded["why"], message: string, declarations: readonly Declaration[], options: readonly ChoiceOption[], instead: string): ChoiceNeeded {
   const offered = unique(options.map((option) => option.value)).map((value) => options.find((option) => option.value === value)!);
-  if (offered.length === 0) throw new Refused(why === "unreadable" ? "unreadable" : "unavailable", clip(`${message.replace(/ Choose[^.]*\.( Or [^.]*\.)?$/, "")} ${instead}`, 2_000));
+  // The message's closing "Choose …" sentence goes, a version's dots inside it included, since there is nothing to choose.
+  if (offered.length === 0) throw new Refused(why === "unreadable" ? "unreadable" : "unavailable", clip(`${message.replace(/ Choose(?:[^.]|\.(?=\d))*\.( Or (?:[^.]|\.(?=\d))*\.)?$/, "")} ${instead}`, 2_000));
   return { id, why, message: clip(message, 1_000), declarations: declarations.slice(0, 40), options: offered.slice(0, 20) };
 }
 
@@ -207,6 +230,9 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
 
   const pnpmGlobs = workspace ? stringList(workspace.values.get("packages")) : null;
   const globs = managerName === "pnpm" ? pnpmGlobs : npmGlobs;
+  // A pattern read as matching nothing would leave its packages' Node requirements and install hooks unchecked.
+  const unread = globs ? unreadGlob(globs) : null;
+  if (unread !== null) throw new Refused("layout", `Nivra can't read the workspace pattern ${quoted(unread)} in ${managerName === "pnpm" ? "pnpm-workspace.yaml" : "package.json's workspaces"}, so it can't tell which packages the workspace holds. Nivra reads *, **, ? and lists such as {a,b}: write the pattern with those, or list each package's folder, commit, then try again.`);
   const memberFolders = globs ? workspaceMembers(globs, folders) : [];
   const members = manifests.filter((manifest) => manifest.folder === "" || memberFolders.includes(manifest.folder));
 
@@ -375,16 +401,22 @@ function resolveManagerName(root: Record<string, unknown>, present: (path: strin
 }
 
 function lockFacts(manager: string, path: string, text: string): LockfileFacts {
+  // An entry Nivra can't read could fetch from anywhere, so the lockfile is refused rather than read without it.
+  const readable = (facts: LockfileFacts) => {
+    const more = facts.unreadable.length - 1;
+    if (more >= 0) throw new Refused("layout", `Nivra couldn't read ${quoted(facts.unreadable[0]!)} in ${path}${more ? ` (and ${more} more)` : ""}, so it can't tell where the install fetches from. ${manager} writes this file itself: run ${manager} install in the repository, commit ${path}, then try again.`);
+    return facts;
+  };
   if (manager === "npm") {
     const facts = npmLockFacts(text);
     if (!facts) throw new Refused("layout", `${path} isn't a JSON object, so Nivra can't read what it installs. Fix it, commit, then try again.`);
     if (facts.format === "1") throw new Refused("layout", `${path} is lockfile format 1, from npm 6, which npm ci can't install exactly. Run npm install with npm 7 or later, commit the lockfile, then try again.`);
     if (!NPM_LOCKFILES.includes(String(facts.format))) throw new Refused("layout", `${path} says lockfileVersion ${quoted(String(facts.format))}, which Nivra can't read. Regenerate it with npm 7 or later, commit, then try again.`);
-    return facts;
+    return readable(facts);
   }
   const facts = pnpmLockFacts(text);
   if (facts.format === null) throw new Refused("layout", `${path} doesn't say its lockfileVersion, so Nivra can't tell which pnpm reads it. Regenerate it with pnpm, commit, then try again.`);
-  return facts;
+  return readable(facts);
 }
 
 /** The layouts that need the project's sources, or tools the image hasn't got, to install: refused, naming the file. */
@@ -477,7 +509,8 @@ function resolveRuntime(input: RuntimeInput): Outcome & { meets: (version: strin
   };
   const option = (version: string, note: string | null = null): ChoiceOption => ({ value: version, label: `Node ${version}`, note });
   const choose = (why: ChoiceNeeded["why"], message: string, options: ChoiceOption[]): Outcome => {
-    const choice = choiceOf("runtime", why, message, declarations, options, "Pin an exact Node version in .nvmrc, commit, then try again.");
+    // Only a release an environment can use is offered: a choice settles which declaration to follow, never that.
+    const choice = choiceOf("runtime", why, message, declarations, options.filter((item) => usable(item.value)), "Pin an exact Node version in .nvmrc, commit, then try again.");
     const value = answered(choice, choices.runtime);
     return value !== null ? { settled: settled(value, "choice", null) } : { choices: [choice] };
   };
@@ -617,6 +650,17 @@ function resolveManagerVersion(input: ManagerInput): Outcome {
   const works = (version: string) => meetsRanges(version) && runsOn(release(version)) !== false && readsLock(version) !== false && !withdrawn(version);
   const option = (version: string, note: string | null = null): ChoiceOption => ({ value: version, label: `${manager} ${version}`, note });
   const alternatives = (limit = 3) => known.filter((item) => !item.deprecated && works(item.version) && readsLock(item.version) === true).slice(0, limit).map((item) => option(item.version));
+  /** What would keep a version offered from working here as it stands: ranges it doesn't meet, the project's Node, or its lockfile. */
+  const caveat = (version: string, lead: string | null = null, withRanges = false): string | null => {
+    const item = release(version);
+    const against = withRanges ? ranges.filter((range) => satisfies(version, range.range) === false) : [];
+    const notes = [
+      lead,
+      against.length ? `It doesn't meet ${against.map((range) => `${range.declaration.field} (${range.range})`).join(" or ")}.` : null,
+      runsOn(item) === false ? `It needs Node ${quoted(item!.node!)}, and this project's Node is ${node.version}.` : readsLock(version) === false ? `It can't read the lockfile's format ${lock.format}.` : null,
+    ].filter(Boolean);
+    return notes.length ? notes.join(" ") : null;
+  };
   const settled = (version: string, source: ResolutionSource, note: string | null): Settled => {
     const at = standing(known, version);
     const extra = at === "listed" ? null : `${manager} ${version} is newer than Nivra's release index, so whether it runs on Node ${node.version} is checked when preparing.`;
@@ -624,7 +668,8 @@ function resolveManagerVersion(input: ManagerInput): Outcome {
     return { version, source, declarations, note: [note, extra, lockNote].filter(Boolean).join(" ") || null, unknown: at !== "listed" };
   };
   const instead = `Pin an exact ${manager} version in package.json's packageManager, commit, then try again.`;
-  const choice = (why: ChoiceNeeded["why"], message: string, options: ChoiceOption[]) => choiceOf("manager-version", why, message, declarations, options, instead);
+  /** A choice offers only versions an environment can use: releases of a major Nivra supports that aren't withdrawn. */
+  const choice = (why: ChoiceNeeded["why"], message: string, options: ChoiceOption[]) => choiceOf("manager-version", why, message, declarations, options.filter((item) => usable(item.value)), instead);
   /**
    * The runtime side of a conflict: Node releases that meet the project and that this manager version runs on. Never
    * offered when the project pins its Node exactly, since a pin always wins over a choice.
@@ -635,17 +680,29 @@ function resolveManagerVersion(input: ManagerInput): Outcome {
     const chosen = fits.find((candidate) => candidate.lts !== null) ?? fits[0];
     return chosen ? [{ id: "runtime", why: "conflict", message: clip(message, 1_000), declarations: declarations.slice(0, 40), options: [{ value: chosen.version, label: `Node ${chosen.version}`, note: `The newest LTS release that meets the project and that ${manager} ${item.version} runs on.` }] }] : [];
   };
+  /**
+   * The person's answer, checked as the project's own pin is: a choice settles which declaration to follow, never whether
+   * the version runs on the project's Node or reads its lockfile. One that doesn't is put to them again, with versions
+   * that do, so nothing is ready that couldn't be prepared.
+   */
   const answer = (needed: ChoiceNeeded[]): Outcome => {
     const value = needed.filter((item) => item.id === "manager-version").map((item) => answered(item, choices.managerVersion)).find((item) => item !== null) ?? null;
-    return value !== null ? { settled: settled(value, "choice", null) } : { choices: needed };
+    if (value === null) return { choices: needed };
+    const item = release(value);
+    if (runsOn(item) === false) {
+      const message = `You chose ${manager} ${value}, which needs Node ${quoted(item!.node!)}, and this project's Node is ${node.version}. Choose a ${manager} version that runs on it, or a Node that ${manager} ${value} runs on.`;
+      return { choices: [...runtimeSide(item, message), choice("conflict", message, alternatives())] };
+    }
+    if (readsLock(value) === false) return { choices: [choice("conflict", `You chose ${manager} ${value}, which can't install ${manager === "pnpm" ? "pnpm-lock.yaml" : "the lockfile"} (format ${lock.format}) without changing it. Choose a ${manager} version that reads it.`, alternatives())] };
+    return { settled: settled(value, "choice", null) };
   };
 
   if (unreadableRanges.length) {
-    return answer([choice("unreadable", `Nivra can't read ${unreadableRanges.map((item) => `${where(item)} (${item.value})`).join(" and ")}, so it can't tell which ${manager} this project needs. Confirm the version to use.`, [...pins.map((item) => option(item.version, "The pin.")), ...alternatives()])]);
+    return answer([choice("unreadable", `Nivra can't read ${unreadableRanges.map((item) => `${where(item)} (${item.value})`).join(" and ")}, so it can't tell which ${manager} this project needs. Confirm the version to use.`, [...pins.map((item) => option(item.version, caveat(item.version, "The pin.", true))), ...alternatives()])]);
   }
 
   const distinct = unique(pins.map((item) => item.version));
-  if (distinct.length > 1) return answer([choice("conflict", `This project pins more than one ${manager} version: ${pins.map((item) => `${item.version} in ${item.declaration.field}`).join(" and ")}. Choose one, or make them agree.`, distinct.map((version) => option(version)))]);
+  if (distinct.length > 1) return answer([choice("conflict", `This project pins more than one ${manager} version: ${pins.map((item) => `${item.version} in ${item.declaration.field}`).join(" and ")}. Choose one, or make them agree.`, distinct.map((version) => option(version, caveat(version, null, true))))]);
   if (distinct.length === 1) {
     const version = distinct[0]!;
     if (majorOf(version) < MIN_MANAGER_MAJOR) throw new Refused("unsupported-manager", `This project pins ${manager} ${version}, older than Nivra's environments support (${manager} ${MIN_MANAGER_MAJOR} and later), so ${WITHOUT}.`);
@@ -655,7 +712,7 @@ function resolveManagerVersion(input: ManagerInput): Outcome {
       return answer([choice("unavailable", `${reason} Choose a version to use instead, or correct the pin and commit.`, alternatives())]);
     }
     const against = ranges.filter((range) => satisfies(version, range.range) === false);
-    if (against.length) return answer([choice("conflict", `package.json pins ${manager} ${version}, which ${against.map((range) => `${range.declaration.field} (${range.range})`).join(" and ")} doesn't allow. Choose which to follow, or make them agree.`, [option(version, "The pin."), ...alternatives()])]);
+    if (against.length) return answer([choice("conflict", `package.json pins ${manager} ${version}, which ${against.map((range) => `${range.declaration.field} (${range.range})`).join(" and ")} doesn't allow. Choose which to follow, or make them agree.`, [option(version, caveat(version, "The pin.")), ...alternatives()])]);
     const item = release(version);
     if (runsOn(item) === false) {
       const message = `${manager} ${version} needs Node ${quoted(item!.node!)}, and this project's Node is ${node.version}. Choose a ${manager} version that runs on it, or a Node that ${manager} ${version} runs on.`;
@@ -769,8 +826,10 @@ const allowMap = (value: YamlValue | unknown): Record<string, unknown> => (value
  * Nivra records it and never widens it; where it can't know, it says so.
  * - npm runs every dependency's install scripts, unless ignore-scripts is on.
  * - pnpm 9 and older read build settings from package.json's pnpm field, and run every build unless a list narrows it.
- * - pnpm 10 reads them from pnpm-workspace.yaml or package.json, and runs only builds the project allows, unless it names
- *   only builds to deny (then every other one runs). An install doesn't fail over an unreviewed build unless strictDepBuilds.
+ * - pnpm 10 reads them from package.json, and from pnpm-workspace.yaml from 10.5 (that file's wins, one setting at a
+ *   time), each only from the version that brought it (BUILD_SETTINGS). It runs only builds the project allows, unless it
+ *   names only builds to deny (then every other one runs). An install doesn't fail over an unreviewed build unless
+ *   strictDepBuilds.
  * - pnpm 11 reads allowBuilds from pnpm-workspace.yaml only, and fails an install over an unreviewed build by default.
  */
 function buildPolicy(manager: string, version: string, root: Record<string, unknown>, workspace: ReturnType<typeof simpleYaml> | null, options: InstallOptions, warnings: ResolutionWarning[]): BuildPolicy {
@@ -795,19 +854,52 @@ function buildPolicy(manager: string, version: string, root: Record<string, unkn
   }
 
   if (major === 10) {
-    const read = (key: string): unknown => (yaml.has(key) ? yaml.get(key) : field[key]);
-    const declaredIn = BUILD_KEYS.some((key) => yaml.has(key)) ? "pnpm-workspace.yaml" : BUILD_KEYS.some((key) => key in field) ? "package.json" : null;
-    if (read("onlyBuiltDependenciesFile") !== undefined) return policy("unknown", [], [], null, declaredIn, ["The allowed builds are listed in a file Nivra doesn't read, so which run is checked when preparing."]);
+    const notes: string[] = [];
+    /** The settings one file gives, as this version reads them. allowBuilds adds to the same file's lists, as pnpm merges it. */
+    const settingsIn = (where: "package.json" | "pnpm-workspace.yaml", values: ReadonlyMap<string, unknown>) => {
+      const out = new Map<string, unknown>();
+      for (const [key, value] of values) {
+        const rule = BUILD_SETTINGS[key];
+        if (!rule) continue;
+        const since = where === "package.json" ? rule.field : rule.workspace;
+        if (since !== null && atLeast(version, since)) {
+          out.set(key, value);
+          continue;
+        }
+        const message = since === null ? `pnpm reads ${key} from pnpm-workspace.yaml (from pnpm ${rule.workspace!.join(".")}), not package.json, so package.json's isn't counted.` : `pnpm ${version} doesn't read ${key} from ${where} (pnpm ${since.join(".")} and later do), so it isn't counted.`;
+        notes.push(message);
+        warnings.push({ code: "ignored-setting", message });
+      }
+      const builds = out.get("allowBuilds");
+      if (builds !== undefined) {
+        const map = allowMap(builds);
+        out.set("onlyBuiltDependencies", [...namesOf(out.get("onlyBuiltDependencies")), ...Object.keys(map).filter((name) => map[name] === true)]);
+        out.set("ignoredBuiltDependencies", [...namesOf(out.get("ignoredBuiltDependencies")), ...Object.keys(map).filter((name) => map[name] === false)]);
+        out.delete("allowBuilds");
+      }
+      return out;
+    };
+    const fromField = settingsIn("package.json", new Map(Object.entries(field)));
+    const fromWorkspace = settingsIn("pnpm-workspace.yaml", yaml);
+    // pnpm-workspace.yaml's settings replace package.json's, one setting at a time.
+    const read = (key: string): unknown => (fromWorkspace.has(key) ? fromWorkspace.get(key) : fromField.get(key));
+    const declaredIn = fromWorkspace.size ? "pnpm-workspace.yaml" : fromField.size ? "package.json" : null;
+    if (read("onlyBuiltDependenciesFile") !== undefined) return policy("unknown", [], [], null, declaredIn, [...notes, "The allowed builds are listed in a file Nivra doesn't read, so which run is checked when preparing."]);
     const strict = typeof read("strictDepBuilds") === "boolean" ? (read("strictDepBuilds") as boolean) : false;
-    if (read("dangerouslyAllowAllBuilds") === true) return policy("all", [], [], strict, declaredIn, []);
-    const builds = allowMap(read("allowBuilds"));
-    const allowed = [...namesOf(read("onlyBuiltDependencies")), ...Object.keys(builds).filter((name) => builds[name] === true)];
-    const denied = [...namesOf(read("neverBuiltDependencies")), ...namesOf(read("ignoredBuiltDependencies")), ...Object.keys(builds).filter((name) => builds[name] === false)];
-    const listed = read("onlyBuiltDependencies") !== undefined || Object.values(builds).includes(true);
-    if (listed) return policy(allowed.length ? "allowed" : "none", allowed, denied, strict, declaredIn, []);
+    if (read("dangerouslyAllowAllBuilds") === true) return policy("all", [], [], strict, declaredIn, notes);
+    const denied = [...namesOf(read("neverBuiltDependencies")), ...namesOf(read("ignoredBuiltDependencies"))];
+    if (read("onlyBuiltDependencies") !== undefined) {
+      let allowed = namesOf(read("onlyBuiltDependencies"));
+      const versioned = atLeast(version, VERSIONED_BUILDS) ? [] : allowed.filter((entry) => /^(@[^/@]+\/)?[^@]+@/.test(entry));
+      if (versioned.length) {
+        notes.push(`pnpm ${version} reads onlyBuiltDependencies entries as package names (versions in them arrived in pnpm 10.19), so ${versioned.slice(0, 3).join(", ")} allow${versioned.length === 1 ? "s" : ""} no build.`);
+        allowed = allowed.filter((entry) => !versioned.includes(entry));
+      }
+      return policy(allowed.length ? "allowed" : "none", allowed, denied, strict, declaredIn, notes);
+    }
     // Naming only builds to deny lets every other one run.
-    if (read("neverBuiltDependencies") !== undefined) return policy("all", [], denied, strict, declaredIn, []);
-    return policy("none", [], denied, strict, declaredIn, []);
+    if (read("neverBuiltDependencies") !== undefined) return policy("all", [], denied, strict, declaredIn, notes);
+    return policy("none", [], denied, strict, declaredIn, notes);
   }
 
   // pnpm 11.

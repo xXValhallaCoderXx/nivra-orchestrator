@@ -138,18 +138,69 @@ export function simpleYaml(text: string): { values: Map<string, YamlValue>; unre
   return { values, unreadable };
 }
 
-/** A workspace glob as a matcher for package folders: `*` is one segment, `**` any number of them. */
+/** The longest workspace glob Nivra reads, and the most patterns its brace lists may stand for. */
+const MAX_GLOB = 1_024;
+const MAX_EXPANSIONS = 256;
+/** Glob syntax Nivra doesn't read in a workspace pattern: character classes, extglobs and groups, and escapes. */
+const UNREAD_GLOB = /[[\]()|\\]/;
+
+/**
+ * A workspace glob's brace lists expanded as pnpm and npm expand them, nested ones included: `packages/{a,b}` stands for
+ * `packages/a` and `packages/b`. Null when the braces don't pair, a pair holds no list (a range such as {1..3}, or a
+ * single name), or the pattern stands for more than MAX_EXPANSIONS.
+ */
+export function expandBraces(pattern: string): string[] | null {
+  const open = pattern.indexOf("{");
+  if (open === -1) return pattern.includes("}") ? null : [pattern];
+  let depth = 0;
+  let close = -1;
+  const commas: number[] = [];
+  for (let index = open; index < pattern.length && close === -1; index++) {
+    const char = pattern[index];
+    if (char === "{") depth++;
+    else if (char === "}" && --depth === 0) close = index;
+    else if (char === "," && depth === 1) commas.push(index);
+  }
+  if (close === -1 || commas.length === 0) return null;
+  const out = new Set<string>();
+  let start = open + 1;
+  for (const end of [...commas, close]) {
+    const expanded = expandBraces(`${pattern.slice(0, open)}${pattern.slice(start, end)}${pattern.slice(close + 1)}`);
+    if (expanded === null) return null;
+    for (const item of expanded) out.add(item);
+    if (out.size > MAX_EXPANSIONS) return null;
+    start = end + 1;
+  }
+  return [...out];
+}
+
+/** The first workspace glob Nivra can't read, or null. One it can't read is refused, never matched as nothing. */
+export function unreadGlob(globs: readonly string[]): string | null {
+  return (
+    globs.find((glob) => {
+      const body = glob.replace(/^!/, "");
+      return body.length > MAX_GLOB || UNREAD_GLOB.test(body) || expandBraces(body) === null;
+    }) ?? null
+  );
+}
+
+/**
+ * A workspace glob as a matcher for package folders: `*` is one segment or part of one, `**` any number of them, `?` one
+ * character, and a brace list any of its patterns. Check the glob with unreadGlob first: other syntax is matched as text.
+ */
 export function globMatcher(pattern: string): RegExp {
-  const body = pattern
-    .replace(/^\.\//, "")
-    .replace(/\/+$/, "")
-    .split("/")
-    .map((segment) => (segment === "**" ? "\u0000" : segment.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*")))
-    .join("/")
-    .replace(/\u0000\//g, "(?:[^/]+/)*")
-    .replace(/\/\u0000$/, "(?:/[^/]+)*")
-    .replace(/\u0000/g, "(?:[^/]+(?:/[^/]+)*)?");
-  return new RegExp(`^${body}$`);
+  const bodies = (expandBraces(pattern) ?? [pattern]).map((item) =>
+    item
+      .replace(/^\.\//, "")
+      .replace(/\/+$/, "")
+      .split("/")
+      .map((segment) => (segment === "**" ? "\u0000" : segment.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")))
+      .join("/")
+      .replace(/\u0000\//g, "(?:[^/]+/)*")
+      .replace(/\/\u0000$/, "(?:/[^/]+)*")
+      .replace(/\u0000/g, "(?:[^/]+(?:/[^/]+)*)?"),
+  );
+  return new RegExp(`^(?:${bodies.join("|")})$`);
 }
 
 /** The workspace's member folders: package folders that the globs include and no negated glob excludes. */
@@ -175,6 +226,11 @@ export interface LockfileFacts {
   installScripts: string[];
   /** Platform packages and the libc they need, where the lockfile records it. */
   libc: Array<{ name: string; libc: string[] }>;
+  /**
+   * Entries Nivra couldn't read where they're fetched from, or what they need, each with the field: refused, never
+   * skipped, since a private registry or a git dependency could hide in one.
+   */
+  unreadable: string[];
 }
 
 /** How many of each kind of fact a lockfile reader keeps. Every entry is still read: a cap never hides a refusal. */
@@ -213,13 +269,14 @@ export function npmLockFacts(text: string): LockfileFacts | null {
   } catch {
     return null;
   }
-  const facts: LockfileFacts = { format: lock["lockfileVersion"] === undefined ? null : String(lock["lockfileVersion"]), hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [] };
+  const facts: LockfileFacts = { format: lock["lockfileVersion"] === undefined ? null : String(lock["lockfileVersion"]), hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [] };
   const hosts = new Set<string>();
   for (const [key, raw] of Object.entries(objectAt(lock["packages"]))) {
     if (key === "") continue;
     const entry = objectAt(raw);
     const name = key.replace(/^.*node_modules\//, "");
     const resolved = stringAt(entry["resolved"]);
+    if (entry["resolved"] !== undefined && resolved === null) keep(facts.unreadable, `${key} (resolved)`);
     if (resolved) {
       if (/^(git\+|git:|github:|gitlab:|bitbucket:)/.test(resolved) || /codeload\.github\.com/.test(resolved)) keep(facts.git, name);
       else if (resolved.startsWith("file:")) keep(facts.local, name);
@@ -227,8 +284,10 @@ export function npmLockFacts(text: string): LockfileFacts | null {
       else if (entry["link"] === true) {
         if (escapes("", resolved)) keep(facts.local, name);
       } else {
+        // Anything else is fetched from an address: one that isn't http or https can't be told, so it isn't passed over.
         const host = hostOf(resolved);
         if (host) hosts.add(host);
+        else keep(facts.unreadable, `${key} (resolved)`);
       }
     }
     // A key outside node_modules is a folder the lockfile installs from: outside the repository, a sandbox won't have it.
@@ -243,54 +302,228 @@ export function npmLockFacts(text: string): LockfileFacts | null {
   return facts;
 }
 
+/** A lockfile line beneath an entry: its indentation, and its text without it. */
+interface LockLine {
+  indent: number;
+  text: string;
+}
+/** A field of a lockfile entry: what follows its key on the line, and the lines beneath it. */
+interface LockField {
+  inline: string;
+  block: LockLine[];
+}
+
 /**
- * A pnpm lockfile's facts, read from its text line by line: the format, tarball hosts, git and local resolutions, and
- * each package's engines.node. pnpm records a registry tarball's address only when it isn't the standard one.
+ * A YAML scalar as pnpm writes one, plain or quoted, unquoted; null for anything else (an anchor, an alias, a tag, a
+ * block scalar, a collection, an escape, an empty value), which the caller reads as unreadable.
+ */
+function lockScalar(raw: string): string | null {
+  const text = raw.trim();
+  const single = /^'((?:[^']|'')*)'$/.exec(text);
+  if (single) return single[1]!.replaceAll("''", "'");
+  const double = /^"([^"\\]*)"$/.exec(text);
+  if (double) return double[1]!;
+  if (text === "" || text === "~" || text === "null" || /^[-?:](\s|$)|^[&*!|>'"%@`{}[\],#]/.test(text) || /:\s|\s#|[{}[\],]/.test(text)) return null;
+  return text;
+}
+
+/** A flow collection's items, split at its commas outside quotes; null when it isn't one, or holds another collection. */
+function flowItems(text: string, open: "{" | "[", close: "}" | "]"): string[] | null {
+  const body = text.trim();
+  if (body[0] !== open || body.at(-1) !== close) return null;
+  const items: string[] = [];
+  let item = "";
+  // Whether the next character starts a scalar, where a quote opens a quoted one.
+  let start = true;
+  for (let index = 1; index < body.length - 1; index++) {
+    const char = body[index]!;
+    if (start && (char === "'" || char === '"')) {
+      let end = index + 1;
+      for (; end < body.length - 1; end++) {
+        if (body[end] !== char) continue;
+        if (char === "'" && body[end + 1] === "'") {
+          end++;
+          continue;
+        }
+        break;
+      }
+      if (end >= body.length - 1) return null;
+      item += body.slice(index, end + 1);
+      index = end;
+      start = false;
+      continue;
+    }
+    if ("{}[]".includes(char)) return null;
+    if (char === ",") {
+      items.push(item.trim());
+      item = "";
+      start = true;
+      continue;
+    }
+    item += char;
+    if (char === ":" && /\s/.test(body[index + 1] ?? "")) start = true;
+    else if (!/\s/.test(char)) start = false;
+  }
+  if (item.trim() !== "") items.push(item.trim());
+  return items;
+}
+
+/** One `key: value` of scalars, or null. */
+function lockPair(text: string): [string, string] | null {
+  const at = text.search(/:(\s|$)/);
+  const key = at > 0 ? lockScalar(text.slice(0, at)) : null;
+  const value = key === null ? null : lockScalar(text.slice(at + 1));
+  return key === null || value === null ? null : [key, value];
+}
+
+/**
+ * A field's flow collection as one text: on the field's line, which may run on below it, or starting on the line beneath
+ * it, as formatters write a long one. Null when the field's value doesn't start with one.
+ */
+function flowText(field: LockField, open: "{" | "["): string | null {
+  const lines = [field.inline, ...field.block.map((line) => line.text)].filter((text) => text !== "");
+  return lines[0]?.startsWith(open) ? lines.join(" ") : null;
+}
+/** Whether a field's lines beneath it are all at one indentation: a block of one level. */
+const oneLevel = (field: LockField) => field.inline === "" && field.block.length > 0 && field.block.every((line) => line.indent === field.block[0]!.indent);
+
+/**
+ * A field's value as a map of scalars, in either of YAML's styles: a flow mapping (`resolution: {integrity: …, tarball:
+ * …}`, also across lines), or one key a line beneath it. Null for any other shape, or a key given twice.
+ */
+function lockMap(field: LockField): Record<string, string> | null {
+  const flow = flowText(field, "{");
+  const items = flow !== null ? flowItems(flow, "{", "}") : oneLevel(field) ? field.block.map((line) => line.text) : null;
+  if (items === null) return null;
+  const out: Record<string, string> = {};
+  for (const item of items) {
+    const pair = lockPair(item);
+    if (pair === null || pair[0] in out) return null;
+    out[pair[0]] = pair[1];
+  }
+  return out;
+}
+
+/** A field's value as a list of scalars, as a flow list (also across lines) or one `- item` a line beneath it; null otherwise. */
+function lockList(field: LockField): string[] | null {
+  const flow = flowText(field, "[");
+  const items = flow !== null ? flowItems(flow, "[", "]") : oneLevel(field) && field.block.every((line) => /^-\s/.test(line.text)) ? field.block.map((line) => line.text.replace(/^-\s+/, "")) : null;
+  if (items === null) return null;
+  const out = items.map(lockScalar);
+  return out.every((item) => item !== null) ? (out as string[]) : null;
+}
+
+/**
+ * A pnpm lockfile's facts: the format, tarball hosts, git and local resolutions, and each package's engines.node and
+ * libc. The packages and importers sections are read by their indentation, and the fields that matter in either of
+ * YAML's styles; a field written any other way, or a line that doesn't fit the layout, is listed as unreadable, never
+ * passed over. pnpm records a registry tarball's address only when it isn't the standard one.
  */
 export function pnpmLockFacts(text: string): LockfileFacts {
-  const facts: LockfileFacts = { format: null, hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [] };
+  const facts: LockfileFacts = { format: null, hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [] };
   facts.format = /^lockfileVersion:\s*['"]?([0-9.]+)['"]?\s*$/m.exec(text)?.[1] ?? null;
   const hosts = new Set<string>();
+  const entries: Array<{ section: string; key: string; body: LockLine[] }> = [];
   let section: string | null = null;
-  let current: string | null = null;
-  for (const line of text.split(/\r?\n/)) {
-    const top = /^([A-Za-z]+):\s*$/.exec(line);
-    if (top) {
-      section = top[1]!;
-      current = null;
+  let entryIndent = 0;
+  let entry: { section: string; key: string; body: LockLine[] } | null = null;
+  for (const raw of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
+    if (raw.trim() === "" || /^\s*#/.test(raw)) continue;
+    const line = raw.replace(/\s+$/, "");
+    const indent = line.length - line.trimStart().length;
+    if (/^ *\t/.test(line)) {
+      keep(facts.unreadable, "a line indented with a tab");
+      entry = null;
       continue;
     }
-    if (section === "importers") {
-      // An importer's link to a folder outside the repository: a sandbox won't have it.
-      const importer = /^ {2}(?! )(['"]?)(.+?)\1:\s*$/.exec(line);
-      if (importer) current = importer[2]!;
-      const linked = /^\s+version:\s*['"]?link:([^'"\s]+)/.exec(line);
-      if (linked && current !== null && escapes(current === "." ? "" : current, linked[1]!)) keep(facts.local, `link:${linked[1]}`);
+    if (indent === 0) {
+      // A section, or the start or end of a document: pnpm can write more than one, and every one is read.
+      entry = null;
+      entryIndent = 0;
+      if (line === "---" || line === "...") {
+        section = null;
+        continue;
+      }
+      const top = /^([A-Za-z][\w-]*):(?:\s+(.*))?$/.exec(line);
+      section = top ? top[1]! : null;
+      if (!top) keep(facts.unreadable, "a line outside any section");
+      else if ((section === "packages" || section === "importers") && top[2] !== undefined && top[2].trim() !== "{}") keep(facts.unreadable, `the ${section} section`);
       continue;
     }
-    if (section !== "packages") continue;
-    const key = /^ {2}(?! )(['"]?)(.+?)\1:\s*$/.exec(line);
-    if (key) {
-      current = key[2]!;
-      continue;
-    }
-    if (current === null) continue;
+    if (section !== "packages" && section !== "importers") continue;
+    if (entryIndent === 0) entryIndent = indent;
+    if (indent === entryIndent) {
+      const key = /^(['"]?)(.+?)\1:(?:\s+(.*))?$/.exec(line.trim());
+      entry = key && (key[3] === undefined || key[3].trim() === "{}") ? { section, key: key[2]!, body: [] } : null;
+      if (entry) entries.push(entry);
+      else keep(facts.unreadable, key ? key[2]! : `the ${section} section`);
+    } else if (indent < entryIndent) {
+      keep(facts.unreadable, `the ${section} section`);
+      entry = null;
+    } else entry?.body.push({ indent, text: line.trim() });
+  }
+
+  const readPackage = (key: string, body: readonly LockLine[]): void => {
     // A package's name, from its key: any peer suffix and its version dropped.
-    const name = current.replace(/\(.*$/, "").replace(/^\//, "").replace(/(?<=.)@[^@]*$/, "");
-    if (/^ {4}resolution:/.test(line)) {
-      if (/\btype:\s*git\b/.test(line) || /\brepo:/.test(line) || /codeload\.github\.com/.test(line)) keep(facts.git, name);
-      else if (/\bdirectory:/.test(line) || /tarball:\s*['"]?file:/.test(line)) keep(facts.local, name);
-      const tarball = /tarball:\s*['"]?(https?:\/\/[^\s'",}]+)/.exec(line)?.[1];
-      const host = tarball ? hostOf(tarball) : null;
-      if (host) hosts.add(host);
+    const name = key.replace(/\(.*$/, "").replace(/^\//, "").replace(/(?<=.)@[^@]*$/, "");
+    const fields = new Map<string, LockField>();
+    const fieldIndent = body[0]?.indent ?? 0;
+    let field: LockField | null = null;
+    for (const line of body) {
+      const pair = line.indent === fieldIndent ? /^([A-Za-z][\w-]*):(?:\s+(.*))?$/.exec(line.text) : null;
+      if (pair) {
+        if (fields.has(pair[1]!)) return keep(facts.unreadable, `${key} (${pair[1]})`);
+        field = { inline: pair[2] ?? "", block: [] };
+        fields.set(pair[1]!, field);
+      } else if (field && (line.indent > fieldIndent || (line.indent === fieldIndent && /^-\s/.test(line.text) && field.inline === ""))) {
+        // A field's own lines, and a list's items at the field's own column.
+        field.block.push(line);
+      } else return keep(facts.unreadable, key);
     }
-    const engines = /^ {4}engines:\s*\{(.*)\}\s*$/.exec(line);
+    const resolution = fields.get("resolution");
+    if (resolution) {
+      const map = lockMap(resolution);
+      if (map === null) return keep(facts.unreadable, `${key} (resolution)`);
+      const type = map["type"];
+      if (type === "git" || "repo" in map || "commit" in map) keep(facts.git, name);
+      else if (type === "directory" || "directory" in map) keep(facts.local, name);
+      else if (type !== undefined) return keep(facts.unreadable, `${key} (resolution)`);
+      const tarball = map["tarball"];
+      if (tarball !== undefined) {
+        if (tarball.startsWith("file:")) keep(facts.local, name);
+        else if (/codeload\.github\.com/.test(tarball)) keep(facts.git, name);
+        else {
+          const host = hostOf(tarball);
+          if (host) hosts.add(host);
+          else keep(facts.unreadable, `${key} (resolution)`);
+        }
+      }
+    }
+    const engines = fields.get("engines");
     if (engines) {
-      const node = /(?:^|,)\s*node:\s*['"]?([^'",}]+)['"]?/.exec(engines[1]!)?.[1]?.trim();
-      if (node) keep(facts.engines, { name, range: node.slice(0, 200) });
+      const map = lockMap(engines);
+      if (map === null) return keep(facts.unreadable, `${key} (engines)`);
+      if (map["node"]) keep(facts.engines, { name, range: map["node"].slice(0, 200) });
     }
-    const libc = /^ {4}libc:\s*\[(.*)\]\s*$/.exec(line);
-    if (libc) keep(facts.libc, { name, libc: libc[1]!.split(",").map((item) => item.trim()).filter(Boolean) });
+    const libc = fields.get("libc");
+    if (libc) {
+      const list = lockList(libc);
+      if (list === null) return keep(facts.unreadable, `${key} (libc)`);
+      keep(facts.libc, { name, libc: list });
+    }
+  };
+
+  for (const { section: where, key, body } of entries) {
+    if (where === "packages") {
+      readPackage(key, body);
+      continue;
+    }
+    // An importer's link to a folder outside the repository, in either style: a sandbox won't have it.
+    for (const line of body) {
+      for (const linked of line.text.matchAll(/(?:^|[\s{,])version:\s*['"]?link:([^'"\s,}]+)/g)) {
+        if (escapes(key === "." ? "" : key, linked[1]!)) keep(facts.local, `link:${linked[1]}`);
+      }
+    }
   }
   facts.hosts = [...hosts].sort();
   return facts;

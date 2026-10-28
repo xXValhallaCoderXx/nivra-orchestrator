@@ -470,3 +470,82 @@ describe("the independent review's findings, each kept fixed (NIV-55)", () => {
     assert.equal(ten["npm_config_manage_package_manager_versions"], "false");
   });
 });
+
+describe("Nate's review of PR 31, each finding kept fixed (NIV-55)", () => {
+  it("1. reads brace lists in workspace patterns, so their packages' requirements and hooks count, and refuses syntax it can't read", async () => {
+    const members = {
+      "packages/a/package.json": json({ name: "a", engines: { node: "<24" } }),
+      "packages/b/package.json": json({ name: "b", scripts: { postinstall: "node build.js" } }),
+    };
+    refused(await resolveIn(pnpmProject({}, { "pnpm-workspace.yaml": "packages:\n  - 'packages/{a,b}'\n", ...members })), "needs-sources", /packages\/b\/package\.json runs postinstall/);
+    refused(await resolveIn(npmProject({ workspaces: ["packages/{a,b}"] }, members)), "needs-sources", /packages\/b\/package\.json runs postinstall/);
+    const a = ready(await resolveIn(pnpmProject({}, { "pnpm-workspace.yaml": "packages:\n  - packages/{a,c}\n", "packages/a/package.json": members["packages/a/package.json"] })));
+    assert.deepEqual([tool(a, "node"), row(a, "workspace").value], [{ kind: "exact", version: "22.23.4" }, "pnpm workspace, 1 package"], "a's range counts");
+    for (const pattern of ["packages/[ab]", "packages/@(a|b)", "packages/{1..3}"]) {
+      refused(await resolveIn(pnpmProject({}, { "pnpm-workspace.yaml": `packages:\n  - '${pattern}'\n`, ...members })), "layout", /can't read the workspace pattern .* Nivra reads \*, \*\*, \? and lists such as \{a,b\}/);
+    }
+  });
+
+  it("2. checks a chosen pnpm version against the project's Node and lockfile, as it checks a pin", async () => {
+    const files = pnpmProject({ engines: { pnpm: "^10" } }, { ".nvmrc": "20.19.0\n" });
+    const [conflict] = choice(await resolveIn(files));
+    assert.deepEqual(conflict!.options.map((option) => option.value), ["11.5.3", "10.4.1"]);
+    assert.match(conflict!.options[0]!.note!, /^The pin\. It needs Node >=22\.13, and this project's Node is 20\.19\.0\.$/);
+    const again = choice(await resolveIn(files, { choices: { managerVersion: "11.5.3" } }));
+    assert.deepEqual(again.map((item) => [item.id, item.options.map((option) => option.value)]), [["manager-version", ["10.4.1"]]], "not ready; a pinned Node offers no runtime side");
+    assert.match(again[0]!.message, /^You chose pnpm 11\.5\.3, which needs Node >=22\.13, and this project's Node is 20\.19\.0\./);
+    assert.deepEqual(tool(ready(await resolveIn(files, { choices: { managerVersion: "10.4.1" } })), "pnpm"), { kind: "exact", version: "10.4.1" });
+    // With a Node the person may change, the other side is offered, and choosing both is ready.
+    const ranged = pnpmProject({ engines: { pnpm: "^10", node: ">=20" } });
+    const configuration = ready(await resolveIn(ranged, { choices: { managerVersion: "10.4.1" } })).recipe.configuration.digest;
+    const previous = { configuration, runtime: "20.19.0", manager: "pnpm", managerVersion: "10.4.1" };
+    const sides = choice(await resolveIn(ranged, { previous, choices: { managerVersion: "11.5.3" } }));
+    assert.deepEqual(sides.map((item) => item.id), ["runtime", "manager-version"]);
+    const both = ready(await resolveIn(ranged, { previous, choices: { managerVersion: "11.5.3", runtime: sides[0]!.options[0]!.value } }));
+    assert.deepEqual([tool(both, "node"), tool(both, "pnpm")], [{ kind: "exact", version: "24.21.0" }, { kind: "exact", version: "11.5.3" }]);
+    // A chosen version that can't read the lockfile is put to the person again too.
+    const six = pnpmProject({ engines: { pnpm: "^8" } }, { "pnpm-lock.yaml": "lockfileVersion: '6.0'\n" });
+    assert.match(choice(await resolveIn(six))[0]!.options[0]!.note!, /^The pin\. It can't read the lockfile's format 6\.0\.$/);
+    const relock = choice(await resolveIn(six, { choices: { managerVersion: "11.5.3" } }));
+    assert.deepEqual(relock.map((item) => item.options.map((option) => option.value)), [["8.15.9"]]);
+    assert.match(relock[0]!.message, /^You chose pnpm 11\.5\.3, which can't install pnpm-lock\.yaml \(format 6\.0\) without changing it\./);
+    // Where nothing in the index fits, a choice that doesn't run is refused, saying what to do instead.
+    const none = pnpmProject({ packageManager: undefined, engines: { pnpm: ">=11" } }, { ".nvmrc": "20.19.0\n" });
+    assert.deepEqual(choice(await resolveIn(none))[0]!.options.map((option) => option.value), ["12.1.0", "11.5.3"]);
+    refused(await resolveIn(none, { choices: { managerVersion: "11.5.3" } }), "unavailable", /^You chose pnpm 11\.5\.3, which needs Node >=22\.13, and this project's Node is 20\.19\.0\. Pin an exact pnpm version/);
+  });
+
+  it("2. offers only Node releases an environment can use when declarations disagree", async () => {
+    const files = pnpmProject({}, { ".nvmrc": "18.20.0\n", ".node-version": "22.23.4\n" });
+    const [conflict] = choice(await resolveIn(files));
+    assert.deepEqual(conflict!.options.map((option) => option.value), ["22.23.4"], "18.20.0 is older than any release Nivra's environments use");
+    assert.equal((await resolveIn(files, { choices: { runtime: "18.20.0" } })).status, "needs-choice", "so choosing it settles nothing");
+  });
+
+  it("3. reads block-style lockfile entries, so a private registry or a dependency's engines can't hide in one", async () => {
+    const lock = (body: string) => `lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\npackages:\n\n${body}`;
+    const hidden = "  a@1.0.0:\n    resolution:\n      integrity: sha512-x\n      tarball: https://npm.example.com/a/-/a-1.0.0.tgz\n";
+    refused(await resolveIn(pnpmProject({}, { "pnpm-lock.yaml": lock(hidden) })), "private-registry", /npm\.example\.com/);
+    const engines = ready(await resolveIn(pnpmProject({ packageManager: "pnpm@10.4.1", engines: { node: ">=20" } }, { "pnpm-lock.yaml": lock("  a@1.0.0:\n    resolution:\n      integrity: sha512-x\n    engines:\n      node: '<22'\n") })));
+    assert.deepEqual(tool(engines, "node"), { kind: "exact", version: "20.19.0" }, "the dependency's engines are preferred");
+    refused(await resolveIn(pnpmProject({}, { "pnpm-lock.yaml": lock("  a@1.0.0:\n    resolution: *shared\n") })), "layout", /couldn't read "?a@1\.0\.0 \(resolution\)"? in pnpm-lock\.yaml, so it can't tell where the install fetches from\. pnpm writes this file itself/);
+    refused(await resolveIn(npmProject({}, { "package-lock.json": npmLock({ "node_modules/a": { version: "1.0.0", resolved: { url: "https://npm.example.com/a.tgz" } } }) })), "layout", /couldn't read "?node_modules\/a \(resolved\)"? in package-lock\.json/);
+  });
+
+  it("4. counts each pnpm build setting only from the version that reads it, and only where it reads it", async () => {
+    const policy = async (version: string, manifest: Record<string, unknown>, yaml?: string) => ready(await resolveIn(pnpmProject({ packageManager: `pnpm@${version}`, ...manifest }, yaml ? { "pnpm-workspace.yaml": yaml } : {}))).recipe.builds;
+    const early = await policy("10.4.1", {}, "allowBuilds:\n  esbuild: true\ndangerouslyAllowAllBuilds: true\nonlyBuiltDependencies:\n  - sharp\n");
+    assert.deepEqual([early.runs, early.allowed], ["none", []], "10.4.1 reads none of them from pnpm-workspace.yaml");
+    assert.deepEqual(early.notes.map((note) => /\((pnpm [\d.]+) and later do\)/.exec(note)?.[1]), ["pnpm 10.26", "pnpm 10.9", "pnpm 10.5"]);
+    assert.equal((await policy("10.4.1", { pnpm: { dangerouslyAllowAllBuilds: true } })).runs, "none", "never read from package.json");
+    assert.equal((await policy("10.9.0", {}, "dangerouslyAllowAllBuilds: true\n")).runs, "all");
+    assert.deepEqual((await policy("10.9.0", {}, "allowBuilds:\n  esbuild: true\n")).runs, "none", "allowBuilds arrived in 10.26");
+    const late = await policy("10.26.0", { pnpm: { onlyBuiltDependencies: ["core-js"] } }, "allowBuilds:\n  esbuild: true\n  sharp: false\n");
+    assert.deepEqual([late.runs, late.allowed, late.denied, late.source], ["allowed", ["esbuild"], ["sharp"], "pnpm-workspace.yaml"], "the workspace file's list replaces package.json's");
+    assert.deepEqual((await policy("10.5.0", {}, "onlyBuiltDependencies:\n  - esbuild\nstrictDepBuilds: true\n")).allowed, ["esbuild"]);
+    assert.deepEqual([(await policy("10.5.0", {}, "onlyBuiltDependencies: []\nstrictDepBuilds: true\n")).strict, (await policy("10.6.0", {}, "onlyBuiltDependencies: []\nstrictDepBuilds: true\n")).strict], [false, true], "the workspace file holds strictDepBuilds from 10.6");
+    const versioned = await policy("10.4.1", { pnpm: { onlyBuiltDependencies: ["esbuild@0.25.1", "sharp"] } });
+    assert.deepEqual([versioned.runs, versioned.allowed], ["allowed", ["sharp"]], "before 10.19 a version in an entry names no package");
+    assert.match(versioned.notes.join(" "), /esbuild@0\.25\.1 allows no build/);
+  });
+});
