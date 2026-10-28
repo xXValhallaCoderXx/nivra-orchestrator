@@ -4,6 +4,7 @@ import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, requestMsFor, TASK_RUN_BOUNDS, type EnvironmentChoices } from "@nivra/domain";
+import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining } from "@nivra/domain";
 import { z } from "zod";
 import { containsSavedKey, DRAFT_CHECK_FAILED, DRAFT_KEY_NAMES, type SavedKey } from "./draft-keys.ts";
 import { COPY_TEXT_CHARS, DRAFT_CHECK_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
@@ -368,6 +369,13 @@ function start(): void {
   handle(IPC.listCoachings, z.tuple([Id]), (_event, id) => host.coachings(id));
   handle(IPC.cancelCoach, z.tuple([Id, Id]), (_event, id, coachingId) => host.cancelCoach(id, coachingId));
   handle(IPC.acceptCoachChanges, z.tuple([Id, Revision, Id, z.array(CoachField).max(CoachField.options.length)]), (_event, id, revision, coachingId, fields) => host.acceptCoachChanges(id, revision, coachingId, fields));
+  // The shared monthly budget (NIV-66).
+  handle(IPC.getBudgetPolicy, none, () => host.getBudgetPolicy());
+  handle(IPC.setBudgetPolicy, z.tuple([BudgetPolicyDraft.nullable()]), (_event, draft) => host.setBudgetPolicy(draft));
+  handle(IPC.budgetSummary, none, () => host.budgetSummary());
+  handle(IPC.budgetPrices, none, () => host.budgetPrices());
+  handle(IPC.confirmBudgetMonth, z.tuple([BudgetMonthLabel]), (_event, month) => host.confirmBudgetMonth(month));
+  handle(IPC.startNewBudgetHistory, z.tuple([BudgetRemaining.nullable()]), (_event, remaining) => host.startNewBudgetHistory(remaining));
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {

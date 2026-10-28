@@ -409,6 +409,225 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
       OR json_extract(NEW.builds_json, '$.verified') IS NOT json_extract(NEW.prepared_json, '$.verifiedDigest'))
   BEGIN SELECT RAISE(ABORT, 'an acceptance of missing builds names the environment it was given for'); END;
   `,
+  `
+  -- The shared monthly budget (NIV-66): one ledger for every paid activity this installation sends, kept by the host
+  -- alone (D7). Engines get finite grants and journal their own operations. This keeps what the person chose, the
+  -- months, the price lists, every grant, and the operations each grant's sealed journal reported. The ledger's id and
+  -- its authority revision are written with its first change, and the revision moves forward with every change to
+  -- spending authority, each with a digest chained to the one before, so a guard kept outside this file can tell a
+  -- ledger that was replaced, put back, or changed along another history. No table before this one changes.
+  CREATE TABLE budget_authority (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    ledger_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    chain TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  ) STRICT;
+
+  -- A history the person chose to start again after a loss: when, why, what was lost, the new ledger id it started
+  -- under, the ledger's month then and the recovery month it holds through (the latest month the lost history
+  -- established, as its guard kept it, however many of the ledger's months that spans), and what they said was left
+  -- of it, money and counted services (null: wait for the month after). Spend before it is unknown, never zero.
+  CREATE TABLE budget_adjustments (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('history-lost')),
+    ledger_id TEXT NOT NULL,
+    period_idx INTEGER NOT NULL,
+    through_idx INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    recovery_json TEXT NOT NULL,
+    remaining_json TEXT,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at TEXT NOT NULL,
+    CHECK (through_idx >= period_idx)
+  ) STRICT;
+  CREATE TRIGGER budget_adjustments_kept BEFORE UPDATE ON budget_adjustments BEGIN SELECT RAISE(ABORT, 'a recorded loss is kept as written'); END;
+  CREATE TRIGGER budget_adjustments_not_removed BEFORE DELETE ON budget_adjustments BEGIN SELECT RAISE(ABORT, 'recorded losses are kept'); END;
+
+  -- The ledger keeps its id, except when a new history is started, which the same transaction records.
+  CREATE TRIGGER budget_authority_forward BEFORE UPDATE ON budget_authority
+  WHEN NEW.revision <= OLD.revision
+    OR ((NEW.ledger_id IS NOT OLD.ledger_id OR NEW.created_at IS NOT OLD.created_at)
+      AND NOT EXISTS (SELECT 1 FROM budget_adjustments WHERE kind = 'history-lost' AND ledger_id = NEW.ledger_id AND revision = NEW.revision))
+  BEGIN SELECT RAISE(ABORT, 'the budget ledger keeps its id unless a new history is started, and its revision only moves forward'); END;
+  CREATE TRIGGER budget_authority_kept BEFORE DELETE ON budget_authority BEGIN SELECT RAISE(ABORT, 'the budget ledger is kept'); END;
+
+  -- Every revision the ledger moved through, with its chained digest: the guard's record is checked against the one at
+  -- its own revision, so a ledger that reached that revision along another history doesn't match.
+  CREATE TABLE budget_revisions (
+    ledger_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    chain TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (ledger_id, revision)
+  ) STRICT;
+  CREATE TRIGGER budget_revisions_current BEFORE INSERT ON budget_revisions
+  WHEN NOT EXISTS (SELECT 1 FROM budget_authority WHERE singleton = 1 AND ledger_id = NEW.ledger_id AND revision = NEW.revision AND chain = NEW.chain)
+  BEGIN SELECT RAISE(ABORT, 'a revision is recorded as the ledger holds it'); END;
+  CREATE TRIGGER budget_revisions_kept BEFORE UPDATE ON budget_revisions BEGIN SELECT RAISE(ABORT, 'a revision is kept as it was written'); END;
+  CREATE TRIGGER budget_revisions_not_removed BEFORE DELETE ON budget_revisions BEGIN SELECT RAISE(ABORT, 'revisions are kept'); END;
+
+  -- What the person chose, one immutable version at a time; a version without a policy turns the monthly budget off.
+  -- A change is the next version and resets nothing.
+  CREATE TABLE budget_policies (
+    version INTEGER PRIMARY KEY CHECK (version >= 1),
+    policy_json TEXT,
+    replaces INTEGER REFERENCES budget_policies(version),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at TEXT NOT NULL,
+    CHECK ((version = 1) = (replaces IS NULL)),
+    CHECK (replaces IS NULL OR replaces = version - 1)
+  ) STRICT;
+  CREATE TRIGGER budget_policies_current BEFORE INSERT ON budget_policies
+  WHEN NEW.revision IS NOT (SELECT revision FROM budget_authority WHERE singleton = 1)
+  BEGIN SELECT RAISE(ABORT, 'a policy version is written with the revision that records it'); END;
+  CREATE TRIGGER budget_policies_kept BEFORE UPDATE ON budget_policies BEGIN SELECT RAISE(ABORT, 'a policy version is immutable'); END;
+  CREATE TRIGGER budget_policies_not_removed BEFORE DELETE ON budget_policies BEGIN SELECT RAISE(ABORT, 'policy versions are kept'); END;
+
+  -- Budget months, in the policy's time zone. Only the first opens without evidence; every later one needs the
+  -- provider's clock past its start, or the person's word. The index only moves forward.
+  CREATE TABLE budget_periods (
+    idx INTEGER PRIMARY KEY CHECK (idx >= 0),
+    label TEXT NOT NULL,
+    starts_at TEXT NOT NULL,
+    ends_at TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    opened_by TEXT NOT NULL CHECK (opened_by IN ('first', 'corroborated', 'confirmed')),
+    evidence_json TEXT,
+    opened_at TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    CHECK ((opened_by = 'first') = (evidence_json IS NULL))
+  ) STRICT;
+  CREATE TRIGGER budget_periods_forward BEFORE INSERT ON budget_periods
+  WHEN EXISTS (SELECT 1 FROM budget_periods WHERE idx >= NEW.idx)
+    OR ((NEW.opened_by = 'first') <> (NOT EXISTS (SELECT 1 FROM budget_periods)))
+    OR NEW.revision IS NOT (SELECT revision FROM budget_authority WHERE singleton = 1)
+  BEGIN SELECT RAISE(ABORT, 'budget months only move forward, only the first opens without evidence, and each is opened with the revision that records it'); END;
+  CREATE TRIGGER budget_periods_kept BEFORE UPDATE ON budget_periods BEGIN SELECT RAISE(ABORT, 'a budget month is kept as it was opened'); END;
+  CREATE TRIGGER budget_periods_not_removed BEFORE DELETE ON budget_periods BEGIN SELECT RAISE(ABORT, 'budget months are kept'); END;
+
+  -- What the clocks said: jumps of the computer's clock, and the provider's times that an engine recorded.
+  CREATE TABLE budget_clock (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('jump-forward', 'jump-back', 'provider')),
+    wall_at TEXT NOT NULL,
+    provider_at TEXT,
+    delta_ms INTEGER,
+    recorded_at TEXT NOT NULL,
+    CHECK ((kind = 'provider') = (provider_at IS NOT NULL))
+  ) STRICT;
+  CREATE TRIGGER budget_clock_kept BEFORE UPDATE ON budget_clock BEGIN SELECT RAISE(ABORT, 'clock records are kept as written'); END;
+  CREATE TRIGGER budget_clock_not_removed BEFORE DELETE ON budget_clock BEGIN SELECT RAISE(ABORT, 'clock records are kept'); END;
+
+  CREATE TABLE price_catalogues (
+    version TEXT PRIMARY KEY,
+    catalogue_json TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    registered_at TEXT NOT NULL
+  ) STRICT;
+  CREATE TRIGGER price_catalogues_kept BEFORE UPDATE ON price_catalogues BEGIN SELECT RAISE(ABORT, 'a price list version is immutable'); END;
+  CREATE TRIGGER price_catalogues_not_removed BEFORE DELETE ON price_catalogues BEGIN SELECT RAISE(ABORT, 'price list versions are kept'); END;
+
+  -- Every spendable call's grant, written before anything is sent, with the request id it is sent under, the digest of
+  -- what was asked, the revision it was written at, its day (the local date, never earlier than any grant before it,
+  -- so a clock moved back or forward and back can't free a daily limit), and the engine store (home id) recorded when
+  -- it is marked dispatching. What it was written with never changes; its state only moves forward; and its journal's rows are
+  -- recorded once, with its seal. A grant still written when a new history is started becomes uncertain, so it is never
+  -- released or sent again.
+  CREATE TABLE budget_grants (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    workflow TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    home_id TEXT,
+    period_idx INTEGER NOT NULL REFERENCES budget_periods(idx),
+    policy_version INTEGER REFERENCES budget_policies(version),
+    catalogue_version TEXT NOT NULL REFERENCES price_catalogues(version),
+    grant_json TEXT NOT NULL,
+    attribution_json TEXT NOT NULL,
+    feature TEXT NOT NULL,
+    project_id TEXT,
+    attempt_id TEXT,
+    queue_id TEXT,
+    profile_id TEXT,
+    model TEXT,
+    productive_micros INTEGER CHECK (productive_micros >= 0),
+    finalisation_micros INTEGER CHECK (finalisation_micros >= 0),
+    extends_id TEXT REFERENCES budget_grants(id),
+    need TEXT,
+    state TEXT NOT NULL CHECK (state IN ('written', 'dispatching', 'accepted', 'settled', 'released', 'uncertain', 'written-off')),
+    seal_kind TEXT CHECK (seal_kind IN ('complete', 'interrupted')),
+    recorded_micros INTEGER CHECK (recorded_micros >= 0),
+    written_revision INTEGER NOT NULL CHECK (written_revision >= 1),
+    day_idx INTEGER NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((productive_micros IS NULL) = (finalisation_micros IS NULL)),
+    CHECK ((extends_id IS NULL) = (need IS NULL)),
+    CHECK (home_id IS NOT NULL OR state IN ('written', 'released', 'uncertain', 'written-off')),
+    CHECK (state <> 'settled' OR seal_kind = 'complete'),
+    CHECK (seal_kind IS NULL OR recorded_micros IS NOT NULL OR productive_micros IS NULL)
+  ) STRICT;
+  CREATE INDEX budget_grants_period ON budget_grants(period_idx, state);
+  CREATE INDEX budget_grants_request ON budget_grants(request_id);
+  CREATE INDEX budget_grants_day ON budget_grants(day_idx);
+  CREATE INDEX budget_grants_attempt ON budget_grants(attempt_id) WHERE attempt_id IS NOT NULL;
+  CREATE INDEX budget_grants_queue ON budget_grants(queue_id) WHERE queue_id IS NOT NULL;
+  CREATE UNIQUE INDEX budget_grants_one_per_need ON budget_grants(extends_id, need) WHERE extends_id IS NOT NULL;
+  CREATE TRIGGER budget_grants_written BEFORE INSERT ON budget_grants
+  WHEN NEW.state IS NOT 'written' OR NEW.home_id IS NOT NULL OR NEW.seal_kind IS NOT NULL OR NEW.recorded_micros IS NOT NULL
+    OR NEW.written_revision IS NOT NEW.revision OR NEW.revision IS NOT (SELECT revision FROM budget_authority WHERE singleton = 1)
+    OR NEW.day_idx < (SELECT coalesce(max(day_idx), NEW.day_idx) FROM budget_grants)
+  BEGIN SELECT RAISE(ABORT, 'a grant is written before anything is sent, with the revision that records it'); END;
+  CREATE TRIGGER budget_grants_moves BEFORE UPDATE ON budget_grants
+  WHEN NEW.id IS NOT OLD.id OR NEW.request_id IS NOT OLD.request_id OR NEW.request_sha256 IS NOT OLD.request_sha256
+    OR NEW.workflow IS NOT OLD.workflow OR NEW.target_id IS NOT OLD.target_id
+    OR NEW.period_idx IS NOT OLD.period_idx OR NEW.policy_version IS NOT OLD.policy_version OR NEW.catalogue_version IS NOT OLD.catalogue_version
+    OR NEW.grant_json IS NOT OLD.grant_json OR NEW.attribution_json IS NOT OLD.attribution_json OR NEW.feature IS NOT OLD.feature
+    OR NEW.project_id IS NOT OLD.project_id OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.queue_id IS NOT OLD.queue_id
+    OR NEW.profile_id IS NOT OLD.profile_id OR NEW.model IS NOT OLD.model
+    OR NEW.productive_micros IS NOT OLD.productive_micros OR NEW.finalisation_micros IS NOT OLD.finalisation_micros
+    OR NEW.extends_id IS NOT OLD.extends_id OR NEW.need IS NOT OLD.need OR NEW.created_at IS NOT OLD.created_at
+    OR NEW.written_revision IS NOT OLD.written_revision OR NEW.day_idx IS NOT OLD.day_idx
+    OR (OLD.home_id IS NOT NULL AND NEW.home_id IS NOT OLD.home_id)
+    OR (OLD.seal_kind IS NOT NULL AND (NEW.seal_kind IS NOT OLD.seal_kind OR NEW.recorded_micros IS NOT OLD.recorded_micros))
+    OR NEW.revision <= OLD.revision OR NEW.revision IS NOT (SELECT revision FROM budget_authority WHERE singleton = 1)
+    OR (NEW.state IS NOT OLD.state AND NOT (
+      (OLD.state = 'written' AND NEW.state IN ('dispatching', 'released'))
+      OR (OLD.state = 'written' AND NEW.state = 'uncertain' AND EXISTS (SELECT 1 FROM budget_adjustments WHERE kind = 'history-lost' AND revision = NEW.revision))
+      OR (OLD.state = 'dispatching' AND NEW.state IN ('accepted', 'settled', 'uncertain'))
+      OR (OLD.state = 'accepted' AND NEW.state IN ('settled', 'uncertain'))
+      OR (OLD.state = 'uncertain' AND NEW.state IN ('settled', 'written-off'))
+    ))
+  BEGIN SELECT RAISE(ABORT, 'a grant keeps what it was written with, and its state only moves forward'); END;
+  CREATE TRIGGER budget_grants_not_removed BEFORE DELETE ON budget_grants BEGIN SELECT RAISE(ABORT, 'grants are kept'); END;
+
+  -- The operations a grant's sealed journal reported, each once, closed: never reserved or sent. They arrive with
+  -- the seal, so a grant that already has its seal takes no more. amount_micros is what the engine said; counted_micros
+  -- is what the ledger counts, worked out again from the row's usage at the grant's prices (null for an unpriced grant).
+  CREATE TABLE budget_operations (
+    id TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL REFERENCES budget_grants(id),
+    seq INTEGER NOT NULL CHECK (seq >= 1),
+    kind TEXT NOT NULL CHECK (kind IN ('model-request', 'model-listing', 'research-search', 'research-extract', 'sandbox-operation', 'sandbox-transfer')),
+    model TEXT,
+    state TEXT NOT NULL CHECK (state IN ('unsent', 'reported', 'partial', 'unknown')),
+    amount_micros INTEGER CHECK (amount_micros >= 0),
+    counted_micros INTEGER CHECK (counted_micros >= 0),
+    units INTEGER CHECK (units >= 0),
+    operation_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    UNIQUE (grant_id, seq)
+  ) STRICT;
+  CREATE INDEX budget_operations_grant ON budget_operations(grant_id, seq);
+  CREATE TRIGGER budget_operations_sealed BEFORE INSERT ON budget_operations
+  WHEN NOT EXISTS (SELECT 1 FROM budget_grants WHERE id = NEW.grant_id AND seal_kind IS NULL AND state IN ('dispatching', 'accepted', 'uncertain'))
+  BEGIN SELECT RAISE(ABORT, 'a grant takes its operations once, with its seal, after it was dispatched'); END;
+  CREATE TRIGGER budget_operations_kept BEFORE UPDATE ON budget_operations BEGIN SELECT RAISE(ABORT, 'a recorded operation is kept as it was reported'); END;
+  CREATE TRIGGER budget_operations_not_removed BEFORE DELETE ON budget_operations BEGIN SELECT RAISE(ABORT, 'recorded operations are kept'); END;
+`,
 ];
 
 export type WorkspaceOpening =
