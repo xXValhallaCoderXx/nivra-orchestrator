@@ -35,9 +35,11 @@
 // `applies.log` so a later applyStatus reads it; with an `error-settle` file, either does its work, then answers with an
 // internal error, as an engine whose answer is lost, and with a `hold-settle` file, does its work and never answers.
 // For environments (D41, NIV-55): environment.resolve records what it was asked (`env-resolves.log`) and answers with
-// a ready recipe (a pnpm workspace on Node 24, on the Node a runtime choice names) whose fingerprint covers the choices
-// it was given, and also an `env-changed` file while one exists, as a commit that changed would; it asks for a choice
-// while an `env-needs-choice` file exists, and refuses while an `env-refused` one does. runs.start records each
+// a ready recipe (a pnpm workspace on Node 24, on the Node a runtime choice names, installing the packages a scope
+// chooses with one --filter each, or the whole project while an `env-ignores-scope` file exists, as an engine that
+// ignored the choice would) whose fingerprint covers the choices it was given, and also an `env-changed` file while
+// one exists, as a commit that changed would; it asks for a choice while an `env-needs-choice` file exists, and
+// refuses while an `env-refused` one does. runs.start records each
 // preparation with its input and context (`environments.log`). runs.environment answers with a report: in progress
 // while a `running` file exists, cancelled for a run it was asked to cancel, else the outcome an `environment-outcome`
 // file names (prepared unless it says otherwise), with the recipe's environment only when it is prepared, or whatever
@@ -66,9 +68,11 @@ const cancelled = new Set();
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 /** The Nebius project id the host handed over with the secrets, as an engine keeps it in memory. */
 let nebiusProject = null;
-/** A recipe as the gated engine resolves one (NIV-55): a pnpm workspace on Node 24, or on the Node the person chose. */
+/** A recipe as the gated engine resolves one (NIV-55): a pnpm workspace on Node 24, or on the Node the person chose, installing what they chose. */
 const recipeFor = (choices) => {
   const node = choices?.runtime ?? "24.21.0";
+  const scope = choices?.scope && !existsSync(join(home, "env-ignores-scope")) ? choices.scope : { kind: "whole" };
+  const filters = scope.kind === "selected" ? scope.selectors.flatMap((selector) => ["--filter", selector]) : [];
   return {
     format: "nivra.environment-recipe.v1",
     profile: "node",
@@ -80,8 +84,8 @@ const recipeFor = (choices) => {
       { name: "pnpm", version: { kind: "exact", version: "11.5.3" }, from: "bootstrap" },
     ],
     bootstrap: [{ tool: "pnpm", version: "11.5.3", via: "corepack-else-npm-global" }],
-    install: { tool: "pnpm", args: ["install", "--frozen-lockfile"], options: {} },
-    scope: { kind: "whole" },
+    install: { tool: "pnpm", args: ["install", "--frozen-lockfile", ...filters], options: {} },
+    scope,
     builds: { tool: "pnpm", runs: "allowed", allowed: ["esbuild"], denied: [], strict: true, source: "pnpm-workspace.yaml", notes: [] },
     configuration: { mode: "manifests", files: ["package.json", "packages/data/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].map((path) => ({ path, bytes: 100, sha256: sha256(path) })), digest: "2".repeat(64) },
     systemPackages: [],

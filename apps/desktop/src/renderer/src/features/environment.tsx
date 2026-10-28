@@ -1,6 +1,7 @@
-import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, Radio, Stack, Text } from "@mantine/core";
-import type { ChoiceNeeded, EnvironmentChoices, EnvironmentPreviewV2, EnvironmentReport, PreparedEnvironmentV2, ResolutionRow } from "@nivra/domain";
+import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, Radio, Stack, Text, TextInput } from "@mantine/core";
+import type { ChoiceNeeded, EnvironmentChoices, EnvironmentPreviewV2, EnvironmentReport, InstallScope, PreparedEnvironmentV2, ResolutionRow } from "@nivra/domain";
 import { useRef, useState } from "react";
+import { MAX_SELECTORS, sameScope, scopeOf, scopeText, selectorHint, selectorList, withScope } from "../../../shared/environment-scope";
 import type { EnvironmentView, PreparationView, ProjectView, TurnStatus } from "../../../shared/ipc";
 import { errorMessage, Section, usePoll } from "../shared/ui";
 
@@ -13,6 +14,10 @@ import { errorMessage, Section, usePoll } from "../shared/ui";
  * either changes the project's policy or accepts the environment without them. The install's log is shown as text, never
  * as markup. `credentialsSaved` changes each time the key or project id is saved: what keeps Prepare from being pressed
  * is read again.
+ *
+ * What to install is the whole project unless the person names packages of a pnpm workspace, as typed selectors sent
+ * exactly as typed (option a1): the host's or the engine's refusal is shown in their words, the selectors are kept, and
+ * nothing else is installed in their place. Changing it clears the preview shown, and Prepare waits for a new one.
  */
 
 type Ready = Extract<EnvironmentPreviewV2, { status: "ready" }>;
@@ -61,7 +66,13 @@ const NPM_OPTIONS: ReadonlyArray<{ name: string; label: string }> = [
 
 /** The choices, in words. */
 const choicesText = (choices: EnvironmentChoices | null) => {
-  const said = [choices?.runtime ? `Node ${choices.runtime}` : null, choices?.manager ? choices.manager : null, choices?.managerVersion ? `version ${choices.managerVersion}` : null, ...Object.entries(choices?.options ?? {}).filter(([, value]) => value !== false).map(([name]) => name)].filter((item): item is string => item !== null);
+  const said = [
+    choices?.runtime ? `Node ${choices.runtime}` : null,
+    choices?.manager ? choices.manager : null,
+    choices?.managerVersion ? `version ${choices.managerVersion}` : null,
+    choices?.scope?.kind === "selected" ? `installing ${selectorList(choices.scope.selectors)}` : null,
+    ...Object.entries(choices?.options ?? {}).filter(([, value]) => value !== false).map(([name]) => name),
+  ].filter((item): item is string => item !== null);
   return said.length ? `with your choices: ${said.join(", ")}` : "as the project declares";
 };
 
@@ -95,6 +106,11 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
   const preparation = view?.preparation ?? null;
   const underway = preparation !== null && going(preparation.status);
   const stale = preview !== null && previewed !== key;
+  const scope = scopeOf(choices);
+  // The choices changed since the last preview, which was cleared: a new one is needed before anything is prepared.
+  const unpreviewed = preview === null && previewed !== null && previewed !== key;
+  // A preview that doesn't install what was chosen is never prepared, whatever it installs instead.
+  const mismatch = ready !== null && !stale && !sameScope(ready.recipe.scope, scope);
 
   async function act(body: () => Promise<void>) {
     setBusy(true);
@@ -154,7 +170,14 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
       state.refresh();
     });
 
-  const prepareBlocked = !ready || stale || underway || busy || !online || view?.blocked !== null;
+  // Another scope clears the preview shown, and what went wrong with the last one: Prepare waits for a new preview.
+  const chooseScope = (next: InstallScope) => {
+    setEdited(withScope(choices, next));
+    setPreview(null);
+    setError(null);
+  };
+
+  const prepareBlocked = !ready || stale || mismatch || underway || busy || !online || view?.blocked !== null;
   return (
     <Section
       title="Environment"
@@ -183,9 +206,15 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
           </Alert>
         )}
         {preparation && <Preparation preparation={preparation} />}
+        {projectId && <ScopeControl scope={scope} disabled={busy} onChange={chooseScope} />}
+        {unpreviewed && !error && !busy && (
+          <Text size="sm" c="var(--nivra-warning)" data-testid="environment-scope-changed">
+            This choice isn't previewed yet. Preview it to see what it installs, then prepare.
+          </Text>
+        )}
         <Group gap="sm">
           <Button variant="default" onClick={() => void previewIt()} loading={busy && !consent && !underway} disabled={!projectId || !online || underway} data-testid="environment-preview">
-            {preview && stale ? "Preview this choice" : view?.prepared || view?.legacy || preparation ? "Preview preparing again" : "Preview the preparation"}
+            {(preview && stale) || unpreviewed ? "Preview this choice" : view?.prepared || view?.legacy || preparation ? "Preview preparing again" : "Preview the preparation"}
           </Button>
           <Button onClick={() => (project?.sharing.cloudExecution ? void act(start) : setConsent(true))} disabled={prepareBlocked} data-testid="environment-prepare">
             {view?.prepared || view?.legacy || preparation ? "Prepare again" : "Prepare"}
@@ -286,6 +315,88 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
 const networkText = (ready: Ready) =>
   `Networking is on for the preparation only, to reach ${ready.recipe.network.hosts.join(", ") || "the package registry"} and to bring the base image from ${ready.recipe.network.imageRegistry}. Every check and task run is offline.`;
 
+/**
+ * What to install (NIV-55, option a1): the whole project, the default, or packages of a pnpm workspace named by up to
+ * eight selectors. Each is sent exactly as typed; the hint under one the domain's rule won't take is only a hint, and the
+ * host's or the engine's refusal is the one that counts. Selectors typed stay while the whole project is chosen, so
+ * choosing packages again brings them back.
+ */
+function ScopeControl({ scope, disabled, onChange }: { scope: InstallScope; disabled: boolean; onChange(next: InstallScope): void }) {
+  const typed = useRef<string[]>(scope.kind === "selected" ? scope.selectors : [""]);
+  const selectors = scope.kind === "selected" ? scope.selectors : null;
+  const set = (next: string[]) => {
+    typed.current = next;
+    onChange({ kind: "selected", selectors: next });
+  };
+  const choose = (kind: string) => {
+    if (kind === "whole") {
+      if (selectors) typed.current = selectors;
+      onChange({ kind: "whole" });
+    } else if (!selectors) {
+      onChange({ kind: "selected", selectors: typed.current });
+    }
+  };
+  return (
+    <Stack gap={4} data-testid="environment-scope" data-kind={scope.kind}>
+      <Radio.Group label="What to install" value={scope.kind} onChange={choose}>
+        <Stack gap={6} mt={4}>
+          <Radio value="whole" label="The whole project" description="Every package its lockfile installs. This is the default." disabled={disabled} data-testid="environment-scope-whole" />
+          <Radio
+            value="selected"
+            label="Chosen packages"
+            description="Only the packages of a pnpm workspace that you name. An npm project, or a pnpm project that isn't a workspace, can't install chosen packages yet."
+            disabled={disabled}
+            data-testid="environment-scope-selected"
+          />
+        </Stack>
+      </Radio.Group>
+      {selectors && (
+        <Stack gap={4} pl="xl">
+          {selectors.map((selector, index) => {
+            const hint = selectorHint(selector);
+            return (
+              <Stack key={index} gap={2} data-testid="environment-scope-row">
+                <Group gap="xs" wrap="nowrap">
+                  <TextInput
+                    aria-label={`Package selector ${index + 1}`}
+                    placeholder="@scope/app... or ./packages/data"
+                    value={selector}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      set(selectors.map((item, at) => (at === index ? value : item)));
+                    }}
+                    disabled={disabled}
+                    styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+                    style={{ flex: 1 }}
+                    data-testid="environment-scope-selector"
+                  />
+                  <Button size="compact-xs" variant="subtle" color="red" onClick={() => set(selectors.filter((_, at) => at !== index))} disabled={disabled || selectors.length === 1} data-testid="environment-scope-remove">
+                    Remove
+                  </Button>
+                </Group>
+                {hint && (
+                  <Text size="xs" c={selector === "" ? "var(--nivra-text-3)" : "var(--nivra-warning)"} data-testid="environment-scope-hint">
+                    {hint}
+                  </Text>
+                )}
+              </Stack>
+            );
+          })}
+          <Group>
+            <Button size="xs" variant="default" onClick={() => set([...selectors, ""])} disabled={disabled || selectors.length >= MAX_SELECTORS} data-testid="environment-scope-add">
+              Add a package
+            </Button>
+          </Group>
+          <Text size="xs" c="var(--nivra-text-3)">
+            Up to {MAX_SELECTORS} selectors, each as pnpm install --filter takes it, such as @scope/app... or ./packages/data. They are sent as you type them, and the preview shows
+            the install command they make.
+          </Text>
+        </Stack>
+      )}
+    </Stack>
+  );
+}
+
 /** The setup Nivra found: each value, where it came from, and the declarations behind it. */
 function Rows({ rows }: { rows: ResolutionRow[] }) {
   if (rows.length === 0) return null;
@@ -314,8 +425,9 @@ function Rows({ rows }: { rows: ResolutionRow[] }) {
 
 /**
  * What preparing would send and run, as the project's engine worked it out: the setup it found, each value with where it
- * came from, the image, the install and its options, the files sent and those never sent, what networking reaches, how
- * dependency builds run, what Nebius keeps, and the bounds.
+ * came from, the image, what it installs and the install with its options, the files sent and those never sent, what
+ * networking reaches, how dependency builds run, what Nebius keeps, and the bounds. A recipe that doesn't install the
+ * scope chosen is said to be so, and isn't prepared.
  */
 function PreviewPanel({ ready, choices, stale, prepared, onChoose }: { ready: Ready; choices: EnvironmentChoices; stale: boolean; prepared: PreparedEnvironmentV2 | null; onChoose(next: EnvironmentChoices): void }) {
   const { recipe } = ready;
@@ -329,6 +441,7 @@ function PreviewPanel({ ready, choices, stale, prepared, onChoose }: { ready: Re
   const bootstrap = recipe.bootstrap.map((step) => `${step.tool} ${step.version}${step.via === "npm-global" ? ", installed with npm" : step.via === "corepack" ? ", through corepack" : ", through corepack where the image has it, else with npm"}`);
   const set = Object.entries(recipe.install.options).filter(([, value]) => value !== false);
   const differs = prepared !== null && prepared.recipeDigest !== ready.recipeDigest;
+  const asked = scopeOf(choices);
   return (
     <Stack gap="xs" data-testid="environment-preview-panel">
       <Rows rows={ready.rows} />
@@ -364,6 +477,15 @@ function PreviewPanel({ ready, choices, stale, prepared, onChoose }: { ready: Re
             <Text size="sm" data-testid="environment-left-out">
               {ready.leftOut.join(", ")} {ready.leftOut.length === 1 ? "is" : "are"} never read or sent. If its settings shape the lockfile, such as legacy-peer-deps, set the same install
               option here.
+            </Text>
+          )}
+          <Text size="sm" data-testid="environment-scope-resolved" data-kind={recipe.scope.kind} data-selectors={recipe.scope.kind === "selected" ? recipe.scope.selectors.join(" ") : ""}>
+            What it installs: {scopeText(recipe.scope)}.
+          </Text>
+          {!sameScope(recipe.scope, asked) && (
+            <Text size="sm" c="var(--nivra-warning)" data-testid="environment-scope-mismatch">
+              This preview doesn't install what you chose: it installs {scopeText(recipe.scope)}, not {scopeText(asked)}. Nivra won't prepare it. Preview again, and if it still
+              differs, report it.
             </Text>
           )}
           <Text size="sm" data-testid="environment-install">
@@ -421,6 +543,9 @@ function Prepared({ prepared, accepted, ready, busy, online, onAccept }: { prepa
         <Text size="xs" c="var(--nivra-text-3)">
           Its task runs start from it, with networking off, while the commit's setup files stay as they were. It was prepared from {prepared.recipe.image.tag}
           {verified.images.imported ? ", imported into your Nebius project" : ""}.
+        </Text>
+        <Text size="xs" c="var(--nivra-text-3)" data-testid="environment-prepared-scope" data-kind={prepared.recipe.scope.kind}>
+          Installed with <Code>{[prepared.recipe.install.tool, ...prepared.recipe.install.args].join(" ")}</Code>: {scopeText(prepared.recipe.scope)}.
         </Text>
         {builds.state === "complete" ? (
           <Text size="xs" c="var(--nivra-text-3)" data-testid="environment-builds">

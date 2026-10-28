@@ -582,9 +582,9 @@ this machine.
 ```bash
 cd apps/engine && node --test test/environment-recipe-engine.test.ts test/environment-prepare.test.ts test/task-recipe-engine.test.ts test/task-environment.test.ts
 cd apps/engine && node --test test/snapshot.test.ts test/patch.test.ts test/prepared-image.test.ts test/nebius-session.test.ts
-cd apps/desktop && node --test test/environment-store.test.ts test/tasks.test.ts test/task-started.test.ts test/task-live-checks.test.ts
+cd apps/desktop && node --test test/environment-store.test.ts test/environment-scope.test.ts test/tasks.test.ts test/task-started.test.ts test/task-live-checks.test.ts
 cd apps/desktop && node --test --test-name-pattern="from its own recipe" test/host.test.ts
-xvfb-run -a pnpm --filter @nivra/desktop test:e2e environment.spec.ts task-journey.spec.ts
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e environment.spec.ts environment-scope.spec.ts task-journey.spec.ts
 ```
 
 - **The preparation** (`environment/prepare.ts`, its scripts and readers in `environment/scripts.ts`): the base image;
@@ -599,6 +599,13 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e environment.spec.ts task-journ
 - **The host and the store**: `resolveEnvironment`, `prepareEnvironment(choices)` and `acceptMissingBuilds`. The store
   reads its rows with the domain's schemas, D41's as legacy, and workspace migration 8 keeps an acceptance of missing
   builds bound to one verified record. The run preview's fingerprint v3 binds a run to the environment.
+- **What to install** (option a1): the window offers the whole project, the default, or packages of a pnpm workspace
+  as up to eight typed selectors, sent as typed. The host's and the engine's refusals are shown in their words with
+  the selectors kept; a change of scope clears the preview, and a preview whose recipe doesn't install the scope chosen
+  is never prepared. `src/shared/environment-scope.ts` copies the domain's selector rule and limit for a hint under
+  each selector, held to them by `test/environment-scope.test.ts`. `e2e/environment-scope.spec.ts` drives it against
+  the real engine and the stand-in, whose guest fails any step it doesn't stand in for; the gated engine applies a
+  scope as the engine does, and ignores it while an `env-ignores-scope` file exists.
 - **Live runs**: `task-live.ts`'s recipe (kind v3 since the live checks' state folders) takes the person's choices for
   the project's own recipe in the task file's `environment` (`{}` for none), and binds the resolution's fingerprint and
   warnings, the recipe's digest and the setup files' digest. Each live run needs Nate's approval of its own recipe and

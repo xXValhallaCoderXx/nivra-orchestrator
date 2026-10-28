@@ -3266,6 +3266,13 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     const WRONG = /^Error: Those choices can't be sent as they are: a version is exact, such as 24\.21\.0, and an option is one the preview offers\. Preview the environment again\.$/;
     await assert.rejects(host.prepareEnvironment(linux, { runtime: "24; rm -rf /" }, fingerprint), WRONG);
     await assert.rejects(host.resolveEnvironment(linux, { runtime: "latest" }), WRONG);
+    // So are chosen packages the domain's rule doesn't take, which the window sends as typed (NIV-55): none, more than
+    // eight, an empty one, a space, a leading dash.
+    const nine = Array.from({ length: 9 }, (_, index) => `@scope/p${index}`);
+    for (const selectors of [[], nine, [""], ["web app"], ["-r"]]) {
+      await assert.rejects(host.resolveEnvironment(linux, { scope: { kind: "selected", selectors } }), WRONG, JSON.stringify(selectors));
+      await assert.rejects(host.prepareEnvironment(linux, { scope: { kind: "selected", selectors } }, fingerprint), WRONG, JSON.stringify(selectors));
+    }
     assert.deepEqual([stateOf(host, "wsl:Test")?.status, stateOf(host, "local")?.status], ["stopped", "stopped"]);
   });
 
@@ -3279,6 +3286,12 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     await assert.rejects(host.prepareEnvironment(id, CHOICES, fingerprint), { message: CHANGED });
     rmSync(join(home, "env-changed"));
     await assert.rejects(host.prepareEnvironment(id, { runtime: "22.23.4" }, fingerprint), { message: CHANGED });
+    // Chosen packages, started with the whole project's preview, and the whole project with chosen packages' (NIV-55).
+    const scoped = { scope: { kind: "selected" as const, selectors: ["@mono/data...", "./packages/web"] } };
+    await assert.rejects(host.prepareEnvironment(id, scoped, fingerprint), { message: CHANGED });
+    const scopedFingerprint = await fingerprintOf(host, id, scoped);
+    assert.deepEqual(JSON.parse(lines(home, "env-resolves.log").at(-1)!).choices, scoped, "the selectors reached the project's engine as typed");
+    await assert.rejects(host.prepareEnvironment(id, CHOICES, scopedFingerprint), { message: CHANGED });
     assert.deepEqual([calls(home, "runs.start"), (await host.environment(id)).choices], [0, null], "nothing was sent, and no choices were kept");
     // An install that fails keeps no environment, even one its report holds.
     writeFileSync(join(home, "environment-outcome"), "failed");

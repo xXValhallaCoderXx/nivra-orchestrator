@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { TASK_MODEL } from "@nivra/domain";
 import { environmentRefOf } from "../src/main/host.ts";
@@ -230,5 +232,60 @@ describe("a rehearsal's homes, read once its app is closed (NIV-55)", () => {
       throw new Error("the preview wasn't the recipe's");
     }, after), /the preview wasn't the recipe's/);
     assert.deepEqual(order, ["body", "close"]);
+  });
+});
+
+describe("the packages a live run's recipe installs (NIV-55)", () => {
+  // task-live.ts reads its command line as it loads, so its recipe can't be imported here. --check reads the task file
+  // and its checkout and writes nothing: it prints what a plan binds besides the build, from the same resolution the
+  // approval's digest hashes with the task file's choices.
+  const desktop = fileURLToPath(new URL("..", import.meta.url));
+  const repository = mkdtempSync(join(tmpdir(), "nivra live scope repository "));
+  const files = mkdtempSync(join(tmpdir(), "nivra live scope task "));
+  dirs.push(repository, files);
+  const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+  for (const [path, text] of Object.entries({
+    "package.json": json({ name: "live-mono", private: true, packageManager: "pnpm@11.5.3" }),
+    ".nvmrc": "24.21.0\n",
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
+    "packages/data/package.json": json({ name: "@live/data", private: true }),
+    "packages/web/package.json": json({ name: "@live/web", private: true }),
+  })) {
+    mkdirSync(dirname(join(repository, path)), { recursive: true });
+    writeFileSync(join(repository, path), text);
+  }
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", args, { cwd: repository, encoding: "utf8" });
+    assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.trim();
+  };
+  git("init", "-q", "-b", "main");
+  git("add", "-A");
+  git("-c", "user.name=t", "-c", "user.email=t@nivra.invalid", "commit", "-q", "-m", "init");
+  const baseline = git("rev-parse", "HEAD");
+  /** What --check prints of the environment for these choices, read into its parts. */
+  const checked = (name: string, environment: unknown) => {
+    const task = join(files, `${name}.json`);
+    // A run that expects its preparation to stop takes no brief, which this check doesn't need.
+    writeFileSync(task, json({ repository, baseline, environment, task: { title: "Scope" }, expect: { preparation: { code: "install", step: "install", detail: null } } }));
+    const result = spawnSync(process.execPath, ["scripts/task-live.ts", "--check", "--task", task], { cwd: desktop, encoding: "utf8", timeout: 120_000 });
+    assert.equal(result.status, 0, (result.stderr || result.stdout).slice(0, 2_000));
+    const line = result.stdout.split("\n").find((text) => text.startsWith("Environment: ")) ?? "";
+    const parts = /^Environment: the project's own recipe ([0-9a-f]{64}), with (\S+): .*; (pnpm install [^;]*); builds: .*; preview ([0-9a-f]{64}); hosts /.exec(line);
+    assert.ok(parts, line.slice(0, 600));
+    return { recipe: parts[1]!, choices: parts[2]!, install: parts[3]!, preview: parts[4]! };
+  };
+
+  it("binds the packages the task file chooses: its choices, the install's filters, the recipe's digest and the preview's fingerprint all change with them", () => {
+    const whole = checked("whole", {});
+    const chosen = checked("chosen", { scope: { kind: "selected", selectors: ["@live/data...", "./packages/web"] } });
+    assert.deepEqual([whole.choices, whole.install], ["{}", "pnpm install --frozen-lockfile"]);
+    assert.deepEqual([chosen.choices, chosen.install], ['{"scope":{"kind":"selected","selectors":["@live/data...","./packages/web"]}}', "pnpm install --frozen-lockfile --filter @live/data... --filter ./packages/web"]);
+    assert.notEqual(chosen.recipe, whole.recipe);
+    assert.notEqual(chosen.preview, whole.preview);
+    // The same packages in another order are another install, so another recipe.
+    const reordered = checked("reordered", { scope: { kind: "selected", selectors: ["./packages/web", "@live/data..."] } });
+    assert.deepEqual([reordered.install === chosen.install, reordered.recipe === chosen.recipe], [false, false]);
   });
 });

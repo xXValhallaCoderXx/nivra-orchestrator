@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import type { EnvironmentChoices, InstallScope } from "@nivra/domain";
 import type { BriefFields } from "../src/shared/ipc";
 
 /**
@@ -13,8 +14,10 @@ import type { BriefFields } from "../src/shared/ipc";
  * it came from, puts the project's conflict to the person, asks for uploads with what is sent in front of them, follows
  * the preparation, keeps what it verified, shows a failed install's log as text, and takes the person's acceptance of
  * builds that didn't run. A brief's baseline checks and frozen files are written in the brief's form; the run preview
- * and the run's card show them with the environment's verified versions. A packaged app ignores the switch, so this
- * skips there.
+ * and the run's card show them with the environment's verified versions. What to install is the whole project unless
+ * the person names packages, which are sent as typed: the host's refusal is shown with them kept, a change of them
+ * clears the preview, and a preview that installs something else is never prepared. A packaged app ignores the switch,
+ * so this skips there.
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIELDS: BriefFields = {
@@ -166,4 +169,114 @@ test("writes a brief's baseline checks and frozen files, previews a run from the
   await expect(page.getByTestId("task-engine-failed")).toHaveCount(0);
   const run = JSON.parse(lines("tasks.log")[0]!.split(" ").slice(1).join(" ")) as { input: { environment?: { format: string; tools: Array<{ name: string; version: string }>; builds: { missing: string[] } | null } }; brief: { baseline?: unknown[]; frozen?: string[] } };
   expect([run.input.environment?.format, run.input.environment?.tools[0]?.version, run.input.environment?.builds?.missing, run.brief.baseline?.length, run.brief.frozen]).toEqual(["nivra.environment-ref.v1", "22.23.4", ["esbuild"], 1, ["check.sh"]]);
+});
+
+test("chooses what to install: the whole project unless packages are named, each sent as typed and refused in the host's words with the selectors kept, and a change cleared until it is previewed", async () => {
+  test.skip(packaged, "a packaged app ignores the test engine switch");
+  await page.getByTestId("nav-projects").click();
+  const section = page.getByTestId("environment");
+  const selectors = section.getByTestId("environment-scope-selector");
+  const prepare = section.getByTestId("environment-prepare");
+  const resolved = () => lines("env-resolves.log").map((line) => JSON.parse(line) as { choices: EnvironmentChoices });
+  const starts = () => lines("calls.log").filter((call) => call === "runs.start").length;
+  const CHOSEN: InstallScope = { kind: "selected", selectors: ["@mono/data...", "./packages/web"] };
+
+  // The whole project is the default: what was prepared, and what a preview installs, with no filter.
+  await expect(section.getByTestId("environment-scope-whole")).toBeChecked();
+  await expect(selectors).toHaveCount(0);
+  await expect(section.getByTestId("environment-prepared-scope")).toHaveText("Installed with pnpm install --frozen-lockfile: the whole project.");
+  await section.getByTestId("environment-preview").click();
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: the whole project.");
+  await expect(section.getByTestId("environment-install")).toHaveText("Then, in the sandbox: pnpm install --frozen-lockfile");
+  await expect(prepare).toBeEnabled();
+  expect(resolved().at(-1)?.choices).toEqual({ runtime: "22.23.4" });
+
+  // Choosing packages clears the preview shown: nothing can be prepared until the choice is previewed.
+  await section.getByTestId("environment-scope-selected").check();
+  await expect(section.getByTestId("environment-scope")).toHaveAttribute("data-kind", "selected");
+  await expect(section.getByTestId("environment-preview-panel")).toHaveCount(0);
+  await expect(prepare).toBeDisabled();
+  await expect(section.getByTestId("environment-preview")).toHaveText("Preview this choice");
+  await expect(section.getByTestId("environment-scope-changed")).toHaveText("This choice isn't previewed yet. Preview it to see what it installs, then prepare.");
+  await expect(section.getByTestId("environment-scope-hint")).toHaveText("Type a selector here, such as @scope/app..., or remove this row.");
+
+  // A selector the domain's rule doesn't take is sent as typed and refused in the host's words, before the engine sees
+  // it; the hint says why, the selector stays as typed, and Prepare stays off.
+  const asked = resolved().length;
+  await selectors.first().fill("web app");
+  await expect(section.getByTestId("environment-scope-hint")).toHaveText("A selector holds only letters, digits and @ . _ / ^ ~ * ! -. Take the space out of it.");
+  await section.getByTestId("environment-preview").click();
+  await expect(section.getByTestId("environment-action-error")).toHaveText("Those choices can't be sent as they are: a version is exact, such as 24.21.0, and an option is one the preview offers. Preview the environment again.");
+  await expect(selectors.first()).toHaveValue("web app");
+  await expect(section.getByTestId("environment-scope-selected")).toBeChecked();
+  await expect(prepare).toBeDisabled();
+  expect(resolved().length).toBe(asked);
+
+  // Typed again: the refusal goes, and the packages are previewed with one --filter each, as the preview's recipe says.
+  // The engine is given the selectors as typed.
+  await selectors.first().fill("@mono/data...");
+  await expect(section.getByTestId("environment-action-error")).toHaveCount(0);
+  await expect(section.getByTestId("environment-scope-hint")).toHaveCount(0);
+  await section.getByTestId("environment-scope-add").click();
+  await selectors.nth(1).fill("./packages/web");
+  await section.getByTestId("environment-preview").click();
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: only the workspace packages that @mono/data... and ./packages/web select.");
+  await expect(section.getByTestId("environment-install")).toHaveText("Then, in the sandbox: pnpm install --frozen-lockfile --filter @mono/data... --filter ./packages/web");
+  await expect(prepare).toBeEnabled();
+  expect(resolved().at(-1)?.choices).toEqual({ runtime: "22.23.4", scope: CHOSEN });
+
+  // A start bound to the whole project's preview is refused, and nothing is started.
+  const projectId = await page.evaluate(async () => (await window.nivra.listProjects())[0]!.id);
+  const before = starts();
+  const refused = await page.evaluate(async ({ id, scope }) => {
+    const whole = await window.nivra.resolveEnvironment(id, { runtime: "22.23.4" });
+    if (whole.status !== "ready") return `the whole project's preview is ${whole.status}`;
+    return window.nivra.prepareEnvironment(id, { runtime: "22.23.4", scope }, whole.fingerprint).then(() => "started", (error: unknown) => String(error));
+  }, { id: projectId, scope: CHOSEN });
+  expect(refused).toContain("What preparing this environment would send has changed since you previewed it. Check the new preview, then prepare it again.");
+  expect(starts()).toBe(before);
+
+  // Another selector clears the preview again, and typing the previewed one back doesn't bring it back: only a new
+  // preview turns Prepare on.
+  await selectors.nth(1).fill("./packages/api");
+  await expect(section.getByTestId("environment-preview-panel")).toHaveCount(0);
+  await expect(prepare).toBeDisabled();
+  await selectors.nth(1).fill("./packages/web");
+  await expect(prepare).toBeDisabled();
+  await section.getByTestId("environment-preview").click();
+  await expect(prepare).toBeEnabled();
+
+  // An engine that would install the whole project instead is never prepared from: the window says so.
+  writeFileSync(join(home(), "env-ignores-scope"), "");
+  await section.getByTestId("environment-preview").click();
+  await expect(section.getByTestId("environment-scope-mismatch")).toHaveText(
+    "This preview doesn't install what you chose: it installs the whole project, not only the workspace packages that @mono/data... and ./packages/web select. Nivra won't prepare it. Preview again, and if it still differs, report it.",
+  );
+  await expect(prepare).toBeDisabled();
+  rmSync(join(home(), "env-ignores-scope"));
+  await section.getByTestId("environment-preview").click();
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveAttribute("data-selectors", "@mono/data... ./packages/web");
+  await expect(section.getByTestId("environment-scope-mismatch")).toHaveCount(0);
+  await expect(prepare).toBeEnabled();
+
+  // Prepared with the packages chosen: the preparation is started with them, and the environment's recipe records them,
+  // with the same filters.
+  await prepare.click();
+  await expect(section.getByTestId("environment-prepared-scope")).toHaveText(
+    "Installed with pnpm install --frozen-lockfile --filter @mono/data... --filter ./packages/web: only the workspace packages that @mono/data... and ./packages/web select.",
+    { timeout: 30_000 },
+  );
+  await expect(section.getByTestId("environment-preparation")).toContainText("with your choices: Node 22.23.4, installing @mono/data... and ./packages/web");
+  const sent = JSON.parse(lines("environments.log").at(-1)!.split(" ").slice(1).join(" ")) as { context: { choices: unknown } };
+  expect(sent.context.choices).toEqual({ runtime: "22.23.4", scope: CHOSEN });
+  const view = await page.evaluate((id) => window.nivra.getEnvironment(id), projectId);
+  expect([view.prepared?.recipe.scope, view.prepared?.recipe.install.args, view.choices?.scope]).toEqual([CHOSEN, ["install", "--frozen-lockfile", "--filter", "@mono/data...", "--filter", "./packages/web"], CHOSEN]);
+
+  // The whole project again: the selectors are put away, kept for later, and nothing is prepared until it is previewed.
+  await section.getByTestId("environment-scope-whole").check();
+  await expect(selectors).toHaveCount(0);
+  await expect(prepare).toBeDisabled();
+  await section.getByTestId("environment-scope-selected").check();
+  await expect(selectors).toHaveCount(2);
+  await expect(selectors.nth(1)).toHaveValue("./packages/web");
 });
