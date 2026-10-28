@@ -487,7 +487,7 @@ function RunPreview({ preview, busy, error, onAllow, onStart, onCancel }: { prev
       {snapshot && (
         <Text size="sm" data-testid="task-run-preview-environment">
           {preview.environment
-            ? `Starts from the prepared environment: Node ${preview.environment.node}, pnpm ${preview.environment.pnpm}, prepared ${new Date(preview.environment.preparedAt).toLocaleString()}. Nivra checked that this commit's manifests and lockfile are the ones it was prepared from.`
+            ? `Starts from the prepared environment: ${preview.environment.tools.map((tool) => `${tool.name} ${tool.version}`).join(", ")}, prepared ${new Date(preview.environment.preparedAt).toLocaleString()}. Nivra checked that this commit's setup files are the ones it was prepared from.`
             : "Starts from Nivra's own base image, with nothing installed."}
         </Text>
       )}

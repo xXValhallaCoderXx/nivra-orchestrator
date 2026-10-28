@@ -4,7 +4,7 @@
 // its own bridge, called with string expressions: scripts are compiled without the DOM's types. Nothing here presses
 // Prepare or Start more than once, and nothing reads a key field.
 import { expect, type ElectronApplication, type Page } from "@playwright/test";
-import type { EnvironmentPreview, EnvironmentSpec } from "@nivra/domain";
+import type { EnvironmentChoices, EnvironmentPreviewV2 } from "@nivra/domain";
 import type { BriefFields, EnvironmentView, ProjectView, SettingsView, TaskAttemptView, TaskView } from "../src/shared/ipc.ts";
 
 const arg = (value: unknown) => JSON.stringify(value);
@@ -30,21 +30,25 @@ export async function keysSaved(page: Page, timeoutMs: number): Promise<void> {
     .toBe(true);
 }
 
-/** The environment section's preview for the packages chosen, as the window shows it; its fingerprint from the host. */
-export async function previewEnvironment(page: Page, projectId: string, spec: EnvironmentSpec): Promise<Extract<EnvironmentPreview, { status: "ready" }>> {
+/**
+ * The environment section's preview of the project's own recipe (NIV-55), as the window shows it, with these choices
+ * made in it: a Node version the project leaves to the person, and npm's install options. Its fingerprint from the host.
+ */
+export async function previewEnvironment(page: Page, projectId: string, choices: EnvironmentChoices = {}): Promise<Extract<EnvironmentPreviewV2, { status: "ready" }>> {
   const section = page.getByTestId("environment");
   await section.getByTestId("environment-preview").click();
-  if (spec.filters.length) {
-    await section.getByTestId("environment-chosen").check();
-    for (const filter of spec.filters) {
-      const name = filter.replace(/\.\.\.$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      await section.getByRole("checkbox", { name: new RegExp(`^${name} \\(`) }).check();
-    }
+  const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (choices.runtime) {
+    await section.getByTestId("environment-choice-runtime").getByRole("radio", { name: new RegExp(`^Node ${escaped(choices.runtime)}`) }).check();
     await section.getByTestId("environment-preview").click();
   }
-  await expect(section.getByTestId("environment-sends")).toContainText(`pnpm install --frozen-lockfile${spec.filters.map((filter) => ` --filter ${filter}`).join("")}`);
-  const shown = await call<EnvironmentPreview>(page, `window.nivra.previewEnvironment(${arg(projectId)}, ${arg(spec)})`);
-  if (shown.status !== "ready") throw new Error(`The environment's preview was refused (${shown.code}): ${shown.message}`);
+  const options = Object.entries(choices.options ?? {}).filter(([, on]) => on === true);
+  for (const [name] of options) await section.getByRole("checkbox", { name: new RegExp(`^${escaped(name)}:`) }).check();
+  if (options.length) await section.getByTestId("environment-preview").click();
+  const shown = await call<EnvironmentPreviewV2>(page, `window.nivra.resolveEnvironment(${arg(projectId)}, ${arg(choices)})`);
+  if (shown.status === "refused") throw new Error(`The environment's preview was refused (${shown.code}): ${shown.message}`);
+  if (shown.status === "needs-choice") throw new Error(`The environment's preview needs a choice: ${shown.choices.map((choice) => choice.message).join(" ")}`);
+  await expect(section.getByTestId("environment-install")).toContainText([shown.recipe.install.tool, ...shown.recipe.install.args].join(" "));
   return shown;
 }
 
