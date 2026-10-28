@@ -69,6 +69,8 @@ function workspace(): WorkspaceDb {
 
 const SUPER = "nvidia/nemotron-3-super-120b-a12b";
 const LIGHTNING = "nvidia/Nemotron-3_5-Lightning";
+/** A model the price lists here don't have, as Track A's switch makes the task model before price list v2. */
+const UNLISTED = "nvidia/Nemotron-3.5-Super-VL";
 const PROJECT = randomUUID();
 const OCT = Date.parse("2026-10-28T01:00:00Z");
 const NOV = Date.parse("2026-11-02T01:00:00Z");
@@ -209,12 +211,34 @@ describe("writing grants", () => {
     assert.equal(summary(db).reservedMicros, GRANT_TOTAL);
   });
 
-  it("refuses a model with no price, names it, and writes nothing", () => {
+  it("with the budget off, admits a call to a model the price list doesn't have: written, counted and unpriced, its money unknown, never 0", () => {
     const db = workspace();
-    const refused = refusal(db, { models: ["nvidia/some-other-model"] });
-    assert.equal(refused.code, "no-price");
-    assert.match(refused.message, /nvidia\/some-other-model/);
-    assert.equal(ledgerState(db), null);
+    const grant = granted(db, { models: [UNLISTED] });
+    assert.deepEqual([grant.productiveMicros, grant.finalisationMicros, grant.rates.length], [null, null, 0]);
+    const usage = { inputTokens: 10_000, cachedInputTokens: 0, outputTokens: 1_000 };
+    assert.ok("state" in sent(db, grant.id, [row(grant.id, 1, { model: UNLISTED, boundMicros: null, amountMicros: null, usage })]));
+    const totals = summary(db);
+    assert.deepEqual([totals.settledMicros, totals.unknownMicros, totals.reservedMicros], [null, null, null], "money unknown, not 0");
+    assert.deepEqual([totals.usage?.requests, totals.usage?.inputTokens, totals.usage?.outputTokens], [1, 10_000, 1_000], "requests and tokens recorded");
+    assert.ok(totals.gaps.includes("unpriced-usage"));
+    // One model the list doesn't have leaves the whole grant unpriced, even beside one it has.
+    assert.equal(granted(db, { models: [SUPER, UNLISTED] }).productiveMicros, null);
+    // Turned off by the person after a dollar budget, the same.
+    setPolicy(db, DRAFT, OCT, ESTABLISHED);
+    setPolicy(db, null, OCT, ESTABLISHED);
+    assert.equal(granted(db, { models: [UNLISTED] }).productiveMicros, null);
+  });
+
+  it("under a dollar budget, refuses a model the price list doesn't have, by name, says what to do, and writes nothing", () => {
+    const db = workspace();
+    setPolicy(db, DRAFT, OCT, ESTABLISHED);
+    const before = ledgerState(db);
+    for (const models of [[UNLISTED], [SUPER, UNLISTED]]) {
+      const refused = refusal(db, { models });
+      assert.equal(refused.code, "no-price");
+      assert.match(refused.message, /no price for nvidia\/Nemotron-3\.5-Super-VL, so it can't keep this call within your budget\. Turn the monthly budget off/);
+    }
+    assert.deepEqual(ledgerState(db), before);
   });
 
   it("refuses every model under a money policy until its bounds and the list's currency are established, and says how to go on", () => {
@@ -573,6 +597,7 @@ describe("a history started again after a loss", () => {
     assert.equal(refusal(db, { models: [], allowances: { sandboxOperations: 1, sandboxSeconds: 0, researchCredits: 0 } }).code, "history-wait");
     startNewHistory(db, { recovery: lost(db), remaining: left(GRANT_TOTAL), now: OCT, timezone: "UTC" });
     assert.equal(refusal(db, {}, OCT, TOKEN_FACTORY_PRICES).code, "unestablished");
+    assert.equal(refusal(db, { models: [UNLISTED] }).code, "unestablished", "money the person set after a loss holds an unlisted model too");
     granted(db);
     assert.equal(refusal(db).code, "pool");
   });

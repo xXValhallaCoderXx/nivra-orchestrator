@@ -114,6 +114,9 @@ export const BUDGET_UNVERIFIED =
   "Nivra's budget history doesn't match what its guard last checked, so nothing was granted, sent or released. Open Nivra again to check it.";
 const UNESTABLISHED =
   "Your monthly budget is in dollars, but Nivra hasn't yet established this model's price limits, or its price list's currency, so it can't keep this call within your budget. Turn the monthly budget off to use today's fixed allowances, or wait until Nivra has established them.";
+/** Said under a money policy for a call to a model the price list doesn't have. */
+const noPrice = (models: readonly string[]) =>
+  `Your monthly budget is in dollars, but Nivra's price list has no price for ${listed(models)}, so it can't keep this call within your budget. Turn the monthly budget off to use today's fixed allowances, or wait for a price list that includes it.`;
 const UNPRICED_SPEND = `This month holds spend Nivra couldn't price, from before your monthly budget could count it, so it can't tell how much of your budget is left. Turn the monthly budget off to use today's fixed allowances, or ${CONFIRM_NEXT}.`;
 
 /** The ledger's id, authority revision and chained digest, or null before its first change. */
@@ -598,10 +601,11 @@ function boundAcross(rates: readonly ModelRate[], outputTokens: number): number 
 
 /**
  * Writes a grant for one spendable call, before anything is sent, or refuses it. A call that reaches a model is priced
- * only when every model it may use has its bounds established, and the price list its currency; one that reaches none
- * costs no money here, and its counted services are held. A history lost this month binds in every mode. Under a money
- * policy the grant must also be priced, and fit the pool, every sublimit that applies, and the counted services.
- * Without one nothing else limits it, but it is still written, priced where it can be, and counted. An extension
+ * only when every model it may use is on the price list with its bounds established, and the list has its currency;
+ * one that reaches none costs no money here, and its counted services are held. A history lost this month binds in
+ * every mode. Under a money policy the grant must also be priced, and fit the pool, every sublimit that applies, and the
+ * counted services, and a model the price list doesn't have is refused by name. Without one nothing else limits it, a
+ * model the list doesn't have included, but it is still written, priced where it can be, and counted. An extension
  * answers one need once: asked again with the same request, the same grant comes back; with another, it is refused.
  * `verified` is the ledger state the guard last verified; a ledger that no longer holds it throws BUDGET_UNVERIFIED.
  */
@@ -630,14 +634,18 @@ export function writeGrant(
     const policy = currentPolicyIn(db);
     registerCatalogueIn(db, context.catalogue, at);
     const rates: ModelRate[] = [];
+    const unlisted: string[] = [];
     for (const model of asked.models) {
       const rate = rateFor(context.catalogue, model);
-      if (!rate) return { refused: { code: "no-price" as const, message: `Nivra has no price for ${model}, so it can't count it against your budget. Choose a model on Nivra's price list.` } };
-      rates.push(rate);
+      if (rate) rates.push(rate);
+      else unlisted.push(model);
     }
+    // A model the price list doesn't have can't be held to money: under a money policy (every policy, for now) it is
+    // refused; with the budget off it is admitted, counted and unpriced, its money unknown, never 0 (Nate's choice (b)).
+    if (unlisted.length > 0 && policy) return { refused: { code: "no-price" as const, message: noPrice(unlisted) } };
     const established = context.catalogue.currency !== null;
-    const productiveBound = asked.models.length === 0 ? 0 : boundAcross(rates, asked.productive.outputTokens);
-    const finalisationBound = asked.models.length === 0 ? 0 : boundAcross(rates, asked.finalisation.outputTokens);
+    const productiveBound = asked.models.length === 0 ? 0 : unlisted.length > 0 ? null : boundAcross(rates, asked.productive.outputTokens);
+    const finalisationBound = asked.models.length === 0 ? 0 : unlisted.length > 0 ? null : boundAcross(rates, asked.finalisation.outputTokens);
     const priced = asked.models.length === 0 || (established && productiveBound !== null && finalisationBound !== null);
     const productiveMicros = priced ? asked.productive.requests * productiveBound! : null;
     const finalisationMicros = priced ? asked.finalisation.requests * finalisationBound! : null;
