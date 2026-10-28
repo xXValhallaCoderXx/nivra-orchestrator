@@ -8,6 +8,7 @@ import { environmentRowOf, readinessOf, type ReadinessAction } from "../../../sh
 import { environmentStepOf, latestHolds, stripItemsOf, type StripItem } from "../../../shared/task-strip";
 import { decisionLead, outcomeLookOf } from "../../../shared/task-verdict";
 import { errorMessage, Section, usePoll } from "../shared/ui";
+import { DraftNotice, useDraft } from "../shell/drafts";
 import { EngineNotices } from "./engine";
 import { KeyPrompt } from "./key-prompt";
 import { useNarrow } from "./narrow";
@@ -439,6 +440,7 @@ export function NewTask({
   onCreated,
   onCancel,
   renderStrip,
+  draftKey = null,
 }: {
   projects: ProjectView[];
   plan: PlanView | null;
@@ -449,6 +451,8 @@ export function NewTask({
   onCancel(): void;
   /** The shell's progress strip, from the brief's own steps; none until the shell passes it. */
   renderStrip?(items: StripItem[]): ReactNode;
+  /** Where the shell keeps the form's draft (NIV-56): restored when the form opens again, gone once saved or cancelled. */
+  draftKey?: string | null;
 }) {
   const planProject = plan?.projectId ? (projects.find((p) => p.id === plan.projectId) ?? null) : null;
   const [title, setTitle] = useState(initialTitle);
@@ -463,6 +467,22 @@ export function NewTask({
   const [draft, setDraft] = useState<Draft>(plan ? { ...EMPTY, context: plan.text, assumptions: plan.assumptions.join("\n") } : EMPTY);
   const [busy, setBusy] = useState<"draft" | "ready" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The shell's draft of the form, written on every edit. It is restored once, never over what was typed, when the form
+  // opens bare (New task, or the draft's own link); a form opened with a title from the Home composer starts from that.
+  const kept = useDraft<{ title: string; repository: string; draft: Draft }>(draftKey ?? "new-task:none");
+  useEffect(() => {
+    const restored = kept.restore;
+    if (!draftKey || !restored || initialTitle !== "") return;
+    setTitle(restored.title);
+    setRepository(projects.some((p) => p.id === restored.repository) ? restored.repository : NONE);
+    setDraft({ ...EMPTY, ...restored.draft });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kept.restore]);
+  const remember = (edit: Partial<{ title: string; repository: string; draft: Draft }>) => {
+    if (!draftKey) return;
+    const next = { title, repository, draft, ...edit };
+    kept.change(next, next.title.trim() || "New task");
+  };
   const chosen = repository === NONE ? null : repository;
   const leavesPlan = plan !== null && plan.projectId !== null && chosen !== plan.projectId;
   const project = chosen ? (projects.find((p) => p.id === chosen) ?? null) : null;
@@ -482,6 +502,7 @@ export function NewTask({
       setBusy(null);
       return;
     }
+    if (draftKey) kept.discard();
     if (ready) {
       try {
         task = await window.nivra.setTaskState(task.summary.id, task.revision, "ready");
@@ -511,13 +532,24 @@ export function NewTask({
           <Stack gap="md">
             <Paper withBorder p="md" radius="md">
               <Stack gap="sm">
-                <TextInput label="Title" value={title} onChange={(event) => setTitle(event.currentTarget.value)} data-testid="task-form-title" />
+                <TextInput
+                  label="Title"
+                  value={title}
+                  onChange={(event) => {
+                    setTitle(event.currentTarget.value);
+                    remember({ title: event.currentTarget.value });
+                  }}
+                  data-testid="task-form-title"
+                />
                 <Select
                   label="Repository"
                   description="Where the task's work will run. You can choose it later."
                   data={repositoryChoices(projects)}
                   value={repository}
-                  onChange={(value) => setRepository(value ?? NONE)}
+                  onChange={(value) => {
+                    setRepository(value ?? NONE);
+                    remember({ repository: value ?? NONE });
+                  }}
                   allowDeselect={false}
                   data-testid="task-form-repository"
                 />
@@ -531,7 +563,14 @@ export function NewTask({
                 )}
               </Stack>
             </Paper>
-            <BriefInputs draft={draft} onChange={setDraft} />
+            <BriefInputs
+              draft={draft}
+              onChange={(next) => {
+                setDraft(next);
+                remember({ draft: next });
+              }}
+            />
+            <DraftNotice result={kept.result} />
             {error && (
               <Text size="sm" c="var(--nivra-error)" data-testid="task-form-error">
                 {error}
@@ -542,7 +581,14 @@ export function NewTask({
                 Mark ready saves the brief as v1 and marks the task ready: it needs a goal and at least one acceptance criterion. Nothing is sent while you write.
               </Text>
               <Group gap="sm" wrap="nowrap">
-                <Button variant="subtle" onClick={onCancel} disabled={busy !== null}>
+                <Button
+                  variant="subtle"
+                  onClick={() => {
+                    if (draftKey) kept.discard();
+                    onCancel();
+                  }}
+                  disabled={busy !== null}
+                >
                   Cancel
                 </Button>
                 <Button variant="default" onClick={() => void create(false)} loading={busy === "draft"} disabled={busy === "ready"} data-testid="task-form-create">
@@ -659,6 +705,20 @@ export function TaskDetail({
   // Narrow (NW3): the decision follows the result, and a bar keeps Approve in view; its press opens the same confirmation.
   const narrow = useNarrow();
   const [confirmAsked, setConfirmAsked] = useState(0);
+  // The brief editor's draft (NIV-56), by task and brief version: when the page opens again with one, the editor opens
+  // with it (never over another edit or typed text), and it goes once the edit is saved or cancelled.
+  const briefVersion = task.value?.brief.version ?? null;
+  const briefDraft = useDraft<Draft>(`brief:${taskId}:${briefVersion ?? "unread"}`);
+  useEffect(() => {
+    const view = task.value;
+    if (!briefDraft.restore || !view || editing !== null || view.summary.state === "completed") return;
+    setDraft({ ...EMPTY, ...briefDraft.restore });
+    setBase({ revision: view.revision, version: view.brief.version });
+    setConflict(false);
+    setError(null);
+    setEditing("brief");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [briefDraft.restore, briefVersion]);
 
   const view = task.value;
   if (!view) {
@@ -707,7 +767,7 @@ export function TaskDetail({
   }
 
   function editBrief() {
-    setDraft(draftOf(brief.content));
+    setDraft(briefDraft.restore ? { ...EMPTY, ...briefDraft.restore } : draftOf(brief.content));
     startEdit("brief");
   }
 
@@ -994,12 +1054,37 @@ export function TaskDetail({
                     Saving makes v{(base?.version ?? brief.version) + 1}. v{base?.version ?? brief.version} stays as it was.
                   </Text>
                 </Group>
-                <BriefInputs draft={draft} onChange={setDraft} reveal={focus?.field ?? null} />
+                <BriefInputs
+                  draft={draft}
+                  onChange={(next) => {
+                    setDraft(next);
+                    briefDraft.change(next, `${summary.title}, brief v${brief.version}`);
+                  }}
+                  reveal={focus?.field ?? null}
+                />
+                <DraftNotice result={briefDraft.result} />
                 <Group justify="flex-end" gap="sm">
-                  <Button variant="default" onClick={stopEdit} disabled={busy} data-testid="task-brief-cancel">
+                  <Button
+                    variant="default"
+                    onClick={() => {
+                      briefDraft.discard();
+                      stopEdit();
+                    }}
+                    disabled={busy}
+                    data-testid="task-brief-cancel"
+                  >
                     Cancel
                   </Button>
-                  <Button onClick={() => void saveEdit((from) => window.nivra.reviseBrief(taskId, from, fieldsOf(draft)))} loading={busy} data-testid="task-brief-save">
+                  <Button
+                    onClick={() =>
+                      void saveEdit(async (from) => {
+                        await window.nivra.reviseBrief(taskId, from, fieldsOf(draft));
+                        briefDraft.discard();
+                      })
+                    }
+                    loading={busy}
+                    data-testid="task-brief-save"
+                  >
                     Save as v{(base?.version ?? brief.version) + 1}
                   </Button>
                 </Group>

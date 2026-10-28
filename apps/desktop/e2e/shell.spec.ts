@@ -192,6 +192,63 @@ test("while a key is being saved no draft is listed, and once the save settles, 
   await expect(page.getByTestId("nav-draft")).toHaveCount(0);
 });
 
+test("New task from a project's Home opens on its repository with the strip; its draft comes back from the sidebar after navigation and a relaunch, and a credential in it is refused with the text kept", async ({}, testInfo) => {
+  const title = "Export invoices as CSV";
+  const goal = "Invoices can be downloaded as CSV with their totals";
+  await composer().fill(title);
+  await page.getByTestId("home-create-task").click();
+  const form = () => page.getByTestId("new-task");
+  await expect(page.getByTestId("task-form-title")).toHaveValue(title);
+  await expect(page.getByTestId("task-form-repository")).toHaveValue(new RegExp(PROJECT));
+  await expect(form().getByTestId("task-strip")).toBeVisible();
+  await page.getByTestId("brief-goal").fill(goal);
+  // Functions, since a relaunch makes a new page.
+  const kept = () => page.locator('[data-testid="nav-draft"][data-draft-key^="new-task:"]');
+  await expect(kept()).toContainText(title);
+  for (const away of ["navigation", "relaunch"]) {
+    if (away === "navigation") await goTo(page, "home");
+    else await relaunch(testInfo);
+    await kept().click();
+    await expect(page.getByTestId("task-form-title")).toHaveValue(title);
+    await expect(page.getByTestId("brief-goal")).toHaveValue(goal);
+  }
+  await page.getByTestId("brief-goal").fill(`Use ${TOKEN} for the call`);
+  await expect(form().getByTestId("draft-not-kept")).toHaveAttribute("data-reason", "credential");
+  await expect(page.getByTestId("brief-goal")).toHaveValue(`Use ${TOKEN} for the call`);
+  await expect(kept()).toHaveCount(0);
+  expect((await stored()).includes(TOKEN)).toBe(false);
+  await page.getByTestId("brief-goal").fill(goal);
+  await expect(kept()).toHaveCount(1);
+});
+
+test("a task page shows the strip at its step, brings the brief editor's draft back after navigation, and opens its project's Environment from readiness", async () => {
+  // The form from the test before, saved as a draft task: its own draft goes.
+  await page.getByTestId("task-form-create").click();
+  const strip = page.getByTestId("page-task").getByTestId("task-strip");
+  await expect(strip).toBeVisible();
+  await expect(strip.locator('[aria-current="step"]')).toHaveCount(1);
+  await expect(page.locator('[data-testid="nav-draft"][data-draft-key^="new-task:"]')).toHaveCount(0);
+
+  await page.getByTestId("task-edit-brief").click();
+  const goal = "Invoices can be downloaded as CSV, totals and all";
+  await page.getByTestId("brief-goal").fill(goal);
+  const brief = page.locator('[data-testid="nav-draft"][data-draft-key^="brief:"]');
+  await expect(brief).toHaveCount(1);
+  await goTo(page, "home");
+  await brief.click();
+  await expect(page.getByTestId("task-brief-editor")).toBeVisible();
+  await expect(page.getByTestId("brief-goal")).toHaveValue(goal);
+  await page.getByTestId("task-brief-cancel").click();
+  await expect(brief).toHaveCount(0);
+
+  await page.getByTestId("task-readiness-environment").click();
+  await expect(page.getByTestId("environment")).toBeVisible();
+  await expect(page.getByTestId("nav-environment")).toHaveAttribute("aria-current", "page");
+  await goTo(page, "home");
+  await composer().fill("");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+});
+
 test("Ctrl+K opens the switcher on the project in view, Esc closes it and leaves the typed text, F6 moves between the sidebar and the page, Ctrl+comma opens Settings", async () => {
   await composer().fill(TITLE);
   await page.getByTestId("main").focus();

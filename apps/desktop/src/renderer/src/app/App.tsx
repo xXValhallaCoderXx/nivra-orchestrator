@@ -13,6 +13,7 @@ import { NewTask, TaskDetail, TasksPage } from "../features/tasks";
 import { usePoll } from "../shared/ui";
 import { browserStorage, DraftsProvider, useDraftList, useDrafts } from "../shell/drafts";
 import { composerDraftKey, newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
+import { TaskStrip } from "../shell/TaskStrip";
 import { Sidebar } from "../shell/Sidebar";
 import { dialogOpen, useShortcuts } from "../shell/keyboard";
 import { NARROW_QUERY, SIDEBAR_WIDTH } from "../shell/layout";
@@ -184,10 +185,7 @@ function Shell() {
     setChosen(next);
     setRoute((current) => routeAfterSwitch(current, next));
   };
-  /**
-   * A project's environment, from a page about one of its tasks: the switcher moves to that project. For the task
-   * page's onOpenEnvironment(projectId) (Next A), wired in TaskDetail once its prop lands.
-   */
+  /** A project's environment, from a page about one of its tasks (TaskDetail's onOpenEnvironment): the switcher moves there. */
   const openEnvironment = (projectId: string) => {
     setNavOpen(false);
     setChosen({ kind: "project", projectId });
@@ -349,11 +347,15 @@ function Shell() {
             {shown.kind === "new-task" && (
               <Box data-testid="page-new-task">
                 <NewTask
-                  // A new form for each plan or draft it starts from.
-                  key={shown.plan?.id ?? shown.draftKey}
+                  // A new form for each plan, draft, project or title it starts from.
+                  key={`${shown.plan?.id ?? shown.draftKey}:${scope.kind === "project" ? scope.projectId : "general"}:${shown.title}`}
                   projects={list}
                   plan={shown.plan}
                   initialTitle={shown.title}
+                  initialProjectId={scope.kind === "project" ? scope.projectId : null}
+                  // A plan's new task keeps no draft: the sidebar couldn't open it again without the plan.
+                  draftKey={shown.plan ? null : shown.draftKey}
+                  renderStrip={(items) => <TaskStrip items={items} />}
                   onCreated={(task) => {
                     // The composer's draft this page came from is a task now.
                     if (composerOrigin) draftStore.discard(composerOrigin);
@@ -373,6 +375,8 @@ function Shell() {
                   onEngineRestarted={() => engines.refresh()}
                   onDeleted={() => navigate({ kind: "tasks" })}
                   onOpenConversation={(id) => navigate({ kind: "conversation", id })}
+                  renderStrip={(items) => <TaskStrip items={items} />}
+                  onOpenEnvironment={openEnvironment}
                 />
               </Box>
             )}
