@@ -631,6 +631,41 @@ describe("an acceptance of missing builds (NIV-55)", () => {
   });
 });
 
+describe("the shared budget's ledger (NIV-66)", () => {
+  it("keeps v8's text as main released it, and moves a v8 file to v9 with every table and row as it was and an empty ledger", () => {
+    // v8's text is pinned too, now that v9 (the budget's ledger) follows it.
+    assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[7]!).digest("hex"), "9132da43975e943b4e416ffac99f6ac1cf738533b2e9fe95458d03c22b5e8643");
+    const path = join(folder(), "workspace.db");
+    // A v8 file, written as v8 wrote one: its schema alone, then a preparation and its environment.
+    const raw = new DatabaseSync(path);
+    raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+    raw.exec("BEGIN IMMEDIATE");
+    for (const migration of WORKSPACE_MIGRATIONS.slice(0, 8)) raw.exec(migration);
+    raw.exec("PRAGMA user_version = 8; COMMIT;");
+    const project = randomUUID();
+    const preparation = randomUUID();
+    raw.prepare("INSERT INTO preparations (id, project_id, session_id, target_id, status, spec_json, preview, report_json, reported_at, created_at, settled_at) VALUES (?, ?, 's', 'local', 'answered', '{\"filters\":[]}', 'x', '{}', ?, ?, ?)").run(preparation, project, AT, AT, AT);
+    raw.prepare("INSERT INTO environments (project_id, spec_json, prepared_json, prepared_by, updated_at) VALUES (?, '{\"filters\":[]}', '{\"image\":\"img-d41\"}', ?, ?)").run(project, preparation, AT);
+    const schema = (db: DatabaseSync) => db.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name").all();
+    const tables = schema(raw).filter((row) => row["type"] === "table" && !String(row["name"]).startsWith("sqlite_")).map((row) => String(row["name"]));
+    const rows = (db: DatabaseSync) => tables.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const before = { schema: schema(raw), rows: rows(raw) };
+    raw.close();
+
+    const migrated = ready(path);
+    // On to the latest: v9, which adds the budget's tables and nothing else.
+    assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
+    const db = migrated.db.db;
+    const kept = new Set(before.schema.map((row) => String(row["name"])));
+    assert.deepEqual(schema(db).filter((row) => kept.has(String(row["name"]))), before.schema);
+    const added = [...new Set(schema(db).filter((row) => !kept.has(String(row["name"]))).map((row) => String(row["tbl_name"])))];
+    assert.deepEqual(added.filter((table) => !table.startsWith("budget_") && table !== "price_catalogues"), []);
+    assert.ok(added.length >= 8, added.join(", "));
+    assert.deepEqual(rows(db), before.rows);
+    assert.deepEqual(added.map((table) => Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"])), added.map(() => 0));
+  });
+});
+
 describe("a project's environment (D41)", () => {
   it("keeps the released v3 and v4 schemas as they were, and moves a v4 file to v5 with every row as it was and no environment yet", () => {
     // v3's and v4's text are pinned too, now that v5 follows them.

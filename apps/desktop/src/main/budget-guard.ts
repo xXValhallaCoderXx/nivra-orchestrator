@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync, fsyncSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
-import { BudgetRecovery, type BudgetRecoveryReason } from "@nivra/domain";
+import { BudgetMonthLabel, BudgetRecovery, type BudgetRecoveryReason } from "@nivra/domain";
 import { z } from "zod";
 import type { LedgerState } from "./budget-store.ts";
 
@@ -11,6 +11,10 @@ import type { LedgerState } from "./budget-store.ts";
  * workspace is later replaced, damaged and kept aside, put back from a backup (even one holding the same number of
  * grants), or changed along another history, the next start finds a ledger missing, another, behind its guard or
  * diverged from it, and spending stops until the person resolves it.
+ *
+ * Each record also keeps the latest budget month the ledger had established, never earlier than the record before it,
+ * whatever the computer's clock says. Spend reaches a month only after a record naming it, so a history started again
+ * after a loss holds its restriction through every month the lost one could have spent in.
  *
  * Each record is one line: its JSON, a tab, and the JSON's SHA-256. A last line cut short by a crash fails its check
  * and is ignored; nothing was sent on it, because sending waits for the append to return. Appending to a file that
@@ -23,6 +27,12 @@ export interface GuardRecord {
   revision: number;
   /** The ledger's chained digest at that revision. */
   chain: string;
+  /**
+   * The latest budget month the ledger had established by then (its label; null before its first): taken from the
+   * months it opened, never from the computer's clock, and never earlier than the guard's record before, so it is
+   * carried through a recovery.
+   */
+  month: string | null;
   /** Set while the budget history needs recovery: recorded so that state survives a restart. */
   recovery: BudgetRecovery | null;
   at: string;
@@ -33,6 +43,7 @@ const GuardLine = z.strictObject({
   ledgerId: z.uuid(),
   revision: z.number().int().nonnegative(),
   chain: z.string().regex(/^[0-9a-f]{64}$/),
+  month: BudgetMonthLabel.nullable(),
   recovery: BudgetRecovery.nullable(),
   at: z.iso.datetime(),
 });
@@ -90,7 +101,7 @@ export class BudgetGuard {
         continue;
       }
       const parsed = GuardLine.safeParse(value);
-      if (parsed.success) last = { ledgerId: parsed.data.ledgerId, revision: parsed.data.revision, chain: parsed.data.chain, recovery: parsed.data.recovery, at: parsed.data.at };
+      if (parsed.success) last = { ledgerId: parsed.data.ledgerId, revision: parsed.data.revision, chain: parsed.data.chain, month: parsed.data.month, recovery: parsed.data.recovery, at: parsed.data.at };
     }
     return last;
   }
@@ -100,7 +111,7 @@ export class BudgetGuard {
    * may be sent. A last line left cut short by a crash is ended first, so the new record stands on a line of its own.
    */
   append(record: GuardRecord): void {
-    const json = JSON.stringify({ v: 1, ledgerId: record.ledgerId, revision: record.revision, chain: record.chain, recovery: record.recovery, at: record.at });
+    const json = JSON.stringify({ v: 1, ledgerId: record.ledgerId, revision: record.revision, chain: record.chain, month: record.month, recovery: record.recovery, at: record.at });
     const fd = openSync(this.path, "a+", 0o600);
     let created = false;
     try {
@@ -135,10 +146,12 @@ function syncFolder(folder: string): void {
 }
 
 /**
- * The workspace's ledger as the check sees it: its state; its chained digest at the guard's last revision, if it holds
- * one; and the loss its current history was started for, with the revision it started at, if it began with one.
+ * The workspace's ledger as the check sees it: its state; the latest month it has established (budget-store.ts's
+ * establishedMonth); its chained digest at the guard's last revision, if it holds one; and the loss its current history
+ * was started for, with the revision it started at, if it began with one.
  */
 export interface LedgerView extends LedgerState {
+  month: string | null;
   chainAtGuard: string | null;
   answered: { recovery: BudgetRecovery; revision: number } | null;
 }
@@ -146,6 +159,9 @@ export interface LedgerView extends LedgerState {
 /** Whether two recoveries are the same one: the same reason, found at the same time, against the same guard record. */
 const sameRecovery = (a: BudgetRecovery, b: BudgetRecovery) =>
   a.reason === b.reason && a.detectedAt === b.detectedAt && a.guard.ledgerId === b.guard.ledgerId && a.guard.revision === b.guard.revision && a.guard.chain === b.guard.chain;
+
+/** The later of two months by their labels (zero-padded, so they compare as text), or null when both are. */
+const laterMonth = (a: string | null, b: string | null): string | null => (a === null ? b : b === null || a > b ? a : b);
 
 /** What the start-of-session check found, and the record to append for it, if any. */
 export type HistoryCheck = { state: "fresh" | "ok"; append: GuardRecord | null } | { state: "needs-recovery"; recovery: BudgetRecovery; append: GuardRecord | null };
@@ -165,7 +181,8 @@ export type HistoryCheck = { state: "fresh" | "ok"; append: GuardRecord | null }
  */
 export function checkHistory(guard: GuardRecord | null, ledger: LedgerView | null, keptAside: boolean, now: number): HistoryCheck {
   const at = new Date(now).toISOString();
-  const recordOf = (state: LedgerState): GuardRecord => ({ ledgerId: state.ledgerId, revision: state.revision, chain: state.chain, recovery: null, at });
+  // A record never names an earlier month than the guard's last one: what a lost history established is carried on.
+  const recordOf = (state: LedgerView): GuardRecord => ({ ledgerId: state.ledgerId, revision: state.revision, chain: state.chain, month: laterMonth(state.month, guard?.month ?? null), recovery: null, at });
   if (guard === null) return ledger === null ? { state: "fresh", append: null } : { state: "ok", append: recordOf(ledger) };
   const holds = ledger !== null && ledger.ledgerId === guard.ledgerId && ledger.revision >= guard.revision && ledger.chainAtGuard === guard.chain;
   if (guard.recovery !== null) {
@@ -181,8 +198,8 @@ export function checkHistory(guard: GuardRecord | null, ledger: LedgerView | nul
   const recovery: BudgetRecovery = {
     reason,
     detectedAt: at,
-    guard: { ledgerId: guard.ledgerId, revision: guard.revision, chain: guard.chain, at: guard.at },
+    guard: { ledgerId: guard.ledgerId, revision: guard.revision, chain: guard.chain, month: guard.month, at: guard.at },
     ledger: ledger === null ? null : { ledgerId: ledger.ledgerId, revision: ledger.revision },
   };
-  return { state: "needs-recovery", recovery, append: { ledgerId: guard.ledgerId, revision: guard.revision, chain: guard.chain, recovery, at } };
+  return { state: "needs-recovery", recovery, append: { ledgerId: guard.ledgerId, revision: guard.revision, chain: guard.chain, month: guard.month, recovery, at } };
 }

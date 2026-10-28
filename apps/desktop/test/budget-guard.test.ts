@@ -11,6 +11,7 @@ import {
   chainAt,
   confirmMonth,
   currentPeriod,
+  establishedMonth,
   getGrant,
   ledgerState,
   markDispatching,
@@ -92,13 +93,24 @@ function restore(db: WorkspaceDb, from: string): Extract<WorkspaceOpening, { sta
   return opening(db.path);
 }
 
-const record = (state: LedgerState, recovery: GuardRecord["recovery"] = null): GuardRecord => ({ ledgerId: state.ledgerId, revision: state.revision, chain: state.chain, recovery, at: AT });
+/** The month every record names unless a test says otherwise. */
+const MONTH = "2026-10";
+const record = (state: LedgerState, recovery: GuardRecord["recovery"] = null, month: string | null = MONTH, now = OCT): GuardRecord => ({
+  ledgerId: state.ledgerId,
+  revision: state.revision,
+  chain: state.chain,
+  month,
+  recovery,
+  at: new Date(now).toISOString(),
+});
+/** What the host appends once a change commits: its revision, with the latest month the ledger established, at the computer's time. */
+const recorded = (db: WorkspaceDb, state: LedgerState, now = OCT): GuardRecord => record(state, null, establishedMonth(db), now);
 
 /** The workspace's ledger as the host's check sees it against the guard's last record. */
 function view(db: WorkspaceDb, guard: BudgetGuard): LedgerView | null {
   const ledger = ledgerState(db);
   const last = guard.last();
-  return ledger === null ? null : { ...ledger, chainAtGuard: last === null ? null : chainAt(db, last.ledgerId, last.revision), answered: answeredRecovery(db) };
+  return ledger === null ? null : { ...ledger, month: establishedMonth(db), chainAtGuard: last === null ? null : chainAt(db, last.ledgerId, last.revision), answered: answeredRecovery(db) };
 }
 
 /** What the host does at the first budget call of a session: check, and record what the check says to. */
@@ -127,7 +139,7 @@ function request(): GrantRequest {
 function written(db: WorkspaceDb, guard: BudgetGuard): string {
   const result = writeGrant(db, request(), { now: OCT, catalogue: ESTABLISHED, timezone: "UTC", verified: ledgerState(db) });
   assert.ok("grant" in result && result.authority);
-  guard.append(record(result.authority));
+  guard.append(recorded(db, result.authority));
   return result.grant.id;
 }
 
@@ -135,13 +147,13 @@ function written(db: WorkspaceDb, guard: BudgetGuard): string {
 function dispatched(db: WorkspaceDb, guard: BudgetGuard, id: string): void {
   const authority = markDispatching(db, id, HOME, OCT, ledgerState(db));
   assert.ok(authority);
-  guard.append(record(authority));
+  guard.append(recorded(db, authority));
 }
 
 function settled(db: WorkspaceDb, guard: BudgetGuard, id: string): void {
   const result = recordJournal(db, id, [], { grantId: id, kind: "complete", rows: 0, instanceId: randomUUID(), sealedAt: AT }, OCT);
   assert.ok("state" in result && result.authority);
-  guard.append(record(result.authority));
+  guard.append(recorded(db, result.authority));
 }
 
 const grants = (db: WorkspaceDb) => Number(db.db.prepare("SELECT count(*) AS n FROM budget_grants").get()?.["n"]);
@@ -186,16 +198,16 @@ describe("the guard log", () => {
 
 describe("comparing a ledger with its guard", () => {
   const ledger: LedgerState = { ledgerId: randomUUID(), revision: 5, chain: digest() };
-  const at5 = { ...ledger, chainAtGuard: ledger.chain, answered: null };
+  const at5 = { ...ledger, month: MONTH, chainAtGuard: ledger.chain, answered: null };
 
   it("finds nothing to protect on a fresh install, and rebuilds a missing guard from the ledger", () => {
     assert.deepEqual(checkHistory(null, null, false, OCT), { state: "fresh", append: null });
-    assert.deepEqual(checkHistory(null, { ...ledger, chainAtGuard: null, answered: null }, false, OCT), { state: "ok", append: record(ledger) });
+    assert.deepEqual(checkHistory(null, { ...ledger, month: MONTH, chainAtGuard: null, answered: null }, false, OCT), { state: "ok", append: record(ledger) });
   });
 
   it("lets a guard behind its ledger catch up when the ledger holds the guard's history, with no alarm", () => {
     const earlier = { ledgerId: ledger.ledgerId, revision: 4, chain: digest() };
-    assert.deepEqual(checkHistory(record(earlier), { ...ledger, chainAtGuard: earlier.chain, answered: null }, false, OCT), { state: "ok", append: record(ledger) });
+    assert.deepEqual(checkHistory(record(earlier), { ...ledger, month: MONTH, chainAtGuard: earlier.chain, answered: null }, false, OCT), { state: "ok", append: record(ledger) });
     assert.deepEqual(checkHistory(record(ledger), at5, false, OCT), { state: "ok", append: null });
   });
 
@@ -204,10 +216,10 @@ describe("comparing a ledger with its guard", () => {
     for (const [found, kept, reason] of [
       [null, false, "ledger-missing"],
       [null, true, "workspace-kept-aside"],
-      [{ ledgerId: randomUUID(), revision: 9, chain: digest(), chainAtGuard: null, answered: null }, false, "ledger-replaced"],
-      [{ ...ledger, revision: 4, chainAtGuard: null, answered: null }, false, "ledger-behind"],
-      [{ ...ledger, revision: 7, chain: digest(), chainAtGuard: digest(), answered: null }, false, "ledger-diverged"],
-      [{ ...ledger, chainAtGuard: digest(), answered: null }, false, "ledger-diverged"],
+      [{ ledgerId: randomUUID(), revision: 9, chain: digest(), month: MONTH, chainAtGuard: null, answered: null }, false, "ledger-replaced"],
+      [{ ...ledger, revision: 4, month: MONTH, chainAtGuard: null, answered: null }, false, "ledger-behind"],
+      [{ ...ledger, revision: 7, chain: digest(), month: MONTH, chainAtGuard: digest(), answered: null }, false, "ledger-diverged"],
+      [{ ...ledger, month: MONTH, chainAtGuard: digest(), answered: null }, false, "ledger-diverged"],
     ] as const) {
       const found_ = checkHistory(guard, found, kept, OCT);
       assert.equal(found_.state, "needs-recovery", reason);
@@ -216,22 +228,22 @@ describe("comparing a ledger with its guard", () => {
   });
 
   it("keeps a recorded recovery until the ledger holds the guard's history again, whatever its revision reaches", () => {
-    const found = checkHistory(record(ledger), { ...ledger, revision: 2, chainAtGuard: null, answered: null }, false, OCT);
+    const found = checkHistory(record(ledger), { ...ledger, revision: 2, month: MONTH, chainAtGuard: null, answered: null }, false, OCT);
     assert.ok(found.state === "needs-recovery" && found.append);
     const persisted = found.append;
-    assert.equal(checkHistory(persisted, { ...ledger, revision: 2, chainAtGuard: null, answered: null }, false, OCT).state, "needs-recovery");
+    assert.equal(checkHistory(persisted, { ...ledger, revision: 2, month: MONTH, chainAtGuard: null, answered: null }, false, OCT).state, "needs-recovery");
     assert.equal(checkHistory(persisted, null, false, OCT).state, "needs-recovery");
     // The rolled-back copy, changed until its revision passes the guard's, still doesn't hold the guard's history.
-    assert.equal(checkHistory(persisted, { ...ledger, revision: 9, chain: digest(), chainAtGuard: digest(), answered: null }, false, OCT).state, "needs-recovery");
+    assert.equal(checkHistory(persisted, { ...ledger, revision: 9, chain: digest(), month: MONTH, chainAtGuard: digest(), answered: null }, false, OCT).state, "needs-recovery");
     assert.deepEqual(checkHistory(persisted, at5, false, OCT), { state: "ok", append: record(ledger) });
   });
 
   it("clears a recorded recovery for the new history started for it, unchanged since, and for no other", () => {
-    const found = checkHistory(record(ledger), { ...ledger, revision: 2, chainAtGuard: null, answered: null }, false, OCT);
+    const found = checkHistory(record(ledger), { ...ledger, revision: 2, month: MONTH, chainAtGuard: null, answered: null }, false, OCT);
     assert.ok(found.state === "needs-recovery" && found.append);
     const persisted = found.append;
     const fresh: LedgerState = { ledgerId: randomUUID(), revision: 6, chain: digest() };
-    const started = { ...fresh, chainAtGuard: null, answered: { recovery: found.recovery, revision: 6 } };
+    const started = { ...fresh, month: MONTH, chainAtGuard: null, answered: { recovery: found.recovery, revision: 6 } };
     assert.deepEqual(checkHistory(persisted, started, false, OCT), { state: "ok", append: record(fresh) });
     // Started for another loss, or changed since it started: the recovery stands.
     const other = { ...found.recovery, detectedAt: new Date(OCT + 1).toISOString() };
@@ -272,9 +284,9 @@ describe("a backup put back after paid work, holding the same number of grants",
   it("is caught when it was taken before a policy change", () => {
     const { dbPath, guard, dir } = profile();
     let db = opening(dbPath).db;
-    guard.append(record(setPolicy(db, DRAFT, OCT).authority!));
+    guard.append(recorded(db, setPolicy(db, DRAFT, OCT, ESTABLISHED).authority!));
     backup(db, join(dir, "before-policy.db"));
-    guard.append(record(setPolicy(db, { ...DRAFT, monthlyMicros: 25_000_000 }, OCT).authority!));
+    guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 25_000_000 }, OCT, ESTABLISHED).authority!));
     db = restore(db, join(dir, "before-policy.db")).db;
     assert.equal(grants(db), 0);
     const found = check(db, guard);
@@ -291,7 +303,7 @@ describe("a backup put back after paid work, holding the same number of grants",
     const reached = ledgerState(db)!.revision;
     db = restore(db, join(dir, "after-written.db")).db;
     // Changes made to the restored copy without the check, until it stands past the guard's revision.
-    while (ledgerState(db)!.revision <= reached) setPolicy(db, { ...DRAFT, monthlyMicros: DRAFT.monthlyMicros + ledgerState(db)!.revision }, OCT);
+    while (ledgerState(db)!.revision <= reached) setPolicy(db, { ...DRAFT, monthlyMicros: DRAFT.monthlyMicros + ledgerState(db)!.revision }, OCT, ESTABLISHED);
     const found = check(db, guard);
     assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-diverged");
     assert.equal(getGrant(db, id)?.state, "written");
@@ -305,7 +317,7 @@ describe("crashes around a guard update", () => {
     const id = written(db, guard);
     // The dispatch mark commits; the process dies before its guard record, and so before anything was sent.
     markDispatching(db, id, HOME, OCT, ledgerState(db));
-    assert.deepEqual(checkHistory(guard.last(), view(db, guard), false, OCT), { state: "ok", append: record(ledgerState(db)!) });
+    assert.deepEqual(checkHistory(guard.last(), view(db, guard), false, OCT), { state: "ok", append: recorded(db, ledgerState(db)!) });
   });
 
   it("after the append and before the send: the grant is dispatching, so it is never released or sent again", () => {
@@ -323,10 +335,10 @@ describe("crashes around a guard update", () => {
     const db = opening(dbPath).db;
     const id = written(db, guard);
     const authority = markDispatching(db, id, HOME, OCT, ledgerState(db))!;
-    const line = JSON.stringify({ v: 1, ...record(authority) });
+    const line = JSON.stringify({ v: 1, ...recorded(db, authority) });
     appendFileSync(guard.path, line.slice(0, line.length - 7));
     assert.equal(guard.last()?.revision, authority.revision - 1);
-    assert.deepEqual(checkHistory(guard.last(), view(db, guard), false, OCT), { state: "ok", append: record(authority) });
+    assert.deepEqual(checkHistory(guard.last(), view(db, guard), false, OCT), { state: "ok", append: recorded(db, authority) });
   });
 });
 
@@ -334,7 +346,7 @@ describe("a damaged workspace after spend", () => {
   function spent() {
     const paths = profile();
     const db = opening(paths.dbPath).db;
-    paths.guard.append(record(setPolicy(db, DRAFT, OCT).authority!));
+    paths.guard.append(recorded(db, setPolicy(db, DRAFT, OCT, ESTABLISHED).authority!));
     const id = written(db, paths.guard);
     dispatched(db, paths.guard, id);
     settled(db, paths.guard, id);
@@ -376,7 +388,7 @@ describe("a damaged workspace after spend", () => {
     const authority = startNewHistory(reopened.db, { recovery: found.recovery, remaining: null, now: OCT, timezone: "UTC" });
     assert.ok(authority.revision > found.recovery.guard.revision);
     assert.notEqual(authority.ledgerId, found.recovery.guard.ledgerId);
-    guard.append(record(authority));
+    guard.append(recorded(reopened.db, authority));
     assert.deepEqual(checkHistory(guard.last(), view(reopened.db, guard), false, OCT), { state: "ok", append: null });
     assert.equal(Number(reopened.db.db.prepare("SELECT count(*) AS n FROM budget_adjustments WHERE kind = 'history-lost'").get()?.["n"]), 1);
   });
@@ -398,7 +410,7 @@ describe("a new history after a ledger behind its guard", () => {
     // Before: both grants read written in the restored copy, though one of them was sent.
     assert.deepEqual([getGrant(db, kept)?.state, getGrant(db, sentLater)?.state], ["written", "written"]);
     const authority = startNewHistory(db, { recovery: found.recovery, remaining: { micros: 10_000_000, allowances: DRAFT.allowances }, now: OCT, timezone: "UTC" });
-    guard.append(record(authority));
+    guard.append(recorded(db, authority));
     assert.deepEqual([getGrant(db, kept)?.state, getGrant(db, sentLater)?.state], ["uncertain", "uncertain"]);
     assert.equal(releaseGrant(db, sentLater, OCT, ledgerState(db)), null);
     assert.equal(markDispatching(db, kept, HOME, OCT, ledgerState(db)), null);
@@ -420,21 +432,32 @@ describe("a new history after a ledger behind its guard", () => {
     assert.ok(found.state === "needs-recovery");
     // The new history commits, but its guard record is never written.
     const authority = startNewHistory(db, { recovery: found.recovery, remaining: null, now: OCT, timezone: "UTC" });
-    assert.deepEqual(check(db, guard), { state: "ok", append: record(authority) });
+    assert.deepEqual(check(db, guard), { state: "ok", append: recorded(db, authority) });
     assert.equal(Number(db.db.prepare("SELECT count(*) AS n FROM budget_adjustments").get()?.["n"]), 1);
     assert.equal(check(db, guard).state, "ok");
   });
 });
+
+/** Asks for a grant as the host would, at the computer's time `now`, without recording it. */
+const ask = (db: WorkspaceDb, over: Partial<GrantRequest> = {}, now = NOV) =>
+  writeGrant(db, { ...request(), ...over }, { now, catalogue: ESTABLISHED, timezone: "UTC", verified: ledgerState(db) });
+const operations = (count: number): Partial<GrantRequest> => ({
+  models: [],
+  productive: { requests: 0, outputTokens: 0 },
+  finalisation: { requests: 0, outputTokens: 0 },
+  allowances: { sandboxOperations: count, sandboxSeconds: 0, researchCredits: 0 },
+});
+const code = (result: ReturnType<typeof ask>) => ("refused" in result ? result.refused.code : "granted");
 
 describe("a backup from an older month put back after the real month began", () => {
   /** October's history is backed up; November opens on the provider's clock and is spent in; then October's copy is put back. */
   function restoredFromOctober() {
     const { dbPath, guard, dir } = profile();
     let db = opening(dbPath).db;
-    guard.append(record(setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT).authority!));
+    guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT, ESTABLISHED).authority!));
     const id = written(db, guard);
     backup(db, join(dir, "october.db"));
-    guard.append(record(observeProviderTime(db, NOV, NOV, "UTC").authority!));
+    guard.append(recorded(db, observeProviderTime(db, NOV, NOV, "UTC").authority!));
     dispatched(db, guard, id);
     db = restore(db, join(dir, "october.db")).db;
     const found = check(db, guard);
@@ -442,19 +465,10 @@ describe("a backup from an older month put back after the real month began", () 
     assert.equal(currentPeriod(db)?.label, "2026-10");
     return { db, guard, recovery: found.recovery };
   }
-  const ask = (db: WorkspaceDb, over: Partial<GrantRequest> = {}, now = NOV) =>
-    writeGrant(db, { ...request(), ...over }, { now, catalogue: ESTABLISHED, timezone: "UTC", verified: ledgerState(db) });
-  const operations = (count: number): Partial<GrantRequest> => ({
-    models: [],
-    productive: { requests: 0, outputTokens: 0 },
-    finalisation: { requests: 0, outputTokens: 0 },
-    allowances: { sandboxOperations: count, sandboxSeconds: 0, researchCredits: 0 },
-  });
-  const code = (result: ReturnType<typeof ask>) => ("refused" in result ? result.refused.code : "granted");
 
   it("keeps a wait through November once November is confirmed, for money and Nebius operations alike", () => {
     const { db, guard, recovery } = restoredFromOctober();
-    guard.append(record(startNewHistory(db, { recovery, remaining: null, now: NOV, timezone: "UTC" })));
+    guard.append(recorded(db, startNewHistory(db, { recovery, remaining: null, now: NOV, timezone: "UTC" })));
     assert.equal(check(db, guard).state, "ok");
     assert.deepEqual([code(ask(db)), code(ask(db, operations(1)))], ["history-wait", "history-wait"]);
     assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
@@ -466,12 +480,137 @@ describe("a backup from an older month put back after the real month began", () 
   it("keeps a finite allowance, money and Nebius operations, through November once November is confirmed", () => {
     const { db, guard, recovery } = restoredFromOctober();
     const left = { micros: 100_000, allowances: { sandboxOperations: 2, sandboxSeconds: 0, researchCredits: 0 } };
-    guard.append(record(startNewHistory(db, { recovery, remaining: left, now: NOV, timezone: "UTC" })));
+    guard.append(recorded(db, startNewHistory(db, { recovery, remaining: left, now: NOV, timezone: "UTC" })));
     assert.deepEqual([code(ask(db)), code(ask(db, operations(2)))], ["granted", "granted"]);
     assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
     // What was admitted before November was confirmed still counts against what the person said was left.
     assert.deepEqual([code(ask(db)), code(ask(db, operations(1)))], ["pool", "counted"]);
     assert.ok("opened" in confirmMonth(db, "2026-12", DEC, "UTC"));
     assert.deepEqual([code(ask(db, {}, DEC)), code(ask(db, operations(1), DEC))], ["granted", "granted"]);
+  });
+});
+
+describe("the latest month a lost history established, kept by the guard whatever the computer's clock says", () => {
+  /** After the computer's clock moved back from November. */
+  const OCT_BACK = Date.parse("2026-10-30T09:00:00Z");
+  /** The computer's clock, a few minutes behind the provider's at the month's end. */
+  const OCT_BEHIND = Date.parse("2026-10-31T23:50:00Z");
+  const NOV_FIRST = Date.parse("2026-11-01T00:05:00Z");
+  const NOV_AGAIN = Date.parse("2026-11-05T01:00:00Z");
+  // One grant of request(): 128,000 input and 8,000 output, then the hand-in's 128,000 and 1,500: 45,600 + 39,750.
+  const ONE_GRANT = 85_350;
+  /** What the person can say is left after a loss: wait for the month after, nothing, or one grant and two Nebius operations. */
+  const CHOICES = [
+    { choice: "wait", remaining: null },
+    { choice: "zero", remaining: { micros: 0, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 } } },
+    { choice: "finite", remaining: { micros: ONE_GRANT, allowances: { sandboxOperations: 2, sandboxSeconds: 0, researchCredits: 0 } } },
+  ] as const;
+
+  /** A grant written at the computer's time `now` and marked dispatching, each change recorded in the guard as the host does. */
+  function spentAt(db: WorkspaceDb, guard: BudgetGuard, now: number): void {
+    const result = ask(db, {}, now);
+    assert.ok("grant" in result && result.authority);
+    guard.append(recorded(db, result.authority, now));
+    const authority = markDispatching(db, result.grant.id, HOME, now, ledgerState(db));
+    assert.ok(authority);
+    guard.append(recorded(db, authority, now));
+  }
+
+  /** Puts October's copy back, and the check finds the ledger behind its guard. */
+  function putBack(db: WorkspaceDb, guard: BudgetGuard, copy: string, now: number) {
+    const restored = restore(db, copy).db;
+    const found = checkHistory(guard.last(), view(restored, guard), false, now);
+    if (found.append) guard.append(found.append);
+    assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-behind");
+    assert.equal(currentPeriod(restored)?.label, "2026-10");
+    return { db: restored, recovery: found.recovery };
+  }
+
+  /**
+   * Nate's first case: November opens on the provider's clock and is spent in; the computer's clock moves back to
+   * October, and a policy saved then writes October's time into the guard's last record; October's copy is put back.
+   */
+  function clockMovedBack() {
+    const { dbPath, guard, dir } = profile();
+    const db = opening(dbPath).db;
+    guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT, ESTABLISHED).authority!, OCT));
+    spentAt(db, guard, OCT);
+    backup(db, join(dir, "october.db"));
+    guard.append(recorded(db, observeProviderTime(db, NOV, NOV, "UTC").authority!, NOV));
+    spentAt(db, guard, NOV);
+    guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 20_000_000 }, OCT_BACK, ESTABLISHED).authority!, OCT_BACK));
+    assert.equal(guard.last()?.at.slice(0, 7), "2026-10", "the guard's last record was written at October's time");
+    return { guard, dir, ...putBack(db, guard, join(dir, "october.db"), OCT_BACK), now: OCT_BACK };
+  }
+
+  /**
+   * Nate's second case: the provider's clock opens November while this computer's still says October, November is
+   * spent in with every guard record written at October's time, and October's copy is put back.
+   */
+  function providerAhead() {
+    const { dbPath, guard, dir } = profile();
+    const db = opening(dbPath).db;
+    guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT, ESTABLISHED).authority!, OCT));
+    spentAt(db, guard, OCT);
+    backup(db, join(dir, "october.db"));
+    guard.append(recorded(db, observeProviderTime(db, NOV_FIRST, OCT_BEHIND, "UTC").authority!, OCT_BEHIND));
+    spentAt(db, guard, OCT_BEHIND);
+    assert.deepEqual([currentPeriod(db)?.label, guard.last()?.at.slice(0, 7)], ["2026-11", "2026-10"], "November opened, every record written at October's time");
+    return { guard, dir, ...putBack(db, guard, join(dir, "october.db"), OCT_BEHIND), now: OCT_BEHIND };
+  }
+
+  /**
+   * Starts a new history with what the person chose, then has the provider's clock show November again with this
+   * computer's still in October, and checks that what the person chose still holds there; December frees it.
+   */
+  function holdsThroughNovember(lost: ReturnType<typeof clockMovedBack>, choice: (typeof CHOICES)[number]) {
+    const { db, guard, recovery, now } = lost;
+    guard.append(recorded(db, startNewHistory(db, { recovery, remaining: choice.remaining, now, timezone: "UTC" }), now));
+    assert.equal(check(db, guard).state, "ok");
+    assert.equal(observeProviderTime(db, NOV_AGAIN, now, "UTC").opened?.label, "2026-11", choice.choice);
+    if (choice.choice === "wait") {
+      assert.deepEqual([code(ask(db, {}, now)), code(ask(db, operations(1), now))], ["history-wait", "history-wait"], choice.choice);
+    } else if (choice.choice === "zero") {
+      assert.deepEqual([code(ask(db, {}, now)), code(ask(db, operations(1), now))], ["pool", "counted"], choice.choice);
+    } else {
+      assert.deepEqual([code(ask(db, {}, now)), code(ask(db, {}, now)), code(ask(db, operations(2), now)), code(ask(db, operations(1), now))], ["granted", "pool", "granted", "counted"], choice.choice);
+    }
+    assert.equal(observeProviderTime(db, DEC, now, "UTC").opened?.label, "2026-12", choice.choice);
+    assert.deepEqual([code(ask(db, {}, now)), code(ask(db, operations(1), now))], ["granted", "granted"], choice.choice);
+    // How: the guard kept November, whatever its records' times said, and the loss holds through it.
+    assert.equal(recovery.guard.month, "2026-11", choice.choice);
+  }
+
+  it("holds a wait, zero left, or a finite allowance with Nebius operations through November after the computer's clock moved back", () => {
+    for (const choice of CHOICES) holdsThroughNovember(clockMovedBack(), choice);
+  });
+
+  it("holds a wait, zero left, or a finite allowance with Nebius operations through November when the provider's clock ran ahead of the computer's", () => {
+    for (const choice of CHOICES) holdsThroughNovember(providerAhead(), choice);
+  });
+
+  it("carries November through the recovery: the new history's records keep it, and a second loss holds through it too", () => {
+    const lost = clockMovedBack();
+    const { db, guard, recovery, dir, now } = lost;
+    guard.append(recorded(db, startNewHistory(db, { recovery, remaining: null, now, timezone: "UTC" }), now));
+    guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 30_000_000 }, now, ESTABLISHED).authority!, now));
+    const carried = guard.last();
+    // October's first copy is put back again: it holds neither November nor the first loss. Only the guard remembers.
+    const restored = restore(db, join(dir, "october.db")).db;
+    const found = check(restored, guard);
+    assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-replaced");
+    holdsThroughNovember({ ...lost, db: restored, recovery: found.recovery }, CHOICES[0]);
+    assert.equal(carried?.month, "2026-11", "the new history's records named November while its ledger was in October");
+  });
+
+  it("never records an earlier month than the guard's last, and a recovery it records keeps the guard's month apart from its time", () => {
+    const ledger: LedgerState = { ledgerId: randomUUID(), revision: 5, chain: digest() };
+    const earlier = { ledgerId: ledger.ledgerId, revision: 4, chain: digest() };
+    const caughtUp = checkHistory(record(earlier, null, "2026-11"), { ...ledger, month: "2026-10", chainAtGuard: earlier.chain, answered: null }, false, OCT);
+    assert.equal(caughtUp.append?.month, "2026-11");
+    assert.equal(checkHistory(null, { ...ledger, month: "2026-12", chainAtGuard: null, answered: null }, false, OCT).append?.month, "2026-12");
+    const lostOne = checkHistory(record(ledger, null, "2026-11", OCT_BACK), null, false, NOV);
+    assert.ok(lostOne.state === "needs-recovery");
+    assert.deepEqual([lostOne.recovery.guard.month, lostOne.recovery.guard.at, lostOne.append?.month], ["2026-11", new Date(OCT_BACK).toISOString(), "2026-11"]);
   });
 });

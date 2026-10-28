@@ -105,6 +105,8 @@ const limitDollars = (micros: number) => (Math.floor(micros / 10_000) / 100).toF
 const CONFIRM_NEXT = "wait for next month, and confirm it in your budget when it begins";
 /** A month's label from its index (year * 12 + month - 1). */
 const monthLabel = (index: number) => `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, "0")}`;
+/** A month's index from its label. */
+const monthIndex = (label: string) => Number(label.slice(0, 4)) * 12 + Number(label.slice(5, 7)) - 1;
 /** After a loss: wait for the month after the one the loss holds through, by its label. */
 const waitFor = (loss: Loss) => `wait for ${monthLabel(loss.throughIndex + 1)}, and confirm it in your budget when it begins`;
 /** Thrown when a write that depends on the guard finds a ledger that isn't the one the guard last verified. */
@@ -210,17 +212,43 @@ function currentPolicyIn(db: DatabaseSync): BudgetPolicy | null {
   return json === null ? null : BudgetPolicy.parse(JSON.parse(json));
 }
 
+/** Names in a sentence: "a", "a and b", "a, b and c". */
+const listed = (names: readonly string[]) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);
+
+/**
+ * Why a monthly budget in dollars can't be kept with `catalogue`, in the person's words, or null when it can: the list's
+ * currency must be established, and every model on it must have its bounds established, so that each model call Nivra
+ * makes can be reserved at its most before it is sent. `current` is the policy now in force, which a refusal leaves as
+ * it is: a budget that can't be kept is never saved, and never quietly turned off or into counts alone.
+ */
+export function dollarBudgetRefusal(catalogue: PriceCatalogue, current: BudgetPolicy | null): string | null {
+  const unbounded = catalogue.models.filter((rate) => rate.bounds === null).map((rate) => rate.model);
+  if (catalogue.currency !== null && unbounded.length === 0) return null;
+  const every = unbounded.length === catalogue.models.length;
+  const models = every ? (catalogue.currency === null ? "any model on it" : "any model on its price list") : listed(unbounded);
+  const cost = unbounded.length === 0 ? null : `the most a request can cost with ${models}`;
+  const what = catalogue.currency === null ? `the currency of its price list${cost === null ? "" : `, or ${cost}`}` : cost;
+  const why = `Nivra can't keep a monthly budget in dollars yet: it hasn't established ${what}, so it couldn't keep each call within the budget before sending it.`;
+  return current === null
+    ? `${why} Your monthly budget stays off, with today's fixed allowances. Set a dollar budget once Nivra has established them.`
+    : `${why} Your budget wasn't changed: it stays at ${limitDollars(current.monthlyMicros)} dollars a month. Turn the monthly budget off to use today's fixed allowances, or wait until Nivra has established them.`;
+}
+
 /**
  * Saves the person's choice as the next policy version, or with null a version that turns the monthly budget off. What
  * was spent, reserved or left uncertain stays as it was: a new version changes what is admitted from now on, never the
  * history. The ledger's first month opens with its first policy or grant. Turning off a budget that is already off
- * changes nothing.
+ * changes nothing. A budget in dollars that `catalogue`, the price list new grants are priced with, can't keep is
+ * refused, throwing the person's words (dollarBudgetRefusal), and nothing changes; with the budget off, today's fixed
+ * allowances apply, as the person's own choice.
  */
-export function setPolicy(workspace: WorkspaceDb, draft: BudgetPolicyDraft | null, now: number): { policy: BudgetPolicy | null; authority: LedgerState | null } {
+export function setPolicy(workspace: WorkspaceDb, draft: BudgetPolicyDraft | null, now: number, catalogue: PriceCatalogue): { policy: BudgetPolicy | null; authority: LedgerState | null } {
   const at = iso(now);
   return workspace.tx((db) => {
     const latest = db.prepare("SELECT version, policy_json FROM budget_policies ORDER BY version DESC LIMIT 1").get();
     if (draft === null && (!latest || latest["policy_json"] === null)) return { policy: null, authority: null };
+    const refusal = draft === null ? null : dollarBudgetRefusal(catalogue, currentPolicyIn(db));
+    if (refusal) throw new Error(refusal);
     const version = latest ? num(latest["version"]) + 1 : 1;
     const replaces = latest ? version - 1 : null;
     const policy = draft === null ? null : BudgetPolicy.parse({ ...draft, version, replaces, createdAt: at });
@@ -268,6 +296,20 @@ export function currentPeriod(workspace: WorkspaceDb): BudgetPeriod | null {
 function currentPeriodIn(db: DatabaseSync): BudgetPeriod | null {
   const row = db.prepare("SELECT * FROM budget_periods ORDER BY idx DESC LIMIT 1").get();
   return row ? periodOf(row) : null;
+}
+
+/**
+ * The latest budget month the ledger has established, by its label (null before its first): its latest month, or the
+ * month a lost history it was started again after holds through, when that is later. A month is established only as
+ * the ledger opens it (its first with its first change; later ones on the provider's clock or the person's word) or as
+ * a guard kept it for a lost history: the computer's clock alone never makes one. The host records it in the guard with
+ * every revision, before anything that depends on it is sent, so what a lost history reached outlives it.
+ */
+export function establishedMonth(workspace: WorkspaceDb): string | null {
+  const row = workspace.db
+    .prepare("SELECT max(idx) AS idx FROM (SELECT max(idx) AS idx FROM budget_periods UNION ALL SELECT max(through_idx) FROM budget_adjustments WHERE kind = 'history-lost')")
+    .get();
+  return row?.["idx"] === null || row?.["idx"] === undefined ? null : monthLabel(num(row["idx"]));
 }
 
 function insertPeriod(db: DatabaseSync, month: BudgetMonth, timezone: string, openedBy: PeriodOpenedBy, evidence: object | null, revision: number, at: string): BudgetPeriod {
@@ -874,9 +916,10 @@ export function recordJournal(workspace: WorkspaceDb, id: string, rows: readonly
  * own and the guard's last, so no copy of the lost history can later pass for this one; the loss is recorded with what
  * was lost and what the person said was left, money and counted services (null: wait for the month after); and every
  * grant still open becomes uncertain, since whether it was sent can't be known. The ledger's month stays as it is (a
- * ledger with none opens its first), and the restriction holds through the recovery month: the latest month that the
- * ledger, this computer's clock or the guard's last record shows, so a history put back from an older month can't
- * leave it behind when the real month is confirmed. Spend before the loss is unknown, never zero. The caller records
+ * ledger with none opens its first), and the restriction holds through the latest month the lost history established,
+ * as its guard kept it, or the ledger's month when that is later. Never by the computer's clock, which may have moved
+ * back or run behind the provider's: a history put back from an earlier month can't leave behind a month the lost one
+ * reached, however that month is established again. Spend before the loss is unknown, never zero. The caller records
  * the returned revision in the guard, with the recovery cleared.
  */
 export function startNewHistory(workspace: WorkspaceDb, input: { recovery: BudgetRecovery; remaining: BudgetRemaining | null; now: number; timezone: string }): LedgerState {
@@ -889,8 +932,8 @@ export function startNewHistory(workspace: WorkspaceDb, input: { recovery: Budge
     const current = currentPeriodIn(db);
     const month = monthOf(input.now, input.timezone);
     const periodIdx = current?.index ?? month.index;
-    // The recovery month: the latest the ledger, this computer's clock, or the guard's last record of the lost history shows.
-    const throughIdx = Math.max(periodIdx, month.index, monthOf(Date.parse(input.recovery.guard.at), input.timezone).index);
+    // The recovery month: the latest month the lost history established, as its guard kept it, or the ledger's own.
+    const throughIdx = Math.max(periodIdx, input.recovery.guard.month === null ? periodIdx : monthIndex(input.recovery.guard.month));
     db.prepare("INSERT INTO budget_adjustments (id, kind, ledger_id, period_idx, through_idx, reason, recovery_json, remaining_json, revision, created_at) VALUES (?, 'history-lost', ?, ?, ?, ?, ?, ?, ?, ?)").run(
       randomUUID(),
       ledgerId,

@@ -328,10 +328,11 @@ export const BudgetRecovery = z.strictObject({
   reason: BudgetRecoveryReason,
   detectedAt: z.iso.datetime(),
   /**
-   * What the guard last recorded: the ledger's id, its revision, the chained digest of its history to there, and when
-   * it was recorded, the latest time the lost history is known to have been in use.
+   * What the guard last recorded: the ledger's id, its revision, the chained digest of its history to there, the latest
+   * budget month that history had established (null before its first), and when it was recorded by the computer's
+   * clock. A new history's restriction holds through that month; the time is shown, and never read as a month.
    */
-  guard: z.strictObject({ ledgerId: z.uuid(), revision: count, chain: Sha256Hex, at: z.iso.datetime() }),
+  guard: z.strictObject({ ledgerId: z.uuid(), revision: count, chain: Sha256Hex, month: BudgetMonthLabel.nullable(), at: z.iso.datetime() }),
   /** What the workspace holds now; null when it holds no ledger. */
   ledger: z.strictObject({ ledgerId: z.uuid(), revision: count }).nullable(),
 });

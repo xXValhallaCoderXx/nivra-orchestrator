@@ -4,18 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import { BUDGET_PRESETS, monthOf, NO_SUBLIMITS, type BudgetPolicyDraft } from "@nivra/domain";
+import { BUDGET_PRESETS, CURRENT_PRICES, monthOf, NO_SUBLIMITS, type BudgetPolicyDraft, type PriceCatalogue } from "@nivra/domain";
 import { BUDGET_GUARD_FAILED, BUDGET_GUARD_FAILED_AFTER_SAVE, BUDGET_NEEDS_RECOVERY, BudgetGuard } from "../src/main/budget-guard.ts";
+import { dollarBudgetRefusal } from "../src/main/budget-store.ts";
 import { Host } from "../src/main/host.ts";
 import { HostStore } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
 import type { TargetFactory } from "../src/main/targets/registry.ts";
 
 /**
- * The shared budget through the host (NIV-66): the API the window and the development harness both use. A policy's
- * revision is in the guard before the call answers; a month is confirmed only as it was shown; a damaged history blocks
- * every budget change until the person starts a new one; and a guard that can't be read or written stops spending, a
- * change it couldn't record standing for the next start to catch up with. No budget call starts an engine.
+ * The shared budget through the host (NIV-66): the API the window and the development harness both use. A budget in
+ * dollars is set only with a price list that can keep it (a test list here; today's can't, and says why), and is never
+ * turned off or into counts alone in its place; a policy's revision is in the guard before the call answers; a month is
+ * confirmed only as it was shown; a damaged history blocks every budget change until the person starts a new one; and a
+ * guard that can't be read or written stops spending, a change it couldn't record standing for the next start to catch
+ * up with. No budget call starts an engine.
  */
 
 const ENGINE = fileURLToPath(new URL("../../engine/src/main.mjs", import.meta.url));
@@ -37,14 +40,22 @@ const DRAFT: BudgetPolicyDraft = {
   researchCreditMicros: null,
 };
 
+/** A test price list whose currency and every model's bounds are established, as Nebius's answers would make one. */
+const ESTABLISHED: PriceCatalogue = {
+  ...CURRENT_PRICES,
+  version: "test-established-1",
+  currency: { code: "USD", source: "test" },
+  models: CURRENT_PRICES.models.map((rate) => ({ ...rate, bounds: { inputTokens: 128_000, outputCappedByMaxTokens: true as const, source: "test", establishedOn: "2026-10-28" } })),
+};
+
 function root(): string {
   const dir = mkdtempSync(join(tmpdir(), "nivra host budget ü "));
   dirs.push(dir);
   return dir;
 }
 
-/** A host on the records under `at`; a second one on the same folder is a restart. */
-function hostAt(at: string): Host {
+/** A host on the records under `at`, pricing with `prices`; a second one on the same folder is a restart. */
+function hostAt(at: string, prices: PriceCatalogue = ESTABLISHED): Host {
   const targets: TargetFactory = {
     local: new LocalTarget({ platform: "linux", runtime: { node: process.execPath, entry: ENGINE, runtimeHash: null }, home: join(at, "local home"), extraArgs: [] }),
     discoverWsl: async () => null,
@@ -58,6 +69,7 @@ function hostAt(at: string): Host {
     credentials: async () => ({}),
     platform: "linux",
     log: () => undefined,
+    prices,
   });
   host.init();
   hosts.push(host);
@@ -73,13 +85,38 @@ describe("the budget through the host", () => {
     assert.equal(await host.getBudgetPolicy(), null);
     const summary = await host.setBudgetPolicy(DRAFT);
     assert.deepEqual([summary.policy?.version, summary.poolMicros, summary.recovery], [1, 100_000_000, null]);
-    // Today's price list establishes no currency or bounds, and the summary says so.
-    for (const gap of ["currency-unconfirmed", "bounds-unestablished"] as const) assert.ok(summary.gaps.includes(gap), gap);
-    assert.equal(guardAt(at).last()?.revision, 1);
+    for (const gap of ["currency-unconfirmed", "bounds-unestablished"] as const) assert.ok(!summary.gaps.includes(gap), gap);
+    assert.deepEqual([guardAt(at).last()?.revision, guardAt(at).last()?.month], [1, monthOf(Date.now(), DRAFT.timezone).label]);
     await host.shutdown();
     const restarted = hostAt(at);
     assert.equal((await restarted.getBudgetPolicy())?.monthlyMicros, 100_000_000);
     assert.equal((await restarted.budgetSummary()).recovery, null);
+  });
+
+  it("refuses a budget in dollars that today's price list can't keep, says why, saves nothing, and keeps counts alone as a choice of its own", async () => {
+    const at = root();
+    const host = hostAt(at, CURRENT_PRICES);
+    await assert.rejects(host.setBudgetPolicy(DRAFT), (error: Error) => error.message === dollarBudgetRefusal(CURRENT_PRICES, null));
+    assert.equal(await host.getBudgetPolicy(), null);
+    assert.equal(guardAt(at).last(), null, "nothing was written, so nothing was recorded");
+    const summary = await host.budgetSummary();
+    for (const gap of ["currency-unconfirmed", "bounds-unestablished"] as const) assert.ok(summary.gaps.includes(gap), gap);
+    const off = await host.setBudgetPolicy(null);
+    assert.deepEqual([off.policy, off.poolMicros], [null, null]);
+  });
+
+  it("keeps a budget in dollars as it was when a change to it can't be kept: never turned off or into counts alone", async () => {
+    const at = root();
+    const first = hostAt(at);
+    await first.setBudgetPolicy(DRAFT);
+    await first.shutdown();
+    const before = guardAt(at).last();
+    const today = hostAt(at, CURRENT_PRICES);
+    await assert.rejects(today.setBudgetPolicy({ ...DRAFT, monthlyMicros: 25_000_000 }), /Your budget wasn't changed: it stays at 100\.00 dollars a month\./);
+    assert.deepEqual([(await today.getBudgetPolicy())?.version, (await today.getBudgetPolicy())?.monthlyMicros, guardAt(at).last()?.revision], [1, 100_000_000, before?.revision]);
+    // Turning it off is the person's own choice, and stays open to them.
+    const off = await today.setBudgetPolicy(null);
+    assert.deepEqual([off.policy, guardAt(at).last()?.revision], [null, (before?.revision ?? 0) + 1]);
   });
 
   it("refuses a policy that isn't valid, and saves nothing", async () => {
