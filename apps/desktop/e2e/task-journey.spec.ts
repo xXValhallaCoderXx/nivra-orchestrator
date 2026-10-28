@@ -106,15 +106,18 @@ test.beforeAll(async ({}, testInfo) => {
   guest.images.set("img-imported", imported);
   // The preparation, stood in for: the image's inspect and readiness steps, as an image would answer them, the setup
   // files it was sent, extracted, and node_modules as an install would leave it.
+  const sent: string[] = [];
   guest.intercept = ({ args: given, body }, folder): Behaviour | undefined => {
     // Each ends at its first read, as the engine's own recipe test answers them: a preparation polls every few seconds.
     const done = (stdout: string): Behaviour => ({ ...succeed({ stdout }), statuses: ["SUCCESS"] });
     if (given[1] === INSPECT_SCRIPT) return done("node v24.21.0\nnpm 11.19.0\ncorepack 0.34.0\narch x86_64\nos Alpine Linux v3.22\nlibc musl\n");
-    if (given[1] === READINESS_SCRIPT) return done(`node v24.21.0\nnpm 11.19.0\npnpm 11.5.3\n${["sh", "tar", "find", "sha256sum", "gzip", "sort"].map((tool) => `tool ${tool} ok`).join("\n")}\nsetting verify-deps-before-run false\nsetting pm-on-fail ignore\n`);
+    // Readiness lists the workspace as the step does: the setup files the preparation was sent, and nothing else.
+    if (given[1] === READINESS_SCRIPT) return done(`node v24.21.0\nnpm 11.19.0\npnpm 11.5.3\n${["sh", "tar", "find", "sha256sum", "gzip", "sort"].map((tool) => `tool ${tool} ok`).join("\n")}\nsetting verify-deps-before-run false\nsetting pm-on-fail ignore\n${sent.map((path) => `file ./${path}`).join("\n")}\nlisted\n`);
     if (given[1] !== ENV_PREPARE_SCRIPT) return undefined;
     const reference = (body["files"] as Record<string, { uuid: string }>)["/nivra/env-inputs.tar.gz"]!;
     for (const entry of readTar(new Uint8Array(gunzipSync(guest.service.uploadsById.get(reference.uuid)!)), { maxEntries: 100, maxBytes: 1 << 22, maxEntryBytes: 1 << 22, maxPathBytes: 1024 })) {
       if (entry.kind !== "file") continue;
+      sent.push(entry.path);
       mkdirSync(dirname(join(folder, "workspace", entry.path)), { recursive: true });
       writeFileSync(join(folder, "workspace", entry.path), entry.bytes);
     }

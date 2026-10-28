@@ -3525,7 +3525,8 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     const done = (stdout: string) => ({ ...succeed({ stdout }), statuses: ["SUCCESS" as const] });
     guest.intercept = ({ args, body }, folder) => {
       if (args[1] === INSPECT_SCRIPT) return done("node v24.21.0\nnpm 11.19.0\ncorepack 0.34.0\narch x86_64\nos Alpine Linux v3.22\nlibc musl\n");
-      if (args[1] === READINESS_SCRIPT) return done(`node v24.21.0\nnpm 11.19.0\npnpm 11.5.3\n${["sh", "tar", "find", "sha256sum", "gzip", "sort"].map((tool) => `tool ${tool} ok`).join("\n")}\nsetting verify-deps-before-run false\nsetting pm-on-fail ignore\n`);
+      // Readiness lists the workspace as the step does: the setup files the preparation was sent, and nothing else.
+      if (args[1] === READINESS_SCRIPT) return done(`node v24.21.0\nnpm 11.19.0\npnpm 11.5.3\n${["sh", "tar", "find", "sha256sum", "gzip", "sort"].map((tool) => `tool ${tool} ok`).join("\n")}\nsetting verify-deps-before-run false\nsetting pm-on-fail ignore\n${(received.at(-1) ?? []).map((path) => `file ./${path}`).join("\n")}\nlisted\n`);
       if (args[1] !== ENV_PREPARE_SCRIPT) return undefined;
       const reference = (body["files"] as Record<string, { uuid: string }>)["/nivra/env-inputs.tar.gz"]!;
       const entries = readTar(new Uint8Array(gunzipSync(guest.service.uploadsById.get(reference.uuid)!)), { maxEntries: 100, maxBytes: 1 << 22, maxEntryBytes: 1 << 22, maxPathBytes: 1024 });
