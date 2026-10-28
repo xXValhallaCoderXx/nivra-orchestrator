@@ -22,7 +22,7 @@ the person's approval.
    are never presented as live results.
 5. **The sandbox check's repository:** the public onboarding sample,
    [nivra-sample](https://github.com/xXValhallaCoderXx/nivra-sample) (MIT), at the commit the judges' instructions pin:
-   PENDING-SAMPLE-COMMIT. It runs through the normal app and a real Nebius sandbox, with no special bypass. Nivra's own
+   `bbf62893cb699c6994cca9fa7219b66f87f5a30d`. It runs through the normal app and a real Nebius sandbox, with no special bypass. Nivra's own
    commit can't be checked: the check's credential scan refuses it, because its tests hold fake keys on purpose.
 
 ## Before recording

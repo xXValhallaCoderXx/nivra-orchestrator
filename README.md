@@ -144,15 +144,25 @@ There is no AppImage: it doesn't start on a stock Ubuntu 24.04 (D10).
 
 ## Testing instructions
 
-The quick path takes about PENDING-TAKE minutes. It uses the public onboarding sample,
+The quick path takes about PENDING-TAKE minutes. It can use the public onboarding sample,
 [nivra-sample](https://github.com/xXValhallaCoderXx/nivra-sample): a few plain files with an MIT licence, which need
-nothing installed. Use the commit named here, so what you upload is what was checked: PENDING-SAMPLE-COMMIT.
+nothing installed, at commit `bbf62893cb699c6994cca9fa7219b66f87f5a30d`. The sample is optional: any git repository works, as
+*Using another folder* below says, and Nivra treats the sample like any other.
+
+**What your credentials need.**
+- **Check Token Factory and Explain:** a Token Factory API key whose model listing offers an NVIDIA model. Nemotron 3
+  Super (`nvidia/nemotron-3-super-120b-a12b`) is preferred, and a task run uses only it.
+- **The sandbox check:** the id of a Nebius project with Sandboxes access. Sandboxes is in beta, and Nebius enables it
+  per project on request, on its [Sandboxes page](https://tokenfactory.nebius.com/sandboxes/about). With it, the key can
+  start, list and cancel sandboxes in that project. Without it, Nebius turns the key down (HTTP 403), and Nivra says
+  so.
 
 1. Install Nivra (above).
-2. Clone the sample, and check out that commit. On Windows, clone it inside WSL, for example in `~`:
+2. Clone the sample, if you want to use it, and check out its commit. On Windows, clone it inside WSL, for example in
+   `~`:
    ```bash
    git clone https://github.com/xXValhallaCoderXx/nivra-sample.git
-   git -C nivra-sample checkout PENDING-SAMPLE-COMMIT
+   git -C nivra-sample checkout bbf62893cb699c6994cca9fa7219b66f87f5a30d
    ```
 3. Start Nivra. Under **Settings**, paste your key and press **Save**, then your project id and **Save**.
 4. **Add** the sample's folder. On Windows, browse to `\\wsl.localhost\<distribution>\home\<you>\nivra-sample`.

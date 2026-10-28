@@ -131,7 +131,7 @@ Factory, Nebius Sandboxes, Tavily, WSL, Playwright.
 - Release: the release's page, which gives the version, the source commit and the checksums (its URL goes in when
   Nate publishes it)
 - Video: PENDING-TAKE
-- The onboarding sample: https://github.com/xXValhallaCoderXx/nivra-sample (MIT), at PENDING-SAMPLE-COMMIT
+- The onboarding sample (optional): https://github.com/xXValhallaCoderXx/nivra-sample (MIT), at `bbf62893cb699c6994cca9fa7219b66f87f5a30d`
 
 **Track:** Coding and Agentic Engineering (item 5).
 
