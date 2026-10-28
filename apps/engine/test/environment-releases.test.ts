@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { RELEASE_DATA } from "../src/environment/release-data.ts";
 import { corepackBundled, releaseIndexOf, RELEASES, standing } from "../src/environment/releases.ts";
@@ -122,6 +123,18 @@ describe("Nate's review of PR 31: the readers, each finding kept fixed (NIV-55)"
       assert.equal(unreadGlob(["apps/*", glob]), glob, glob);
     }
     assert.equal(unreadGlob(["apps/*", "!packages/{a,b}", "tools/x?"]), null);
+  });
+
+  it("limits the work brace lists take, not just their results, so a short pattern can't keep the engine busy", () => {
+    // Forty {a,a} lists stand for one folder, but take 2^40 steps expanded list by list. Run apart, so a hang fails the test.
+    const pattern = `packages/${"{a,a}".repeat(40)}`;
+    const readers = new URL("../src/environment/node-files.ts", import.meta.url).href;
+    const script = `import { expandBraces, unreadGlob } from ${JSON.stringify(readers)}; process.stdout.write(JSON.stringify([expandBraces(${JSON.stringify(pattern)}), unreadGlob([${JSON.stringify(pattern)}])]));`;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20_000 });
+    assert.equal(child.error?.message ?? null, null, "it answers within the time, rather than working on");
+    assert.deepEqual(JSON.parse(child.stdout), [null, pattern], "the pattern is refused as unreadable");
+    assert.deepEqual(expandBraces(`packages/${"{a,a}".repeat(3)}`), ["packages/aaa"], "a few repeats still read");
+    assert.equal(expandBraces(`${"{a,b}".repeat(8)}`)?.length, 256, "every list of distinct names within the limits still reads");
   });
 
   it("reads a pnpm lockfile's resolution, engines and libc written as blocks, and lists what it can't read", () => {
