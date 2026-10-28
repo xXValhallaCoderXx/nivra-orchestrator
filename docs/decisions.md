@@ -3168,3 +3168,136 @@ of the plan, 27 October).
   wording (a label it doesn't know, on a finding that names the plan, is kept as "plan" and marked relabelled); it is
   left as it is here, since the plan mode doesn't change, and is follow-up work.
 - **Evidence:** `docs/acceptance.md`, *Mission reviews (D44, NIV-52)*.
+
+## D45. The submission: the Coding and Agentic Engineering track again, and a dedicated Nebius project and key for judges (2026-10-27)
+
+**Decision.** Nate's choices on 27 October, for the execution release's submission (NIV-50):
+- **The track:** Coding and Agentic Engineering, as D13 first chose. This supersedes D24's Best Apps and Agents. The release now writes, runs and tests code: Nemotron, through Token Factory, makes a task's change inside Nebius Sandboxes; tests the agent can't edit judge it; and it reaches the checkout only when the person approves that exact change (D39 to D41).
+- **Judge access:** judges run Nivra locally on a folder of their choosing, and enter the credentials in Settings themselves. They use their own, or a dedicated judges' Nebius project and key given only in the private testing instructions, and never the development probe key. There is no automatic fallback in the app. This supersedes D24's shared key for judges.
+- **What judges are offered:** the quick path (Check Token Factory, explain, one sandbox check), and an optional full-task walkthrough on a public sample only, with no fix applied and no private material.
+- **Footage:** one recorded take before the freeze, which is also the packaged judge rehearsal.
+- **Live calls,** the judge-access checks included, are each approved on their own, with exact bounds.
+
+**Why.** D24 chose Best Apps and Agents because the Coding track's "write, run, and test code" was work D20 had deferred, and that work is now built. A shared development key reaches retained development records (D28, D39), so judges get a project of their own, whose uploads and operation records are theirs alone.
+
+**Consequences.**
+- The judges' project needs Sandboxes (beta) access, and its own environment image: D41's images are per project.
+- A Token Factory success alone doesn't prove Sandboxes access. J0 reads the judges' Sandboxes access, and J1 checks Token Factory, each approved on its own.
+- The full-task walkthrough is offered only once a public sample exists.
+- **Evidence:** NIV-50.
+
+## D46. A task run uses one model, named in its preview, and stops before any request to a model when Token Factory doesn't offer it (2026-10-27)
+
+**Decision.** NIV-35, before the first live run, from Nate's review of the Track A plan.
+- **One model:** a task run uses only `TASK_MODEL`, `nvidia/nemotron-3-super-120b-a12b`, which the domain exports.
+  - The model step takes it from Token Factory's listing, matched without regard to case, and uses the id as listed.
+  - No other model stands in.
+- **When the listing doesn't offer it,** the run ends at the model step:
+  - the listing was the only request;
+  - nothing of the task was uploaded;
+  - no model was asked anything.
+
+  The stop's words name the model the run needs.
+- **The preview names it.** The run preview's Token Factory list names the model before Start, so starting the run
+  approves it. The live run's recipe binds it as the one model the run may use, and its log says which model the
+  report names.
+- **Other workflows are unchanged.** Explain, chat, review and research keep D22's order of Nemotron models; the coach
+  (D43) and mission reviews (D44) choose theirs as they say.
+
+**Why.** The live run's recipe said Nemotron 3 Super was expected and that a different model would be recorded, never
+refused, which was the code's real policy: any NVIDIA model could stand in. An approved run must use the model that
+was approved; a substitute recorded afterwards isn't the approved run.
+
+**Consequences.**
+- A key that isn't offered Nemotron 3 Super can't run tasks, and the card says which model is needed.
+- **Tests:** `task-engine.test.ts` (a real engine given a listing of other NVIDIA models makes no chat request and no
+  sandbox request; a listing in another case is used as listed; every request carries the model), `host.test.ts`
+  (the preview's words, as written), `task-live-checks.test.ts` (the recipe's check that the preview names the model).
+  Four mutations each fail a test: any NVIDIA model taken, the refusal's report removed, its words changed, the
+  preview's line removed.
+- `rpc.ts` against stand-ins: with the model listed, the run was proposed, its route naming it; without it, the run
+  stopped at the model step after one listing request.
+- Live runs 1 to 3 each named it (`docs/acceptance.md`, *NIV-35's live runs*).
+
+## D47. A task worker's room to work: search over its own copy, allowances raised together and told with every answer, and each request given its whole answer's time, which the engine's fetch now waits for (2026-10-28)
+
+**Decision.** NIV-35, after live runs 1 to 3 on candidates 1 and 2. Nate set each part: after run 1, search and
+higher allowances told to the worker; after run 3, a longer request allowance that "should accommodate the configured
+output limit, not just increase one timer while another still cuts the request off", and then option B of three, with
+undici approved as an exactly pinned engine dependency.
+
+- **Search** (`search_files`): file names, or lines by their text, in the engine's own copy of the approved snapshot
+  plus the worker's checked writes, never anything else and never a command. Literal, ignoring case; at most 40
+  matches, each line cut to 200 characters around the match, counting stopped at 10,000. A folder that is absolute,
+  has a backslash or contains `..` is refused. Lines are masked like every answer.
+- **Allowances, raised together:** 24 model requests (was 12), 48 tool calls (24), 480,000 estimated input tokens
+  (160,000; an admission estimate, not a cap, as D30 says). Writes (8), runs (4), operations and every check's time are
+  unchanged.
+- **What is left, with every tool's answer:** requests, tool calls, writes, runs, the seconds in which a request with
+  tools can still start, and the run's estimated input. Near the end (4 requests, 6 tool calls, 300 seconds, or room for
+  3 more requests of input) a note names what is near, grades its advice to what can still be done, and says handing in
+  unchanged is a fair result: nothing pushes the worker to write. When the input budget or a request's context holds
+  only the hand-in, only handing in is offered.
+- **A request's time is its answer's.** A request's output cap and its deadline are sized together: the deadline holds
+  a whole answer of the cap at 10 tokens a second, the slowest long answers run 3 saw (its ninth request gave 634 in
+  58.5 s), with 30 s for its input and the queue. A work request: 8,000 tokens in 830 s. The hand-in, which only calls
+  submit, has its own: 1,500 tokens in 180 s, given to Mastra as that request's own settings, with retries off.
+- **Nothing else cuts a request off:**
+  - **Fetch.** Mastra's `generate` doesn't stream, so a reply's headers come only with its whole answer, and Node's own
+    fetch gives up on them after 300 s (shown offline on Node 24.21.0: a reply at 285 s came back, one at 310 s failed at
+    301.2 s with `UND_ERR_HEADERS_TIMEOUT`). At start, before any request, the engine makes undici's agent the global
+    dispatcher, which Node's own fetch reads, with 15 minutes' waits (`providers/transport.ts`). undici is 7.29.1,
+    exactly the version Node 24.21.0 bundles, which both runtimes ship. Every request keeps its own, shorter deadline:
+    each model call, Nebius, Tavily and the model listing set one, so the longer wait loosens none of them.
+  - **The work window.** A request is sent only when the window holds its whole time, and the hand-in's whole time is
+    kept from the window's start: a request offers tools only when the window holds its own time and the hand-in's, and
+    no write or run takes the hand-in's time. The worker doesn't start unless the window holds one request with tools
+    and the hand-in.
+  - **The run's bounds** hold it: the sandbox session is 45 minutes (was 20) and the run 58 (33). The reserve for
+    collect, its reads and the final checks is unchanged, and so is the run's one absolute deadline (D39).
+  - **The host.** The engine answers the supervisor's heartbeat while a request is held: fetch waits without blocking.
+- **An answer cut off at its cap** ends Mastra's loop with nothing more to run ("length" is terminal there, and its
+  tool calls aren't made). The worker's end says so, `output-cap`, never that its requests ran out; the worker is told
+  both caps beforehand, and to make a large change as several smaller edits. Protocol 15.
+- **Unchanged:** the person's cancel, which still ends a request in flight at once and hangs up on it; no request is
+  ever sent again (D22); the frozen files; the approved model (D46); separate patch approval (D40).
+
+**Why.**
+- Run 1 spent its 12 requests finding its way.
+- Runs 2 and 3 each had a code-writing request still unanswered at the old 150 s, which ended their attempts with no
+  hand-in. Their long answers ran at about 11 to 18 tokens a second, so a large edit needed more than 150 s.
+- Raising the 150 s alone would have left fetch's 300 s, and the window's end, to cut a request off.
+- Lowering the cap to fit under 300 s (option A, `243edd4`) would have turned long answers into cut-offs. The independent
+  review showed that an answer at its cap ends the loop.
+
+**Consequences.**
+- **Waiting:** a request that never answers is now waited on for up to 830 s (was 150 s); the run's bounds hold it.
+- **Fit:** with SHE-65's three final checks, requests with tools can start for about the first 15 minutes of a 32-minute
+  work window.
+- **Process-wide:** the global dispatcher is set in the engine's process only; the host and the other processes keep
+  Node's defaults. Where Node itself would take the proxy from the environment (`NODE_USE_ENV_PROXY=1`), so does the
+  engine's fetch, through undici's `EnvHttpProxyAgent` with the same waits; otherwise it is the plain agent Node uses.
+- **The worst case:** a brief with four final checks whose setup inside the session (the toolchain probe and three
+  baseline selections) takes every cap leaves the window too short for a request with tools and the hand-in, and the
+  worker doesn't start ("no-time"), which the card says.
+- **Not shown offline:** whether Token Factory itself holds a request open for 830 s. Only a live run shows that. If
+  its side closes a quiet connection first, the request fails as "network" ("Token Factory couldn't be reached"),
+  and the attempt ends with no hand-in, as a request that reaches its own deadline does.
+- **Tests:**
+  - `task-search.test.ts`;
+  - `task-worker.test.ts` (the allowance, the notes, exhaustion);
+  - `task-timing.test.ts` ("a task request's time": sizing, whole time or none, the hand-in kept, operations refused,
+    the start rule, the cut-off end);
+  - `model.test.ts` (a request's own cap and deadline, never sent again);
+  - `transport.test.ts` (fetch waits as set for a reply's headers and for its body, and no longer; a model call's
+    request goes through it; a request that reaches its own deadline, or is cancelled, is hung up on at once; the
+    environment's proxy is taken where Node would take it; it outlasts every model request's deadline);
+  - `task-engine.test.ts` (the heartbeat answered while a request is held; a real engine started with a 1 s fetch
+    wait cutting off a reply 3 s late, and one started without it receiving it; `max_tokens` as Token Factory received
+    it; the preview's bounds);
+  - `units.test.ts` (`--fetch-wait-ms` shortens the wait, never lengthens it; the host never passes it);
+  - the e2e asserts the preview's bounds.
+- **Offline, through a real engine process:** a reply after 310 s was received and the run proposed; a cancel during a
+  held request ended the run. Recorded in acceptance.md.
+- **Mutations:** 23 of 24 caught, each part broken on purpose in turn. The one not caught changes no behaviour: a
+  request with tools held for the hand-in's time, which the whole-time rule already gates.

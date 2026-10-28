@@ -143,8 +143,11 @@ export interface CallOptions {
   maxOutputTokens: number;
   toolChoice?: ToolChoice;
   stopWhen?: () => boolean;
-  /** Before each request. A failure it records through `internal` ends the call there, and the request is never sent. */
-  prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice } | undefined;
+  /**
+   * Before each request. A failure it records through `internal` ends the call there, and the request is never sent.
+   * A request may have an output cap and a deadline of its own, in place of the call's (NIV-35).
+   */
+  prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice; maxOutputTokens?: number; stepMs?: number } | undefined;
   /** The person's cancel. */
   signal?: AbortSignal;
   internal?: InternalFailure;
@@ -285,7 +288,10 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
                   const prepared = call.prepareStep!({ stepNumber });
                   // Mastra's tripwire ends the loop before the request, quietly: a throw here would be logged with its stack.
                   if (internal.failure) abort("stopped before its request");
-                  return prepared;
+                  if (!prepared || (prepared.maxOutputTokens === undefined && prepared.stepMs === undefined)) return prepared;
+                  // Mastra takes a step's settings whole, so the call's are given again beside its own, retries off.
+                  const { maxOutputTokens = call.maxOutputTokens, stepMs = call.deadlines.stepMs, ...rest } = prepared;
+                  return { ...rest, modelSettings: { maxOutputTokens, maxRetries: 0, timeout: { stepMs: Math.max(1, Math.floor(stepMs)), totalMs: Math.max(1, Math.floor(call.deadlines.totalMs)) } } };
                 },
               }
             : {}),
@@ -447,6 +453,8 @@ function total(steps: readonly StepRecord[], field: "inputTokens" | "outputToken
 }
 
 const NETWORK_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"]);
+/** Fetch gave up waiting for a reply's headers or body (NIV-35): the reply was late, not the network down. */
+const WAIT_CODES = new Set(["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
 const UNREADABLE = new Set(["AI_JSONParseError", "AI_TypeValidationError", "AI_InvalidResponseDataError", "AI_EmptyResponseBodyError", "AI_NoContentGeneratedError"]);
 
 function kindForStatus(status: number): ModelFailureKind {
@@ -512,6 +520,7 @@ export function toModelFailure(error: unknown, stage = "model.call"): ModelFailu
     }
     if (UNREADABLE.has(name)) return failure("bad-response", name.replace(/^AI_/, ""));
     if (typeof e.code === "string" && NETWORK_CODES.has(e.code)) return failure("network", e.code);
+    if (typeof e.code === "string" && WAIT_CODES.has(e.code)) return failure("timeout", "its reply took longer than the engine's fetch waits for one");
     if (name === "TypeError" && /fetch failed/i.test(message)) fetchFailed = true;
     current = e.cause;
   }

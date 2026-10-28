@@ -319,7 +319,8 @@ const ENDED: Record<NonNullable<TaskReport["worker"]>["ended"], string> = {
   input: "reached its input budget before handing in",
   "tool-calls": "used its tool calls before handing in",
   "model-failed": "stopped when the model failed",
-  "no-time": "didn't start: there was no time left",
+  "output-cap": "stopped when an answer reached its output cap, before handing in",
+  "no-time": "didn't start: too little time was left",
   "not-started": "didn't start",
 };
 

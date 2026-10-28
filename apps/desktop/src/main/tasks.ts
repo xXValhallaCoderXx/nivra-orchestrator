@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AcceptanceCase, TASK_BRIEF_LIMITS, TaskBrief, type ChatResult, type TaskEnvironment } from "@nivra/domain";
+import { AcceptanceCase, TASK_BRIEF_LIMITS, TASK_MODEL, TaskBrief, type ChatResult, type TaskEnvironment } from "@nivra/domain";
 import { z } from "zod";
 import { TASK_LIMITS, type BriefContent, type BriefFields, type BriefSource, type TaskState } from "../shared/ipc.ts";
 import { planText } from "../shared/plans.ts";
@@ -211,8 +211,9 @@ export function taskRunFingerprint(parts: {
 export const TASK_SENDS = {
   tokenFactory: [
     "The brief: its goal, acceptance criteria, scope, exclusions and context, with its acceptance cases and checks, and any baseline checks and frozen files.",
-    "The names of the commit's files, the files the worker reads, and what the cases and checks it runs print.",
+    "The names of the commit's files, the files the worker reads, the lines its searches find, and what the cases and checks it runs print.",
     "Nivra's instructions to the worker, and the tools it may use.",
+    `All of it to one model, ${TASK_MODEL}. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in.`,
   ],
   nebius: [
     "The commit's files, as counted above: never your uncommitted work, nor the files left out.",

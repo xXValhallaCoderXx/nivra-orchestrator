@@ -2631,6 +2631,8 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
       "Test · WSL",
     ]);
     assert.match(preview.keeps.nebius ?? "", /^Images are retained for 180 days.* Nebius keeps each operation's arguments in its records, so what the worker writes stays there too\.$/);
+    // The one model the run may use is named before Start, so starting it approves that model (NIV-35).
+    assert.equal(preview.sends.tokenFactory.at(-1), "All of it to one model, nvidia/nemotron-3-super-120b-a12b. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in.");
     assert.deepEqual([sandbox.requests.length, model.chats().length], [0, 0], "a preview sends nothing");
     const started = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
     assert.ok(["submitting", "running"].includes(started.status));

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { parseArgs } from "node:util";
 import { z } from "zod";
+import { FETCH_HEADERS_MS } from "./providers/transport.ts";
 
 /** How the engine was started. Everything arrives as arguments, never as environment variables (D3). */
 export interface EngineArgs {
@@ -20,6 +21,11 @@ export interface EngineArgs {
    * see the apply reconciled after a restart. The host passes it only when unpackaged. Null in normal use.
    */
   applyHold: string | null;
+  /**
+   * How long the engine's fetch waits for a reply's headers: 15 minutes (NIV-35). Tests only may shorten it, never
+   * lengthen it, so a test can see the engine set it at start; the host never passes it.
+   */
+  fetchWaitMs: number;
 }
 
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "localhost"]);
@@ -34,7 +40,7 @@ export class ArgsError extends Error {
 export const DEFAULT_HEARTBEAT_MS = 30_000;
 
 export function readArgs(argv: readonly string[]): EngineArgs {
-  let values: { stdio?: boolean; home?: string; instance?: string; "heartbeat-ms"?: string; "token-factory-url"?: string; "sandboxes-url"?: string; "tavily-url"?: string; "apply-hold"?: string };
+  let values: { stdio?: boolean; home?: string; instance?: string; "heartbeat-ms"?: string; "token-factory-url"?: string; "sandboxes-url"?: string; "tavily-url"?: string; "apply-hold"?: string; "fetch-wait-ms"?: string };
   try {
     ({ values } = parseArgs({
       args: [...argv],
@@ -47,6 +53,7 @@ export function readArgs(argv: readonly string[]): EngineArgs {
         "sandboxes-url": { type: "string" },
         "tavily-url": { type: "string" },
         "apply-hold": { type: "string" },
+        "fetch-wait-ms": { type: "string" },
         // A marker that lets an orphan check find engine processes by their command line; it means nothing else.
         "nivra-engine": { type: "boolean" },
       },
@@ -62,6 +69,8 @@ export function readArgs(argv: readonly string[]): EngineArgs {
   if (!z.uuid().safeParse(instance).success) throw new ArgsError("--instance must be a UUID.");
   const heartbeat = values["heartbeat-ms"] === undefined ? DEFAULT_HEARTBEAT_MS : Number(values["heartbeat-ms"]);
   if (!Number.isInteger(heartbeat) || heartbeat < 0) throw new ArgsError("--heartbeat-ms must be a whole number of milliseconds, 0 or more.");
+  const fetchWait = values["fetch-wait-ms"] === undefined ? FETCH_HEADERS_MS : Number(values["fetch-wait-ms"]);
+  if (!Number.isInteger(fetchWait) || fetchWait < 1_000 || fetchWait > FETCH_HEADERS_MS) throw new ArgsError(`--fetch-wait-ms is for tests: a whole number of milliseconds from 1,000 to ${FETCH_HEADERS_MS.toLocaleString("en-US")}.`);
   return {
     home: values.home,
     instanceId: instance,
@@ -70,6 +79,7 @@ export function readArgs(argv: readonly string[]): EngineArgs {
     sandboxesUrl: loopbackUrl("--sandboxes-url", values["sandboxes-url"]),
     tavilyUrl: loopbackUrl("--tavily-url", values["tavily-url"]),
     applyHold: values["apply-hold"] === undefined ? null : absolute("--apply-hold", values["apply-hold"]),
+    fetchWaitMs: fetchWait,
   };
 }
 

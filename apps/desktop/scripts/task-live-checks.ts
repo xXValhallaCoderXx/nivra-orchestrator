@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PreparedEnvironment } from "@nivra/domain";
+import { TASK_MODEL, type PreparedEnvironment } from "@nivra/domain";
 import type { TaskRunPreview } from "../src/shared/ipc.ts";
 import { taskRunFingerprint } from "../src/main/tasks.ts";
 import { filesIn, hashRuntime } from "./runtime-files.ts";
@@ -73,14 +73,16 @@ export interface ApprovedRun {
  * Why a run's preview isn't the approved one; none when it is. The window's preview (`shownExpected`, what Start sends)
  * and the app's structured preview must both carry the fingerprint worked out here from the approved brief digest and
  * snapshot, with the task, the project and the environment just prepared, which the host checks again at Start. The
- * structured preview must show the approved commit, snapshot, frozen files with their hashes, and environment.
+ * structured preview must show the approved commit, snapshot, frozen files with their hashes, and environment, and
+ * name the one model the recipe allows: a build from before that rule names none, and its run would take whichever
+ * model the listing offered.
  */
 export function previewProblems(input: {
   approved: ApprovedRun;
   ids: { taskId: string; briefId: string; briefVersion: number; projectId: string; targetId: string };
   prepared: Pick<PreparedEnvironment, "image" | "inputsDigest" | "projectFingerprint"> | null;
   shownExpected: string;
-  structured: Pick<TaskRunPreview, "expected" | "snapshotFingerprint" | "snapshot" | "frozen" | "environment">;
+  structured: Pick<TaskRunPreview, "expected" | "snapshotFingerprint" | "snapshot" | "frozen" | "environment" | "sends">;
 }): string[] {
   const { approved, ids, prepared, structured } = input;
   const expected = taskRunFingerprint({ ...ids, briefDigest: approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: approved.snapshotFingerprint, environment: prepared });
@@ -93,5 +95,6 @@ export function previewProblems(input: {
   if (frozen !== approved.frozen.map((file) => `${file.sha256}  ${file.path}`).join("\n")) problems.push("the frozen files or their hashes aren't the approved ones");
   if (prepared === null ? structured.environment !== null : structured.environment?.image !== prepared.image) problems.push("the run doesn't start from the environment just prepared");
   if (structured.environment && structured.environment.inputsDigest !== approved.inputsDigest) problems.push("the environment's inputs aren't the approved ones");
+  if (!structured.sends.tokenFactory.some((line) => line.includes(TASK_MODEL))) problems.push(`the app's preview doesn't name ${TASK_MODEL}, the one model the recipe allows`);
   return problems;
 }

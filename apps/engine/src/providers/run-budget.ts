@@ -95,6 +95,11 @@ export class RunBudget {
     return Math.max(0, this.limits.totalMs - (this.#now() - this.#started));
   }
 
+  /** The estimated input still free: the budget less what was counted and what open holds have reserved. */
+  remainingInput(): number {
+    return Math.max(0, this.limits.estimatedInputTokens - this.#committedInput());
+  }
+
   /** Input counted so far plus what open holds have reserved. */
   #committedInput(): number {
     let held = 0;
