@@ -31,7 +31,8 @@ import { insideRepository, RETENTION, tokenOutlasts } from "../src/exec/nebius/p
 import { isInstallArgs, Journal } from "../src/exec/nebius/sandbox.ts";
 import { compressSnapshot, createNebiusBackend, NEBIUS_LIMITS, reconcileJournals, scanJournals } from "../src/exec/nebius/session.ts";
 import { canonicalJson } from "../src/exec/proposal.ts";
-import { takeSnapshot, type Snapshot } from "../src/exec/snapshot.ts";
+import { WorkspaceRefusal } from "../src/exec/git-tool.ts";
+import { credentialKinds, takeSnapshot, type Snapshot } from "../src/exec/snapshot.ts";
 import { writeTar } from "../src/exec/tar.ts";
 import { hiddenReason, OUTPUT_DIRS } from "../src/repo/deny.ts";
 import { claimApproval, claimOn, isDigest } from "./research-check/claim.ts";
@@ -136,7 +137,7 @@ const matchesPattern = (pattern: string, path: string) => {
  * sends (a secrets file such as .npmrc, or output), when a manifest runs an install lifecycle script or the repository
  * has a pnpmfile (each needs the sources), or when the root manifest pins another package manager.
  */
-function preparationInputs(config: Config, repo: string) {
+function preparationInputs(config: Config, repo: string, known: readonly string[] = []) {
   const tree = gitIn(repo, ["ls-tree", "-r", "-z", "--full-tree", config.baseline]).toString("utf8").split("\0").filter(Boolean);
   const entries = tree.map((line) => {
     const [meta, path] = line.split("\t") as [string, string];
@@ -155,6 +156,9 @@ function preparationInputs(config: Config, repo: string) {
       if (hidden) fail(`The input ${hit.path} is ${hidden === "secret" ? "on the secrets deny list" : "dependency or build output"}, so it never enters a boundary. Take it out of the config's inputs. Nothing was sent.`);
       if (files.some((file) => file.path === hit.path)) continue;
       const bytes = new Uint8Array(gitIn(repo, ["cat-file", "blob", hit.object]));
+      // Nothing unsafe is sent to prepare either: a credential's shape, or the key this run holds, whatever it looks like (D34).
+      const kinds = credentialKinds(bytes, known);
+      if (kinds.length) fail(`The input ${hit.path} holds what looks like ${kinds.join(" and ")}, so Nivra won't send it. Remove it from the commit (and replace the key if it's real), then try again. Nothing was sent.`);
       files.push({ path: hit.path, bytes, sha256: sha(bytes) });
     }
   }
@@ -172,10 +176,14 @@ function preparationInputs(config: Config, repo: string) {
   return { files, tar: { bytes: tar.byteLength, sha256: sha(tar) }, gzip: { archive: gzip, bytes: gzip.byteLength, sha256: sha(gzip) } };
 }
 
-async function snapshotOf(config: Config, repo: string): Promise<Snapshot> {
+/** The baseline's snapshot, refused when any file holds a credential's shape or one of `known`, the values this run holds. */
+async function snapshotOf(config: Config, repo: string, known: readonly string[] = []): Promise<Snapshot> {
   const local = await createLocalBackend({ baseEnv: process.env }).open({ workspace: repo });
   try {
-    return await takeSnapshot({ folder: repo, session: local, git: git!, baseline: config.baseline });
+    return await takeSnapshot({ folder: repo, session: local, git: git!, baseline: config.baseline, knownValues: known });
+  } catch (error) {
+    if (error instanceof WorkspaceRefusal) return fail(`${error.message} Nothing was sent.`);
+    throw error;
   } finally {
     await local.close();
   }
@@ -251,6 +259,7 @@ function recipeText(recipe: ReturnType<typeof recipeOf>, digest: string, clean: 
     "",
     `Bounds: the session has ${PROBE.sessionMinutes} minutes and at most ${recipe.limits.sessionOperations} operations; stopping a command already under way may take ${STOP_SECONDS} s more; closing has ${PROBE.cleanupMinutes} minutes of its own, then one --recover pass over what is left, ${PROBE.cleanupMinutes} minutes more.`,
     `At its longest, the whole run takes ${Math.ceil(NEEDED_SECONDS / 60)} minutes, cleanup and one recovery pass included. Before anything is sent, it reads the account twice, 15 s apart (GET /v1/whoami), and starts only if the token outlasts that.`,
+    "Before anything is sent, the run checks the commit and the preparation inputs again for the Nebius key it reads, whatever the key looks like, and refuses if either holds it. This plan reads no credentials, so it has checked credential shapes only.",
     `Network: ${recipe.network}.`,
     ...recipe.sends.map((line) => `Sends ${line}.`),
     `Retention: ${RETENTION}`,
@@ -263,13 +272,17 @@ function recipeText(recipe: ReturnType<typeof recipeOf>, digest: string, clean: 
   ].join("\n");
 }
 
-async function prepared() {
+/**
+ * Everything the run would send, checked. `known` are the values the run holds and checks the commit and the
+ * preparation inputs against: --run passes its Nebius key; --plan reads no credentials, so it checks shapes alone.
+ */
+async function prepared(known: readonly string[] = []) {
   const { config, repo } = readConfig();
   const at = revision();
   if (gitIn(repo, ["rev-parse", "HEAD"]).toString("utf8").trim() !== config.baseline) fail(`${repo} isn't at the baseline ${config.baseline}. Check it out there, then try again. Nothing was sent.`);
   if (gitIn(repo, ["status", "--porcelain", "--untracked-files=all"]).toString("utf8").trim() !== "") fail(`${repo} has uncommitted changes. The probe sends only the baseline commit, so clean it first. Nothing was sent.`);
-  const inputs = preparationInputs(config, repo);
-  const snapshot = await snapshotOf(config, repo);
+  const inputs = preparationInputs(config, repo, known);
+  const snapshot = await snapshotOf(config, repo, known);
   frozenAtBaseline(config, snapshot);
   for (let run = 1; ; run++) {
     const recipe = recipeOf(config, inputs, snapshot, at, run);
@@ -352,7 +365,8 @@ const changed = (before: Map<string, string> | null, after: Map<string, string> 
 
 const approved = values.approved ?? "";
 if (!isDigest(approved)) fail("--run needs --approved <digest>: the 64 lowercase hexadecimal characters --plan printed. Nothing was sent.");
-const plan = await prepared();
+// The key this run holds, whatever it looks like, is looked for in all it would send; the project id only names the account (D34, D36).
+const plan = await prepared([keys.key]);
 if (!plan.at.clean) fail("Nivra's checkout has uncommitted changes, so the code that would run isn't the approved revision. Commit or set them aside, then print the recipe again. Nothing was sent.");
 if (plan.digest !== approved) fail(`The next unclaimed run of this recipe digests to ${plan.digest}, not the approved ${approved}: it is claimed already, or something changed. Print the recipe with --plan and ask for its approval again. Nothing was sent.`);
 
