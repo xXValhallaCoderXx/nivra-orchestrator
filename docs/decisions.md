@@ -3341,12 +3341,13 @@ after another decision lands renumbers it.
   prepares again, or accepts it without them; the acceptance is bound to that verified record (workspace migration 8,
   `environments.builds_json`) and ends when another preparation leaves an environment.
 - **Task runs.** A run starts from the project's environment only when it is ready, and never from Nivra's own image
-  instead while the project has one: an environment D41 prepared reads "Prepared by an earlier version of Nivra.
-  Prepare it again to use it." Its sessions start from the environment's image with the recipe's task variables
-  (corepack's downloads off, pnpm's installs before a run and version switches off), and leave out only the recipe's
-  dependency folders. The worker can't create or change a setup file; after collect the setup files are digested
-  again, and any difference leaves the change unverified. A gone image (Nebius answers 404 or 410) stops the run as
-  environment-missing, saying to prepare the environment again.
+  instead while the project has one: an environment D41 prepared reads "Prepared by an earlier version of Nivra. Prepare
+  it again to use it." Its sessions start from the environment's image with the recipe's task variables (corepack's
+  downloads off, pnpm's installs before a run and version switches off), and leave out only the recipe's dependency
+  folders. A commit whose setup file is a link is refused at the run's preview and before anything is sent, since a
+  link's digest is its target's name. The worker can't create or change a setup file; after collect the setup files are
+  digested again, and any difference leaves the change unverified. A gone image (Nebius answers 404 or 410) stops the
+  run as environment-missing, saying to prepare the environment again.
 - **A tracked file is source wherever it is.** Snapshots keep tracked files under folders named like build output
   (`dist`, `build`, `vendor` and the rest); only the secrets deny list and the caller's exclusions (the engine home)
   leave a tracked file out, inside such folders too. A session leaves out only the folders it is given: a recipe's
