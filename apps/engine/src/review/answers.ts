@@ -54,14 +54,14 @@ export type SynthesisAnswer = z.infer<typeof SynthesisAnswer>;
 export const REVIEW_TOOL_DESCRIPTION = "Hand in your review. Call this once. Name only what the message holds in refs.";
 export const SYNTHESIS_TOOL_DESCRIPTION = "Hand in your synthesis of the reviewers' reports. Call this once. Name findings only by the ids shown.";
 
-const PREFIX: Readonly<Record<ReviewRole, string>> = { architecture: "arch", risks: "risk", single: "single" };
+export const PREFIX: Readonly<Record<ReviewRole, string>> = { architecture: "arch", risks: "risk", single: "single" };
 const ROLE_OF_PREFIX: Readonly<Record<string, ReviewRole>> = { arch: "architecture", risk: "risks", single: "single" };
 
 /** A list a model may send as one string: split on commas, semicolons and white space. */
-const items = (value: string | string[]): string[] => (Array.isArray(value) ? value : value.split(/[,;\s]+/)).map((item) => item.trim()).filter(Boolean);
+export const items = (value: string | string[]): string[] => (Array.isArray(value) ? value : value.split(/[,;\s]+/)).map((item) => item.trim()).filter(Boolean);
 
 /** Counts what was changed while clipping and checking. */
-class Changes {
+export class Changes {
   dropped = 0;
   refsDropped = 0;
   relabelled = 0;
@@ -89,7 +89,7 @@ const SEVERITY: ReadonlyArray<[RegExp, "high" | "medium" | "low"]> = [
   [/^(medium|moderate|important)$/i, "medium"],
   [/^(low|minor|nit|trivial)$/i, "low"],
 ];
-const severityOf = (value: string | null): "high" | "medium" | "low" | null => (value === null ? null : (SEVERITY.find(([pattern]) => pattern.test(value.trim()))?.[1] ?? null));
+export const severityOf = (value: string | null): "high" | "medium" | "low" | null => (value === null ? null : (SEVERITY.find(([pattern]) => pattern.test(value.trim()))?.[1] ?? null));
 
 /**
  * What a reference may name in this packet: the plan, one of its assumptions, one of its historical references, or one

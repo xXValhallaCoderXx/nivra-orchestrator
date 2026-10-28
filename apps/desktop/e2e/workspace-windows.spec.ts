@@ -173,3 +173,32 @@ test("a seeded plan's review on Windows shows what it would send, is refused on 
   await app.close();
   rmSync(root, { recursive: true, force: true });
 });
+
+test("a mission on Windows: its backlog and the review's exact preview, refused with no key on the native engine before any request, and kept across a relaunch", async () => {
+  const { root, launch } = setUp("e2e-mission");
+  let { app, page } = await launch();
+  expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");
+  const made = await page.evaluate(() =>
+    window.nivra.createMission({ name: "Runner's log", intendedUsers: "Club runners.", outcome: "A runner sees this week's distance against their plan.", successCriteria: [], constraints: [], nonGoals: [] }),
+  );
+  await page.evaluate((id) => window.nivra.createMissionTask(id, "Store runs"), made.id);
+  await page.getByTestId("nav-missions").click();
+  await page.getByTestId("mission-open").filter({ hasText: "Runner's log" }).click();
+  await page.getByTestId("backlog-row").filter({ hasText: "Store runs" }).getByTestId("backlog-select").check();
+  await page.getByTestId("mission-review-open").click();
+  await expect(page.getByTestId("mission-preview-text")).toContainText("T1. Store runs");
+  await page.getByTestId("mission-review-start").click();
+  await expect(page.getByTestId("mission-review").first().getByTestId("review-status")).toHaveText("Failed", { timeout: 120_000 });
+  await expect(page.getByTestId("mission-review").first().getByTestId("review-note")).toHaveText("No Nebius key is set, so nothing was sent. Add your key in Settings, then try again. Nothing was resent.");
+  const engines = await page.evaluate(() => window.nivra.listEngines());
+  expect(engines.map((engine) => [engine.targetId, engine.state.status, engine.state.status === "online" ? engine.state.info.platform : null])).toEqual([["local", "online", "win32"]]);
+  // A mission's own conversation isn't one of the person's.
+  expect((await page.evaluate(() => window.nivra.listConversations())).conversations).toEqual([]);
+  await app.close();
+
+  ({ app, page } = await launch());
+  const kept = await page.evaluate((id) => window.nivra.getMission(id), made.id);
+  expect([kept.latest.version, kept.backlog.map((entry) => entry.task.title), kept.reviews.map((review) => [review.status, review.tasks.map((task) => task.title)])]).toEqual([1, ["Store runs"], [["failed", ["Store runs"]]]]);
+  await app.close();
+  rmSync(root, { recursive: true, force: true });
+});

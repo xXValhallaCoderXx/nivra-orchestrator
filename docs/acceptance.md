@@ -2554,6 +2554,88 @@ except where the list above says so):
 - **Not run: a live coaching.** A recipe is prepared, and not approved. The stand-ins prove the contract, not the coach's
   quality.
 
+### Mission reviews (D44, NIV-52)
+
+Track B's mission review, on D42's foundation: a mission written with no repository, a backlog and its board, a review
+of up to five selected tasks by the council's specialists, findings that open the task, and stale reports. On
+`feature/niv-52`, on the foundation (#26), and integrated with `main` after the coach (#27) merged. The engine mode was built in parallel by a helper on
+`feature/niv-52-engine`, from the foundation's contract commit, then merged; then an independent review.
+
+| Commit | What |
+|---|---|
+| `d3ff4c6` | The engine's mission mode (by the helper, from `4aa1aa6`): the packet union, the seam, the profiles' instructions, references and set-aside findings, rejected output, the model enforced before inference |
+| `36b1038` | The host: the composition, refusals, the whole-packet credential check, the preview fingerprint, start in one transaction, the mission's calls and IPC |
+| `fcb38e0` | The window: missions, backlog, selection, the exact preview, reports whose findings open the task, the board; `missions.spec.ts` |
+| `f46f658` | The live check's recipe, its public synthetic fixture and its offline tests (not run live) |
+| `7745c6e` | A mission on Windows in `workspace-windows.spec.ts`: its backlog, its preview refused with no key on the native engine, kept across a relaunch |
+| `4ad3526` | The review button's own test id; a test of the start's context check inside its transaction |
+| `b5fcbd7` | The preference export test's words restored after a text replacement in `36b1038` changed them |
+| `51d2e68` | The independent review's engine fixes: the mission's own form, a message that masking would change refused, an unknown basis an assumption, empty findings counted apart |
+| `9cfe752` | Its host and window fixes: a key across two parts refused naming both, an unreadable report's version unknown, the card's words |
+| `61b4193` | Its live check fixes: the forms bound in the recipe, the model held only when every answer named it, engine homes checked by containment |
+| `a46fe7c` | Nate's review of #25: the live check's approval is used once, claimed atomically and kept, whatever `--out` or `--home` says |
+| `ca44e48` | The claim's place said as it is: before the checkout is checked, the key is read or anything is sent |
+| `65094d7`, `1be62b3`, `9427884` | Merges of the foundation, bringing its review fixes (`2b61660`, `1c27882`) and its record |
+| `ff9bba5` | `main` merged in, with the foundation (#26) and the coach (#27): both tracks' calls, the expected API as their union, and the coach's D43 and record before this one |
+| `4440a57` | Protocol 14 and D44, after the coach's 13 and D43: the version, its six pins, this decision and this record |
+| this record | D44, the development notes and this section |
+
+**NIV-52's flow, shown:**
+
+| Point | Where | What it shows |
+|---|---|---|
+| A mission with no repository, saved in versions; a backlog; a board of its states | `missions.spec.ts`, `host.test.ts` | Written, refused without an outcome, edited to v2; three tasks added by title; the board's Draft column holds them; a mission's conversation isn't listed |
+| Up to five selected tasks, previewed exactly | `missions.spec.ts`, `mission-review.test.ts`, `host.test.ts` | The reviewers' message starts with the preview's text, byte for byte, then the preferences; it names T1 and T2, counts the other task without its title, lists the three profiles and versions, up to 3 calls, and what isn't sent. More than five, twice, outside the backlog, gone or linked to a repository are refused, nothing sent |
+| Version and title binding; start only as previewed | `mission-review.test.ts`, `host.test.ts` | The fingerprint changes with a rename, a brief, the mission, a preference and the order; a start after a rename is refused and sends nothing |
+| Packet limits, no silent truncation | `mission-review.test.ts`, `mission.test.ts` | Three 9,500-character contexts are refused naming the size and the longest task; two fit |
+| Credentials over the whole packet | `mission-review.test.ts` (desktop and engine), `host.test.ts` | A key in a task's context or title, the mission's outcome, or a preference refuses the preview, naming the part, never the value. A private key's first line in T1's goal and its last in its acceptance criteria, or in a preference, is refused naming both parts; a first line alone isn't. The engine refuses such a message before the listing, with no request |
+| Two reviewers and a chair, at most three calls; references validated | `mission-review.test.ts` (engine), `host.test.ts`, `missions.spec.ts` | Exactly the three requests; each reviewer is sent the mission's own form, which asks for `T1, T2, ...` and nothing the plan review's does, its definition pinned with the instructions; findings keep T-refs, `mission` and `backlog`; foreign references dropped and counted; a basis other than "plan" or "assumption" becomes an assumption |
+| Rejected output isn't a clean review | engine tests, `host.test.ts`, `missions.spec.ts` | Two findings naming T7 and E1 fail the stage as malformed with "2 findings named nothing in the selection"; the review is incomplete; the chair is skipped; the model's references aren't repeated. Findings sent with the wrong keys (no title, no detail) are counted apart, never as over the limit, and a reviewer of only those fails its stage the same way |
+| A sound selection may get no findings | engine tests, `missions.spec.ts` | Complete, with "Raised nothing material. That isn't an approval" |
+| The model enforced before inference | engine tests, `mission-review-live.test.ts` | A packet naming a model the listing lacks fails with no chat request; the live script's stub run holds the approved model, fails its evidence when an answer names another, and calls it unknown, never held, when the answers name none. Its recipe binds the forms with the instructions; an engine home inside `~/.nivra` or `~/.nivra-dev` is refused before the key is read |
+| One approval is one paid run | `mission-review-live.test.ts` | Of six launches started together with one approval, exactly one claims it (its own process, in the claims folder) and the other five stop before any key is read or evidence made. A launch killed after claiming leaves its claim; a relaunch with another `--out` and `--home` is refused; `--plan` moves on to run 2's digest. Both fail with the claim removed |
+| Findings open the existing task editor; a hand edit saves | `missions.spec.ts` | T1's chip opens Store runs' page; Edit brief saves v2 |
+| Stale reports, readable | `host.test.ts`, `missions.spec.ts` | After a brief edit and a rename, the report names both changes and keeps its findings |
+| Persistence across restart | `host.test.ts`, `missions.spec.ts` | Reopened after a restart and a relaunch: every review, its stale lines and the board, with nothing sent again |
+| Saved-plan review unchanged | the engine's plan-mode tests, `council-eval.test.ts`, `review.spec.ts` | Unchanged and passing; the council-eval approval digest is still `c3b9225a…` |
+| No execution, uploads or external writes | `missions.spec.ts`, `host.test.ts` | Only the council's requests reach the stub; no task leaves draft; no run starts |
+
+**Checks:**
+- `pnpm verify` at `61b4193`: 1,147 (domain 90, engine 710, desktop 347), none skipped. At `1be62b3`, before the
+  independent review's fixes: 1,142. The foundation at `1c27882` had 1,107; main at `c854b50`, 1,075.
+- The built app (`test:e2e`, every spec) at `61b4193`: 83 passed and 1 skipped (`explain.spec.ts`'s packaged-only
+  test, which skips outside a packaged app). The missions spec's 8 tests passed among them.
+- The packaged app (`test:packaged`, after `stage:runtime linux-x64` and `package:dir`) at `61b4193`: 31 passed and 53
+  skipped (the 49 skipped on main and the foundation, and 4 missions tests that need the stub switch a packaged app
+  ignores). The missions spec's other 4 passed packaged: a mission and its board, a repository-linked task refused,
+  the preview refused with no key before any request, and deleting a mission.
+- A real engine (`rpc.ts`, a fresh home under `~/.nivra-dev-niv52`) at `61b4193`, against a loopback stub: a three-task
+  mission review completed with exactly three chat requests; a private key split across T1's goal and its acceptance
+  criteria was refused in the context step, before the listing, with no request. The engine helper's run at `d3ff4c6`
+  showed a named model the listing lacks refused with no chat request.
+- An independent review by a fresh agent at `1be62b3` found four defects and eight smaller points, all fixed in
+  `51d2e68`, `9cfe752` and `61b4193`. Each fix has a test that fails without it; three were shown by undoing the fix.
+- Nate's review of #25 (28 Oct): one finding, the live approval reusable, fixed in `a46fe7c`. `pnpm verify` there:
+  1,150 (domain 90, engine 713, desktop 347), none skipped. The two claim tests fail with the claim removed. After the
+  wording fix in `ca44e48`, the live check's tests again: 10 passed. Only the live script and its test changed since
+  `61b4193`, so the built and packaged runs above still stand for the app.
+- **Not run on this branch: `test:windows`**, which AGENTS.md asks for when the main process or preload changes. By
+  Nate's decision (28 Oct, 01:44 SGT), one Windows staging and test run on the final candidate containing Tracks B and
+  C covers it, in Track A's candidate step, including `workspace-windows.spec.ts`'s mission test (`7745c6e`). Windows
+  validation is pending on that candidate. Nothing here changes a target, the supervisor or staging, so
+  `verify:windows` isn't needed for this branch.
+- **On the integrated code, `4440a57`** (Nate asked for the checks after `main` was merged in):
+  - `pnpm verify`: 1,241 (domain 100, engine 743, desktop 398), none skipped.
+  - The built app, every spec: 94 passed and 1 skipped (the same packaged-only `explain.spec.ts` test). The missions
+    spec's 8 tests and the coach spec's 11 passed among them.
+  - The packaged app, after `stage:runtime linux-x64` and `package:dir`: 32 passed and 63 skipped. The skips are the
+    53 skipped before and the coach spec's 10, all needing the stub switches a packaged app ignores.
+  - A real engine through `rpc.ts`, on protocol 14, against a loopback stub: a three-task mission review completed with
+    exactly three chat requests; a key split across two parts was refused in the context step, with no request.
+- **Not run: the live check.** Nate deferred it until after the integration. Its recipe and digest for the revision
+  to be tested are printed apart from this record, since a digest bound to a commit can't be written into it. The
+  digest printed at `68a49df` is withdrawn. No paid call was made.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

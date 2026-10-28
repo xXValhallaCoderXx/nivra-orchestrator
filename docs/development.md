@@ -99,6 +99,28 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 ```
 
 `verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`.
+- **A mission review** (NIV-52). `rpc.ts` drives one against a real engine: give `runs.start` a `review` with a mission
+  packet in its context (`"packet": {"kind": "mission", ...}`, as `apps/engine/test/fixtures/mission-review/live.json`
+  holds one), and it fills in the packet's and the preferences' digests when the input leaves them out. A packet that
+  names a model is refused before any inference request unless the listing gives exactly that model.
+- **The mission review's live check** is an explicit script, never part of `verify`, and runs only with Nate's approval
+  of its digest:
+
+  ```bash
+  node apps/engine/scripts/mission-review-live.ts --plan                                   # the recipe; no network
+  node apps/engine/scripts/mission-review-live.ts --credentials <file> --approved <digest> # one review, at most 3 requests
+  ```
+
+  The digest binds the revision (a clean checkout), the fixture, the three profiles, their instructions' hashes and the
+  forms they hand in (the tools' definitions), the model and the limits. The engine home is a fresh folder under
+  `~/.nivra-dev-niv52` (one inside `~/.nivra` or `~/.nivra-dev` is refused); evidence goes to
+  `~/nivra-acceptance/mission-review-<UTC>-<rev>/`. The model counts as held only when every answer named it. One
+  approval is one run: a launch claims it in `~/nivra-acceptance/claims/mission-review/` before the checkout is
+  checked, the key is read or anything is sent, the claim is kept whatever happens next, and `--plan` then prints the
+  next run's digest.
+- **The window's tests** (`e2e/missions.spec.ts`) drive missions with the token factory stub: the council's roles are
+  told apart by the instructions' first line, as for plan reviews. A packaged app runs only the parts that need no
+  model.
 - **Its WSL engine runs in a home of the run's own** (D27): `~/.nivra-test/verify-<UTC>-<id>` inside the distribution,
   removed at the end. `test:windows` does the same with `e2e-…`, and `verify:interrupt` with `interrupt-…`. A home an
   interrupted run left is removed by a later run once it is a day old.

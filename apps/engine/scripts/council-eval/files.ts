@@ -146,7 +146,7 @@ export function planIdOf(digest: string): string {
  * The one request a run sends: the fixture's packet, unchanged, with the protocol's empty preference snapshot and, for
  * a project-scoped fixture, consent (it is synthetic). `--plan` prints what it shows from this same function.
  */
-export function requestFor(frozen: Frozen, fixtureId: FixtureId, arm: Arm, clientRequestId: string): Extract<ParamsOf<"runs.start">, { workflowId: "review" }> {
+export function requestFor(frozen: Frozen, fixtureId: FixtureId, arm: Arm, clientRequestId: string): Extract<ParamsOf<"runs.start">, { workflowId: "review" }> & { context: { packet: ReviewPacket } } {
   const fixture = frozen.fixtures.find((f) => f.id === fixtureId)!;
   return {
     clientRequestId,

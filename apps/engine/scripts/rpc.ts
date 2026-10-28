@@ -18,6 +18,8 @@
 // A review of a saved plan version (D30) needs its context: the preferences, the consent and the packet. Its two
 // fingerprints are worked out here when they are left out; after --follow, its report is printed:
 //   pnpm rpc runs.start '{"workflowId":"review","input":{"planId":"<uuid>","planVersion":1},"context":{"preferences":{"revision":0,"records":[]},"sharing":{"modelContext":false},"packet":{"scope":{"kind":"general"},"text":"Plan text","assumptions":[],"references":[]}}}' --follow
+// A mission review (NIV-52) is the same run with a mission packet in place of the plan's (kind "mission": the council's
+// three profiles, the model or null, the mission and up to five tasks); its fingerprint is worked out the same way.
 // A sandbox check (D36) needs upload consent; without a context it has none. Its preview's fingerprint is taken here
 // from `sandbox.preview` when it is left out, and a project id and the local target are filled in; after --follow, its
 // report is printed. Against a stand-in for Nebius on this machine, pass --sandboxes-url:
@@ -67,6 +69,7 @@ import {
   isTerminal,
   LineSplitter,
   Methods,
+  missionPacketDigest,
   packetDigest,
   preferencesDigest,
   PROTOCOL_VERSION,
@@ -76,6 +79,7 @@ import {
   taskBriefDigest,
   type CoachPacket,
   type MethodName,
+  type MissionReviewPacket,
   type TaskBrief,
 } from "@nivra/domain";
 
@@ -98,9 +102,10 @@ try {
 if (method === "runs.start" && params["clientRequestId"] === undefined) params = { clientRequestId: randomUUID(), ...params };
 // A review's fingerprints, worked out from the context it carries when the request leaves them out (D30).
 if (method === "runs.start" && params["workflowId"] === "review") {
-  const context = params["context"] as { preferences?: { records?: Parameters<typeof preferencesDigest>[0] }; packet?: Parameters<typeof packetDigest>[0] } | undefined;
+  const context = params["context"] as { preferences?: { records?: Parameters<typeof preferencesDigest>[0] }; packet?: Parameters<typeof packetDigest>[0] | MissionReviewPacket } | undefined;
   const input = (params["input"] ?? {}) as Record<string, unknown>;
-  if (context?.packet && input["packetDigest"] === undefined) input["packetDigest"] = await packetDigest(context.packet);
+  const packet = context?.packet;
+  if (packet && input["packetDigest"] === undefined) input["packetDigest"] = "kind" in packet ? await missionPacketDigest(packet) : await packetDigest(packet);
   if (context?.preferences?.records && input["preferencesDigest"] === undefined) input["preferencesDigest"] = await preferencesDigest(context.preferences.records);
   params = { ...params, input };
 }
