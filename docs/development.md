@@ -653,6 +653,12 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-reco
   run passes only on exactly that stop, with nothing kept (and, for an install, its log's end), and no task is created.
   Nothing in the script names a repository. A rehearsal reads the protected homes only once its app is closed.
 
+A task run's bounds that no brief changes live in `packages/domain/src/task.ts`: `TASK_RUN_BOUNDS` (requests, the
+output cap, the hand-in's cap, the rate, a request's input time, the input estimate, tool calls, writes, runs, a check's
+seconds, and the session's and the run's minutes), with `requestMsFor` (a request's time from its cap: 830 s for 8,000
+tokens, 180 s for the hand-in's 1,500) and `minutesMs`. The engine's `TASK_LIMITS` (`apps/engine/src/task/limits.ts`)
+reads them as it reads `TASK_BRIEF_LIMITS`, and copies none. The tests still pin each number on its own.
+
 The engine's fetch (D47): at start, before any request, the engine makes undici's agent, with 15 minutes' waits for a
 reply's headers and body, the global dispatcher that Node's own fetch reads (`apps/engine/src/providers/transport.ts`),
 since a model's reply is not streamed and comes whole; with `NODE_USE_ENV_PROXY=1` it is undici's `EnvHttpProxyAgent`,

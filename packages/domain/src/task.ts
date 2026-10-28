@@ -214,6 +214,44 @@ export type StoredTaskInput = z.infer<typeof StoredTaskInput>;
  */
 export const TASK_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
+/**
+ * A task run's bounds that no brief changes (D39, NIV-35): one source for the engine, which enforces them
+ * (`TASK_LIMITS`, apps/engine/src/task/limits.ts), and for main, which shows them in Settings (getRunLimits). Times
+ * come from the functions below, so every reader works them out the same way; a test pins each number on its own.
+ */
+export const TASK_RUN_BOUNDS = {
+  /** Requests to the model in a run, the hand-in's among them. */
+  modelRequests: 24,
+  /** The output cap sent with each request; it counts the model's reasoning tokens too (`max_completion_tokens`). */
+  outputTokensPerRequest: 8_000,
+  /** The hand-in only calls submit with a short summary: its answer has a cap, and so a time, of its own. */
+  handInOutputTokens: 1_500,
+  /**
+   * A request's time holds the whole of an answer of its cap at the slowest rate the live runs saw, 10 tokens a second
+   * (run 3's ninth request gave 634 in 58.5 s), with time for its input and the queue besides. A request isn't streamed,
+   * so its reply's headers come with its whole answer.
+   */
+  tokensPerSecond: 10,
+  requestInputMs: 30_000,
+  /** An estimated admission budget for the run's input, not a cap (D30). */
+  estimatedInputTokens: 480_000,
+  /** Tool calls the model may make, of which writes and runs of a case or a check are operations. */
+  toolCalls: 48,
+  writes: 8,
+  runs: 4,
+  /** Each command's time, a case's or a check's. */
+  checkSeconds: 60,
+  /** The sandbox session, from when it opens, and the whole run, from when it starts. */
+  sessionMinutes: 45,
+  runMinutes: 58,
+} as const;
+
+/** A request's time from its output cap: 830,000 ms for 8,000 tokens, and 180,000 ms for the hand-in's 1,500. */
+export const requestMsFor = (outputTokens: number): number => TASK_RUN_BOUNDS.requestInputMs + (outputTokens / TASK_RUN_BOUNDS.tokensPerSecond) * 1000;
+
+/** Minutes in milliseconds, for the session's and the run's. */
+export const minutesMs = (minutes: number): number => minutes * 60_000;
+
 /** A run's bounds, as the engine enforces them (D39), for the person to see before it starts. */
 export const TaskRunLimits = z.strictObject({
   /** Hard limits: the model's requests, each request's time, and the output cap sent with each. */

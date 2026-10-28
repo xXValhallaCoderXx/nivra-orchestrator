@@ -5,7 +5,7 @@ import { Methods, StartRunParams } from "../src/methods.ts";
 import { PROTOCOL_VERSION } from "../src/protocol.ts";
 import { WorkflowId } from "../src/runs.ts";
 import { SandboxStopCode } from "../src/sandbox.ts";
-import { TASK_BRIEF_LIMITS, TaskBrief, taskBriefDigest, TaskPreview, TaskReport, TaskStopCode, type TaskBrief as Brief } from "../src/task.ts";
+import { minutesMs, requestMsFor, TASK_BRIEF_LIMITS, TaskBrief, taskBriefDigest, TaskPreview, TaskReport, TaskStopCode, type TaskBrief as Brief } from "../src/task.ts";
 
 /** A task run's contract (NIV-7, D39): what a run takes, what it never takes, what binds it, and what it gives back. */
 const BRIEF: Brief = {
@@ -152,5 +152,11 @@ describe("what a task run gives back (NIV-7)", () => {
     assert.equal(TaskReport.safeParse({ ...report, checks: Array.from({ length: 5 }, () => report.checks[0]) }).success, false, "four cases and checks at most");
     assert.equal(TaskReport.safeParse({ ...report, checks: [{ ...report.checks[0], verdict: "skipped" }] }).success, false);
     assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 10, true]);
+  });
+});
+
+describe("a task run's times, from the bounds no brief changes (NIV-35)", () => {
+  it("works a request's time out from its cap, the hand-in's from its own, and minutes in milliseconds", () => {
+    assert.deepEqual([requestMsFor(8_000), requestMsFor(1_500), minutesMs(45), minutesMs(58)], [830_000, 180_000, 2_700_000, 3_480_000]);
   });
 });
