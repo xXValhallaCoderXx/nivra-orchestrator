@@ -1,11 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
 import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, type EnvironmentChoices } from "@nivra/domain";
 import { z } from "zod";
-import { IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
+import { COPY_TEXT_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
@@ -115,6 +115,12 @@ function start(): void {
     platform: process.platform,
     packaged: app.isPackaged,
   }));
+  // Copy buttons (NIV-56): only text a person asked to copy, and only so much of it; the window never reaches the clipboard.
+  handle(IPC.copyText, z.tuple([z.unknown()]), (_event, text) => {
+    if (typeof text !== "string") throw new Error("Nivra copies only text, so nothing was copied.");
+    if (text.length > COPY_TEXT_CHARS) throw new Error(`That is ${text.length.toLocaleString("en-GB")} characters, more than the ${COPY_TEXT_CHARS.toLocaleString("en-GB")} Nivra copies at once, so nothing was copied.`);
+    clipboard.writeText(text);
+  });
   handle(IPC.listEngines, none, () => host.engines());
   handle(IPC.openProject, project, (_event, id) => host.open(id));
   handle(IPC.restartEngine, project, (_event, id) => host.restart(id));

@@ -2,6 +2,7 @@ import { Alert, Badge, Box, Button, Code, Group, Stack, Text, Tooltip } from "@m
 import { useState } from "react";
 import type { EngineView, ProjectView } from "../../../shared/ipc";
 import { errorMessage } from "../shared/ui";
+import { CopyButton } from "../shell/CopyButton";
 
 const LOOK = {
   online: { dot: "var(--nivra-success)", label: "Engine online" },
@@ -89,9 +90,12 @@ export function EngineNotices({ engine, onRestart, testId = "engine" }: { engine
           <Stack gap={6}>
             <Text size="sm">{state.reason}</Text>
             {state.logPath && (
-              <Text size="xs" c="var(--nivra-text-3)">
-                Its log: <Code fz="xs">{state.logPath}</Code>
-              </Text>
+              <Group gap="sm" wrap="nowrap" align="center">
+                <Text size="xs" c="var(--nivra-text-3)" style={{ overflowWrap: "anywhere" }}>
+                  Its log: <Code fz="xs">{state.logPath}</Code>
+                </Text>
+                <CopyButton text={state.logPath} label="Copy the log's path" testId={`${testId}-copy-log`} />
+              </Group>
             )}
             {error && (
               <Text size="sm" c="var(--nivra-error)">

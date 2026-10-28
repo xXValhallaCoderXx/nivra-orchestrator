@@ -1,7 +1,9 @@
-import { Alert, Button, Group, List, Modal, Stack, Text } from "@mantine/core";
+import { Alert, Button, Code, Group, List, Modal, Stack, Text } from "@mantine/core";
 import { useRef, useState } from "react";
 import type { ProjectView } from "../../../shared/ipc";
 import { errorMessage } from "../shared/ui";
+import { CopyButton } from "../shell/CopyButton";
+import { codeSpans } from "../shell/text";
 
 /**
  * Adding and removing repositories (PN1, PN3). Folders come from the native picker in main; the renderer never names a
@@ -39,8 +41,19 @@ export function useAddProject({ projects, onAdded, onChanged }: { projects: Proj
     <Modal opened={refusal !== null} onClose={() => setRefusal(null)} title="Nivra can't add this folder" centered data-testid="project-add-refused">
       <Stack gap="md">
         <Text size="sm" data-testid="project-add-refusal">
-          {refusal}
+          {codeSpans(refusal ?? "").map((part, index) => (part.code ? <Code key={index}>{part.text}</Code> : <span key={index}>{part.text}</span>))}
         </Text>
+        {/* A command the refusal asks the person to run (PN1), to copy rather than retype. */}
+        {codeSpans(refusal ?? "")
+          .filter((part) => part.code)
+          .map((part) => (
+            <Group key={part.text} gap="sm" wrap="nowrap" data-testid="project-add-command" data-command={part.text}>
+              <Code block style={{ flex: "1 1 auto" }}>
+                {part.text}
+              </Code>
+              <CopyButton text={part.text} label={`Copy the command ${part.text}`} testId="project-add-copy-command" />
+            </Group>
+          ))}
         <Text size="sm" c="var(--nivra-text-2)">
           Nothing was added.
         </Text>

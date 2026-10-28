@@ -46,6 +46,7 @@ import type { ResearchPreview, ResearchSelection, ResearchView } from "./researc
 
 export const IPC = {
   getAppInfo: "app:info",
+  copyText: "app:copy-text",
   listEngines: "engines:list",
   openProject: "projects:open",
   restartEngine: "engine:restart",
@@ -146,6 +147,9 @@ export const IPC = {
 
 /** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
 export const MESSAGE_CHARS = 8_000;
+
+/** The most text a copy button may put on the clipboard (copyText), in characters. */
+export const COPY_TEXT_CHARS = 65_536;
 
 /** What the host takes in a task's title, brief and plan (D26); the window counts a plan's characters as they are typed. */
 export const TASK_LIMITS = { titleChars: 200, textChars: 4_000, contextChars: 20_000, itemChars: 1_000, items: 20, planChars: 20_000 } as const;
@@ -808,6 +812,12 @@ export interface MissionReviewPreview {
 
 export interface NivraApi {
   getAppInfo(): Promise<AppInfo>;
+  /**
+   * Puts text a person asked to copy on the clipboard, for the window's copy buttons: the window itself has no clipboard
+   * access (every permission is refused), so main writes it. Text of at most COPY_TEXT_CHARS characters; anything else is
+   * refused, saying so, and nothing is copied.
+   */
+  copyText(text: string): Promise<void>;
   /** One view per engine a project uses or that is running; nothing is started by asking. */
   listEngines(): Promise<EngineView[]>;
   /** Starts the engine of the project's folder if it isn't running yet, never another one (D17). */

@@ -9,6 +9,7 @@ import { SandboxCheck } from "../features/sandbox";
 import { FeatureNeeds, NebiusConnection, ResearchSwitch, SettingsCard, SharingTable, TavilyConnection } from "../features/settings";
 import { WslGuidance } from "../features/wsl";
 import { Appearance } from "../shell/Appearance";
+import { CopyButton } from "../shell/CopyButton";
 import { SETTINGS_TABS } from "../shell/places";
 import type { SettingsSection } from "./routes";
 
@@ -134,6 +135,7 @@ export function SettingsPage({
             testId="diagnostics-engine"
           >
             {project && <EngineNotices engine={engine} onRestart={() => window.nivra.restartEngine(project.id)} />}
+            {engine?.state.status === "online" && <TechnicalDetails text={engineDetails(engine)} label="Copy the engine's technical details" testId="engine-details" />}
             <EngineList engines={engines} projects={projects} />
           </SettingsCard>
           <Doctor key={`doctor:${project?.targetId ?? "none"}`} projectId={project?.id ?? null} online={online} targetLabel={project?.targetLabel ?? null} />
@@ -141,14 +143,39 @@ export function SettingsPage({
           <SandboxCheck key={`sandbox:${project?.id ?? "none"}`} project={project} online={online} credentialsSaved={credentialsSaved} onProjectChanged={onProjectsChanged} />
           {wsl && <WslGuidance wsl={wsl} onChecked={onWslChecked} />}
           <SettingsCard title="This app" testId="diagnostics-app">
-            <Text size="sm" ff="monospace" c="var(--nivra-text-2)" style={{ overflowWrap: "anywhere" }}>
-              {appInfo ? `Nivra ${appInfo.version} · window on ${appInfo.platform} · Electron ${appInfo.electron}` : "Reading…"}
-              {settings ? ` · keys ${settings.keychain === "available" ? "encrypted by this computer's keychain" : "kept unencrypted: no keychain"}` : ""}
-            </Text>
+            {appInfo ? (
+              <TechnicalDetails
+                text={`Nivra ${appInfo.version} · window on ${appInfo.platform} · Electron ${appInfo.electron}${settings ? ` · keys ${settings.keychain === "available" ? "encrypted by this computer's keychain" : "kept unencrypted: no keychain"}` : ""}`}
+                label="Copy this app's technical details"
+                testId="app-details"
+              />
+            ) : (
+              <Text size="sm" c="var(--nivra-text-2)">
+                Reading…
+              </Text>
+            )}
           </SettingsCard>
         </Stack>
       </Box>
     </Stack>
+  );
+}
+
+/** An engine's facts on one line, as a person would paste them into a report. */
+const engineDetails = (engine: EngineView) =>
+  engine.state.status === "online"
+    ? `Engine ${engine.state.info.engineVersion} · ${engine.state.info.platform}/${engine.state.info.arch} · Node ${engine.state.info.node} · data in ${engine.state.info.home}`
+    : "";
+
+/** A line of technical details, with a button that copies it. */
+function TechnicalDetails({ text, label, testId }: { text: string; label: string; testId: string }) {
+  return (
+    <Group gap="sm" wrap="nowrap" align="flex-start" justify="space-between">
+      <Text size="sm" ff="monospace" c="var(--nivra-text-2)" style={{ overflowWrap: "anywhere" }} data-testid={testId}>
+        {text}
+      </Text>
+      <CopyButton text={text} label={label} testId={`copy-${testId}`} />
+    </Group>
   );
 }
 

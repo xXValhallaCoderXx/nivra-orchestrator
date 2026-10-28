@@ -199,6 +199,31 @@ test("Esc never stops a run: a held hello run keeps running", async () => {
   await goTo(page, "home");
 });
 
+test("a copy button puts exactly the shown text on the clipboard, through main, and says so; main refuses what isn't text or is too long", async () => {
+  await goTo(page, "settings-diagnostics");
+  const clipboard = () => app.evaluate(({ clipboard }) => clipboard.readText());
+  await app.evaluate(({ clipboard }) => clipboard.writeText("before"));
+  const shown = (await page.getByTestId("app-details").textContent()) ?? "";
+  expect(shown).toContain("Nivra ");
+  await page.getByTestId("copy-app-details").click();
+  await expect(page.getByTestId("toast").filter({ hasText: "Copied" })).toBeVisible();
+  expect(await clipboard()).toBe(shown);
+
+  // Main takes text only, and only so much of it: a refusal says what happened, and nothing is copied.
+  const refusal = (value: unknown) => page.evaluate((given) => (window.nivra.copyText as (value: unknown) => Promise<void>)(given).then(() => null, (error: Error) => error.message), value);
+  expect(await refusal("x".repeat(65_537))).toContain("more than the 65,536 Nivra copies at once, so nothing was copied.");
+  expect(await refusal(42)).toContain("Nivra copies only text, so nothing was copied.");
+  expect(await clipboard()).toBe(shown);
+
+  // The engine's own details copy the same way.
+  const engine = page.getByTestId("engine-details");
+  await expect(engine).toContainText("Engine ");
+  await page.getByTestId("copy-engine-details").click();
+  await expect.poll(clipboard).toBe((await engine.textContent()) ?? "");
+  await expect(page.getByTestId("copy-failed")).toHaveCount(0);
+  await goTo(page, "home");
+});
+
 test("a narrow window folds the sidebar behind the menu button; Settings and a dialog scroll inside themselves, their actions in reach, and nothing scrolls sideways", async () => {
   // 820 by 900 at 150% zoom, then the window's least height: 547 by 600, then 547 by 373 CSS px.
   await app.evaluate(({ BrowserWindow }) => {

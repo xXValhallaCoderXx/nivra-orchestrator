@@ -31,6 +31,7 @@ const EXPECTED_API = [
   "cancelTurn",
   "checkTokenFactory",
   "checkWsl",
+  "copyText",
   "createConversation",
   "createMission",
   "createMissionTask",
