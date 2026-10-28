@@ -185,6 +185,35 @@ describe("the draft store (NIV-56, R30)", () => {
     assert.deepEqual([store.list().map((draft) => draft.key), store.unchecked], [["a:clean"], false]);
   });
 
+  it("asks again when a key was saved while a write was being checked, so an answer about the old keys never keeps it", async () => {
+    const storage = new FakeStorage();
+    const keys = new Set<string>();
+    // The write's own check is held; every later one answers from the keys saved by then.
+    let held: ((holds: boolean) => void) | null = null;
+    let asked = 0;
+    const check: SavedKeyCheck = (text) => {
+      asked += 1;
+      if (asked === 1) return new Promise((resolve) => (held = resolve));
+      return Promise.resolve([...keys].some((key) => text.includes(key)));
+    };
+    const store = createDraftStore(storage, check);
+    const written = store.write("home-composer:general", { title: `Rotate ${LATER}` }, "Rotate");
+    await Promise.resolve();
+    keys.add(LATER);
+    await store.recheck();
+    held!(false);
+    assert.deepEqual(await written, { kept: false, reason: "credential" });
+    assert.deepEqual([storage.entries.size, store.list().length, store.read("home-composer:general")], [0, 0, null]);
+    // A clean text in the same race is kept, on the current keys' answer, and not called unchecked.
+    asked = 0;
+    const clean = store.write("home-composer:general", { title: "Rotate the deploy key on Friday" }, "Rotate");
+    await Promise.resolve();
+    await store.recheck();
+    held!(false);
+    assert.deepEqual(await clean, { kept: true });
+    assert.deepEqual(store.read("home-composer:general"), { title: "Rotate the deploy key on Friday" });
+  });
+
   it("removes, after a recheck, a copy that holds a key saved since it was kept", async () => {
     const storage = new FakeStorage();
     const keys = savedKeys();

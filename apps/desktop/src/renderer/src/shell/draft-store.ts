@@ -102,6 +102,8 @@ export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: S
   const checked = new Map<string, string>();
   const hidden = new Set<string>();
   let rechecking = 0;
+  // Counts the rechecks begun, each after the saved keys changed: a write whose answer came from older keys asks again.
+  let keysEpoch = 0;
 
   const raw = (key: string): string | null => {
     if (!storage) return null;
@@ -149,9 +151,17 @@ export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: S
       }
       // 2. The saved keys, through main, on exactly the text that would be stored.
       const record = JSON.stringify({ label, savedAt: now().toISOString(), value } satisfies Stored);
+      const text = textOf(label, value);
       let holdsKey: boolean;
       try {
-        holdsKey = await hasSavedKey(textOf(label, value));
+        let epoch = keysEpoch;
+        holdsKey = await hasSavedKey(text);
+        // The keys changed while it was asked (a key saved, so a recheck began): ask again with the current ones, so
+        // no copy is kept on an answer about keys that are gone or missing a key that is new.
+        while (epoch !== keysEpoch && latest.get(key) === mine) {
+          epoch = keysEpoch;
+          holdsKey = await hasSavedKey(text);
+        }
       } catch {
         // Not checked, so not kept; the copy kept before stays as it is.
         return { kept: false, reason: "unchecked" };
@@ -199,6 +209,7 @@ export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: S
     async recheck() {
       if (!storage) return;
       const pass = ++rechecking;
+      keysEpoch += 1;
       let entries: Array<[key: string, text: string]>;
       try {
         entries = [];
