@@ -4,7 +4,7 @@
 // its own bridge, called with string expressions: scripts are compiled without the DOM's types. Nothing here presses
 // Prepare or Start more than once, and nothing reads a key field.
 import { expect, type ElectronApplication, type Page } from "@playwright/test";
-import type { EnvironmentChoices, EnvironmentPreviewV2 } from "@nivra/domain";
+import type { EnvironmentChoices, EnvironmentPreviewV2, InstallScope } from "@nivra/domain";
 import type { BriefFields, EnvironmentView, ProjectView, SettingsView, TaskAttemptView, TaskView } from "../src/shared/ipc.ts";
 
 const arg = (value: unknown) => JSON.stringify(value);
@@ -32,10 +32,25 @@ export async function keysSaved(page: Page, timeoutMs: number): Promise<void> {
 
 /**
  * The environment section's preview of the project's own recipe (NIV-55), as the window shows it, with these choices
- * made in it: a Node version the project leaves to the person, and npm's install options. Its fingerprint from the host.
+ * made in it: what to install, a Node version the project leaves to the person, and npm's install options. Its
+ * fingerprint from the host.
  */
 export async function previewEnvironment(page: Page, projectId: string, choices: EnvironmentChoices = {}): Promise<Extract<EnvironmentPreviewV2, { status: "ready" }>> {
   const section = page.getByTestId("environment");
+  // What to install, chosen before the first preview so that it is the one previewed: the whole project unless the task
+  // file names packages, typed into the rows the window holds, and any rows left over removed.
+  const scope: InstallScope = choices.scope ?? { kind: "whole" };
+  await section.getByTestId(scope.kind === "whole" ? "environment-scope-whole" : "environment-scope-selected").check();
+  if (scope.kind === "selected") {
+    const rows = section.getByTestId("environment-scope-selector");
+    await expect(rows.first()).toBeVisible();
+    for (let extra = (await rows.count()) - scope.selectors.length; extra > 0; extra--) await section.getByTestId("environment-scope-remove").last().click();
+    for (const [index, selector] of scope.selectors.entries()) {
+      if ((await rows.count()) <= index) await section.getByTestId("environment-scope-add").click();
+      await rows.nth(index).fill(selector);
+    }
+    await expect(rows).toHaveCount(scope.selectors.length);
+  }
   await section.getByTestId("environment-preview").click();
   const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (choices.runtime) {
@@ -49,6 +64,7 @@ export async function previewEnvironment(page: Page, projectId: string, choices:
   if (shown.status === "refused") throw new Error(`The environment's preview was refused (${shown.code}): ${shown.message}`);
   if (shown.status === "needs-choice") throw new Error(`The environment's preview needs a choice: ${shown.choices.map((choice) => choice.message).join(" ")}`);
   await expect(section.getByTestId("environment-install")).toContainText([shown.recipe.install.tool, ...shown.recipe.install.args].join(" "));
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveAttribute("data-selectors", shown.recipe.scope.kind === "selected" ? shown.recipe.scope.selectors.join(" ") : "");
   return shown;
 }
 

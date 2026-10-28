@@ -12,7 +12,7 @@ import { readTar } from "../../engine/src/exec/tar.ts";
 import { succeed, type Behaviour } from "../../engine/test/fake-sandboxes.ts";
 import { RealGuest } from "../../engine/test/real-guest.ts";
 import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandboxes.ts";
-import { addProject, prepareOnce } from "../scripts/task-journey.ts";
+import { addProject, prepareOnce, previewEnvironment } from "../scripts/task-journey.ts";
 
 /**
  * What a project's environment installs, chosen in the window (NIV-55, option a1), through the real host and engine,
@@ -133,21 +133,16 @@ test("installs only the packages chosen in the window: the install the preview s
   await expect(section.getByTestId("environment-install")).toHaveText("Then, in the sandbox: pnpm install --frozen-lockfile");
   await expect(row("workspace")).toContainText("Workspace: pnpm workspace, 2 packages");
 
-  // Two packages, typed: the engine's install has one --filter each, and its own rows say so too.
-  await section.getByTestId("environment-scope-selected").check();
-  await expect(section.getByTestId("environment-preview-panel")).toHaveCount(0);
-  await section.getByTestId("environment-scope-selector").first().fill("@mono/data");
-  await section.getByTestId("environment-scope-add").click();
-  await section.getByTestId("environment-scope-selector").nth(1).fill("./packages/web");
-  await section.getByTestId("environment-preview").click();
+  // Two packages, typed as the live run's journey types a task file's: the engine's install has one --filter each, and
+  // its own rows say so too.
+  const shown = await previewEnvironment(page, projectId, { scope: SCOPE });
   await expect(section.getByTestId("environment-install")).toHaveText(`Then, in the sandbox: ${COMMAND}`);
   await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: only the workspace packages that @mono/data and ./packages/web select.");
   await expect(row("workspace")).toContainText("Installing @mono/data, ./packages/web.");
   await expect(row("install")).toContainText(COMMAND);
   await expect(section.getByTestId("environment-prepare")).toBeEnabled();
-  const shown = await resolveIn(projectId, { scope: SCOPE });
   const whole = await resolveIn(projectId, {});
-  if (shown.status !== "ready" || whole.status !== "ready") throw new Error(`The previews weren't ready: ${shown.status}, ${whole.status}.`);
+  if (whole.status !== "ready") throw new Error(`The whole project's preview is ${whole.status}.`);
   expect([shown.recipe.scope, shown.recipe.install.args]).toEqual([SCOPE, COMMAND.split(" ").slice(1)]);
 
   // A start whose preview was of another scope is refused, either way round, and nothing reaches the sandbox.

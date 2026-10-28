@@ -607,7 +607,8 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e environment.spec.ts environmen
   the real engine and the stand-in, whose guest fails any step it doesn't stand in for; the gated engine applies a
   scope as the engine does, and ignores it while an `env-ignores-scope` file exists.
 - **Live runs**: `task-live.ts`'s recipe (kind v3 since the live checks' state folders) takes the person's choices for
-  the project's own recipe in the task file's `environment` (`{}` for none), and binds the resolution's fingerprint and
+  the project's own recipe in the task file's `environment` (`{}` for none; a `scope` names the packages to install,
+  which the journey's preview types into the window by test id), and binds the resolution's fingerprint and
   warnings, the recipe's digest and the setup files' digest. Each live run needs Nate's approval of its own recipe and
   digest. Run the window's e2e through `pnpm --filter @nivra/desktop test:e2e`: the development engine runs on the Node
   that started pnpm's script.
