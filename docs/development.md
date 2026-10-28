@@ -562,7 +562,10 @@ cd apps/engine && node scripts/environment-releases.ts --write   # write it: rev
 - **The resolver** (`apps/engine/src/environment/node.ts`, with its file readers in `node-files.ts`) honours exact pins,
   resolves ranges to an exact release, takes a labelled default when nothing is declared, and puts conflicting or
   unreadable declarations to the person as choices. It refuses, naming the file, the layouts that need the project's
-  sources to install, until preparing from the sources is built.
+  sources to install, until preparing from the sources is built. It reads workspace patterns with `*`, `**`, `?` and
+  brace lists, and lockfile entries in either YAML style; a pattern or an entry it can't read is refused, never passed
+  over. A chosen version is checked against the project's Node and lockfile as a pin is, and each pnpm build setting
+  counts only from the pnpm version that reads it, where it reads it (`BUILD_SETTINGS`, from pnpm's changelog).
 - **The release index** (`releases.ts`, with generated rows in `release-data.ts`) is the Node, npm and pnpm releases known
   when this Nivra was built, from nodejs.org and the npm registry, with each source's SHA-256 and the time it was
   fetched. The engine never fetches it: ranges resolve only within it, and a pin newer than it is checked when

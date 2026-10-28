@@ -3316,7 +3316,10 @@ after another decision lands renumbers it.
   admit; nothing declared takes a labelled default. Declarations that conflict, or that Nivra can't read, are put to
   the person as a choice, never picked for them. The recipe never takes a fact from the release index (npm stays the
   one the Node image bundles unless pinned), and the versions a preparation settled on are kept while the setup files
-  are unchanged, unless the person had chosen them. Refreshing the index invalidates nothing.
+  are unchanged, unless the person had chosen them. Refreshing the index invalidates nothing. Workspace patterns and
+  lockfile entries are read as the package managers write them (brace lists, and either YAML style); one Nivra can't
+  read is refused, never passed over. A choice settles which declaration to follow, never compatibility: a chosen
+  version is checked against the project's Node and lockfile as a pin is.
 - **Identity.** The recipe's digest is what the person approves; a preparation writes what it verified (the tools'
   versions, the OS release and platform, the images, the builds that didn't run) once, as a record of its own, and a
   task run carries both digests (`EnvironmentRef`). The run preview's fingerprint v3 binds both, the image, the setup
@@ -3332,8 +3335,9 @@ after another decision lands renumbers it.
   folders and nothing else. Any mismatch keeps nothing, and the stop says what was found, in Nivra's words; a known
   install failure (npm's ERESOLVE, a lockfile out of step, pnpm's unapproved builds, an engine mismatch, a build tool
   missing, the registry out of reach) says what to change.
-- **Builds.** Each package manager's own build policy is honoured, never widened. An environment whose builds didn't
-  all run, or whose builds Nivra can't tell, starts no task run until the person changes the project's policy and
+- **Builds.** Each package manager's own build policy is honoured, never widened, as the pinned version applies it: a
+  pnpm setting counts only from the version that reads it, and only where it reads it. An environment whose builds
+  didn't all run, or whose builds Nivra can't tell, starts no task run until the person changes the project's policy and
   prepares again, or accepts it without them; the acceptance is bound to that verified record (workspace migration 8,
   `environments.builds_json`) and ends when another preparation leaves an environment.
 - **Task runs.** A run starts from the project's environment only when it is ready, and never from Nivra's own image

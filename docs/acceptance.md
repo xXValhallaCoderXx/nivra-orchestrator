@@ -2733,8 +2733,8 @@ checked unchanged afterwards):
 
 A project's own recipe prepared in Nebius and used by its task runs, through the engine, the task touch points, the
 host, the store and the window, offline. On `feature/env-node`, stacked on PR 31 (`feature/env-recipe`, the recipe
-contract and Node's resolver), with main `a902bc8` merged in through it. An independent review of the engine half came
-before the host half.
+contract and Node's resolver, with Nate's review of it fixed), with main `ab82e91` merged in through it. An independent
+review of the engine half came before the host half.
 
 | Commit | What |
 |---|---|
@@ -2747,7 +2747,8 @@ before the host half.
 | `b61d95c` | The environment panel, the run preview and card; the journey shared by the e2e test and the live run |
 | `1e5043f` | The live run's recipe kind v2 |
 | `4ee0749`, `3f97abd`, `3426c83` | The stand-ins list the workspace as readiness does; a chosen version kept as the person's; the environment e2e journey through the recipe panel |
-| `f069d22` | PR 31's head, with main `a902bc8`, merged in |
+| `39f0d30` | The panel says plainly why a preview's recipe differs from the environment prepared |
+| `f069d22`, `14868f2`, `040c09a` | PR 31's head merged in: with main `a902bc8`; then with Nate's review of PR 31 fixed (`63c9467`); then with main `ab82e91` (`9fbb673`) |
 | this record | D48, `AGENTS.md`'s boundary rule, the development notes and this section |
 
 **What it shows, offline:**
@@ -2762,15 +2763,43 @@ before the host half.
 | Requested and verified identity bound to runs | `task-recipe-engine.test.ts`, `tasks.test.ts`, `host.test.ts` | Fingerprint v3 binds both digests, the image, the setup files, the Nebius project and the target; a different verification makes a new record and a new fingerprint |
 | Tracked files are never hidden by an output folder's name | `snapshot.test.ts`, `patch.test.ts`, `prepared-image.test.ts`, `task-environment.test.ts` | A tracked `dist/` is sent, editable, and its new files enter the change; an untracked one's are generated; a commit that tracks files in a folder its environment leaves out is refused before anything is sent. The secrets deny list and the engine-home exclusion are unchanged, inside such folders too; the preferences store is the host's own and never in a commit Nivra reads |
 | D41's records | `environment-store.test.ts`, `host.test.ts`, `workspace-store.test.ts` | Read as legacy, "Prepared by an earlier version of Nivra. Prepare it again to use it.", and never a run's environment; migration 8 keeps every row |
+| Setup files read as the package managers write them (PR 31, with Nate's review) | `environment-node.test.ts`, `environment-releases.test.ts` | Workspace patterns with brace lists and `?`; lockfile entries in either YAML style; a chosen version checked against the project's Node and lockfile as a pin is; each pnpm 10 build setting from the version that reads it, where it reads it. A pattern or an entry Nivra can't read is refused, never passed over |
 
-**Checks:** `pnpm verify` at `f069d22`; the built app's end-to-end suite under xvfb; mutation checks on the guards
-(`~/nivra-acceptance/niv55/mutate-pr2b.mjs`, 22 of 23 caught, the one missed unreachable through a run;
-`mutate-pr2c.mjs`, 13 of 14 caught, the one missed then given its test). `test:packaged`; the Windows checks
-(`verify:windows`, `test:windows`) need a Windows turn, which Nate approves.
+**Through a real engine** (`apps/engine/scripts/rpc.ts` at `040c09a`, offline, in a home of its own under
+`~/.nivra-dev-niv55`; nothing installed, no repository script run): `environment.resolve` on nine local repositories,
+each a clone at its commit. Two are ready. humin (`1712af4`) resolves to Node 24.22.1 from its `engines.node` (`>=20`)
+and Nivra's labelled default of pnpm 11.28.9, recipe digest
+`cd775674cff7867acf6ae5be8c30bdf6bb5be6e115cd93c8022c4d0582aac322`. valhalla-fitness (`3c3c5d7`), a pnpm workspace of
+six packages, resolves to Node 22.23.4 from its `.node-version` (`22`) and its packages' ranges, and pnpm 11.5.3 from
+its `packageManager`, with esbuild's build allowed, recipe digest
+`6c0d7474c67c4877f0d4c51651ca15d4f4ff6fd81e5fc225a7dc54580f0eb0a3`. Seven are refused, each saying what to do: three
+because test files hold credential-shaped strings (sentiment-hound, hird-orchestration and Nivra itself), two because
+one file is over the 2 MiB Nivra sends (xc-mvp, portfolio-website), and two because they have no lockfile (nivra-sample,
+nivra-demo-timer). These are resolutions, what preparing would send; nothing was prepared. The answers are in
+`~/nivra-acceptance/niv55/survey-040c09a/`, and the same nine gave the same answers at `39f0d30`, before PR 31's fixes.
+
+**Checks**, at `040c09a`, the code this records, under the shared lock:
+- `pnpm verify`: exit 0, 1,392 tests passed (domain 105, engine 879, desktop 408), none failed, skipped, cancelled or
+  todo, and all three typechecks clean.
+- The built app's end-to-end suite under xvfb: 94 passed and none failed; 1 skipped, `explain.spec.ts`'s "a packaged app
+  ignores the test endpoint switch…", which runs only against a packaged app.
+- `test:packaged`, after `stage:runtime linux-x64` and `package:dir`: 32 passed and none failed; 63 skipped, each
+  needing a test-only switch (a stand-in endpoint or engine) that a packaged app ignores by design: task-coach 10,
+  research 9, workspace 7, review 7, task-recovery 5, explain 5, missions 4, task-apply 3, sandbox 3, research-journey
+  2, research-cancel 2, environment 2, and task-run, task-journey, task-apply-partial and d20 one each.
+- Neither `~/.nivra` nor `~/.nivra-dev` changed during them.
+- Mutation checks on the guards: `~/nivra-acceptance/niv55/mutate-pr2b.mjs` (sha256
+  7b63dcec863664ec240a83ea875cd58403b34c84af57859343bd24a913d3c318), 22 of 23 caught, the one missed ("a changed setup
+  file still verifies") unreachable through a run; `mutate-pr2c.mjs` (sha256
+  5b6858ccb5e9a1d414388a51bb039e22f00c5f998ea0ba68891fcbfa574bb405), 14 of 14 caught (13 of 14 before the chosen-version
+  test, `3f97abd`).
+- Not run: the Windows checks (`verify:windows`, `test:windows`), which need a Windows turn that Nate approves.
 
 **Still to show:** the live checks, each on Nate's approval of its own recipe and digest (`task-live.ts`'s recipe kind
-v2): L1 a pnpm workspace on Node 22, L2 an npm project on the default Node, L3 an install that fails. PR 3
-(source-dependent setup, system packages, Debian) is a decision for Nate.
+v2): L1 a pnpm workspace on Node 22, L2 an npm project on the default Node, L3 an install that fails. L2's planned
+repository, portfolio-website at `e981144`, is refused by the snapshot's one-file limit (`game-ui-update.html`, 6.7 MB),
+so L2 needs another npm project or that file out of its commit: Nate's choice. PR 3 (source-dependent setup, system
+packages, Debian) is a decision for Nate.
 
 ### Deferred to a later milestone (kept, not dropped)
 
