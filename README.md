@@ -4,8 +4,8 @@ A desktop workspace for engineers. It explains a repository with evidence, remem
 preferences, and runs a coding task in a Nebius sandbox, where tests the agent can't edit judge the change. Nothing
 reaches your checkout until you approve that exact change.
 
-> **Status:** this README describes the next release, which isn't released yet. The values marked PENDING- are
-> filled in when it is.
+> **Status:** this README describes the next release, which isn't released yet. Its release page will give the
+> version, the source commit and the checksums; the values marked PENDING- here are filled in when it is out.
 > - The current release is [v0.1.1](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1), for
 >   Linux and Windows. It explains a repository with evidence, and applies your confirmed preferences with explicit
 >   precedence. Its own install and testing steps are in the
@@ -41,8 +41,9 @@ reaches your checkout until you approve that exact change.
     give. The files the cases depend on are frozen.
   - Before anything is sent, the Run preview shows what goes to Token Factory and to Nebius, what each keeps, and the
     run's limits.
-  - The repository's checks run before the model starts, so a missing tool stops the run instead of wasting it.
-    PENDING-H1: the baseline selections' wording.
+  - The repository's checks run before the model starts, so a missing tool stops the run instead of wasting it: up
+    to three baseline checks ("Baseline checks, before the worker"), each a command with its exact output or a pattern
+    that must match all of it, and its exit code, run once with networking off.
   - NVIDIA Nemotron makes the change on a copy of one commit, with networking off. It reads and writes files and runs
     the brief's cases through fixed tools that Nivra's engine carries out; it never chooses a command.
   - Nivra judges the result outside what the model can edit: every case's output is compared byte for byte on this
@@ -50,7 +51,8 @@ reaches your checkout until you approve that exact change.
   - The change comes back as an exact patch, with every case's verdict. You approve it by its hash, and the engine on
     the repository's own system applies it: each original is moved aside and kept, and nothing is committed, pushed or
     staged. Then you accept the change. Instead of approving, you can reject it, or ask for a revision with a note.
-- **Prepares a Node and pnpm environment inside the boundary** (PENDING-H1): the pinned Node image is imported into
+- **Prepares a Node and pnpm environment inside the boundary** (Node 22.23.4 from the `node:22.23.4-alpine3.24` image,
+  and the exact pnpm version the repository's `package.json` pins in `packageManager`): the Node image is imported into
   your Nebius project, and the dependencies are installed from the frozen lockfile in a run of its own, the only one
   with networking on. Its preview says so first.
 - **Asks before anything leaves.** Sending a project's content to the model, uploading its commit to Nebius, and
@@ -97,9 +99,9 @@ Nivra calls Nebius with credentials you save under **Settings**. Nothing is buil
     Add them in Settings, then preview the run again."
   - If the project has no Sandboxes access, or the key and the id don't belong together, Nebius turns the key down,
     and Nivra says so (HTTP 403).
-- **Judges:** the private testing instructions give a key and a project id for a project made for judging. Everything
-  uploaded with them stays with Nebius in that project, where anyone holding the same key can read it. Use the public
-  sample below, or code you're happy to share.
+- **Judges** use their own key and project id, as any user does. The quick path's sandbox check needs a project with
+  Sandboxes (beta) access, requested on the Sandboxes page above. Everything uploaded stays with Nebius in your
+  project. Use the onboarding sample below, or code you're happy to share.
 
 The key and the id are encrypted by your system where it can (Settings says "Key saved, encrypted"), and handed to the
 engine in memory only.
@@ -111,10 +113,11 @@ The next release isn't published yet. Until it is, the build to install is
 [README as of commit `8086464`](https://github.com/xXValhallaCoderXx/nivra-orchestrator/blob/8086464f8f7cd2c2aadfc3adf7829d6c2755bd36/README.md).
 The steps below are for the next release.
 
-Download PENDING-H4-VERSION from the repository's
-[GitHub Releases](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases): `PENDING-H4-ZIP` for Windows or
-`PENDING-H4-DEB` for Linux, with `SHA256SUMS` and `build-info.json` (the commit and runtimes the build came from). To
-check a download, run `sha256sum -c SHA256SUMS --ignore-missing` in Linux or WSL, or `Get-FileHash` in PowerShell.
+Download it from the release's page on the repository's
+[GitHub Releases](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases). The page gives the version, the
+source commit it was built from, and the SHA256 checksum of each file: the Windows zip, the Linux deb, `SHA256SUMS` and
+`build-info.json` (the commit and runtimes the build came from). To check a download, run
+`sha256sum -c SHA256SUMS --ignore-missing` in Linux or WSL, or `Get-FileHash` in PowerShell, and compare with the page.
 
 **Windows 10/11 x64**
 1. Extract the zip into a folder of your own, for example `%LOCALAPPDATA%\Programs\Nivra`, and run `Nivra.exe`.
@@ -128,7 +131,7 @@ check a download, run `sha256sum -c SHA256SUMS --ignore-missing` in Linux or WSL
 **Linux x64** (Ubuntu 24.04 and similar)
 
 ```bash
-sudo apt install ./PENDING-H4-DEB
+sudo apt install ./Nivra-<version>-amd64.deb   # the deb's name, as the release page gives it
 nivra
 ```
 
@@ -141,18 +144,28 @@ There is no AppImage: it doesn't start on a stock Ubuntu 24.04 (D10).
 
 ## Testing instructions
 
-The quick path takes about PENDING-TAKE minutes. It uses the public sample, a copy of
-[valhalla-fitness](https://github.com/xXValhallaCoderXx/valhalla-fitness) with one bug and the tests that show it:
-PENDING-SAMPLE.
+The quick path takes about PENDING-TAKE minutes. It can use the public onboarding sample,
+[nivra-sample](https://github.com/xXValhallaCoderXx/nivra-sample): a few plain files with an MIT licence, which need
+nothing installed, at commit `bbf62893cb699c6994cca9fa7219b66f87f5a30d`. The sample is optional: any git repository works, as
+*Using another folder* below says, and Nivra treats the sample like any other.
+
+**What your credentials need.**
+- **Check Token Factory and Explain:** a Token Factory API key whose model listing offers an NVIDIA model. Nemotron 3
+  Super (`nvidia/nemotron-3-super-120b-a12b`) is preferred, and a task run uses only it.
+- **The sandbox check:** the id of a Nebius project with Sandboxes access. Sandboxes is in beta, and Nebius enables it
+  per project on request, on its [Sandboxes page](https://tokenfactory.nebius.com/sandboxes/about). With it, the key can
+  start, list and cancel sandboxes in that project. Without it, Nebius turns the key down (HTTP 403), and Nivra says
+  so.
 
 1. Install Nivra (above).
-2. Clone the sample. On Windows, clone it inside WSL, for example in `~`:
+2. Clone the sample, if you want to use it, and check out its commit. On Windows, clone it inside WSL, for example in
+   `~`:
    ```bash
-   git clone PENDING-SAMPLE
+   git clone https://github.com/xXValhallaCoderXx/nivra-sample.git
+   git -C nivra-sample checkout bbf62893cb699c6994cca9fa7219b66f87f5a30d
    ```
-3. Start Nivra. Under **Settings**, paste the key and press **Save**, then the project id and **Save**: yours, or the
-   ones in the submission's private testing instructions.
-4. **Add** the sample's folder. On Windows, browse to `\\wsl.localhost\<distribution>\home\<you>\PENDING-SAMPLE-NAME`.
+3. Start Nivra. Under **Settings**, paste your key and press **Save**, then your project id and **Save**.
+4. **Add** the sample's folder. On Windows, browse to `\\wsl.localhost\<distribution>\home\<you>\nivra-sample`.
 5. Under **Settings**, press **Check Token Factory from …** (the label names the system the folder is on). It lists
    the models your key can use, makes one Nemotron call that has to use a tool to answer, then three small probes: at
    most six model requests, within 150 seconds.
@@ -162,21 +175,23 @@ PENDING-SAMPLE.
    what Nebius keeps. Then press **Upload and check**, and **Allow uploads for this project**. A check runs Nivra's own
    fixed steps with networking off: at most 8 operations, each command up to 60 seconds, 10 minutes in all, then up to
    7 minutes to close. Nothing comes back to your checkout.
-8. *Optional, about PENDING-TAKE minutes:* run the real task, the sample's bug fixed by Nemotron in Nebius, then
-   approved and applied by you: [docs/judge-walkthrough.md](docs/judge-walkthrough.md).
+
+A full task run on a public sample isn't offered in this release: its public reproduction is deferred. How a task run
+works, and what it needs, is in *Running a task on your own repository* below.
 
 **Using another folder.** Any git repository with at least one commit works, from the commit only: uncommitted and
 untracked work is never sent.
 - An explanation sends excerpts of the files the model reads to Token Factory.
 - A sandbox check or a task uploads the whole commit, except files on Nivra's deny list, to the Nebius project of the
-  key you saved. Nebius keeps it, and offers no way to delete it. With shared credentials, such as a judges' project,
+  key you saved. Nebius keeps it, and offers no way to delete it. If you share credentials with others,
   anyone holding them can read it. Nivra refuses a commit in which it finds what looks like a key or token, but it
   can't recognise every secret.
 
 ## Running a task on your own repository
 
-- **What it needs:** a repository whose checks run with Node and pnpm (PENDING-H1: the pinned versions), opened on the
-  Linux engine or a WSL one; your key and project id; and both permissions for the project.
+- **What it needs:** a repository whose checks run with Node 22.23.4 and the exact pnpm version its `package.json`
+  pins in `packageManager`, opened on the Linux engine or a WSL one; your key and project id; and both permissions for
+  the project.
 - **What you write:** the brief's goal, and its acceptance cases. Each case is a command, and the exact output and exit
   code only the right behaviour gives: a case that only prints "passed" can be satisfied by the wrong change.
 - **What bounds a run:** PENDING-H2, the limits the Run preview shows.
