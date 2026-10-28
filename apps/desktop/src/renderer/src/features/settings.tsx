@@ -3,6 +3,7 @@ import type { ProviderCheck } from "@nivra/domain";
 import { useEffect, useState, type ReactNode } from "react";
 import type { ProjectView, SettingsView } from "../../../shared/ipc";
 import { RESEARCH_RETENTION } from "../../../shared/research";
+import { useDrafts } from "../shell/drafts";
 import { errorMessage } from "../shared/ui";
 
 const KEY_LOOK = {
@@ -36,8 +37,9 @@ export function SettingsCard({ title, description, children, testId }: { title: 
 /**
  * Settings › Connections, Nebius (SE1): the key, and the project ID Nebius Sandboxes needs with it (D36), kept by the app
  * (D8): encrypted by the OS where it can be, and handed to the engines in memory only. No part of a key is ever shown,
- * and a field clears once it is saved. `onCredentialsSaved` follows each save, once the engines have them. Check Token
- * Factory runs from the engine of the project in view, and makes paid calls.
+ * and a field clears once it is saved. `onCredentialsSaved` follows each save, once the engines have them. While the key
+ * is being saved or removed, no draft is shown, and once that settles, succeeded or failed, each is checked against the
+ * keys as they are. Check Token Factory runs from the engine of the project in view, and makes paid calls.
  */
 export function NebiusConnection({ project, online, onCredentialsSaved, freshness = 0 }: { project: ProjectView | null; online: boolean; onCredentialsSaved(): void; freshness?: number }) {
   const [settings, setSettings] = useState<SettingsView | null>(null);
@@ -47,6 +49,7 @@ export function NebiusConnection({ project, online, onCredentialsSaved, freshnes
   const [nebiusProject, setNebiusProject] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const drafts = useDrafts();
   const projectId = project?.id ?? null;
   const usableKey = settings !== null && (settings.nebiusKey === "encrypted" || settings.nebiusKey === "unencrypted");
 
@@ -72,6 +75,7 @@ export function NebiusConnection({ project, online, onCredentialsSaved, freshnes
   async function save(value: string | null) {
     setBusy(true);
     setError(null);
+    const settled = drafts.keysChanging();
     try {
       setSettings(await window.nivra.setNebiusKey(value));
       setKey("");
@@ -80,6 +84,7 @@ export function NebiusConnection({ project, online, onCredentialsSaved, freshnes
       setError(errorMessage(reason));
     } finally {
       setBusy(false);
+      void settled();
     }
   }
 
@@ -224,8 +229,12 @@ export function NebiusConnection({ project, online, onCredentialsSaved, freshnes
   );
 }
 
-/** Settings › Connections, Tavily (D37): the key research needs, kept like the Nebius key and shown only as saved or not. */
+/**
+ * Settings › Connections, Tavily (D37): the key research needs, kept like the Nebius key and shown only as saved or not;
+ * drafts are out of sight while it is saved or removed, and checked against the keys again once that settles.
+ */
 export function TavilyConnection({ freshness = 0, onSaved }: { freshness?: number; onSaved?(): void }) {
+  const drafts = useDrafts();
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
@@ -238,14 +247,15 @@ export function TavilyConnection({ freshness = 0, onSaved }: { freshness?: numbe
   async function act(change: () => Promise<SettingsView>) {
     setBusy(true);
     setError(null);
+    const settled = drafts.keysChanging();
     try {
       setSettings(await change());
-      // The key changed: drafts are checked against it again.
       onSaved?.();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
       setBusy(false);
+      void settled();
     }
   }
 

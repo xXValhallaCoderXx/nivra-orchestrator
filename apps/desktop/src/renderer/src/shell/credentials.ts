@@ -29,10 +29,13 @@ export function looksLikeCredential(text: string): boolean {
   return hasKeyBlock(text) || SHAPES.some((shape) => shape.test(text));
 }
 
-/** Every string inside a value, wherever it sits, checked the same way: a draft is refused if any of them is one. */
+/**
+ * Every string inside a value, wherever it sits, its objects' keys among them (they are stored too), checked the same
+ * way: a draft is refused if any of them is one.
+ */
 export function holdsCredential(value: unknown): boolean {
   if (typeof value === "string") return looksLikeCredential(value);
   if (Array.isArray(value)) return value.some(holdsCredential);
-  if (value && typeof value === "object") return Object.values(value).some(holdsCredential);
+  if (value && typeof value === "object") return Object.entries(value).some(([name, inner]) => looksLikeCredential(name) || holdsCredential(inner));
   return false;
 }

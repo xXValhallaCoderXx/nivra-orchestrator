@@ -18,7 +18,9 @@ import { holdsCredential } from "./credentials.ts";
  * overwrites a newer copy. A draft that holds a key or a recognised format isn't kept, and the copy kept before it is
  * removed; one that couldn't be checked isn't kept either, and the copy kept before it stays. Stored copies are checked
  * again before they are restored or listed, at start and whenever a key is saved: one that fails is removed, and one
- * whose check errors stays stored but out of sight. The text being edited is never touched: it is the page's.
+ * whose check errors stays stored but out of sight. While a key is being saved or removed, every stored copy is out of
+ * sight and no draft is checked or kept: each waits for the change to settle, and is then checked against the keys as
+ * they are (review, 29 Oct). The text being edited is never touched: it is the page's.
  * Every storage access is guarded, so storage that throws never breaks a page.
  */
 
@@ -53,13 +55,21 @@ function parse(text: string | null): Stored | null {
   }
 }
 
-/** Every string a draft holds, its label first, one a line: what main checks. A key never spans two of them. */
+/**
+ * Every string a draft holds, its label first, one a line, its objects' keys among them, since they are stored too: what
+ * main checks. A key never spans two of them.
+ */
 function textOf(label: string, value: unknown): string {
   const strings: string[] = [label];
   const walk = (item: unknown) => {
     if (typeof item === "string") strings.push(item);
     else if (Array.isArray(item)) item.forEach(walk);
-    else if (item && typeof item === "object") Object.values(item).forEach(walk);
+    else if (item && typeof item === "object") {
+      for (const [name, inner] of Object.entries(item)) {
+        strings.push(name);
+        walk(inner);
+      }
+    }
   };
   walk(value);
   return strings.join("\n");
@@ -70,8 +80,14 @@ export interface ShellDraftStore extends DraftStore {
   readonly available: boolean;
   /** True when a stored copy couldn't be checked against the saved keys, so it is kept out of sight for now. */
   readonly unchecked: boolean;
-  /** Checks every stored copy against the current keys again: at start, and whenever a key is saved or removed. */
+  /** Checks every stored copy against the current keys again: at start, and once a key change has settled. */
   recheck(): Promise<void>;
+  /**
+   * A key is about to be saved or removed: every stored copy goes out of sight at once, and no draft is checked, kept,
+   * restored or listed until the change settles. Call what it returns when it settles, whether it succeeded or failed:
+   * every stored copy is then checked against the keys as they are.
+   */
+  keysChanging(): () => Promise<void>;
   /** Called after every change of what is stored or shown, so the sidebar's list follows. */
   subscribe(listener: () => void): () => void;
   /** Counts the changes; a snapshot for React's useSyncExternalStore. */
@@ -102,8 +118,12 @@ export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: S
   const checked = new Map<string, string>();
   const hidden = new Set<string>();
   let rechecking = 0;
-  // Counts the rechecks begun, each after the saved keys changed: a write whose answer came from older keys asks again.
+  // Counts the rechecks and key changes begun: a write whose answer came from older keys asks again.
   let keysEpoch = 0;
+  // Key changes under way (a save or a removal), and the writes waiting for them to settle.
+  let changing = 0;
+  let waiting: Array<() => void> = [];
+  const keysSettled = (): Promise<void> => (changing === 0 ? Promise.resolve() : new Promise((resolve) => waiting.push(resolve)));
 
   const raw = (key: string): string | null => {
     if (!storage) return null;
@@ -152,16 +172,17 @@ export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: S
       // 2. The saved keys, through main, on exactly the text that would be stored.
       const record = JSON.stringify({ label, savedAt: now().toISOString(), value } satisfies Stored);
       const text = textOf(label, value);
-      let holdsKey: boolean;
+      // Asked once no key is being saved or removed, and again if the keys changed while it was asked: no copy is kept
+      // on an answer about keys that are gone, or missing a key that is new.
+      let holdsKey = false;
       try {
         let epoch = keysEpoch;
-        holdsKey = await hasSavedKey(text);
-        // The keys changed while it was asked (a key saved, so a recheck began): ask again with the current ones, so
-        // no copy is kept on an answer about keys that are gone or missing a key that is new.
-        while (epoch !== keysEpoch && latest.get(key) === mine) {
+        do {
+          if (changing > 0) await keysSettled();
+          if (latest.get(key) !== mine) break;
           epoch = keysEpoch;
           holdsKey = await hasSavedKey(text);
-        }
+        } while (latest.get(key) === mine && (epoch !== keysEpoch || changing > 0));
       } catch {
         // Not checked, so not kept; the copy kept before stays as it is.
         return { kept: false, reason: "unchecked" };
@@ -206,47 +227,26 @@ export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: S
       }
       return drafts.sort((a, b) => (a.savedAt < b.savedAt ? 1 : a.savedAt > b.savedAt ? -1 : 0));
     },
-    async recheck() {
-      if (!storage) return;
-      const pass = ++rechecking;
+    recheck,
+    keysChanging() {
+      changing += 1;
       keysEpoch += 1;
-      let entries: Array<[key: string, text: string]>;
-      try {
-        entries = [];
-        for (let index = 0; index < storage.length; index += 1) {
-          const name = storage.key(index);
-          const text = name?.startsWith(DRAFT_PREFIX) ? storage.getItem(name) : null;
-          if (name && text !== null) entries.push([name.slice(DRAFT_PREFIX.length), text]);
-        }
-      } catch {
-        return;
-      }
-      // Until a copy is checked against the current keys, it is out of sight.
+      // A recheck under way has no last word on any copy now.
+      rechecking += 1;
       checked.clear();
       changed();
-      for (const [key, text] of entries) {
-        const stored = parse(text);
-        if (!stored || holdsCredential(stored.value) || holdsCredential(stored.label)) {
-          if (stored) remove(key);
-          continue;
+      let settled = false;
+      return () => {
+        if (settled) return Promise.resolve();
+        settled = true;
+        changing -= 1;
+        if (changing === 0) {
+          const resume = waiting;
+          waiting = [];
+          for (const go of resume) go();
         }
-        let holdsKey: boolean;
-        try {
-          holdsKey = await hasSavedKey(textOf(stored.label, stored.value));
-        } catch {
-          // Kept, out of sight, until a check can be made; a newer pass, or a write meanwhile, has the last word.
-          if (pass === rechecking && raw(key) === text) hidden.add(key);
-          continue;
-        }
-        // A newer pass, or a write meanwhile, has the last word on this copy.
-        if (pass !== rechecking || raw(key) !== text) continue;
-        if (holdsKey) remove(key);
-        else {
-          checked.set(key, text);
-          hidden.delete(key);
-        }
-      }
-      changed();
+        return recheck();
+      };
     },
     subscribe(listener: () => void) {
       listeners.add(listener);
@@ -254,4 +254,50 @@ export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: S
     },
     version: () => changes,
   };
+
+  async function recheck(): Promise<void> {
+    if (!storage) return;
+    const pass = ++rechecking;
+    keysEpoch += 1;
+    // Until a copy is checked against the current keys, it is out of sight, even when storage can't be read now.
+    checked.clear();
+    changed();
+    // A key is being saved or removed: the recheck once it settles has the last word.
+    if (changing > 0) return;
+    let entries: Array<[key: string, text: string]>;
+    try {
+      entries = [];
+      for (let index = 0; index < storage.length; index += 1) {
+        const name = storage.key(index);
+        const text = name?.startsWith(DRAFT_PREFIX) ? storage.getItem(name) : null;
+        if (name && text !== null) entries.push([name.slice(DRAFT_PREFIX.length), text]);
+      }
+    } catch {
+      return;
+    }
+    for (const [key, text] of entries) {
+      const stored = parse(text);
+      if (!stored || holdsCredential(stored.value) || holdsCredential(stored.label)) {
+        // A newer pass, or a write meanwhile, has the last word on this copy.
+        if (stored && pass === rechecking && raw(key) === text) remove(key);
+        continue;
+      }
+      let holdsKey: boolean;
+      try {
+        holdsKey = await hasSavedKey(textOf(stored.label, stored.value));
+      } catch {
+        // Kept, out of sight, until a check can be made; a newer pass, or a write meanwhile, has the last word.
+        if (pass === rechecking && raw(key) === text) hidden.add(key);
+        continue;
+      }
+      // A newer pass, or a write meanwhile, has the last word on this copy.
+      if (pass !== rechecking || raw(key) !== text) continue;
+      if (holdsKey) remove(key);
+      else {
+        checked.set(key, text);
+        hidden.delete(key);
+      }
+    }
+    changed();
+  }
 }

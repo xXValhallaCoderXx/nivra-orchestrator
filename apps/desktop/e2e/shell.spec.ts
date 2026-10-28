@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -161,10 +161,35 @@ test("a draft kept before a key was saved, holding that key's text, leaves the s
   await page.getByTestId("nebius-key-save").click();
   await expect(page.getByTestId("nebius-key-state")).toContainText("Key saved");
   await expect(page.getByTestId("nav-draft")).toHaveCount(0);
-  expect((await stored()).includes(key)).toBe(false);
+  // The list empties as the save begins; the copy is removed by the check after it, a moment later.
+  await expect.poll(async () => (await stored()).includes(key)).toBe(false);
   await goTo(page, "home");
   await expect(composer()).toHaveValue("");
   await page.evaluate(() => window.nivra.setNebiusKey(null));
+});
+
+test("while a key is being saved no draft is listed, and once the save settles, even by failing, each is checked and listed again", async ({}, testInfo) => {
+  const title = "Draft kept through a slow save";
+  await composer().fill(title);
+  await expect(page.getByTestId("nav-draft").filter({ hasText: title })).toHaveCount(1);
+  // The key's save, in this app only, waits until the test makes it fail; a relaunch brings back the real one.
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler("settings:nebius-key");
+    ipcMain.handle("settings:nebius-key", () => new Promise((_resolve, reject) => ((globalThis as { failSave?: () => void }).failSave = () => reject(new Error("The test made this save fail.")))));
+  });
+  await goTo(page, "settings-connections");
+  await page.getByTestId("nebius-key").fill("test-key-shell-slow-0123456789");
+  await page.getByTestId("nebius-key-save").click();
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+  await app.evaluate(() => (globalThis as { failSave?: () => void }).failSave?.());
+  await expect(page.getByTestId("nebius-error")).toContainText("The test made this save fail.");
+  await expect(page.getByTestId("nav-draft").filter({ hasText: title })).toHaveCount(1);
+
+  await relaunch(testInfo);
+  await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
+  await expect(composer()).toHaveValue(title);
+  await composer().fill("");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
 });
 
 test("Ctrl+K opens the switcher on the project in view, Esc closes it and leaves the typed text, F6 moves between the sidebar and the page, Ctrl+comma opens Settings", async () => {
@@ -449,4 +474,25 @@ test("a read that fails shows as a failure, never as an empty list or a wait tha
   await page.getByTestId("home-conversation").click();
   await expect(page.getByTestId("home-conversation-error")).toContainText("Nivra couldn't start the conversation: The test made this read fail.");
   await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
+});
+
+test("with a secrets file Nivra can't read, a draft is unchecked and not kept: the field keeps it, nothing is listed or stored, and nothing of the file shows", async ({}, testInfo) => {
+  // Nothing under the drafts prefix from earlier tests, so whatever is there afterwards is this test's.
+  await page.evaluate(() => {
+    for (const key of Object.keys(window.localStorage)) if (key.startsWith("nivra.drafts.v1:")) window.localStorage.removeItem(key);
+  });
+  await app.close();
+  const marker = "corrupt-secrets-marker-0123456789";
+  writeFileSync(join(root, "user data", "secrets.json"), `{"NEBIUS_API_KEY": {"scheme": "plain", "value": "${marker}`);
+  await launch(testInfo);
+  await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
+  const typed = "Draft while the keys can't be read";
+  await composer().fill(typed);
+  const warning = page.getByTestId("draft-not-kept");
+  await expect(warning).toHaveAttribute("data-reason", "unchecked");
+  await expect(warning).toHaveText("This draft couldn't be checked against your saved keys, so it isn't kept. What you typed is still here.");
+  await expect(composer()).toHaveValue(typed);
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+  const kept = await page.evaluate(() => Object.keys(window.localStorage).filter((key) => key.startsWith("nivra.drafts.v1:")).length);
+  expect([kept, (await shownText()).includes(marker)]).toEqual([0, false]);
 });

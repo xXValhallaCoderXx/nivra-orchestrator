@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, requestMsFor, TASK_RUN_BOUNDS, type EnvironmentChoices } from "@nivra/domain";
 import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining } from "@nivra/domain";
 import { z } from "zod";
-import { containsSavedKey, DRAFT_CHECK_FAILED, DRAFT_KEY_NAMES, type SavedKey } from "./draft-keys.ts";
+import { containsSavedKey, DRAFT_CHECK_FAILED, DRAFT_KEY_NAMES } from "./draft-keys.ts";
 import { COPY_TEXT_CHARS, DRAFT_CHECK_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
@@ -128,17 +128,14 @@ function start(): void {
   // draft as unchecked.
   handle(IPC.draftHasSavedKey, z.tuple([z.unknown()]), async (_event, text) => {
     if (typeof text !== "string" || text.length > DRAFT_CHECK_CHARS) throw new Error(`Nivra checks a draft of at most ${DRAFT_CHECK_CHARS.toLocaleString("en-GB")} characters of text, so this one wasn't checked.`);
-    let keys: SavedKey[];
+    // The strict read: a file or a key that can't be read throws, so it is never taken as no keys.
+    let values: string[];
     try {
-      keys = [];
-      for (const name of DRAFT_KEY_NAMES) {
-        const state = await secrets.state(name);
-        keys.push({ state, value: state === "unreadable" || state === "none" ? null : await secrets.get(name) });
-      }
+      values = await secrets.draftCheckValues(DRAFT_KEY_NAMES);
     } catch {
       throw new Error(DRAFT_CHECK_FAILED);
     }
-    return containsSavedKey(text, keys);
+    return containsSavedKey(text, values);
   });
   handle(IPC.listEngines, none, () => host.engines());
   handle(IPC.openProject, project, (_event, id) => host.open(id));

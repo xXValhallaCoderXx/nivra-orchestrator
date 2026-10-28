@@ -137,7 +137,8 @@ describe("the draft store (NIV-56, R30)", () => {
     const first = store.write("home-composer:general", { title: "A" }, "A");
     const second = store.write("home-composer:general", { title: "A and B" }, "A and B");
     await Promise.resolve();
-    assert.deepEqual(held.waiting.map((asked) => asked.text), ["A\nA", "A and B\nA and B"]);
+    // The label, then each object key and string as stored: what main is asked about.
+    assert.deepEqual(held.waiting.map((asked) => asked.text), ["A\ntitle\nA", "A and B\ntitle\nA and B"]);
     held.waiting[1]!.answer(false);
     assert.deepEqual(await second, { kept: true });
     held.waiting[0]!.answer(false);
@@ -260,5 +261,76 @@ describe("the draft store (NIV-56, R30)", () => {
     stop();
     await store.write("a:c", "text", "label");
     assert.deepEqual([store.list().map((draft) => draft.key), heard], [["a:c"], 2]);
+  });
+
+  it("hides every stored copy while a key is saved, checks a write made meanwhile only once it settles, then checks every copy against the keys as they are", async () => {
+    const storage = new FakeStorage();
+    const keys = savedKeys();
+    const store = createDraftStore(storage, keys.check, clock("2026-10-28T10:00:00.000Z"));
+    await store.write("home-composer:general", { title: `Rotate ${LATER}` }, "Rotate");
+    await store.write("new-task:general", { title: "Fix rounding" }, "Fix rounding");
+    const settle = store.keysChanging();
+    assert.deepEqual([store.list().length, store.read("home-composer:general"), store.read("new-task:general")], [0, null, null]);
+    const asked = keys.state.calls;
+    const written = store.write("home-composer:project:p1", { title: `Use ${LATER} here` }, "Use");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual([keys.state.calls - asked, storage.entries.has(`${DRAFT_PREFIX}home-composer:project:p1`), store.list().length], [0, false, 0]);
+    // The save wrote the key, then settled.
+    keys.state.keys.add(LATER);
+    await settle();
+    assert.deepEqual(await written, { kept: false, reason: "credential" });
+    assert.deepEqual([store.list().map((draft) => draft.key), [...storage.entries.keys()]], [["new-task:general"], [`${DRAFT_PREFIX}new-task:general`]]);
+  });
+
+  it("shows nothing until every key change under way has settled, a failed one too", async () => {
+    const storage = new FakeStorage();
+    const store = createDraftStore(storage, savedKeys().check);
+    await store.write("a:b", "text", "label");
+    const first = store.keysChanging();
+    const second = store.keysChanging();
+    await first();
+    assert.equal(store.list().length, 0);
+    await second();
+    await second();
+    assert.deepEqual(store.list().map((draft) => draft.key), ["a:b"]);
+  });
+
+  it("never lets an older recheck remove a copy a write replaced meanwhile, even one that held a recognised format", async () => {
+    const storage = new FakeStorage();
+    const held = heldChecks();
+    storage.entries.set(`${DRAFT_PREFIX}a:first`, JSON.stringify({ label: "First", savedAt: "2026-10-28T10:00:00.000Z", value: "fine" }));
+    storage.entries.set(`${DRAFT_PREFIX}b:second`, JSON.stringify({ label: "Second", savedAt: "2026-10-28T10:00:00.000Z", value: FAKE_GITHUB }));
+    const store = createDraftStore(storage, held.check);
+    const pass = store.recheck();
+    const written = store.write("b:second", "clean now", "Second");
+    assert.equal(held.waiting.length, 2);
+    held.waiting[1]!.answer(false);
+    assert.deepEqual(await written, { kept: true });
+    held.waiting[0]!.answer(false);
+    await pass;
+    assert.deepEqual([store.read("a:first"), store.read("b:second")], ["fine", "clean now"]);
+  });
+
+  it("takes every copy out of sight when a recheck can't read storage, and tells its listeners", async () => {
+    const storage = new FakeStorage();
+    const store = createDraftStore(storage, savedKeys().check);
+    await store.write("a:b", "text", "label");
+    let heard = 0;
+    store.subscribe(() => (heard += 1));
+    storage.fail.add("read");
+    await store.recheck();
+    storage.fail.delete("read");
+    assert.deepEqual([store.list().length, store.read("a:b"), heard > 0], [0, null, true]);
+  });
+
+  it("checks a draft's object keys as well as its values, since both are stored", async () => {
+    assert.equal(holdsCredential({ fine: { [FAKE_GITHUB]: 1 } }), true);
+    const storage = new FakeStorage();
+    const keys = savedKeys(SAVED);
+    const store = createDraftStore(storage, keys.check);
+    assert.deepEqual(await store.write("a:b", { [FAKE_GITHUB]: "value" }, "label"), { kept: false, reason: "credential" });
+    assert.equal(keys.state.calls, 0);
+    assert.deepEqual(await store.write("a:c", { fields: { [`note ${SAVED}`]: true } }, "label"), { kept: false, reason: "credential" });
+    assert.equal(storage.entries.size, 0);
   });
 });
