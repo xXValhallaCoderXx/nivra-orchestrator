@@ -3,7 +3,8 @@ import { after, describe, it } from "node:test";
 import { gunzipSync } from "node:zlib";
 import { EnvironmentPreview } from "@nivra/domain";
 import { readTar } from "../src/exec/tar.ts";
-import { environmentInputs, EnvironmentRefusal, inputsArchive, installArgsFor, satisfies } from "../src/environment/inputs.ts";
+import { configurationDigest, environmentInputs, EnvironmentRefusal, inputsArchive, inputsDigest, installArgsFor, satisfies, setupConfiguration } from "../src/environment/inputs.ts";
+import { isNodeSetupPath } from "../src/environment/node-files.ts";
 import { environmentPreviewOf } from "../src/environment/preview.ts";
 import { cleanUp, repoWith, snap } from "./workspace-fixtures.ts";
 
@@ -96,10 +97,58 @@ describe("an environment's inputs (NIV-49, D41)", () => {
 
 describe("a Node range as package.json's engines write it", () => {
   it("reads the common forms, and says when it can't", () => {
-    const yes = [">=22", ">=22.23.4", "^22", "^22.10.0", "~22.23", "22", "22.x", "22.23.x", ">=20 <23", "<23", "<=22", ">21", "*", "", "^18 || ^22", "v22", "x"];
-    const no = [">=24", "^20", "~22.22", "21", "<22", ">22", "22.23.5", ">=22.24", "^18 || ^20"];
+    const yes = [">=22", ">=22.23.4", "^22", "^22.10.0", "~22.23", "22", "22.x", "22.23.x", ">=20 <23", "<23", "<=22", ">21", "*", "", "^18 || ^22", "v22", "x", "20 - 22", ">= 22", ">=  22 <  23"];
+    const no = [">=24", "^20", "~22.22", "21", "<22", ">22", "22.23.5", ">=22.24", "^18 || ^20", "18 - 21", "> 22"];
     for (const range of yes) assert.equal(satisfies("22.23.4", range), true, range);
     for (const range of no) assert.equal(satisfies("22.23.4", range), false, range);
-    for (const range of ["20 - 22", "lts", ">=22.0.0-rc.1"]) assert.equal(satisfies("22.23.4", range), null, range);
+    for (const range of ["lts", ">=22.0.0-rc.1", "latest", "~> 22"]) assert.equal(satisfies("22.23.4", range), null, range);
+  });
+
+  it("reads hyphen ranges and partial versions as npm documents them (NIV-55)", () => {
+    // From npm's semver documentation: a partial version on either side of a hyphen range.
+    const cases: Array<[string, string, boolean]> = [
+      ["1.2.3 - 2.3.4", "1.2.3", true],
+      ["1.2.3 - 2.3.4", "2.3.4", true],
+      ["1.2.3 - 2.3.4", "2.3.5", false],
+      ["1.2 - 2.3.4", "1.2.0", true],
+      ["1.2 - 2.3.4", "1.1.9", false],
+      ["1.2.3 - 2.3", "2.3.9", true],
+      ["1.2.3 - 2.3", "2.4.0", false],
+      ["1.2.3 - 2", "2.9.9", true],
+      ["1.2.3 - 2", "3.0.0", false],
+      ["^0.2.3", "0.2.9", true],
+      ["^0.2.3", "0.3.0", false],
+      ["^0.0.3", "0.0.3", true],
+      ["^0.0.3", "0.0.4", false],
+      ["~1.2", "1.2.9", true],
+      ["~1.2", "1.3.0", false],
+      ["1.x", "1.9.9", true],
+      ["^20.19.0 || >=22.12.0", "22.12.0", true],
+      ["^20.19.0 || >=22.12.0", "21.0.0", false],
+    ];
+    for (const [range, version, expected] of cases) assert.equal(satisfies(version, range), expected, `${version} against ${range}`);
+  });
+});
+
+describe("a setup configuration (NIV-55)", () => {
+  it("binds only the files that decide the environment, so a version file counts and a source doesn't", async () => {
+    const base = await snap(repoWith(SINGLE));
+    const config = setupConfiguration(base, isNodeSetupPath);
+    assert.deepEqual(config.files.map((file) => file.path), ["package.json", "pnpm-lock.yaml"]);
+    const sources = setupConfiguration(await snap(repoWith({ ...SINGLE, "src/index.mjs": "export const tool = 2;\n" })), isNodeSetupPath);
+    assert.equal(sources.digest, config.digest);
+    const nvmrc = setupConfiguration(await snap(repoWith({ ...SINGLE, ".nvmrc": "22\n" })), isNodeSetupPath);
+    assert.deepEqual([nvmrc.files.map((file) => file.path), nvmrc.digest === config.digest], [[".nvmrc", "package.json", "pnpm-lock.yaml"], false]);
+    // Its digest has a version of its own: never the same as the D41 inputs digest of the same files.
+    assert.notEqual(configurationDigest(config.files), inputsDigest(config.files));
+  });
+
+  it("follows each ecosystem's own rule for what is setup, with nothing Node-shaped in it", async () => {
+    const toy = await snap(repoWith({ "toy.json": "{}\n", "toy.lock": "a\n", "src/main.toy": "print\n" }));
+    const isToySetup = (path: string) => path === "toy.json" || path === "toy.lock";
+    const before = setupConfiguration(toy, isToySetup);
+    assert.deepEqual(before.files.map((file) => file.path), ["toy.json", "toy.lock"]);
+    const after = setupConfiguration(await snap(repoWith({ "toy.json": "{}\n", "toy.lock": "b\n", "src/main.toy": "print\n" })), isToySetup);
+    assert.notEqual(after.digest, before.digest);
   });
 });

@@ -544,6 +544,33 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e environment.spec.ts
   `--apply-hold <file>` on the engine, `--nivra-test-apply-hold <file>` on an unpackaged app (an absolute path). The
   engine writes `<file>.held` when it holds.
 
+Project-driven environments (NIV-55, NIV-58), the first part: a recipe contract that names no runtime or package
+manager, and Node's resolver, which reads a project's own declarations into it. Nothing is wired into the engine's
+methods yet, so this part is exercised by its tests alone:
+
+```bash
+cd apps/engine && node --test test/environment-node.test.ts test/environment-releases.test.ts test/environment-inputs.test.ts
+cd packages/domain && node --test test/environment.test.ts
+cd apps/engine && node scripts/environment-releases.ts           # what a refreshed release index would hold
+cd apps/engine && node scripts/environment-releases.ts --write   # write it: review the result as data
+```
+
+- **The contract** (`packages/domain/src/environment.ts`): the requested configuration (`EnvironmentRecipe`), which the
+  person approves and which never changes afterwards; the verified tool record a preparation writes once; and the
+  `EnvironmentRef` a task run carries, with both digests. A fact only preparation can know, such as the npm a Node
+  release newer than the index bundles, is written in the recipe as a rule, never as a guessed value.
+- **The resolver** (`apps/engine/src/environment/node.ts`, with its file readers in `node-files.ts`) honours exact pins,
+  resolves ranges to an exact release, takes a labelled default when nothing is declared, and puts conflicting or
+  unreadable declarations to the person as choices. It refuses, naming the file, the layouts that need the project's
+  sources to install, until preparing from the sources is built.
+- **The release index** (`releases.ts`, with generated rows in `release-data.ts`) is the Node, npm and pnpm releases known
+  when this Nivra was built, from nodejs.org and the npm registry, with each source's SHA-256 and the time it was
+  fetched. The engine never fetches it: ranges resolve only within it, and a pin newer than it is checked when
+  preparing. Refreshing it doesn't change an unchanged project's recipe: given the exact versions its last preparation
+  settled on, the resolver keeps them while the project's setup configuration is the same. (The host passes them in
+  from the next part.)
+- **Tests** use a small fixed index of their own, so each answer is known whatever the shipped index holds.
+
 A task's journey and its recovery, through the real host and engine (NIV-35): the built app with the production engine
 against the stand-ins, through the unpackaged-only switches. A packaged app ignores the switches, so these skip there.
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
-import { ENVIRONMENT_BASE, EnvironmentPreview, EnvironmentReport, EnvironmentSpec, PreparedEnvironment, projectFingerprint } from "../src/environment.ts";
+import { canonicalJson, ENVIRONMENT_BASE, EnvironmentPreview, EnvironmentRecipe, EnvironmentRef, EnvironmentReport, EnvironmentSpec, InvalidationReason, PreparedEnvironment, projectFingerprint, RECIPE_FORMAT, recipeDigest, REF_FORMAT, VERIFIED_FORMAT, verifiedDigest, VerifiedToolRecord, type EnvironmentRecipe as Recipe } from "../src/environment.ts";
 import { StartRunParams } from "../src/methods.ts";
 import { baselinePattern, TaskBrief, taskBriefDigest, TaskInput, TaskReport, type TaskBrief as Brief } from "../src/task.ts";
 
@@ -140,5 +140,89 @@ describe("a brief's baseline selections and frozen files (D41)", () => {
       finishedAt: null,
     });
     assert.deepEqual([kept.environment, kept.baseline, kept.frozen], [null, [], []]);
+  });
+});
+
+describe("a project-driven environment's contract (NIV-55)", () => {
+  const configuration = { mode: "manifests" as const, files: [{ path: "toy.lock", bytes: 12, sha256: "1".repeat(64) }], digest: "2".repeat(64) };
+  /** A recipe for an ecosystem that isn't Node at all: nothing in the contract is shaped like one. */
+  const toy: Recipe = {
+    format: RECIPE_FORMAT,
+    profile: "toy",
+    platform: { os: "linux", arch: "x86_64", libc: "glibc" },
+    image: { registryUrl: "docker://docker.io/library/toylang:3.1.4-slim", tag: "toylang:3.1.4-slim" },
+    tools: [
+      { name: "toyc", version: { kind: "exact", version: "3.1.4" }, from: "image" },
+      { name: "toypkg", version: { kind: "bundled", with: "toyc" }, from: "image" },
+    ],
+    bootstrap: [],
+    install: { tool: "toypkg", args: ["fetch", "--locked"], options: { offline: false } },
+    scope: { kind: "whole" },
+    builds: { tool: "toypkg", runs: "all", allowed: [], denied: [], strict: null, source: null, notes: [] },
+    configuration,
+    systemPackages: ["pkg-config"],
+    workdir: "/workspace",
+    env: { preparation: { TOY_HOME: "/root/.toy" }, task: { TOY_OFFLINE: "1" } },
+    artifacts: { dependency: ["target"], caches: ["/root/.toy"] },
+    network: { preparation: "on", tasks: "off", hosts: ["registry.toylang.org"], imageRegistry: "docker.io" },
+    probes: ["tool-versions"],
+    limits: { importSeconds: 900, prepareSeconds: 600, probeSeconds: 120 },
+  };
+
+  it("takes a recipe for any ecosystem, strictly, with arguments free of spaces, quotes and shell operators", () => {
+    // The sandbox passes arguments to a fixed script one by one, never through a shell; `*`, `~` and `!` stay plain text.
+    assert.equal(EnvironmentRecipe.safeParse(toy).success, true);
+    assert.equal(EnvironmentRecipe.safeParse({ ...toy, extra: 1 }).success, false, "nothing beyond the contract");
+    for (const name of ["Toy", "toy c", "-toy", ""]) assert.equal(EnvironmentRecipe.safeParse({ ...toy, tools: [{ ...toy.tools[0]!, name }] }).success, false, name);
+    for (const arg of ["a b", "$(x)", "a;b", "`x`", "a|b", "'x'", ""]) assert.equal(EnvironmentRecipe.safeParse({ ...toy, install: { ...toy.install, args: [arg] } }).success, false, arg);
+    for (const version of ["latest", "3.1", "^3.1.4", "3.1.4-rc.1"]) assert.equal(EnvironmentRecipe.safeParse({ ...toy, tools: [{ ...toy.tools[0]!, version: { kind: "exact", version } }] }).success, false, version);
+    assert.equal(EnvironmentRecipe.safeParse({ ...toy, network: { ...toy.network, tasks: "on" } }).success, false, "task runs are offline");
+    assert.equal(EnvironmentRecipe.safeParse({ ...toy, env: { preparation: { TOKEN: "a b" }, task: {} } }).success, false, "no free text in variables");
+  });
+
+  it("digests a recipe the same whatever order its keys were written in, and differently for any change", async () => {
+    const reordered = JSON.parse(canonicalJson(toy)) as Recipe;
+    const shuffled = Object.fromEntries(Object.entries(reordered).reverse()) as Recipe;
+    assert.equal(await recipeDigest(shuffled), await recipeDigest(toy));
+    assert.equal(canonicalJson({ b: 1, a: { d: [2, { f: 1, e: 0 }], c: null } }), '{"a":{"c":null,"d":[2,{"e":0,"f":1}]},"b":1}');
+    assert.notEqual(await recipeDigest({ ...toy, configuration: { ...configuration, digest: "3".repeat(64) } }), await recipeDigest(toy));
+  });
+
+  it("keeps what preparation found apart from what the person approved, and binds both to a run", async () => {
+    const record = {
+      format: VERIFIED_FORMAT,
+      recipe: await recipeDigest(toy),
+      tools: [{ name: "toyc", version: "3.1.4" }, { name: "toypkg", version: "1.9.0" }],
+      platform: { os: "linux", arch: "x86_64", libc: "glibc", release: "Debian GNU/Linux 12" },
+      images: { base: "img-base", prepared: "img-prepared", imported: true },
+      builds: { state: "missing", missing: ["native-thing"] },
+      generated: null,
+      probes: [{ name: "tool-versions", durationMs: 812 }],
+      verifiedAt: new Date().toISOString(),
+    };
+    assert.equal(VerifiedToolRecord.safeParse(record).success, true);
+    assert.equal(VerifiedToolRecord.safeParse({ ...record, tools: [{ name: "toyc", version: "latest" }] }).success, false, "verified versions are exact");
+    const verified = await verifiedDigest(VerifiedToolRecord.parse(record));
+    assert.notEqual(verified, record.recipe);
+    const ref = {
+      format: REF_FORMAT,
+      recipe: record.recipe,
+      verified,
+      configuration: configuration.digest,
+      image: "img-prepared",
+      projectFingerprint: await projectFingerprint("project-e00one"),
+      target: "wsl:Ubuntu",
+      tools: record.tools,
+      platform: { arch: "x86_64", libc: "glibc" },
+      builds: { verified, missing: ["native-thing"], acceptedAt: new Date().toISOString() },
+      preparedAt: new Date().toISOString(),
+    };
+    assert.equal(EnvironmentRef.safeParse(ref).success, true);
+    const { verified: _, ...unbound } = ref;
+    assert.equal(EnvironmentRef.safeParse(unbound).success, false, "a run is bound to what was verified, not only to what was asked for");
+  });
+
+  it("never lists a release-index refresh as a reason to prepare again", () => {
+    assert.deepEqual(InvalidationReason.options, ["inputs-changed", "recipe-changed", "advisory", "project-changed", "target-changed", "image-missing", "legacy"]);
   });
 });
