@@ -2706,6 +2706,49 @@ checked unchanged afterwards):
 | Reject leaves the checkout untouched | Offline, and live after run 3 | Nothing more |
 | Linux and Windows-to-WSL evidence naming the packaged revision and backend | Linux: runs 1 to 3, on candidates 1 and 2, with Nebius Sandboxes | Windows to WSL live needs its own recipe and approval; native Windows refuses task runs (D39, D41) |
 
+### Project-driven environments, PR 2 (D48, NIV-55, NIV-58, NIV-59)
+
+A project's own recipe prepared in Nebius and used by its task runs, through the engine, the task touch points, the
+host, the store and the window, offline. On `feature/env-node`, stacked on PR 31 (`feature/env-recipe`, the recipe
+contract and Node's resolver), with main `a902bc8` merged in through it. An independent review of the engine half came
+before the host half.
+
+| Commit | What |
+|---|---|
+| `f1ffabf` | The recipe's preparation: `environment.resolve`, the inspect step before any upload, the bootstrap and frozen install, the builds pnpm reports, readiness offline, the verified record; protocol 16 |
+| `ff62fbf` | Task runs from a recipe's environment: sessions from its image with its task variables, setup files held and digested after collect, environment-missing; a tracked file is source wherever it is |
+| `7fc1ac3` | The independent review's twelve findings, each with a test |
+| `2d3e875` | The store: a recipe's setup and environment, D41's as legacy, workspace migration 8 for an acceptance of missing builds |
+| `a158563` | The host: resolve, prepare with choices, readiness, legacy, fingerprint v3 |
+| `a433abd` | The window's calls: `resolveEnvironment`, `prepareEnvironment(choices)`, `acceptMissingBuilds` |
+| `b61d95c` | The environment panel, the run preview and card; the journey shared by the e2e test and the live run |
+| `1e5043f` | The live run's recipe kind v2 |
+| `4ee0749`, `3f97abd`, `3426c83` | The stand-ins list the workspace as readiness does; a chosen version kept as the person's; the environment e2e journey through the recipe panel |
+| `f069d22` | PR 31's head, with main `a902bc8`, merged in |
+| this record | D48, `AGENTS.md`'s boundary rule, the development notes and this section |
+
+**What it shows, offline:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| Another ordinary Node project prepares with no code written for it | `environment-recipe-engine.test.ts`, `host.test.ts` | A pnpm workspace on the Node its `.nvmrc` pins and an npm project on another Node, with the npm its image bundles, go through the same flow and nothing in Nivra names either |
+| Missing declarations, conflicts and incompatible requirements | `environment-node.test.ts` (PR 1), `host.test.ts`, the window | A labelled default, a choice the person makes (never made for them), or a refusal that says what to do; a chosen pnpm that differs from the pin is installed with npm, where corepack can't swap the pin back in |
+| A setup failure, told in Nivra's words | `environment-recipe-engine.test.ts`, `environment-prepare.test.ts` | An install that fails keeps nothing and keeps its log's end; a known failure (ERESOLVE, a lockfile out of step, unapproved pnpm builds) says what to change; an image that doesn't hold the recipe's Node or libc stops before any upload; a readiness check that fails offline keeps nothing |
+| No installs during tasks or checks | `environment-recipe-engine.test.ts`, `task-environment.test.ts` | Readiness confirms pnpm reads the switches that stop installs before a run and version changes; every task command carries them, with corepack's downloads off |
+| Builds the policy didn't run are found before an environment is ready | `environment-recipe-engine.test.ts`, `host.test.ts`, `environment-store.test.ts` | pnpm's own report (10.1 and later), or npm's install scripts under ignore-scripts; no task run starts until the person accepts it without them, for that verified record, or prepares again |
+| Requested and verified identity bound to runs | `task-recipe-engine.test.ts`, `tasks.test.ts`, `host.test.ts` | Fingerprint v3 binds both digests, the image, the setup files, the Nebius project and the target; a different verification makes a new record and a new fingerprint |
+| Tracked files are never hidden by an output folder's name | `snapshot.test.ts`, `patch.test.ts`, `prepared-image.test.ts`, `task-environment.test.ts` | A tracked `dist/` is sent, editable, and its new files enter the change; an untracked one's are generated; a commit that tracks files in a folder its environment leaves out is refused before anything is sent. The secrets deny list and the engine-home exclusion are unchanged, inside such folders too; the preferences store is the host's own and never in a commit Nivra reads |
+| D41's records | `environment-store.test.ts`, `host.test.ts`, `workspace-store.test.ts` | Read as legacy, "Prepared by an earlier version of Nivra. Prepare it again to use it.", and never a run's environment; migration 8 keeps every row |
+
+**Checks:** `pnpm verify` at `f069d22`; the built app's end-to-end suite under xvfb; mutation checks on the guards
+(`~/nivra-acceptance/niv55/mutate-pr2b.mjs`, 22 of 23 caught, the one missed unreachable through a run;
+`mutate-pr2c.mjs`, 13 of 14 caught, the one missed then given its test). `test:packaged`; the Windows checks
+(`verify:windows`, `test:windows`) need a Windows turn, which Nate approves.
+
+**Still to show:** the live checks, each on Nate's approval of its own recipe and digest (`task-live.ts`'s recipe kind
+v2): L1 a pnpm workspace on Node 22, L2 an npm project on the default Node, L3 an install that fails. PR 3
+(source-dependent setup, system packages, Debian) is a decision for Nate.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
