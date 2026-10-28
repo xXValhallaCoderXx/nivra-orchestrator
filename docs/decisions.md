@@ -3674,8 +3674,9 @@ to show what Nivra actually sends: a direct API probe that accepts a field isn't
 - **Places:** the window holds a scope (General or a project) and a route, with no router. Settings, Explain and a
   project's Environment stay mounted while hidden, so nothing in them is lost by moving away.
 - **Sidebar and switcher:** the sidebar lists the scope's places, the places everywhere, unsaved drafts and Settings.
-  The switcher (Ctrl+K) changes the scope, and is the only way projects are added. `nav-projects` is gone. Below 48em
-  the sidebar folds behind a menu button, opens over the page, and the page scrolls inside main, never sideways.
+  The switcher (Ctrl+K) changes the scope and holds Add project…; Home's first use offers it too. `nav-projects` is
+  gone. Below 48em the sidebar folds behind a menu button, opens over the page, and the page scrolls inside main, never
+  sideways.
 - **Settings in sections:** Connections, Sharing, Preferences, Budget and usage, and Advanced diagnostics. Budget and
   usage is read-only: Nate's words, and a run's bounds from `getRunLimits`. No figures are shown.
 - **Drafts:** kept in the window's localStorage under `nivra.drafts.v1:`, with no migration. A draft is kept only
@@ -3685,7 +3686,8 @@ to show what Nivra actually sends: a direct API probe that accepts a field isn't
     unreadable file or key fails the check.
   A draft that fails a check isn't kept, and the page keeps its text. Saving or removing a key hides every draft until
   the change settles, and each is then checked again. The Home composer, New task and the brief editor keep drafts.
-- **Keyboard:** Ctrl+K, F6, Ctrl+comma and a skip link. Esc closes only what is open, and never stops a run.
+- **Keyboard:** Ctrl+K, F6, Ctrl+comma and a skip link. Esc closes only what is open: it never discards typed text or
+  stops a run.
 - **Bounds:** `TASK_RUN_BOUNDS` in packages/domain is the one source of a run's bounds that no brief changes. The
   engine's `TASK_LIMITS` and main's `getRunLimits` read it, and only the engine enforces it.
 
