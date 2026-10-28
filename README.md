@@ -4,10 +4,16 @@ A desktop workspace for engineers. It explains a repository with evidence, remem
 preferences, and runs a coding task in a Nebius sandbox, where tests the agent can't edit judge the change. Nothing
 reaches your checkout until you approve that exact change.
 
-> **Status:** PENDING-H4-VERSION is released for Linux, and for Windows with WSL.
-> - Built: explaining a repository with evidence, confirmed preferences with explicit precedence, saved plans with a
->   council review and web research, and native tasks run in Nebius Sandboxes, then approved and applied by you.
-> - Shown live on the packaged build: PENDING-H3.
+> **Status:** this README describes the next release, which isn't released yet. The values marked PENDING- are
+> filled in when it is.
+> - The current release is [v0.1.1](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1), for
+>   Linux and Windows. It explains a repository with evidence, and applies your confirmed preferences with explicit
+>   precedence. Its own install and testing steps are in the
+>   [README as of commit `8086464`](https://github.com/xXValhallaCoderXx/nivra-orchestrator/blob/8086464f8f7cd2c2aadfc3adf7829d6c2755bd36/README.md).
+> - Built for the next release, in this repository: explaining a repository with evidence, confirmed preferences with
+>   explicit precedence, saved plans with a council review and web research, and native tasks run in Nebius
+>   Sandboxes, then approved and applied by you.
+> - Shown live on a packaged build: PENDING-H3.
 >
 > Built for the Nebius × NVIDIA Global AI Hackathon. What isn't built yet is said so where it comes up.
 
@@ -99,6 +105,11 @@ The key and the id are encrypted by your system where it can (Settings says "Key
 engine in memory only.
 
 ## Install a test build
+
+The next release isn't published yet. Until it is, the build to install is
+[v0.1.1](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1), with the steps in the
+[README as of commit `8086464`](https://github.com/xXValhallaCoderXx/nivra-orchestrator/blob/8086464f8f7cd2c2aadfc3adf7829d6c2755bd36/README.md).
+The steps below are for the next release.
 
 Download PENDING-H4-VERSION from the repository's
 [GitHub Releases](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases): `PENDING-H4-ZIP` for Windows or
