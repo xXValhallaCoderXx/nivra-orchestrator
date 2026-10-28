@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ArgsError, readArgs } from "../src/args.ts";
+import { FETCH_HEADERS_MS } from "../src/providers/transport.ts";
 import { libsqlFileUrl } from "../src/db/libsql-url.ts";
 import { startWatchdog } from "../src/engine.ts";
 import { childEnv, insideWsl } from "../src/exec/child-env.ts";
@@ -61,7 +62,13 @@ describe("readArgs", () => {
     assert.throws(() => readArgs(["--stdio", "--home", "/tmp/x", "--unknown"]), ArgsError);
     const args = readArgs(["--stdio", "--home", "/tmp/x", "--heartbeat-ms", "0", "--nivra-engine"]);
     assert.equal(args.heartbeatMs, 0);
+    assert.equal(args.fetchWaitMs, FETCH_HEADERS_MS);
     assert.equal(args.instanceId.length, 36);
+  });
+
+  it("lets a test shorten the engine's fetch wait, never lengthen it (NIV-35)", () => {
+    for (const value of ["999", "900001", "1.5", "soon"]) assert.throws(() => readArgs(["--stdio", "--home", "/tmp/x", "--fetch-wait-ms", value]), ArgsError, value);
+    assert.equal(readArgs(["--stdio", "--home", "/tmp/x", "--fetch-wait-ms", "1000"]).fetchWaitMs, 1_000);
   });
 
   it("takes a test endpoint only on this machine, for Token Factory, Nebius Sandboxes and Tavily alike", () => {

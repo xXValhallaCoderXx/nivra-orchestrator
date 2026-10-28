@@ -204,6 +204,13 @@ export const StoredTaskInput = z.object({
 });
 export type StoredTaskInput = z.infer<typeof StoredTaskInput>;
 
+/**
+ * The one model a task run uses (NIV-35): Nemotron 3 Super, whose tool choice Nivra has checked. The run takes it from
+ * Token Factory's listing or stops at its model step, before any request to a model and before anything is uploaded:
+ * no other model stands in. The run's preview names it.
+ */
+export const TASK_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+
 /** A run's bounds, as the engine enforces them (D39), for the person to see before it starts. */
 export const TaskRunLimits = z.strictObject({
   /** Hard limits: the model's requests, each request's time, and the output cap sent with each. */
@@ -291,7 +298,8 @@ export const TaskWorker = z.strictObject({
   handedIn: z.boolean(),
   /** The worker's own words, masked. */
   summary: z.string().max(2_000).nullable(),
-  ended: z.enum(["submitted", "time", "requests", "input", "tool-calls", "model-failed", "no-time", "not-started"]),
+  /** `output-cap`: an answer reached the output cap before its tool call was made, which ends the loop (NIV-35). */
+  ended: z.enum(["submitted", "time", "requests", "input", "tool-calls", "model-failed", "output-cap", "no-time", "not-started"]),
   /** Why it was first left only handing in: its last request, its tool calls used, or no time for another operation. */
   handInDue: z.enum(["last-request", "tool-calls", "time"]).nullable(),
   failure: ModelFailureKind.nullable(),

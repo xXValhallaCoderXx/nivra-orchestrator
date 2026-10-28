@@ -16,12 +16,12 @@
 // Nothing is sent before the approval is claimed, and then only by pressing Prepare and Start, once each.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { ENVIRONMENT_BASE, TaskBrief, taskBriefDigest, type EnvironmentSpec, type PreparedEnvironment } from "@nivra/domain";
+import { ENVIRONMENT_BASE, TASK_MODEL, TaskBrief, taskBriefDigest, type EnvironmentSpec, type PreparedEnvironment } from "@nivra/domain";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { claimApproval, claimOn, isDigest } from "../../engine/scripts/research-check/claim.ts";
 import { environmentPreviewOf, ENVIRONMENT_NETWORK, PREPARE_LIMITS } from "../../engine/src/environment/preview.ts";
@@ -40,7 +40,6 @@ const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = join(desktop, "..", "..");
 const STATE = join(homedir(), "nivra-acceptance", "task-live");
 const CLAIMS = join(homedir(), "nivra-acceptance", "claims", "task-live");
-const MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
 const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 const run = (exe: string, args: string[], cwd: string): string => {
@@ -106,6 +105,16 @@ function checkBuild(frozen: Frozen): void {
 }
 
 /**
+ * This script, from the revision its build was frozen from, with no changes: what the recipe says of the build, the
+ * model's rule among it, is this source's, so it has to be the build's too.
+ */
+function checkSource(frozen: Frozen): void {
+  const head = git(repository, "rev-parse", "HEAD");
+  const changed = git(repository, "status", "--porcelain") !== "";
+  if (head !== frozen.revision || changed) throw new Error(`This script runs from the revision its build was frozen from, ${frozen.revision.slice(0, 12)}, with no changes; this checkout is at ${head.slice(0, 12)}${changed ? ", with changes" : ""}. Check that revision out here, or freeze again, then try again.`);
+}
+
+/**
  * Copies the release candidate's unpacked Linux build, made from this clean tree by `pnpm release:candidate`, to a
  * folder of its own, and records its hashes. The candidate's files are the ones a release publishes unchanged.
  */
@@ -168,19 +177,22 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
     environment: { spec: task.environment, base: ENVIRONMENT_BASE, ...shown.environment, network: ENVIRONMENT_NETWORK, limits: { importSeconds: PREPARE_LIMITS.importSeconds, prepareSeconds: PREPARE_LIMITS.prepareSeconds } },
     task: { title: task.task.title, briefDigest: await taskBriefDigest(brief), cases: brief.acceptanceCases.map((given) => given.name), checks: brief.checks, baseline: (brief.baseline ?? []).map((given) => given.name), frozen: shown.frozen },
     limits: runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0),
-    model: { expected: MODEL, rule: "The app uses the model its listing picks; a different one is recorded, never refused." },
+    model: {
+      required: TASK_MODEL,
+      rule: "The run uses this model and no other: the engine takes it from Token Factory's listing, or stops the run at its model step, before any request to a model and before the commit is uploaded. The preparation comes first, so it has run by then.",
+    },
     steps: [
       "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
       "the script adds the repository as a project, and allows its model sharing and its uploads, each through its own dialog",
       "the script previews the environment and checks its fingerprint is the one above, claims the approval, and presses Prepare once",
-      "once it is prepared, the script creates the task with the brief above, marks it ready, and previews the run. It checks the preview is bound to this brief's digest, this commit's snapshot and the environment just prepared (the fingerprint Start sends, which the app checks again), and shows the frozen files above with their hashes, then presses Start once",
+      "once it is prepared, the script creates the task with the brief above, marks it ready, and previews the run. It checks the preview is bound to this brief's digest, this commit's snapshot and the environment just prepared (the fingerprint Start sends, which the app checks again), shows the frozen files above with their hashes, and names the model above in the app's own words, then presses Start once",
       "Nate reads the proposal and its checks, with the review points below, and decides: Approve and then Accept, Reject, or a revision (which this approval doesn't run)",
-      "on Nate's go-ahead, the app is closed and relaunched, the keys are removed, and ~/.nivra is checked unchanged",
+      "on Nate's go-ahead, the script removes the keys through Settings' own calls and checks they are gone, closes the app, and checks that ~/.nivra and ~/.nivra-dev are unchanged",
     ],
     requests: [
       `Nebius: the image listing; an import of ${ENVIRONMENT_BASE.tag} if the project has none; one upload of the environment's inputs (${shown.environment.sentBytes} bytes); one preparation with networking on`,
       `Nebius: one upload of the commit (${shown.snapshot.sentBytes} bytes compressed); at most ${runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0).operations} operations with networking off, and cleanup's cancels`,
-      "Token Factory: one model listing; at most the run's model requests, each with the brief, the files the worker reads and the output of what it runs",
+      "Token Factory: one model listing; at most the run's model requests, each with the brief, the files the worker reads, the lines its searches find and the output of what it runs",
     ],
     keeps: { nebius: `${RETENTION} Nebius keeps each operation's arguments in its records, so what the worker writes stays there too.`, tokenFactory: "Token Factory keeps what it receives, under its own terms. What was sent can't be withdrawn." },
     review: task.review ?? [],
@@ -214,7 +226,7 @@ function recipeText(recipe: Awaited<ReturnType<typeof recipeOf>>, digest: string
     ...recipe.task.baseline.map((name, index) => `  baseline ${index + 1}: ${name}`),
     ...recipe.task.frozen.map((file) => `  frozen: ${file.sha256}  ${file.path}`),
     `Limits: ${JSON.stringify(recipe.limits)}; preparation ${recipe.environment.limits.importSeconds} s to import, ${recipe.environment.limits.prepareSeconds} s to install`,
-    `Model: ${recipe.model.expected} expected. ${recipe.model.rule}`,
+    `Model: ${recipe.model.required} only. ${recipe.model.rule}`,
     "Steps:",
     ...recipe.steps.map((step) => `  - ${step}`),
     ...(recipe.review.length ? ["Before deciding, check in the proposal (what its tests can't show):", ...recipe.review.map((point) => `  - ${point}`)] : []),
@@ -247,6 +259,20 @@ async function openApp(frozen: Frozen, folder: string): Promise<{ app: ElectronA
 }
 
 const call = <T>(page: Page, expression: string) => page.evaluate(expression) as Promise<T>;
+
+/**
+ * The window as it stands, kept as privately as the rest of the evidence. One that fails is logged and the run goes on:
+ * a picture is never a reason to stop a run whose approval is claimed. Settings never shows a saved key or project id,
+ * so no picture can hold one.
+ */
+async function shot(page: Page, folder: string, name: string, log: (line: string) => void): Promise<void> {
+  try {
+    await page.screenshot({ path: join(folder, name), timeout: 15_000 });
+    chmodSync(join(folder, name), 0o600);
+  } catch (error) {
+    log(`The screenshot ${name} wasn't kept: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 /** Removes the Nebius key and project id, through the calls Settings' own buttons make, and checks they are gone. */
 async function removeKeys(page: Page): Promise<void> {
   await call(page, "window.nivra.setNebiusKey(null)");
@@ -290,6 +316,7 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
     const shown = await previewEnvironment(page, projectId, task.environment);
     if (shown.fingerprint !== recipe.environment.fingerprint) throw new Error(`The environment's preview is ${shown.fingerprint}, not the recipe's ${recipe.environment.fingerprint}.`);
     log(`Environment preview: ${shown.inputs.length} inputs, ${shown.sentBytes} bytes, pnpm install ${shown.installArgs.join(" ")}; the recipe's fingerprint.`);
+    await shot(page, folder, "1-environment-preview.png", log);
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
     log(`Run preview: ${run.baseline}; frozen ${run.frozen.length}; ${run.limits.slice(0, 160)}`);
@@ -297,6 +324,7 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
     const problems = await runPreviewProblems(page, recipe, { taskId, projectId }, null, run.expected);
     if (problems.length) throw new Error(`The rehearsal's run preview isn't the recipe's: ${problems.join("; ")}.`);
     log("Run preview: bound to the recipe's brief digest and snapshot, with its frozen files and their hashes.");
+    await shot(page, folder, "2-run-preview.png", log);
     const brief = (await taskOf(page, taskId)).brief;
     writeFileSync(join(folder, "rehearsal.json"), `${JSON.stringify({ recipe: digest, environment: shown, run, briefVersion: brief.version }, null, 2)}\n`, { mode: 0o600 });
     await removeKeys(page);
@@ -347,20 +375,27 @@ async function live(frozen: Frozen, task: LiveTask, approved: string): Promise<n
       return finish(1);
     }
     log(`Prepared: Node ${environment.prepared.node}, pnpm ${environment.prepared.pnpm}, ${environment.prepared.arch}, image ${environment.prepared.image}.`);
+    await shot(page, folder, "1-environment-prepared.png", log);
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
     save("run-preview.json", run);
     const problems = await runPreviewProblems(page, recipe, { taskId, projectId }, environment.prepared, run.expected);
     if (problems.length) throw new Error(`The run's preview isn't the approved one: ${problems.join("; ")}. Start wasn't pressed.`);
     log("The run's preview is the approved one: this brief, this commit's snapshot, the environment just prepared and the frozen files. Pressing Start, once.");
+    await shot(page, folder, "2-run-preview.png", log);
     const attemptId = await startOnce(page, taskId);
-    const ended = await followRun(page, taskId, attemptId, 45 * 60_000, log);
+    // Followed past the run's own deadline, so only the engine's limits end it, never this wait.
+    const ended = await followRun(page, taskId, attemptId, (recipe.limits.runMinutes + 10) * 60_000, log);
     save("attempt.json", ended);
+    await shot(page, folder, "3-run-ended.png", log);
+    const used = ended.report?.route?.model ?? null;
+    log(used === null ? "The report names no model." : `The report names the model ${used}${used.toLowerCase() === TASK_MODEL.toLowerCase() ? ", the approved one" : `, not the approved ${TASK_MODEL}`}.`);
     log(`The run ended ${ended.status}${ended.report ? `: ${ended.report.outcome}${ended.report.verified ? ", verified" : ""}` : ""}. The decisions are yours, in the window: Approve and then Accept, Reject, or a revision. Create ${join(folder, "go-close")} when you're done.`);
     for (;;) {
       if (existsSync(join(folder, "go-close"))) break;
       await page.waitForTimeout(5_000);
     }
+    await shot(page, folder, "4-final.png", log);
     save("task.json", await taskOf(page, taskId));
     save("attempt-final.json", await attemptOf(page, taskId, attemptId));
     save("environment-final.json", await environmentOf(page, projectId));
@@ -436,6 +471,7 @@ if (values.freeze) {
 } else {
   const frozen = readFrozen();
   checkBuild(frozen);
+  checkSource(frozen);
   if (values.plan) {
     const { recipe, digest } = await nextRecipe(frozen, task);
     const text = recipeText(recipe, digest);

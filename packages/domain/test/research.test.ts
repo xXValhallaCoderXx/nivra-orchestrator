@@ -81,7 +81,7 @@ describe("a research run's request (NIV-45, D37)", () => {
 
   it("takes the plan version and the packet's fingerprint as its input, and the packet with both permissions as its context", async () => {
     const parsed = StartRunParams.parse(await request());
-    assert.deepEqual([parsed.workflowId, WorkflowId.parse("research"), PROTOCOL_VERSION], ["research", "research", 14]);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("research"), PROTOCOL_VERSION], ["research", "research", 15]);
     assert.equal(Methods["runs.research"].result.safeParse(null).success, true, "no report yet");
   });
 

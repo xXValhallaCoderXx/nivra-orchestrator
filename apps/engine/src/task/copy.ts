@@ -17,6 +17,24 @@ const sha256 = (data: Uint8Array) => createHash("sha256").update(data).digest("h
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const quoted = (path: string) => JSON.stringify(path.length > 120 ? `${path.slice(0, 117)}...` : path);
 
+/** A search stops counting here, so one over a large workspace stays cheap; `capped` says it stopped. */
+export const SEARCH_COUNT_MAX = 10_000;
+
+/** One search result: a path, or a line of one with its number. */
+export interface SearchMatch {
+  path: string;
+  line?: number;
+  text?: string;
+}
+
+/** A line as a search shows it: whole when it fits, or `max` characters around the match, marked where it was cut. */
+function excerpt(line: string, at: number, length: number, max: number): string {
+  const clean = line.replace(/\r$/, "");
+  if (clean.length <= max) return clean;
+  const start = Math.max(0, Math.min(at - Math.floor((max - length) / 2), clean.length - max));
+  return `${start > 0 ? "..." : ""}${clean.slice(start, start + max)}${start + max < clean.length ? "..." : ""}`;
+}
+
 export class WorkspaceCopy {
   readonly snapshot: Snapshot;
   readonly #nodes = new Map<string, Node>();
@@ -51,6 +69,43 @@ export class WorkspaceCopy {
     } catch {
       return { refused: `${quoted(path)} isn't UTF-8 text, so it isn't shown.` };
     }
+  }
+
+  /**
+   * The paths that hold `text`, or the lines that do, compared without regard to case, under `folder` when it is given:
+   * the snapshot and the worker's own writes, nothing else (NIV-35). Lines are looked for only in UTF-8 text files;
+   * links and other files are counted as skipped. At most `max` matches come back, each line cut to `lineChars`
+   * characters around the match; `total` counts every match, up to `SEARCH_COUNT_MAX`.
+   */
+  search(text: string, where: "names" | "content", folder: string, max: number, lineChars: number): { matches: SearchMatch[]; total: number; capped: boolean; skipped: number } {
+    // Literal text, found ignoring case in the line as it is, so a match's place is the line's own, whatever lowercasing
+    // would do to its length.
+    const wanted = new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu");
+    const matches: SearchMatch[] = [];
+    let total = 0;
+    let skipped = 0;
+    const found = (match: SearchMatch) => {
+      total++;
+      if (matches.length < max) matches.push(match);
+    };
+    for (const path of this.paths(folder)) {
+      if (total >= SEARCH_COUNT_MAX) break;
+      if (where === "names") {
+        if (wanted.test(path)) found({ path });
+        continue;
+      }
+      const read = this.text(path);
+      if ("refused" in read) {
+        skipped++;
+        continue;
+      }
+      const lines = read.text.split("\n");
+      for (let index = 0; index < lines.length && total < SEARCH_COUNT_MAX; index++) {
+        const hit = wanted.exec(lines[index]!);
+        if (hit) found({ path, line: index + 1, text: excerpt(lines[index]!, hit.index, hit[0].length, lineChars) });
+      }
+    }
+    return { matches, total, capped: total >= SEARCH_COUNT_MAX, skipped };
   }
 
   /**

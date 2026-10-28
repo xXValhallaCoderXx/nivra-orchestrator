@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { join, relative, sep } from "node:path";
 import { after, describe, it } from "node:test";
-import { hashRuntime, misplacedVcRuntime, placeVcRuntime, renameDllImport, vcRuntimeAddons, vcRuntimeNames } from "../scripts/runtime-files.ts";
+import { hashRuntime, misplacedVcRuntime, PACKAGER_SKIPS, placeVcRuntime, renameDllImport, vcRuntimeAddons, vcRuntimeNames } from "../scripts/runtime-files.ts";
 
 const dirs: string[] = [];
 after(() => {
@@ -32,6 +33,28 @@ function setup() {
   chmodSync(join(system32, "vcruntime140.dll"), 0o444);
   return { stage, system32 };
 }
+
+describe("what the packager skips in the runtime (NIV-35)", () => {
+  it("is exactly what electron-builder's own walk skips when it copies extra resources, at any depth", async () => {
+    // undici 7.29.1 ships an empty lib/llhttp/.gitkeep, which electron-builder left out of candidate 3's first build.
+    const fromBuilder = createRequire(createRequire(import.meta.url).resolve("electron-builder"));
+    const { walk } = fromBuilder("builder-util") as { walk: (dir: string) => Promise<string[]> };
+    const root = mkdtempSync(join(tmpdir(), "nivra packager skips "));
+    try {
+      const names = [".gitkeep", ".DS_Store", ".npmignore", ".eslintrc", ".travis.yml", "index.js", "README.md", "llhttp.wasm"];
+      for (const folder of ["lib", ".github"]) mkdirSync(join(root, "pkg", folder), { recursive: true });
+      for (const name of names) writeFileSync(join(root, "pkg", name), "");
+      writeFileSync(join(root, "pkg", "lib", ".gitkeep"), "");
+      writeFileSync(join(root, "pkg", ".github", "ci.yml"), "");
+      const all = [...names.map((name) => `pkg/${name}`), "pkg/lib/.gitkeep", "pkg/.github/ci.yml"];
+      const copied = (await walk(root)).map((path) => relative(root, path).split(sep).join("/")).sort();
+      assert.deepEqual(copied, all.filter((path) => !PACKAGER_SKIPS.has(path.split("/").at(-1)!)).sort());
+      assert.deepEqual([...PACKAGER_SKIPS].sort(), [".DS_Store", ".gitkeep"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("the Visual C++ runtime beside native addons (D25)", () => {
   it("finds the runtime DLLs a binary names, in any case, telling vcruntime140.dll from vcruntime140_1.dll", () => {

@@ -14,7 +14,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -22,7 +22,7 @@ import { createGzip, inflateRawSync } from "node:zlib";
 import { build } from "esbuild";
 import { EngineSelfCheck, LineSplitter, PROTOCOL_VERSION, RpcClient } from "@nivra/domain";
 import { ENGINE_VERSION } from "../../engine/src/version.ts";
-import { hashRuntime, misplacedVcRuntime, placeVcRuntime } from "./runtime-files.ts";
+import { hashRuntime, misplacedVcRuntime, PACKAGER_SKIPS, placeVcRuntime } from "./runtime-files.ts";
 
 const NODE_VERSION = "24.21.0";
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -191,6 +191,14 @@ async function stageTarget(target: Target): Promise<void> {
     if (WINDOWS_PREFIX_CHARS + longest.length > 259) throw new Error(`A staged path is too long for Windows once installed (${longest.length} + ${WINDOWS_PREFIX_CHARS} > 259): ${longest}`);
     console.log(`  longest path: ${longest.length} characters (+${WINDOWS_PREFIX_CHARS} for the install folder)`);
   }
+
+  step("Leaving out what the packager skips");
+  walk(stage, (path) => {
+    if (!PACKAGER_SKIPS.has(basename(path))) return;
+    rmSync(path, { recursive: true, force: true });
+    console.log(`  left out ${relative(stage, path)}`);
+    return false;
+  });
 
   step("Writing the manifest");
   const { contentHash, sha256, files } = hashRuntime(stage);
