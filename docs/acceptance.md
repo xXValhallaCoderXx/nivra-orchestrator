@@ -2639,8 +2639,9 @@ of up to five selected tasks by the council's specialists, findings that open th
 ### NIV-35's live runs, and the candidates they ran on (D46, D47)
 
 The live packaged journey on SHE-65, on Linux, each run approved by Nate by its recipe's whole digest. Evidence is
-credited to the exact build it ran on: no run below is evidence for a later candidate. SHE-65 is in Nate's private
-repository: this record names its files and hashes, never its content.
+credited to the exact build it ran on: no run below is evidence for a later candidate. These runs used an unpublished
+revision of Nate's own public repository, including frozen acceptance tests: this record names its files and hashes,
+never the unpublished changes or the frozen tests.
 
 **The candidates** (version 0.2.0, unpublished; each built once by `pnpm release:candidate`, with `pnpm verify`
 inside it, then checked file for file against its build-info and frozen before use):

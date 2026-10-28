@@ -13,11 +13,11 @@ reaches your checkout until you approve that exact change.
 > - Built for the next release, in this repository: explaining a repository with evidence, confirmed preferences with
 >   explicit precedence, saved plans with a council review and web research, and native tasks run in Nebius
 >   Sandboxes, then approved and applied by you.
-> - Shown live on a packaged build, candidate 3 (0.2.0 at `c99fe9d`, not published), 28 October: a real task run in a
->   private repository proposed a change that passed every configured acceptance case, but the repository typecheck
->   failed with three new errors. An AI review identified the broken caller before the decision; the proposal was
->   rejected, and the checkout remained unchanged. It was not a fix: no change has yet been approved, applied and
->   accepted live.
+> - Shown live on a packaged build, candidate 3 (0.2.0 at `c99fe9d`, not published), 28 October: a real task run.
+>   This run used an unpublished revision of the author's own public repository, including frozen acceptance tests.
+>   It proposed a change that passed every configured acceptance case, but the repository typecheck failed with three
+>   new errors. An AI review identified the broken caller before the decision; the proposal was rejected, and the
+>   checkout remained unchanged. It was not a fix: no change has yet been approved, applied and accepted live.
 >
 > Built for the Nebius × NVIDIA Global AI Hackathon. What isn't built yet is said so where it comes up.
 
