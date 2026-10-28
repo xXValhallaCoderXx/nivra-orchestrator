@@ -4,8 +4,8 @@ A desktop workspace for engineers. It explains a repository with evidence, remem
 preferences, and runs a coding task in a Nebius sandbox, where tests the agent can't edit judge the change. Nothing
 reaches your checkout until you approve that exact change.
 
-> **Status:** this README describes the next release, which isn't released yet. The values marked PENDING- are
-> filled in when it is.
+> **Status:** this README describes the next release, which isn't released yet. Its release page will give the
+> version, the source commit and the checksums; the values marked PENDING- here are filled in when it is out.
 > - The current release is [v0.1.1](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1), for
 >   Linux and Windows. It explains a repository with evidence, and applies your confirmed preferences with explicit
 >   precedence. Its own install and testing steps are in the
@@ -41,8 +41,9 @@ reaches your checkout until you approve that exact change.
     give. The files the cases depend on are frozen.
   - Before anything is sent, the Run preview shows what goes to Token Factory and to Nebius, what each keeps, and the
     run's limits.
-  - The repository's checks run before the model starts, so a missing tool stops the run instead of wasting it.
-    PENDING-H1: the baseline selections' wording.
+  - The repository's checks run before the model starts, so a missing tool stops the run instead of wasting it: up
+    to three baseline checks ("Baseline checks, before the worker"), each a command with its exact output or a pattern
+    that must match all of it, and its exit code, run once with networking off.
   - NVIDIA Nemotron makes the change on a copy of one commit, with networking off. It reads and writes files and runs
     the brief's cases through fixed tools that Nivra's engine carries out; it never chooses a command.
   - Nivra judges the result outside what the model can edit: every case's output is compared byte for byte on this
@@ -50,7 +51,8 @@ reaches your checkout until you approve that exact change.
   - The change comes back as an exact patch, with every case's verdict. You approve it by its hash, and the engine on
     the repository's own system applies it: each original is moved aside and kept, and nothing is committed, pushed or
     staged. Then you accept the change. Instead of approving, you can reject it, or ask for a revision with a note.
-- **Prepares a Node and pnpm environment inside the boundary** (PENDING-H1): the pinned Node image is imported into
+- **Prepares a Node and pnpm environment inside the boundary** (Node 22.23.4 from the `node:22.23.4-alpine3.24` image,
+  and the exact pnpm version the repository's `package.json` pins in `packageManager`): the Node image is imported into
   your Nebius project, and the dependencies are installed from the frozen lockfile in a run of its own, the only one
   with networking on. Its preview says so first.
 - **Asks before anything leaves.** Sending a project's content to the model, uploading its commit to Nebius, and
@@ -111,10 +113,11 @@ The next release isn't published yet. Until it is, the build to install is
 [README as of commit `8086464`](https://github.com/xXValhallaCoderXx/nivra-orchestrator/blob/8086464f8f7cd2c2aadfc3adf7829d6c2755bd36/README.md).
 The steps below are for the next release.
 
-Download PENDING-H4-VERSION from the repository's
-[GitHub Releases](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases): `PENDING-H4-ZIP` for Windows or
-`PENDING-H4-DEB` for Linux, with `SHA256SUMS` and `build-info.json` (the commit and runtimes the build came from). To
-check a download, run `sha256sum -c SHA256SUMS --ignore-missing` in Linux or WSL, or `Get-FileHash` in PowerShell.
+Download it from the release's page on the repository's
+[GitHub Releases](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases). The page gives the version, the
+source commit it was built from, and the SHA256 checksum of each file: the Windows zip, the Linux deb, `SHA256SUMS` and
+`build-info.json` (the commit and runtimes the build came from). To check a download, run
+`sha256sum -c SHA256SUMS --ignore-missing` in Linux or WSL, or `Get-FileHash` in PowerShell, and compare with the page.
 
 **Windows 10/11 x64**
 1. Extract the zip into a folder of your own, for example `%LOCALAPPDATA%\Programs\Nivra`, and run `Nivra.exe`.
@@ -128,7 +131,7 @@ check a download, run `sha256sum -c SHA256SUMS --ignore-missing` in Linux or WSL
 **Linux x64** (Ubuntu 24.04 and similar)
 
 ```bash
-sudo apt install ./PENDING-H4-DEB
+sudo apt install ./Nivra-<version>-amd64.deb   # the deb's name, as the release page gives it
 nivra
 ```
 
@@ -176,8 +179,9 @@ untracked work is never sent.
 
 ## Running a task on your own repository
 
-- **What it needs:** a repository whose checks run with Node and pnpm (PENDING-H1: the pinned versions), opened on the
-  Linux engine or a WSL one; your key and project id; and both permissions for the project.
+- **What it needs:** a repository whose checks run with Node 22.23.4 and the exact pnpm version its `package.json`
+  pins in `packageManager`, opened on the Linux engine or a WSL one; your key and project id; and both permissions for
+  the project.
 - **What you write:** the brief's goal, and its acceptance cases. Each case is a command, and the exact output and exit
   code only the right behaviour gives: a case that only prints "passed" can be satisfied by the wrong change.
 - **What bounds a run:** PENDING-H2, the limits the Run preview shows.
