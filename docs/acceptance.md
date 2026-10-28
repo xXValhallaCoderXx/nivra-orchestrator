@@ -2706,6 +2706,72 @@ checked unchanged afterwards):
 | Reject leaves the checkout untouched | Offline, and live after run 3 | Nothing more |
 | Linux and Windows-to-WSL evidence naming the packaged revision and backend | Linux: runs 1 to 3, on candidates 1 and 2, with Nebius Sandboxes | Windows to WSL live needs its own recipe and approval; native Windows refuses task runs (D39, D41) |
 
+### The shared monthly budget's ledger, PR 1 (D48, NIV-66)
+
+Lane C's PR 1 for NIV-57: the budget's contract, the host's ledger, its guard and the six calls the budget screen and
+the evaluation harness will both use. Backend only, and nothing spends through it yet. On `feature/budget-ledger`, from
+`main` at `a902bc8`. Tested at `42c9c47`; the commit after it adds only D48, AGENTS.md's rules, the development notes
+and this record.
+
+| Commit | What |
+|---|---|
+| `5ed855a` | The contract and today's price list; the ledger (migration 8), the guard, the host's block and the six calls; the tests; the schema pins move to 8 |
+| `b796823` | The first independent review's fixes, each with its test |
+| `42c9c47` | The second independent review's fixes, each with its test |
+
+NIV-66's checkpoints, as this PR leaves them:
+- **Checkpoint 1, the contract:** done. Money in integer micro-units, rounded up per request; presets as starting
+  points; immutable policy versions, which can turn the budget off; grants, journal rows and seals; months; recovery;
+  and a summary that shows unknown money as null, never 0.
+- **Checkpoint 2, the ledger:** its core is done: one synchronous transaction per grant, release only on affirmative
+  evidence and only on the ledger the guard verified, journal rows worked out again, months only on the provider's
+  clock or the person's word, and the guard. The reconciler and the engine's journal come with PR 2a.
+- **Checkpoint 3, every paid activity:** not started. Model calls come with PR 2a, Tavily and Nebius with PR 2b.
+- **Bounds and currency:** not established. Until C1 checkpoint 1 establishes them from a supported source, no model is
+  admitted under a money policy.
+
+Passes, at `42c9c47`, one at a time under the shared lock:
+- `pnpm verify`: 1,375 passed (domain 120, engine 779, desktop 476).
+- Built e2e (`test:e2e`, under `xvfb-run -a`): 95 passed, `budget-api.spec.ts` among them.
+- Packaged (`stage:runtime linux-x64`, `package:dir`, then `test:packaged`): 33 passed, `budget-api.spec.ts` among them.
+- `test:windows`, after `pnpm dev:win --no-launch`, in the Windows turn Nate approved (28 Oct, 20:50 to 20:52 SGT,
+  from this lane's worktree, with Track A's clearance): 13 passed (`windows.spec.ts` 8, `workspace-windows.spec.ts` 5),
+  among them `windows.spec.ts:224`, "the release's WSL home, ~/.nivra, is as it was, and this run's own home goes".
+  `tasklist` showed no `Nivra.exe` before the turn or after it, and fingerprints of `~/.nivra` and `~/.nivra-dev`
+  (each file's name, size and modification time) were the same before and after. The Windows suite has no budget test of
+  its own: it shows that the Windows build, with these main and preload changes, passes the suite it has.
+- Mutations, each of the PR's 56 safety claims broken alone and its test file run: 56 of 56 caught. Five were caught
+  only by a deeper layer, a trigger or schema check refusing the write before an assertion could: a grant that may
+  have been sent released, an interrupted seal settling, a grant's day going back, and the provider's clock or the
+  person opening the current month again.
+
+Skips, apart from the passes:
+- `pnpm verify`: none.
+- Built e2e: 1, `explain.spec.ts:197`, "only a packaged app ignores the switch": it checks that a packaged app ignores
+  a test switch, so it runs only in the packaged project.
+- Packaged: 63, each a test that needs a test switch a packaged app ignores, as the JSON report gives them: the test
+  endpoint switch (25) or switches (8), the stub switches (10), the stand-in switches (9), the test engine switch (3)
+  or `--nivra-test-engine` (2), the test switches (2), and four that also need a signal to kill the engine with.
+- `test:windows`: none.
+- Not run, and not needed: `verify:windows`, since nothing here changes a target, the supervisor or staging; and
+  `rpc.ts`, since there is no engine change. No live check: nothing here sends anything.
+- Not shown: a budget screen. The calls are proven through the built, packaged and Windows app's `window.nivra`, not
+  through a screen; the packaged user journey needs its own check once NIV-56's design is built.
+
+Earlier runs:
+- At `5ed855a`: verify 1,342 passed; built e2e 95 passed, 1 skipped; packaged 33 passed, 63 skipped; mutations 23 of 23.
+- At `b796823`: verify 1,363 passed; built e2e 95 passed, 1 skipped; packaged 33 passed, 63 skipped; mutations 43 of
+  43 (the first run caught 40: three trigger tests failed for the wrong reason, a hand edit refused for its revision
+  rather than for what it changed, and were rewritten to fail only on the rule under test).
+- A first built e2e run at `42c9c47` was started with `pnpm exec playwright` instead of the package script. Without
+  `npm_node_execpath`, the unpackaged app gave its engine no absolute node, and 29 tests failed on "Engine stopped"
+  (8 passed, 59 didn't run). It was rerun through `pnpm test:e2e`, as every other run was (above).
+
+Reviews:
+- An independent review of `5ed855a` found three blocking holes and eight significant ones, all fixed in `b796823`.
+- A second independent review, of `b796823`, found two blocking holes and four significant ones, all fixed in
+  `42c9c47`. D48 lists both reviews' findings.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

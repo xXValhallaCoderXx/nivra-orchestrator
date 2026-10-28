@@ -141,6 +141,22 @@ list.
   on the version the specialist read. It never changes a task's state, adds an acceptance case, waives a run
   prerequisite or grants consent.
 
+## Budget rules (D48)
+
+- One budget authority: the host's ledger in workspace.db. Engines get finite grants and never see the pool, and no
+  ledger is opened from two operating systems (D7).
+- Every spendable call gets a grant before it is sent. The grant is marked dispatching, and that revision is fsynced
+  to the guard log beside the workspace, before the send begins. If the guard can't be written, nothing is sent.
+  Writing, dispatching and releasing a grant pass the ledger state the guard last verified; the ledger refuses them on
+  any other.
+- A grant's unused remainder is released only on affirmative evidence: the host never began sending it, in a ledger
+  the guard shows wasn't rolled back, or the engine's complete seal. A missing record, an interrupted seal or age never
+  releases it, and the ledger works out each journal row's amount itself, never taking it on the engine's word.
+- Unknown usage counts at its reserved bound and shows as unknown (null), never as 0 or 0 dollars. Money counts only
+  for a model whose bounds, and whose price list's currency, are established from a supported source.
+- Grants and budget context travel in memory and RPC. They never go in workflow input, step output, run events,
+  requestContext or logs.
+
 ## Engineering rules
 
 - Keep main thin and the renderer free of Node APIs.
