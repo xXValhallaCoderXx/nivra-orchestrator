@@ -4986,7 +4986,7 @@ function preparationNote(preparation: PreparationRecord): string | null {
  * the verified versions for display, the recipe's task variables and dependency folders, and the person's acceptance
  * of missing builds, if any.
  */
-function environmentRefOf(prepared: PreparedEnvironmentV2, builds: BuildsAcceptance | null, target: string): EnvironmentRef {
+export function environmentRefOf(prepared: PreparedEnvironmentV2, builds: BuildsAcceptance | null, target: string): EnvironmentRef {
   return {
     format: REF_FORMAT,
     recipe: prepared.recipeDigest,

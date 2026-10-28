@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
+import { environmentRefOf } from "../src/main/host.ts";
 import { taskRunFingerprint } from "../src/main/tasks.ts";
+import { preparedOf } from "./fixtures/environment-recipe.ts";
 import { hashRuntime } from "../scripts/runtime-files.ts";
 import { buildChanges, buildHashes, previewProblems, type ApprovedRun } from "../scripts/task-live-checks.ts";
 
@@ -58,21 +60,25 @@ describe("the live run's frozen build (NIV-35)", () => {
   });
 });
 
+/** A recipe's environment, as a preparation that ended prepared leaves it (NIV-55). */
+const PREPARED = await preparedOf("image-1");
+
 describe("the live run's preview, before Start (NIV-35)", () => {
   const ids = { taskId: "task-1", briefId: "brief-1", briefVersion: 1, projectId: "project-1", targetId: "local" };
-  const approved: ApprovedRun = { baseline: "a".repeat(40), snapshotFingerprint: "b".repeat(64), briefDigest: "c".repeat(64), frozen: [{ path: "tests/she65.test.ts", sha256: "d".repeat(64) }], inputsDigest: "e".repeat(64) };
-  const prepared = { image: "image-1", inputsDigest: "e".repeat(64), projectFingerprint: "f".repeat(64) };
+  const prepared = PREPARED;
+  const approved: ApprovedRun = { baseline: "a".repeat(40), snapshotFingerprint: "b".repeat(64), briefDigest: "c".repeat(64), frozen: [{ path: "tests/she65.test.ts", sha256: "d".repeat(64) }], configuration: prepared.recipe.configuration.digest };
+  const ref = environmentRefOf(prepared, null, ids.targetId);
   /** The fingerprint the host works out, from what the app holds. */
-  const hostExpected = (parts: { briefDigest?: string; snapshot?: string; environment?: typeof prepared | null }) =>
-    taskRunFingerprint({ ...ids, briefDigest: parts.briefDigest ?? approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: parts.snapshot ?? approved.snapshotFingerprint, environment: parts.environment === undefined ? prepared : parts.environment });
+  const hostExpected = (parts: { briefDigest?: string; snapshot?: string; environment?: typeof ref | null }) =>
+    taskRunFingerprint({ ...ids, briefDigest: parts.briefDigest ?? approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: parts.snapshot ?? approved.snapshotFingerprint, environment: parts.environment === undefined ? ref : parts.environment });
   /** What the app's preview says goes to each service: the build's own words, the model among them. */
   const SENDS = { tokenFactory: ["The brief.", "All of it to one model, nvidia/nemotron-3-super-120b-a12b. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in."], nebius: ["The commit's files."] };
-  const structured = (change: Partial<{ expected: string; snapshotFingerprint: string; baseline: string; frozen: Array<{ path: string; sha256: string | null }>; environment: { image: string; inputsDigest: string } | null; sends: typeof SENDS }> = {}) => ({
+  const structured = (change: Partial<{ expected: string; snapshotFingerprint: string; baseline: string; frozen: Array<{ path: string; sha256: string | null }>; environment: Partial<typeof ref> | null; sends: typeof SENDS }> = {}) => ({
     expected: change.expected ?? hostExpected({}),
     snapshotFingerprint: change.snapshotFingerprint ?? approved.snapshotFingerprint,
     snapshot: { baseline: change.baseline ?? approved.baseline } as never,
     frozen: change.frozen ?? approved.frozen,
-    environment: (change.environment === undefined ? { ...prepared, node: "v22.23.4", pnpm: "11.5.3", arch: "x86_64", preparedAt: "2026-10-28T00:00:00.000Z" } : change.environment) as never,
+    environment: (change.environment === undefined ? ref : change.environment === null ? null : { ...ref, ...change.environment }) as never,
     sends: change.sends ?? SENDS,
   });
   const problems = (shownExpected: string, given: ReturnType<typeof structured>, environment: typeof prepared | null = prepared) => previewProblems({ approved, ids, prepared: environment, shownExpected, structured: given });
@@ -97,8 +103,9 @@ describe("the live run's preview, before Start (NIV-35)", () => {
     const otherBrief = hostExpected({ briefDigest: "0".repeat(64) });
     assert.equal(problems(otherBrief, structured({ expected: otherBrief })).length, 2);
     assert.deepEqual(problems(hostExpected({}), structured({ frozen: [{ path: "tests/she65.test.ts", sha256: "1".repeat(64) }] })), ["the frozen files or their hashes aren't the approved ones"]);
-    assert.deepEqual(problems(hostExpected({}), structured({ environment: { image: "image-2", inputsDigest: "e".repeat(64) } })), ["the run doesn't start from the environment just prepared"]);
-    assert.deepEqual(problems(hostExpected({}), structured({ environment: { image: "image-1", inputsDigest: "2".repeat(64) } })), ["the environment's inputs aren't the approved ones"]);
+    assert.deepEqual(problems(hostExpected({}), structured({ environment: { image: "image-2" } })), ["the run doesn't start from the environment just prepared"]);
+    assert.deepEqual(problems(hostExpected({}), structured({ environment: { verified: "2".repeat(64) } })), ["the run doesn't start from the environment just prepared"]);
+    assert.deepEqual(problems(hostExpected({}), structured({ environment: { configuration: "9".repeat(64) } })), ["the environment's setup files aren't the approved ones"]);
     assert.deepEqual(problems("3".repeat(64), structured()), ["the window's preview isn't bound to the approved brief, commit and environment"]);
   });
 
