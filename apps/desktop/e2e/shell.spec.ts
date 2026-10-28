@@ -465,6 +465,8 @@ test("a read that fails shows as a failure, never as an empty list or a wait tha
   await page.reload();
   await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
   await expect(page.getByTestId("host-error")).toContainText("The test made this read fail.");
+  await expect(page.getByTestId("host-error")).toContainText("If this keeps happening, quit Nivra and open it again.");
+  await expect(page.getByTestId("host-error")).not.toContainText("tries again");
   await expect(page.getByTestId("home-tasks-state")).toContainText("Nivra couldn't read the tasks");
   await expect(page.getByText(`No tasks in ${PROJECT} yet`)).toHaveCount(0);
   await expect(page.getByTestId("home-setup-key")).toContainText("Nebius key and project ID: couldn't be read");
@@ -474,6 +476,20 @@ test("a read that fails shows as a failure, never as an empty list or a wait tha
   await page.getByTestId("home-conversation").click();
   await expect(page.getByTestId("home-conversation-error")).toContainText("Nivra couldn't start the conversation: The test made this read fail.");
   await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
+});
+
+test("while the projects can't be read, no draft is called removed: each stays listed to open, with nothing to discard", async () => {
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler("projects:list");
+    ipcMain.handle("projects:list", () => {
+      throw new Error("The test made this read fail.");
+    });
+  });
+  await page.reload();
+  await expect(page.getByTestId("host-error")).toContainText("The test made this read fail.");
+  await expect(page.getByTestId("nav-draft").filter({ hasText: TITLE })).toHaveCount(1);
+  await expect(page.locator('[data-testid="nav-draft"][data-gone]')).toHaveCount(0);
+  await expect(page.getByTestId("nav-draft-discard")).toHaveCount(0);
 });
 
 test("with a secrets file Nivra can't read, a draft is unchecked and not kept: the field keeps it, nothing is listed or stored, and nothing of the file shows", async ({}, testInfo) => {

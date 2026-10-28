@@ -262,7 +262,7 @@ function Shell() {
         showLogo={!narrow}
         openTasks={tasks.value?.workspace.state === "ready" ? openTaskCount(tasks.value.tasks, scope) : null}
         conversations={conversations.value}
-        projects={list}
+        projects={projects.error === null ? projects.value : null}
         drafts={drafts}
         onNavigate={navigate}
         onOpenSettings={openSettings}
@@ -282,7 +282,7 @@ function Shell() {
           <Stack gap="md">
             {hostError && (
               <Alert color="red" title="Nivra couldn't load its state" data-testid="host-error">
-                <Text size="sm">{hostError} It tries again by itself; if this keeps happening, quit and open Nivra again.</Text>
+                <Text size="sm">{hostError} If this keeps happening, quit Nivra and open it again.</Text>
               </Alert>
             )}
             {notice && (

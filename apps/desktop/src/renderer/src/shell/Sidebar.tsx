@@ -218,7 +218,8 @@ export function Sidebar({
   /** The scope's tasks that aren't completed; null until they are read. */
   openTasks: number | null;
   conversations: ConversationsView | null;
-  projects: ProjectView[];
+  /** Null while the list is unknown: before its first answer, or while reading it fails. */
+  projects: ProjectView[] | null;
   drafts: SidebarDrafts;
   onNavigate: Navigate;
   /** Settings, on the section last shown there. */
@@ -262,7 +263,7 @@ export function Sidebar({
             }
           />
           <NavItem section="conversations" label="Conversations and plans" active={section === "conversations"} onClick={() => onNavigate({ kind: "conversations" })} testId="nav-planning" />
-          {section === "conversations" && <ConversationsNav route={route} onNavigate={onNavigate} conversations={conversations} projects={projects} onCreated={onConversationCreated} />}
+          {section === "conversations" && <ConversationsNav route={route} onNavigate={onNavigate} conversations={conversations} projects={projects ?? []} onCreated={onConversationCreated} />}
           {scope.kind === "project" && <NavItem section="environment" label="Environment" active={section === "environment"} onClick={() => onNavigate({ kind: "environment" })} testId="nav-environment" />}
           <Text className="nivra-nav-label">Everywhere</Text>
           <NavItem section="missions" label="Missions" active={section === "missions"} onClick={() => onNavigate({ kind: "missions" })} testId="nav-missions" />
@@ -285,8 +286,9 @@ export function Sidebar({
                 {drafts.list.map((draft) => {
                   const place = placeOfDraft(draft.key);
                   const scope = place?.scope;
-                  // A draft of a project no longer in the list opens nothing: it can only be discarded.
-                  const gone = scope?.kind === "project" && !projects.some((p) => p.id === scope.projectId);
+                  // A draft of a project no longer in the list opens nothing: it can only be discarded. While the list is
+                  // unknown, no draft is called gone.
+                  const gone = projects !== null && scope?.kind === "project" && !projects.some((p) => p.id === scope.projectId);
                   const label = (
                     <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={draft.label}>
                       {draft.label || "Untitled"}
