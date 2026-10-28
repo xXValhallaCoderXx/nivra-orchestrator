@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { isTerminal, projectFingerprint, REF_FORMAT, taskBriefDigest, type EnvironmentRef, type RunSummary, type TaskBrief, type TaskPreview, type TaskReport } from "@nivra/domain";
+import { isTerminal, projectFingerprint, REF_FORMAT, TASK_MODEL, taskBriefDigest, type EnvironmentRef, type RunSummary, type TaskBrief, type TaskPreview, type TaskReport } from "@nivra/domain";
 import { setupConfiguration } from "../src/environment/inputs.ts";
 import { isNodeSetupPath } from "../src/environment/node-files.ts";
 import { CHECK_IMAGE } from "../src/exec/check.ts";
@@ -73,7 +73,7 @@ async function setup(files: Record<string, string> = FILES): Promise<{ sandbox: 
   put(join(image, "workspace"), "node_modules/dep/index.js", "module.exports = 1;\n");
   guest.images.set(IMAGE, image);
   const sandbox = await startSandboxStub({ guest });
-  const model = await startStub({ chat: (_request, index) => toolCall(WORK[Math.min(index, WORK.length - 1)]![0], WORK[Math.min(index, WORK.length - 1)]![1], { id: `call_${index}` }) });
+  const model = await startStub({ models: [{ id: TASK_MODEL }], chat: (_request, index) => toolCall(WORK[Math.min(index, WORK.length - 1)]![0], WORK[Math.min(index, WORK.length - 1)]![1], { id: `call_${index}` }) });
   stubs.push(sandbox, model);
   const root = tempDir("nivra task recipe engine");
   dirs.push(root);

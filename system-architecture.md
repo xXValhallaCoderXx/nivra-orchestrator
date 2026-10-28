@@ -500,9 +500,11 @@ Migration v2 (D22) added the run's duration, usage and route, and the `artifacts
 - **Every call is recorded** as a `model.call` event, failed ones too. Usage is what the provider reported: a run's
   totals are `null` when any call didn't say, never 0. Every run records its route: provider, endpoint
   (`token-factory` or `loopback-test`) and model.
-- **Model choice.** The first preferred model the key can see: `nvidia/nemotron-3-super-120b-a12b`, then
-  `nvidia/Nemotron-3_5-Lightning`, then `nvidia/Nemotron-3-Ultra-550b-a55b`; otherwise any NVIDIA model. A policy table
-  sets the tool choice: Nemotron 3 Super explores with `required` and is forced to answer; other models use `auto`.
+- **Model choice.** The first preferred model the key can see: `nvidia/Nemotron-3.5-Super-VL`, then
+  `nvidia/Nemotron-3_5-Lightning`, then `nvidia/Nemotron-3-Ultra-550b-a55b`; otherwise any NVIDIA model (D50). A policy
+  table sets the tool choice: Nemotron 3.5 Super VL and Nemotron 3 Super explore with `required` and are forced to
+  answer, as checks have seen each honour that (D22, D50); other models use `auto`. Every request carries its output
+  cap as `max_completion_tokens` (D50).
 - **`providers.check`** runs from any engine, within 150 s:
   1. it lists `GET /v1/models?verbose=true`;
   2. it makes one tool call;
