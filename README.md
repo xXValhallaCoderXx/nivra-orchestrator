@@ -144,18 +144,19 @@ There is no AppImage: it doesn't start on a stock Ubuntu 24.04 (D10).
 
 ## Testing instructions
 
-The quick path takes about PENDING-TAKE minutes. It uses the public sample, a copy of
-[valhalla-fitness](https://github.com/xXValhallaCoderXx/valhalla-fitness) with one bug and the tests that show it:
-PENDING-SAMPLE.
+The quick path takes about PENDING-TAKE minutes. It uses the public onboarding sample,
+[nivra-sample](https://github.com/xXValhallaCoderXx/nivra-sample): a few plain files with an MIT licence, which need
+nothing installed. Use the commit named here, so what you upload is what was checked: PENDING-SAMPLE-COMMIT.
 
 1. Install Nivra (above).
-2. Clone the sample. On Windows, clone it inside WSL, for example in `~`:
+2. Clone the sample, and check out that commit. On Windows, clone it inside WSL, for example in `~`:
    ```bash
-   git clone PENDING-SAMPLE
+   git clone https://github.com/xXValhallaCoderXx/nivra-sample.git
+   git -C nivra-sample checkout PENDING-SAMPLE-COMMIT
    ```
 3. Start Nivra. Under **Settings**, paste the key and press **Save**, then the project id and **Save**: yours, or the
    ones in the submission's private testing instructions.
-4. **Add** the sample's folder. On Windows, browse to `\\wsl.localhost\<distribution>\home\<you>\PENDING-SAMPLE-NAME`.
+4. **Add** the sample's folder. On Windows, browse to `\\wsl.localhost\<distribution>\home\<you>\nivra-sample`.
 5. Under **Settings**, press **Check Token Factory from …** (the label names the system the folder is on). It lists
    the models your key can use, makes one Nemotron call that has to use a tool to answer, then three small probes: at
    most six model requests, within 150 seconds.
@@ -165,9 +166,9 @@ PENDING-SAMPLE.
    what Nebius keeps. Then press **Upload and check**, and **Allow uploads for this project**. A check runs Nivra's own
    fixed steps with networking off: at most 8 operations, each command up to 60 seconds, 10 minutes in all, then up to
    7 minutes to close. Nothing comes back to your checkout.
-8. *Optional, about PENDING-TAKE minutes, once the public sample exists:* run a task on it. Nemotron makes a change in
-   Nebius, tests it can't edit decide whether it is verified, and only a verified change can be approved and applied
-   by you: [docs/judge-walkthrough.md](docs/judge-walkthrough.md).
+
+A full task run on a public sample isn't offered in this release: its public reproduction is deferred. How a task run
+works, and what it needs, is in *Running a task on your own repository* below.
 
 **Using another folder.** Any git repository with at least one commit works, from the commit only: uncommitted and
 untracked work is never sent.

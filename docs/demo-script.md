@@ -19,9 +19,10 @@ the person's approval.
    unchanged checkout. A failed attempt is never described as completing the task.
 4. **The coach and the mission review** appear only if they ship in the chosen build: candidate 3. Their offline checks
    are never presented as live results.
-5. **Still open:** which public repository the live sandbox check uses. Nivra's own commit is refused by the check's
-   credential scan (its tests hold fake keys on purpose), so the check runs on another public repository:
-   PENDING-SANDBOX-REPO.
+5. **The sandbox check's repository:** the public onboarding sample,
+   [nivra-sample](https://github.com/xXValhallaCoderXx/nivra-sample) (MIT), at the commit the judges' instructions pin:
+   PENDING-SAMPLE-COMMIT. It runs through the normal app and a real Nebius sandbox, with no special bypass. Nivra's own
+   commit can't be checked: the check's credential scan refuses it, because its tests hold fake keys on purpose.
 
 ## Before recording
 
@@ -29,7 +30,7 @@ the person's approval.
   It is named on screen once. The route proven live is the Linux packaged build. Windows with WSL is recorded only if
   its own live run passed: PENDING-WSL.
 - **A fresh profile and engine home** for the take, so the opening scene starts empty and nothing touches `~/.nivra`.
-- **The repositories:** Nivra's own, and the sandbox check's, cloned at their commits into neutral folders.
+- **The repositories:** Nivra's own, and nivra-sample, cloned at their commits into neutral folders.
 - **The credentials** pasted under Settings *before* recording starts. The key field never shows the key, but the
   project id field shows what is typed, so it must not be filmed.
 - **The SHE-65 stills:** taken from the real run's own screens on the chosen build, cropped, and checked frame by frame
@@ -50,7 +51,7 @@ the person's approval.
 | 0:10–0:30 | Evidence | **Explain**, after allowing model sharing for this project: the answer, and its citations to the lines the model was shown | "Nemotron, through Nebius Token Factory, explains the repository. Every citation says which lines it was shown." | one explain call |
 | 0:30–0:55 | Mission and planning | A mission and its backlog, and the mission review's findings, each opening its task. Then a saved plan with its council review and web research, as labelled stills from their own live runs | "A project starts from what it's for. Plans are reviewed by a council of specialists, and their assumptions researched." | the mission review: candidate 3, and a live review in the recipe, or left out. The plan stills: only from labelled live runs |
 | 0:55–1:20 | A clear task brief | A vague task's guidance, worked out with no model; the coach's preview, exactly what is sent; its questions and proposed changes; two ticked and saved as brief v2 with its acceptance cases | "Before any code, the coach asks what the brief is missing. Nothing changes until I pick it." | candidate 3, and one coach call. Otherwise the brief's form alone |
-| 1:20–1:40 | Execution in Nebius | **Sandbox check** on the public repository: the preview (the commit, what's left out and why, what Nebius keeps), then the check with networking off | "The commit goes to a Nebius sandbox only when I allow uploads, and the sandbox runs with networking off." | one sandbox check |
+| 1:20–1:40 | Execution in Nebius | **Sandbox check** on nivra-sample: the preview (the commit, what's left out and why, what Nebius keeps), then the check with networking off | "The commit goes to a Nebius sandbox only when I allow uploads, and the sandbox runs with networking off." | one sandbox check |
 | 1:40–2:35 | Verification and approval | SHE-65's real run, as cropped and labelled stills: the Run preview's limits, the checks before and after in Nebius, and the verdict. *Captioned with the build and date* | "Tests the agent can't edit decide whether the change is verified." | stills from the real run |
 | | *Verified* | Approve, with the patch's hash, then the change applied unstaged with the originals kept; Accept | "Nothing reaches the checkout until I approve that exact change. Nothing is committed or pushed." | a verified run |
 | | *Not verified* | The verdict says not verified; Reject; the checkout unchanged | "When the tests don't verify a change, it can't be applied, and the checkout is untouched." | an unverified run |

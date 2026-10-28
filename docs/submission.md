@@ -17,7 +17,7 @@ A requirement counts as met only when its evidence exists. A plan or a design is
 | 3 | A runtime Token Factory inference call | Rules, FAQ | Recorded runs: the v0.1.1 explanations (17–20 October), and the execution release's live task run | Claude records; Nate supplies the key | v0.1.1's evidence is recorded (below). The execution release's: PENDING-H3 |
 | 4 | An NVIDIA open-source model is used | Rules | The model id in each run record | Claude | `nvidia/nemotron-3-super-120b-a12b`, route `token-factory`, in every recorded run. The task run's: PENDING-H3 |
 | 5 | Track selection | Rules | See *Track* below | Nate | **Decided** on 27 October: Coding and Agentic Engineering. It replaces Best Apps and Agents (18 October) |
-| 6 | A working demo or test-build URL | Rules | The release: the Windows zip, the Linux deb, `build-info.json` and `SHA256SUMS`, published unchanged | Claude prepares; Nate publishes | PENDING-H4 |
+| 6 | A working demo or test-build URL | Rules | The release's page: the Windows zip, the Linux deb, `build-info.json` and `SHA256SUMS`, published unchanged, with the version, the source commit and each file's SHA256 checksum. Devpost names and links that same release, and the README directs judges there | Claude prepares; Nate publishes | Open: published at the release |
 | 7 | A public open-source repository with setup instructions | Rules | github.com/xXValhallaCoderXx/nivra-orchestrator (MIT) and its README | Claude | Public. The README is refreshed for the release |
 | 8 | A public YouTube demonstration, under three minutes | Rules | The video link | Nate records and uploads | PENDING-TAKE |
 | 9 | Technology feedback | Rules | The submission form's text | Nate, with a draft from Claude | **Draft below** |
@@ -128,22 +128,23 @@ Factory, Nebius Sandboxes, Tavily, WSL, Playwright.
 
 **Links**
 - Source: https://github.com/xXValhallaCoderXx/nivra-orchestrator (MIT)
-- Release: PENDING-H4
+- Release: the release's page, which gives the version, the source commit and the checksums (its URL goes in when
+  Nate publishes it)
 - Video: PENDING-TAKE
-- The public sample: PENDING-SAMPLE
+- The onboarding sample: https://github.com/xXValhallaCoderXx/nivra-sample (MIT), at PENDING-SAMPLE-COMMIT
 
 **Track:** Coding and Agentic Engineering (item 5).
 
 **Testing instructions** (the private field for judges, item 11). Never put these values anywhere else.
-1. Install the release: PENDING-H4 (the Windows zip, or the Linux deb).
+1. Install the release from its page (the Windows zip, or the Linux deb), which lists the version, the source commit
+   and each file's checksum.
 2. Under Settings, paste the key and the project id below, or your own if your Nebius project has Sandboxes access.
    - Key: `<entered only in this private field>`
    - Project id: `<entered only in this private field>`
    - They belong to a project made for judging, and work until judging ends, 16 December, 04:00 SGT.
-3. Follow the README's testing instructions: the quick path takes about PENDING-TAKE minutes; the full task about
-   PENDING-TAKE more.
-4. Use the public sample, or code you're happy to share: whatever is uploaded with these credentials stays with Nebius
-   in that project, where anyone holding them can read it.
+3. Follow the README's testing instructions, the quick path on the onboarding sample: about PENDING-TAKE minutes.
+4. Use the onboarding sample, or code you're happy to share: whatever is uploaded with these credentials stays with
+   Nebius in that project, where anyone holding them can read it.
 
 **Measured, with conditions,** for the text or the video. The model and the sandboxes run on Nebius, so times depend on
 the service.
