@@ -3440,12 +3440,14 @@ to show what Nivra actually sends: a direct API probe that accepts a field isn't
     carried `max_tokens`.
   - Its usage reports `completion_tokens_details.reasoning_tokens`, and `completion_tokens` includes them. The
     forced-answer probe stopped at its cap (`length`) after exactly 1,000 completion tokens, 139 of them reasoning.
-  - 4,463 input and 1,489 output tokens in all. Cost isn't reported, so it isn't shown.
+  - 3,293 input and 1,489 completion tokens across the 5 inference requests; the completion total already includes
+    the 547 reasoning tokens. No cost was reported, so none is shown.
 - **Not shown yet:**
   - how a whole task run does on it: a candidate and a live run, each with its own approved recipe;
   - whether billing follows `completion_tokens`;
   - that reasoning-inclusive usage reaches the budget ledger, which is Next C's, in the journal of NIV-66's PR 2a.
-  The forced answer used its whole 1,000-token cap: tiny probes are evidence, not proof of reliability.
+  The forced-answer probe returned a valid answer but finished at its 1,000-token limit. These probes establish the
+  tested capabilities, not general reliability or confirmed billing.
 - **Money:** until dollar budgets are established, the count-based limits stay, and costs are shown only as labelled
   estimates (Nate, 28 Oct).
 - **Evidence is credited to its model.** The live scripts (`research-live.ts`, `research-check.ts`,
