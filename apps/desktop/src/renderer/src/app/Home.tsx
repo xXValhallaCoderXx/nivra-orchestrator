@@ -376,7 +376,7 @@ export function GeneralHome({
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
         <Card title="Plan without a repository" description="Write a mission and its tasks before any repository exists. Planning by hand sends nothing and needs no key." testId="home-plan">
           <Group gap="sm">
-            <Button onClick={() => onNavigate({ kind: "missions" })} data-testid="home-new-mission">
+            <Button onClick={() => onNavigate({ kind: "missions", startNew: true })} data-testid="home-new-mission">
               New mission
             </Button>
             <Button variant="default" onClick={onNewTask} data-testid="home-new-task">

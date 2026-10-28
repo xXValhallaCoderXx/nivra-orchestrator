@@ -28,7 +28,8 @@ export type Route =
   | { kind: "environment" }
   /** Today's Explain, on its own page until the conversation version is built (P1x). Project scope only. */
   | { kind: "explain" }
-  | { kind: "missions" }
+  /** `startNew` opens the new mission form at once, as Home's New mission does. */
+  | { kind: "missions"; startNew?: boolean }
   | { kind: "mission"; id: string }
   | { kind: "settings"; section: SettingsSection };
 

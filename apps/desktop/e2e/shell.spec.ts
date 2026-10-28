@@ -569,3 +569,13 @@ test("with a secrets file Nivra can't read, a draft is unchecked and not kept: t
   const kept = await page.evaluate(() => Object.keys(window.localStorage).filter((key) => key.startsWith("nivra.drafts.v1:")).length);
   expect([kept, (await shownText()).includes(marker)]).toEqual([0, false]);
 });
+
+test("New mission on the general Home opens the mission form at once, and Missions in the sidebar still shows the list", async () => {
+  await openSwitcher(page);
+  await page.getByTestId("switcher-general").click();
+  await page.getByTestId("home-new-mission").click();
+  await expect(page.getByTestId("mission-new")).toBeVisible();
+  await page.getByTestId("nav-missions").click();
+  await expect(page.getByTestId("missions-new")).toBeVisible();
+  await expect(page.getByTestId("mission-new")).toHaveCount(0);
+});

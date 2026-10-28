@@ -404,7 +404,8 @@ function Shell() {
             )}
             {shown.kind === "missions" && (
               <Box data-testid="page-missions">
-                <MissionsPage onOpen={(id) => navigate({ kind: "mission", id })} />
+                {/* A page of its own for the form, so the sidebar's Missions goes back to the list. */}
+                <MissionsPage key={shown.startNew ? "new" : "list"} startNew={shown.startNew ?? false} onOpen={(id) => navigate({ kind: "mission", id })} />
               </Box>
             )}
             {shown.kind === "mission" && (
