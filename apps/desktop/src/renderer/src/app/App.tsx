@@ -14,7 +14,7 @@ import { usePoll } from "../shared/ui";
 import { browserStorage, DraftsProvider, useDraftList, useDrafts } from "../shell/drafts";
 import { composerDraftKey, newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
 import { Sidebar } from "../shell/Sidebar";
-import { useShortcuts } from "../shell/keyboard";
+import { dialogOpen, useShortcuts } from "../shell/keyboard";
 import { NARROW_QUERY, SIDEBAR_WIDTH } from "../shell/layout";
 import { Switcher, type SwitcherHandle } from "../shell/Switcher";
 import { ToastProvider, useToast } from "../shell/Toasts";
@@ -100,13 +100,16 @@ function Shell() {
   useEffect(() => {
     if (!navOpen) return;
     (sidebar.current?.querySelector<HTMLElement>('[aria-current="page"]') ?? sidebar.current?.querySelector<HTMLElement>("button"))?.focus();
+    // Heard before the page's own handlers (capture), while an open switcher or menu still marks itself as taking Esc
+    // (data-mantine-stop-propagation, which Mantine clears once it has closed): an Esc it takes closes only it, and a
+    // dialog's own Esc closes only the dialog.
     const onKey = (event: KeyboardEvent) => {
-      // An Esc something open already took (the switcher in the top bar, say) closes only that.
-      const handled = event.defaultPrevented || (event.target instanceof Element && event.target.closest("[data-mantine-stop-propagation]") !== null);
-      if (event.key === "Escape" && !handled) closeNav(true);
+      if (event.key !== "Escape" || event.defaultPrevented || dialogOpen()) return;
+      if (event.target instanceof Element && event.target.closest("[data-mantine-stop-propagation]") !== null) return;
+      closeNav(true);
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [navOpen]);
 
   // Home and Settings show what other pages change (a task page allows sharing, a research dialog turns research on),
