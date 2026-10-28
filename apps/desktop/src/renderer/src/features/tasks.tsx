@@ -1,17 +1,18 @@
-import { Alert, Anchor, Badge, Button, Code, Grid, Group, List, Menu, Modal, Paper, Select, SimpleGrid, Stack, Table, Tabs, Text, Textarea, TextInput, Title, UnstyledButton } from "@mantine/core";
+import { Alert, Anchor, Badge, Button, Code, Collapse, Grid, Group, List, Menu, Modal, Paper, Select, SimpleGrid, Stack, Table, Tabs, Text, Textarea, TextInput, Title, UnstyledButton } from "@mantine/core";
 import type { CoachQuestionField } from "@nivra/domain";
 import { useEffect, useId, useState, type ChangeEvent, type ReactNode } from "react";
 import type { CoachingView } from "../../../shared/coach";
 import type { BriefContent, BriefFields, EngineView, EnvironmentView, PlanView, ProjectView, SettingsView, TaskState, TaskSummary, TasksView, TaskView } from "../../../shared/ipc";
+import { initialRepositoryOf } from "../../../shared/task-form";
 import { environmentRowOf, readinessOf, type ReadinessAction } from "../../../shared/task-readiness";
 import { environmentStepOf, latestHolds, stripItemsOf, type StripItem } from "../../../shared/task-strip";
 import { errorMessage, Section, usePoll } from "../shared/ui";
 import { EngineNotices } from "./engine";
 import { KeyPrompt } from "./key-prompt";
-import { AttemptsList } from "./task-apply";
+import { ApplyCard, applyMarks, AttemptsList, CompletedCards, DecisionCard, RunSummary, SettleCard } from "./task-apply";
 import { isOpenCoaching, TaskCoach } from "./task-coach";
 import { CheckGroup, CheckLine, ReadinessCard } from "./task-readiness";
-import { AttemptCard, BaselineInput, BaselineRead, baselineDraftOf, baselineOf, caseDraftOf, caseOf, CasesInput, CasesRead, RunLauncher, type BaselineDraft, type CaseDraft } from "./task-run";
+import { BaselineInput, BaselineRead, baselineDraftOf, baselineOf, caseDraftOf, caseOf, CasesInput, CasesRead, RunGoing, RunLauncher, RunReview, useRun, type BaselineDraft, type CaseDraft } from "./task-run";
 
 /**
  * Native tasks (D26, NIV-32): a brief written directly or made from a plan, the same form either way. Every change to a
@@ -432,6 +433,7 @@ export function NewTask({
   projects,
   plan,
   initialTitle,
+  initialProjectId = null,
   onCreated,
   onCancel,
   renderStrip,
@@ -439,6 +441,8 @@ export function NewTask({
   projects: ProjectView[];
   plan: PlanView | null;
   initialTitle: string;
+  /** The repository to start with when there's no plan, such as the project whose page opened the form. */
+  initialProjectId?: string | null;
   onCreated(task: TaskView): void;
   onCancel(): void;
   /** The shell's progress strip, from the brief's own steps; none until the shell passes it. */
@@ -446,7 +450,14 @@ export function NewTask({
 }) {
   const planProject = plan?.projectId ? (projects.find((p) => p.id === plan.projectId) ?? null) : null;
   const [title, setTitle] = useState(initialTitle);
-  const [repository, setRepository] = useState<string>(planProject?.id ?? NONE);
+  const [repository, setRepository] = useState<string>(
+    () =>
+      initialRepositoryOf(
+        plan,
+        projects.map((p) => p.id),
+        initialProjectId,
+      ) ?? NONE,
+  );
   const [draft, setDraft] = useState<Draft>(plan ? { ...EMPTY, context: plan.text, assumptions: plan.assumptions.join("\n") } : EMPTY);
   const [busy, setBusy] = useState<"draft" | "ready" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -632,6 +643,16 @@ export function TaskDetail({
     return () => cancelAnimationFrame(frame);
   }, [focus, editing]);
 
+  const reread = () => setReadCount((n) => n + 1);
+  const latestId = task.value?.attempts.at(-1)?.id ?? null;
+  const shownId = chosen ?? latestId;
+  const run = useRun(taskId, shownId, reread, reread);
+  // An applied change's review is opened from its summary, and closed again for another run.
+  const [reviewing, setReviewing] = useState(false);
+  useEffect(() => setReviewing(false), [shownId]);
+  // "Preview the run" pressed from the page's next step, not the header.
+  const [previewAsked, setPreviewAsked] = useState(0);
+
   const view = task.value;
   if (!view) {
     return task.error ? (
@@ -647,7 +668,6 @@ export function TaskDetail({
 
   const { summary, brief, revision } = view;
   const completed = summary.state === "completed";
-  const reread = () => setReadCount((n) => n + 1);
 
   async function act(change: () => Promise<unknown>) {
     setBusy(true);
@@ -725,9 +745,28 @@ export function TaskDetail({
 
   const latest = view.attempts.at(-1) ?? null;
   const going = latest !== null && (latest.status === "submitting" || latest.status === "running");
-  const shown = chosen ?? latest?.id ?? null;
+  const shown = shownId;
   const shownAt = shown ? view.attempts.findIndex((attempt) => attempt.id === shown) : -1;
   const shownNumber = shown ? (shownAt >= 0 ? shownAt + 1 : view.attempts.length + 1) : null;
+  // What the main column leads with for the shown run: it going, its review, its applied change, or the task completed.
+  const value = run.value;
+  const phase =
+    shown === null
+      ? "none"
+      : value === null
+        ? "loading"
+        : value.status === "submitting" || value.status === "running"
+          ? "going"
+          : value.decision === "approved" && value.apply !== null && completed && value.id === latest?.id && (value.acceptedAt !== null || value.apply.resolution === "accepted") && value.acceptNote === null
+            ? "completed"
+            : value.decision === "approved" && value.apply !== null
+              ? "applied"
+              : "review";
+  // A command is shown only from the brief version the run ran: the report keeps names, not commands.
+  const ranContent = value && value.briefVersion === brief.version ? brief.content : null;
+  const marks = value ? applyMarks(value) : null;
+  // Nothing to decide on the latest run (RS1): the page says so, with the next step.
+  const settledQuietly = phase === "review" && value !== null && value.id === latest?.id && value.decision === null && !value.actions.some((action) => action === "approve" || action === "reject" || action === "revise");
   // Readiness leads until the latest run goes or waits on the person; a draft always shows it, with Mark ready.
   const leading = summary.state === "draft" || !latestHolds(latest);
   const found = readinessOf({ task: view, project, settings: settings.value, environment: ofProject });
@@ -784,6 +823,7 @@ export function TaskDetail({
           {!going && (
             <RunLauncher
               view={view}
+              asked={previewAsked}
               primary={readiness.needed.every((row) => row.action === null)}
               onStarted={(attemptId) => {
                 setChosen(attemptId);
@@ -909,6 +949,8 @@ export function TaskDetail({
         </Alert>
       )}
 
+      <div data-testid={shown ? "task-attempt" : undefined} data-status={shown ? (value?.status ?? "") : undefined} data-attempt-id={shown ?? undefined}>
+      <div data-testid={marks ? "task-apply" : undefined} data-status={marks?.status} data-resolution={marks?.resolution}>
       <Grid gap="md">
         <Grid.Col span={{ base: 12, md: 8 }}>
           <Stack gap="md">
@@ -949,7 +991,12 @@ export function TaskDetail({
                 </Group>
               </Stack>
             )}
-            {leading && <ReadinessCard readiness={readiness} busy={busy || coachSaving} onAction={onReadiness} />}
+            {run.error && (
+              <Alert color="red" variant="light" data-testid="task-attempt-error">
+                <Text size="sm">{run.error}</Text>
+              </Alert>
+            )}
+            {leading && phase !== "completed" && (summary.state === "draft" || shown === null) && <ReadinessCard readiness={readiness} busy={busy || coachSaving} onAction={onReadiness} />}
             {shown && chosen !== null && latest !== null && chosen !== latest.id && (
               <Group gap="xs" data-testid="task-attempt-earlier">
                 <Text size="sm" c="var(--nivra-text-2)">
@@ -960,11 +1007,70 @@ export function TaskDetail({
                 </Anchor>
               </Group>
             )}
-            {shown && shownNumber !== null && <AttemptCard key={shown} taskId={taskId} attemptId={shown} number={shownNumber} onEnded={reread} onDecided={reread} />}
+            {phase === "loading" && (
+              <Text size="sm" c={run.loadError ? "var(--nivra-error)" : "var(--nivra-text-3)"}>
+                {run.loadError ?? `Reading run ${shownNumber}…`}
+              </Text>
+            )}
+            {phase === "going" && value && <RunGoing run={run} number={shownNumber!} />}
+            {phase === "review" && value && (
+              <>
+                <RunReview value={value} number={shownNumber!} task={STATE_LOOK[summary.state]} content={ranContent} />
+                {value.apply && <ApplyCard value={value} />}
+              </>
+            )}
+            {phase === "applied" && value && (
+              <>
+                <ApplyCard value={value} />
+                <Collapse expanded={reviewing}>
+                  <RunReview value={value} number={shownNumber!} task={STATE_LOOK[summary.state]} content={ranContent} />
+                </Collapse>
+              </>
+            )}
+            {phase === "completed" && value && <CompletedCards task={view} value={value} project={project?.label ?? null} />}
+            {settledQuietly && value && !completed && (
+              <Paper withBorder p="md" radius="md" data-testid="task-next-step">
+                <Stack gap="xs">
+                  <Text fw={600}>Next step</Text>
+                  <Text size="sm" c="var(--nivra-text-2)">
+                    {value.report?.outcome === "interrupted" || value.status === "interrupted"
+                      ? "Nothing to decide: no change came back, and your checkout wasn't touched. A new run starts only from a new preview: this one isn't replayed."
+                      : value.report?.outcome === "uncertain"
+                        ? "Nothing to decide: nothing was proposed, and your checkout wasn't touched. Check your Nebius project for what's still open, listed in the result."
+                        : value.report?.outcome === "unchanged"
+                          ? "Nothing to decide: the run proposed no change. Say more about what the run should do, then run it again."
+                          : "Nothing to decide: the run proposed no change."}
+                  </Text>
+                  <Group gap="sm">
+                    {value.report?.outcome === "unchanged" && (
+                      <Button size="xs" onClick={() => onReadiness("edit-brief")} disabled={editing === "brief" || coachSaving} data-testid="task-next-edit-brief">
+                        Edit brief
+                      </Button>
+                    )}
+                    <Button size="xs" variant={value.report?.outcome === "unchanged" ? "default" : "filled"} onClick={() => setPreviewAsked((n) => n + 1)} disabled={view.runBlocked !== null} data-testid="task-next-preview">
+                      Preview the run
+                    </Button>
+                  </Group>
+                  {view.runBlocked !== null && (
+                    <Text size="xs" c="var(--nivra-text-3)">
+                      Preview is off until what's needed is done: see Before this task can run.
+                    </Text>
+                  )}
+                </Stack>
+              </Paper>
+            )}
+            {leading && phase !== "completed" && !(summary.state === "draft" || shown === null) && <ReadinessCard readiness={readiness} busy={busy || coachSaving} onAction={onReadiness} />}
           </Stack>
         </Grid.Col>
         <Grid.Col span={{ base: 12, md: 4 }}>
           <Stack gap="md">
+            {phase === "review" && value && <DecisionCard value={value} busy={run.busy} act={run.act} content={ranContent} />}
+            {phase === "applied" && value && (
+              <>
+                <SettleCard value={value} busy={run.busy} act={run.act} briefVersion={brief.version} />
+                <RunSummary value={value} number={shownNumber!} reviewing={reviewing} onReview={() => setReviewing(!reviewing)} />
+              </>
+            )}
             <Paper withBorder radius="md">
               <Tabs value={tab} onChange={(value) => setTab((value as TaskTab | null) ?? "brief")}>
                 <Tabs.List px="xs">
@@ -1061,10 +1167,10 @@ export function TaskDetail({
             <Paper withBorder radius="md" p="md" data-testid="task-progress">
               <Stack gap="xs">
                 <Text fw={600} size="sm">
-                  Progress
+                  {completed ? "What next" : "Progress"}
                 </Text>
                 <Text size="sm" c="var(--nivra-text-2)">
-                  {STATE_SAYS[summary.state]}
+                  {completed ? "Reopen sets the task back to draft, to change its brief and run it again. Your checkout stays as it is." : STATE_SAYS[summary.state]}
                 </Text>
                 {(summary.state === "ready" || completed) && (
                   <Group gap="sm">
@@ -1090,6 +1196,8 @@ export function TaskDetail({
           </Stack>
         </Grid.Col>
       </Grid>
+      </div>
+      </div>
 
       <KeyPrompt opened={keysOpen} settings={settings.value} onClose={() => setKeysOpen(false)} onSaved={() => setSettingsCount((n) => n + 1)} />
 

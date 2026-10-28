@@ -1,8 +1,8 @@
-import { Alert, Badge, Button, Code, Group, Modal, Stack, Table, Text, Textarea } from "@mantine/core";
+import { Alert, Anchor, Badge, Button, Code, Group, List, Modal, Paper, Stack, Text, Textarea } from "@mantine/core";
 import type { ApplyPath, ApplyResolution, ApplyStatus, TaskReport } from "@nivra/domain";
-import { useState } from "react";
-import type { AttemptDecision, TaskApplyView, TaskAttemptView, TaskView, TurnStatus } from "../../../shared/ipc";
-import { errorMessage } from "../shared/ui";
+import { useId, useState } from "react";
+import type { AttemptDecision, BriefContent, TaskApplyView, TaskAttemptView, TaskView, TurnStatus } from "../../../shared/ipc";
+import { decisionLead, failingReportedChecks, outcomeLookOf, unapprovableText } from "../../../shared/task-verdict";
 
 /**
  * Deciding on a run's change, and what applying it did (D40). The window offers exactly what the host says the person
@@ -115,44 +115,116 @@ export const applyGoing = (value: Pick<TaskAttemptView, "decision" | "apply">) =
 };
 
 /**
- * The person's decision on a run's change: approve it by its hash, reject it, or ask for a revision; or what was
- * decided. `act` runs one of the host's calls and reads the run again.
+ * The person's decision on a run's change (P1i, RS1, RS5), in the aside: approve it by its hash, ask for a revision, or
+ * reject it, exactly as the host offers. A change that can't be approved says why, and Request revision leads; a
+ * verified change whose reported check failed says so first, and approving it stays possible. `act` runs one of the
+ * host's calls and reads the run again. Once decided, it says what was decided.
  */
-export function Decision({ value, busy, act }: { value: TaskAttemptView; busy: boolean; act(work: () => Promise<TaskAttemptView>): void }) {
+export function DecisionCard({ value, busy, act, content }: { value: TaskAttemptView; busy: boolean; act(work: () => Promise<TaskAttemptView>): void; content: BriefContent | null }) {
   const [confirming, setConfirming] = useState(false);
   const [revising, setRevising] = useState(false);
   const [note, setNote] = useState("");
+  const warningId = useId();
   const { report, proposal, actions, decision } = value;
   const can = (action: TaskAttemptView["actions"][number]) => actions.includes(action);
 
-  if (decision) return <Decided value={value} />;
-  if (!can("approve") && !can("reject") && !can("revise")) return null;
+  if (decision === "rejected" || decision === "revision") {
+    return (
+      <Paper withBorder p="md" radius="md">
+        <Stack gap="xs">
+          <Text fw={600}>Your decision</Text>
+          <Decided value={value} />
+        </Stack>
+      </Paper>
+    );
+  }
+  if (decision || (!can("approve") && !can("reject") && !can("revise"))) return null;
+  const { lead, approve: approveWords } = decisionLead(report, can("approve"), proposal !== null);
+  const approvable = approveWords !== null && proposal !== null;
+  const failing = approvable ? failingReportedChecks(report) : [];
+  // A failing check's command, run before the worker too? Only the run's own brief version can say.
+  const ranBefore = content === null ? null : failing.some((check) => content.baseline.some((selection) => selection.command === check.name));
+  const revisionLeads = lead === "revise";
+  const approve = approvable && (
+    <Stack gap={2}>
+      <Button fullWidth variant={revisionLeads ? "default" : "filled"} onClick={() => setConfirming(true)} disabled={busy} data-testid="task-attempt-approve">
+        {approveWords}
+      </Button>
+      <Text size="xs" c="var(--nivra-text-3)" data-testid="task-attempt-approve-what">
+        Change {short(proposal.hash)}, made from commit {short(proposal.baseline)}.
+      </Text>
+    </Stack>
+  );
+  const revise = can("revise") && !revising && (
+    <Stack gap={2}>
+      <Button fullWidth variant={revisionLeads ? "filled" : "default"} onClick={() => setRevising(true)} disabled={busy} data-testid="task-attempt-revise">
+        Request revision
+      </Button>
+      <Text size="xs" c="var(--nivra-text-3)">
+        Your note becomes a new brief version. Nothing runs until you preview the run and start it.
+      </Text>
+    </Stack>
+  );
   return (
-    <Stack gap="xs" data-testid="task-attempt-decision-ask">
-      {!can("approve") && report?.outcome === "proposed" && !report.verified && (
-        <Text size="sm" c="var(--nivra-text-2)" data-testid="task-attempt-unapprovable">
-          This change can't be approved: not every acceptance case was shown to pass. You can reject it, or ask for a revision.
-        </Text>
-      )}
-      {can("approve") && !proposal && (
-        <Text size="sm" c="var(--nivra-warning)" data-testid="task-attempt-approve-unavailable">
-          The change can't be read from its engine now, so it can't be approved. Open the project to start its engine, then try again.
-        </Text>
-      )}
-      <Group gap="sm" align="flex-start">
-        {can("approve") && proposal && (
-          <Stack gap={2}>
-            <Button size="xs" onClick={() => setConfirming(true)} disabled={busy} data-testid="task-attempt-approve">
-              Approve and apply
-            </Button>
-            <Text size="xs" c="var(--nivra-text-3)" data-testid="task-attempt-approve-what">
-              Change {short(proposal.hash)}, made from commit {short(proposal.baseline)}.
+    <Paper withBorder p="md" radius="md">
+      <Stack gap="sm" data-testid="task-attempt-decision-ask">
+        <Stack gap={2}>
+          <Text fw={600}>Your decision</Text>
+          {approvable && (
+            <Text size="sm" c="var(--nivra-text-2)">
+              Approving applies this change to your checkout, unstaged. You accept the task after you've looked at it there.
             </Text>
+          )}
+        </Stack>
+        {!can("approve") && report?.outcome === "proposed" && !report.verified && (
+          <Text size="sm" c="var(--nivra-text-2)" data-testid="task-attempt-unapprovable">
+            {unapprovableText(report)}
+          </Text>
+        )}
+        {can("approve") && !proposal && (
+          <Text size="sm" c="var(--nivra-warning)" data-testid="task-attempt-approve-unavailable">
+            The change can't be read from its engine now, so it can't be approved. Open the project to start its engine, then try again.
+          </Text>
+        )}
+        {failing.length > 0 && (
+          <Alert color="yellow" variant="light" role="note" aria-labelledby={warningId} data-testid="task-attempt-check-warning">
+            <Text id={warningId} size="sm" fw={600}>
+              {failing.length === 1 ? `Check ${failing[0]!.number}, a repository check, didn't pass` : `${failing.length} repository checks didn't pass`}
+            </Text>
+            <Text size="sm">
+              A repository check is reported and doesn't decide the result, so the change still counts as verified and can be approved.
+              {ranBefore === false ? ` Nivra didn't run ${failing.length === 1 ? "this check" : "these checks"} on the commit before the change, so it can't tell whether what ${failing.length === 1 ? "it reports is" : "they report is"} new.` : ""} Read
+              {failing.length === 1 ? " its output" : " their output"} under Acceptance cases and checks before you decide.
+            </Text>
+          </Alert>
+        )}
+        {revisionLeads ? revise : approve}
+        {revisionLeads ? approve : revise}
+        {can("revise") && revising && (
+          <Stack gap="xs" data-testid="task-attempt-revision">
+            <Textarea
+              label="What should change"
+              description="Your note goes into the task's brief, as a new version. Nothing runs until you preview the run and start it."
+              autosize
+              minRows={2}
+              maxRows={8}
+              value={note}
+              onChange={(event) => setNote(event.currentTarget.value)}
+              data-testid="task-attempt-revision-note"
+            />
+            <Group gap="sm">
+              <Button size="xs" onClick={() => act(() => window.nivra.requestTaskRevision(value.taskId, value.id, note.trim()))} disabled={busy || note.trim() === ""} data-testid="task-attempt-revision-send">
+                Ask for the revision
+              </Button>
+              <Button size="xs" variant="default" onClick={() => setRevising(false)} disabled={busy}>
+                Cancel
+              </Button>
+            </Group>
           </Stack>
         )}
         {can("reject") && (
           <Stack gap={2}>
-            <Button size="xs" variant="default" color="red" onClick={() => act(() => window.nivra.rejectTaskChange(value.taskId, value.id))} disabled={busy} data-testid="task-attempt-reject">
+            <Button fullWidth variant="outline" color="red" onClick={() => act(() => window.nivra.rejectTaskChange(value.taskId, value.id))} disabled={busy} data-testid="task-attempt-reject">
               Reject
             </Button>
             <Text size="xs" c="var(--nivra-text-3)">
@@ -160,36 +232,9 @@ export function Decision({ value, busy, act }: { value: TaskAttemptView; busy: b
             </Text>
           </Stack>
         )}
-        {can("revise") && !revising && (
-          <Button size="xs" variant="default" onClick={() => setRevising(true)} disabled={busy} data-testid="task-attempt-revise">
-            Request revision
-          </Button>
-        )}
-      </Group>
-      {can("revise") && revising && (
-        <Stack gap="xs" data-testid="task-attempt-revision">
-          <Textarea
-            label="What should change"
-            description="Your note goes into the task's brief, as a new version. The next run starts when you press Run."
-            autosize
-            minRows={2}
-            maxRows={8}
-            value={note}
-            onChange={(event) => setNote(event.currentTarget.value)}
-            data-testid="task-attempt-revision-note"
-          />
-          <Group gap="sm">
-            <Button size="xs" onClick={() => act(() => window.nivra.requestTaskRevision(value.taskId, value.id, note.trim()))} disabled={busy || note.trim() === ""} data-testid="task-attempt-revision-send">
-              Ask for the revision
-            </Button>
-            <Button size="xs" variant="default" onClick={() => setRevising(false)} disabled={busy}>
-              Cancel
-            </Button>
-          </Group>
-        </Stack>
-      )}
+      </Stack>
       {proposal && (
-        <Modal opened={confirming} onClose={() => setConfirming(false)} title="Apply this change?" data-testid="task-apply-confirm">
+        <Modal opened={confirming} onClose={() => setConfirming(false)} title="Apply this change?" size="lg" data-testid="task-apply-confirm">
           <Stack gap="sm">
             <Text size="sm">
               Nivra applies change <Code>{short(proposal.hash)}</Code> to your checkout, which must still be at commit <Code>{short(proposal.baseline)}</Code>.
@@ -197,6 +242,30 @@ export function Decision({ value, busy, act }: { value: TaskAttemptView; busy: b
             <Text size="sm">
               First it checks the proposal and your checkout again, and writes nothing if either changed. Then each file the change replaces is moved aside into the
               repository's git folder and kept there, and each new file is put in place without replacing anything. Nothing is staged or committed.
+            </Text>
+            <Stack gap={0} data-testid="task-apply-confirm-files">
+              {proposal.paths.map((one) => (
+                <Group key={one.path} justify="space-between" align="flex-start" wrap="nowrap" gap="sm" py={6} style={{ borderTop: "1px solid var(--nivra-border)" }} data-testid="task-apply-confirm-file" data-change={one.change}>
+                  <Stack gap={2} style={{ minWidth: 0 }}>
+                    <Text size="sm" ff="monospace" style={{ overflowWrap: "anywhere" }}>
+                      {one.path}
+                    </Text>
+                    <Text size="xs" c={one.change === "deleted" ? "var(--nivra-warning)" : "var(--nivra-text-2)"}>
+                      {one.change === "added"
+                        ? "Put in place, replacing nothing."
+                        : one.change === "changed"
+                          ? "Your copy is moved aside into the recovery folder and kept, then the changed file goes in its place."
+                          : "A deletion, which Nivra doesn't apply: the apply is refused, and nothing is written."}
+                    </Text>
+                  </Stack>
+                  <Badge size="sm" variant="light" color={one.change === "deleted" ? "yellow" : "gray"} style={{ flexShrink: 0 }}>
+                    {one.change === "added" ? "New file" : one.change === "changed" ? "Changed" : "Deleted"}
+                  </Badge>
+                </Group>
+              ))}
+            </Stack>
+            <Text size="sm" c="var(--nivra-text-2)">
+              Afterwards the change is in your checkout, unstaged, for you to look at before you accept it.
             </Text>
             <Group justify="flex-end" gap="sm">
               <Button variant="default" onClick={() => setConfirming(false)}>
@@ -216,7 +285,7 @@ export function Decision({ value, busy, act }: { value: TaskAttemptView; busy: b
           </Stack>
         </Modal>
       )}
-    </Stack>
+    </Paper>
   );
 }
 
@@ -226,7 +295,7 @@ function Decided({ value }: { value: TaskAttemptView }) {
   const words: Record<AttemptDecision, string> = {
     approved: `You approved this change${decided ? ` on ${decided}` : ""}.`,
     rejected: `You rejected this change${decided ? ` on ${decided}` : ""}. Nothing was sent, and your checkout wasn't touched.`,
-    revision: `You asked for a revision${decided ? ` on ${decided}` : ""}. Your note is in the task's brief as a new version; press Run to try again.`,
+    revision: `You asked for a revision${decided ? ` on ${decided}` : ""}. Your note is in the task's brief as a new version; preview the run to try again.`,
   };
   return (
     <Stack gap={2} data-testid="task-attempt-decision" data-decision={value.decision}>
@@ -240,20 +309,23 @@ function Decided({ value }: { value: TaskAttemptView }) {
   );
 }
 
-/** What applying the change did: its state, each path, where the originals are kept, and how to settle it. */
-export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy: boolean; act(work: () => Promise<TaskAttemptView>): void }) {
+const APPLY_TITLE: Record<ApplyStatus, string> = { claimed: "Checking the change", writing: "Applying the change", refused: "Apply refused", applied: "Change applied", "not-applied": "Not applied", partial: "Applied in part", unknown: "Where the files are isn't known" };
+
+/** The apply's record: whether its approval stands, its state and badge. The page's apply area carries these. */
+export const applyMarks = (value: Pick<TaskAttemptView, "decision" | "apply">) =>
+  value.apply === null ? null : { status: takenBack(value) ? "taken-back" : (value.apply.status ?? "waiting"), resolution: value.apply.resolution ?? "" };
+
+/**
+ * What applying the change did (P1k, RS2): its state, the approval, each file in the checkout and where its original is,
+ * the recovery folder, and how it was settled. It never claims more than the engine reported.
+ */
+export function ApplyCard({ value }: { value: TaskAttemptView }) {
   const apply = value.apply;
   if (!apply) return null;
-  const settle = (action: "accept" | "dismiss" | "restore" | "keep") => {
-    if (action === "restore") return act(() => window.nivra.restoreTaskChange(value.taskId, value.id));
-    const as: Record<"accept" | "dismiss" | "keep", ApplyResolution> = { accept: "accepted", dismiss: "dismissed", keep: "kept" };
-    return act(() => window.nivra.settleTaskChange(value.taskId, value.id, as[action]));
-  };
-  const offered = (["accept", "dismiss", "restore", "keep"] as const).filter((action) => value.actions.includes(action));
   // The approval was taken back: the host's note says why, and nothing else of this apply stands.
   if (takenBack(value)) {
     return (
-      <Stack gap="sm" data-testid="task-apply" data-status="taken-back" data-resolution="">
+      <Paper withBorder p="md" radius="md">
         <Group gap="sm">
           <Badge color="gray" variant="light">
             Approval taken back
@@ -262,17 +334,20 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
             {apply.unresolved ?? "The approval was taken back, and nothing was written. You can decide on the change again."}
           </Text>
         </Group>
-      </Stack>
+      </Paper>
     );
   }
   const savedOver = apply.status === "applied" ? apply.paths.filter((one) => one.place === "theirs" && one.changedSince) : [];
-  const keepWithheld = apply.status === "partial" && apply.resolution === null && value.actions.includes("restore") && !value.actions.includes("keep") && apply.paths.some((one) => one.place === "aside");
+  const proposal = value.proposal;
   return (
-    <Stack gap="sm" data-testid="task-apply" data-status={apply.status ?? "waiting"} data-resolution={apply.resolution ?? ""}>
-      <Group gap="sm">
-        <Badge color={apply.status ? APPLY_COLOR[apply.status] : "blue"} variant="light">
-          {apply.status === null ? "Waiting for its engine" : APPLY_BADGE[apply.status]}
-        </Badge>
+    <Paper withBorder p="md" radius="md">
+      <Stack gap="sm">
+        <Group gap="sm" align="baseline">
+          <Text fw={600}>{apply.status === null ? "Waiting for its engine" : APPLY_TITLE[apply.status]}</Text>
+          <Badge color={apply.status ? APPLY_COLOR[apply.status] : "blue"} variant="light">
+            {apply.status === null ? "Waiting" : APPLY_BADGE[apply.status]}
+          </Badge>
+        </Group>
         <Text size="sm" data-testid="task-apply-status">
           {apply.status === null
             ? "Nivra sent the approval to the repository's engine and is waiting for its answer. It won't be sent again."
@@ -280,102 +355,280 @@ export function ApplyResult({ value, busy, act }: { value: TaskAttemptView; busy
               ? DUPLICATE
               : APPLY_STATE[apply.status]}
         </Text>
-      </Group>
-      {savedOver.length > 0 && (
-        <Text size="sm" c="var(--nivra-warning)" data-testid="task-apply-saved-over">
-          Since Nivra wrote {savedOver.length === 1 ? "it" : "them"}, another program has saved over {savedOver.map((one) => one.path).join(", ")}. {savedOver.length === 1 ? "That version is" : "Those versions are"}{" "}
-          kept as {savedOver.length === 1 ? "it is" : "they are"}.
-        </Text>
-      )}
-      {apply.refusal && (
-        <Alert color="gray" variant="light" data-testid="task-apply-refusal" data-code={apply.refusal.code}>
-          <Text size="sm">{apply.refusal.message}</Text>
-          {apply.refusal.path && (
-            <Text size="sm">
-              It's about <Code>{apply.refusal.path}</Code>.
+        {value.decision === "approved" && (
+          <Stack gap={2} data-testid="task-attempt-decision" data-decision="approved">
+            <Text size="sm" c="var(--nivra-text-2)">
+              You approved {proposal ? `change ${short(proposal.hash)}, made from commit ${short(proposal.baseline)}` : "this change"}
+              {value.decidedAt ? `, on ${when(value.decidedAt)}` : ""}. Nivra writes nothing when the change or your checkout changed since the run.
             </Text>
-          )}
-        </Alert>
-      )}
-      {apply.failure && (
-        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-failure" data-step={apply.failure.step}>
-          It stopped while {stepText(apply.failure.step)}
-          {apply.failure.code ? `: ${ERROR_WORDS[apply.failure.code] ?? apply.failure.code}` : ""}.
+          </Stack>
+        )}
+        {apply.status === "applied" && apply.resolution === null && (
+          <Alert color="gray" variant="light" data-testid="task-apply-not-accepted">
+            <Text size="sm">Applied isn't accepted. Look at the change in your checkout, with your editor or with git, then come back to accept it. Until then the task stays in review.</Text>
+          </Alert>
+        )}
+        {savedOver.length > 0 && (
+          <Text size="sm" c="var(--nivra-warning)" data-testid="task-apply-saved-over">
+            Since Nivra wrote {savedOver.length === 1 ? "it" : "them"}, another program has saved over {savedOver.map((one) => one.path).join(", ")}. {savedOver.length === 1 ? "That version is" : "Those versions are"}{" "}
+            kept as {savedOver.length === 1 ? "it is" : "they are"}.
+          </Text>
+        )}
+        {apply.refusal && (
+          <Alert color="gray" variant="light" data-testid="task-apply-refusal" data-code={apply.refusal.code}>
+            <Text size="sm">{apply.refusal.message}</Text>
+            {apply.refusal.path && (
+              <Text size="sm">
+                It's about <Code>{apply.refusal.path}</Code>.
+              </Text>
+            )}
+          </Alert>
+        )}
+        {apply.failure && (
+          <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-failure" data-step={apply.failure.step}>
+            It stopped while {stepText(apply.failure.step)}
+            {apply.failure.code ? `: ${ERROR_WORDS[apply.failure.code] ?? apply.failure.code}` : ""}.
+          </Text>
+        )}
+        {apply.unresolved && (
+          <Text size="sm" c="var(--nivra-warning)" data-testid="task-apply-unresolved">
+            {apply.unresolved}
+          </Text>
+        )}
+        {apply.paths.length > 0 && <ApplyPaths apply={apply} />}
+        {apply.folders.length > 0 && (
+          <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-folders">
+            Folders Nivra made: {apply.folders.join(", ")}.
+          </Text>
+        )}
+        <Recovery apply={apply} />
+        {apply.resolution && (
+          <Text size="sm" data-testid="task-apply-resolution">
+            {apply.resolution === "accepted" && value.acceptNote ? "You accepted the change." : RESOLVED[apply.resolution]}
+          </Text>
+        )}
+        {apply.resolution === "accepted" && value.acceptNote && (
+          <Text size="sm" c="var(--nivra-warning)" data-testid="task-apply-accept-note">
+            {value.acceptNote}
+          </Text>
+        )}
+      </Stack>
+    </Paper>
+  );
+}
+
+/** Each file the change writes, and where it is in the checkout now, with the copies kept for it. */
+function ApplyPaths({ apply, compact = false }: { apply: TaskApplyView; compact?: boolean }) {
+  return (
+    <Stack gap={0} data-testid="task-apply-paths">
+      <Group justify="space-between" align="baseline" pb={4} gap="xs">
+        <Text size="sm" fw={600}>
+          Files in your checkout
         </Text>
-      )}
-      {apply.unresolved && (
-        <Text size="sm" c="var(--nivra-warning)" data-testid="task-apply-unresolved">
-          {apply.unresolved}
+        <Text size="xs" c="var(--nivra-text-3)">
+          {apply.paths.length === 1 ? "1 file" : `${apply.paths.length} files`}
+          {apply.paths.every((one) => one.place === "post") ? `, ${apply.paths.length === 1 ? "as" : "each as"} the change leaves it` : ""}
         </Text>
-      )}
-      {apply.paths.length > 0 && (
-        <Table data-testid="task-apply-paths">
-          <Table.Tbody>
-            {apply.paths.map((path) => (
-              <Table.Tr key={path.path} data-testid="task-apply-path" data-path={path.path} data-place={path.place}>
-                <Table.Td>
-                  <Code>{path.path}</Code>
-                  <Text size="xs" c="var(--nivra-text-3)">
-                    {path.change === "added" ? "added" : "changed"}
-                  </Text>
-                </Table.Td>
-                <Table.Td>
-                  <Text size="sm">{placeText(path)}</Text>
-                  <Text size="xs" c="var(--nivra-text-3)">
-                    There now: {foundText(path.found)}.{path.kept.length ? ` Copies kept: ${path.kept.join(", ")}.` : ""}
-                  </Text>
-                </Table.Td>
-              </Table.Tr>
-            ))}
-          </Table.Tbody>
-        </Table>
-      )}
-      {apply.folders.length > 0 && (
-        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-folders">
-          Folders Nivra made: {apply.folders.join(", ")}.
-        </Text>
-      )}
-      {apply.recovery && apply.resolution === null && (
-        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-recovery">
-          Nivra keeps every copy it made in the repository's git folder, in <Code>{apply.recovery}</Code>: the originals it moved aside, and its own. They stay there after you settle this
-          change, in case a program that had one of these files open saves into it.
-        </Text>
-      )}
-      {apply.recovery && apply.resolution !== null && (
-        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-recovery">
-          The copies Nivra kept stay in the repository's git folder, in <Code>{apply.recovery}</Code>. Delete that folder when you no longer need them.
-        </Text>
-      )}
-      {apply.resolution && (
-        <Text size="sm" data-testid="task-apply-resolution">
-          {apply.resolution === "accepted" && value.acceptNote ? "You accepted the change." : RESOLVED[apply.resolution]}
-        </Text>
-      )}
-      {apply.resolution === "accepted" && value.acceptNote && (
-        <Text size="sm" c="var(--nivra-warning)" data-testid="task-apply-accept-note">
-          {value.acceptNote}
-        </Text>
-      )}
-      {keepWithheld && (
-        <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-keep-unavailable">
-          Keeping this as it is isn't offered: a file the change replaces is missing from your checkout, its original kept aside. Restore the originals to put it back.
-        </Text>
-      )}
-      {offered.length > 0 && (
-        <Group gap="sm" align="flex-start">
-          {offered.map((action) => (
-            <Stack key={action} gap={2} maw={260}>
-              <Button size="xs" variant={action === "accept" || action === "restore" ? "filled" : "default"} onClick={() => settle(action)} disabled={busy} data-testid={SETTLE[action].testid}>
-                {SETTLE[action].label}
-              </Button>
+      </Group>
+      {apply.paths.map((path) => (
+        <Group key={path.path} justify="space-between" align="flex-start" wrap="nowrap" gap="md" py={8} style={{ borderTop: "1px solid var(--nivra-border)" }} data-testid="task-apply-path" data-path={path.path} data-place={path.place}>
+          <Stack gap={4} style={{ minWidth: 0, flex: "1 1 40%" }}>
+            <Text size="sm" ff="monospace" style={{ overflowWrap: "anywhere" }}>
+              {path.path}
+            </Text>
+            <Badge size="sm" variant="light" color="gray">
+              {path.change === "added" ? "New file" : "Changed"}
+            </Badge>
+          </Stack>
+          {!compact && (
+            <Stack gap={2} style={{ minWidth: 0, flex: "1 1 60%" }}>
+              <Text size="sm">{placeText(path)}</Text>
               <Text size="xs" c="var(--nivra-text-3)">
-                {SETTLE[action].says}
+                There now: {foundText(path.found)}.{path.kept.length ? ` Copies kept: ${path.kept.join(", ")}.` : ""}
               </Text>
             </Stack>
-          ))}
+          )}
         </Group>
-      )}
+      ))}
     </Stack>
+  );
+}
+
+/** Where Nivra keeps the copies it made, before and after the change is settled. */
+function Recovery({ apply }: { apply: TaskApplyView }) {
+  if (!apply.recovery) return null;
+  return apply.resolution === null ? (
+    <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-recovery">
+      Nivra keeps every copy it made in the repository's git folder, in <Code>{apply.recovery}</Code>: the originals it moved aside, and its own. They stay there after you settle this change,
+      in case a program that had one of these files open saves into it.
+    </Text>
+  ) : (
+    <Text size="xs" c="var(--nivra-text-2)" data-testid="task-apply-recovery">
+      The copies Nivra kept stay in the repository's git folder, in <Code>{apply.recovery}</Code>. Delete that folder when you no longer need them.
+    </Text>
+  );
+}
+
+/**
+ * How to settle an apply (P1k, RS2), in the aside: exactly the host's actions, each with what it does. Accept leads when
+ * it's offered, then Restore. Keep, when it's withheld for a file moved aside, stays in view, off, with its reason.
+ */
+export function SettleCard({ value, busy, act, briefVersion }: { value: TaskAttemptView; busy: boolean; act(work: () => Promise<TaskAttemptView>): void; briefVersion: number }) {
+  const keepWhy = useId();
+  const apply = value.apply;
+  if (!apply || takenBack(value)) return null;
+  const offered = (["accept", "restore", "keep", "dismiss"] as const).filter((action) => value.actions.includes(action));
+  const keepWithheld = apply.status === "partial" && apply.resolution === null && value.actions.includes("restore") && !value.actions.includes("keep") && apply.paths.some((one) => one.place === "aside");
+  if (!offered.length && !keepWithheld) return null;
+  const leads = offered.includes("accept") ? "accept" : offered.includes("restore") ? "restore" : offered[0];
+  const settle = (action: "accept" | "dismiss" | "restore" | "keep") => {
+    if (action === "restore") return act(() => window.nivra.restoreTaskChange(value.taskId, value.id));
+    const as: Record<"accept" | "dismiss" | "keep", ApplyResolution> = { accept: "accepted", dismiss: "dismissed", keep: "kept" };
+    return act(() => window.nivra.settleTaskChange(value.taskId, value.id, as[action]));
+  };
+  return (
+    <Paper withBorder p="md" radius="md">
+      <Stack gap="sm" data-testid="task-apply-settle">
+        <Text fw={600}>Your decision</Text>
+        {offered.includes("accept") && briefVersion > value.briefVersion && (
+          <Text size="sm" c="var(--nivra-warning)">
+            Brief v{briefVersion} is the latest now, and this run ran v{value.briefVersion}: accepting this change won't complete the task.
+          </Text>
+        )}
+        {offered.map((action) => (
+          <Stack key={action} gap={2}>
+            <Button fullWidth variant={action === leads ? "filled" : "default"} onClick={() => settle(action)} disabled={busy} data-testid={SETTLE[action].testid}>
+              {SETTLE[action].label}
+            </Button>
+            <Text size="xs" c="var(--nivra-text-3)">
+              {SETTLE[action].says}
+            </Text>
+          </Stack>
+        ))}
+        {keepWithheld && (
+          <Stack gap={2}>
+            <Button fullWidth variant="default" aria-disabled data-disabled onClick={() => undefined} aria-describedby={keepWhy} data-testid="task-apply-keep-off">
+              {SETTLE.keep.label}
+            </Button>
+            <Text id={keepWhy} size="xs" c="var(--nivra-text-2)" data-testid="task-apply-keep-unavailable">
+              Keeping this as it is isn't offered: a file the change replaces is missing from your checkout, its original kept aside. Restore the originals to put it back.
+            </Text>
+          </Stack>
+        )}
+        {apply.resolution === null && (
+          <Text size="xs" c="var(--nivra-text-3)">
+            Until you settle this change, this task can't run again.
+          </Text>
+        )}
+      </Stack>
+    </Paper>
+  );
+}
+
+/**
+ * A completed task's account (P1l): the acceptance, the checkout as Nivra left it, and how it got here, from what the
+ * workspace and the run recorded. What the window can't know (whether the change is committed yet) is said as advice.
+ */
+export function CompletedCards({ task, value, project }: { task: TaskView; value: TaskAttemptView; project: string | null }) {
+  const apply = value.apply;
+  const run = task.attempts.findIndex((attempt) => attempt.id === value.id) + 1;
+  const used = task.versions.find((version) => version.version === value.briefVersion) ?? null;
+  const events: Array<{ at: string; text: string }> = [];
+  if (used) events.push({ at: used.createdAt, text: `Brief v${used.version} saved.` });
+  events.push({ at: value.createdAt, text: `Run ${run} started.` });
+  if (value.settledAt) events.push({ at: value.settledAt, text: `Run ${run} ended with ${value.report?.verified ? "a verified change" : "a change"}.` });
+  if (value.decidedAt) events.push({ at: value.decidedAt, text: `You approved ${value.proposal ? `change ${short(value.proposal.hash)}, made from commit ${short(value.proposal.baseline)}` : "the change"}, and Nivra applied it, unstaged.` });
+  if (value.acceptedAt) events.push({ at: value.acceptedAt, text: "You accepted the change." });
+  return (
+    <Stack gap="md">
+      <Paper withBorder p="md" radius="md">
+        <Stack gap="sm">
+          <Text fw={600}>Completed</Text>
+          <Alert color="green" variant="light" role="status">
+            <Text size="sm" data-testid="task-apply-resolution">
+              {RESOLVED.accepted}
+            </Text>
+          </Alert>
+          {value.acceptedAt && (
+            <Text size="sm" c="var(--nivra-text-2)">
+              Accepted {when(value.acceptedAt)}. The task's brief and repository were still the ones this run used, so accepting completed it.
+            </Text>
+          )}
+        </Stack>
+      </Paper>
+      {apply && (
+        <Paper withBorder p="md" radius="md">
+          <Stack gap="sm">
+            <Text fw={600}>Your checkout</Text>
+            <Text size="sm">
+              Nivra left the change in your checkout, unstaged. Nivra never stages or commits: commit it when you're ready, with your own tools.
+            </Text>
+            <ApplyPaths apply={apply} compact />
+            <Alert color="gray" variant="light">
+              <Text size="sm">
+                If the change isn't committed yet, commit or stash it before you run a task in {project ?? "this repository"} again: a run works from a commit, so its preview refuses a checkout with
+                uncommitted changes.
+              </Text>
+            </Alert>
+            <Recovery apply={apply} />
+          </Stack>
+        </Paper>
+      )}
+      <Paper withBorder p="md" radius="md">
+        <Stack gap="xs">
+          <Text fw={600}>How it got here</Text>
+          <List type="ordered" listStyleType="none" spacing={6} data-testid="task-history">
+            {events.map((event, index) => (
+              <List.Item key={index}>
+                <Group gap="md" wrap="nowrap" align="flex-start">
+                  <Text size="xs" c="var(--nivra-text-3)" w={150} style={{ flexShrink: 0 }}>
+                    {when(event.at)}
+                  </Text>
+                  <Text size="sm">{event.text}</Text>
+                </Group>
+              </List.Item>
+            ))}
+          </List>
+        </Stack>
+      </Paper>
+    </Stack>
+  );
+}
+
+/** The run behind an applied change (P1k), in the aside: its outcome and checks in short, and the way back to its review. */
+export function RunSummary({ value, number, reviewing, onReview }: { value: TaskAttemptView; number: number; reviewing: boolean; onReview(): void }) {
+  const report = value.report;
+  if (!report) return null;
+  const look = outcomeLookOf(value);
+  return (
+    <Paper withBorder p="md" radius="md">
+      <Stack gap="xs">
+        <Group gap="sm">
+          <Text fw={600}>Run {number}</Text>
+          <Badge color={look.color} variant="light">
+            {look.label}
+          </Badge>
+        </Group>
+        {report.checks.map((check) => (
+          <Group key={`${check.kind}-${check.number}`} justify="space-between" wrap="nowrap" gap="sm">
+            <Text size="sm" style={{ overflowWrap: "anywhere" }}>
+              {check.kind === "case" ? `Case ${check.number}, ${check.name}` : `Check ${check.number} (reported)`}
+            </Text>
+            <Badge size="sm" variant="light" color={check.verdict === "passed" ? "green" : check.verdict === "not-run" ? "gray" : check.verdict === "unknown" ? "yellow" : "red"}>
+              {check.verdict === "passed" ? "Passed" : check.verdict === "failed" ? "Failed" : check.verdict === "couldnt-run" ? "Couldn't run" : check.verdict === "unknown" ? "Unknown" : "Not run"}
+            </Badge>
+          </Group>
+        ))}
+        {value.settledAt && (
+          <Text size="xs" c="var(--nivra-text-3)">
+            Ended {when(value.settledAt)}.
+          </Text>
+        )}
+        <Anchor component="button" size="sm" ta="left" onClick={onReview} aria-expanded={reviewing} data-testid="task-attempt-open-review">
+          {reviewing ? "Hide the review" : "Open the review"}
+        </Anchor>
+      </Stack>
+    </Paper>
   );
 }
 
