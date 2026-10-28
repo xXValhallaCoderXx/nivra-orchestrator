@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -7,7 +7,10 @@ import { environmentRefOf } from "../src/main/host.ts";
 import { taskRunFingerprint } from "../src/main/tasks.ts";
 import { preparedOf } from "./fixtures/environment-recipe.ts";
 import { hashRuntime } from "../scripts/runtime-files.ts";
-import { buildChanges, buildHashes, previewProblems, type ApprovedRun } from "../scripts/task-live-checks.ts";
+import { claimApproval, claimOn } from "../../engine/scripts/research-check/claim.ts";
+import { ENVIRONMENT_STOP_MESSAGES } from "../../engine/src/environment/report.ts";
+import type { EnvironmentView } from "../src/shared/ipc.ts";
+import { buildChanges, buildHashes, closedThen, liveFolders, previewProblems, stopProblems, type ApprovedRun, type ExpectedStop } from "../scripts/task-live-checks.ts";
 
 /**
  * What the live run's script checks before it trusts a frozen build or presses Start (NIV-35): every file of the build
@@ -111,5 +114,120 @@ describe("the live run's preview, before Start (NIV-35)", () => {
 
   it("refuses a build whose own preview doesn't name the one model the recipe allows: a build from before that rule would take whichever model the listing offered", () => {
     assert.deepEqual(problems(hostExpected({}), structured({ sends: { tokenFactory: ["The brief."], nebius: ["The commit's files."] } })), ["the app's preview doesn't name nvidia/nemotron-3-super-120b-a12b, the one model the recipe allows"]);
+  });
+});
+
+describe("the folders a live run writes (NIV-55)", () => {
+  // A home of the test's own, so nothing here comes near the real ~/nivra-acceptance.
+  const home = mkdtempSync(join(tmpdir(), "nivra live home "));
+  const repository = mkdtempSync(join(tmpdir(), "nivra live repository "));
+  // Another checkout of Nivra's repository, as candidate 3's worktree is.
+  const worktree = mkdtempSync(join(tmpdir(), "nivra live candidate worktree "));
+  dirs.push(home, repository, worktree);
+  const checkouts = [repository, worktree];
+  const take = join(home, "nivra-acceptance", "task-live");
+  const claims = join(home, "nivra-acceptance", "claims", "task-live");
+  mkdirSync(take, { recursive: true });
+
+  it("needs a state folder of its own, never candidate 3's take, the claims or any of Nivra's checkouts", () => {
+    assert.throws(() => liveFolders(undefined, home, checkouts), /--state <folder> is required/);
+    for (const folder of [take, join(take, "frozen-x"), join(home, "nivra-acceptance")]) assert.throws(() => liveFolders(folder, home, checkouts), /candidate 3's frozen take/, folder);
+    for (const folder of [claims, join(claims, "x"), join(home, "nivra-acceptance", "claims")]) assert.throws(() => liveFolders(folder, home, checkouts), /the approvals' claims/, folder);
+    for (const folder of [join(repository, "evidence"), join(worktree, "evidence"), worktree]) assert.throws(() => liveFolders(folder, home, checkouts), /one of Nivra's checkouts/, folder);
+    // A link that leads into the take is the take.
+    symlinkSync(take, join(home, "a link"));
+    assert.throws(() => liveFolders(join(home, "a link", "x"), home, checkouts), /candidate 3's frozen take/);
+    assert.deepEqual(liveFolders(join(home, "nivra-acceptance", "niv55-live"), home, checkouts), { state: join(home, "nivra-acceptance", "niv55-live"), claims });
+  });
+
+  it("refuses a child named like a parent (..state) inside every protected folder: it is inside, not above", () => {
+    // Nate's review of PR 37: relative() gives "..state" for such a child, which isn't a way up.
+    assert.throws(() => liveFolders(join(take, "..state"), home, checkouts), /candidate 3's frozen take/);
+    assert.throws(() => liveFolders(join(claims, "..state"), home, checkouts), /the approvals' claims/);
+    for (const root of checkouts) assert.throws(() => liveFolders(join(root, "..state"), home, checkouts), /one of Nivra's checkouts/, root);
+    // A sibling whose name only starts with dots is outside them all.
+    assert.equal(liveFolders(join(home, "nivra-acceptance", "..niv55-live"), home, checkouts).state, join(home, "nivra-acceptance", "..niv55-live"));
+  });
+
+  it("claims approvals in one folder for every state folder, so a digest claimed under one is refused under a second", () => {
+    const first = liveFolders(join(home, "nivra-acceptance", "niv55-live"), home, checkouts);
+    const second = liveFolders(join(home, "nivra-acceptance", "task-live-c4"), home, checkouts);
+    assert.equal(first.claims, second.claims);
+    const digest = "5".repeat(64);
+    const claim = (state: string) => ({ digest, run: 1, revision: null, out: state, pid: process.pid, claimedAt: "2026-10-28T15:00:00.000Z" });
+    assert.equal(claimApproval(first.claims, claim(first.state)).ok, true);
+    assert.equal(claimApproval(second.claims, claim(second.state)).ok, false, "the same approval ran again under another state folder");
+    assert.equal(claimOn(second.claims, digest).claimed, true);
+  });
+});
+
+describe("a preparation the recipe expects to stop (NIV-55)", () => {
+  const LOCKFILE = "The lockfile doesn't match package.json. Run npm install in the repository, commit the lockfile, then prepare again.";
+  const expected: ExpectedStop = { code: "install", step: "install", detail: LOCKFILE };
+  const report = (over: Record<string, unknown> = {}, stopped: Record<string, unknown> = {}) => ({
+    outcome: "failed",
+    stopped: { code: "install", step: "install", message: ENVIRONMENT_STOP_MESSAGES.install, detail: LOCKFILE, ...stopped },
+    prepared: null,
+    environment: null,
+    install: { exitCode: 1, logTail: "npm error `npm ci` can only install packages when your package.json and package-lock.json are in sync." },
+    ...over,
+  });
+  const view = (given: ReturnType<typeof report> | null, prepared: unknown = null) => ({ prepared, preparation: { status: "answered", report: given } }) as unknown as Pick<EnvironmentView, "prepared" | "preparation">;
+
+  it("passes only on exactly the expected stop: its code and step, Nivra's words, the expected guidance, the install's log, nothing kept", () => {
+    assert.deepEqual(stopProblems(expected, view(report())), []);
+  });
+
+  it("fails on another failure of the same step: each other install diagnosis, a time-out, or no guidance at all", () => {
+    // Nate's review of PR 37: a registry time-out at the install passed as the lockfile's mismatch.
+    const others = [
+      "The install couldn't reach the package registry from the sandbox. Try again later; if it keeps happening, check Nebius's status.",
+      "npm couldn't settle the dependencies' peer requirements. If the lockfile was made with legacy-peer-deps, for example set in an .npmrc, turn on that install option, then prepare again.",
+      "The install ran past its limit of 600 s and was stopped.",
+      null,
+    ];
+    for (const detail of others) assert.match(stopProblems(expected, view(report({}, { detail }))).join("; "), /its guidance is .*, not the expected "The lockfile doesn't match package\.json/, String(detail));
+    // A stop that gives no guidance is expected as null, and then any guidance is another failure.
+    assert.deepEqual(stopProblems({ ...expected, detail: null }, view(report({}, { detail: null }))), []);
+    assert.match(stopProblems({ ...expected, detail: null }, view(report())).join("; "), /not the expected null/);
+  });
+
+  it("fails on any other ending: another stop code or step, a success, or a stop that keeps too little", () => {
+    assert.match(stopProblems(expected, view(report({}, { code: "readiness", step: "readiness", message: ENVIRONMENT_STOP_MESSAGES.readiness }))).join("; "), /stopped at readiness \(step readiness\), not the expected install \(step install\)/);
+    assert.match(stopProblems(expected, view(report({}, { step: "upload" }))).join("; "), /not the expected install \(step install\)/);
+    const success = stopProblems(expected, view(report({ outcome: "prepared", stopped: null, environment: PREPARED }), PREPARED));
+    assert.ok(success.includes("an environment was kept") && success.includes("the preparation succeeded"), success.join("; "));
+    assert.match(stopProblems(expected, view(report({ install: { exitCode: 1, logTail: "" } }))).join("; "), /the end of the install's log wasn't kept/);
+    assert.match(stopProblems(expected, view(report({}, { message: "Something else." }))).join("; "), /words aren't Nivra's/);
+    assert.match(stopProblems(expected, view(null)).join("; "), /with no report/);
+  });
+});
+
+describe("a rehearsal's homes, read once its app is closed (NIV-55)", () => {
+  // Nate's review of PR 37: a rehearsal that ended early read the homes before its app was closed.
+  const traced = () => {
+    const order: string[] = [];
+    return { order, close: async () => void order.push("close"), after: () => (order.push("after"), "checked") };
+  };
+
+  it("closes the app before reading the homes, when the body ends early and when it runs to its end", async () => {
+    for (const early of [true, false]) {
+      const { order, close, after } = traced();
+      const result = await closedThen({}, close, async () => {
+        order.push("body");
+        if (early) return;
+        order.push("rest");
+      }, after);
+      assert.deepEqual([result, order], ["checked", early ? ["body", "close", "after"] : ["body", "rest", "close", "after"]]);
+    }
+  });
+
+  it("closes the app when the body fails, and reads nothing after a failure", async () => {
+    const { order, close, after } = traced();
+    await assert.rejects(closedThen({}, close, async () => {
+      order.push("body");
+      throw new Error("the preview wasn't the recipe's");
+    }, after), /the preview wasn't the recipe's/);
+    assert.deepEqual(order, ["body", "close"]);
   });
 });
