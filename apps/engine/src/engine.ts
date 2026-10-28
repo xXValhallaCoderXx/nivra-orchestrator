@@ -567,6 +567,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   };
 
   /** A project's own setup resolved into a recipe, with no network (NIV-55); a refusal names the file and says why. */
+  /** The snapshot's rules for what a task run sends (NIV-55): what the commit holds, its sizes, and paths Nivra won't send. */
+  const TASK_SEND_RULES: readonly string[] = ["content", "limit", "path"];
   const environmentResolve = async (repoPath: string, choices: EnvironmentChoices, previous: PreviousSettlement | null): Promise<EnvironmentPreviewV2> => {
     const git = locateGit();
     if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
@@ -575,7 +577,12 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       const shown = await environmentResolutionOf(await takeSnapshot({ folder: repoPath, session, git, exclude: [home], knownValues: taskKnownValues() }), choices, previous);
       return shown.status === "refused" ? { ...shown, message: mask(shown.message).slice(0, 2_000) } : shown;
     } catch (error) {
-      if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000), rows: [] };
+      if (error instanceof WorkspaceRefusal) {
+        // A rule for what a task run sends stops a preparation too, though preparing sends only the setup files: the
+        // refusal says which stage the rule is for, after the file it names.
+        const message = TASK_SEND_RULES.includes(error.code) ? `Task runs send the whole commit, and this one can't be sent: ${error.message.slice(0, 1_500)} Preparing the environment would upload only its setup files, but no task run could start from this commit, so Nivra doesn't prepare it either.` : error.message;
+        return { status: "refused", code: error.code, message: mask(message).slice(0, 2_000), rows: [] };
+      }
       throw error;
     } finally {
       await session.close();

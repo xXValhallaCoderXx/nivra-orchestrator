@@ -252,6 +252,23 @@ describe("a project-driven recipe's preparation through a real engine (NIV-55)",
     assert.match(done.stopped!.detail!, /the install left 1 file outside node_modules, such as "\.pnp\.cjs", which a task's session would read as the commit's own/);
   });
 
+  it("says when a rule for what task runs send stops a preparation, after the file it names, though preparing sends only the setup files", async () => {
+    const { stub, engine } = await setup({ node: "24.21.0", npm: "11.19.0" });
+    const stage = (shown: EnvironmentPreviewV2, code: string) => {
+      assert.equal(shown.status, "refused");
+      const refusal = shown as Extract<EnvironmentPreviewV2, { status: "refused" }>;
+      assert.equal(refusal.code, code, refusal.message);
+      assert.ok(refusal.message.startsWith("Task runs send the whole commit, and this one can't be sent: "), refusal.message);
+      assert.ok(refusal.message.endsWith(" Preparing the environment would upload only its setup files, but no task run could start from this commit, so Nivra doesn't prepare it either."), refusal.message);
+      return refusal.message;
+    };
+    // Built here, so this file holds no credential-shaped text of its own.
+    const token = `ghp_${"a".repeat(36)}`;
+    assert.match(stage(await resolve(engine, repoWith({ ...PNPM, "test/fixture.ts": `export const TOKEN = "${token}";\n` })), "content"), /test\/fixture\.ts in this commit holds what looks like a GitHub token/);
+    assert.match(stage(await resolve(engine, repoWith({ ...PNPM, "assets/big.bin": new Uint8Array(2_200_000) })), "limit"), /assets\/big\.bin is 2200000 bytes, over the 2097152 Nivra sends for one file/);
+    assert.equal(uploads(stub), 0);
+  });
+
   it("answers a resolution that needs the person's choice, and one it refuses, through the same method", async () => {
     const { engine } = await setup({ node: "24.21.0", npm: "11.19.0" });
     const both = await resolve(engine, repoWith({ ...PNPM, ".node-version": "22.23.4\n" }));
