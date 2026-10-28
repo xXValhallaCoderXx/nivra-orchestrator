@@ -72,10 +72,20 @@ const onlineInfo = async (targetId: string) => {
   return view?.state.status === "online" ? view.state.info : null;
 };
 
+/**
+ * Navigation in the window's shell (NIV-56), by test id only: presses `place` (a sidebar link, a Settings section's link
+ * or the switcher's field), then waits, within 30 s, for `shown`, a test id only the place it opens shows.
+ */
+async function open(place: string, shown: string): Promise<void> {
+  await page.getByTestId(place).click();
+  await page.getByTestId(shown).waitFor({ state: "visible", timeout: 30_000 });
+}
+
 async function pick(path: string): Promise<void> {
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, path);
+  await open("project-select", "project-switcher-list");
   await page.getByTestId("project-add").click();
 }
 
@@ -94,6 +104,8 @@ const statusShown = () => page.getByTestId("hello-status").textContent();
 
 /** Starts a run held for 60 s from the UI and returns its id once its child process is holding. */
 async function startHeld(): Promise<string> {
+  await open("nav-settings", "page-settings");
+  await open("settings-tab-diagnostics", "settings-diagnostics");
   await page.getByText("60 s", { exact: true }).click();
   await page.getByTestId("hello-start").click();
   await page.getByTestId("hello-timeline").getByText("Holding a child process").waitFor({ timeout: 60_000 });
