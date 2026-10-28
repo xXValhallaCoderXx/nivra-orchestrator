@@ -166,6 +166,8 @@ async function main(): Promise<number> {
   });
   await check(`${distro}: Restart in the UI brings up a fresh engine`, async () => {
     await choose(wslTarget);
+    await open("nav-settings", "page-settings");
+    await open("settings-tab-diagnostics", "settings-diagnostics");
     await page.getByTestId("engine-failed").waitFor({ timeout: 10_000 });
     await page.getByTestId("engine-restart").click();
     const info = await waitFor(() => onlineInfo(wslTarget), 180_000, `the engine in ${distro} again`);
