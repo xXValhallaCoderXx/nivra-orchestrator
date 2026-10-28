@@ -240,6 +240,16 @@ test("a copy button puts exactly the shown text on the clipboard, through main, 
   await goTo(page, "home");
 });
 
+test("the draft check takes only text, and only so much, and answers only yes or no", async () => {
+  const check = (value: unknown) =>
+    page.evaluate((given) => (window.nivra.draftHasSavedKey as (value: unknown) => Promise<boolean>)(given).then((answer) => ({ answer, error: null }), (error: Error) => ({ answer: null, error: error.message })), value);
+  expect(await check("Add CSV export for invoices")).toEqual({ answer: false, error: null });
+  const long = await check("x".repeat(262_145));
+  expect([long.answer, long.error?.includes("Nivra checks a draft of at most 262,144 characters of text, so this one wasn't checked.")]).toEqual([null, true]);
+  const notText = await check(42);
+  expect([notText.answer, notText.error?.includes("so this one wasn't checked.")]).toEqual([null, true]);
+});
+
 test("Home and Settings show what another place changed: sharing and uploads allowed, research turned on", async () => {
   const projectId = (await page.evaluate(() => window.nivra.listProjects()))[0]!.id;
   // As a task page and a research dialog would, while another place is in view.

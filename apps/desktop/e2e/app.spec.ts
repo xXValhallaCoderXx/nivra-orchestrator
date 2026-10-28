@@ -40,6 +40,7 @@ const EXPECTED_API = [
   "deleteMission",
   "deletePreference",
   "deleteTask",
+  "draftHasSavedKey",
   "editPreference",
   "exportPreferences",
   "getAppInfo",

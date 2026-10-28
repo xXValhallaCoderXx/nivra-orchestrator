@@ -5,7 +5,8 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, requestMsFor, TASK_RUN_BOUNDS, type EnvironmentChoices } from "@nivra/domain";
 import { z } from "zod";
-import { COPY_TEXT_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
+import { containsSavedKey, DRAFT_CHECK_FAILED, DRAFT_KEY_NAMES, type SavedKey } from "./draft-keys.ts";
+import { COPY_TEXT_CHARS, DRAFT_CHECK_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
@@ -120,6 +121,23 @@ function start(): void {
     if (typeof text !== "string") throw new Error("Nivra copies only text, so nothing was copied.");
     if (text.length > COPY_TEXT_CHARS) throw new Error(`That is ${text.length.toLocaleString("en-GB")} characters, more than the ${COPY_TEXT_CHARS.toLocaleString("en-GB")} Nivra copies at once, so nothing was copied.`);
     clipboard.writeText(text);
+  });
+  // Drafts (NIV-56): whether typed text holds a whole saved API key. Only the answer goes back, and nothing is logged: a
+  // failure, such as a key that can't be read, gets fixed words, never the draft or a key, and the window counts the
+  // draft as unchecked.
+  handle(IPC.draftHasSavedKey, z.tuple([z.unknown()]), async (_event, text) => {
+    if (typeof text !== "string" || text.length > DRAFT_CHECK_CHARS) throw new Error(`Nivra checks a draft of at most ${DRAFT_CHECK_CHARS.toLocaleString("en-GB")} characters of text, so this one wasn't checked.`);
+    let keys: SavedKey[];
+    try {
+      keys = [];
+      for (const name of DRAFT_KEY_NAMES) {
+        const state = await secrets.state(name);
+        keys.push({ state, value: state === "unreadable" || state === "none" ? null : await secrets.get(name) });
+      }
+    } catch {
+      throw new Error(DRAFT_CHECK_FAILED);
+    }
+    return containsSavedKey(text, keys);
   });
   handle(IPC.listEngines, none, () => host.engines());
   handle(IPC.openProject, project, (_event, id) => host.open(id));

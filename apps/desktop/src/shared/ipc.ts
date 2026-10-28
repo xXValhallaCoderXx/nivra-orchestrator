@@ -47,6 +47,7 @@ import type { ResearchPreview, ResearchSelection, ResearchView } from "./researc
 export const IPC = {
   getAppInfo: "app:info",
   copyText: "app:copy-text",
+  draftHasSavedKey: "drafts:has-saved-key",
   listEngines: "engines:list",
   openProject: "projects:open",
   restartEngine: "engine:restart",
@@ -151,6 +152,9 @@ export const MESSAGE_CHARS = 8_000;
 
 /** The most text a copy button may put on the clipboard (copyText), in characters. */
 export const COPY_TEXT_CHARS = 65_536;
+
+/** The most text one draft check takes (draftHasSavedKey), in characters: a draft's value and its label together. */
+export const DRAFT_CHECK_CHARS = 262_144;
 
 /** What the host takes in a task's title, brief and plan (D26); the window counts a plan's characters as they are typed. */
 export const TASK_LIMITS = { titleChars: 200, textChars: 4_000, contextChars: 20_000, itemChars: 1_000, items: 20, planChars: 20_000 } as const;
@@ -829,6 +833,12 @@ export interface NivraApi {
    * refused, saying so, and nothing is copied.
    */
   copyText(text: string): Promise<void>;
+  /**
+   * Whether a draft's text holds one of the API keys Nivra keeps, whole, anywhere in it: true or false, and nothing
+   * else (no key, no fragment, no place). Text of at most DRAFT_CHECK_CHARS characters; anything else is refused. It
+   * fails when a saved key can't be read: the window then treats the draft as unchecked, never as clean.
+   */
+  draftHasSavedKey(text: string): Promise<boolean>;
   /** One view per engine a project uses or that is running; nothing is started by asking. */
   listEngines(): Promise<EngineView[]>;
   /** Starts the engine of the project's folder if it isn't running yet, never another one (D17). */

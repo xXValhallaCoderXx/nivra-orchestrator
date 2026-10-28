@@ -8,6 +8,7 @@ import { IPC, type NivraApi } from "../shared/ipc.ts";
 const api = {
   getAppInfo: () => ipcRenderer.invoke(IPC.getAppInfo),
   copyText: (text) => ipcRenderer.invoke(IPC.copyText, text),
+  draftHasSavedKey: (text) => ipcRenderer.invoke(IPC.draftHasSavedKey, text),
   listEngines: () => ipcRenderer.invoke(IPC.listEngines),
   openProject: (projectId) => ipcRenderer.invoke(IPC.openProject, projectId),
   restartEngine: (projectId) => ipcRenderer.invoke(IPC.restartEngine, projectId),
