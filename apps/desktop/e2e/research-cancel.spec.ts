@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { openSwitcher } from "./places.ts";
 import { seedPlan } from "./seed-workspace.ts";
 
 /**
@@ -73,6 +74,7 @@ test("only an unpackaged app runs the gated stand-in; a packaged one ignores the
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, repo);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   const version = async () => {
     const local = (await page.evaluate(() => window.nivra.listEngines())).find((engine) => engine.targetId === "local");

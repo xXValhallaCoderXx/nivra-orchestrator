@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 import { startStub, text, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 
 /**
@@ -63,6 +64,7 @@ async function addProject(path: string) {
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, path);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
 }
 
@@ -70,6 +72,7 @@ async function addProject(path: string) {
 async function newChat(scope: "general" | string) {
   const shown = page.getByTestId("conversation");
   const before = (await shown.count()) ? await shown.getAttribute("data-conversation-id") : null;
+  if (!(await page.getByTestId("new-chat").isVisible())) await goTo(page, "conversations");
   await page.getByTestId("new-chat").click();
   if (scope === "general") await page.getByTestId("new-chat-general").click();
   else await page.getByTestId("new-chat-project").filter({ hasText: scope }).click();
@@ -80,6 +83,7 @@ async function newChat(scope: "general" | string) {
 
 /** Opens a conversation from the list and waits until it is the one shown. */
 async function openConversation(title: string) {
+  await goTo(page, "conversations");
   await page.getByTestId("nav-conversation").filter({ hasText: title }).click();
   await expect(page.getByTestId("conversation-title")).toHaveText(title);
 }
@@ -165,10 +169,10 @@ test("a repository chat asks for its project's consent first, then answers in it
   expect(chats() - before).toBe(2);
 });
 
-test("choosing another project on Projects & settings changes neither an open conversation's scope nor the repository its next turn reads", async () => {
+test("choosing another project in the switcher changes neither an open conversation's scope nor the repository its next turn reads", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
-  await page.getByTestId("nav-projects").click();
-  // Choosing the project already chosen would clear the choice: choose alpha, the conversation's own, then beta.
+  await goTo(page, "home");
+  // Choose alpha, the conversation's own, then beta.
   for (const label of ["alpha", "beta"]) {
     await page.getByTestId("project-select").click();
     await page.getByRole("option", { name: new RegExp(`^${label}`) }).click();
@@ -241,10 +245,12 @@ test("a turn whose engine is killed waits, unresolved; after Restart it is inter
 });
 
 test("conversations are kept across a relaunch, nothing is sent on reopening, and a repository chat goes on", async ({}, testInfo) => {
+  await goTo(page, "conversations");
   const count = await page.getByTestId("nav-conversation").count();
   const before = chats();
   await app.close();
   await launch(testInfo);
+  await goTo(page, "conversations");
   await expect(page.getByTestId("nav-conversation")).toHaveCount(count);
   await openConversation("No key yet?");
   await expect(page.getByTestId("turn-status")).toHaveText("Failed");

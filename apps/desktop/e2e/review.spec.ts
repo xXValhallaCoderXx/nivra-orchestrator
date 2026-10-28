@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 import { httpError, startStub, text, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 import { seedPlan } from "./seed-workspace.ts";
 
@@ -92,6 +93,7 @@ async function openConversation(title: string) {
 async function newChat(scope: "general" | string) {
   const shown = page.getByTestId("conversation");
   const before = (await shown.count()) ? await shown.getAttribute("data-conversation-id") : null;
+  if (!(await page.getByTestId("new-chat").isVisible())) await goTo(page, "conversations");
   await page.getByTestId("new-chat").click();
   if (scope === "general") await page.getByTestId("new-chat-general").click();
   else await page.getByTestId("new-chat-project").filter({ hasText: scope }).click();
@@ -123,6 +125,7 @@ test.beforeAll(async ({}, testInfo) => {
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, join(root, "alpha"));
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("project-select")).toHaveValue("alpha");
 });

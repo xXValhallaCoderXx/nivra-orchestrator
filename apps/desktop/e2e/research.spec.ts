@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 import { extractAnswer, searchAnswer, startTavilyStub, type TavilyCall, type TavilyStub } from "../../engine/test/stub-tavily.ts";
 import { startStub, text, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 import { seedPlan } from "./seed-workspace.ts";
@@ -112,6 +113,7 @@ async function openConversation(title: string) {
 async function newChat(scope: "general" | string) {
   const shown = page.getByTestId("conversation");
   const before = (await shown.count()) ? await shown.getAttribute("data-conversation-id") : null;
+  if (!(await page.getByTestId("new-chat").isVisible())) await goTo(page, "conversations");
   await page.getByTestId("new-chat").click();
   if (scope === "general") await page.getByTestId("new-chat-general").click();
   else await page.getByTestId("new-chat-project").filter({ hasText: scope }).click();
@@ -155,6 +157,7 @@ test.beforeAll(async ({}, testInfo) => {
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, join(root, "alpha"));
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("project-select")).toHaveValue("alpha");
 });
@@ -209,7 +212,7 @@ test("with research off and no Tavily key, a seeded plan's preview says what kee
   await page.getByTestId("research-dialog-cancel").click();
   expect((await page.evaluate(() => window.nivra.getSettings())).webResearch).toBe(true);
   // Settings say the same of what Tavily gets and what is kept.
-  await page.getByTestId("nav-projects").click();
+  await goTo(page, "settings-sharing");
   await expect(page.getByTestId("web-research-words")).toHaveText(
     `When it is on, each run still waits for you to start it. Tavily gets your Tavily key, the queries you approve, the sites you list, if any, and the addresses of pages its own search returned: no other words from the plan, and none of your repositories or conversations. Turning it off stops research under way where it can. ${RETENTION}`,
   );

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 import { PROBE_SCRIPT } from "../../engine/src/exec/check.ts";
 import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandboxes.ts";
 
@@ -41,6 +42,7 @@ test.beforeAll(async ({}, testInfo) => {
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, repo);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 });
@@ -54,9 +56,11 @@ test.afterAll(async () => {
 test("previews what a check would upload, asks for upload consent of its own, then checks and reports", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
   await page.evaluate(() => window.nivra.setNebiusKey("test-key-0123456789"));
+  await goTo(page, "settings-connections");
   await page.getByTestId("nebius-project-id").fill("project-e00e2esandbox");
   await page.getByTestId("nebius-project-id-save").click();
-  await expect(page.getByTestId("nebius-project-id-state")).toHaveText("Project id saved");
+  await expect(page.getByTestId("nebius-project-id-state")).toHaveText("Project ID saved");
+  await goTo(page, "settings-diagnostics");
   await page.getByTestId("sandbox-preview").click();
   await expect(page.getByTestId("sandbox-preview-panel")).toContainText("2 files");
   await expect(page.getByTestId("sandbox-preview-left-out")).toContainText("Left out: nothing.");
@@ -82,6 +86,7 @@ test("previews what a check would upload, asks for upload consent of its own, th
 
 test("turning uploads off asks again before anything more is uploaded", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
+  await goTo(page, "settings-diagnostics");
   await page.getByTestId("sandbox-uploads-off").click();
   await expect(page.getByTestId("sandbox-uploads")).toHaveCount(0);
   const before = stub.requests.length;
@@ -105,18 +110,20 @@ test("saving the key and project id settles what an earlier session left open, a
     await opened.evaluate(async ({ dialog }, path) => {
       dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
     }, repo);
+    await openSwitcher(window);
     await window.getByTestId("project-add").click();
     await expect(window.getByTestId("engine-badge")).toHaveText("Engine online");
     return { opened, window };
   };
   // Through Settings, as a person saves them.
   const saveCredentials = async (window: Page) => {
-    await window.getByLabel("API key", { exact: true }).fill("test-key-0123456789");
+    await goTo(window, "settings-connections");
+    await window.getByLabel("Nebius API key", { exact: true }).fill("test-key-0123456789");
     await window.getByTestId("nebius-key-save").click();
     await expect(window.getByTestId("nebius-key-state")).toContainText("Key saved");
     await window.getByTestId("nebius-project-id").fill("project-e00e2esandbox");
     await window.getByTestId("nebius-project-id-save").click();
-    await expect(window.getByTestId("nebius-project-id-state")).toHaveText("Project id saved");
+    await expect(window.getByTestId("nebius-project-id-state")).toHaveText("Project ID saved");
   };
   try {
     // A first session's check leaves its probe open: the answer is lost, and the operation hidden from the search for now.
@@ -130,6 +137,7 @@ test("saving the key and project id settles what an earlier session left open, a
       own.guest.service.hideNextSpawn = true;
       return { waits: true };
     };
+    await goTo(first.window, "settings-diagnostics");
     await first.window.getByTestId("sandbox-preview").click();
     await expect(first.window.getByTestId("sandbox-preview-panel")).toContainText("2 files");
     await first.window.getByTestId("sandbox-start").click();

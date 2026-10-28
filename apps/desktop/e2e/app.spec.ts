@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 
 /**
  * The built app, driven like a person would (B4, D17): the sandboxed window, the typed bridge, no engine until a
@@ -160,12 +161,14 @@ test("a repository picked in the native dialog runs on its folder's engine, runs
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, repo);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("project-select")).toHaveValue("repo ü%#");
   await expect(page.getByTestId("project-target")).toHaveText(/· Local$/);
   await expect(page.getByTestId("engine-target")).toHaveText(/· Local$/);
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 
+  await goTo(page, "settings-diagnostics");
   await page.getByTestId("hello-start").click();
   await expect(page.getByTestId("hello-status")).toHaveText("succeeded");
   await expect(page.getByTestId("hello-timeline")).toContainText("on main");
@@ -186,6 +189,7 @@ test("a key holding a character no key has is refused when it is saved, saying w
 });
 
 test("Doctor reports git and the execution boundaries", async () => {
+  await goTo(page, "settings-diagnostics");
   await page.getByTestId("doctor-run").click();
   await expect(page.getByTestId("doctor-report")).toContainText("Git");
   await expect(page.getByTestId("doctor-report")).toContainText("Execution boundaries");
