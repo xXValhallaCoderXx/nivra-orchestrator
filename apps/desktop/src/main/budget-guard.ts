@@ -43,7 +43,8 @@ const GuardLine = z.strictObject({
   ledgerId: z.uuid(),
   revision: z.number().int().nonnegative(),
   chain: z.string().regex(/^[0-9a-f]{64}$/),
-  month: BudgetMonthLabel.nullable(),
+  // A record written before months were kept (by review builds only) names none, and keeps the rest of what it says.
+  month: BudgetMonthLabel.nullable().default(null),
   recovery: BudgetRecovery.nullable(),
   at: z.iso.datetime(),
 });

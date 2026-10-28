@@ -179,6 +179,17 @@ describe("the guard log", () => {
     assert.equal(guard.last()?.revision, 3);
   });
 
+  it("reads a record written before months were kept, its recovery included, as naming no month", () => {
+    const { guard } = profile();
+    const ledgerId = randomUUID();
+    const chain = digest();
+    const recovery = { reason: "ledger-behind", detectedAt: AT, guard: { ledgerId, revision: 3, chain, at: AT }, ledger: null };
+    const json = JSON.stringify({ v: 1, ledgerId, revision: 3, chain, recovery, at: AT });
+    appendFileSync(guard.path, `${json}\t${createHash("sha256").update(json).digest("hex")}\n`);
+    const last = guard.last();
+    assert.deepEqual([last?.revision, last?.month, last?.recovery?.reason, last?.recovery?.guard.month], [3, null, "ledger-behind", null]);
+  });
+
   it("skips a line whose checksum doesn't match", () => {
     const { guard } = profile();
     const first = record({ ledgerId: randomUUID(), revision: 1, chain: digest() });

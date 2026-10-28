@@ -6,10 +6,11 @@ import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { BUDGET_PRESETS, CURRENT_PRICES, monthOf, NO_SUBLIMITS, type BudgetPolicyDraft, type PriceCatalogue } from "@nivra/domain";
 import { BUDGET_GUARD_FAILED, BUDGET_GUARD_FAILED_AFTER_SAVE, BUDGET_NEEDS_RECOVERY, BudgetGuard } from "../src/main/budget-guard.ts";
-import { dollarBudgetRefusal } from "../src/main/budget-store.ts";
+import { dollarBudgetRefusal, observeProviderTime } from "../src/main/budget-store.ts";
 import { Host } from "../src/main/host.ts";
 import { HostStore } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
+import { openWorkspace } from "../src/main/workspace-db.ts";
 import type { TargetFactory } from "../src/main/targets/registry.ts";
 
 /**
@@ -143,6 +144,22 @@ describe("the budget through the host", () => {
     await assert.rejects(host.confirmBudgetMonth(summary.clock.computerMonth), /still the same budget month/);
     await assert.rejects(host.confirmBudgetMonth("2099-01"), /so that month wasn't confirmed/);
     await assert.rejects(host.confirmBudgetMonth("next month"));
+  });
+
+  it("records the latest month its ledger established, and catches its guard up with one opened after the guard's last record", async () => {
+    const at = root();
+    const first = hostAt(at);
+    await first.setBudgetPolicy(DRAFT);
+    await first.shutdown();
+    assert.equal(guardAt(at).last()?.month, monthOf(Date.now(), DRAFT.timezone).label);
+    // The provider's clock opens a later month, and the host stops before recording it, as a crash would leave it.
+    const later = Date.now() + 40 * 24 * 60 * 60 * 1000;
+    const opening = openWorkspace(join(at, "workspace.db"));
+    assert.ok(opening.state === "ready");
+    assert.ok(observeProviderTime(opening.db, later, Date.now(), DRAFT.timezone).opened);
+    opening.db.close();
+    await hostAt(at).budgetSummary();
+    assert.equal(guardAt(at).last()?.month, monthOf(later, DRAFT.timezone).label);
   });
 
   it("refuses to start a new history when nothing needs recovery", async () => {
