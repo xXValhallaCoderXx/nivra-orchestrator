@@ -3667,3 +3667,33 @@ to show what Nivra actually sends: a direct API probe that accepts a field isn't
   can run on Super after 9 November. Recorded runs and their fixtures name the model they ran on, and
   `docs/submission.md` keeps its model line until the release's build is chosen.
 - D50 is a provisional number: D48 is PR 36's, and D49 is PR 35's.
+
+## D51. The window's shell: a scope and a route instead of a router, Settings in sections, drafts kept with the saved keys checked, and a task run's bounds in one place (2026-10-29)
+
+**Decision.** NIV-56's shell (Next B, slice B1), with the task page (PR 39) wired into it.
+- **Places:** the window holds a scope (General or a project) and a route, with no router. Settings, Explain and a
+  project's Environment stay mounted while hidden, so nothing in them is lost by moving away.
+- **Sidebar and switcher:** the sidebar lists the scope's places, the places everywhere, unsaved drafts and Settings.
+  The switcher (Ctrl+K) changes the scope, and is the only way projects are added. `nav-projects` is gone. Below 48em
+  the sidebar folds behind a menu button, opens over the page, and the page scrolls inside main, never sideways.
+- **Settings in sections:** Connections, Sharing, Preferences, Budget and usage, and Advanced diagnostics. Budget and
+  usage is read-only: Nate's words, and a run's bounds from `getRunLimits`. No figures are shown.
+- **Drafts:** kept in the window's localStorage under `nivra.drafts.v1:`, with no migration. A draft is kept only
+  after two checks (Nate, option c, 29 Oct):
+  - the renderer refuses the recognised credential formats;
+  - main's `draftHasSavedKey` says whether the draft holds a whole saved API key, using a strict read in which an
+    unreadable file or key fails the check.
+  A draft that fails a check isn't kept, and the page keeps its text. Saving or removing a key hides every draft until
+  the change settles, and each is then checked again. The Home composer, New task and the brief editor keep drafts.
+- **Keyboard:** Ctrl+K, F6, Ctrl+comma and a skip link. Esc closes only what is open, and never stops a run.
+- **Bounds:** `TASK_RUN_BOUNDS` in packages/domain is the one source of a run's bounds that no brief changes. The
+  engine's `TASK_LIMITS` and main's `getRunLimits` read it, and only the engine enforces it.
+
+**Why.** Every page has one place, and the person can move between pages without losing what they typed or where they
+were. A draft is the person's text on their own computer, so it must never become a copy of a key. Bounds shown in
+one place and enforced in another must come from the same numbers.
+
+**Consequences.**
+- A draft from a plan's New task isn't kept: the sidebar couldn't open it again without the plan.
+- Settings still shows an unreadable `secrets.json` as "no keys". Only the draft check reads the file strictly.
+- Moving the drafts to another store needs its own tested migration, which keeps every draft.

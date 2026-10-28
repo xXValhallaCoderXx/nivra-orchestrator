@@ -764,6 +764,18 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e budget-api.spec.ts
   Token Factory's public model list, for review. It sends no key and never runs in tests. A new version is added beside
   the old ones in `prices.ts`, never edited into one.
 
+## A preview of the integrated build
+
+To try the app without touching your own profile or engine homes, start it from `apps/desktop` with folders of its own
+(never `~/.nivra` or `~/.nivra-dev`, D27):
+
+```bash
+pnpm dev -- --user-data-dir="$HOME/nivra-preview/user-data" --nivra-engine-home="$HOME/nivra-preview/engine-home"
+```
+
+Everything after `--` goes to Electron. Under WSLg, if the window or the focus misbehaves, add
+`--ozone-platform=wayland` or `--ozone-platform=x11` there too. Delete the folders afterwards to start fresh.
+
 ## Where things will live
 
 | What | Where |
