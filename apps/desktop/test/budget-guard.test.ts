@@ -196,6 +196,8 @@ describe("the guard log", () => {
     const state = { ledgerId: randomUUID(), revision: 1, chain: digest() };
     guard.append(record(state, null, "2026-11"));
     guard.append(record({ ...state, revision: 2 }, null, "2026-10"));
+    const written = readFileSync(guard.path, "utf8").trim().split("\n").at(-1)!;
+    assert.equal(JSON.parse(written.slice(0, written.lastIndexOf("\t"))).month, "2026-11", "the second record itself names November");
     assert.deepEqual([guard.last()?.revision, guard.last()?.month], [2, "2026-11"]);
     // A log whose earlier line names the later month, as another writer might have left it.
     const json = JSON.stringify({ v: 1, ...record({ ...state, revision: 3 }, null, "2026-09") });
@@ -628,6 +630,14 @@ describe("the latest month a lost history established, kept by the guard whateve
       holdsThroughNovember({ ...lost, db: restored, recovery: found.recovery }, choice);
       assert.equal(carried?.month, "2026-11", "the new history's records named November while its ledger was in October");
     }
+  });
+
+  it("keeps November in a guard rebuilt from the new history's ledger, when the guard is lost after the recovery", () => {
+    const { db, guard, recovery, now } = clockMovedBack();
+    guard.append(recorded(db, startNewHistory(db, { recovery, remaining: null, now, timezone: "UTC" }), now));
+    rmSync(guard.path);
+    const found = check(db, new BudgetGuard(guard.path));
+    assert.deepEqual([found.state, found.append?.month], ["ok", "2026-11"]);
   });
 
   it("never records an earlier month than the guard's last, and a recovery it records keeps the guard's month apart from its time", () => {
