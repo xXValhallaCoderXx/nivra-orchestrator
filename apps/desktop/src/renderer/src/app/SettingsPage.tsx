@@ -108,7 +108,7 @@ export function SettingsPage({
           <Grid.Col span={{ base: 12, md: 8 }}>
             <Stack gap="md">
               <NebiusConnection key={`nebius:${project?.targetId ?? "none"}`} project={project} online={online} onCredentialsSaved={onCredentialsSaved} freshness={opened} />
-              <TavilyConnection freshness={opened} />
+              <TavilyConnection freshness={opened} onSaved={onCredentialsSaved} />
             </Stack>
           </Grid.Col>
           <Grid.Col span={{ base: 12, md: 4 }}>

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { secretShapes } from "@nivra/domain";
 import { holdsCredential, looksLikeCredential } from "../src/renderer/src/shell/credentials.ts";
-import { createDraftStore, DRAFT_PREFIX } from "../src/renderer/src/shell/draft-store.ts";
+import { createDraftStore, DRAFT_PREFIX, type SavedKeyCheck } from "../src/renderer/src/shell/draft-store.ts";
 import { FakeStorage } from "./fixtures/fake-storage.ts";
 
 // Shapes only: none of these is a real credential.
@@ -40,78 +40,196 @@ describe("the renderer's credential check (NIV-56)", () => {
   });
 });
 
-describe("the draft store (NIV-56, R30)", () => {
-  const clock = (iso: string) => () => new Date(iso);
+// Synthetic saved keys, as the specs save: no recognised format, so only the saved-key check can catch them.
+const SAVED = "test-key-0123456789";
+const LATER = "test-key-later-555555";
 
-  it("keeps a draft under the versioned prefix, reads it back, and lists the newest first", () => {
+/** Main's check, standing in: the keys saved now, how often it was asked, and a way to make it fail. */
+function savedKeys(...keys: string[]) {
+  const state = { keys: new Set(keys), calls: 0, failing: false };
+  const check: SavedKeyCheck = async (text) => {
+    state.calls += 1;
+    if (state.failing) throw new Error("A saved key can't be read here.");
+    return [...state.keys].some((key) => text.includes(key));
+  };
+  return { state, check };
+}
+
+/** A check whose answers the test hands out, in any order. */
+function heldChecks() {
+  const waiting: Array<{ text: string; answer(holds: boolean): void }> = [];
+  const check: SavedKeyCheck = (text) => new Promise((resolve) => waiting.push({ text, answer: resolve }));
+  return { waiting, check };
+}
+
+const clock = (iso: string) => () => new Date(iso);
+const at = (storage: FakeStorage, key: string) => storage.entries.get(DRAFT_PREFIX + key);
+
+describe("the draft store (NIV-56, R30)", () => {
+  it("keeps a draft under the versioned prefix once it is checked, reads it back, and lists the newest first", async () => {
     const storage = new FakeStorage();
     let now = "2026-10-28T13:41:00.000Z";
-    const store = createDraftStore(storage, () => new Date(now));
-    assert.deepEqual(store.write("home-composer:project:a", { title: "Add CSV export" }, "Add CSV export"), { kept: true });
+    const keys = savedKeys();
+    const store = createDraftStore(storage, keys.check, () => new Date(now));
+    assert.deepEqual(await store.write("home-composer:project:a", { title: "Add CSV export" }, "Add CSV export"), { kept: true });
     now = "2026-10-28T13:45:00.000Z";
-    assert.deepEqual(store.write("brief:t1:1", { goal: "A goal" }, "Fix rounding"), { kept: true });
+    assert.deepEqual(await store.write("brief:t1:1", { goal: "A goal" }, "Fix rounding"), { kept: true });
     assert.deepEqual([...storage.entries.keys()].sort(), [`${DRAFT_PREFIX}brief:t1:1`, `${DRAFT_PREFIX}home-composer:project:a`]);
-    assert.deepEqual(JSON.parse(storage.entries.get(`${DRAFT_PREFIX}home-composer:project:a`)!), { label: "Add CSV export", savedAt: "2026-10-28T13:41:00.000Z", value: { title: "Add CSV export" } });
+    assert.deepEqual(JSON.parse(at(storage, "home-composer:project:a")!), { label: "Add CSV export", savedAt: "2026-10-28T13:41:00.000Z", value: { title: "Add CSV export" } });
     assert.deepEqual(store.read("home-composer:project:a"), { title: "Add CSV export" });
     assert.deepEqual(store.list().map((draft) => draft.key), ["brief:t1:1", "home-composer:project:a"]);
-    assert.equal(store.available, true);
+    assert.deepEqual([store.available, store.unchecked, keys.state.calls], [true, false, 2]);
   });
 
-  it("survives a new store over the same storage, as a restart does, and forgets a discarded draft", () => {
+  it("shows a stored copy only once it is checked against the current keys, as after a restart, and forgets a discarded one", async () => {
     const storage = new FakeStorage();
-    createDraftStore(storage, clock("2026-10-28T10:00:00.000Z")).write("home-composer:general", { title: "Kept" }, "Kept");
-    const again = createDraftStore(storage);
+    await createDraftStore(storage, savedKeys().check, clock("2026-10-28T10:00:00.000Z")).write("home-composer:general", { title: "Kept" }, "Kept");
+    const again = createDraftStore(storage, savedKeys().check);
+    assert.deepEqual([again.read("home-composer:general"), again.list().length], [null, 0]);
+    await again.recheck();
     assert.deepEqual(again.read("home-composer:general"), { title: "Kept" });
     again.discard("home-composer:general");
-    assert.deepEqual([again.read("home-composer:general"), again.list().length], [null, 0]);
+    assert.deepEqual([again.read("home-composer:general"), again.list().length, storage.entries.size], [null, 0, 0]);
   });
 
-  it("never keeps a draft that looks like it holds a credential, and removes the copy it kept before", () => {
+  it("refuses a recognised credential format at once, without asking main, and removes the copy kept before", async () => {
     const storage = new FakeStorage();
-    const store = createDraftStore(storage, clock("2026-10-28T10:00:00.000Z"));
-    store.write("home-composer:general", { title: "Use the key" }, "Use the key");
-    const refused = store.write("home-composer:general", { title: `Use the key ${FAKE_GITHUB}` }, "Use the key");
-    assert.deepEqual(refused, { kept: false, reason: "credential" });
-    assert.equal(storage.entries.size, 0);
+    const keys = savedKeys();
+    const store = createDraftStore(storage, keys.check, clock("2026-10-28T10:00:00.000Z"));
+    await store.write("home-composer:general", { title: "Use the key" }, "Use the key");
+    const asked = keys.state.calls;
+    assert.deepEqual(await store.write("home-composer:general", { title: `Use the key ${FAKE_GITHUB}` }, "Use the key"), { kept: false, reason: "credential" });
+    assert.deepEqual([keys.state.calls, storage.entries.size], [asked, 0]);
     assert.equal([...storage.entries.values()].some((value) => value.includes("ghp_")), false);
-    assert.deepEqual(createDraftStore(storage).read("home-composer:general"), null);
-    // A label is shown in the sidebar, so it is checked too.
-    assert.deepEqual(store.write("brief:t1:1", { goal: "Fine" }, FAKE_KEY_BLOCK), { kept: false, reason: "credential" });
   });
 
-  it("says when storage refused a write, deletes nothing, and keeps the earlier copy", () => {
+  it("refuses a draft holding a saved key inside other text, and removes the copy kept before", async () => {
     const storage = new FakeStorage();
-    const store = createDraftStore(storage, clock("2026-10-28T10:00:00.000Z"));
-    store.write("home-composer:general", { title: "First" }, "First");
-    storage.fail.add("write");
-    assert.deepEqual(store.write("home-composer:general", { title: "First, then more" }, "First, then more"), { kept: false, reason: "storage" });
-    assert.deepEqual(store.read("home-composer:general"), { title: "First" });
+    const store = createDraftStore(storage, savedKeys(SAVED).check, clock("2026-10-28T10:00:00.000Z"));
+    await store.write("home-composer:general", { title: "Rotate the key" }, "Rotate the key");
+    assert.deepEqual(await store.write("home-composer:general", { title: `Rotate the key${SAVED}today` }, "Rotate the key"), { kept: false, reason: "credential" });
+    assert.deepEqual([storage.entries.size, store.list().length], [0, 0]);
   });
 
-  it("works with storage that can't be read at all: it says so, reads nothing and keeps nothing", () => {
+  it("checks the label too: a saved key in it, or a recognised format, refuses the draft", async () => {
+    const storage = new FakeStorage();
+    const store = createDraftStore(storage, savedKeys(SAVED).check);
+    assert.deepEqual(await store.write("brief:t1:1", { goal: "Fine" }, `Title with ${SAVED}`), { kept: false, reason: "credential" });
+    assert.deepEqual(await store.write("brief:t1:2", { goal: "Fine" }, FAKE_KEY_BLOCK), { kept: false, reason: "credential" });
+    assert.equal(storage.entries.size, 0);
+  });
+
+  it("keeps nothing it couldn't check, and keeps the copy kept before as it was", async () => {
+    const storage = new FakeStorage();
+    const keys = savedKeys();
+    const store = createDraftStore(storage, keys.check, clock("2026-10-28T10:00:00.000Z"));
+    await store.write("home-composer:general", { title: "First" }, "First");
+    const before = at(storage, "home-composer:general");
+    keys.state.failing = true;
+    assert.deepEqual(await store.write("home-composer:general", { title: "First, then more" }, "First, then more"), { kept: false, reason: "unchecked" });
+    assert.deepEqual([at(storage, "home-composer:general"), store.read("home-composer:general")], [before, { title: "First" }]);
+  });
+
+  it("stores only the latest text when answers come out of order, and an older answer never overwrites it", async () => {
+    const storage = new FakeStorage();
+    const held = heldChecks();
+    const store = createDraftStore(storage, held.check);
+    const first = store.write("home-composer:general", { title: "A" }, "A");
+    const second = store.write("home-composer:general", { title: "A and B" }, "A and B");
+    await Promise.resolve();
+    assert.deepEqual(held.waiting.map((asked) => asked.text), ["A\nA", "A and B\nA and B"]);
+    held.waiting[1]!.answer(false);
+    assert.deepEqual(await second, { kept: true });
+    held.waiting[0]!.answer(false);
+    assert.deepEqual(await first, { kept: false, reason: "unchecked" });
+    assert.deepEqual(store.read("home-composer:general"), { title: "A and B" });
+    // A late match for older text never removes the newer copy either.
+    const third = store.write("home-composer:general", { title: "C" }, "C");
+    const fourth = store.write("home-composer:general", { title: "C, D" }, "C, D");
+    await Promise.resolve();
+    held.waiting[3]!.answer(false);
+    await fourth;
+    held.waiting[2]!.answer(true);
+    await third;
+    assert.deepEqual(store.read("home-composer:general"), { title: "C, D" });
+  });
+
+  it("never stores a write that a discard overtook", async () => {
+    const storage = new FakeStorage();
+    const held = heldChecks();
+    const store = createDraftStore(storage, held.check);
+    const pending = store.write("home-composer:general", { title: "Typed, then cleared" }, "Typed, then cleared");
+    await Promise.resolve();
+    store.discard("home-composer:general");
+    held.waiting[0]!.answer(false);
+    await pending;
+    assert.equal(storage.entries.size, 0);
+  });
+
+  it("checks stored copies again: one that fails is removed, one that can't be checked is kept out of sight", async () => {
+    const storage = new FakeStorage();
+    const record = (title: string) => JSON.stringify({ label: title, savedAt: "2026-10-28T10:00:00.000Z", value: { title } });
+    storage.entries.set(`${DRAFT_PREFIX}a:clean`, record("Clean"));
+    storage.entries.set(`${DRAFT_PREFIX}a:holds`, record(`Holds ${SAVED}`));
+    storage.entries.set(`${DRAFT_PREFIX}a:format`, record(`Holds ${FAKE_GITHUB}`));
+    const keys = savedKeys(SAVED);
+    const store = createDraftStore(storage, keys.check);
+    await store.recheck();
+    assert.deepEqual([store.list().map((draft) => draft.key), [...storage.entries.keys()].sort()], [["a:clean"], [`${DRAFT_PREFIX}a:clean`]]);
+    // A check that errors hides the copy and says so, but keeps it.
+    keys.state.failing = true;
+    await store.recheck();
+    assert.deepEqual([store.list().length, store.read("a:clean"), store.unchecked, storage.entries.has(`${DRAFT_PREFIX}a:clean`)], [0, null, true, true]);
+    keys.state.failing = false;
+    await store.recheck();
+    assert.deepEqual([store.list().map((draft) => draft.key), store.unchecked], [["a:clean"], false]);
+  });
+
+  it("removes, after a recheck, a copy that holds a key saved since it was kept", async () => {
+    const storage = new FakeStorage();
+    const keys = savedKeys();
+    const store = createDraftStore(storage, keys.check);
+    assert.deepEqual(await store.write("home-composer:general", { title: `Rotate ${LATER}` }, "Rotate"), { kept: true });
+    keys.state.keys.add(LATER);
+    await store.recheck();
+    assert.deepEqual([store.read("home-composer:general"), store.list().length, storage.entries.size], [null, 0, 0]);
+  });
+
+  it("says when storage refused a write, deletes nothing, and keeps the earlier copy", async () => {
+    const storage = new FakeStorage();
+    const store = createDraftStore(storage, savedKeys().check, clock("2026-10-28T10:00:00.000Z"));
+    await store.write("home-composer:general", { title: "First" }, "First");
+    storage.fail.add("write");
+    assert.deepEqual(await store.write("home-composer:general", { title: "First, then more" }, "First, then more"), { kept: false, reason: "storage" });
+    assert.deepEqual([store.read("home-composer:general"), store.list().length], [{ title: "First" }, 1]);
+  });
+
+  it("works with storage that can't be read at all: it says so, reads nothing and keeps nothing", async () => {
     const storage = new FakeStorage();
     storage.fail.add("read");
     storage.fail.add("write");
-    const store = createDraftStore(storage);
+    const store = createDraftStore(storage, savedKeys().check);
     assert.equal(store.available, false);
-    assert.deepEqual([store.read("x:y"), store.list(), store.write("home-composer:general", { title: "T" }, "T")], [null, [], { kept: false, reason: "storage" }]);
-    const none = createDraftStore(null);
-    assert.deepEqual([none.available, none.list(), none.write("a:b", "text", "label")], [false, [], { kept: false, reason: "storage" }]);
+    assert.deepEqual([store.read("x:y"), store.list(), await store.write("home-composer:general", { title: "T" }, "T")], [null, [], { kept: false, reason: "storage" }]);
+    const none = createDraftStore(null, savedKeys().check);
+    assert.deepEqual([none.available, none.list(), await none.write("a:b", "text", "label")], [false, [], { kept: false, reason: "storage" }]);
     assert.doesNotThrow(() => none.discard("a:b"));
+    await assert.doesNotReject(() => none.recheck());
   });
 
-  it("skips entries it can't read as drafts, and tells its listeners about every change", () => {
+  it("skips entries it can't read as drafts, and tells its listeners about every change", async () => {
     const storage = new FakeStorage();
     storage.entries.set(`${DRAFT_PREFIX}broken`, "{not json");
     storage.entries.set(`${DRAFT_PREFIX}partial`, JSON.stringify({ label: "No time" }));
     storage.entries.set("someone-else", JSON.stringify({ label: "x", savedAt: "y", value: 1 }));
-    const store = createDraftStore(storage);
+    const store = createDraftStore(storage, savedKeys().check);
+    await store.recheck();
     let heard = 0;
     const stop = store.subscribe(() => (heard += 1));
-    store.write("a:b", "text", "label");
+    await store.write("a:b", "text", "label");
     store.discard("a:b");
     stop();
-    store.write("a:c", "text", "label");
-    assert.deepEqual([store.list().map((draft) => draft.key), heard, store.version()], [["a:c"], 2, 3]);
+    await store.write("a:c", "text", "label");
+    assert.deepEqual([store.list().map((draft) => draft.key), heard], [["a:c"], 2]);
   });
 });

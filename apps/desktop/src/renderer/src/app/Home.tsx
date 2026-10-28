@@ -1,12 +1,12 @@
 import { Anchor, Badge, Box, Button, Code, Group, Paper, SimpleGrid, Stack, Table, Text, TextInput, Title } from "@mantine/core";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { EngineView, EnvironmentView, ProjectView, SettingsView, TaskState, TasksView, WslView } from "../../../shared/ipc";
 import { EngineBadge, EngineNotices } from "../features/engine";
 import { ProjectNotice, RemoveProject } from "../features/projects";
 import { errorMessage, usePoll } from "../shared/ui";
-import { DraftNotice, useDrafts } from "../shell/drafts";
+import { DraftNotice, useDraft } from "../shell/drafts";
 import { composerDraftKey } from "../shell/places";
-import type { DraftWrite, Navigate } from "./routes";
+import type { Navigate } from "./routes";
 
 /** A task's state in words, as the Tasks page shows it. */
 const STATE_LOOK: Record<TaskState, { label: string; color: string }> = {
@@ -109,10 +109,12 @@ export function ProjectHome({
 }) {
   // The title typed here is a draft (R30): kept on this computer across navigation and restarts until a task is
   // created from it, never one that looks like it holds a credential, and never sent anywhere.
-  const drafts = useDrafts();
-  const draftKey = composerDraftKey({ kind: "project", projectId: project.id });
-  const [title, setTitle] = useState(() => drafts.read<{ title: string }>(draftKey)?.title ?? "");
-  const [kept, setKept] = useState<DraftWrite | null>(null);
+  const draft = useDraft<{ title: string }>(composerDraftKey({ kind: "project", projectId: project.id }));
+  const [title, setTitle] = useState("");
+  // The kept copy, once it is checked against the saved keys; never over what was typed meanwhile.
+  useEffect(() => {
+    if (draft.restore) setTitle(draft.restore.title);
+  }, [draft.restore]);
   const [starting, setStarting] = useState(false);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const online = engine?.state.status === "online";
@@ -154,11 +156,8 @@ export function ProjectHome({
               onChange={(event) => {
                 const next = event.currentTarget.value;
                 setTitle(next);
-                if (next.trim()) setKept(drafts.write(draftKey, { title: next }, next.trim()));
-                else {
-                  drafts.discard(draftKey);
-                  setKept(null);
-                }
+                if (next.trim()) draft.change({ title: next }, next.trim());
+                else draft.discard();
               }}
               style={{ flex: "1 1 auto", minWidth: 0 }}
               data-testid="home-composer"
@@ -167,7 +166,7 @@ export function ProjectHome({
               Create task
             </Button>
           </Group>
-          <DraftNotice result={kept} />
+          <DraftNotice result={draft.result} />
           <Text size="xs" c="var(--nivra-text-3)">
             {tasks?.workspace.state === "unavailable"
               ? `Tasks can't be written now: ${tasks.workspace.reason}`

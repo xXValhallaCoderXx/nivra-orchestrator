@@ -225,7 +225,7 @@ export function NebiusConnection({ project, online, onCredentialsSaved, freshnes
 }
 
 /** Settings › Connections, Tavily (D37): the key research needs, kept like the Nebius key and shown only as saved or not. */
-export function TavilyConnection({ freshness = 0 }: { freshness?: number }) {
+export function TavilyConnection({ freshness = 0, onSaved }: { freshness?: number; onSaved?(): void }) {
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
@@ -240,6 +240,8 @@ export function TavilyConnection({ freshness = 0 }: { freshness?: number }) {
     setError(null);
     try {
       setSettings(await change());
+      // The key changed: drafts are checked against it again.
+      onSaved?.();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {

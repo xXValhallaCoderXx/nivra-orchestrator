@@ -178,6 +178,8 @@ function ConversationsNav({ route, onNavigate, conversations, projects, onCreate
 
 export interface SidebarDrafts {
   available: boolean;
+  /** Some stored drafts couldn't be checked against the saved keys, so they are out of sight for now. */
+  unchecked: boolean;
   list: ReadonlyArray<{ key: string; label: string; savedAt: string }>;
 }
 
@@ -272,9 +274,14 @@ export function Sidebar({
               </Text>
             </>
           ) : (
-            drafts.list.length > 0 && (
+            (drafts.list.length > 0 || drafts.unchecked) && (
               <>
                 <Text className="nivra-nav-label">Unsaved drafts</Text>
+                {drafts.unchecked && (
+                  <Text size="xs" c="var(--nivra-text-3)" px={10} data-testid="drafts-unchecked">
+                    Drafts can't be checked against your saved keys right now, so some aren't shown.
+                  </Text>
+                )}
                 {drafts.list.map((draft) => {
                   const place = placeOfDraft(draft.key);
                   const scope = place?.scope;

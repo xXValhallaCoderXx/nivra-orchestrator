@@ -69,6 +69,10 @@ function Shell() {
   const [conversationsVersion, setConversationsVersion] = useState(0);
   // Counts the saves of the key and project id: the sandbox check and environment read their engine's state again on each.
   const [credentialsSaved, setCredentialsSaved] = useState(0);
+  // A key saved, replaced or removed changes what a stored draft may hold: each is checked again before it is shown.
+  useEffect(() => {
+    if (credentialsSaved > 0) void draftStore.recheck();
+  }, [credentialsSaved, draftStore]);
   const [chosen, setChosen] = useState<Scope | null>(null);
   const [route, setRoute] = useState<Route>({ kind: "home" });
   // Hello and Explain runs this window started, by project: their pages find them again after any navigation.

@@ -65,19 +65,23 @@ export interface TaskStripProps {
 }
 
 /**
- * Drafts kept across navigation and restarts (Nate, G2), on this computer only, never sent anywhere. A draft holding
- * what looks like a credential isn't kept, and neither is one this computer's storage refused: `reason` says which, so
- * the page can tell the person (shell/drafts: `DraftNotice`). `key` is a stable name such as `new-task:<scope>` or
- * `brief:<taskId>:<version>`.
+ * Drafts kept across navigation and restarts (Nate, G2), on this computer only, never sent anywhere. A draft that holds
+ * one of the saved API keys or text in a recognised credential format isn't kept (`credential`), nor one that couldn't
+ * be checked against the saved keys (`unchecked`), nor one this computer's storage refused (`storage`); the page tells the
+ * person with shell/drafts' `DraftNotice`. `key` is a stable name such as `new-task:<scope>` or `brief:<taskId>:<version>`.
  */
-export type DraftWrite = { kept: true } | { kept: false; reason: "credential" | "storage" };
+export type DraftWrite = { kept: true } | { kept: false; reason: "credential" | "storage" | "unchecked" };
 
 export interface DraftStore {
+  /** The stored copy, once it is checked against the current saved keys; null otherwise. */
   read<T>(key: string): T | null;
-  /** `label` is the line the sidebar's "Unsaved drafts" shows, such as the brief's title: the page knows it best. */
-  write<T>(key: string, value: T, label: string): DraftWrite;
+  /**
+   * Checks the draft, then keeps it if it passed and is still the key's latest text. `label` is the line the sidebar's
+   * "Unsaved drafts" shows, such as the brief's title: the page knows it best.
+   */
+  write<T>(key: string, value: T, label: string): Promise<DraftWrite>;
   discard(key: string): void;
-  /** The drafts that exist, newest first, for the sidebar's "Unsaved drafts" list. */
+  /** The drafts that exist and are checked against the current saved keys, newest first, for "Unsaved drafts". */
   list(): ReadonlyArray<{ key: string; label: string; savedAt: string }>;
 }
 

@@ -128,6 +128,45 @@ test("a draft that looks like it holds a credential is refused: the warning show
   expect((await stored()).includes(TOKEN)).toBe(false);
 });
 
+test("a draft holding one of your saved keys inside other words isn't kept: the warning shows, the field keeps it, nothing is listed, and a relaunch brings nothing back", async ({}, testInfo) => {
+  // A synthetic key in no recognised format: only the check against the saved keys can catch it.
+  const key = "test-key-shell-0123456789";
+  await goTo(page, "settings-connections");
+  await page.getByTestId("nebius-key").fill(key);
+  await page.getByTestId("nebius-key-save").click();
+  await expect(page.getByTestId("nebius-key-state")).toContainText("Key saved");
+  await goTo(page, "home");
+  const typed = `Rotate the deploy key ${key} before Friday`;
+  await composer().fill(typed);
+  const warning = page.getByTestId("draft-not-kept");
+  await expect(warning).toHaveAttribute("data-reason", "credential");
+  await expect(warning).toHaveText("This draft isn't kept: it contains one of your saved keys or text in a recognised credential format. What you typed is still here.");
+  await expect(composer()).toHaveValue(typed);
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+  expect([(await shownText()).includes(key), (await stored()).includes(key)]).toEqual([false, false]);
+
+  await relaunch(testInfo);
+  await expect(page.getByTestId("home-title")).toHaveText(PROJECT);
+  await expect(composer()).toHaveValue("");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+  await page.evaluate(() => window.nivra.setNebiusKey(null));
+});
+
+test("a draft kept before a key was saved, holding that key's text, leaves the sidebar once the key is saved", async () => {
+  const key = "test-key-shell-later-9876543210";
+  await composer().fill(`Use ${key} for the staging deploy`);
+  await expect(page.getByTestId("nav-draft")).toHaveCount(1);
+  await goTo(page, "settings-connections");
+  await page.getByTestId("nebius-key").fill(key);
+  await page.getByTestId("nebius-key-save").click();
+  await expect(page.getByTestId("nebius-key-state")).toContainText("Key saved");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+  expect((await stored()).includes(key)).toBe(false);
+  await goTo(page, "home");
+  await expect(composer()).toHaveValue("");
+  await page.evaluate(() => window.nivra.setNebiusKey(null));
+});
+
 test("Ctrl+K opens the switcher on the project in view, Esc closes it and leaves the typed text, F6 moves between the sidebar and the page, Ctrl+comma opens Settings", async () => {
   await composer().fill(TITLE);
   await page.getByTestId("main").focus();
