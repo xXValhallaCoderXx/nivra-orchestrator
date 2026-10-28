@@ -425,9 +425,9 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   ) STRICT;
 
   -- A history the person chose to start again after a loss: when, why, what was lost, the new ledger id it started
-  -- under, the ledger's month then and the recovery month it holds through (the latest month any evidence shows,
-  -- however many of the ledger's months that spans), and what they said was left of it, money and counted services
-  -- (null: wait for the month after). Spend before it is unknown, never zero.
+  -- under, the ledger's month then and the recovery month it holds through (the latest month the lost history
+  -- established, as its guard kept it, however many of the ledger's months that spans), and what they said was left
+  -- of it, money and counted services (null: wait for the month after). Spend before it is unknown, never zero.
   CREATE TABLE budget_adjustments (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('history-lost')),

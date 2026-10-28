@@ -46,6 +46,7 @@ const ESTABLISHED: PriceCatalogue = {
   ...CURRENT_PRICES,
   version: "test-established-1",
   currency: { code: "USD", source: "test" },
+  listings: "free",
   models: CURRENT_PRICES.models.map((rate) => ({ ...rate, bounds: { inputTokens: 128_000, outputCappedByMaxTokens: true as const, source: "test", establishedOn: "2026-10-28" } })),
 };
 
@@ -160,6 +161,17 @@ describe("the budget through the host", () => {
     opening.db.close();
     await hostAt(at).budgetSummary();
     assert.equal(guardAt(at).last()?.month, monthOf(later, DRAFT.timezone).label);
+  });
+
+  it("records the month its ledger established, never the computer's: a clock run ahead names no later month", async (t) => {
+    const at = root();
+    const host = hostAt(at);
+    await host.setBudgetPolicy(DRAFT);
+    const month = monthOf(Date.now(), DRAFT.timezone).label;
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 70 * 24 * 60 * 60 * 1000 });
+    await host.setBudgetPolicy({ ...DRAFT, monthlyMicros: 25_000_000 });
+    t.mock.timers.reset();
+    assert.deepEqual([guardAt(at).last()?.revision, guardAt(at).last()?.month], [2, month]);
   });
 
   it("refuses to start a new history when nothing needs recovery", async () => {

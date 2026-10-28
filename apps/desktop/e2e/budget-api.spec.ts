@@ -57,8 +57,8 @@ test("the budget's calls refuse a dollar budget the app can't keep yet, keep cou
     }, draft);
   expect(await page.evaluate(() => window.nivra.getBudgetPolicy())).toBeNull();
   const dollars = await attempt(DRAFT);
-  expect(dollars).toMatch(/Nivra can't keep a monthly budget in dollars yet: it hasn't established the currency of its price list, or the most a request can cost with any model on it,/);
-  expect(dollars).toMatch(/Your monthly budget stays off, with today's fixed allowances\./);
+  expect(dollars).toMatch(/Nivra can't keep a monthly budget in dollars yet: it hasn't established the currency of its price list, the most a request can cost with any model on its price list or whether listing its models is charged,/);
+  expect(dollars).toMatch(/Your monthly budget stays off, and the existing per-run limits apply\./);
   expect(await page.evaluate(() => window.nivra.getBudgetPolicy())).toBeNull();
   const off = await page.evaluate(() => window.nivra.setBudgetPolicy(null));
   expect([off.policy, off.poolMicros, off.gaps.includes("currency-unconfirmed"), off.gaps.includes("bounds-unestablished")]).toEqual([null, null, true, true]);

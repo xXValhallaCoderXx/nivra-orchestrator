@@ -83,6 +83,7 @@ const ESTABLISHED: PriceCatalogue = {
   ...TOKEN_FACTORY_PRICES,
   version: "test-established-1",
   currency: { code: "USD", source: "a written answer from the provider (test)" },
+  listings: "free",
   models: TOKEN_FACTORY_PRICES.models.map((rate) => ({ ...rate, bounds: { inputTokens: 128_000, outputCappedByMaxTokens: true as const, source: "test", establishedOn: "2026-10-28" } })),
 };
 // One request with Super's bounds: all 128,000 input at 0.30 a million, and 8,000 output at 0.90 a million.
@@ -540,7 +541,7 @@ describe("price lists", () => {
     const db = workspace();
     const first = granted(db);
     registerCatalogue(db, ESTABLISHED, OCT);
-    assert.throws(() => registerCatalogue(db, { ...ESTABLISHED, listings: "free" }, OCT), /already kept/);
+    assert.throws(() => registerCatalogue(db, { ...ESTABLISHED, listings: "charged" }, OCT), /already kept/);
     const dearer: PriceCatalogue = { ...ESTABLISHED, version: "test-established-2", models: ESTABLISHED.models.map((rate) => ({ ...rate, inputMicrosPerMillion: rate.inputMicrosPerMillion * 2 })) };
     const second = granted(db, {}, OCT, dearer);
     assert.equal(getGrant(db, first.id)?.catalogueVersion, "test-established-1");
@@ -790,6 +791,16 @@ describe("a lost history's recovery month: the latest month it established, as i
     granted(db, {}, DEC);
   });
 
+  it("falls back, for a guard record from before months were kept, to the clocks those builds read: this computer's, or the record's time", () => {
+    for (const [at, now] of [[OCT, NOV], [NOV, OCT]]) {
+      const db = workspace();
+      granted(db, {}, OCT);
+      startNewHistory(db, { recovery: lost(db, { month: null, at }), remaining: null, now, timezone: "UTC" });
+      assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
+      assert.equal(refusal(db, {}, NOV).code, "history-wait");
+    }
+  });
+
   it("never takes a month from a clock: one the lost history never reached is its own, whatever the guard's record time or this computer says", () => {
     const db = workspace();
     granted(db, {}, OCT);
@@ -844,13 +855,15 @@ describe("a budget in dollars", () => {
       () => setPolicy(db, DRAFT, OCT, TOKEN_FACTORY_PRICES),
       (error: Error) =>
         error.message ===
-        "Nivra can't keep a monthly budget in dollars yet: it hasn't established the currency of its price list, or the most a request can cost with any model on it, so it couldn't keep each call within the budget before sending it. Your monthly budget stays off, with today's fixed allowances. Set a dollar budget once Nivra has established them.",
+        "Nivra can't keep a monthly budget in dollars yet: it hasn't established the currency of its price list, the most a request can cost with any model on its price list or whether listing its models is charged, so it couldn't keep each call within the budget before sending it. Your monthly budget stays off, and the existing per-run limits apply. You can set a dollar budget once an update to Nivra establishes what's missing.",
     );
     assert.deepEqual([currentPolicy(db), ledgerState(db), currentPeriod(db)], [null, null, null], "nothing was written");
   });
 
-  it("is refused while any model on the list has no bounds, or the list has no currency, naming what is missing", () => {
+  it("is refused while any model on the list has no bounds, the list has no currency, or listing models isn't known to be free, naming what is missing", () => {
     const db = workspace();
+    assert.throws(() => setPolicy(db, DRAFT, OCT, { ...ESTABLISHED, listings: "unknown" }), (error: Error) => /it hasn't established whether listing its models is charged, so/.test(error.message));
+    assert.throws(() => setPolicy(db, DRAFT, OCT, { ...ESTABLISHED, listings: "charged" }), (error: Error) => /it hasn't established a price for listing its models, so/.test(error.message));
     assert.throws(() => setPolicy(db, DRAFT, OCT, lightningUnbounded), (error: Error) => /it hasn't established the most a request can cost with nvidia\/Nemotron-3_5-Lightning, so/.test(error.message));
     assert.throws(() => setPolicy(db, DRAFT, OCT, noCurrency), (error: Error) => /it hasn't established the currency of its price list, so/.test(error.message));
     assert.equal(ledgerState(db), null);

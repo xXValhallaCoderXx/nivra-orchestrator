@@ -49,6 +49,7 @@ const ESTABLISHED: PriceCatalogue = {
   ...TOKEN_FACTORY_PRICES,
   version: "test-established-1",
   currency: { code: "USD", source: "test" },
+  listings: "free",
   models: TOKEN_FACTORY_PRICES.models.map((rate) => ({ ...rate, bounds: { inputTokens: 128_000, outputCappedByMaxTokens: true as const, source: "test", establishedOn: "2026-10-28" } })),
 };
 const DRAFT: BudgetPolicyDraft = {
@@ -188,6 +189,19 @@ describe("the guard log", () => {
     appendFileSync(guard.path, `${json}\t${createHash("sha256").update(json).digest("hex")}\n`);
     const last = guard.last();
     assert.deepEqual([last?.revision, last?.month, last?.recovery?.reason, last?.recovery?.guard.month], [3, null, "ledger-behind", null]);
+  });
+
+  it("never names an earlier month than one it has read or written, and reads back the latest month any record named", () => {
+    const { guard } = profile();
+    const state = { ledgerId: randomUUID(), revision: 1, chain: digest() };
+    guard.append(record(state, null, "2026-11"));
+    guard.append(record({ ...state, revision: 2 }, null, "2026-10"));
+    assert.deepEqual([guard.last()?.revision, guard.last()?.month], [2, "2026-11"]);
+    // A log whose earlier line names the later month, as another writer might have left it.
+    const json = JSON.stringify({ v: 1, ...record({ ...state, revision: 3 }, null, "2026-09") });
+    appendFileSync(guard.path, `${json}\t${createHash("sha256").update(json).digest("hex")}\n`);
+    const fresh = new BudgetGuard(guard.path);
+    assert.deepEqual([fresh.last()?.revision, fresh.last()?.month], [3, "2026-11"]);
   });
 
   it("skips a line whose checksum doesn't match", () => {
@@ -600,18 +614,20 @@ describe("the latest month a lost history established, kept by the guard whateve
     for (const choice of CHOICES) holdsThroughNovember(providerAhead(), choice);
   });
 
-  it("carries November through the recovery: the new history's records keep it, and a second loss holds through it too", () => {
-    const lost = clockMovedBack();
-    const { db, guard, recovery, dir, now } = lost;
-    guard.append(recorded(db, startNewHistory(db, { recovery, remaining: null, now, timezone: "UTC" }), now));
-    guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 30_000_000 }, now, ESTABLISHED).authority!, now));
-    const carried = guard.last();
-    // October's first copy is put back again: it holds neither November nor the first loss. Only the guard remembers.
-    const restored = restore(db, join(dir, "october.db")).db;
-    const found = check(restored, guard);
-    assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-replaced");
-    holdsThroughNovember({ ...lost, db: restored, recovery: found.recovery }, CHOICES[0]);
-    assert.equal(carried?.month, "2026-11", "the new history's records named November while its ledger was in October");
+  it("carries November through the recovery: the new history's records keep it, and a second loss holds through it too, whatever is left", () => {
+    for (const choice of CHOICES) {
+      const lost = clockMovedBack();
+      const { db, guard, recovery, dir, now } = lost;
+      guard.append(recorded(db, startNewHistory(db, { recovery, remaining: null, now, timezone: "UTC" }), now));
+      guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 30_000_000 }, now, ESTABLISHED).authority!, now));
+      const carried = guard.last();
+      // October's first copy is put back again: it holds neither November nor the first loss. Only the guard remembers.
+      const restored = restore(db, join(dir, "october.db")).db;
+      const found = check(restored, guard);
+      assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-replaced", choice.choice);
+      holdsThroughNovember({ ...lost, db: restored, recovery: found.recovery }, choice);
+      assert.equal(carried?.month, "2026-11", "the new history's records named November while its ledger was in October");
+    }
   });
 
   it("never records an earlier month than the guard's last, and a recovery it records keeps the guard's month apart from its time", () => {
@@ -620,6 +636,9 @@ describe("the latest month a lost history established, kept by the guard whateve
     const caughtUp = checkHistory(record(earlier, null, "2026-11"), { ...ledger, month: "2026-10", chainAtGuard: earlier.chain, answered: null }, false, OCT);
     assert.equal(caughtUp.append?.month, "2026-11");
     assert.equal(checkHistory(null, { ...ledger, month: "2026-12", chainAtGuard: null, answered: null }, false, OCT).append?.month, "2026-12");
+    // A guard record from before months were kept, at the ledger's own revision: the guard catches up with the month.
+    assert.equal(checkHistory(record(ledger, null, null), { ...ledger, month: "2026-11", chainAtGuard: ledger.chain, answered: null }, false, OCT).append?.month, "2026-11");
+    assert.equal(checkHistory(record(ledger, null, "2026-11"), { ...ledger, month: "2026-11", chainAtGuard: ledger.chain, answered: null }, false, OCT).append, null);
     const lostOne = checkHistory(record(ledger, null, "2026-11", OCT_BACK), null, false, NOV);
     assert.ok(lostOne.state === "needs-recovery");
     assert.deepEqual([lostOne.recovery.guard.month, lostOne.recovery.guard.at, lostOne.append?.month], ["2026-11", new Date(OCT_BACK).toISOString(), "2026-11"]);

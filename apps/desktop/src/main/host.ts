@@ -4954,8 +4954,17 @@ export class Host {
    * next start) but nothing more is spent this session.
    */
   #guardBudget(guard: BudgetGuard, workspace: WorkspaceDb, authority: LedgerState, now: number): void {
+    let month: string | null;
     try {
-      guard.append({ ledgerId: authority.ledgerId, revision: authority.revision, chain: authority.chain, month: establishedMonth(workspace), recovery: null, at: new Date(now).toISOString() });
+      month = establishedMonth(workspace);
+    } catch (error) {
+      // The change is saved, but its month can't be read back, so it can't be recorded and nothing more is spent.
+      this.#budgetState = { kind: "unavailable", message: BUDGET_HISTORY_UNREADABLE };
+      this.#options.log(`Budget: the history couldn't be read after a change (${guardErrorCode(error)}).`);
+      throw new Error(BUDGET_HISTORY_UNREADABLE);
+    }
+    try {
+      guard.append({ ledgerId: authority.ledgerId, revision: authority.revision, chain: authority.chain, month, recovery: null, at: new Date(now).toISOString() });
     } catch (error) {
       this.#budgetState = { kind: "unavailable", message: BUDGET_GUARD_FAILED };
       this.#options.log(`Budget: the guard couldn't be written (${guardErrorCode(error)}).`);

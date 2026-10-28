@@ -113,11 +113,11 @@ const waitFor = (loss: Loss) => `wait for ${monthLabel(loss.throughIndex + 1)}, 
 export const BUDGET_UNVERIFIED =
   "Nivra's budget history doesn't match what its guard last checked, so nothing was granted, sent or released. Open Nivra again to check it.";
 const UNESTABLISHED =
-  "Your monthly budget is in dollars, but Nivra hasn't yet established this model's price limits, or its price list's currency, so it can't keep this call within your budget. Turn the monthly budget off to use today's fixed allowances, or wait until Nivra has established them.";
+  "Your monthly budget is in dollars, but Nivra hasn't yet established this model's price limits, or its price list's currency, so it can't keep this call within your budget. Turn the monthly budget off to use the existing per-run limits, or wait for an update to Nivra that establishes them.";
 /** Said under a money policy for a call to a model the price list doesn't have. */
 const noPrice = (models: readonly string[]) =>
-  `Your monthly budget is in dollars, but Nivra's price list has no price for ${listed(models)}, so it can't keep this call within your budget. Turn the monthly budget off to use today's fixed allowances, or wait for a price list that includes it.`;
-const UNPRICED_SPEND = `This month holds spend Nivra couldn't price, from before your monthly budget could count it, so it can't tell how much of your budget is left. Turn the monthly budget off to use today's fixed allowances, or ${CONFIRM_NEXT}.`;
+  `Your monthly budget is in dollars, but Nivra's price list has no price for ${listed(models)}, so it can't keep this call within your budget. Turn the monthly budget off to use the existing per-run limits, or wait for an update to Nivra whose price list includes it.`;
+const UNPRICED_SPEND = `This month holds spend Nivra couldn't price, from before your monthly budget could count it, so it can't tell how much of your budget is left. Turn the monthly budget off to use the existing per-run limits, or ${CONFIRM_NEXT}.`;
 
 /** The ledger's id, authority revision and chained digest, or null before its first change. */
 export function ledgerState(workspace: WorkspaceDb): LedgerState | null {
@@ -217,24 +217,28 @@ function currentPolicyIn(db: DatabaseSync): BudgetPolicy | null {
 
 /** Names in a sentence: "a", "a and b", "a, b and c". */
 const listed = (names: readonly string[]) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);
+/** Alternatives in a sentence: "a", "a or b", "a, b or c". */
+const eitherOf = (items: readonly string[]) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} or ${items.at(-1)}`);
 
 /**
  * Why a monthly budget in dollars can't be kept with `catalogue`, in the person's words, or null when it can: the list's
- * currency must be established, and every model on it must have its bounds established, so that each model call Nivra
- * makes can be reserved at its most before it is sent. `current` is the policy now in force, which a refusal leaves as
- * it is: a budget that can't be kept is never saved, and never quietly turned off or into counts alone.
+ * currency must be established, every model on it must have its bounds established, and listing models must be known to
+ * be free, so that each call Nivra makes can be reserved at its most before it is sent and nothing it sends falls
+ * outside the budget. `current` is the policy now in force, which a refusal leaves as it is: a budget that can't be
+ * kept is never saved, and never quietly turned off or into counts alone.
  */
 export function dollarBudgetRefusal(catalogue: PriceCatalogue, current: BudgetPolicy | null): string | null {
   const unbounded = catalogue.models.filter((rate) => rate.bounds === null).map((rate) => rate.model);
-  if (catalogue.currency !== null && unbounded.length === 0) return null;
-  const every = unbounded.length === catalogue.models.length;
-  const models = every ? (catalogue.currency === null ? "any model on it" : "any model on its price list") : listed(unbounded);
-  const cost = unbounded.length === 0 ? null : `the most a request can cost with ${models}`;
-  const what = catalogue.currency === null ? `the currency of its price list${cost === null ? "" : `, or ${cost}`}` : cost;
-  const why = `Nivra can't keep a monthly budget in dollars yet: it hasn't established ${what}, so it couldn't keep each call within the budget before sending it.`;
+  const missing = [
+    ...(catalogue.currency === null ? ["the currency of its price list"] : []),
+    ...(unbounded.length === 0 ? [] : [`the most a request can cost with ${unbounded.length === catalogue.models.length ? "any model on its price list" : listed(unbounded)}`]),
+    ...(catalogue.listings === "free" ? [] : [catalogue.listings === "charged" ? "a price for listing its models" : "whether listing its models is charged"]),
+  ];
+  if (missing.length === 0) return null;
+  const why = `Nivra can't keep a monthly budget in dollars yet: it hasn't established ${eitherOf(missing)}, so it couldn't keep each call within the budget before sending it.`;
   return current === null
-    ? `${why} Your monthly budget stays off, with today's fixed allowances. Set a dollar budget once Nivra has established them.`
-    : `${why} Your budget wasn't changed: it stays at ${limitDollars(current.monthlyMicros)} dollars a month. Turn the monthly budget off to use today's fixed allowances, or wait until Nivra has established them.`;
+    ? `${why} Your monthly budget stays off, and the existing per-run limits apply. You can set a dollar budget once an update to Nivra establishes what's missing.`
+    : `${why} Your budget wasn't changed: it stays at ${limitDollars(current.monthlyMicros)} dollars a month. Turn the monthly budget off to use the existing per-run limits instead, or wait for an update to Nivra that establishes what's missing.`;
 }
 
 /**
@@ -644,9 +648,10 @@ export function writeGrant(
     // refused; with the budget off it is admitted, counted and unpriced, its money unknown, never 0 (Nate's choice (b)).
     if (unlisted.length > 0 && policy) return { refused: { code: "no-price" as const, message: noPrice(unlisted) } };
     const established = context.catalogue.currency !== null;
-    const productiveBound = asked.models.length === 0 ? 0 : unlisted.length > 0 ? null : boundAcross(rates, asked.productive.outputTokens);
-    const finalisationBound = asked.models.length === 0 ? 0 : unlisted.length > 0 ? null : boundAcross(rates, asked.finalisation.outputTokens);
-    const priced = asked.models.length === 0 || (established && productiveBound !== null && finalisationBound !== null);
+    const productiveBound = asked.models.length === 0 ? 0 : boundAcross(rates, asked.productive.outputTokens);
+    const finalisationBound = asked.models.length === 0 ? 0 : boundAcross(rates, asked.finalisation.outputTokens);
+    // One model the list doesn't have leaves the whole grant unpriced, whatever the others' bounds.
+    const priced = asked.models.length === 0 || (unlisted.length === 0 && established && productiveBound !== null && finalisationBound !== null);
     const productiveMicros = priced ? asked.productive.requests * productiveBound! : null;
     const finalisationMicros = priced ? asked.finalisation.requests * finalisationBound! : null;
     const timezone = policy?.timezone ?? context.timezone;
@@ -927,8 +932,9 @@ export function recordJournal(workspace: WorkspaceDb, id: string, rows: readonly
  * ledger with none opens its first), and the restriction holds through the latest month the lost history established,
  * as its guard kept it, or the ledger's month when that is later. Never by the computer's clock, which may have moved
  * back or run behind the provider's: a history put back from an earlier month can't leave behind a month the lost one
- * reached, however that month is established again. Spend before the loss is unknown, never zero. The caller records
- * the returned revision in the guard, with the recovery cleared.
+ * reached, however that month is established again. (A guard record from before months were kept falls back to the
+ * clocks those builds read.) Spend before the loss is unknown, never zero. The caller records the returned revision in
+ * the guard, with the recovery cleared.
  */
 export function startNewHistory(workspace: WorkspaceDb, input: { recovery: BudgetRecovery; remaining: BudgetRemaining | null; now: number; timezone: string }): LedgerState {
   const at = iso(input.now);
@@ -940,8 +946,11 @@ export function startNewHistory(workspace: WorkspaceDb, input: { recovery: Budge
     const current = currentPeriodIn(db);
     const month = monthOf(input.now, input.timezone);
     const periodIdx = current?.index ?? month.index;
-    // The recovery month: the latest month the lost history established, as its guard kept it, or the ledger's own.
-    const throughIdx = Math.max(periodIdx, input.recovery.guard.month === null ? periodIdx : monthIndex(input.recovery.guard.month));
+    // The recovery month: the latest month the lost history established, as its guard kept it, or the ledger's own. A
+    // guard record from before months were kept (review builds only) names none: then, as those builds did, the latest
+    // month this computer's clock or that record's time shows.
+    const kept = input.recovery.guard.month === null ? Math.max(month.index, monthOf(Date.parse(input.recovery.guard.at), input.timezone).index) : monthIndex(input.recovery.guard.month);
+    const throughIdx = Math.max(periodIdx, kept);
     db.prepare("INSERT INTO budget_adjustments (id, kind, ledger_id, period_idx, through_idx, reason, recovery_json, remaining_json, revision, created_at) VALUES (?, 'history-lost', ?, ?, ?, ?, ?, ?, ?, ?)").run(
       randomUUID(),
       ledgerId,

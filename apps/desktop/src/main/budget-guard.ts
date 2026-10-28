@@ -75,12 +75,17 @@ export function guardErrorCode(error: unknown): string {
 
 export class BudgetGuard {
   readonly path: string;
+  /** The latest month any whole record named, read or written: no record names an earlier one. */
+  #month: string | null = null;
 
   constructor(path: string) {
     this.path = path;
   }
 
-  /** The last whole record, or null when the log is missing or holds none. Lines that fail their check are skipped. */
+  /**
+   * The last whole record, or null when the log is missing or holds none, naming the latest month any whole record
+   * named. Lines that fail their check are skipped.
+   */
   last(): GuardRecord | null {
     let text: string;
     try {
@@ -90,6 +95,7 @@ export class BudgetGuard {
       throw error;
     }
     let last: GuardRecord | null = null;
+    let latest: string | null = null;
     for (const line of text.split("\n")) {
       const tab = line.lastIndexOf("\t");
       if (tab < 0) continue;
@@ -102,17 +108,22 @@ export class BudgetGuard {
         continue;
       }
       const parsed = GuardLine.safeParse(value);
-      if (parsed.success) last = { ledgerId: parsed.data.ledgerId, revision: parsed.data.revision, chain: parsed.data.chain, month: parsed.data.month, recovery: parsed.data.recovery, at: parsed.data.at };
+      if (!parsed.success) continue;
+      last = { ledgerId: parsed.data.ledgerId, revision: parsed.data.revision, chain: parsed.data.chain, month: parsed.data.month, recovery: parsed.data.recovery, at: parsed.data.at };
+      latest = laterMonth(latest, parsed.data.month);
     }
-    return last;
+    this.#month = laterMonth(this.#month, latest);
+    return last === null ? null : { ...last, month: laterMonth(last.month, latest) };
   }
 
   /**
    * Appends a record and fsyncs it before returning. Throws when it can't, and then nothing that depends on the record
-   * may be sent. A last line left cut short by a crash is ended first, so the new record stands on a line of its own.
+   * may be sent. A last line left cut short by a crash is ended first, so the new record stands on a line of its own. The
+   * record names no earlier month than the guard has read or written.
    */
   append(record: GuardRecord): void {
-    const json = JSON.stringify({ v: 1, ledgerId: record.ledgerId, revision: record.revision, chain: record.chain, month: record.month, recovery: record.recovery, at: record.at });
+    const month = laterMonth(record.month, this.#month);
+    const json = JSON.stringify({ v: 1, ledgerId: record.ledgerId, revision: record.revision, chain: record.chain, month, recovery: record.recovery, at: record.at });
     const fd = openSync(this.path, "a+", 0o600);
     let created = false;
     try {
@@ -131,6 +142,7 @@ export class BudgetGuard {
     } finally {
       closeSync(fd);
     }
+    this.#month = month;
     if (created) syncFolder(dirname(this.path));
   }
 }
@@ -190,7 +202,8 @@ export function checkHistory(guard: GuardRecord | null, ledger: LedgerView | nul
     const answered = ledger !== null && ledger.answered !== null && ledger.revision === ledger.answered.revision && sameRecovery(ledger.answered.recovery, guard.recovery);
     return holds || answered ? { state: "ok", append: recordOf(ledger!) } : { state: "needs-recovery", recovery: guard.recovery, append: null };
   }
-  if (holds) return { state: "ok", append: ledger!.revision > guard.revision ? recordOf(ledger!) : null };
+  // The guard catches up with a revision past its own, or a later month at the same one (a record from before months were kept).
+  if (holds) return { state: "ok", append: ledger!.revision > guard.revision || laterMonth(ledger!.month, guard.month) !== guard.month ? recordOf(ledger!) : null };
   let reason: BudgetRecoveryReason;
   if (ledger === null) reason = keptAside ? "workspace-kept-aside" : "ledger-missing";
   else if (ledger.ledgerId !== guard.ledgerId) reason = "ledger-replaced";
