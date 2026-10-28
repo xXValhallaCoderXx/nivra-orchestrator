@@ -2733,14 +2733,17 @@ checked unchanged afterwards):
 
 Lane C's PR 1 for NIV-57: the budget's contract, the host's ledger, its guard and the six calls the budget screen and
 the evaluation harness will both use. Backend only, and nothing spends through it yet. On `feature/budget-ledger`, from
-`main` at `a902bc8`. Tested at `42c9c47`; the commit after it adds only D48, AGENTS.md's rules, the development notes
-and this record.
+`main` at `a902bc8`. Tested at `662efbc`: the fix for Nate's review (`bb451ee`), with main at `ab82e91` (Track A's
+docs) merged in. The commit after it adds only docs.
 
 | Commit | What |
 |---|---|
 | `5ed855a` | The contract and today's price list; the ledger (migration 8), the guard, the host's block and the six calls; the tests; the schema pins move to 8 |
 | `b796823` | The first independent review's fixes, each with its test |
 | `42c9c47` | The second independent review's fixes, each with its test |
+| `40b7564` | D48, AGENTS.md's rules, the development notes and this record, with the checks at `42c9c47` |
+| `bb451ee` | Nate's review of `40b7564`: a lost history's restriction holds through its recovery month, with regression tests |
+| `662efbc` | Main (`ab82e91`) merged in |
 
 NIV-66's checkpoints, as this PR leaves them:
 - **Checkpoint 1, the contract:** done. Money in integer micro-units, rounded up per request; presets as starting
@@ -2753,22 +2756,36 @@ NIV-66's checkpoints, as this PR leaves them:
 - **Bounds and currency:** not established. Until C1 checkpoint 1 establishes them from a supported source, no model is
   admitted under a money policy.
 
-Passes, at `42c9c47`, one at a time under the shared lock:
-- `pnpm verify`: 1,375 passed (domain 120, engine 779, desktop 476).
+Nate's finding at `40b7564`, and its fix in `bb451ee`: a backup from an older month, put back, took the new history's
+restriction to that old month, and confirming the real month bypassed it. The restriction now holds through the
+recovery month (D48). Its regression tests:
+- `budget-store.test.ts`, "a lost history's recovery month": a wait, and a finite allowance with Nebius operations, each
+  refused in the history's old month and again once the real month is confirmed, counting what was admitted before the
+  confirmation, and freed in the month after; the guard's last record as evidence with the computer's clock behind;
+  and only the loss's own months excused.
+- `budget-guard.test.ts`, "a backup from an older month put back after the real month began": the same, on real files,
+  with October's backup put back after November opened on the provider's clock.
+- Mutations of the bug's three parts (a loss binding only the ledger month it was recorded in, grants since a loss
+  counted only in the current month, and the recovery month taken from the ledger's month alone) are each caught by
+  an assertion, the last one on real files too.
+
+Passes, at `662efbc`, one at a time under the shared lock:
+- `pnpm verify`: 1,381 passed (domain 120, engine 779, desktop 482).
 - Built e2e (`test:e2e`, under `xvfb-run -a`): 95 passed, `budget-api.spec.ts` among them.
 - Packaged (`stage:runtime linux-x64`, `package:dir`, then `test:packaged`): 33 passed, `budget-api.spec.ts` among them.
-- `test:windows`, after `pnpm dev:win --no-launch`, in the Windows turn Nate approved (28 Oct, 20:50 to 20:52 SGT,
-  from this lane's worktree, with Track A's clearance): 13 passed (`windows.spec.ts` 8, `workspace-windows.spec.ts` 5),
-  among them `windows.spec.ts:224`, "the release's WSL home, ~/.nivra, is as it was, and this run's own home goes".
-  `tasklist` showed no `Nivra.exe` before the turn or after it, and fingerprints of `~/.nivra` and `~/.nivra-dev`
-  (each file's name, size and modification time) were the same before and after. The Windows suite has no budget test of
-  its own: it shows that the Windows build, with these main and preload changes, passes the suite it has.
-- Mutations, each of the PR's 56 safety claims broken alone and its test file run: 56 of 56 caught. Five were caught
+- `test:windows`, after `pnpm dev:win --no-launch`, in a second Windows turn on the fixed revision, within Nate's
+  approval (28 Oct, 21:31 to 21:33 SGT, each step taking the lock as it queued, from this lane's worktree, with Track
+  A's clearance): 13 passed (`windows.spec.ts` 8, `workspace-windows.spec.ts` 5), among them `windows.spec.ts:224`,
+  "the release's WSL home, ~/.nivra, is as it was, and this run's own home goes". `tasklist` showed no `Nivra.exe`
+  before the turn or after it, and fingerprints of `~/.nivra` and `~/.nivra-dev` (each file's name, size and
+  modification time) were the same before and after. The Windows suite has no budget test of its own: it shows that the
+  Windows build, with these main and preload changes, passes the suite it has.
+- Mutations, each of the PR's 62 safety claims broken alone and its test file run: 62 of 62 caught. Five were caught
   only by a deeper layer, a trigger or schema check refusing the write before an assertion could: a grant that may
   have been sent released, an interrupted seal settling, a grant's day going back, and the provider's clock or the
   person opening the current month again.
 
-Skips, apart from the passes:
+Skips, apart from the passes, at `662efbc`:
 - `pnpm verify`: none.
 - Built e2e: 1, `explain.spec.ts:197`, "only a packaged app ignores the switch": it checks that a packaged app ignores
   a test switch, so it runs only in the packaged project.
@@ -2782,6 +2799,9 @@ Skips, apart from the passes:
   through a screen; the packaged user journey needs its own check once NIV-56's design is built.
 
 Earlier runs:
+- At `42c9c47` (the head before Nate's review): verify 1,375 passed; built e2e 95 passed, 1 skipped
+  (`explain.spec.ts:197`); packaged 33 passed, 63 skipped; `test:windows` 13 passed (20:50 to 20:52 SGT, with no
+  `Nivra.exe` left and `~/.nivra` as it was); mutations 56 of 56.
 - At `5ed855a`: verify 1,342 passed; built e2e 95 passed, 1 skipped; packaged 33 passed, 63 skipped; mutations 23 of 23.
 - At `b796823`: verify 1,363 passed; built e2e 95 passed, 1 skipped; packaged 33 passed, 63 skipped; mutations 43 of
   43 (the first run caught 40: three trigger tests failed for the wrong reason, a hand edit refused for its revision

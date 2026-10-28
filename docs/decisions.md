@@ -3372,13 +3372,16 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
   recovery. The guard records that, so it survives restarts, and every budget change is refused (and, from PR 2a, every
   spendable call) until the person puts back the matching copy and opens Nivra again, or starts a new history.
 - **A new history** takes a new ledger id, at a revision past both the ledger's and the guard's, so no copy of the lost
-  history can later pass for it. It records the loss, keeps the current month, and makes every grant still open
-  uncertain, since whether it was sent can't be known. Spend earlier in that month is unknown, never zero. The person
-  says what is left of the month, money and each counted service, or chooses to wait for the next, and that binds in
-  every mode, with or without a policy: waiting admits nothing, and what is left admits only priced grants whose money
-  and counted services fit it. A new history whose guard record couldn't be written clears the recovery at the next
-  start, with no second loss, as long as the ledger is unchanged since. A guard that can't be read or written stops all
-  spending, and so do budget records in the history that can't be read.
+  history can later pass for it. It records the loss, and makes every grant still open uncertain, since whether it was
+  sent can't be known. Spend earlier in that month is unknown, never zero. The person says what is left of the month,
+  money and each counted service, or chooses to wait for the month after, and that binds in every mode, with or without
+  a policy: waiting admits nothing, and what is left admits only priced grants whose money and counted services fit it.
+  The restriction holds through the recovery month, the latest month that the ledger, this computer's clock or the
+  guard's last record of the lost history shows, in every ledger month up to it: a history put back from an older month
+  keeps its own month, but confirming the real one doesn't leave the restriction behind, and what was admitted since the
+  loss counts in whichever of those months it fell. A new history whose guard record couldn't be written clears the
+  recovery at the next start, with no second loss, as long as the ledger is unchanged since. A guard that can't be read
+  or written stops all spending, and so do budget records in the history that can't be read.
 - **Six calls** on `window.nivra`, each through ipc.ts, the preload and `assertTrustedSender` with its arguments
   checked: getBudgetPolicy, setBudgetPolicy (a draft, or null to turn the budget off), budgetSummary, budgetPrices,
   confirmBudgetMonth (the month's label as shown) and startNewBudgetHistory (what is left, or null to wait). The budget
@@ -3406,6 +3409,9 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
   held only money, so the counted services' earlier use counted as nothing. It also found a summary that showed a
   history needing recovery as known, counted services read as a complete 0, and the store releasing or spending
   without the guard's verification.
+- Nate's review of the PR (at `40b7564`) found that a backup from an older month, put back, took the new history's
+  restriction with it to that old month, so confirming the real current month bypassed it. The restriction now holds
+  through the recovery month.
 
 **Consequences.**
 - A workspace this build writes (v8) is refused by older builds, so this lane's app profile is never one a release
@@ -3425,6 +3431,8 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
     passes it (the month still needs the provider's clock or the person);
   - after a loss with nothing left of the ledger, its first month opens by the computer's clock; what the person says
     is left is their own statement;
+  - a clock that is ahead when a new history starts holds its restriction through the clock's month, longer than the
+    real one, which errs on the side of spending less; a clock behind is checked against the guard's last record;
   - when everything is refused (the pool spent, or a wait after a loss), the next month opens only on the person's
     confirmation: a refused grant sends nothing that could bring the provider's clock.
 - **Tests:**
@@ -3435,16 +3443,18 @@ yet: PR 2a gives every model-calling path a grant, and PR 2b counts Tavily and N
     don't add up, interrupted seals, write-offs, counted services, policies turned off, unpriced spend under a policy,
     sublimits against a clock moved back and a month's end, a daily limit with the clock ahead and back, a queue's
     limit, months, price lists, extensions, a lost history in every mode, against a clock moved back and ahead and
-    holding the counted services, writes refused on a ledger the guard didn't verify, the summary of a history that
-    needs recovery, durability, and every hand edit the triggers refuse);
+    holding the counted services, a lost history's recovery month (a wait and a finite allowance, before and after the
+    real month is confirmed, and the guard's record time as evidence), writes refused on a ledger the guard didn't
+    verify, the summary of a history that needs recovery, durability, and every hand edit the triggers refuse);
   - `budget-guard.test.ts` (the log; the check; a backup put back at each point the plan names, and one changed past
     the guard's revision; a crash around each guard update; a damaged workspace after spend, resolved both ways; a new
-    history after a ledger behind, a copy of the lost history put back after it, and a new history whose guard record
-    was never written);
+    history after a ledger behind, a copy of the lost history put back after it, a new history whose guard record was
+    never written, and October's backup put back after November began, with a wait and with a finite allowance of
+    money and Nebius operations, held before and after November is confirmed);
   - `host-budget.test.ts` (the calls, a month confirmed by its label, a damaged history through restarts, a guard that
     can't be read, and one that can't be written after a commit);
   - `e2e/budget-api.spec.ts` (the calls through the built and the packaged app's `window.nivra`).
-- **Mutations:** 56 of 56 caught, each safety claim broken on purpose in turn. Five were caught only by a deeper
+- **Mutations:** 62 of 62 caught, each safety claim broken on purpose in turn. Five were caught only by a deeper
   layer, a trigger or schema check refusing the write before an assertion could: a grant that may have been sent
   released, an interrupted seal settling, a grant's day going back, and the provider's clock or the person opening the
   current month again.

@@ -657,6 +657,10 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e budget-api.spec.ts
   first budget call clears the recovery once the ledger holds the guard's last revision and digest again. Deleting
   `budget-guard.log` while the workspace exists rebuilds it from the ledger. `budget-guard.test.ts` makes these faults
   with real files: it takes backups at each point the plan names, does paid work, and puts them back.
+- **A new history's restriction** (the wait, or what is left) holds through the recovery month, the summary's
+  `afterLoss.through`: the latest month the ledger, the computer's clock or the guard's last record shows. A history
+  put back from an older month keeps its own month until the person confirms the real one, and the restriction holds
+  in both.
 - **The parts** (`apps/desktop/src/main/`): `budget-store.ts` (grants, journals, months and the summary, synchronous,
   each write in one transaction), `budget-guard.ts` (the log and the start-of-session check), migration 8 in
   `workspace-db.ts`, and the budget block at the end of `host.ts`. The contract is `packages/domain/src/budget.ts`, and
