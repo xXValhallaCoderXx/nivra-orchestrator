@@ -554,3 +554,12 @@ export const PreparedEnvironmentV2 = z.strictObject({
   preparedAt: z.iso.datetime(),
 });
 export type PreparedEnvironmentV2 = z.infer<typeof PreparedEnvironmentV2>;
+
+export const SETUP_FORMAT = "nivra.environment-setup.v2";
+
+/**
+ * What a recipe-driven preparation was started with, as the host keeps it (NIV-55): the person's choices, the versions
+ * the project's last preparation settled on, and the digest of the recipe they resolved to then.
+ */
+export const EnvironmentSetup = z.strictObject({ format: z.literal(SETUP_FORMAT), choices: EnvironmentChoices, previous: PreviousSettlement.nullable(), recipeDigest: Sha256Hex });
+export type EnvironmentSetup = z.infer<typeof EnvironmentSetup>;

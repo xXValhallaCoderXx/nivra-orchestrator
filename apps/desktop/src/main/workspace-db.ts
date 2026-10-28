@@ -395,6 +395,20 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
     )))
   BEGIN SELECT RAISE(ABORT, 'a coaching never changes what it was bound to, keeps its first report, and records its saved changes once, after its report'); END;
 `,
+  `
+  -- An acceptance of the dependency builds a project's environment didn't run (NIV-55): bound to the environment's
+  -- verified record by its digest, and cleared whenever another preparation leaves an environment, so it never carries
+  -- over to one it wasn't given for. Rows from before have none. No other table changes.
+  ALTER TABLE environments ADD COLUMN builds_json TEXT;
+  CREATE TRIGGER environments_builds_new BEFORE INSERT ON environments
+  WHEN NEW.builds_json IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'an acceptance of missing builds names the environment it was given for'); END;
+  CREATE TRIGGER environments_builds BEFORE UPDATE ON environments
+  WHEN NEW.builds_json IS NOT NULL
+    AND (NEW.prepared_json IS NULL OR NEW.prepared_by IS NOT OLD.prepared_by
+      OR json_extract(NEW.builds_json, '$.verified') IS NOT json_extract(NEW.prepared_json, '$.verifiedDigest'))
+  BEGIN SELECT RAISE(ABORT, 'an acceptance of missing builds names the environment it was given for'); END;
+  `,
 ];
 
 export type WorkspaceOpening =

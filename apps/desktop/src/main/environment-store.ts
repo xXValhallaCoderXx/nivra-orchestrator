@@ -1,13 +1,17 @@
-import type { EnvironmentReport, EnvironmentSpec, PreparedEnvironment } from "@nivra/domain";
+import { BuildsAcceptance, EnvironmentReport, EnvironmentSetup, PreparedEnvironmentV2 } from "@nivra/domain";
 import { str, strOrNull, type Row, type WorkspaceDb } from "./workspace-db.ts";
 import type { TurnStatus } from "./workspace.ts";
 
 /**
- * A project's environment in the workspace (NIV-49, D41): the spec the person accepted for it, the environment its last
- * successful preparation left, and each preparation, kept as a task's attempt is. A preparation's id is the request id,
- * saved before runs.start is sent; the engine store it goes to is recorded just before the request is written, so one
- * with none was never sent; and its engine's report, masked again, is kept once, when it ends. The prepared environment
- * is kept only from a report whose outcome is `prepared`. Its tables are the workspace's fifth migration.
+ * A project's environment in the workspace (NIV-49, NIV-55): what the person chose with its last preparation, the
+ * environment its last successful preparation left, any acceptance of builds that preparation didn't run, and each
+ * preparation, kept as a task's attempt is. A preparation's id is the request id, saved before runs.start is sent; the
+ * engine store it goes to is recorded just before the request is written, so one with none was never sent; and its
+ * engine's report, masked again, is kept once, when it ends. The prepared environment is kept only from a report whose
+ * outcome is `prepared`. Its tables are the workspace's fifth migration, and the acceptance's column a later one.
+ *
+ * Rows are read with the domain's schemas, never cast. One written by D41's single setup, or one Nivra can't read, is
+ * legacy: it says "prepare again", and nothing in it is used for a run.
  */
 
 const OPEN = "('submitting', 'running')";
@@ -17,12 +21,16 @@ export type PreparationStop = "person" | "uploads" | "removal";
 
 export interface EnvironmentRecord {
   projectId: string;
-  /** The packages the person chose with the last preparation they started, as pnpm filters; none is the whole workspace. */
-  spec: EnvironmentSpec;
+  /** What the person chose with the last preparation they started; null when that was D41's setup, or can't be read. */
+  setup: EnvironmentSetup | null;
   /** What the project's task runs start from: the last preparation that ended prepared left it; null before one did. */
-  prepared: PreparedEnvironment | null;
+  prepared: PreparedEnvironmentV2 | null;
+  /** The environment kept is D41's, or can't be read: prepare again. */
+  legacy: boolean;
   /** The preparation that left it. */
   preparedBy: string | null;
+  /** The person's acceptance of the dependency builds its preparation didn't run, bound to its verified record. */
+  builds: BuildsAcceptance | null;
   updatedAt: string;
 }
 
@@ -43,23 +51,43 @@ export interface PreparationRecord {
   cancelReason: PreparationStop | null;
   errorKind: string | null;
   errorMessage: string | null;
-  spec: EnvironmentSpec;
+  /** What it was started with; null for one D41's setup started, or one that can't be read. */
+  setup: EnvironmentSetup | null;
   /** The fingerprint of the preview the person was shown, which the engine checks again before sending anything. */
   preview: string;
-  /** Its engine's report, masked again, kept once when it ended; null until then, or when it ended without one. */
+  /** Its engine's report, masked again, kept once when it ended; null until then, when it ended without one, or when it can't be read. */
   report: EnvironmentReport | null;
   reportedAt: string | null;
   createdAt: string;
   settledAt: string | null;
 }
 
-const environmentOfRow = (row: Row): EnvironmentRecord => ({
-  projectId: str(row["project_id"]),
-  spec: JSON.parse(str(row["spec_json"])) as EnvironmentSpec,
-  prepared: row["prepared_json"] ? (JSON.parse(str(row["prepared_json"])) as PreparedEnvironment) : null,
-  preparedBy: strOrNull(row["prepared_by"]),
-  updatedAt: str(row["updated_at"]),
-});
+/** A JSON column read with a schema: what it holds, or null when it's empty, isn't JSON, or isn't that shape. */
+function parsed<T>(text: unknown, schema: { safeParse: (value: unknown) => { success: true; data: T } | { success: false } }): T | null {
+  if (typeof text !== "string" || text === "") return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const read = schema.safeParse(value);
+  return read.success ? read.data : null;
+}
+
+const environmentOfRow = (row: Row): EnvironmentRecord => {
+  const prepared = parsed(row["prepared_json"], PreparedEnvironmentV2);
+  return {
+    projectId: str(row["project_id"]),
+    setup: parsed(row["spec_json"], EnvironmentSetup),
+    prepared,
+    legacy: row["prepared_json"] !== null && prepared === null,
+    preparedBy: strOrNull(row["prepared_by"]),
+    // Only for the environment kept now: the trigger binds it, and reading it again costs nothing.
+    builds: prepared ? (parsed(row["builds_json"], BuildsAcceptance) ?? null) : null,
+    updatedAt: str(row["updated_at"]),
+  };
+};
 
 const preparationOf = (row: Row): PreparationRecord => ({
   id: str(row["id"]),
@@ -73,9 +101,9 @@ const preparationOf = (row: Row): PreparationRecord => ({
   cancelReason: strOrNull(row["cancel_reason"]) as PreparationStop | null,
   errorKind: strOrNull(row["error_kind"]),
   errorMessage: strOrNull(row["error_message"]),
-  spec: JSON.parse(str(row["spec_json"])) as EnvironmentSpec,
+  setup: parsed(row["spec_json"], EnvironmentSetup),
   preview: str(row["preview"]),
-  report: row["report_json"] ? (JSON.parse(str(row["report_json"])) as EnvironmentReport) : null,
+  report: parsed(row["report_json"], EnvironmentReport),
   reportedAt: strOrNull(row["reported_at"]),
   createdAt: str(row["created_at"]),
   settledAt: strOrNull(row["settled_at"]),
@@ -88,26 +116,26 @@ export function environmentOf(workspace: WorkspaceDb, projectId: string): Enviro
 }
 
 /**
- * Starts a preparation, in one transaction, before anything is sent: its record, and its spec as the project's accepted
- * one. A prepared environment the project has stays until another preparation ends prepared. Refused (false) while the
- * project has a preparation still open: one at a time, however quickly two arrive.
+ * Starts a preparation, in one transaction, before anything is sent: its record, and what it was started with as the
+ * project's choices. A prepared environment the project has stays until another preparation ends prepared. Refused
+ * (false) while the project has a preparation still open: one at a time, however quickly two arrive.
  */
-export function insertPreparation(workspace: WorkspaceDb, preparation: Pick<PreparationRecord, "id" | "projectId" | "sessionId" | "targetId" | "spec" | "preview" | "createdAt">): boolean {
+export function insertPreparation(workspace: WorkspaceDb, preparation: Pick<PreparationRecord, "id" | "projectId" | "sessionId" | "targetId" | "preview" | "createdAt"> & { setup: EnvironmentSetup }): boolean {
   return workspace.tx((db) => {
     if (db.prepare(`SELECT 1 FROM preparations WHERE project_id = ? AND status IN ${OPEN}`).get(preparation.projectId)) return false;
-    const spec = JSON.stringify(preparation.spec);
+    const setup = JSON.stringify(EnvironmentSetup.parse(preparation.setup));
     db.prepare("INSERT INTO preparations (id, project_id, session_id, target_id, status, spec_json, preview, created_at) VALUES (?, ?, ?, ?, 'submitting', ?, ?, ?)").run(
       preparation.id,
       preparation.projectId,
       preparation.sessionId,
       preparation.targetId,
-      spec,
+      setup,
       preparation.preview,
       preparation.createdAt,
     );
     db.prepare("INSERT INTO environments (project_id, spec_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET spec_json = excluded.spec_json, updated_at = excluded.updated_at").run(
       preparation.projectId,
-      spec,
+      setup,
       preparation.createdAt,
     );
     return true;
@@ -163,14 +191,14 @@ export function withdrawPreparationStop(workspace: WorkspaceDb, id: string, reas
 
 /**
  * Ends an open preparation, in one transaction: how it ended, the report its engine saved when there is one, and the
- * environment it prepared, kept as the project's only when the report's outcome is `prepared`. A preparation that
- * already ended keeps its first outcome and report.
+ * environment it prepared, kept as the project's only when the report's outcome is `prepared`. A new environment ends
+ * any acceptance of builds given for the one before. A preparation that already ended keeps its first outcome and report.
  */
 export function settlePreparation(
   workspace: WorkspaceDb,
   id: string,
   outcome: { status: Exclude<TurnStatus, "submitting" | "running">; errorKind?: string | null; errorMessage?: string | null },
-  ended: { report: EnvironmentReport | null; prepared: PreparedEnvironment | null },
+  ended: { report: EnvironmentReport | null; prepared: PreparedEnvironmentV2 | null },
   at: string,
 ): boolean {
   return workspace.tx((db) => {
@@ -182,7 +210,23 @@ export function settlePreparation(
     db.prepare("UPDATE preparations SET report_json = ?, reported_at = ? WHERE id = ? AND report_json IS NULL").run(JSON.stringify(ended.report), at, id);
     if (ended.prepared === null || ended.report.outcome !== "prepared") return true;
     const projectId = str(db.prepare("SELECT project_id FROM preparations WHERE id = ?").get(id)?.["project_id"]);
-    db.prepare("UPDATE environments SET prepared_json = ?, prepared_by = ?, updated_at = ? WHERE project_id = ?").run(JSON.stringify(ended.prepared), id, at, projectId);
+    db.prepare("UPDATE environments SET prepared_json = ?, prepared_by = ?, builds_json = NULL, updated_at = ? WHERE project_id = ?").run(JSON.stringify(PreparedEnvironmentV2.parse(ended.prepared)), id, at, projectId);
     return true;
   });
+}
+
+/**
+ * Records the person's acceptance of the dependency builds the project's environment didn't run (NIV-55), bound to its
+ * verified record by digest: false when the environment kept now isn't that one. It ends when another preparation leaves
+ * an environment, and never carries over to one it wasn't given for.
+ */
+export function acceptBuilds(workspace: WorkspaceDb, projectId: string, acceptance: BuildsAcceptance, at: string): boolean {
+  const accepted = BuildsAcceptance.parse(acceptance);
+  return (
+    Number(
+      workspace.db
+        .prepare("UPDATE environments SET builds_json = ?, updated_at = ? WHERE project_id = ? AND prepared_json IS NOT NULL AND json_extract(prepared_json, '$.verifiedDigest') = ?")
+        .run(JSON.stringify(accepted), at, projectId, accepted.verified).changes,
+    ) === 1
+  );
 }
