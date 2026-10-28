@@ -99,9 +99,9 @@ Nivra calls Nebius with credentials you save under **Settings**. Nothing is buil
     Add them in Settings, then preview the run again."
   - If the project has no Sandboxes access, or the key and the id don't belong together, Nebius turns the key down,
     and Nivra says so (HTTP 403).
-- **Judges:** the private testing instructions give a key and a project id for a project made for judging. Everything
-  uploaded with them stays with Nebius in that project, where anyone holding the same key can read it. Use the public
-  sample below, or code you're happy to share.
+- **Judges** use their own key and project id, as any user does. The quick path's sandbox check needs a project with
+  Sandboxes (beta) access, requested on the Sandboxes page above. Everything uploaded stays with Nebius in your
+  project. Use the onboarding sample below, or code you're happy to share.
 
 The key and the id are encrypted by your system where it can (Settings says "Key saved, encrypted"), and handed to the
 engine in memory only.
@@ -154,8 +154,7 @@ nothing installed. Use the commit named here, so what you upload is what was che
    git clone https://github.com/xXValhallaCoderXx/nivra-sample.git
    git -C nivra-sample checkout PENDING-SAMPLE-COMMIT
    ```
-3. Start Nivra. Under **Settings**, paste the key and press **Save**, then the project id and **Save**: yours, or the
-   ones in the submission's private testing instructions.
+3. Start Nivra. Under **Settings**, paste your key and press **Save**, then your project id and **Save**.
 4. **Add** the sample's folder. On Windows, browse to `\\wsl.localhost\<distribution>\home\<you>\nivra-sample`.
 5. Under **Settings**, press **Check Token Factory from …** (the label names the system the folder is on). It lists
    the models your key can use, makes one Nemotron call that has to use a tool to answer, then three small probes: at
@@ -174,7 +173,7 @@ works, and what it needs, is in *Running a task on your own repository* below.
 untracked work is never sent.
 - An explanation sends excerpts of the files the model reads to Token Factory.
 - A sandbox check or a task uploads the whole commit, except files on Nivra's deny list, to the Nebius project of the
-  key you saved. Nebius keeps it, and offers no way to delete it. With shared credentials, such as a judges' project,
+  key you saved. Nebius keeps it, and offers no way to delete it. If you share credentials with others,
   anyone holding them can read it. Nivra refuses a commit in which it finds what looks like a key or token, but it
   can't recognise every secret.
 

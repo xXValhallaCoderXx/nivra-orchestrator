@@ -22,7 +22,7 @@ A requirement counts as met only when its evidence exists. A plan or a design is
 | 8 | A public YouTube demonstration, under three minutes | Rules | The video link | Nate records and uploads | PENDING-TAKE |
 | 9 | Technology feedback | Rules | The submission form's text | Nate, with a draft from Claude | **Draft below** |
 | 10 | An explanation of pre-existing work and significant new work | Rules, FAQ | [provenance.md](provenance.md), and *Significant new work* below | Claude | Draft below |
-| 11 | Free judge access until judging ends (16 December, 04:00 SGT) | Rules | The private testing instructions: judges enter their own credentials, or ones from a project made for judging | Nate | Decided on 27 October. Checked: PENDING-J0, PENDING-J1; through the app: PENDING-TAKE |
+| 11 | Free judge access until judging ends (16 December, 04:00 SGT) | Rules | The testing instructions: judges enter their own Token Factory key and Nebius project id, as any user does; no credentials are given (Nate, 28 October). The sandbox check needs a project with Sandboxes (beta) access | Nate | Decided on 28 October: judges bring their own credentials. Whether that meets the rules' free-access requirement is for Nate to confirm against the official rules: PENDING-NATE. Our own credentials checked: PENDING-J0, PENDING-J1; through the app: PENDING-TAKE |
 | 12 | Eligibility and licensing (entrant eligibility, third-party licences) | Rules | — | Nate | To check; not presumed |
 
 ## The demonstration
@@ -135,16 +135,13 @@ Factory, Nebius Sandboxes, Tavily, WSL, Playwright.
 
 **Track:** Coding and Agentic Engineering (item 5).
 
-**Testing instructions** (the private field for judges, item 11). Never put these values anywhere else.
+**Testing instructions** (the form's field for judges, item 11). No credentials are given: judges use their own.
 1. Install the release from its page (the Windows zip, or the Linux deb), which lists the version, the source commit
    and each file's checksum.
-2. Under Settings, paste the key and the project id below, or your own if your Nebius project has Sandboxes access.
-   - Key: `<entered only in this private field>`
-   - Project id: `<entered only in this private field>`
-   - They belong to a project made for judging, and work until judging ends, 16 December, 04:00 SGT.
+2. Under Settings, paste your own Token Factory key and your Nebius project's id.
+   - The project needs Sandboxes (beta) access, which Nebius grants per project on request, on its Sandboxes page.
 3. Follow the README's testing instructions, the quick path on the onboarding sample: about PENDING-TAKE minutes.
-4. Use the onboarding sample, or code you're happy to share: whatever is uploaded with these credentials stays with
-   Nebius in that project, where anyone holding them can read it.
+4. Use the onboarding sample, or code you're happy to share: whatever you upload stays with Nebius in your project.
 
 **Measured, with conditions,** for the text or the video. The model and the sandboxes run on Nebius, so times depend on
 the service.

@@ -10,9 +10,10 @@ the person's approval.
 
 ## Decisions (Nate, 28 October)
 
-1. **Credentials:** the dedicated judges' project and key, entered under Settings before recording starts. The take is
-   then also the packaged judge rehearsal. Track A's private task runs stay separate, and no credential appears in a
-   file or on screen.
+1. **Credentials:** Nate's own key and project id, entered under Settings before recording starts, as any user enters
+   theirs. Judges bring their own: no credentials are given to them. The take follows the judges' quick path, so it is
+   also its packaged rehearsal. Track A's private task runs stay separate, and no credential appears in a file or on
+   screen.
 2. **The repository on screen:** Nivra's own public repository (MIT). SHE-65 appears only as genuine stills from its
    real run, cropped so no private content shows, each labelled with its actual build and run date.
 3. **The task's outcome:** aim for a verified real change. If it doesn't verify, show the honest Reject and the
