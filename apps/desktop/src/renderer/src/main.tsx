@@ -1,5 +1,6 @@
 import "@mantine/core/styles.css";
 import "./app/fonts.css";
+import "./shell/shell.css";
 import { MantineProvider } from "@mantine/core";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";

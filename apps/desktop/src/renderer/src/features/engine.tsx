@@ -7,7 +7,7 @@ const LOOK = {
   online: { dot: "var(--nivra-success)", label: "Engine online" },
   starting: { dot: "var(--nivra-text-3)", label: "Engine starting…" },
   stopped: { dot: "var(--nivra-text-3)", label: "Engine stopped" },
-  failed: { dot: "var(--nivra-error-icon)", label: "Engine stopped" },
+  failed: { dot: "var(--nivra-error-icon)", label: "Engine failed" },
 } as const;
 
 /** An engine's state at a glance: a dot and a word, with the details on hover. */
@@ -36,8 +36,9 @@ export function EngineDot({ engine, stoppedLabel, testId }: { engine: EngineView
 }
 
 /**
- * Where the chosen project's work runs (D1: always visible where work starts) and its engine's state at a glance.
- * There is nothing to choose: the folder decides (D17).
+ * Where the project in view runs (D1: always visible where work starts), its folder, and its engine's state in words
+ * (PN2), under the project's name on its Home. There is nothing to choose: the folder decides (D17). General has no
+ * folder, and says so.
  */
 export function EngineBadge({ project, engine }: { project: ProjectView | null; engine: EngineView | null }) {
   if (!project) {
@@ -48,10 +49,13 @@ export function EngineBadge({ project, engine }: { project: ProjectView | null; 
     );
   }
   return (
-    <Group gap="sm" wrap="nowrap">
-      <Badge variant="light" color="gray" data-testid="engine-target">
+    <Group gap="sm" wrap="wrap" align="center">
+      <Badge variant="outline" color="gray" radius="sm" c="var(--mantine-color-text)" style={{ borderColor: "var(--nivra-border)" }} data-testid="engine-target">
         {project.targetLabel}
       </Badge>
+      <Code fz="xs" style={{ background: "transparent", color: "var(--nivra-text-2)", padding: 0, overflowWrap: "anywhere" }} data-testid="engine-path">
+        {project.displayPath}
+      </Code>
       <EngineDot engine={engine} testId="engine-badge" />
     </Group>
   );

@@ -1,126 +1,149 @@
-import { Alert, Badge, Button, Code, Group, Select, Stack, Text } from "@mantine/core";
-import { useState } from "react";
-import type { ProjectView, WslView } from "../../../shared/ipc";
-import { errorMessage, Section } from "../shared/ui";
-import { WslGuidance } from "./wsl";
+import { Alert, Button, Group, List, Modal, Stack, Text } from "@mantine/core";
+import { useRef, useState } from "react";
+import type { ProjectView } from "../../../shared/ipc";
+import { errorMessage } from "../shared/ui";
 
 /**
- * Every repository, each on the engine its folder belongs to (D17). Folders come from the native picker in main; the
- * renderer never names a path (D1).
+ * Adding and removing repositories (PN1, PN3). Folders come from the native picker in main; the renderer never names a
+ * path (D1), and each folder runs where it is kept (D17). Adding is started from the switcher's "Add project…" or from
+ * General's Home; the result is the new project in view with a note, the project already listed opened with a note, or a
+ * refusal in a dialog that says what to do. A warning that came with an added folder stays until it is dismissed.
  */
-export function Projects({
-  projects,
-  selectedId,
-  onSelect,
-  onChanged,
-  busyIds,
-  wsl,
-  onWslChecked,
-}: {
-  projects: ProjectView[];
-  selectedId: string | null;
-  onSelect(id: string | null): void;
-  onChanged(): void;
-  /** Projects with a run going, which can't be removed until it ends. */
-  busyIds: readonly string[];
-  wsl: WslView | null;
-  onWslChecked(): void;
-}) {
+
+export type AddOutcome = { project: ProjectView; alreadyListed: boolean; warning: string | null };
+
+export function useAddProject({ projects, onAdded, onChanged }: { projects: ProjectView[]; onAdded(outcome: AddOutcome): void; onChanged(): void }) {
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<{ color: "yellow" | "red"; text: string } | null>(null);
-  const selected = projects.find((p) => p.id === selectedId) ?? null;
-  const running = selected ? busyIds.includes(selected.id) : false;
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const listed = useRef(projects);
+  listed.current = projects;
 
   async function add() {
+    if (busy) return;
     setBusy(true);
-    setNotice(null);
+    setRefusal(null);
+    const before = new Set(listed.current.map((p) => p.id));
     try {
       const result = await window.nivra.addProject();
-      if (result.status === "added") {
-        onSelect(result.project.id);
-        if (result.warning) setNotice({ color: "yellow", text: result.warning });
-      } else if (result.status === "refused") {
-        setNotice({ color: "red", text: result.reason });
-      }
+      if (result.status === "added") onAdded({ project: result.project, alreadyListed: before.has(result.project.id), warning: result.warning });
+      else if (result.status === "refused") setRefusal(result.reason);
       onChanged();
     } catch (reason) {
-      setNotice({ color: "red", text: errorMessage(reason) });
+      setRefusal(errorMessage(reason));
     } finally {
       setBusy(false);
     }
   }
 
+  const dialog = (
+    <Modal opened={refusal !== null} onClose={() => setRefusal(null)} title="Nivra can't add this folder" centered data-testid="project-add-refused">
+      <Stack gap="md">
+        <Text size="sm" data-testid="project-add-refusal">
+          {refusal}
+        </Text>
+        <Text size="sm" c="var(--nivra-text-2)">
+          Nothing was added.
+        </Text>
+        <Group justify="flex-end" gap="sm">
+          <Button variant="default" onClick={() => setRefusal(null)}>
+            Close
+          </Button>
+          <Button onClick={() => void add()} loading={busy} data-testid="project-add-again">
+            Choose another folder…
+          </Button>
+        </Group>
+      </Stack>
+    </Modal>
+  );
+
+  return { add, busy, dialog };
+}
+
+/** A warning that came with an added folder (a Windows folder picked through WSL, say): shown in full until dismissed. */
+export function AddedWarning({ project, text, onDismiss }: { project: ProjectView | null; text: string; onDismiss(): void }) {
+  return (
+    <Alert color="yellow" variant="light" withCloseButton closeButtonLabel="Dismiss" onClose={onDismiss} title={project ? `About ${project.label}` : undefined} data-testid="project-add-notice">
+      <Text size="sm">{text}</Text>
+    </Alert>
+  );
+}
+
+/** Something to tell the person about this project this session (it moved to another engine, say). */
+export function ProjectNotice({ project }: { project: ProjectView }) {
+  if (!project.notice) return null;
+  return (
+    <Alert color="yellow" variant="light" data-testid="project-notice">
+      <Text size="sm">{project.notice}</Text>
+    </Alert>
+  );
+}
+
+/**
+ * Removing a project from the list (PN3), after a confirmation whose only action is the removal (R13): Cancel has the
+ * focus. The host stops the project's work first and refuses, saying why, when it can't; nothing touches the folder.
+ * While a hello or explain run of this window goes, the button waits for it to end, as before.
+ */
+export function RemoveProject({ project, running, onRemoved }: { project: ProjectView; running: boolean; onRemoved(label: string, preferencesRemoved: number): void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   async function remove() {
-    if (!selected || running) return;
-    setNotice(null);
+    setBusy(true);
+    setError(null);
     try {
-      const { preferencesRemoved } = await window.nivra.removeProject(selected.id);
-      if (preferencesRemoved) {
-        setNotice({ color: "yellow", text: `Removed ${selected.label} from the list, with its ${preferencesRemoved} own ${preferencesRemoved === 1 ? "preference" : "preferences"}. Your personal preferences stay.` });
-      }
-      onSelect(null);
-      onChanged();
+      const { preferencesRemoved } = await window.nivra.removeProject(project.id);
+      setOpen(false);
+      onRemoved(project.label, preferencesRemoved);
     } catch (reason) {
-      setNotice({ color: "red", text: errorMessage(reason) });
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
-    <Section
-      title="Repositories"
-      description="Each folder runs where it is kept: a folder inside a WSL distribution runs there, one on a Windows drive runs on Windows. Nothing is copied."
-    >
-      <Group gap="sm" align="flex-end">
-        <Select
-          label="Project"
-          placeholder={projects.length ? "Choose a repository" : "No repositories yet"}
-          data={projects.map((p) => ({ value: p.id, label: p.label }))}
-          value={selected?.id ?? null}
-          onChange={onSelect}
-          renderOption={({ option }) => (
-            <Group justify="space-between" w="100%" wrap="nowrap" gap="md">
-              <Text size="sm">{option.label}</Text>
-              <Text size="xs" c="var(--nivra-text-3)">
-                {projects.find((p) => p.id === option.value)?.targetLabel}
-              </Text>
-            </Group>
-          )}
-          w={320}
-          data-testid="project-select"
-        />
-        {selected && (
-          <Badge variant="light" color="gray" mb={6} data-testid="project-target">
-            {selected.targetLabel}
-          </Badge>
-        )}
-        <Button variant="default" onClick={() => void add()} loading={busy} data-testid="project-add">
-          Add folder…
+    <>
+      <Group gap="sm" align="center">
+        <Button variant="default" color="red" c="var(--nivra-error)" onClick={() => setOpen(true)} disabled={running} data-testid="project-remove">
+          Remove from Nivra…
         </Button>
-        {selected && (
-          <Button variant="subtle" color="red" onClick={() => void remove()} disabled={running} data-testid="project-remove">
-            Remove
-          </Button>
-        )}
-      </Group>
-      {selected && (
         <Text size="xs" c="var(--nivra-text-3)">
-          <Code fz="xs">{selected.displayPath}</Code>
-          {running ? " · cancel its run before removing it" : ""}
+          {running ? "Cancel its run before removing it." : "Takes it off the list. The folder stays as it is."}
         </Text>
-      )}
-      {selected?.notice && (
-        <Alert color="yellow" variant="light" data-testid="project-notice">
-          <Text size="sm">{selected.notice}</Text>
-        </Alert>
-      )}
-      {notice && (
-        <Alert color={notice.color} variant="light" data-testid="project-add-notice">
-          <Stack gap={0}>
-            <Text size="sm">{notice.text}</Text>
-          </Stack>
-        </Alert>
-      )}
-      {wsl && <WslGuidance wsl={wsl} onChecked={onWslChecked} />}
-    </Section>
+      </Group>
+      <Modal opened={open} onClose={() => setOpen(false)} title={`Remove ${project.label} from Nivra?`} centered data-testid="project-remove-dialog">
+        <Stack gap="sm">
+          <Text size="sm" fw={600}>
+            What goes
+          </Text>
+          <List size="sm" spacing={4}>
+            <List.Item>{project.label} leaves the list, with its own preferences. Your personal preferences stay.</List.Item>
+            <List.Item>Its work going now stops first: explanations, research, the sandbox check, a task run, the environment's preparation and the coach.</List.Item>
+          </List>
+          <Text size="sm" fw={600}>
+            What stays
+          </Text>
+          <List size="sm" spacing={4}>
+            <List.Item>The folder and everything in it: Nivra doesn't touch it.</List.Item>
+            <List.Item>Its tasks and conversations, marked as from a project no longer in the list.</List.Item>
+            <List.Item>What was already sent to Token Factory or Nebius.</List.Item>
+          </List>
+          {error && (
+            <Alert color="red" variant="light" data-testid="project-remove-error">
+              <Text size="sm">{error}</Text>
+            </Alert>
+          )}
+          <Group justify="flex-end" gap="sm" mt="sm">
+            <Button variant="default" onClick={() => setOpen(false)} data-autofocus>
+              Cancel
+            </Button>
+            <Button variant="default" color="red" c="var(--nivra-error)" style={{ borderColor: "var(--nivra-error)" }} loading={busy} onClick={() => void remove()} data-testid="project-remove-confirm">
+              Remove {project.label}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+    </>
   );
 }
