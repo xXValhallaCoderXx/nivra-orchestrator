@@ -623,9 +623,10 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-reco
   its engine killed, read back as partial and restored.
 - **The live run's script** (`apps/desktop/scripts/task-live.ts`), never part of `pnpm verify`:
   - `--state <folder>` is required by every mode that writes, which is every mode but `--check`: the frozen build,
-    the recipes, the rehearsals and the runs go there. It is refused inside candidate 3's frozen take
-    (`~/nivra-acceptance/task-live`), the claims, or Nivra's checkout, links followed. Approvals are claimed in one
-    folder for every state folder, `~/nivra-acceptance/claims/task-live`, so one approval is one run wherever it runs;
+    the recipes, the rehearsals and the runs go there. It is refused when it is, holds or sits in candidate 3's
+    frozen take (`~/nivra-acceptance/task-live`), the claims, or any of Nivra's checkouts (this one and every worktree
+    of its repository, candidate 3's among them), links followed. Approvals are claimed in one folder for every state
+    folder, `~/nivra-acceptance/claims/task-live`, so one approval is one run wherever it runs;
   - `--check` reads the task file and its checkout and prints what a plan binds but the build (the snapshot, the
     environment's recipe and its warnings, the task or the stop it expects), with no network and nothing written;
   - `--freeze` copies a release candidate's unpacked Linux build, made from a clean tree, with its hashes: every file
@@ -647,9 +648,10 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-reco
   The task, its repository and its brief are in a file outside the repository (by default
   `~/nivra-work/she65/task-live.json`), with any `review` points: what the person checks in the proposal that its
   tests can't show, which the recipe binds and lists. A file may instead expect its preparation to stop
-  (`"expect": { "preparation": { "code": "install", "step": "install" } }`, with no brief): the recipe names the
-  stop and Nivra's words for it, the run passes only on exactly that stop, with nothing kept (and, for an install, its
-  log's end and Nivra's guidance), and no task is created. Nothing in the script names a repository.
+  (`"expect": { "preparation": { "code": "install", "step": "install", "detail": "…" } }`, with no brief): the recipe
+  names the stop, Nivra's words for it and its guidance word for word (`detail`, null for a stop that gives none), the
+  run passes only on exactly that stop, with nothing kept (and, for an install, its log's end), and no task is created.
+  Nothing in the script names a repository. A rehearsal reads the protected homes only once its app is closed.
 
 The engine's fetch (D47): at start, before any request, the engine makes undici's agent, with 15 minutes' waits for a
 reply's headers and body, the global dispatcher that Node's own fetch reads (`apps/engine/src/providers/transport.ts`),

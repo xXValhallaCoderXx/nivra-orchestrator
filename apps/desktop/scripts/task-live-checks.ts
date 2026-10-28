@@ -4,7 +4,7 @@
 // recipe expects (NIV-55).
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TASK_MODEL, type EnvironmentStopCode, type PreparedEnvironmentV2 } from "@nivra/domain";
 import { ENVIRONMENT_STOP_MESSAGES } from "../../engine/src/environment/report.ts";
 import type { EnvironmentView, TaskRunPreview } from "../src/shared/ipc.ts";
@@ -115,16 +115,17 @@ const real = (path: string) => {
 };
 const within = (path: string, root: string) => {
   const rel = relative(real(root), real(path));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 };
 
 /**
  * Where a live run keeps its state (its frozen build, recipes, rehearsals and runs), given with --state and required
- * for every mode, since each writes there; and where its approvals are claimed, one folder for every state folder, so
- * an approval claimed under one can't run again under another. The state folder may be neither candidate 3's frozen
- * take, ~/nivra-acceptance/task-live, nor anything inside it, the claims or this repository.
+ * for every mode that writes; and where its approvals are claimed, one folder for every state folder, so an approval
+ * claimed under one can't run again under another. The state folder may neither be nor hold candidate 3's frozen take,
+ * ~/nivra-acceptance/task-live, the claims, or any of Nivra's checkouts (`checkouts`: this one and every worktree of
+ * its repository, candidate 3's among them).
  */
-export function liveFolders(given: string | undefined, home: string, repository: string): { state: string; claims: string } {
+export function liveFolders(given: string | undefined, home: string, checkouts: readonly string[]): { state: string; claims: string } {
   const claims = join(home, "nivra-acceptance", "claims", "task-live");
   const instead = join(home, "nivra-acceptance", "niv55-live");
   if (!given) throw new Error(`--state <folder> is required: the folder this run's frozen build, recipes and evidence go to, such as ${instead}.`);
@@ -132,22 +133,29 @@ export function liveFolders(given: string | undefined, home: string, repository:
   const take = join(home, "nivra-acceptance", "task-live");
   if (within(state, take) || within(take, state)) throw new Error(`${state} would write into candidate 3's frozen take, ${take}, which nothing may change. Give a state folder of its own, such as ${instead}.`);
   if (within(state, join(home, "nivra-acceptance", "claims")) || within(claims, state)) throw new Error(`${state} would hold or sit in the approvals' claims, ${claims}, which only claiming writes. Give a state folder of its own, such as ${instead}.`);
-  if (within(state, repository) || within(repository, state)) throw new Error(`${state} would put a run's evidence in Nivra's own checkout. Give a state folder outside it, such as ${instead}.`);
+  const checkout = checkouts.find((root) => within(state, root) || within(root, state));
+  if (checkout !== undefined) throw new Error(`${state} would put a run's evidence in one of Nivra's checkouts, ${checkout}. Give a state folder outside every checkout, such as ${instead}.`);
   return { state, claims };
 }
 
 // ---- a preparation expected to stop (NIV-55) ---------------------------------------------------------------------
 
-/** The stop a recipe expects a preparation to end with, by its code and step: named in the recipe, so its digest covers it. */
+/**
+ * The stop a recipe expects a preparation to end with: its code and step, and Nivra's guidance for that failure exactly
+ * (an install's diagnosis, such as the lockfile not matching package.json), or null when the stop gives none. Named in
+ * the recipe, so its digest covers them.
+ */
 export interface ExpectedStop {
   code: EnvironmentStopCode;
   step: string;
+  detail: string | null;
 }
 
 /**
  * Why a preparation's ending isn't exactly the stop the recipe expected; none when it is. Only that stop passes: its
- * code and step, Nivra's words for the code, and no environment kept; an install's stop also keeps the end of its log
- * and Nivra's guidance for what to change. Any other ending, a success included, is a failure.
+ * code and step, Nivra's words for the code, the expected guidance word for word, and no environment kept; an
+ * install's stop also keeps the end of its log. Any other ending, a success or another failure of the same step
+ * included, is a failure.
  */
 export function stopProblems(expected: ExpectedStop, view: Pick<EnvironmentView, "prepared" | "preparation">): string[] {
   const report = view.preparation?.report ?? null;
@@ -159,9 +167,22 @@ export function stopProblems(expected: ExpectedStop, view: Pick<EnvironmentView,
   if (!stopped) return [...problems, `the preparation ended ${report.outcome} without a stop`];
   if (stopped.code !== expected.code || stopped.step !== expected.step) problems.push(`it stopped at ${stopped.code} (step ${stopped.step ?? "none"}), not the expected ${expected.code} (step ${expected.step})`);
   if (stopped.message !== ENVIRONMENT_STOP_MESSAGES[expected.code]) problems.push(`its words aren't Nivra's for the ${expected.code} stop`);
-  if (expected.code === "install") {
-    if (!report.install?.logTail) problems.push("the end of the install's log wasn't kept");
-    if (!stopped.detail) problems.push("it gave no guidance for what to change");
-  }
+  if ((stopped.detail ?? null) !== expected.detail) problems.push(`its guidance is ${JSON.stringify(stopped.detail ?? null)}, not the expected ${JSON.stringify(expected.detail)}`);
+  if (expected.code === "install" && !report.install?.logTail) problems.push("the end of the install's log wasn't kept");
   return problems;
+}
+
+// ---- the app, closed before the homes are read ----------------------------------------------------------------
+
+/**
+ * Runs `body` with an app already started, closes the app whatever `body` does, and only then runs `after`: what
+ * `after` reads (the protected homes) is read with the app and its engine shut down, however `body` ended.
+ */
+export async function closedThen<A, T>(app: A, close: (app: A) => Promise<void>, body: (app: A) => Promise<void>, after: () => T): Promise<T> {
+  try {
+    await body(app);
+  } finally {
+    await close(app);
+  }
+  return after();
 }

@@ -48,7 +48,7 @@ import { takeSnapshot } from "../../engine/src/exec/snapshot.ts";
 import { runLimitsFor } from "../../engine/src/task/limits.ts";
 import type { BriefFields, ProjectView, SettingsView, TaskRunPreview } from "../src/shared/ipc.ts";
 import { addProject, attemptOf, createTask, environmentOf, followRun, keysSaved, prepareOnce, previewEnvironment, previewRun, startOnce, taskOf } from "./task-journey.ts";
-import { buildChanges, buildHashes, liveFolders, previewProblems, stopProblems, type BuildHashes, type ExpectedStop } from "./task-live-checks.ts";
+import { buildChanges, buildHashes, closedThen, liveFolders, previewProblems, stopProblems, type BuildHashes, type ExpectedStop } from "./task-live-checks.ts";
 import { RELEASE_HOME_STATE, releaseHomeChange } from "./test-homes.ts";
 
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -79,7 +79,10 @@ if (modes.length !== 1) {
 let folders: ReturnType<typeof liveFolders> | null = null;
 if (!values.check) {
   try {
-    folders = liveFolders(values.state, homedir(), repository);
+    const listed = spawnSync("git", ["worktree", "list", "--porcelain"], { cwd: repository, encoding: "utf8" });
+    if (listed.status !== 0) throw new Error(`git couldn't list this repository's worktrees, so the folders a run mustn't write can't be told: ${listed.stderr.trim()}`);
+    const worktrees = listed.stdout.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
+    folders = liveFolders(values.state, homedir(), [repository, ...worktrees]);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(2);
@@ -126,7 +129,8 @@ function readTask(path: string): LiveTask {
   const given = JSON.parse(readFileSync(path, "utf8")) as LiveTask;
   if (given.expect !== undefined) {
     const stop = given.expect?.preparation;
-    if (!stop || !EnvironmentStopCode.safeParse(stop.code).success || typeof stop.step !== "string" || stop.step.length === 0 || stop.step.length > 64) throw new Error(`${path}'s expect names the stop its preparation should end with, such as { "preparation": { "code": "install", "step": "install" } }.`);
+    const detailOk = stop?.detail === null || (typeof stop?.detail === "string" && stop.detail.length > 0 && stop.detail.length <= 600);
+    if (!stop || !EnvironmentStopCode.safeParse(stop.code).success || typeof stop.step !== "string" || stop.step.length === 0 || stop.step.length > 64 || !detailOk) throw new Error(`${path}'s expect names the stop its preparation should end with and Nivra's guidance for it word for word, or null for a stop that gives none, such as { "preparation": { "code": "install", "step": "install", "detail": "The lockfile doesn't match package.json. …" } }.`);
     if (given.brief !== undefined || given.review !== undefined) throw new Error(`${path} expects its preparation to stop, so no task is created: it takes no brief and no review points.`);
   }
   const brief = given.expect ? null : TaskBrief.safeParse(given.brief);
@@ -268,14 +272,14 @@ export async function recipeOf(frozen: Frozen, task: LiveTask, run = 1) {
 /** A preparation expected to stop (NIV-55): the stop, by code and step, and only the preparation's own steps and requests. */
 function expectedStopRecipe(expected: ExpectedStop) {
   return {
-    expect: { preparation: { code: expected.code, step: expected.step, words: ENVIRONMENT_STOP_MESSAGES[expected.code] } },
+    expect: { preparation: { code: expected.code, step: expected.step, words: ENVIRONMENT_STOP_MESSAGES[expected.code], detail: expected.detail } },
     task: null,
     limits: null,
     model: null,
     steps: [
       "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
       "the script adds the repository as a project, and allows its uploads through their own dialog",
-      `the script previews the environment, the project's own recipe, and checks its fingerprint is the one above, claims the approval, and presses Prepare once; the run passes only if the preparation stops at ${expected.code} (step ${expected.step}), in Nivra's words for that stop${expected.code === "install" ? ", with the end of the install's log and Nivra's guidance kept" : ""}, and keeps no environment. Any other ending, a success included, is a failure`,
+      `the script previews the environment, the project's own recipe, and checks its fingerprint is the one above, claims the approval, and presses Prepare once; the run passes only if the preparation stops at ${expected.code} (step ${expected.step}), in Nivra's words for that stop, with ${expected.detail === null ? "no guidance" : "exactly the guidance above"}${expected.code === "install" ? " and the end of the install's log kept" : ""}, and keeps no environment. Any other ending, a success or another failure of the same step included, is a failure`,
       "no task is created or started",
       "the script removes the keys through Settings' own calls and checks they are gone, closes the app, and checks that ~/.nivra and ~/.nivra-dev are unchanged",
     ],
@@ -340,7 +344,7 @@ function recipeText(recipe: Awaited<ReturnType<typeof recipeOf>>, digest: string
     ...(recipe.environment.warnings.length ? ["  The resolution's warnings:", ...recipe.environment.warnings.map((warning) => `    ${warning}`)] : ["  The resolution gave no warnings."]),
     ...(recipe.expect
       ? [
-          `Expected: the preparation stops at ${recipe.expect.preparation.code} (step ${recipe.expect.preparation.step}), in Nivra's words "${recipe.expect.preparation.words}"${recipe.expect.preparation.code === "install" ? ", with the end of the install's log and Nivra's guidance kept" : ""}, and keeps no environment. No task is created. Any other ending, a success included, fails this run.`,
+          `Expected: the preparation stops at ${recipe.expect.preparation.code} (step ${recipe.expect.preparation.step}), in Nivra's words "${recipe.expect.preparation.words}", with ${recipe.expect.preparation.detail === null ? "no guidance" : `the guidance "${recipe.expect.preparation.detail}"`}${recipe.expect.preparation.code === "install" ? " and the end of the install's log kept" : ""}, and keeps no environment. No task is created. Any other ending, a success or another failure of the same step included, fails this run.`,
           `Limits: preparation ${recipe.environment.limits.importSeconds} s to import, ${recipe.environment.limits.prepareSeconds} s to install, ${recipe.environment.limits.probeSeconds} s for each check before and after`,
           "Model: none; no task is run.",
         ]
@@ -379,7 +383,7 @@ async function checkText(task: LiveTask): Promise<string> {
     `Environment: the project's own recipe ${shown.environment.recipeDigest}, with ${JSON.stringify(task.environment)}: ${shown.environment.image}; ${shown.environment.bootstrap.join(", ") || "nothing to bootstrap"}; ${shown.environment.install}; builds: ${shown.environment.builds}; ${shown.environment.files} setup files (${shown.environment.configuration}), ${shown.environment.sentBytes} bytes; preview ${shown.environment.fingerprint}; hosts ${shown.environment.hosts.join(", ")}`,
     ...(shown.environment.warnings.length ? ["  The resolution's warnings:", ...shown.environment.warnings.map((warning) => `    ${warning}`)] : ["  The resolution gave no warnings."]),
     ...(task.expect
-      ? [`Expected: the preparation stops at ${task.expect.preparation.code} (step ${task.expect.preparation.step}), in Nivra's words "${ENVIRONMENT_STOP_MESSAGES[task.expect.preparation.code]}"; no task is created.`]
+      ? [`Expected: the preparation stops at ${task.expect.preparation.code} (step ${task.expect.preparation.step}), in Nivra's words "${ENVIRONMENT_STOP_MESSAGES[task.expect.preparation.code]}", with ${task.expect.preparation.detail === null ? "no guidance" : `the guidance "${task.expect.preparation.detail}"`}; no task is created.`]
       : brief
         ? [
             `Task "${task.task.title}", brief ${await taskBriefDigest(brief)}:`,
@@ -462,8 +466,8 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
   mkdirSync(folder, { recursive: true, mode: 0o700 });
   const log = (line: string) => console.log(`${new Date().toISOString().slice(11, 19)} ${line}`);
   const homes = homeStates();
-  const { app, page } = await openApp(frozen, folder);
-  try {
+  // The homes are read only once the app and its engine are shut down, however the rehearsal ends (`closedThen`).
+  return closedThen(await openApp(frozen, folder), ({ app }) => app.close(), async ({ app, page }) => {
     log(`Rehearsing recipe ${digest.slice(0, 12)} on the frozen build, with fake keys: nothing is prepared or started.`);
     await call(page, `window.nivra.setNebiusKey(${JSON.stringify("rehearsal-key-not-real-0123456789")}).then(() => window.nivra.setNebiusProjectId("project-rehearsal"))`);
     const projectId = await addProject(app, page, task.repository);
@@ -475,7 +479,7 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
       log(`The recipe expects the preparation to stop at ${task.expect.preparation.code}: no task is created, so the rehearsal ends here.`);
       writeFileSync(join(folder, "rehearsal.json"), `${JSON.stringify({ recipe: digest, environment: shown }, null, 2)}\n`, { mode: 0o600 });
       await removeKeys(page);
-      return finishRehearsal();
+      return;
     }
     const taskId = await createTask(page, { title: task.task.title, fields: fieldsOf(task), projectId, planId: null });
     const run = await previewRun(page);
@@ -488,10 +492,7 @@ async function rehearse(frozen: Frozen, task: LiveTask): Promise<number> {
     const brief = (await taskOf(page, taskId)).brief;
     writeFileSync(join(folder, "rehearsal.json"), `${JSON.stringify({ recipe: digest, environment: shown, run, briefVersion: brief.version }, null, 2)}\n`, { mode: 0o600 });
     await removeKeys(page);
-  } finally {
-    await app.close();
-  }
-  return finishRehearsal();
+  }, finishRehearsal);
 
   function finishRehearsal(): number {
     const after = homesAfter(homes);
