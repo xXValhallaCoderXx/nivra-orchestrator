@@ -35,6 +35,7 @@ import type {
 } from "@nivra/domain";
 import type { CoachingView, CoachPreview, CoachSelection } from "./coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView } from "./research.ts";
+import type { BudgetPolicy, BudgetPolicyDraft, BudgetSummary, PriceCatalogue } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -140,6 +141,12 @@ export const IPC = {
   listCoachings: "coach:list",
   cancelCoach: "coach:cancel",
   acceptCoachChanges: "coach:accept",
+  getBudgetPolicy: "budget:get-policy",
+  setBudgetPolicy: "budget:set-policy",
+  budgetSummary: "budget:summary",
+  budgetPrices: "budget:prices",
+  confirmBudgetMonth: "budget:confirm-month",
+  startNewBudgetHistory: "budget:start-new-history",
 } as const;
 
 /** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
@@ -999,4 +1006,16 @@ export interface NivraApi {
   cancelCoach(taskId: string, coachingId: string): Promise<void>;
   /** Saves the ticked changes as the brief's next version, from the task's revision as it was read; a stale answer is refused. */
   acceptCoachChanges(taskId: string, revision: number, coachingId: string, fields: CoachField[]): Promise<TaskView>;
+  /** The person's monthly budget policy (NIV-66), or null before they chose one. */
+  getBudgetPolicy(): Promise<BudgetPolicy | null>;
+  /** Saves a monthly budget as the next policy version. What was already spent or reserved stays as it was. */
+  setBudgetPolicy(draft: BudgetPolicyDraft): Promise<BudgetSummary>;
+  /** This month's budget as Nivra counts it, with every reason its totals can't be read as complete. */
+  budgetSummary(): Promise<BudgetSummary>;
+  /** The price list Nivra counts with, and what about it isn't established yet. */
+  budgetPrices(): Promise<PriceCatalogue>;
+  /** Confirms that a new budget month has begun by this computer's clock, when the provider's clock hasn't shown it yet. */
+  confirmBudgetMonth(): Promise<BudgetSummary>;
+  /** Starts a new budget history after a loss, with this month's remaining allowance in micro-units, or null to wait for next month. */
+  startNewBudgetHistory(remainingMicros: number | null): Promise<BudgetSummary>;
 }

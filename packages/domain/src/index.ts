@@ -17,3 +17,5 @@ export * from "./credentials.ts";
 export * from "./specialists.ts";
 export * from "./mission.ts";
 export * from "./coach.ts";
+export * from "./budget.ts";
+export * from "./prices.ts";

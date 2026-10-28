@@ -102,6 +102,12 @@ const api = {
   listCoachings: (taskId) => ipcRenderer.invoke(IPC.listCoachings, taskId),
   cancelCoach: (taskId, coachingId) => ipcRenderer.invoke(IPC.cancelCoach, taskId, coachingId),
   acceptCoachChanges: (taskId, revision, coachingId, fields) => ipcRenderer.invoke(IPC.acceptCoachChanges, taskId, revision, coachingId, fields),
+  getBudgetPolicy: () => ipcRenderer.invoke(IPC.getBudgetPolicy),
+  setBudgetPolicy: (draft) => ipcRenderer.invoke(IPC.setBudgetPolicy, draft),
+  budgetSummary: () => ipcRenderer.invoke(IPC.budgetSummary),
+  budgetPrices: () => ipcRenderer.invoke(IPC.budgetPrices),
+  confirmBudgetMonth: () => ipcRenderer.invoke(IPC.confirmBudgetMonth),
+  startNewBudgetHistory: (remainingMicros) => ipcRenderer.invoke(IPC.startNewBudgetHistory, remainingMicros),
 } satisfies NivraApi;
 
 contextBridge.exposeInMainWorld("nivra", api);

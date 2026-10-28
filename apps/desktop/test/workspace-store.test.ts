@@ -112,7 +112,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v7\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v8\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -588,7 +588,7 @@ describe("coachings of tasks (NIV-53)", () => {
     v6.close();
 
     const migrated = ready(path);
-    assert.equal(migrated.schemaVersion, 7);
+    assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
     assert.deepEqual(dump(migrated.db.db), before);
     assert.equal(Number(migrated.db.db.prepare("SELECT count(*) AS n FROM coachings").get()?.["n"]), 0);
     // The task's runs are still its only attempts.
