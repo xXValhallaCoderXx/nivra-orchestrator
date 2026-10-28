@@ -502,8 +502,8 @@ Migration v2 (D22) added the run's duration, usage and route, and the `artifacts
   (`token-factory` or `loopback-test`) and model.
 - **Model choice.** The first preferred model the key can see: `nvidia/Nemotron-3.5-Super-VL`, then
   `nvidia/Nemotron-3_5-Lightning`, then `nvidia/Nemotron-3-Ultra-550b-a55b`; otherwise any NVIDIA model (D50). A policy
-  table sets the tool choice: Nemotron 3 Super explores with `required` and is forced to answer; other models,
-  Nemotron 3.5 Super VL among them until a check has seen it honour that, use `auto`. Every request carries its output
+  table sets the tool choice: Nemotron 3.5 Super VL and Nemotron 3 Super explore with `required` and are forced to
+  answer, as checks have seen each honour that (D22, D50); other models use `auto`. Every request carries its output
   cap as `max_completion_tokens` (D50).
 - **`providers.check`** runs from any engine, within 150 s:
   1. it lists `GET /v1/models?verbose=true`;

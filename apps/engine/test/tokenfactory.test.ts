@@ -4,6 +4,7 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { TASK_MODEL } from "@nivra/domain";
 import { createModelClient, type CallOptions } from "../src/providers/model.ts";
+import { DEFAULT_POLICY, policyFor } from "../src/providers/policy.ts";
 import { capCompletionTokens, COMPLETION_CAP_FIELD, isNvidiaModel, listModels, pickNemotron, PREFERRED_NEMOTRON, TOKEN_FACTORY_BASE_URL, TokenFactoryError } from "../src/providers/tokenfactory.ts";
 import { startStub, text, toolCall, type Reply, type StubRequest } from "./stub-token-factory.ts";
 
@@ -60,6 +61,12 @@ describe("pickNemotron", () => {
 
   it("puts the task model first, so explain, research and the coach use what a task run uses when the key offers it (D50)", () => {
     assert.deepEqual([PREFERRED_NEMOTRON[0], TASK_MODEL], ["nvidia/Nemotron-3.5-Super-VL", "nvidia/Nemotron-3.5-Super-VL"]);
+  });
+
+  it("gives Nemotron 3.5 Super VL the checked policy, whatever its case, from D50's check, and other models the default", () => {
+    const policy = policyFor("NVIDIA/Nemotron-3.5-Super-VL");
+    assert.deepEqual([policy.explore, policy.forceAnswer, /D50's tool-choice check/.test(policy.evidence)], ["required", true, true]);
+    assert.equal(policyFor("nvidia/Nemotron-3_5-Lightning"), DEFAULT_POLICY);
   });
 
   it("falls back to any NVIDIA model, and to null when there is none", () => {

@@ -209,7 +209,7 @@ export type StoredTaskInput = z.infer<typeof StoredTaskInput>;
 
 /**
  * The one model a task run uses (NIV-35, D50): Nemotron 3.5 Super VL, which replaces Nemotron 3 Super when Token
- * Factory retires it on 9 November 2026; its tool choice hasn't been checked live yet. The run takes it from Token
+ * Factory retires it on 9 November 2026, and whose tool choice a check has seen honoured. The run takes it from Token
  * Factory's listing or stops at its model step, before any request to a model and before anything is uploaded: no
  * other model stands in. The run's preview names it.
  */

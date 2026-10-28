@@ -3399,9 +3399,12 @@ D46 stands.
 - **Its prices** are 0.30 USD per million input tokens and 0.90 USD per million output tokens. Nebius's post of 16
   October 2026 ("Three new open-weight models from US companies give builders more choice") gives them in USD. The
   listing gives the same numbers per token, with no unit.
-- **No policy entry yet.** Its tool choice hasn't been checked live, so it runs on D22's default policy: `auto` tool
-  choice in a bounded loop, with no forced answer. That includes the task worker, whose hand-in isn't forced until a
-  check has seen the model honour it. The paid tool-choice check adds its entry, with that check as its evidence.
+- **Its policy, from a check.** The paid tool-choice check Nate approved saw it honour a `required` tool choice and a
+  forced named tool, and give a forced answer that fits the schema, on tiny probes:
+  - 28 Oct, 23:28 SGT, digest `3bb7057c8d34af01c75fe2460f6a57716ff477479189b470a5881129f44cf098`, at `77e3a45`;
+  - Settings' Check Token Factory, named on the model.
+  So it gets D22's checked policy, as Nemotron 3 Super has: it explores with `required` and is forced to answer. That
+  includes the task worker's hand-in, and the coach, which needs a forced answer and refuses any model without one.
 - **The cap:** every request through `ModelClient` carries its output cap as `max_completion_tokens`, and no
   `max_tokens`.
   - Token Factory documents `max_completion_tokens` as the bound on what a completion generates, reasoning tokens
@@ -3427,14 +3430,22 @@ to show what Nivra actually sends: a direct API probe that accepts a field isn't
   - `task-engine.test.ts`: every request of a real engine's task run carries `max_completion_tokens` 8,000 and no
     `max_tokens`. The heartbeat test's wait for the run's first request is now bounded: a run that ends first fails it
     at once.
-  - Task tests list the task model themselves. Explain, chat, research and the coach keep Super in their stub
+  - `coach.test.ts`: with Super and the new model listed, a coaching sends one forced request to the new model, capped
+    with `max_completion_tokens`, and succeeds. `tokenfactory.test.ts`: the new model's policy, whatever its case.
+  - Task tests list the task model themselves. Explain, chat, research and the coach keep Super in their other stub
     listings, where it keeps its checked policy.
+- **Shown by that check:** 5 inference requests, all answered 200. Evidence:
+  `~/nivra-acceptance/model-switch/tool-choice-2026-10-28T152835449Z`.
+  - Token Factory takes `max_completion_tokens` for this model: every request carried it (400 or 1,000), and none
+    carried `max_tokens`.
+  - Its usage reports `completion_tokens_details.reasoning_tokens`, and `completion_tokens` includes them. The
+    forced-answer probe stopped at its cap (`length`) after exactly 1,000 completion tokens, 139 of them reasoning.
+  - 4,463 input and 1,489 output tokens in all. Cost isn't reported, so it isn't shown.
 - **Not shown yet:**
-  - that Token Factory honours `max_completion_tokens` for this model;
-  - how its usage counts reasoning tokens;
-  - how it does with tools.
-  The paid tool-choice check comes first, then a candidate and a live task run, each with its own approved recipe.
-  That reasoning-inclusive usage reaches the budget ledger is Next C's, in the journal of NIV-66's PR 2a.
+  - how a whole task run does on it: a candidate and a live run, each with its own approved recipe;
+  - whether billing follows `completion_tokens`;
+  - that reasoning-inclusive usage reaches the budget ledger, which is Next C's, in the journal of NIV-66's PR 2a.
+  The forced answer used its whole 1,000-token cap: tiny probes are evidence, not proof of reliability.
 - **Money:** until dollar budgets are established, the count-based limits stay, and costs are shown only as labelled
   estimates (Nate, 28 Oct).
 - **Evidence is credited to its model.** The live scripts (`research-live.ts`, `research-check.ts`,
