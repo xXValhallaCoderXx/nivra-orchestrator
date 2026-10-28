@@ -113,12 +113,21 @@ reaches your checkout without your approval of the exact change.
   and a regression shows that editing, skipping or excluding them can't produce a verified change (PENDING-H2).
 
 *Accomplishments* (measured; the conditions are below)
-- **The live task:** PENDING-H3.
+- **The live task** (candidate 3, 0.2.0 at `c99fe9d`, 28 October): the configured acceptance suites passed, but the
+  repository typecheck failed with three new errors. An AI review identified the broken caller before Nate's decision.
+  He rejected the proposal, and his checkout remained unchanged. It was not a fix: no change has yet been approved,
+  applied and accepted live.
 - **The offline suite:** PENDING-H4 tests at the release's commit, with the packaged and Windows checks as recorded.
 - **Earlier, still valid:** the explain and preferences features passed live acceptance on packaged builds (14 of 14
   criteria on Linux and on Windows to WSL, 18–19 October), and the v0.1.1 clean setups (23 of 23, and 22 of 22).
 
-*What we learned:* PENDING-H3, from the live run and the reviews.
+*What we learned:* passing the frozen tests isn't the whole of a correct change. On candidate 3's live run, a change
+passed every acceptance case while breaking a caller those cases don't reach. The verdict counts only the cases, and
+the repository typecheck that caught it was reported without deciding. Review before approval found it, and the person
+decided. Letting required checks take part in the verdict, with failures that already existed told apart from new
+ones, is recorded as NIV-67. Earlier runs taught that a request's limit must fit its whole answer: requests aren't
+streamed, and on candidate 2 two runs stopped when a request reached its 150 s. Candidate 3 allows 830 s, and its
+longest request, 156.1 s, completed.
 
 *What's next (planned, not built):* macOS; a browser and screenshot specialist; read-only ticket intake; another
 execution backend; task runs from the native Windows engine; package managers other than pnpm.
@@ -150,7 +159,12 @@ the service.
     operation, with networking on, which took 13.1 s by Nebius's own usage figure;
   - then, with networking off, the regression alone failed for the bug's reason in 2.9 s (5 of 5 tests); the existing
     data tests passed in 6.5 s (227 passed, 4 skipped); the domain suite passed in 11.7 s (1,122).
-- **The live task run:** PENDING-H3.
+- **The live task run** (candidate 3, 0.2.0 at `c99fe9d`, 28 October, through the app):
+  - the preparation took 30 s. The run, from Start at 18:25:48 to its report at 18:32:20 SGT, made 20 model requests,
+    all reported: 436,012 input and 7,395 output tokens. The longest answered 3,086 tokens in 156.1 s;
+  - the data suite passed (232 passed, 4 skipped: the repository's database integration tests, which run only against
+    a local database), the domain suite passed (1,122), the frozen files were unchanged, and the typecheck failed with
+    three new errors. Rejected at 18:48 SGT.
 - **v0.1.1's explanations** (19–20 October, Windows 11 with WSL 2.7.8, and an Ubuntu 24.04 VM): 46–212 s each, and
   11,887–142,580 input tokens each. Every citation pointed to lines the model was shown: 129 of 129, across ten
   explanations.
