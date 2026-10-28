@@ -141,37 +141,51 @@ export function simpleYaml(text: string): { values: Map<string, YamlValue>; unre
 /** The longest workspace glob Nivra reads, and the most patterns its brace lists may stand for. */
 const MAX_GLOB = 1_024;
 const MAX_EXPANSIONS = 256;
+/**
+ * The most steps expanding one pattern's brace lists may take, counted before each. Work is what's limited, not results:
+ * {a,a} written forty times stands for one folder, yet expanding it list by list would take 2^40 steps.
+ */
+const MAX_BRACE_STEPS = 4_096;
 /** Glob syntax Nivra doesn't read in a workspace pattern: character classes, extglobs and groups, and escapes. */
 const UNREAD_GLOB = /[[\]()|\\]/;
 
 /**
  * A workspace glob's brace lists expanded as pnpm and npm expand them, nested ones included: `packages/{a,b}` stands for
  * `packages/a` and `packages/b`. Null when the braces don't pair, a pair holds no list (a range such as {1..3}, or a
- * single name), or the pattern stands for more than MAX_EXPANSIONS.
+ * single name), the pattern is longer than MAX_GLOB or stands for more than MAX_EXPANSIONS, or expanding it would take
+ * more than MAX_BRACE_STEPS steps.
  */
 export function expandBraces(pattern: string): string[] | null {
-  const open = pattern.indexOf("{");
-  if (open === -1) return pattern.includes("}") ? null : [pattern];
-  let depth = 0;
-  let close = -1;
-  const commas: number[] = [];
-  for (let index = open; index < pattern.length && close === -1; index++) {
-    const char = pattern[index];
-    if (char === "{") depth++;
-    else if (char === "}" && --depth === 0) close = index;
-    else if (char === "," && depth === 1) commas.push(index);
-  }
-  if (close === -1 || commas.length === 0) return null;
-  const out = new Set<string>();
-  let start = open + 1;
-  for (const end of [...commas, close]) {
-    const expanded = expandBraces(`${pattern.slice(0, open)}${pattern.slice(start, end)}${pattern.slice(close + 1)}`);
-    if (expanded === null) return null;
-    for (const item of expanded) out.add(item);
-    if (out.size > MAX_EXPANSIONS) return null;
-    start = end + 1;
-  }
-  return [...out];
+  if (pattern.length > MAX_GLOB) return null;
+  let steps = MAX_BRACE_STEPS;
+  const expand = (text: string): string[] | null => {
+    if (--steps < 0) return null;
+    const open = text.indexOf("{");
+    if (open === -1) return text.includes("}") ? null : [text];
+    let depth = 0;
+    let close = -1;
+    const commas: number[] = [];
+    for (let index = open; index < text.length && close === -1; index++) {
+      const char = text[index];
+      if (char === "{") depth++;
+      else if (char === "}" && --depth === 0) close = index;
+      else if (char === "," && depth === 1) commas.push(index);
+    }
+    if (close === -1 || commas.length === 0) return null;
+    const out = new Set<string>();
+    let start = open + 1;
+    for (const end of [...commas, close]) {
+      // The limit is checked before each step down, so no pattern takes more than MAX_BRACE_STEPS of them.
+      if (steps <= 0) return null;
+      const expanded = expand(`${text.slice(0, open)}${text.slice(start, end)}${text.slice(close + 1)}`);
+      if (expanded === null) return null;
+      for (const item of expanded) out.add(item);
+      if (out.size > MAX_EXPANSIONS) return null;
+      start = end + 1;
+    }
+    return [...out];
+  };
+  return expand(pattern);
 }
 
 /** The first workspace glob Nivra can't read, or null. One it can't read is refused, never matched as nothing. */
