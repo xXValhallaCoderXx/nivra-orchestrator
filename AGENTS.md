@@ -146,6 +146,29 @@ list.
   on the version the specialist read. It never changes a task's state, adds an acceptance case, waives a run
   prerequisite or grants consent.
 
+## Budget rules (D49)
+
+- One budget authority: the host's ledger in workspace.db. Engines get finite grants and never see the pool, and no
+  ledger is opened from two operating systems (D7).
+- Every spendable call gets a grant before it is sent. The grant is marked dispatching, and that revision is fsynced
+  to the guard log beside the workspace, before the send begins. If the guard can't be written, nothing is sent.
+  Writing, dispatching and releasing a grant pass the ledger state the guard last verified; the ledger refuses them on
+  any other.
+- A grant's unused remainder is released only on affirmative evidence: the host never began sending it, in a ledger
+  the guard shows wasn't rolled back, or the engine's complete seal. A missing record, an interrupted seal or age never
+  releases it, and the ledger works out each journal row's amount itself, never taking it on the engine's word.
+- Unknown usage counts at its reserved bound and shows as unknown (null), never as 0 or 0 dollars. Money counts only
+  for a model whose bounds, and whose price list's currency, are established from a supported source.
+- A budget in dollars is set only when the price list's currency, every model's bounds and free listings are
+  established. Otherwise it is refused with the reason, and the budget in force stays as it was: never turned off or
+  switched to counts alone in its place. With the budget off ("Budget off, existing per-run limits apply"), a call to a
+  model the price list doesn't have is admitted and counted, its money unknown; under a dollar budget it is refused.
+- The price list names every model the engine prefers, and the task model, before grants are wired into model calls.
+- Every guard record keeps the latest month the ledger has established, never earlier than the record before it and
+  never read from a clock. A lost history's restriction holds through that month.
+- Grants and budget context travel in memory and RPC. They never go in workflow input, step output, run events,
+  requestContext or logs.
+
 ## Engineering rules
 
 - Keep main thin and the renderer free of Node APIs.
