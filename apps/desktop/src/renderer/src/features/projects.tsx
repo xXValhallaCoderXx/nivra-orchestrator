@@ -44,7 +44,7 @@ export function useAddProject({ projects, onAdded, onChanged }: { projects: Proj
         <Text size="sm" c="var(--nivra-text-2)">
           Nothing was added.
         </Text>
-        <Group justify="flex-end" gap="sm">
+        <Group justify="flex-end" gap="sm" className="nivra-dialog-actions">
           <Button variant="default" onClick={() => setRefusal(null)}>
             Close
           </Button>
@@ -105,7 +105,7 @@ export function RemoveProject({ project, running, onRemoved }: { project: Projec
   return (
     <>
       <Group gap="sm" align="center">
-        <Button variant="default" color="red" c="var(--nivra-error)" onClick={() => setOpen(true)} disabled={running} data-testid="project-remove">
+        <Button variant="outline" color="red" onClick={() => setOpen(true)} disabled={running} data-testid="project-remove">
           Remove from Nivra…
         </Button>
         <Text size="xs" c="var(--nivra-text-3)">
@@ -134,11 +134,11 @@ export function RemoveProject({ project, running, onRemoved }: { project: Projec
               <Text size="sm">{error}</Text>
             </Alert>
           )}
-          <Group justify="flex-end" gap="sm" mt="sm">
+          <Group justify="flex-end" gap="sm" mt="sm" className="nivra-dialog-actions">
             <Button variant="default" onClick={() => setOpen(false)} data-autofocus>
               Cancel
             </Button>
-            <Button variant="default" color="red" c="var(--nivra-error)" style={{ borderColor: "var(--nivra-error)" }} loading={busy} onClick={() => void remove()} data-testid="project-remove-confirm">
+            <Button variant="outline" color="red" loading={busy} onClick={() => void remove()} data-testid="project-remove-confirm">
               Remove {project.label}
             </Button>
           </Group>

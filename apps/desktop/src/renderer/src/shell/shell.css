@@ -115,3 +115,27 @@
   outline: 2px solid var(--mantine-color-text);
   outline-offset: 2px;
 }
+
+/* Dialogs in a narrow window (NW1, NW3): they fill the window, their title stays at the top while their body scrolls
+   inside them, and nothing scrolls the page sideways. */
+@media (max-width: 47.99375em) {
+  .mantine-Modal-inner {
+    padding: 0 !important;
+  }
+  .mantine-Modal-content {
+    flex: 0 0 100% !important;
+    max-width: 100% !important;
+    max-height: 100dvh !important;
+    height: 100dvh;
+    border-radius: 0 !important;
+  }
+}
+
+/* A dialog's actions, at the foot of its body, stay in view while the body scrolls inside the dialog. */
+.nivra-dialog-actions {
+  position: sticky;
+  bottom: 0;
+  padding: 12px 0 4px;
+  background: var(--mantine-color-body);
+  z-index: 1;
+}

@@ -1,4 +1,5 @@
-import { Alert, AppShell, Box, Stack, Text } from "@mantine/core";
+import { ActionIcon, Alert, AppShell, Box, Overlay, Stack, Text } from "@mantine/core";
+import { useMediaQuery } from "@mantine/hooks";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AppInfo, ConversationsView, ConversationSummary, EngineView, PreferencesView, ProjectView, SettingsView, TasksView, WslView } from "../../../shared/ipc";
 import { Conversation } from "../features/conversation";
@@ -13,6 +14,7 @@ import { errorMessage, usePoll } from "../shared/ui";
 import { browserStorage, DraftsProvider } from "../shell/drafts";
 import { newTaskDraftKey, openTaskCount, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
 import { Sidebar } from "../shell/Sidebar";
+import { NARROW_QUERY, SIDEBAR_WIDTH } from "../shell/layout";
 import { Switcher, type SwitcherHandle } from "../shell/Switcher";
 import { ToastProvider, useToast } from "../shell/Toasts";
 import { GeneralHome, ProjectHome } from "./Home";
@@ -71,6 +73,28 @@ function Shell() {
   // Settings opens on the section last shown there.
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("connections");
   const switcher = useRef<SwitcherHandle>(null);
+  // Narrow windows (SH9, NW1-NW3): the sidebar folds behind a menu button in a top bar, and opens over the page.
+  const narrow = useMediaQuery(NARROW_QUERY, false, { getInitialValueInEffect: false });
+  const [navOpen, setNavOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const sidebar = useRef<HTMLDivElement>(null);
+  const closeNav = (refocus: boolean) => {
+    setNavOpen(false);
+    if (refocus) menuButton.current?.focus();
+  };
+  useEffect(() => {
+    if (!narrow) setNavOpen(false);
+  }, [narrow]);
+  // Opened, the sidebar takes the focus, on the place in view; Esc closes it and gives the focus back to the menu button.
+  useEffect(() => {
+    if (!navOpen) return;
+    (sidebar.current?.querySelector<HTMLElement>('[aria-current="page"]') ?? sidebar.current?.querySelector<HTMLElement>("button"))?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) closeNav(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navOpen]);
 
   const projects = usePoll<ProjectView[]>(() => window.nivra.listProjects(), () => null, [projectsVersion]);
   const engines = usePoll<EngineView[]>(
@@ -113,6 +137,7 @@ function Shell() {
     .map(([id]) => id);
 
   const navigate = (next: Route) => {
+    setNavOpen(false);
     if (next.kind !== "settings") return setRoute(next);
     const section = shownSection(next.section);
     setSettingsSection(section);
@@ -120,6 +145,7 @@ function Shell() {
   };
   const openSettings = () => navigate({ kind: "settings", section: settingsSection });
   const switchTo = (next: Scope) => {
+    setNavOpen(false);
     setChosen(next);
     setRoute((current) => routeAfterSwitch(current, next));
   };
@@ -140,16 +166,52 @@ function Shell() {
   const adding = useAddProject({ projects: list, onAdded: added, onChanged: () => setProjectsVersion((n) => n + 1) });
 
   const switcherElement = (
-    <Switcher scope={scope} projects={list} windowsHost={appInfo.value?.platform === "win32"} adding={adding.busy} onSwitch={switchTo} onAdd={() => void adding.add()} handle={switcher} />
+    <Switcher
+      scope={scope}
+      projects={list}
+      windowsHost={appInfo.value?.platform === "win32"}
+      compact={narrow}
+      adding={adding.busy}
+      onSwitch={switchTo}
+      onAdd={() => void adding.add()}
+      handle={switcher}
+    />
   );
 
   return (
-    <AppShell navbar={{ width: 272, breakpoint: "sm" }} padding={0}>
+    <AppShell header={{ height: 56, collapsed: !narrow }} navbar={{ width: SIDEBAR_WIDTH, breakpoint: "sm", collapsed: { mobile: !navOpen } }} padding={0}>
+      {narrow && (
+        <AppShell.Header px={12} style={{ display: "flex", alignItems: "center", gap: 8 }} data-testid="top-bar">
+          <ActionIcon
+            ref={menuButton}
+            variant="default"
+            size={40}
+            aria-label={navOpen ? "Close navigation" : "Open navigation"}
+            aria-expanded={navOpen}
+            aria-controls="sidebar"
+            onClick={() => (navOpen ? closeNav(false) : setNavOpen(true))}
+            data-testid="nav-menu"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true">
+              <path d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+          </ActionIcon>
+          <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" style={{ flex: "none" }}>
+            <rect x="2" y="2" width="20" height="20" rx="6" fill="currentColor" />
+            <path d="M8 16V8l8 8V8" stroke="var(--mantine-color-body)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <Box style={{ flex: "1 1 auto", minWidth: 0 }}>{switcherElement}</Box>
+        </AppShell.Header>
+      )}
+      {narrow && navOpen && <Overlay fixed zIndex={99} color="#0A0A0A" backgroundOpacity={0.35} onClick={() => closeNav(true)} data-testid="nav-scrim" />}
       <Sidebar
+        ref={sidebar}
+        overlay={narrow}
+        hidden={narrow && !navOpen}
         route={shown}
         scope={scope}
-        switcher={switcherElement}
-        showLogo
+        switcher={narrow ? null : switcherElement}
+        showLogo={!narrow}
         openTasks={tasks.value?.workspace.state === "ready" ? openTaskCount(tasks.value.tasks, scope) : null}
         conversations={conversations.value}
         projects={list}
@@ -304,7 +366,7 @@ function Shell() {
               <SettingsPage
                 section={shown.kind === "settings" ? shown.section : settingsSection}
                 onSection={(section) => navigate({ kind: "settings", section })}
-                narrow={false}
+                narrow={narrow}
                 engines={engines.value ?? []}
                 appInfo={appInfo.value}
                 settings={settings.value}

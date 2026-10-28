@@ -1,8 +1,9 @@
 import { AppShell, Box, Menu, ScrollArea, Text, UnstyledButton } from "@mantine/core";
-import { useState, type ReactNode } from "react";
+import { useState, type ReactNode, type Ref } from "react";
 import type { ConversationScope, ConversationsView, ConversationSummary, ProjectView } from "../../../shared/ipc";
 import type { Navigate, Route, Scope } from "../app/routes";
 import { errorMessage } from "../shared/ui";
+import { SIDEBAR_WIDTH } from "./layout";
 import { placeOfDraft, sectionOf, type Section } from "./places";
 
 /** Inline stroke icons, 16 px (KIT rule 9), decorative: each link says what it is in words. */
@@ -185,6 +186,9 @@ export interface SidebarDrafts {
  * drafts, and Settings at the bottom. Queue, Agents and Activity come in a later build.
  */
 export function Sidebar({
+  ref,
+  overlay,
+  hidden,
   route,
   scope,
   switcher,
@@ -198,6 +202,11 @@ export function Sidebar({
   onOpenDraft,
   onConversationCreated,
 }: {
+  ref?: Ref<HTMLDivElement>;
+  /** In a narrow window it opens over the page, at its own width, instead of beside it. */
+  overlay: boolean;
+  /** Folded away in a narrow window: out of reach of Tab and assistive technology until the menu button opens it. */
+  hidden: boolean;
   route: Route;
   scope: Scope;
   /** The switcher, at wide widths; in a narrow window it sits in the top bar instead. */
@@ -216,7 +225,15 @@ export function Sidebar({
 }) {
   const section = sectionOf(route);
   return (
-    <AppShell.Navbar aria-label="Main" data-testid="nav" p={12} style={{ background: "var(--nivra-subtle)" }}>
+    <AppShell.Navbar
+      ref={ref}
+      id="sidebar"
+      aria-label="Main"
+      inert={hidden}
+      data-testid="nav"
+      p={12}
+      style={{ background: "var(--nivra-subtle)", ...(overlay ? { width: SIDEBAR_WIDTH, maxWidth: "85vw", boxShadow: hidden ? undefined : "0 12px 32px rgba(10, 10, 10, 0.18)" } : {}) }}
+    >
       <AppShell.Section>
         {showLogo && <Logo />}
         {switcher && <Box my={8}>{switcher}</Box>}
