@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { diffFilesOf } from "../src/shared/task-diff.ts";
+import { diffFilesOf, modeChangeOf } from "../src/shared/task-diff.ts";
 import { initialRepositoryOf } from "../src/shared/task-form.ts";
 import { decisionLead, failingReportedChecks, outcomeLookOf, unapprovableText } from "../src/shared/task-verdict.ts";
 
@@ -55,6 +55,63 @@ describe("a proposal's patch, file by file (P1i)", () => {
   it("names a file from its side lines when the header isn't a known path, quoting undone", () => {
     const quoted = ['diff --git "a/caf\\303\\251 \\"x\\".txt" "b/caf\\303\\251 \\"x\\".txt"', '--- "a/caf\\303\\251 \\"x\\".txt"', '+++ "b/caf\\303\\251 \\"x\\".txt"', "@@ -1 +1 @@", "-a", "+b", ""].join("\n");
     assert.equal(diffFilesOf(quoted, [], false)[0]!.path, 'café "x".txt');
+  });
+
+  it("keeps a mode-only change's modes, with no lines and no counts (Nate's final review)", () => {
+    // What git diff-tree writes for chmod +x alone: the modes, and no index line, side lines or hunks.
+    const files = diffFilesOf(["diff --git a/run.sh b/run.sh", "old mode 100644", "new mode 100755", ""].join("\n"), ["run.sh"], false);
+    assert.deepEqual(
+      files.map((file) => [file.path, file.lines.length, file.added, file.removed, file.binary, file.modes]),
+      [["run.sh", 0, 0, 0, false, { before: "100644", after: "100755" }]],
+    );
+  });
+
+  it("keeps the modes of a change with content edits, of a new executable file and of a deleted file", () => {
+    const patch = [
+      "diff --git a/run.sh b/run.sh",
+      "old mode 100644",
+      "new mode 100755",
+      "index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222",
+      "--- a/run.sh",
+      "+++ b/run.sh",
+      "@@ -1 +1 @@",
+      "-echo a",
+      "+echo b",
+      "diff --git a/tool.sh b/tool.sh",
+      "new file mode 100755",
+      "index 0000000000000000000000000000000000000000..3333333333333333333333333333333333333333",
+      "--- /dev/null",
+      "+++ b/tool.sh",
+      "@@ -0,0 +1 @@",
+      "+echo tool",
+      "diff --git a/old.txt b/old.txt",
+      "deleted file mode 100644",
+      "index 4444444444444444444444444444444444444444..0000000000000000000000000000000000000000",
+      "--- a/old.txt",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-gone",
+      "",
+    ].join("\n");
+    assert.deepEqual(
+      diffFilesOf(patch, ["run.sh", "tool.sh", "old.txt"], false).map((file) => [file.path, file.added, file.removed, file.modes]),
+      [
+        ["run.sh", 1, 1, { before: "100644", after: "100755" }],
+        ["tool.sh", 1, 0, { before: null, after: "100755" }],
+        ["old.txt", 0, 1, { before: "100644", after: null }],
+      ],
+    );
+  });
+
+  it("says what a mode is when it's worth saying, and that the apply refuses a mode change, as the engine's rule does", () => {
+    const at = (mode: string) => ({ mode });
+    assert.deepEqual(modeChangeOf({ change: "changed", before: at("100644"), after: at("100755") }), { before: "100644", after: "100755", text: "Mode 100644 to 100755: made executable", applies: false });
+    assert.deepEqual(modeChangeOf({ change: "changed", before: at("100755"), after: at("100644") }), { before: "100755", after: "100644", text: "Mode 100755 to 100644: no longer executable", applies: false });
+    assert.deepEqual(modeChangeOf({ change: "added", before: null, after: at("100755") }), { before: null, after: "100755", text: "An executable file (mode 100755)", applies: true });
+    assert.deepEqual(modeChangeOf({ change: "added", before: null, after: at("120000") }), { before: null, after: "120000", text: "A link (mode 120000)", applies: false });
+    assert.equal(modeChangeOf({ change: "changed", before: at("100644"), after: at("100644") }), null);
+    assert.equal(modeChangeOf({ change: "added", before: null, after: at("100644") }), null);
+    assert.equal(modeChangeOf({ change: "deleted", before: at("100755"), after: null }), null);
   });
 
   it("marks the file the cut ends in, and claims nothing past it", () => {
