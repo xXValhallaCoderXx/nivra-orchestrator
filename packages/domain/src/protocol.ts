@@ -4,7 +4,7 @@ import { z } from "zod";
  * The host–engine protocol (D2): JSON-RPC 2.0, one message per line, over the engine's stdin and stdout.
  * Bump `PROTOCOL_VERSION` whenever a change would break the other side; `initialize` refuses a mismatch.
  */
-// NIV-69 / PR 46 reserves 20. Reconcile both contract sets when that branch lands.
+// NIV-69 uses 20; required task verification and its combined contracts use 21.
 export const PROTOCOL_VERSION = 21;
 
 /**

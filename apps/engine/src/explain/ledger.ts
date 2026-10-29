@@ -1,4 +1,6 @@
 import type { Delivered } from "../repo/files.ts";
+import { mergeRanges } from "@nivra/domain";
+export { mergeRanges } from "@nivra/domain";
 
 /**
  * Everything a run delivered to the model (D22): the map's sources, search hits and reads, each with the step it was
@@ -84,16 +86,4 @@ export class Ledger {
     }
     return [...files.entries()].map(([path, file]) => ({ path, ranges: mergeRanges(file.ranges), sha256: [...file.sha256] }));
   }
-}
-
-/** Overlapping or touching ranges joined, in order. */
-export function mergeRanges(ranges: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
-  const sorted = [...ranges].map(([a, b]) => [a, b] as [number, number]).sort((x, y) => x[0] - y[0]);
-  const merged: Array<[number, number]> = [];
-  for (const [start, end] of sorted) {
-    const last = merged.at(-1);
-    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
-    else merged.push([start, end]);
-  }
-  return merged;
 }

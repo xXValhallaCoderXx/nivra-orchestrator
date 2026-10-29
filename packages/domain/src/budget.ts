@@ -93,9 +93,21 @@ function oneKind(policy: { preset: string; currency: unknown; monthlyMicros: unk
 }
 
 /** What the person chooses. Choosing one never enables paid work by itself: consents and keys still govern. */
-export const ModelRequestLimit = z.strictObject({ feature: z.literal("companion"), monthlyRequests: count });
+// Old records retain their exact shape and hash. Expanded coverage is a new policy version, never a transform.
+export const ModelRequestLimit = z.union([
+  z.strictObject({ feature: z.literal("companion"), monthlyRequests: count }),
+  z.strictObject({ pool: z.literal("companion-and-planning"), monthlyRequests: count }),
+]);
 export type ModelRequestLimit = z.infer<typeof ModelRequestLimit>;
 const RequestLimits = z.array(ModelRequestLimit).max(1);
+
+export const requestPoolCovers = (feature: string): feature is "companion" | "planning" => feature === "companion" || feature === "planning";
+export function modelRequestPoolLimit(limits: readonly ModelRequestLimit[] | undefined): number | null {
+  return limits?.[0]?.monthlyRequests ?? null;
+}
+export function hasSharedRequestPool(limits: readonly ModelRequestLimit[] | undefined): boolean {
+  return limits?.some((limit) => "pool" in limit) ?? false;
+}
 
 const policyDraftShape = {
   modelRequestLimits: RequestLimits.optional(),
@@ -199,7 +211,7 @@ export type ProfileRef = z.infer<typeof ProfileRef>;
 export const CODING_WORKER_PROFILE: ProfileRef = Object.freeze({ source: "builtin", id: "coding-worker", version: 1 });
 
 /** What the money was spent on. `maintenance` is an engine's own recovery and cleanup, outside any run. */
-export const SpendFeature = z.enum(["explain", "chat", "review", "mission-review", "coach", "research", "task", "sandbox-check", "environment", "provider-check", "maintenance", "companion"]);
+export const SpendFeature = z.enum(["explain", "chat", "review", "mission-review", "coach", "research", "task", "sandbox-check", "environment", "provider-check", "maintenance", "companion", "planning"]);
 export type SpendFeature = z.infer<typeof SpendFeature>;
 
 /** Who and what a grant's spend belongs to, so totals can be broken down without counting anything twice. */

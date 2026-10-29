@@ -6,6 +6,14 @@ import { IPC, type NivraApi } from "../shared/ipc.ts";
  * `require`, no "send any channel" helper (AGENTS.md, Electron security rules).
  */
 const api = {
+  createPlanning: (request) => ipcRenderer.invoke(IPC.createPlanning, request),
+  listPlanning: (projectId) => ipcRenderer.invoke(IPC.listPlanning, projectId),
+  getPlanning: (id) => ipcRenderer.invoke(IPC.getPlanning, id),
+  revisePlanning: (id, revision, input) => ipcRenderer.invoke(IPC.revisePlanning, id, revision, input),
+  savePlanning: (input) => ipcRenderer.invoke(IPC.savePlanning, input),
+  generatePlanning: (id, revision, input) => ipcRenderer.invoke(IPC.generatePlanning, id, revision, input),
+  getPlanningOperation: (id, operationId) => ipcRenderer.invoke(IPC.getPlanningOperation, id, operationId),
+  cancelPlanning: (id, operationId) => ipcRenderer.invoke(IPC.cancelPlanning, id, operationId),
   getAppInfo: () => ipcRenderer.invoke(IPC.getAppInfo),
   copyText: (text) => ipcRenderer.invoke(IPC.copyText, text),
   draftHasSavedKey: (text) => ipcRenderer.invoke(IPC.draftHasSavedKey, text),

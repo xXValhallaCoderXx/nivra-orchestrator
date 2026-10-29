@@ -64,7 +64,10 @@ import {
   type TaskInput,
   type TaskReport,
 } from "@nivra/domain";
-import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining, CURRENT_PRICES, monthOf, type BudgetPolicy, type BudgetRecovery, type BudgetSummary, type PriceCatalogue } from "@nivra/domain";
+import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining, CURRENT_PRICES, monthOf, requestPoolCovers, type BudgetGrant, type PlanningBrief, type PlanningProposal, type PlanningRequest, type PlanningSave, type BudgetPolicy, type BudgetRecovery, type BudgetSummary, type PriceCatalogue } from "@nivra/domain";
+import { PlanningHost } from "./planning-host.ts";
+import { PlanningRunner } from "./planning-runner.ts";
+import { getPlanning, planningSourcesOf } from "./planning-store.ts";
 import type {
   AddProjectResult,
   AttemptAction,
@@ -120,6 +123,8 @@ import {
   getGrant,
   openGrants,
   writeGrant,
+  writeAdaptivePlanningGrant,
+  sharedRequestLimitDraft,
   markDispatching,
   markAccepted,
   markUncertain,
@@ -997,6 +1002,7 @@ export class Host {
     return {
       summary: this.#taskSummary(task),
       revision: task.revision,
+      planningSources: planningSourcesOf(workspace, taskId),
       brief: { id: brief.id, version: brief.version, sha256: brief.sha256, content, createdAt: brief.createdAt },
       versions: versions.map(({ id, version, createdAt }) => ({ id, version, createdAt })),
       sourcePlans: content.sources.map((source) => {
@@ -1111,7 +1117,12 @@ export class Host {
     if (openCoachings(workspace, { taskId }).length) throw new Error("The coach is still answering about this task. Wait for it, or cancel it, then change its repository.");
     if (projectId !== null) this.#project(projectId);
     const latest = versionsOf(workspace, taskId).at(-1)!;
-    const cleared = briefForRepository(BriefContentSchema.parse(latest.content), projectId);
+    const before = BriefContentSchema.parse(latest.content);
+    const foreignPlanning = planningSourcesOf(workspace, taskId).some((source) => {
+      const from = getPlanning(workspace, source.planningId)?.request.projectId;
+      return from !== undefined && from !== null && from !== projectId;
+    });
+    const cleared = briefForRepository(before, projectId) ?? (foreignPlanning ? { ...before, context: "", assumptions: [], revalidate: ["context", "assumptions"] as BriefContent["revalidate"] } : null);
     if (cleared) this.#commitBrief(task, latest, cleared, { projectId, state: task.state === "ready" && !briefIsReady(cleared) ? "draft" : task.state });
     else if (!updateTask(workspace, taskId, revision, { projectId }, new Date().toISOString())) throw new Error("This task changed since you opened it. Open it again, then try again.");
     return this.task(taskId);
@@ -2235,14 +2246,15 @@ export class Host {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
       const withdraw = this.#markProjectTurns(projectId, "sharing");
       // Every stop is tried, whatever another's fate, and then any that failed is reported (D39).
-      const [runs, attempts, coachings, companion] = await Promise.allSettled([
+      const [runs, attempts, coachings, companion, planning] = await Promise.allSettled([
         this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`),
         this.#stopProjectAttempts(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
         this.#stopProjectCoachings(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop the coach answering about one of its tasks (${why}). Restart the project's engine to stop it.`),
         this.#companion?.invalidateProject(projectId),
+        this.#planning?.invalidateProject(projectId),
       ]);
       if (runs.status === "rejected") withdraw();
-      const failed = [runs, attempts, coachings, companion].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      const failed = [runs, attempts, coachings, companion, planning].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
     }
     return this.#view(this.#project(projectId));
@@ -2524,6 +2536,7 @@ export class Host {
         this.#stopProjectPreparations(projectId, "removal", (why) => `Nivra couldn't stop the preparation of the project's environment (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
         this.#stopProjectCoachings(projectId, "removal", (why) => `Nivra couldn't stop the coach answering about one of the project's tasks (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
         this.#companion?.invalidateProject(projectId),
+        this.#planning?.invalidateProject(projectId),
       ]);
       const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
@@ -2694,6 +2707,7 @@ export class Host {
 
   /** Stops every engine in parallel, each in the D4 order, then closes the workspace; none can start afterwards. */
   shutdown(): Promise<void> {
+    this.#planning?.clear();
     this.#companion?.clear();
     this.#closing ??= Promise.allSettled([...this.#engines.values()].map((engine) => engine.supervisor.close())).then(() => {
       if (this.#workspace.state === "ready") this.#workspace.db.close();
@@ -4980,6 +4994,67 @@ export class Host {
 
   // ------------------------------------------------------------------------------------------------ the contextual companion (NIV-68)
 
+  #planning: PlanningHost | null = null;
+  #planningRunner: PlanningRunner | null = null;
+  #planningHost(): PlanningHost {
+    if (this.#planning) return this.#planning;
+    const projects = () => this.#options.store.data.projects.filter((project) => !this.#removing.has(project.id));
+    const runner = this.#planningRunner ??= new PlanningRunner({
+      workspace: () => this.#workspaceDb(), projects,
+      sharingEpoch: (id) => this.#epochOf(id),
+      preferences: (id) => snapshotFor(this.#options.store.data, id),
+      secrets: () => this.#knownSecrets(),
+      connect: async (targetId) => (await this.#started(targetId)).supervisor,
+      grant: (id, targetId, homeId, projectId, taskId, maximum) => this.#planningGrant(id, targetId, homeId, projectId, taskId, maximum),
+      reconcile: () => this.getCompanionUsage(),
+    });
+    return this.#planning = new PlanningHost({
+      workspace: () => this.#workspaceDb(), projects,
+      sharingEpoch: (id) => this.#epochOf(id), secrets: () => this.#knownSecrets(),
+      preferences: (id) => snapshotFor(this.#options.store.data, id),
+      checkEvidence: (project, evidence) => runner.checkEvidence(project, evidence),
+      generate: (input) => runner.generate(input),
+      acknowledge: (operationId) => runner.acknowledge(operationId),
+      cancelGeneration: (operationId) => runner.cancel(operationId),
+    });
+  }
+  createPlanning(input: PlanningRequest) { return this.#planningHost().create(input); }
+  listPlanning(projectId?: string | null) { return this.#planningHost().list(projectId); }
+  getPlanning(id: string) { return this.#planningHost().get(id); }
+  revisePlanning(id: string, revision: number, input: { brief: PlanningBrief; proposal: PlanningProposal | null; refresh?: boolean }) { return this.#planningHost().revise(id, revision, input); }
+  savePlanning(input: PlanningSave) { return this.#planningHost().save(input); }
+  generatePlanning(id: string, revision: number, input: { inspectRepository: boolean; operationId: string }) { return this.#planningHost().generate(id, revision, input); }
+  getPlanningOperation(id: string, operationId: string) { return this.#planningHost().operation(id, operationId); }
+  cancelPlanning(id: string, operationId: string) { return this.#planningHost().cancel(id, operationId); }
+
+  /** Coverage expansion appends a guarded policy version; it never rewrites history or replenishes the month. */
+  #ensurePlanningPool(): void {
+    const { workspace, guard, recovery } = this.#budget();
+    if (recovery) throw new Error(BUDGET_NEEDS_RECOVERY);
+    const draft = sharedRequestLimitDraft(currentPolicy(workspace));
+    if (!draft) return;
+    const now = Date.now();
+    const { authority } = setPolicy(workspace, draft, now, this.#prices);
+    if (authority) this.#guardBudget(guard, workspace, authority, now);
+  }
+  #planningGrant(requestId: string, targetId: string, homeId: string, projectId: string | null, taskId: string | null, maximum: number): BudgetGrant {
+    this.#ensurePlanningPool();
+    const { workspace, guard, recovery } = this.#budget();
+    if (recovery) throw new Error(BUDGET_NEEDS_RECOVERY);
+    const last = guard.last();
+    const verified = last ? { ledgerId: last.ledgerId, revision: last.revision, chain: last.chain } : null;
+    const now = Date.now();
+    const written = writeAdaptivePlanningGrant(workspace, { requestId, targetId, workflow: "planning", attribution: { feature: "planning", projectId, taskId, attemptId: null, queueId: null, queueItemId: null, profile: { source: "builtin", id: "planning", version: 1 } }, models: this.#prices.models.map((rate) => rate.model), productive: { requests: maximum - 1, outputTokens: 8000 }, finalisation: { requests: 1, outputTokens: 8000 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, extends: null, need: null }, { now, catalogue: this.#prices, timezone: this.#budgetZone(workspace), verified });
+    if ("refused" in written) throw new Error(written.refused.message);
+    if (written.authority) this.#guardBudget(guard, workspace, written.authority, now);
+    const record = getGrant(workspace, written.grant.id)!;
+    if (record.state !== "written") throw new Error("This planning request was already dispatched. Open its existing operation; it will not be sent again.");
+    const dispatched = markDispatching(workspace, record.id, homeId, now, guard.last());
+    if (!dispatched) throw new Error("The planning grant could not be dispatched. Review its usage before trying a new request.");
+    this.#guardBudget(guard, workspace, dispatched, now);
+    return written.grant;
+  }
+
   #companion: CompanionHost | null = null;
 
   #companionHost(): CompanionHost {
@@ -5144,14 +5219,14 @@ export class Host {
     return budgetSummary(workspace, { now: Date.now(), catalogue: this.#prices, recovery, timezone: this.#budgetZone(workspace) });
   }
 
-  /** Companion AI only: optional monthly request policy, never a token or dollar ceiling. */
+  /** Companion and planning: one optional monthly request policy, never a token or dollar ceiling. */
   async setCompanionLimit(limit: number | null) {
-    if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0)) throw new Error("Choose a non-negative whole number of companion requests, or turn the monthly limit off.");
+    if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0)) throw new Error("Choose a non-negative whole number of Companion and planning requests, or turn the monthly limit off.");
     const previous = await this.getBudgetPolicy();
     if (limit === null && previous === null) return this.getCompanionUsage();
     const base = previous ?? { preset: "counts" as const, currency: null, monthlyMicros: null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, thresholds: [], sublimits: { dailyMicros: null, perQueueMicros: null, perTaskMicros: null, projects: [], profiles: [] }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, researchCreditMicros: null };
     const { version: _version, replaces: _replaces, createdAt: _created, ...draft } = base as typeof base & { version?: number; replaces?: number | null; createdAt?: string };
-    await this.setBudgetPolicy({ ...draft, modelRequestLimits: limit === null ? [] : [{ feature: "companion", monthlyRequests: limit }] });
+    await this.setBudgetPolicy({ ...draft, modelRequestLimits: limit === null ? [] : [{ pool: "companion-and-planning", monthlyRequests: limit }] });
     return this.getCompanionUsage();
   }
 
@@ -5159,11 +5234,12 @@ export class Host {
     const { workspace, recovery } = this.#budget();
     await this.#reconcileCompanionBudgets();
     const usage = companionRequestUsage(workspace);
-    return { ...usage, historyComplete: !recovery && usage.historyComplete, remaining: recovery ? null : usage.remaining, inputTokens: recovery ? null : usage.inputTokens, outputTokens: recovery ? null : usage.outputTokens, blocked: recovery ? BUDGET_NEEDS_RECOVERY : usage.historyBlocked ?? (usage.remaining === 0 ? "The monthly Companion AI allowance is exhausted. Raise it, wait for the next confirmed month, or continue manually." : null) };
+    return { ...usage, historyComplete: !recovery && usage.historyComplete, remaining: recovery ? null : usage.remaining, inputTokens: recovery ? null : usage.inputTokens, outputTokens: recovery ? null : usage.outputTokens, blocked: recovery ? BUDGET_NEEDS_RECOVERY : usage.historyBlocked ?? (usage.remaining === 0 ? "The monthly Companion and planning allowance is exhausted. Raise it, wait for the next confirmed month, or continue manually." : null) };
   }
 
   /** Writes and guards a finite grant before any companion RPC can be sent. */
   #companionGrant(requestId: string, targetId: string, homeId: string, projectId: string | null, taskId: string | null) {
+    this.#ensurePlanningPool();
     const { workspace, guard, recovery } = this.#budget();
     if (recovery) throw new Error(BUDGET_NEEDS_RECOVERY);
     const last = guard.last();
@@ -5184,7 +5260,7 @@ export class Host {
   async #reconcileCompanionBudgets(): Promise<void> {
     const { workspace, guard, recovery } = this.#budget();
     if (recovery) return;
-    for (const grant of openGrants(workspace).filter((one) => one.attribution.feature === "companion")) {
+    for (const grant of openGrants(workspace).filter((one) => requestPoolCovers(one.attribution.feature))) {
       const now = Date.now();
       if (grant.state === "written") {
         const released = releaseGrant(workspace, grant.id, now, guard.last());

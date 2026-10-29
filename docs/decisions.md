@@ -3853,6 +3853,45 @@ store has project and personal scopes, so routing every engineering preference t
 preference to its readiness coach, while other tasks do not inherit it. Explicit broader defaults still use the existing
 preference store. Conservative wording checks leave unresolved scope as a proposal and grant no permission to act.
 
+## D56. Reviewed native-task planning, current sharing consent and one companion/planning request allowance (2026-10-29)
+
+**Decision.** NIV-69 adds one explicit planning capability for new ideas and existing projects, reached directly or
+through a selected companion outcome. Structured briefs and proposals are versioned in the host's existing workspace,
+without creating a saved conversation. A proposal contains constructive challenge, at most three prioritised questions,
+“What this affects”, bounded source references and up to five editable native draft items. Outstanding choices and
+omitted prerequisites stay visible; advisory order is not queue scheduling.
+
+- Scoped native context, confirmed knowledge, source versions and current attempt/decision metadata are bound before
+  sending. A task's own project is authoritative; missions never import other projects' content. Regeneration receives
+  saved item/task mappings and preserves existing work. Material decision or evidence changes invalidate affected advice.
+- Repository-enabled inference requires current model-context consent and its captured sharing epoch. The host checks
+  again after engine startup, authorises each individual request, and rejects late results after revocation/removal.
+  Manual and repository-free planning remain available. No repository scripts or dependency installation are involved.
+- Bounded reads reuse the existing tracked-file reader and deny/masking rules. Observed claims cite delivered lines and
+  hashes; commit, file, search and scoped inventory changes invalidate advice. Missing inspection remains unassessed,
+  never proof of no impact. Citation checks cannot prove complete dependency coverage or semantic causality.
+- A reviewed selected save validates current bindings and creates every task, brief, optional membership, provenance and
+  receipt atomically. Repeated/concurrent saves cannot duplicate items. Deleted results are not recreated. Human
+  acceptance wording never becomes commands or Ready state; active tasks and pending results are not rewritten.
+- This decision supersedes D53's companion-only request coverage. The setting is “Companion and planning”, labelled
+  “Monthly AI request limit”. Both features share one allowance across engines/projects, with separate attribution and
+  a combined total. A guarded appended policy expands legacy coverage without changing its month, limit, consumption
+  or reservations; historical records and recovery restrictions remain intact. Other agents/services remain outside it.
+- Eight requests is an upper bound for repository exploration. Admission sizes the grant to what remains, reserves one
+  final answer, and explains reduced exploration. One remaining request produces a provisional answer without reading
+  code. Navigation, manual edits and draft saves consume no inference. Existing deadlines, no retries and conservative
+  unknown-usage settlement remain. This is not a monthly token or dollar ceiling.
+
+**Why.** Broad requests need proportionate challenge, visible consequences and reviewed work before execution. The
+same operation must have the same spending and consent rules whichever screen opened it. Durable selected outcomes
+allow restart without saving dialogue or replaying a paid request.
+
+**Consequences.** Workspace v13 adds planning versions, content-free operation records and atomic save/provenance
+records; protocol v20 adds planning and its transient result/authorisation handoff. Context/grants stay in scheduler
+memory. The host persists only the validated structured result before acknowledging the engine's bounded outbox.
+Restart interrupts unfinished planning without resend and reconciles its original grant conservatively. No dependency,
+provider, execution-boundary, tracker, queue or live-paid-evaluation scope is added.
+
 ## D57. Required repository checks, before-change observations and approval from the intact proposal report (2026-10-30)
 
 **Decision.** NIV-67 supersedes D39's reported-only repository checks for new runs. Every command in the brief's
@@ -3886,9 +3925,10 @@ A reported-only check could leave that proposal labelled verified. Comparison ev
 cannot establish that a failing final check contains no new errors. Approval must use the evidence actually hashed
 into the proposal, rather than a separately fitted display report.
 
-**Consequences.** Protocol 21 adds admission and the new evidence contracts. NIV-69/PR 46 already reserves protocol 20
-and decision D56; this change reserves D57 without altering that work. Whichever change lands second must reconcile
-both contract sets and advance the protocol as needed (NIV-69 landing after this version 21 requires a newer version).
+**Consequences.** Protocol 21 combines admission and the new evidence contracts with the planning contracts merged
+in NIV-69 / PR 46 (`67a12de`, protocol 20). D56 and its historical protocol-20 evidence are preserved; D57 records this
+verification change. Both planning and admission RPCs and workflows are retained, and both runtimes are rebuilt from
+the combined source rather than reusing the earlier unpublished protocol-21 artifacts.
 Proposal binding version 2 already binds the report bytes and remains unchanged. No dependency, provider, paid run,
 new task system or execution-boundary change is introduced. The deterministic fixtures prove Nivra's verdict handling,
 not that SHE-65 is fixed; NIV-35's real-task acceptance remains separate.

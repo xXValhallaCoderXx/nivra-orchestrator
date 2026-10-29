@@ -7,10 +7,13 @@ import {
   dayOf,
   GrantRequest,
   JournalSeal,
+  hasSharedRequestPool,
+  modelRequestPoolLimit,
   monthOf,
   priceUsage,
   rateFor,
   requestBound,
+  requestPoolCovers,
   type BudgetAllowances,
   type BudgetAttribution,
   type BudgetBreakdownLine,
@@ -657,6 +660,50 @@ export function writeGrant(
 ): { grant: BudgetGrant; authority: LedgerState | null } | { refused: GrantRefusal } {
   const asked = GrantRequest.parse(request);
   const digest = sha256(JSON.stringify(asked));
+  return writeGrantWithDigest(workspace, asked, context, digest);
+}
+
+/**
+ * Size one planner operation inside the ledger transaction, with one request protected for its final answer. The
+ * original maximum is its idempotency identity: a retry must return the same grant even after availability changes.
+ */
+export function writeAdaptivePlanningGrant(
+  workspace: WorkspaceDb,
+  request: GrantRequest,
+  context: { now: number; catalogue: PriceCatalogue; timezone: string; verified: LedgerState | null },
+): { grant: BudgetGrant; authority: LedgerState | null } | { refused: GrantRefusal } {
+  const asked = GrantRequest.parse(request);
+  const maximum = asked.productive.requests + asked.finalisation.requests;
+  if (asked.attribution.feature !== "planning" || asked.workflow !== "planning" || asked.extends !== null || asked.finalisation.requests !== 1 || maximum < 1 || maximum > 8) throw new Error("A planning grant needs one final answer and at most eight requests in total.");
+  const digest = sha256(JSON.stringify(asked));
+  return workspace.tx((db) => {
+    if (!holdsVerified(db, context.verified)) throw new Error(BUDGET_UNVERIFIED);
+    const existing = db.prepare("SELECT * FROM budget_grants WHERE request_id = ? AND extends_id IS NULL").get(asked.requestId);
+    if (existing) {
+      const record = grantOf(existing);
+      return record.requestSha256 === digest ? { grant: record.grant, authority: null } : { refused: { code: "duplicate-need" as const, message: "This planning operation was already granted with different contents. Start a new explicit request." } };
+    }
+    const policy = currentPolicyIn(db);
+    if (policy?.modelRequestLimits?.length && !hasSharedRequestPool(policy.modelRequestLimits)) return { refused: { code: "counted" as const, message: "The request allowance still covers the companion only. Update its coverage to Companion and planning before requesting AI planning; manual planning remains available." } };
+    const period = currentPeriodIn(db);
+    const periodIndex = period?.index ?? monthOf(context.now, policy?.timezone ?? context.timezone).index;
+    const grants = periodGrants(db, periodIndex).filter((grant) => requestPoolCovers(grant.attribution.feature));
+    let available = maximum;
+    const cap = modelRequestPoolLimit(policy?.modelRequestLimits);
+    if (cap !== null) available = Math.min(available, Math.max(0, cap - requestsHeld(db, grants)));
+    const loss = lossIn(db, periodIndex);
+    if (loss?.remaining?.mode === "counts") available = Math.min(available, Math.max(0, (modelRequestPoolLimit(loss.remaining.modelRequestLimits) ?? 0) - requestsHeld(db, grantsSince(db, loss).filter((grant) => requestPoolCovers(grant.attribution.feature)))));
+    if (available < 1) return { refused: { code: "counted" as const, message: "The monthly Companion and planning allowance is exhausted. Raise the limit, wait for the next confirmed month, or continue manually." } };
+    return writeGrantWithDigest(workspace, { ...asked, productive: { ...asked.productive, requests: available - 1 }, finalisation: { ...asked.finalisation, requests: 1 } }, context, digest);
+  });
+}
+
+function writeGrantWithDigest(
+  workspace: WorkspaceDb,
+  asked: GrantRequest,
+  context: { now: number; catalogue: PriceCatalogue; timezone: string; verified: LedgerState | null },
+  digest: string,
+): { grant: BudgetGrant; authority: LedgerState | null } | { refused: GrantRefusal } {
   const at = iso(context.now);
   return workspace.tx((db) => {
     if (!holdsVerified(db, context.verified)) throw new Error(BUDGET_UNVERIFIED);
@@ -787,9 +834,9 @@ function admission(
       return { code: "history-wait", message: `Nivra lost its budget history in ${month}, and you chose to wait for the month after, so nothing more is admitted before ${monthLabel(loss.throughIndex + 1)}. When it begins, confirm it in your budget.` };
     }
     if (remaining.mode === "counts") {
-      const cap = remaining.modelRequestLimits?.find((item) => item.feature === request.attribution.feature)?.monthlyRequests ?? 0;
-      const after = grantsSince(db, loss).filter((grant) => grant.attribution.feature === request.attribution.feature);
-      if (request.models.length > 0 && (request.attribution.feature !== "companion" || requestsHeld(db, after) + request.productive.requests + request.finalisation.requests > cap)) return { code: "counted", message: "This exceeds the companion requests you said remained after recovery. Change the recovery allowance or wait for the next confirmed month." };
+      const cap = modelRequestPoolLimit(remaining.modelRequestLimits) ?? 0;
+      const after = grantsSince(db, loss).filter((grant) => requestPoolCovers(grant.attribution.feature));
+      if (request.models.length > 0 && (!requestPoolCovers(request.attribution.feature) || requestsHeld(db, after) + request.productive.requests + request.finalisation.requests > cap)) return { code: "counted", message: "This exceeds the Companion and planning requests you said remained after recovery. Change the recovery allowance or wait for the next confirmed month." };
     } else {
     if (need === null) {
       return { code: "unestablished", message: `After Nivra lost its budget history you set ${limitDollars(remaining.micros)} dollars for the rest of ${month}, but Nivra hasn't established ${eitherOf(input.missing)}, so it can't keep the call within that. Please ${waitFor(loss)}.` };
@@ -805,8 +852,9 @@ function admission(
     }
   }
   if (!policy) return null;
-  const requestLimit = policy.modelRequestLimits?.find((item) => item.feature === request.attribution.feature);
-  if (requestLimit && requestsHeld(db, grants.filter((grant) => grant.attribution.feature === request.attribution.feature)) + request.productive.requests + request.finalisation.requests > requestLimit.monthlyRequests) return { code: "counted", message: "The monthly Companion AI request allowance cannot cover this turn. Raise the allowance, wait for the next confirmed month, or continue planning manually." };
+  const requestLimit = modelRequestPoolLimit(policy.modelRequestLimits);
+  if (request.attribution.feature === "planning" && policy.modelRequestLimits?.length && !hasSharedRequestPool(policy.modelRequestLimits)) return { code: "counted", message: "The request allowance still covers the companion only. Update its coverage to Companion and planning before requesting AI planning; manual planning remains available." };
+  if (requestLimit !== null && requestPoolCovers(request.attribution.feature) && requestsHeld(db, grants.filter((grant) => requestPoolCovers(grant.attribution.feature))) + request.productive.requests + request.finalisation.requests > requestLimit) return { code: "counted", message: "The monthly Companion and planning request allowance cannot cover this turn. Raise the allowance, wait for the next confirmed month, or continue planning manually." };
   // A counts-only budget holds no money: only its counted services are checked, and an unpriced call is admitted.
   if (policy.monthlyMicros !== null) {
     if (need === null) return { code: "unestablished", message: unestablished(input.missing) };
@@ -1158,13 +1206,7 @@ function requestsHeld(db: DatabaseSync, grants: readonly GrantRecord[]): number 
   }, 0);
 }
 
-/** Coverage is companion inference only. Tokens are reported subtotals; missing data stays unknown. */
-export function companionRequestUsage(workspace: WorkspaceDb) {
-  const db = workspace.db;
-  const period = currentPeriodIn(db);
-  const allGrants = period ? periodGrants(db, period.index).filter((grant) => grant.attribution.feature === "companion") : [];
-  const loss = period ? lossIn(db, period.index) : null;
-  const grants = loss ? grantsSince(db, loss).filter((grant) => grant.attribution.feature === "companion") : allGrants;
+function requestTotals(db: DatabaseSync, grants: readonly GrantRecord[]) {
   const active = grants.filter((grant) => OPEN_STATES.includes(grant.state));
   const final = grants.filter((grant) => !OPEN_STATES.includes(grant.state));
   const used = requestsHeld(db, final);
@@ -1186,18 +1228,37 @@ export function companionRequestUsage(workspace: WorkspaceDb) {
     unknown += unresolved ? Math.max(bound, rows.length) : unknownRows;
     unknownTokens += unresolved ? Math.max(Math.max(bound, rows.length) - completeTokens, incompleteTokens) : incompleteTokens;
   }
-  const limit = currentPolicyIn(db)?.modelRequestLimits?.find((item) => item.feature === "companion")?.monthlyRequests ?? null;
+  return { used, reserved, unknown, reportedInputTokens: inputTokens, reportedOutputTokens: outputTokens, unknownTokens };
+}
+
+/** New policy only: no old serialised policy, grant, period or recovery record is rewritten. */
+export function sharedRequestLimitDraft(previous: BudgetPolicy | null): BudgetPolicyDraft | null {
+  const limit = previous?.modelRequestLimits?.[0];
+  if (!previous || !limit || "pool" in limit) return null;
+  const { version: _version, replaces: _replaces, createdAt: _createdAt, ...draft } = previous;
+  return { ...draft, modelRequestLimits: [{ pool: "companion-and-planning", monthlyRequests: limit.monthlyRequests }] };
+}
+
+/** Combined inference coverage only. Feature rows partition these totals; they never add a second reservation. */
+export function companionRequestUsage(workspace: WorkspaceDb) {
+  const db = workspace.db;
+  const period = currentPeriodIn(db);
+  const allGrants = period ? periodGrants(db, period.index).filter((grant) => requestPoolCovers(grant.attribution.feature)) : [];
+  const loss = period ? lossIn(db, period.index) : null;
+  const grants = loss ? grantsSince(db, loss).filter((grant) => requestPoolCovers(grant.attribution.feature)) : allGrants;
+  const totals = requestTotals(db, grants);
+  const limit = modelRequestPoolLimit(currentPolicyIn(db)?.modelRequestLimits);
   let remaining = limit === null ? null : Math.max(0, limit - requestsHeld(db, allGrants));
   let historyBlocked: string | null = null;
   if (loss) {
     if (loss.remaining?.mode === "counts") {
-      const allowed = loss.remaining.modelRequestLimits?.find((item) => item.feature === "companion")?.monthlyRequests ?? 0;
+      const allowed = modelRequestPoolLimit(loss.remaining.modelRequestLimits) ?? 0;
       const recovered = Math.max(0, allowed - requestsHeld(db, grants));
       remaining = remaining === null ? recovered : Math.min(remaining, recovered);
     } else {
-      historyBlocked = loss.remaining === null ? "Budget history was lost and new spending waits for the next confirmed month. Manual planning remains available." : "The recovery allowance is in money and companion requests cannot be priced within it. Restore the history or choose an explicit request-count recovery allowance.";
+      historyBlocked = loss.remaining === null ? "Budget history was lost and new spending waits for the next confirmed month. Manual planning remains available." : "The recovery allowance is in money and Companion and planning requests cannot be priced within it. Restore the history or choose an explicit request-count recovery allowance.";
       remaining = null;
     }
   }
-  return { month: period?.label ?? "Not started", limit, used, reserved, unknown, remaining, historyComplete: !loss, historyBlocked, reportedInputTokens: inputTokens, reportedOutputTokens: outputTokens, unknownTokens, inputTokens: unknownTokens || loss ? null : inputTokens, outputTokens: unknownTokens || loss ? null : outputTokens };
+  return { month: period?.label ?? "Not started", limit, ...totals, remaining, historyComplete: !loss, historyBlocked, inputTokens: totals.unknownTokens || loss ? null : totals.reportedInputTokens, outputTokens: totals.unknownTokens || loss ? null : totals.reportedOutputTokens, features: { companion: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "companion")), planning: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "planning")) } };
 }

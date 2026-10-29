@@ -4,6 +4,8 @@ import {
   ChatInput,
   CompanionInput,
   type CompanionResult,
+  PlanningInput,
+  type PlanningResult,
   ChatResult,
   CoachReport,
   combinedMask,
@@ -53,6 +55,8 @@ import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, 
 import { Database, EngineLockedError } from "./db/database.ts";
 import { libsqlFileUrl } from "./db/libsql-url.ts";
 import { inspectRepository } from "./repo/inspection.ts";
+import { PlanningAuthorisation } from "./planning/authorisation.ts";
+import { validatePlanningEvidence } from "./planning/evidence.ts";
 import { runDoctor } from "./doctor/doctor.ts";
 import { CHECK_IMAGE, CHECK_LIMITS, previewOf, readSandboxTask, safeUnresolved } from "./exec/check.ts";
 import { childEnv, insideWsl } from "./exec/child-env.ts";
@@ -105,6 +109,7 @@ export class RuntimeBrokenError extends Error {
 }
 
 const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, WorkflowEntry>([
+  ["planning", { id: "planning", title: () => "Planning", mastraInput: (input: unknown) => PlanningInput.parse(input) }],
   ["companion", { id: "companion", title: () => "Companion", mastraInput: (input: unknown) => ({ sessionId: CompanionInput.parse(input).sessionId }) }],
   ["hello", { id: "hello", title: (input: unknown) => `Hello · ${basename(HelloInput.parse(input).repoPath) || "repository"}` }],
   [
@@ -289,6 +294,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/environment.ts"),
     typeof import("./workflows/coach.ts"),
     typeof import("./workflows/companion.ts"),
+    typeof import("./workflows/planning.ts"),
   ];
   try {
     mastraModules = await Promise.all([
@@ -304,6 +310,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       import("./workflows/environment.ts"),
       import("./workflows/coach.ts"),
       import("./workflows/companion.ts"),
+      import("./workflows/planning.ts"),
     ]);
   } catch (error) {
     database.close();
@@ -322,6 +329,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     { createEnvironmentWorkflow, ENVIRONMENT_WORKFLOW_ID },
     { createCoachWorkflow, COACH_WORKFLOW_ID },
     { createCompanionWorkflow, COMPANION_WORKFLOW_ID },
+    { createPlanningWorkflow, PLANNING_WORKFLOW_ID },
   ] = mastraModules;
 
   const vault = new SecretVault();
@@ -335,6 +343,10 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // The only home of a companion reply: bounded process memory, cleared on acknowledgement or session end.
   const companionReplies = new Map<string, { sessionId: string; result: CompanionResult }>();
   const endedCompanionSessions = new Set<string>();
+  const planningReplies = new Map<string, { operationId: string; result: PlanningResult }>();
+  const planningAuthorisation = new PlanningAuthorisation();
+  // A bounded tombstone set covers end-before-start races; saved run metadata prevents later replay.
+  const endedPlanningOperations = new Set<string>();
   // Names this home's store for the host (D26), as its path can't.
   const homeId = store.homeId();
   const backend = createLocalBackend({ baseEnv: env });
@@ -624,6 +636,21 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
 
   const mastra = new Mastra({
     workflows: {
+      [PLANNING_WORKFLOW_ID]: createPlanningWorkflow({
+        backend, findGit: locateGit,
+        context: (runId) => scheduler.contextOf(runId, "planning"),
+        budget: (runId) => { const grantId = scheduler.grantOf(runId); return grantId ? { journal, grantId, models: journal.models(grantId), seat: "planning" } : null; },
+        apiKey: () => vault.get("NEBIUS_API_KEY"), endpoint, mask,
+        authorize: (runId, operationId, request, sharingEpoch, signal) => planningAuthorisation.wait(runId, operationId, request, sharingEpoch, signal),
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        received: (runId, data) => { store.append(runId, { type: "step.output", stepId: "context", message: "Received the planning references", data }); },
+        save: (runId, operationId, result) => {
+          if (endedPlanningOperations.has(operationId) || store.summary(runId)?.status !== "running") return false;
+          if (planningReplies.size >= 32) planningReplies.delete(planningReplies.keys().next().value!);
+          planningReplies.set(runId, { operationId, result });
+          return true;
+        },
+      }),
       [COMPANION_WORKFLOW_ID]: createCompanionWorkflow({
         context: (runId) => scheduler.contextOf(runId, "companion"),
         budget: (runId) => { const grantId = scheduler.grantOf(runId); return grantId ? { journal, grantId, models: journal.models(grantId), seat: "companion" } : null; },
@@ -864,6 +891,39 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         }
       },
       "repository.inspect": ({ repoPath }) => inspectRepository(repoPath, backend, locateGit),
+      "planning.validateEvidence": ({ repoPath, evidence }) => validatePlanningEvidence(repoPath, evidence, backend, locateGit, mask),
+      "planning.result": ({ runId, operationId }) => {
+        const run = store.summary(runId);
+        if (run?.workflowId !== "planning" || PlanningInput.safeParse(run.input).data?.operationId !== operationId) throw new RpcFailure(ErrorCode.InvalidParams, "This planning result belongs to another operation or is unavailable.");
+        const reply = planningReplies.get(runId);
+        return run.status === "succeeded" && reply?.operationId === operationId && !endedPlanningOperations.has(operationId) ? reply.result : null;
+      },
+      "planning.pending": ({ runId, operationId }) => {
+        const run = store.summary(runId);
+        if (run?.workflowId !== "planning" || PlanningInput.safeParse(run.input).data?.operationId !== operationId) throw new RpcFailure(ErrorCode.InvalidParams, "This planning operation is unavailable. Open its saved brief before asking again.");
+        return planningAuthorisation.pending(runId, operationId);
+      },
+      "planning.authorize": ({ runId, operationId, request, sharingEpoch }) => {
+        const run = store.summary(runId);
+        if (run?.workflowId !== "planning" || PlanningInput.safeParse(run.input).data?.operationId !== operationId || run.status !== "running" || endedPlanningOperations.has(operationId) || !planningAuthorisation.authorize(runId, operationId, request, sharingEpoch)) throw new RpcFailure(ErrorCode.InvalidParams, "This planning request's sharing authorisation is stale or was already used. Refresh the plan before asking again.");
+        return { ok: true as const };
+      },
+      "planning.ack": ({ runId, operationId }) => {
+        const run = store.summary(runId);
+        if (run?.workflowId !== "planning" || PlanningInput.safeParse(run.input).data?.operationId !== operationId || !isTerminal(run.status)) throw new RpcFailure(ErrorCode.InvalidParams, "Wait for this planning operation to end before acknowledging its result.");
+        planningReplies.delete(runId);
+        return { ok: true as const };
+      },
+      "planning.end": ({ operationId }) => {
+        if (endedPlanningOperations.size < 1_024) endedPlanningOperations.add(operationId);
+        planningAuthorisation.end(operationId);
+        for (const [runId, reply] of planningReplies) if (reply.operationId === operationId) planningReplies.delete(runId);
+        for (const runId of store.active()) {
+          const run = store.summary(runId);
+          if (run?.workflowId === "planning" && PlanningInput.safeParse(run.input).data?.operationId === operationId) scheduler.cancel(runId);
+        }
+        return { ok: true as const };
+      },
       "companion.result": ({ runId, sessionId }) => {
         const run = store.summary(runId);
         if (run?.workflowId !== "companion" || CompanionInput.safeParse(run.input).data?.sessionId !== sessionId) throw new RpcFailure(ErrorCode.InvalidParams, "This temporary turn belongs to another session or is no longer available.");
@@ -887,6 +947,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       },
       "budget.journal": ({ grantId, after, limit }) => ({ ...journal.read(grantId, after, limit), providerDate: journal.providerDate(grantId) }),
       "runs.start": (params) => {
+        if (params.workflowId === "planning") {
+          if (endedPlanningOperations.size >= 1_024 && !store.findByRequest(params.clientRequestId)) throw new RpcFailure(ErrorCode.InvalidParams, "This engine's temporary planning history is full. Restart its engine before asking for another AI plan; manual planning remains available.");
+          if (endedPlanningOperations.has(params.input.operationId)) throw new RpcFailure(ErrorCode.InvalidParams, "This planning operation ended. Open a new operation to ask again.");
+          if (params.context.maxRequests !== params.budget.productive.requests + params.budget.finalisation.requests || params.budget.finalisation.requests !== 1 || params.budget.finalisation.outputTokens < 8_000 || (!params.context.repository && params.context.maxRequests !== 1)) throw new RpcFailure(ErrorCode.InvalidParams, "This planning grant doesn't preserve its final answer or match the permitted request count, so nothing was started.");
+        }
         if (params.workflowId === "companion" && endedCompanionSessions.has(params.input.sessionId)) throw new RpcFailure(ErrorCode.InvalidParams, "This temporary session has ended. Open a new session to ask again.");
         // One check of a project at a time (D36), for a new request: a repeated one still gets its own run, ended or not.
         // The host refuses a second check as well.
