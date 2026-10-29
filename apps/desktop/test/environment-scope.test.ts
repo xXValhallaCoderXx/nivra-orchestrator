@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { ENVIRONMENT_FILTER, ENVIRONMENT_LIMITS, EnvironmentChoices, InstallScope } from "@nivra/domain";
-import { MAX_SELECTORS, sameScope, scopeOf, scopeText, SELECTOR_RULE, selectorHint, selectorList, withScope } from "../src/shared/environment-scope.ts";
+import { factsOf, flaggedFolders, installsText, MAX_PACKAGES, MAX_SELECTORS, modeOf, sameScope, scopeOf, scopeText, SELECTOR_RULE, selectorHint, selectorList, selectionText, toggled, withScope } from "../src/shared/environment-scope.ts";
+import type { WorkspaceFacts } from "@nivra/domain";
 
 /**
  * What an environment installs, as the window chooses it (NIV-55, option a1): the whole project unless the person names
@@ -92,5 +93,64 @@ describe("what an environment installs, as the window chooses it (NIV-55)", () =
       const source = readFileSync(new URL(path, import.meta.url), "utf8");
       assert.equal(/^import (?!type )[^;]*from "@nivra\/domain"/m.test(source), false, path);
     }
+  });
+
+  describe("workspace packages ticked in the list (D52)", () => {
+    const packages = (list: string[], root = true): InstallScope => ({ kind: "packages", packages: list, root });
+    const facts: WorkspaceFacts = {
+      packages: [
+        { folder: "apps/web", name: "@w/web", unavailable: null },
+        { folder: "packages/data", name: "@w/data", unavailable: null },
+      ],
+      more: 0,
+      root: { dependencies: 2, examples: ["eslint", "typescript"], optional: true, reason: null },
+      modes: [
+        { mode: "whole", available: true, reason: null },
+        { mode: "packages", available: true, reason: null },
+        { mode: "selectors", available: false, reason: "pnpm selectors are pnpm's own syntax, and this project installs with npm." },
+      ],
+    };
+
+    it("ticks and unticks folders into the one form the domain takes, and holds its limit to the domain's", () => {
+      assert.deepEqual(toggled([], "packages/data", true), ["packages/data"]);
+      assert.deepEqual(toggled(["packages/data"], "apps/web", true), ["apps/web", "packages/data"], "in order");
+      assert.deepEqual(toggled(["apps/web", "packages/data"], "apps/web", true), ["apps/web", "packages/data"], "once");
+      assert.deepEqual(toggled(["apps/web", "packages/data"], "apps/web", false), ["packages/data"]);
+      assert.equal(MAX_PACKAGES, ENVIRONMENT_LIMITS.packages);
+      const many = Array.from({ length: MAX_PACKAGES + 1 }, (_, index) => `p/${String(index).padStart(2, "0")}`).reduce((folders, folder) => toggled(folders, folder, true), [] as string[]);
+      assert.deepEqual([InstallScope.safeParse(packages(many.slice(0, MAX_PACKAGES))).success, InstallScope.safeParse(packages(many)).success], [true, false]);
+      const chosen = withScope({ runtime: "24.21.0" }, packages(["apps/web"], false));
+      assert.deepEqual([chosen, EnvironmentChoices.safeParse(chosen).success], [{ runtime: "24.21.0", scope: packages(["apps/web"], false) }, true]);
+    });
+
+    it("compares packages scopes by their folders in order and their root, never as another kind", () => {
+      assert.equal(sameScope(packages(["a/b"]), packages(["a/b"])), true);
+      assert.equal(sameScope(packages(["a/b"]), packages(["a/b"], false)), false, "the root's switch counts");
+      assert.equal(sameScope(packages(["a/b"]), packages(["a/b", "c/d"])), false);
+      assert.equal(sameScope(packages(["a/b"]), selected("a/b")), false);
+      assert.equal(sameScope(selected("a/b"), packages(["a/b"])), false);
+      assert.equal(sameScope(packages(["a/b"]), { kind: "whole" }), false);
+    });
+
+    it("keeps a chosen folder the workspace no longer lists, flagged, until it is unticked", () => {
+      assert.deepEqual(flaggedFolders(packages(["apps/old", "apps/web"]), facts), ["apps/old"]);
+      assert.deepEqual([flaggedFolders(packages(["apps/old"]), null), flaggedFolders(selected("apps/old"), facts)], [[], []], "nothing to compare with yet, or nothing chosen by folder");
+    });
+
+    it("reads the facts and the ways of choosing from any answer that carries them, and none from one that doesn't", () => {
+      const refused = { status: "refused" as const, code: "scope", message: "No.", rows: [] };
+      assert.deepEqual([factsOf(refused), factsOf({ ...refused, workspace: facts }), modeOf(null, "packages")], [null, facts, null]);
+      assert.deepEqual([modeOf(facts, "packages")?.available, modeOf(facts, "selectors")?.reason], [true, "pnpm selectors are pnpm's own syntax, and this project installs with npm."]);
+    });
+
+    it("says what an install of chosen packages installs, from the recipe's selection, and what pnpm selectors leave to pnpm", () => {
+      const selection = { packages: [{ folder: "apps/web", name: "@w/web", chosen: true }, { folder: "packages/data", name: "@w/data", chosen: false }, { folder: "packages/lint", name: null, chosen: false }], root: true };
+      assert.equal(selectionText(selection), "@w/web (apps/web), with @w/data (packages/data) and packages/lint, which they need, and the workspace root's own dependencies");
+      assert.equal(selectionText({ packages: [selection.packages[0]!], root: false }), "@w/web (apps/web), without the workspace root's own dependencies");
+      assert.equal(installsText({ scope: packages(["apps/web"]), selection }), selectionText(selection));
+      assert.equal(installsText({ scope: { kind: "whole" } }), "the whole project");
+      assert.equal(installsText({ scope: selected("@w/web...") }), "only the workspace packages that @w/web... select, and the workspace root, which pnpm always installs");
+      assert.equal(scopeText(packages(["apps/web", "packages/data"])), "the workspace packages in apps/web and packages/data, with the workspace root's own dependencies");
+    });
   });
 });

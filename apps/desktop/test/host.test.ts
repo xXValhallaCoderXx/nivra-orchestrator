@@ -3274,6 +3274,22 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
       await assert.rejects(host.resolveEnvironment(linux, { scope: { kind: "selected", selectors } }), WRONG_SCOPE, JSON.stringify(selectors));
       await assert.rejects(host.prepareEnvironment(linux, { scope: { kind: "selected", selectors } }, fingerprint), WRONG_SCOPE, JSON.stringify(selectors));
     }
+    // And workspace packages chosen from the list (D52) that the domain wouldn't take: none, 21, out of order, twice, a way
+    // up, a space, the root's switch left unsaid.
+    const WRONG_PACKAGES = /^Error: Those workspace packages can't be sent as they are\. Choose 1 to 20 of the workspace's packages from the list, then preview again\.$/;
+    const many = Array.from({ length: 21 }, (_, index) => `packages/p${String(index).padStart(2, "0")}`);
+    for (const scope of [
+      { kind: "packages", packages: [], root: true },
+      { kind: "packages", packages: many, root: true },
+      { kind: "packages", packages: ["packages/web", "packages/data"], root: true },
+      { kind: "packages", packages: ["packages/web", "packages/web"], root: true },
+      { kind: "packages", packages: ["../web"], root: true },
+      { kind: "packages", packages: ["packages/my web"], root: true },
+      { kind: "packages", packages: ["packages/web"] },
+    ]) {
+      await assert.rejects(host.resolveEnvironment(linux, { scope } as never), WRONG_PACKAGES, JSON.stringify(scope).slice(0, 120));
+      await assert.rejects(host.prepareEnvironment(linux, { scope } as never, fingerprint), WRONG_PACKAGES, JSON.stringify(scope).slice(0, 120));
+    }
     assert.deepEqual([stateOf(host, "wsl:Test")?.status, stateOf(host, "local")?.status], ["stopped", "stopped"]);
   });
 
@@ -3293,6 +3309,13 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     const scopedFingerprint = await fingerprintOf(host, id, scoped);
     assert.deepEqual(JSON.parse(lines(home, "env-resolves.log").at(-1)!).choices, scoped, "the selectors reached the project's engine as typed");
     await assert.rejects(host.prepareEnvironment(id, CHOICES, scopedFingerprint), { message: CHANGED });
+    // Workspace packages chosen from the list (D52), either way round as well, and against the selectors' preview.
+    const chosen = { scope: { kind: "packages" as const, packages: ["packages/web"], root: true } };
+    await assert.rejects(host.prepareEnvironment(id, chosen, fingerprint), { message: CHANGED });
+    const chosenFingerprint = await fingerprintOf(host, id, chosen);
+    assert.deepEqual(JSON.parse(lines(home, "env-resolves.log").at(-1)!).choices, chosen, "the packages reached the project's engine as chosen");
+    await assert.rejects(host.prepareEnvironment(id, CHOICES, chosenFingerprint), { message: CHANGED });
+    await assert.rejects(host.prepareEnvironment(id, scoped, chosenFingerprint), { message: CHANGED });
     assert.deepEqual([calls(home, "runs.start"), (await host.environment(id)).choices], [0, null], "nothing was sent, and no choices were kept");
     // An install that fails keeps no environment, even one its report holds.
     writeFileSync(join(home, "environment-outcome"), "failed");
@@ -3328,6 +3351,24 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     await host.prepareEnvironment(id, CHOICES, await fingerprintOf(host, id));
     const kept = await ended(host, id);
     assert.deepEqual([kept.preparation?.status, imageOf(kept), calls(home, "runs.start")], ["failed", `image-${runId.slice(0, 8)}`, 4]);
+  });
+
+  it("keeps each project's own choice of what to install, the one its last preparation was started with (D52)", async () => {
+    const made = makeHost({ wslEntry: GATED, projects: [{ targetId: "wsl:Test", path: "/nowhere/gated" }, { targetId: "wsl:Test", path: "/nowhere/other" }] });
+    made.keys.current = SECRETS;
+    const home = join(made.root, "wsl home");
+    mkdirSync(home, { recursive: true });
+    for (const flag of ["accept", "release"]) writeFileSync(join(home, flag), "");
+    const [one, two] = [made.ids[0]!, made.ids[1]!];
+    for (const id of [one, two]) await made.host.setCloudExecution(id, true);
+    const chosen = { scope: { kind: "packages" as const, packages: ["packages/web"], root: true } };
+    await made.host.prepareEnvironment(one, chosen, await fingerprintOf(made.host, one, chosen));
+    const first = await ended(made.host, one);
+    await made.host.prepareEnvironment(two, CHOICES, await fingerprintOf(made.host, two));
+    await ended(made.host, two);
+    const [a, b] = [await made.host.environment(one), await made.host.environment(two)];
+    assert.deepEqual([a.choices, b.choices], [chosen, CHOICES], "each project keeps its own choice");
+    assert.deepEqual([first.prepared?.recipe.scope, first.prepared?.recipe.selection?.packages.map((item) => item.folder)], [chosen.scope, ["packages/data", "packages/web"]]);
   });
 
   it("reads a preparation back after a restart by its request and run ids, keeps what it prepared, and sends nothing again", async () => {

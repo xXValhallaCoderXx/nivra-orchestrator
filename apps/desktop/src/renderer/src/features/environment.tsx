@@ -1,7 +1,7 @@
-import { Alert, Badge, Button, Checkbox, Code, Group, List, Modal, Radio, Stack, Text, TextInput } from "@mantine/core";
-import type { ChoiceNeeded, EnvironmentChoices, EnvironmentPreviewV2, EnvironmentReport, InstallScope, PreparedEnvironmentV2, ResolutionRow } from "@nivra/domain";
-import { useRef, useState } from "react";
-import { MAX_SELECTORS, sameScope, scopeOf, scopeText, selectorHint, selectorList, withScope } from "../../../shared/environment-scope";
+import { Alert, Badge, Button, Checkbox, Code, Collapse, Group, List, Modal, Radio, Stack, Text, TextInput } from "@mantine/core";
+import type { ChoiceNeeded, EnvironmentChoices, EnvironmentPreviewV2, EnvironmentRecipe, EnvironmentReport, InstallScope, PreparedEnvironmentV2, ResolutionRow, WorkspaceFacts } from "@nivra/domain";
+import { useEffect, useRef, useState } from "react";
+import { factsOf, flaggedFolders, installsText, MAX_PACKAGES, MAX_SELECTORS, modeOf, sameScope, scopeOf, scopeText, selectorHint, selectorList, toggled, withScope } from "../../../shared/environment-scope";
 import type { EnvironmentView, PreparationView, ProjectView, TurnStatus } from "../../../shared/ipc";
 import { errorMessage, Section, usePoll } from "../shared/ui";
 
@@ -15,9 +15,10 @@ import { errorMessage, Section, usePoll } from "../shared/ui";
  * as markup. `credentialsSaved` changes each time the key or project id is saved: what keeps Prepare from being pressed
  * is read again.
  *
- * What to install is the whole project unless the person names packages of a pnpm workspace, as typed selectors sent
- * exactly as typed (option a1): the host's or the engine's refusal is shown in their words, the selectors are kept, and
- * nothing else is installed in their place. Changing it clears the preview shown, and Prepare waits for a new one.
+ * What to install is the whole project unless the person ticks workspace packages in the list the project's engine
+ * sent (D52), or, under Advanced, types pnpm selectors, sent exactly as typed: the host's or the engine's refusal is
+ * shown in their words, the choice is kept, and nothing else is installed in its place. The list is kept apart from
+ * the preview, so a change of scope clears the preview, and Prepare waits for a new one, while the list stays.
  */
 
 type Ready = Extract<EnvironmentPreviewV2, { status: "ready" }>;
@@ -71,6 +72,7 @@ const choicesText = (choices: EnvironmentChoices | null) => {
     choices?.manager ? choices.manager : null,
     choices?.managerVersion ? `version ${choices.managerVersion}` : null,
     choices?.scope?.kind === "selected" ? `installing ${selectorList(choices.scope.selectors)}` : null,
+    choices?.scope?.kind === "packages" ? `installing ${selectorList(choices.scope.packages)}${choices.scope.root ? "" : " without the root's own dependencies"}` : null,
     ...Object.entries(choices?.options ?? {}).filter(([, value]) => value !== false).map(([name]) => name),
   ].filter((item): item is string => item !== null);
   return said.length ? `with your choices: ${said.join(", ")}` : "as the project declares";
@@ -93,6 +95,8 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
   // The choices made here, until the person changes them: the ones made with the last preparation.
   const [edited, setEdited] = useState<EnvironmentChoices | null>(null);
   const [preview, setPreview] = useState<EnvironmentPreviewV2 | null>(null);
+  // The workspace's packages and ways to choose, from the last answer that read them: kept when a preview is cleared.
+  const [facts, setFacts] = useState<WorkspaceFacts | null>(null);
   const [previewed, setPreviewed] = useState<string | null>(null);
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -129,7 +133,9 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
     act(async () => {
       if (!projectId) return;
       setPreview(null);
-      setPreview(await window.nivra.resolveEnvironment(projectId, choices));
+      const shown = await window.nivra.resolveEnvironment(projectId, choices);
+      setPreview(shown);
+      setFacts(factsOf(shown));
       setPreviewed(key);
       state.refresh();
     });
@@ -206,14 +212,14 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
           </Alert>
         )}
         {preparation && <Preparation preparation={preparation} />}
-        {projectId && <ScopeControl scope={scope} disabled={busy} onChange={chooseScope} />}
+        {projectId && <ScopeControl scope={scope} facts={facts} disabled={busy} onChange={chooseScope} />}
         {unpreviewed && !error && !busy && (
           <Text size="sm" c="var(--nivra-warning)" data-testid="environment-scope-changed">
             This choice isn't previewed yet. Preview it to see what it installs, then prepare.
           </Text>
         )}
         <Group gap="sm">
-          <Button variant="default" onClick={() => void previewIt()} loading={busy && !consent && !underway} disabled={!projectId || !online || underway} data-testid="environment-preview">
+          <Button variant="default" onClick={() => void previewIt()} loading={busy && !consent && !underway} disabled={!projectId || !online || underway || (scope.kind === "packages" && scope.packages.length === 0)} data-testid="environment-preview">
             {(preview && stale) || unpreviewed ? "Preview this choice" : view?.prepared || view?.legacy || preparation ? "Preview preparing again" : "Preview the preparation"}
           </Button>
           <Button onClick={() => (project?.sharing.cloudExecution ? void act(start) : setConsent(true))} disabled={prepareBlocked} data-testid="environment-prepare">
@@ -311,89 +317,194 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
   );
 }
 
+/** What a recipe installs, as attributes a test or a journey reads: the kind, the selectors, and the packages chosen and installed. */
+const installsData = (recipe: Pick<EnvironmentRecipe, "scope" | "selection">) => ({
+  "data-kind": recipe.scope.kind,
+  "data-selectors": recipe.scope.kind === "selected" ? recipe.scope.selectors.join(" ") : "",
+  "data-packages": recipe.scope.kind === "packages" ? recipe.scope.packages.join(" ") : "",
+  "data-installs": recipe.selection ? recipe.selection.packages.map((item) => item.folder).join(" ") : "",
+  "data-root": recipe.selection ? String(recipe.selection.root) : "",
+});
+
 /** What networking reaches during the preparation, and that nothing after it has any. */
 const networkText = (ready: Ready) =>
   `Networking is on for the preparation only, to reach ${ready.recipe.network.hosts.join(", ") || "the package registry"} and to bring the base image from ${ready.recipe.network.imageRegistry}. Every check and task run is offline.`;
 
 /**
- * What to install (NIV-55, option a1): the whole project, the default, or packages of a pnpm workspace named by up to
- * eight selectors. Each is sent exactly as typed; the hint under one the domain's rule won't take is only a hint, and the
- * host's or the engine's refusal is the one that counts. Selectors typed stay while the whole project is chosen, so
- * choosing packages again brings them back.
+ * What to install (NIV-55, D52): the whole project, the default; workspace packages ticked in the list the project's
+ * engine sends, with the root's own dependencies or not; or, under Advanced, packages of a pnpm workspace named by up to
+ * eight selectors. Which of these the project supports, and why not, comes from the engine's facts. Before any preview
+ * there are none: a saved choice is shown as it was made, to be checked at the next preview. What was ticked or typed
+ * stays while another way is chosen, so choosing it again brings it back.
  */
-function ScopeControl({ scope, disabled, onChange }: { scope: InstallScope; disabled: boolean; onChange(next: InstallScope): void }) {
+function ScopeControl({ scope, facts, disabled, onChange }: { scope: InstallScope; facts: WorkspaceFacts | null; disabled: boolean; onChange(next: InstallScope): void }) {
   const typed = useRef<string[]>(scope.kind === "selected" ? scope.selectors : [""]);
-  const selectors = scope.kind === "selected" ? scope.selectors : null;
-  const set = (next: string[]) => {
-    typed.current = next;
-    onChange({ kind: "selected", selectors: next });
-  };
+  const ticked = useRef<{ packages: string[]; root: boolean }>(scope.kind === "packages" ? { packages: scope.packages, root: scope.root } : { packages: [], root: true });
+  const [advanced, setAdvanced] = useState(scope.kind === "selected");
+  // A saved choice of selectors arrives after the first render: Advanced opens for it.
+  useEffect(() => {
+    if (scope.kind === "selected") setAdvanced(true);
+  }, [scope.kind]);
+  const packages = modeOf(facts, "packages");
+  const selectorsMode = modeOf(facts, "selectors");
   const choose = (kind: string) => {
-    if (kind === "whole") {
-      if (selectors) typed.current = selectors;
-      onChange({ kind: "whole" });
-    } else if (!selectors) {
-      onChange({ kind: "selected", selectors: typed.current });
-    }
+    if (scope.kind === "selected") typed.current = scope.selectors;
+    if (scope.kind === "packages") ticked.current = { packages: scope.packages, root: scope.root };
+    if (kind === "whole") onChange({ kind: "whole" });
+    else if (kind === "packages" && scope.kind !== "packages") onChange({ kind: "packages", ...ticked.current, root: facts && !facts.root.optional ? true : ticked.current.root });
+    else if (kind === "selected" && scope.kind !== "selected") onChange({ kind: "selected", selectors: typed.current });
   };
+  const showSelectors = scope.kind === "selected" || selectorsMode?.available === true;
   return (
     <Stack gap={4} data-testid="environment-scope" data-kind={scope.kind}>
       <Radio.Group label="What to install" value={scope.kind} onChange={choose}>
         <Stack gap={6} mt={4}>
           <Radio value="whole" label="The whole project" description="Every package its lockfile installs. This is the default." disabled={disabled} data-testid="environment-scope-whole" />
           <Radio
-            value="selected"
-            label="Chosen packages"
-            description="Only the packages of a pnpm workspace that you name. An npm project, or a pnpm project that isn't a workspace, can't install chosen packages yet."
-            disabled={disabled}
-            data-testid="environment-scope-selected"
+            value="packages"
+            label="Chosen workspace packages"
+            description={packages === null ? "Preview to see whether this project's packages can be chosen." : packages.available ? "Only the packages you tick, with the workspace packages they need." : packages.reason}
+            disabled={disabled || (scope.kind !== "packages" && packages?.available !== true)}
+            data-testid="environment-scope-packages"
+            data-available={packages === null ? "unknown" : String(packages.available)}
           />
+          {scope.kind === "packages" && <PackagePicker scope={scope} facts={facts} disabled={disabled} onChange={onChange} />}
+          {showSelectors && (
+            <Stack gap={4}>
+              <Group>
+                <Button size="compact-xs" variant="subtle" onClick={() => setAdvanced((open) => !open)} aria-expanded={advanced} data-testid="environment-scope-advanced">
+                  {advanced ? "Hide Advanced" : "Advanced"}
+                </Button>
+              </Group>
+              <Collapse expanded={advanced}>
+                <Stack gap={6}>
+                  <Radio
+                    value="selected"
+                    label="pnpm selectors"
+                    description="pnpm's own --filter syntax, sent as you type it. pnpm decides what each selects, and always installs the workspace root too."
+                    disabled={disabled || (scope.kind !== "selected" && selectorsMode?.available !== true)}
+                    data-testid="environment-scope-selected"
+                  />
+                  {scope.kind === "selected" && <SelectorRows selectors={scope.selectors} disabled={disabled} onChange={(next) => onChange({ kind: "selected", selectors: (typed.current = next) })} />}
+                </Stack>
+              </Collapse>
+            </Stack>
+          )}
         </Stack>
       </Radio.Group>
-      {selectors && (
-        <Stack gap={4} pl="xl">
-          {selectors.map((selector, index) => {
-            const hint = selectorHint(selector);
-            return (
-              <Stack key={index} gap={2} data-testid="environment-scope-row">
-                <Group gap="xs" wrap="nowrap">
-                  <TextInput
-                    aria-label={`Package selector ${index + 1}`}
-                    placeholder="@scope/app... or ./packages/data"
-                    value={selector}
-                    onChange={(event) => {
-                      const value = event.currentTarget.value;
-                      set(selectors.map((item, at) => (at === index ? value : item)));
-                    }}
-                    disabled={disabled}
-                    styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
-                    style={{ flex: 1 }}
-                    data-testid="environment-scope-selector"
-                  />
-                  <Button size="compact-xs" variant="subtle" color="red" onClick={() => set(selectors.filter((_, at) => at !== index))} disabled={disabled || selectors.length === 1} data-testid="environment-scope-remove">
-                    Remove
-                  </Button>
-                </Group>
-                {hint && (
-                  <Text size="xs" c={selector === "" ? "var(--nivra-text-3)" : "var(--nivra-warning)"} data-testid="environment-scope-hint">
-                    {hint}
-                  </Text>
-                )}
-              </Stack>
-            );
-          })}
-          <Group>
-            <Button size="xs" variant="default" onClick={() => set([...selectors, ""])} disabled={disabled || selectors.length >= MAX_SELECTORS} data-testid="environment-scope-add">
-              Add a package
-            </Button>
-          </Group>
-          <Text size="xs" c="var(--nivra-text-3)">
-            Use a package name such as @scope/app, or a folder such as ./packages/data. Add ... to a package name
-            to include its dependencies, for example @scope/app... . You can enter up to {MAX_SELECTORS} selectors.
-            The preview shows the install command. Preparation checks the matches and stops if no packages match.
-          </Text>
-        </Stack>
+    </Stack>
+  );
+}
+
+/**
+ * The workspace's packages to tick (D52), each by name and folder: one that can't be chosen is off, with why; one the
+ * workspace no longer lists stays ticked and flagged until it is unticked; and the root's switch, locked on where the
+ * package manager always installs the root. Which packages the ticked ones need is the engine's to work out: the
+ * preview lists them.
+ */
+function PackagePicker({ scope, facts, disabled, onChange }: { scope: Extract<InstallScope, { kind: "packages" }>; facts: WorkspaceFacts | null; disabled: boolean; onChange(next: InstallScope): void }) {
+  const [find, setFind] = useState("");
+  const flagged = flaggedFolders(scope, facts);
+  const chosen = new Set(scope.packages);
+  const tick = (folder: string, on: boolean) => onChange({ ...scope, packages: toggled(scope.packages, folder, on) });
+  const listed = (facts?.packages ?? scope.packages.map((folder) => ({ folder, name: null, unavailable: null }))).filter((item) => find === "" || item.folder.includes(find) || (item.name ?? "").includes(find));
+  const root = facts?.root ?? null;
+  return (
+    <Stack gap={4} pl="xl" data-testid="environment-packages">
+      {facts === null && (
+        <Text size="xs" c="var(--nivra-text-3)">
+          Your choice is checked against this commit when you preview it.
+        </Text>
       )}
+      {flagged.map((folder) => (
+        <Checkbox key={folder} checked label={folder} description="Not in this commit: untick it, or choose the whole project." onChange={() => tick(folder, false)} disabled={disabled} data-testid="environment-package" data-folder={folder} data-flagged="true" />
+      ))}
+      {(facts?.packages.length ?? 0) > 12 && <TextInput size="xs" placeholder="Find a package by name or folder" value={find} onChange={(event) => setFind(event.currentTarget.value)} aria-label="Find a package" data-testid="environment-package-find" />}
+      {listed.map((item) => (
+        <Checkbox
+          key={item.folder}
+          checked={chosen.has(item.folder)}
+          label={item.name ?? item.folder}
+          description={[item.name ? item.folder : null, item.unavailable].filter(Boolean).join(". ") || undefined}
+          onChange={(event) => tick(item.folder, event.currentTarget.checked)}
+          disabled={disabled || (item.unavailable !== null && !chosen.has(item.folder))}
+          data-testid="environment-package"
+          data-folder={item.folder}
+        />
+      ))}
+      {facts !== null && facts.more > 0 && (
+        <Text size="xs" c="var(--nivra-text-3)">
+          {plural(facts.more, "more package")} {facts.more === 1 ? "isn't" : "aren't"} listed.
+        </Text>
+      )}
+      <Checkbox
+        checked={scope.root}
+        label="Also install the workspace root's own dependencies"
+        description={
+          root === null
+            ? undefined
+            : [root.dependencies ? `${plural(root.dependencies, "dependency", "dependencies")} of its own${root.examples.length ? `, such as ${selectorList(root.examples)}` : ""}.` : "It declares none of its own.", root.reason].filter(Boolean).join(" ")
+        }
+        onChange={(event) => onChange({ ...scope, root: event.currentTarget.checked })}
+        disabled={disabled || root?.optional === false}
+        data-testid="environment-package-root"
+      />
+      <Text size="xs" c={scope.packages.length === 0 ? "var(--nivra-warning)" : "var(--nivra-text-3)"} data-testid="environment-packages-hint">
+        {scope.packages.length === 0
+          ? "Tick at least one package, or choose the whole project."
+          : `Up to ${MAX_PACKAGES} packages are installed this way, counting the ones they need. The preview lists them all.`}
+      </Text>
+    </Stack>
+  );
+}
+
+/**
+ * pnpm's selectors (NIV-55, option a1), under Advanced: up to eight, each sent exactly as typed. The hint under one the
+ * domain's rule won't take is only a hint, and the host's or the engine's refusal is the one that counts.
+ */
+function SelectorRows({ selectors, disabled, onChange }: { selectors: string[]; disabled: boolean; onChange(next: string[]): void }) {
+  return (
+    <Stack gap={4} pl="xl">
+      {selectors.map((selector, index) => {
+        const hint = selectorHint(selector);
+        return (
+          <Stack key={index} gap={2} data-testid="environment-scope-row">
+            <Group gap="xs" wrap="nowrap">
+              <TextInput
+                aria-label={`Package selector ${index + 1}`}
+                placeholder="@scope/app... or ./packages/data"
+                value={selector}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  onChange(selectors.map((item, at) => (at === index ? value : item)));
+                }}
+                disabled={disabled}
+                styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+                style={{ flex: 1 }}
+                data-testid="environment-scope-selector"
+              />
+              <Button size="compact-xs" variant="subtle" color="red" onClick={() => onChange(selectors.filter((_, at) => at !== index))} disabled={disabled || selectors.length === 1} data-testid="environment-scope-remove">
+                Remove
+              </Button>
+            </Group>
+            {hint && (
+              <Text size="xs" c={selector === "" ? "var(--nivra-text-3)" : "var(--nivra-warning)"} data-testid="environment-scope-hint">
+                {hint}
+              </Text>
+            )}
+          </Stack>
+        );
+      })}
+      <Group>
+        <Button size="xs" variant="default" onClick={() => onChange([...selectors, ""])} disabled={disabled || selectors.length >= MAX_SELECTORS} data-testid="environment-scope-add">
+          Add a package
+        </Button>
+      </Group>
+      <Text size="xs" c="var(--nivra-text-3)">
+        Use a package name such as @scope/app, or a folder such as ./packages/data. Add ... to a package name
+        to include its dependencies, for example @scope/app... . You can enter up to {MAX_SELECTORS} selectors.
+        The preview shows the install command. Preparation checks the matches and stops if no packages match.
+      </Text>
     </Stack>
   );
 }
@@ -480,8 +591,8 @@ function PreviewPanel({ ready, choices, stale, prepared, onChoose }: { ready: Re
               option here.
             </Text>
           )}
-          <Text size="sm" data-testid="environment-scope-resolved" data-kind={recipe.scope.kind} data-selectors={recipe.scope.kind === "selected" ? recipe.scope.selectors.join(" ") : ""}>
-            What it installs: {scopeText(recipe.scope)}.
+          <Text size="sm" data-testid="environment-scope-resolved" {...installsData(recipe)}>
+            What it installs: {installsText(recipe)}.
           </Text>
           {!sameScope(recipe.scope, asked) && (
             <Text size="sm" c="var(--nivra-warning)" data-testid="environment-scope-mismatch">
@@ -545,8 +656,8 @@ function Prepared({ prepared, accepted, ready, busy, online, onAccept }: { prepa
           Its task runs start from it, with networking off, while the commit's setup files stay as they were. It was prepared from {prepared.recipe.image.tag}
           {verified.images.imported ? ", imported into your Nebius project" : ""}.
         </Text>
-        <Text size="xs" c="var(--nivra-text-3)" data-testid="environment-prepared-scope" data-kind={prepared.recipe.scope.kind}>
-          Installed with <Code>{[prepared.recipe.install.tool, ...prepared.recipe.install.args].join(" ")}</Code>: {scopeText(prepared.recipe.scope)}.
+        <Text size="xs" c="var(--nivra-text-3)" data-testid="environment-prepared-scope" {...installsData(prepared.recipe)}>
+          Installed with <Code>{[prepared.recipe.install.tool, ...prepared.recipe.install.args].join(" ")}</Code>: {installsText(prepared.recipe)}.
         </Text>
         {builds.state === "complete" ? (
           <Text size="xs" c="var(--nivra-text-3)" data-testid="environment-builds">

@@ -1,16 +1,20 @@
-import type { EnvironmentChoices, InstallScope } from "@nivra/domain";
+import type { EnvironmentChoices, EnvironmentPreviewV2, EnvironmentRecipe, InstallScope, InstallSelection, ScopeMode, WorkspaceFacts } from "@nivra/domain";
 
 /**
- * What a project's environment installs (NIV-55, option a1): the whole project, which is the default, or the packages of
- * a pnpm workspace that the person names with up to eight selectors, each as `pnpm install --filter` takes it. The
- * window sends the selectors exactly as they were typed, and the host and the engine decide by the domain's own rule:
- * their refusal, in their words, is the one shown. The window imports the domain for its types only (zod's runtime check
- * trips the CSP), so the limit and the rule are copied here for a hint under each selector, and a test holds them to the
- * domain's. Pure, so it is tested without a window.
+ * What a project's environment installs (NIV-55, D52): the whole project, which is the default; workspace packages
+ * ticked in a list the project's engine sends, by folder, with or without the root's own dependencies; or, under
+ * Advanced, the packages of a pnpm workspace that up to eight typed selectors pick, each as `pnpm install --filter`
+ * takes it, sent exactly as typed. The engine says which of these a project supports and why not, so nothing here
+ * reads a refusal's words or a manager's name; the host and the engine decide by the domain's own rules, and their
+ * refusal, in their words, is the one shown. The window imports the domain for its types only (zod's runtime check
+ * trips the CSP), so the limits and the selectors' rule are copied here, and a test holds them to the domain's. Pure,
+ * so it is tested without a window.
  */
 
 /** The most selectors a scope holds: the domain's `ENVIRONMENT_LIMITS.filters`. */
 export const MAX_SELECTORS = 8;
+/** The most workspace packages a chosen install installs, those reached included: the domain's `ENVIRONMENT_LIMITS.packages`. */
+export const MAX_PACKAGES = 20;
 
 /** The domain's `ENVIRONMENT_FILTER`, for the hint only: a selector it refuses is still sent, and the host refuses it. */
 export const SELECTOR_RULE = /^(?!-)[A-Za-z0-9@._/^~*!-]{1,200}$/;
@@ -59,3 +63,40 @@ export const scopeText = (scope: InstallScope): string =>
     : scope.kind === "selected"
       ? `only the workspace packages that ${selectorList(scope.selectors)} select`
       : `the workspace packages in ${selectorList(scope.packages)}${scope.root ? ", with the workspace root's own dependencies" : ""}`;
+
+/** A package as the window names it: its name with its folder, or the folder alone. */
+const labelOf = (item: { folder: string; name: string | null }) => (item.name ? `${item.name} (${item.folder})` : item.folder);
+
+/** What a recipe installs, in words, from its selection when it has one: chosen, reached, and the root's or not. */
+export function installsText(recipe: Pick<EnvironmentRecipe, "scope" | "selection">): string {
+  if (!recipe.selection) return recipe.scope.kind === "selected" ? `${scopeText(recipe.scope)}, and the workspace root, which pnpm always installs` : scopeText(recipe.scope);
+  return selectionText(recipe.selection);
+}
+
+/** A chosen install's selection, in words. */
+export function selectionText(selection: InstallSelection): string {
+  const chosen = selection.packages.filter((item) => item.chosen).map(labelOf);
+  const reached = selection.packages.filter((item) => !item.chosen).map(labelOf);
+  return [
+    `${selectorList(chosen)}${reached.length ? `, with ${selectorList(reached)}, which ${reached.length === 1 ? "it needs" : "they need"}` : ""}`,
+    selection.root ? "and the workspace root's own dependencies" : "without the workspace root's own dependencies",
+  ].join(", ");
+}
+
+/** The folders chosen with one ticked or unticked: each once, in the order the domain takes. */
+export function toggled(folders: readonly string[], folder: string, on: boolean): string[] {
+  const next = new Set(folders);
+  if (on) next.add(folder);
+  else next.delete(folder);
+  return [...next].sort();
+}
+
+/** The chosen folders the workspace no longer lists: shown flagged, and kept until unticked, never dropped. */
+export const flaggedFolders = (scope: InstallScope, facts: WorkspaceFacts | null): string[] =>
+  scope.kind !== "packages" || facts === null ? [] : scope.packages.filter((folder) => !facts.packages.some((item) => item.folder === folder));
+
+/** The workspace's facts an answer carries, or null: a refusal carries them only once the workspace was read. */
+export const factsOf = (answer: EnvironmentPreviewV2): WorkspaceFacts | null => (answer.status === "refused" ? (answer.workspace ?? null) : answer.workspace);
+
+/** One way of choosing, as the facts say: available or not, and why not. Unknown before any preview. */
+export const modeOf = (facts: WorkspaceFacts | null, mode: ScopeMode) => facts?.modes.find((item) => item.mode === mode) ?? null;
