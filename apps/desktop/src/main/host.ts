@@ -101,6 +101,7 @@ import type {
 } from "../shared/ipc.ts";
 import type { CoachingView, CoachPreview, CoachSelection } from "../shared/coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView, StopCause } from "../shared/research.ts";
+import { sameScope, scopeOf } from "../shared/environment-scope.ts";
 import {
   BUDGET_GUARD_FAILED,
   BUDGET_GUARD_FAILED_AFTER_SAVE,
@@ -354,6 +355,8 @@ const PREPARE_KEYS_MISSING = "Preparing an environment needs your Nebius key and
 const PREPARE_REMOVING = "This project is being removed, so its environment can't be prepared.";
 const PREPARATION_GOING = "This project's environment is being prepared. Wait for it to end, or cancel it, then prepare it again.";
 const PREPARATION_CHANGED = "What preparing this environment would send has changed since you previewed it. Check the new preview, then prepare it again.";
+/** A recipe that doesn't install the scope chosen (D52): the host refuses it, as the window does, whatever its fingerprint. */
+const PREPARATION_OTHER_SCOPE = "This preview doesn't install what was chosen, so nothing was prepared. Preview again; if it still differs, report it.";
 const PREPARED_ELSEWHERE =
   "This environment was prepared in another Nebius project than the one in Settings, and an image can be used only in its own project, so task runs will refuse it. Prepare it again.";
 /** Why a project's environment isn't one its task runs start from (NIV-55): a run never starts without it instead. */
@@ -3493,6 +3496,7 @@ export class Host {
     const shown = await engine.supervisor.call("environment.resolve", { repoPath: project.nativePath, choices, previous }, { timeoutMs: SANDBOX_PREVIEW_MS });
     if (shown.status === "refused") throw new Error(shown.message);
     if (shown.status !== "ready" || shown.fingerprint !== expected) throw new Error(PREPARATION_CHANGED);
+    if (!sameScope(shown.recipe.scope, scopeOf(choices))) throw new Error(PREPARATION_OTHER_SCOPE);
     // Checked again after the waits: the keys can be removed, uploads turned off and the project removed meanwhile.
     if (!(await this.#keysSet())) throw new Error(PREPARE_KEYS_MISSING);
     const current = this.#options.store.data.projects.find((p) => p.id === project.id);
@@ -5228,7 +5232,13 @@ function preparationReportMatches(report: EnvironmentReport, preparation: Prepar
 /** The person's choices, as the domain takes them (NIV-55), or why not, in their words. */
 function environmentChoicesOf(choices: EnvironmentChoices): EnvironmentChoices {
   const parsed = EnvironmentChoices.safeParse(choices);
-  if (!parsed.success) throw new Error("Those choices can't be sent as they are: a version is exact, such as 24.21.0, and an option is one the preview offers. Preview the environment again.");
+  if (!parsed.success) {
+    if (parsed.error.issues.some((issue) => issue.path[0] === "scope")) {
+      if ((choices.scope as { kind?: unknown } | undefined)?.kind === "packages") throw new Error("Those workspace packages can't be sent as they are. Choose 1 to 20 of the workspace's packages from the list, then preview again.");
+      throw new Error("Those package selectors can't be sent as they are. Use 1 to 8 selectors, each up to 200 characters, with no spaces or leading dash. Correct them, then preview again.");
+    }
+    throw new Error("Those choices can't be sent as they are: a version is exact, such as 24.21.0, and an option is one the preview offers. Preview the environment again.");
+  }
   return parsed.data;
 }
 

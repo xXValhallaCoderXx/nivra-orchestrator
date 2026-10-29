@@ -37,6 +37,8 @@ export const ENVIRONMENT_LIMITS = {
   /** The manifests, the lockfile and the workspace file. */
   inputs: 200,
   inputBytes: 8 * 1024 * 1024,
+  /** The workspace packages one chosen install installs (NIV-55): those chosen and those they reach. */
+  packages: 20,
 } as const;
 
 /**
@@ -260,12 +262,63 @@ export type InstallOptions = z.infer<typeof InstallOptions>;
 export const InstallStep = z.strictObject({ tool: ToolName, args: z.array(PlainArg).min(1).max(48), options: InstallOptions });
 export type InstallStep = z.infer<typeof InstallStep>;
 
-/** What is installed: the whole project, or the workspace packages the person selected. */
+/**
+ * A workspace package's folder, from the repository's top, as a chosen install names it (NIV-55): plain segments of
+ * letters, digits and @ . _ -, none starting with a dot or a hyphen, which both package managers read literally. At
+ * most 186 characters, so that npm's `--workspace=./` and the folder make one argument of 200 at most.
+ */
+export const WORKSPACE_FOLDER = /^(?=.{1,186}$)[A-Za-z0-9@_][A-Za-z0-9@._-]*(?:\/[A-Za-z0-9@_][A-Za-z0-9@._-]*)*$/;
+/**
+ * A workspace package's name as a chosen install passes it to pnpm's `--filter` (NIV-55): a plain name with an optional
+ * scope, with no glob or selector character and no trailing dot, so it matches that package exactly. At most 200
+ * characters, as any argument.
+ */
+export const WORKSPACE_NAME = /^(?=.{1,200}$)(?:@[A-Za-z0-9][A-Za-z0-9._~-]*\/)?[A-Za-z0-9][A-Za-z0-9._~-]*(?<!\.)$/;
+const WorkspaceFolder = z.string().regex(WORKSPACE_FOLDER);
+/** Whether each item is listed once, in JavaScript's own string order: a selection has one form, so one digest. */
+const ordered = (items: readonly string[]) => items.every((item, index) => index === 0 || items[index - 1]! < item);
+
+/**
+ * What is installed: the whole project; the workspace packages of a pnpm workspace that the person's selectors pick,
+ * sent as typed; or workspace packages chosen by folder (NIV-55), with or without the workspace root's own
+ * dependencies. For chosen packages, the resolver works out every workspace package the install reaches, from the
+ * links the lockfile records, and passes each one.
+ */
 export const InstallScope = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("whole") }),
   z.strictObject({ kind: z.literal("selected"), selectors: z.array(z.string().regex(ENVIRONMENT_FILTER)).min(1).max(ENVIRONMENT_LIMITS.filters) }),
+  z.strictObject({
+    kind: z.literal("packages"),
+    packages: z.array(WorkspaceFolder).min(1).max(ENVIRONMENT_LIMITS.packages).refine(ordered, "Each workspace package is listed once, in order."),
+    root: z.boolean(),
+  }),
 ]);
 export type InstallScope = z.infer<typeof InstallScope>;
+
+/**
+ * What a chosen install installs (NIV-55), as its resolver worked it out from the links the lockfile records: every
+ * workspace package, chosen or reached, in folder order, by folder and name (null for an npm package with none), and
+ * whether the workspace root's own dependencies come too.
+ */
+export const InstallSelection = z.strictObject({
+  packages: z.array(z.strictObject({ folder: WorkspaceFolder, name: z.string().min(1).max(214).nullable(), chosen: z.boolean() })).min(1).max(ENVIRONMENT_LIMITS.packages),
+  root: z.boolean(),
+});
+export type InstallSelection = z.infer<typeof InstallSelection>;
+
+/**
+ * Why a recipe's selection doesn't fit its scope, or null when it does (NIV-55). Only chosen packages have one, and they
+ * must: with the scope's root, and exactly the scope's packages marked chosen. Recipes from before it never carry one.
+ */
+export function selectionProblem(scope: InstallScope, selection: InstallSelection | undefined): string | null {
+  if (scope.kind !== "packages") return selection === undefined ? null : "Only an install of chosen workspace packages has a selection.";
+  if (selection === undefined) return "An install of chosen workspace packages needs the selection it installs.";
+  if (selection.root !== scope.root) return "The selection's root doesn't match the scope's.";
+  if (!ordered(selection.packages.map((item) => item.folder))) return "Each workspace package in the selection is listed once, in order.";
+  const chosen = selection.packages.filter((item) => item.chosen).map((item) => item.folder);
+  if (chosen.length !== scope.packages.length || chosen.some((folder, index) => folder !== scope.packages[index])) return "The selection's chosen packages aren't the scope's.";
+  return null;
+}
 
 /**
  * Which dependency builds the package manager runs, by its own rules and the project's declared policy. Nivra records
@@ -324,27 +377,37 @@ export type NetworkDeclaration = z.infer<typeof NetworkDeclaration>;
 
 export const RecipeLimits = z.strictObject({ importSeconds: count, prepareSeconds: count, probeSeconds: count });
 
-/** The requested configuration: what the person approves. Its digest is their consent, and it never changes afterwards. */
-export const EnvironmentRecipe = z.strictObject({
-  format: z.literal(RECIPE_FORMAT),
-  /** The ecosystem module that resolved it, such as node. */
-  profile: Identifier,
-  platform: EnvironmentPlatform,
-  image: RecipeImage,
-  tools: z.array(RecipeTool).min(1).max(8),
-  bootstrap: z.array(BootstrapStep).max(4),
-  install: InstallStep,
-  scope: InstallScope,
-  builds: BuildPolicy,
-  configuration: SetupConfiguration,
-  systemPackages: z.array(z.string().regex(/^[a-z0-9][a-z0-9.+-]{0,63}$/)).max(16),
-  workdir: z.literal("/workspace"),
-  env: RecipeEnv,
-  artifacts: ArtifactFolders,
-  network: NetworkDeclaration,
-  probes: z.array(Identifier).max(12),
-  limits: RecipeLimits,
-});
+/**
+ * The requested configuration: what the person approves. Its digest is their consent, and it never changes afterwards.
+ * A chosen install's selection is checked against its scope here, wherever a recipe is read.
+ */
+export const EnvironmentRecipe = z
+  .strictObject({
+    format: z.literal(RECIPE_FORMAT),
+    /** The ecosystem module that resolved it, such as node. */
+    profile: Identifier,
+    platform: EnvironmentPlatform,
+    image: RecipeImage,
+    tools: z.array(RecipeTool).min(1).max(8),
+    bootstrap: z.array(BootstrapStep).max(4),
+    install: InstallStep,
+    scope: InstallScope,
+    /** What a chosen install installs (NIV-55): present exactly when the scope chooses packages, so older recipes digest as before. */
+    selection: InstallSelection.optional(),
+    builds: BuildPolicy,
+    configuration: SetupConfiguration,
+    systemPackages: z.array(z.string().regex(/^[a-z0-9][a-z0-9.+-]{0,63}$/)).max(16),
+    workdir: z.literal("/workspace"),
+    env: RecipeEnv,
+    artifacts: ArtifactFolders,
+    network: NetworkDeclaration,
+    probes: z.array(Identifier).max(12),
+    limits: RecipeLimits,
+  })
+  .superRefine((recipe, context) => {
+    const problem = selectionProblem(recipe.scope, recipe.selection);
+    if (problem !== null) context.addIssue({ code: "custom", path: ["selection"], message: problem });
+  });
 export type EnvironmentRecipe = z.infer<typeof EnvironmentRecipe>;
 
 export const VerifiedTool = z.strictObject({ name: ToolName, version: ExactVersion });
@@ -455,18 +518,40 @@ export type EnvironmentChoices = z.infer<typeof EnvironmentChoices>;
 export const ResolutionWarning = z.strictObject({ code: Identifier, message: z.string().max(600) });
 export type ResolutionWarning = z.infer<typeof ResolutionWarning>;
 
+/** The ways to say what an environment installs (NIV-55): the whole project, chosen packages, or pnpm's own selectors. */
+export const ScopeMode = z.enum(["whole", "packages", "selectors"]);
+export type ScopeMode = z.infer<typeof ScopeMode>;
+
+/**
+ * A workspace's packages, and the ways this project's setup can install them (NIV-55), as the resolver found them, so
+ * the window offers what is supported without reading it from a refusal's words or a manager's name. Where a mode
+ * depends on a version still to be chosen, it is counted as available, and the next answer decides.
+ */
+export const WorkspaceFacts = z.strictObject({
+  /** The member packages, in folder order, the root left out: each by folder and name, and why it can't be chosen. */
+  packages: z.array(z.strictObject({ folder: RepoPath, name: z.string().max(214).nullable(), unavailable: z.string().max(300).nullable() })).max(500),
+  /** Packages beyond those listed. */
+  more: count,
+  /** The root's own dependencies, for the switch that installs them, and why it can't be turned off when it can't. */
+  root: z.strictObject({ dependencies: count, examples: z.array(z.string().max(214)).max(5), optional: z.boolean(), reason: z.string().max(300).nullable() }),
+  modes: z.array(z.strictObject({ mode: ScopeMode, available: z.boolean(), reason: z.string().max(600).nullable() })).max(3),
+});
+export type WorkspaceFacts = z.infer<typeof WorkspaceFacts>;
+
 /**
  * A project's setup, resolved on the engine that owns the checkout with no network: refused, waiting for the person's
- * choices, or ready as a recipe.
+ * choices, or ready as a recipe. The workspace's facts come with every answer that got as far as reading the workspace,
+ * a refusal included, so a scope can be corrected, and chosen packages offered when the whole project can't be prepared.
  */
 export const EnvironmentResolution = z.discriminatedUnion("status", [
-  z.strictObject({ status: z.literal("refused"), code: Identifier, message: z.string().max(2_000), rows: z.array(ResolutionRow).max(20) }),
+  z.strictObject({ status: z.literal("refused"), code: Identifier, message: z.string().max(2_000), rows: z.array(ResolutionRow).max(20), workspace: WorkspaceFacts.optional() }),
   z.strictObject({
     status: z.literal("needs-choice"),
     rows: z.array(ResolutionRow).max(20),
     choices: z.array(ChoiceNeeded).min(1).max(4),
     warnings: z.array(ResolutionWarning).max(20),
     limitations: z.array(z.string().max(600)).max(20),
+    workspace: WorkspaceFacts.nullable(),
   }),
   z.strictObject({
     status: z.literal("ready"),
@@ -474,6 +559,7 @@ export const EnvironmentResolution = z.discriminatedUnion("status", [
     recipe: EnvironmentRecipe,
     warnings: z.array(ResolutionWarning).max(20),
     limitations: z.array(z.string().max(600)).max(20),
+    workspace: WorkspaceFacts.nullable(),
   }),
 ]);
 export type EnvironmentResolution = z.infer<typeof EnvironmentResolution>;

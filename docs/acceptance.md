@@ -2965,6 +2965,88 @@ Reviews:
   `42c9c47`.
 - A third, of `0c4a71c..e4ba2d6`, found none blocking; its points are fixed or named above. D49 lists all three.
 
+### Workspace package selection (D52, NIV-55, PR 43)
+
+What an environment installs, chosen in the window: the whole project, workspace packages ticked in the list the
+engine sends (npm and pnpm), or pnpm selectors under Advanced. On `feature/env-scope` (PR 43), with main `c2c1bb2`
+merged in, after Nate's review of its plan (29 Oct). Offline: the engine resolves setup files and the sandbox is a
+stand-in, so these show commands, refusals and preparations' records, not a real filtered install.
+
+| Commit | What |
+|---|---|
+| `0ba335c`, `b7fb263` | PR 43 as it was: typed pnpm selectors, and the journey typing them |
+| `f70b6eb` | Main `c2c1bb2` merged in (one import conflict, both lines kept) |
+| `12f7aa3` | The uncommitted draft's fixes, run for the first time: `--fail-if-no-match`, the empty-match words, the host's selector words, the new shell's navigation in the specs |
+| `e996493` | The domain: the packages scope, the selection and its refinement, the workspace's facts, protocol 17 |
+| `f33bd44` | The lockfile readers and the resolver: what each manager's install reaches, from recorded links; the checked releases and settings |
+| `2b33615` | The sandbox's check of npm's workspace arguments; the preparation's marker and its check of the image's npm |
+| `35b95d1` | Facts on any refusal after the workspace was read |
+| `f82bca5` | The window's picker, the root's switch, Advanced; the host's words; the gated engine |
+| `bf8e384` | The journey ticks packages and opens Advanced (for Track A's review) |
+| `fca5958`, `0d92919` | The e2e specs for both managers, and the live run's recipe test |
+| `6883c76`, `89f5ac1` | The independent review's findings, and one test's types |
+| `194ed76`, `035f091` | D52, the development notes and this section, then the full round's counts |
+| `9787c2e` | Nate's review of `035f091`: npm's peers followed as npm follows them (none with legacy-peer-deps), npm/cli 9847's extra packages found where they arise, and ignore-scripts' missing builds counted from what a chosen install takes in |
+| this record's update | D52's wording for those three, and the checks on `9787c2e` |
+
+**What it shows, offline:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| The whole project is unchanged for npm and pnpm | `environment-node.test.ts`, `environment-recipe-engine.test.ts`, both e2e specs | The same arguments and preparations as before; no selection on its recipe |
+| Packages chosen by name and folder, no syntax | `environment.spec.ts`, `environment-scope.spec.ts` | The list from the engine's facts, ticked; Preview off while nothing is ticked; pnpm selectors only under Advanced |
+| What the chosen packages and the root reach is installed and said | `environment-node.test.ts`, `environment-workspace.test.ts`, both e2e specs | From recorded links: aliases and relative references by where they link, a same-name registry package not counted, the root's links counted when it installs (always for pnpm), a workspace reached through a registry package (npm); each package listed in the preview and the recipe |
+| Each manager's chosen install, on its own | `environment-node.test.ts`, `environment-recipe-engine.test.ts`, `environment-scope.spec.ts` | pnpm by exact name and npm as `./FOLDER`, root on and off for npm, sent to the stand-in exactly as previewed, scope and selection kept with the environment; npm's peers as npm follows them, none with legacy-peer-deps; npm/cli 9847's extra packages named; with ignore-scripts, only the builds the chosen install takes in counted as missing |
+| One package, several, empty, removed and unknown | `environment-node.test.ts`, `environment.test.ts`, both e2e specs | One package offers only the whole project, with the reason; an empty choice refused by the domain and the host; a removed or unlisted package refused by name and flagged until unticked; 21 in all refused |
+| Releases and settings that can't do it are said | `environment-workspace.test.ts`, `environment-node.test.ts` | Each checked range at its boundaries, majors 12 out; a hoisted linker on pnpm 9 and 10, a lockfile per package, links left out, filter in pnpm-workspace.yaml, deep links, npm's omit, include and other install strategies; each refusal says what to pin or change; a lockfile from pnpm 11.28.0 to 11.28.5 warned about on every scope |
+| Frozen lockfiles, inside the boundary | `nebius-sandbox.test.ts`, `environment-recipe-engine.test.ts` | Only the fixed argument forms pass the sandbox's check, near misses refused; an image's unchecked npm stops before any upload; a passed-over filter keeps no environment |
+| A change needs a fresh preview; a mismatch is refused | `environment.spec.ts`, `host.test.ts` | A tick clears the preview and keeps the list; fingerprints crossing scopes refused either way; a recipe that doesn't install the scope chosen refused by the window and the host |
+| Choices kept, per project, after a restart | `environment.spec.ts`, `host.test.ts` | `page.reload` restores a saved packages choice and a saved selectors choice (Advanced open); two projects keep their own |
+| Older recipes keep their meaning and digest | `environment.test.ts`, `nebius-sandbox.test.ts` | Pinned digests of a whole and a selected recipe from `c2c1bb2`; older argument forms still pass |
+
+**Through a real engine** (`apps/engine/scripts/rpc.ts` at `0d92919`, offline, in `~/.nivra-dev-env-scope/rpc`; nothing
+installed, no repository script run; the answers are in `~/nivra-acceptance/env-scope/rpc/`):
+- valhalla-fitness at `3c3c5d7` (pnpm 11.5.3, six packages): the whole project is ready; apps/web and a selector are
+  refused, because pnpm 11.5.3 isn't a checked release, with the releases to pin.
+- The same setup files pinned to pnpm 11.28.9 (a modified copy): apps/web installs with data, domain, tokens and
+  workout-share, reached through the lockfile's links, and the root.
+- humin at `1712af4`, one package: the whole project only, with each other way's reason.
+- An npm-workspaces fixture (built for this, not a real project): web with data, root off; with data and lint, which
+  the root links, root on; a selector refused in npm's words.
+
+**Checks** at `9787c2e`, the code after Nate's review of `035f091`, one at a time under the shared lock:
+- `pnpm verify`: exit 0, 1,661 tests passed (domain 131, engine 924, desktop 606), none failed, skipped, cancelled or
+  todo, and all three typechecks clean.
+- The built app's end-to-end suite under xvfb: 128 passed and none failed; 1 skipped, `explain.spec.ts`'s "only a
+  packaged app ignores the switch".
+- The real-engine resolutions again (`~/nivra-acceptance/env-scope/rpc/`; the ones at `0d92919` kept in `rpc-0d92919/`):
+  the same answers, but for humin's refusal of chosen packages, which since `6883c76` also says to choose the whole
+  project.
+- `test:packaged` and `test:windows` carry from `89f5ac1`: `9787c2e` changes only engine code, and no packaging, main or
+  preload file.
+- Mutations: 17 of 17 caught, the 14 before and three for the review's findings.
+
+**Checks** at `89f5ac1`, before Nate's review, one at a time under the shared lock:
+- `pnpm verify`: exit 0, 1,657 tests passed (domain 131, engine 920, desktop 606), none failed, skipped, cancelled or
+  todo, and all three typechecks clean.
+- The built app's end-to-end suite under xvfb: 128 passed and none failed; 1 skipped, `explain.spec.ts`'s "only a
+  packaged app ignores the switch".
+- `test:packaged`, on the electron-builder `--dir` output after `stage:runtime all`: 58 passed and none failed; 71
+  skipped, the tests whose test-only switches a packaged app ignores. A first packaged run, before this worktree had
+  staged a runtime, failed 25 tests on "Engine failed": it isn't counted.
+- Windows, after `stage:runtime all` and `dev:win --no-launch`: `test:windows` 13 passed, none failed or skipped; no
+  Nivra.exe was left running, `~/.nivra` was unchanged, and candidate 3's files read the same before and after.
+- Not run: `verify:windows`, since no target, the supervisor or staging changed.
+- A first `pnpm verify`, at `194ed76`, stopped at the engine's typecheck on one test's fixture types; `89f5ac1` types
+  them, and nothing else changed.
+- While working: each step's own test files and the three typechecks, as each commit says.
+
+Mutations: 14 of 14 caught (`~/nivra-acceptance/env-scope/mutate.mjs`), at `0d92919` and again at `6883c76`.
+
+Reviews: an independent review of `0d92919` found no high-severity defect and twelve smaller ones; ten are fixed in
+`6883c76`, the npm pass-over is answered by the lockfile cross-check, and the docs are this record. Nate's review of
+`035f091` held it for three P2 findings, each fixed in `9787c2e` with a regression test.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |

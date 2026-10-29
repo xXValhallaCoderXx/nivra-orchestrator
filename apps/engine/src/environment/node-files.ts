@@ -245,6 +245,49 @@ export interface LockfileFacts {
    * skipped, since a private registry or a git dependency could hide in one.
    */
   unreadable: string[];
+  /** The workspace's projects as the lockfile records them, by folder from the repository's top, the root left out. */
+  workspaces: string[];
+  /** pnpm: each importer's links (`version: link:PATH`), by folder from the repository's top, "" for the root. */
+  links: Map<string, string[]>;
+  /** pnpm: whether a link is recorded outside the importers, as linkWorkspacePackages deep writes them. */
+  deepLinks: boolean;
+  /** pnpm: whether the lockfile's own settings say links were left out of it (excludeLinksFromLockfile). */
+  excludesLinks: boolean;
+  /** pnpm: the pnpm that the lockfile's own env document names as the project's package manager, or null. */
+  writer: string | null;
+  /** npm: every entry, by its location, as resolving what a workspace reaches needs it; null for pnpm. */
+  tree: Map<string, NpmLockEntry> | null;
+}
+
+/**
+ * How an npm entry declares a dependency, which decides whether an install follows it: a dependency (and a root's or a
+ * workspace's devDependency), an optional dependency, a peer, or an optional peer. legacy-peer-deps makes npm leave
+ * peers of both kinds out entirely.
+ */
+export type NpmEdgeKind = "dependency" | "optional" | "peer" | "peer-optional";
+
+/** An npm lockfile entry, for following what a workspace package reaches (NIV-55). */
+export interface NpmLockEntry {
+  /** A link to a folder in the repository: a workspace package. */
+  link: boolean;
+  resolved: string | null;
+  /** Its dependencies by name, each with how it is declared. */
+  requires: Array<{ name: string; kind: NpmEdgeKind }>;
+  /** Whether the lockfile says it has an install script, which ignore-scripts leaves unrun. */
+  installScript: boolean;
+}
+
+/** A link's target from the repository's top, "" for the top itself, or null when it leaves the repository. */
+export function linkedFolder(from: string, relative: string): string | null {
+  const parts: string[] = [];
+  for (const segment of `${from}/${relative}`.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (parts.length === 0) return null;
+      parts.pop();
+    } else parts.push(segment);
+  }
+  return parts.join("/");
 }
 
 /** How many of each kind of fact a lockfile reader keeps. Every entry is still read: a cap never hides a refusal. */
@@ -283,11 +326,13 @@ export function npmLockFacts(text: string): LockfileFacts | null {
   } catch {
     return null;
   }
-  const facts: LockfileFacts = { format: lock["lockfileVersion"] === undefined ? null : String(lock["lockfileVersion"]), hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [] };
+  const facts: LockfileFacts = { format: lock["lockfileVersion"] === undefined ? null : String(lock["lockfileVersion"]), hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [], workspaces: [], links: new Map(), deepLinks: false, excludesLinks: false, writer: null, tree: new Map() };
   const hosts = new Set<string>();
   for (const [key, raw] of Object.entries(objectAt(lock["packages"]))) {
+    facts.tree!.set(key, npmEntry(key, objectAt(raw)));
     if (key === "") continue;
     const entry = objectAt(raw);
+    if (!key.includes("node_modules/") && !escapes("", key)) facts.workspaces.push(key);
     const name = key.replace(/^.*node_modules\//, "");
     const resolved = stringAt(entry["resolved"]);
     if (entry["resolved"] !== undefined && resolved === null) keep(facts.unreadable, `${key} (resolved)`);
@@ -313,7 +358,29 @@ export function npmLockFacts(text: string): LockfileFacts | null {
     if (Array.isArray(entry["libc"])) keep(facts.libc, { name, libc: entry["libc"].filter((item): item is string => typeof item === "string") });
   }
   facts.hosts = [...hosts].sort();
+  facts.workspaces.sort();
   return facts;
+}
+
+/**
+ * An npm lockfile entry's dependencies, as npm installs them, each with how it is declared: a folder's own entry (the
+ * root, a workspace package) keeps its devDependencies, anything else has none recorded. A name declared twice takes
+ * the kind npm gives it: a dependency over a peer, and an optional dependency over a dependency, as npm's own
+ * optionalDependencies override.
+ */
+function npmEntry(key: string, entry: Record<string, unknown>): NpmLockEntry {
+  const names = (field: string) => Object.keys(objectAt(entry[field]));
+  const meta = objectAt(entry["peerDependenciesMeta"]);
+  const kinds = new Map<string, NpmEdgeKind>();
+  for (const name of names("peerDependencies")) kinds.set(name, objectAt(meta[name])["optional"] === true ? "peer-optional" : "peer");
+  for (const name of [...names("dependencies"), ...(key.includes("node_modules/") ? [] : names("devDependencies"))]) kinds.set(name, "dependency");
+  for (const name of names("optionalDependencies")) kinds.set(name, "optional");
+  return {
+    link: entry["link"] === true,
+    resolved: stringAt(entry["resolved"]),
+    requires: [...kinds].map(([name, kind]) => ({ name, kind })),
+    installScript: entry["hasInstallScript"] === true,
+  };
 }
 
 /** A lockfile line beneath an entry: its indentation, and its text without it. */
@@ -434,7 +501,7 @@ function lockList(field: LockField): string[] | null {
  * passed over. pnpm records a registry tarball's address only when it isn't the standard one.
  */
 export function pnpmLockFacts(text: string): LockfileFacts {
-  const facts: LockfileFacts = { format: null, hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [] };
+  const facts: LockfileFacts = { format: null, hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [], workspaces: [], links: new Map(), deepLinks: false, excludesLinks: false, writer: null, tree: null };
   facts.format = /^lockfileVersion:\s*['"]?([0-9.]+)['"]?\s*$/m.exec(text)?.[1] ?? null;
   const hosts = new Set<string>();
   const entries: Array<{ section: string; key: string; body: LockLine[] }> = [];
@@ -464,6 +531,10 @@ export function pnpmLockFacts(text: string): LockfileFacts {
       else if ((section === "packages" || section === "importers") && top[2] !== undefined && top[2].trim() !== "{}") keep(facts.unreadable, `the ${section} section`);
       continue;
     }
+    // A link recorded beside a package's own dependencies: linkWorkspacePackages deep, which Nivra doesn't follow. Only a
+    // value counts, never a name that ends in link, such as terminal-link.
+    if ((section === "packages" || section === "snapshots") && /:\s*['"]?link:/.test(line)) facts.deepLinks = true;
+    if (section === "settings" && /^\s+excludeLinksFromLockfile:\s*true\s*$/.test(line)) facts.excludesLinks = true;
     if (section !== "packages" && section !== "importers") continue;
     if (entryIndent === 0) entryIndent = indent;
     if (indent === entryIndent) {
@@ -532,15 +603,47 @@ export function pnpmLockFacts(text: string): LockfileFacts {
       readPackage(key, body);
       continue;
     }
-    // An importer's link to a folder outside the repository, in either style: a sandbox won't have it.
+    // An importer's links, in either style: one to a folder outside the repository is one a sandbox won't have.
+    const folder = key === "." ? "" : key;
+    if (folder !== "" && !facts.workspaces.includes(folder)) facts.workspaces.push(folder);
+    const links = facts.links.get(folder) ?? [];
     for (const line of body) {
       for (const linked of line.text.matchAll(/(?:^|[\s{,])version:\s*['"]?link:([^'"\s,}]+)/g)) {
-        if (escapes(key === "." ? "" : key, linked[1]!)) keep(facts.local, `link:${linked[1]}`);
+        const target = linkedFolder(folder, linked[1]!);
+        if (target === null) keep(facts.local, `link:${linked[1]}`);
+        else if (!links.includes(target)) links.push(target);
       }
     }
+    facts.links.set(folder, links);
+    if (folder === "") facts.writer = packageManagerPnpm(body) ?? facts.writer;
   }
   facts.hosts = [...hosts].sort();
+  facts.workspaces.sort();
   return facts;
+}
+
+/**
+ * The pnpm version a pnpm 11 lockfile's env document names under packageManagerDependencies, in either style, or null:
+ * the release the project manages itself with, and so most likely the one that wrote the lockfile.
+ */
+function packageManagerPnpm(body: readonly LockLine[]): string | null {
+  const start = body.findIndex((line) => /^packageManagerDependencies:/.test(line.text));
+  if (start === -1) return null;
+  const under = body[start]!.indent;
+  for (let index = start + 1; index < body.length && body[index]!.indent > under; index++) {
+    const line = body[index]!.text;
+    const flow = /^['"]?pnpm['"]?:\s*\{(.*)\}$/.exec(line);
+    if (flow) return /(?:^|[\s,])version:\s*['"]?(\d+\.\d+\.\d+)/.exec(flow[1]!)?.[1] ?? null;
+    if (/^['"]?pnpm['"]?:$/.test(line)) {
+      const depth = body[index]!.indent;
+      for (let next = index + 1; next < body.length && body[next]!.indent > depth; next++) {
+        const version = /^version:\s*['"]?(\d+\.\d+\.\d+)/.exec(body[next]!.text);
+        if (version) return version[1]!;
+      }
+      return null;
+    }
+  }
+  return null;
 }
 
 /**

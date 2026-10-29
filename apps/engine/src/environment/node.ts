@@ -1,10 +1,11 @@
-import { EnvironmentResolution, RECIPE_FORMAT, RECIPE_LIMITS, type BootstrapStep, type BuildPolicy, type ChoiceNeeded, type ChoiceOption, type Declaration, type EnvironmentChoices, type EnvironmentRecipe, type InstallOptions, type InstallScope, type RecipeTool, type ResolutionRow, type ResolutionSource, type ResolutionWarning } from "@nivra/domain";
+import { EnvironmentResolution, RECIPE_FORMAT, RECIPE_LIMITS, type BootstrapStep, type BuildPolicy, type ChoiceNeeded, type ChoiceOption, type Declaration, type EnvironmentChoices, type EnvironmentRecipe, type InstallOptions, type InstallScope, type RecipeTool, type ResolutionRow, type ResolutionSource, type ResolutionWarning, type WorkspaceFacts } from "@nivra/domain";
 import { ENV_PATH } from "../exec/nebius/sandbox.ts";
 import type { Snapshot, SnapshotFile } from "../exec/snapshot.ts";
 import { satisfies, setupConfiguration } from "./inputs.ts";
 import { dependencySpecs, INSTALL_HOOKS, isLocalSpec, isNodeSetupPath, LOCKFILES, npmLockFacts, objectAt, PNPMFILES, pnpmLockFacts, simpleYaml, stringAt, SUPPORTED_MANAGERS, textOf, unreadGlob, VERSION_FILES, versionFileValue, workspaceMembers, type LockfileFacts, type Manifest, type YamlValue } from "./node-files.ts";
 import { advisoryFor, RELEASES, standing, type NodeRelease, type ReleaseIndex, type ToolRelease } from "./releases.ts";
 import { versionParts } from "./versions.ts";
+import { chosenInstall, filteredInstallProblem, regressedLockfileWriter, workspaceShape, type ChosenInstall, type WorkspaceShape } from "./workspace.ts";
 
 /**
  * Node's resolver (NIV-55, NIV-58): a project's declared setup, read from Nivra's own snapshot of the commit, settled into
@@ -106,9 +107,15 @@ const PLANNED = `Preparing from a project's sources is planned. Until it's built
 
 class Refused extends Error {
   readonly code: string;
-  constructor(code: string, message: string) {
+  /**
+   * Once the workspace was read, its packages and ways to choose: so a scope can be corrected, and a project whose
+   * whole install can't be prepared can still be offered chosen packages.
+   */
+  workspace: WorkspaceFacts | undefined;
+  constructor(code: string, message: string, workspace?: WorkspaceFacts) {
     super(message);
     this.code = code;
+    this.workspace = workspace;
   }
 }
 
@@ -182,7 +189,7 @@ export function resolveNodeEnvironment(input: NodeResolveInput): EnvironmentReso
     result = resolve(input);
   } catch (error) {
     if (!(error instanceof Refused)) throw error;
-    result = { status: "refused", code: error.code, message: clip(error.message, 2_000), rows: [] };
+    result = { status: "refused", code: error.code, message: clip(error.message, 2_000), rows: [], ...(error.workspace ? { workspace: error.workspace } : {}) };
   }
   // Every answer is one the contract takes. One that isn't is Nivra's fault, said as such, never sent on.
   if (!EnvironmentResolution.safeParse(result).success) {
@@ -191,7 +198,18 @@ export function resolveNodeEnvironment(input: NodeResolveInput): EnvironmentReso
   return result;
 }
 
+/** The resolution, with the workspace's facts on any refusal that came after the workspace was read. */
 function resolve(input: NodeResolveInput): EnvironmentResolution {
+  const known: { facts: WorkspaceFacts | null } = { facts: null };
+  try {
+    return resolveWith(input, known);
+  } catch (error) {
+    if (error instanceof Refused && error.workspace === undefined && known.facts !== null) error.workspace = known.facts;
+    throw error;
+  }
+}
+
+function resolveWith(input: NodeResolveInput, known: { facts: WorkspaceFacts | null }): EnvironmentResolution {
   const releases = input.releases ?? RELEASES;
   const choices = input.choices ?? {};
   const warnings: ResolutionWarning[] = [];
@@ -236,14 +254,27 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
   const memberFolders = globs ? workspaceMembers(globs, folders) : [];
   const members = manifests.filter((manifest) => manifest.folder === "" || memberFolders.includes(manifest.folder));
 
-  // The install scope: pnpm can install chosen packages; npm installs the whole project.
-  const scope: InstallScope = choices.scope ?? { kind: "whole" };
-  if (scope.kind === "selected" && (managerName !== "pnpm" || !pnpmGlobs)) {
-    throw new Refused("scope", managerName === "pnpm" ? "This project isn't a pnpm workspace, so there are no packages to choose. Choose the whole project, then preview again." : "Choosing npm workspaces to install isn't available yet. Choose the whole project, then preview again.");
-  }
-  const inScope = scope.kind === "selected" ? scopedMembers(scope.selectors, members, warnings) : members;
-
+  // Layouts that need the sources refuse the whole project, whatever is chosen: said before any scope's refusal.
   refuseSourceLayouts(root, members, workspace, present, lock);
+
+  // What can be chosen to install (NIV-55): the whole project, workspace packages by folder, or pnpm's own selectors.
+  const shape: WorkspaceShape = workspaceShape({ manager: managerName as "npm" | "pnpm", globs, members, lock, lockPath, yaml: workspace?.values ?? null, options: choices.options ?? {} });
+  let facts: WorkspaceFacts = shape.facts(null);
+  known.facts = facts;
+  const scope: InstallScope = choices.scope ?? { kind: "whole" };
+  const refuseScope = (message: string): never => {
+    throw new Refused("scope", message, facts);
+  };
+  if (scope.kind === "selected" && shape.selectorsBlocked) {
+    refuseScope(`${shape.selectorsBlocked} ${managerName === "npm" && shape.packagesBlocked === null ? "Choose its packages from the list instead, or the whole project" : "Choose the whole project"}, then preview again.`);
+  }
+  let chosen: ChosenInstall | null = null;
+  if (scope.kind === "packages") {
+    const worked = chosenInstall(scope, shape, { manager: managerName as "npm" | "pnpm", lock, lockPath, options: choices.options ?? {} });
+    chosen = "problem" in worked ? refuseScope(worked.problem) : worked;
+  }
+  const installed = new Set(chosen?.selection.packages.map((item) => item.folder) ?? []);
+  const inScope = scope.kind === "selected" ? scopedMembers(scope.selectors, members, warnings) : chosen ? members.filter((member) => member.folder === "" || installed.has(member.folder)) : members;
 
   // The runtime, from every declaration in scope.
   const runtime = resolveRuntime({ releases, byPath, root, inScope, lock, choices, previous: input.previous ?? null, configuration: configuration.digest, warnings });
@@ -259,6 +290,27 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
   const builds = buildPolicy(managerName, managerVersion.version, root, workspace, options, warnings);
   const pnpmMajor = managerName === "pnpm" ? majorOf(managerVersion.version) : null;
 
+  // Whether this release installs chosen packages exactly as the preview says (D52): checked against its own notes. A
+  // bundled npm is judged by the one the index says Node bundles, and checked again on the image before any upload.
+  const bundledNpm = releases.node.find((release) => release.version === node.version)?.npm ?? null;
+  const hoisted = managerName === "pnpm" && (stringAt(workspace?.values.get("nodeLinker") ?? null) === "hoisted" || options["node-linker"] === "hoisted");
+  const release =
+    managerName === "pnpm"
+      ? filteredInstallProblem("pnpm", managerVersion.version, hoisted)
+      : managerVersion.version !== BUNDLED
+        ? filteredInstallProblem("npm", managerVersion.version)
+        : bundledNpm === null
+          ? `Nivra's release index doesn't say which npm Node ${node.version} comes with, so it can't tell whether that npm installs chosen workspace packages. Pin a checked npm in package.json's packageManager, or install the whole project.`
+          : ((problem) => (problem === null ? null : `Node ${node.version} comes with npm ${bundledNpm}. ${problem}`))(filteredInstallProblem("npm", bundledNpm));
+  facts = shape.facts(release);
+  known.facts = facts;
+  if ((scope.kind === "packages" || (scope.kind === "selected" && managerName === "pnpm")) && release !== null) refuseScope(release);
+  const pinned = managerPin(stringAt(root["packageManager"]) ?? "");
+  const writer = managerName !== "pnpm" ? null : regressedLockfileWriter(lock.writer) ? lock.writer : pinned?.name === "pnpm" && regressedLockfileWriter(pinned.version) ? pinned.version : null;
+  if (writer !== null) {
+    warnings.push({ code: "lockfile-regression", message: `This project uses pnpm ${writer}, which can write a lockfile that leaves out a dependency a package also declares as an optional peer (fixed in pnpm 11.28.6). Regenerate pnpm-lock.yaml with pnpm 11.28.6 or later, commit it, then prepare.` });
+  }
+
   // Tools and their bootstrap: the rule where only preparation can confirm the fact, never what the index says.
   const bundled = { kind: "bundled" as const, with: "node" };
   const tools: RecipeTool[] = [{ name: "node", version: { kind: "exact", version: node.version }, from: "image" }];
@@ -273,12 +325,16 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
     tools.push({ name: "pnpm", version: { kind: "exact", version: managerVersion.version }, from: "bootstrap" });
     // Inside the project, corepack runs the version packageManager pins whatever was activated: a different version,
     // the person's choice or an advisory's replacement, is installed with npm instead, where corepack doesn't reach it.
-    const pinned = managerPin(stringAt(root["packageManager"]) ?? "");
     const corepackRunsIt = pinned === null || (pinned.name === "pnpm" && pinned.version === managerVersion.version);
     bootstrap.push({ tool: "pnpm", version: managerVersion.version, via: corepackRunsIt ? "corepack-else-npm-global" : "npm-global" });
   }
 
-  const args = managerName === "npm" ? ["ci", "--no-audit", "--no-fund", ...npmFlags(options)] : ["install", "--frozen-lockfile", ...(scope.kind === "selected" ? scope.selectors.flatMap((selector) => ["--filter", selector]) : [])];
+  // Every workspace package a chosen install reaches is passed on its own, in folder order: pnpm by its exact name, npm
+  // as ./FOLDER, which matches no name; npm's root switch is said either way.
+  const args =
+    managerName === "npm"
+      ? ["ci", "--no-audit", "--no-fund", ...npmFlags(options), ...(chosen ? [...chosen.targets.map((target) => `--workspace=${target}`), chosen.selection.root ? "--include-workspace-root" : "--include-workspace-root=false"] : [])]
+      : ["install", "--frozen-lockfile", ...(scope.kind === "selected" ? ["--fail-if-no-match", ...scope.selectors.flatMap((selector) => ["--filter", selector])] : chosen ? ["--fail-if-no-match", ...chosen.targets.flatMap((name) => ["--filter", name])] : [])];
   const recipe: EnvironmentRecipe = {
     format: RECIPE_FORMAT,
     profile: "node",
@@ -288,6 +344,7 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
     bootstrap,
     install: { tool: managerName, args, options },
     scope,
+    ...(chosen ? { selection: chosen.selection } : {}),
     builds,
     configuration: { mode: "manifests", files: configuration.files.map((file) => ({ path: file.path, bytes: file.size, sha256: file.sha256 })), digest: configuration.digest },
     systemPackages: [],
@@ -302,7 +359,14 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
   if (input.snapshot.leftOutPaths.some((path) => path === ".npmrc" || path.endsWith("/.npmrc"))) {
     limitations.push(".npmrc isn't read or sent, so settings in it don't apply. If it sets install options such as legacy-peer-deps or install-links, choose the same ones here.");
   }
-  if (managerName === "npm" && npmGlobs) limitations.push("Choosing npm workspaces to install isn't available yet: the whole project is installed.");
+  if (chosen) {
+    limitations.push("Only the packages listed get their dependencies installed. A check that needs another workspace package's will fail; the task still sends the whole commit.");
+    if (chosen.strays.length) {
+      const named = chosen.strays.slice(0, 3).map(quoted).join(", ");
+      const one = chosen.strays.length === 1;
+      warnings.push({ code: "npm-optional-peers", message: clip(`npm also installs ${named}${chosen.strays.length > 3 ? ` and ${chosen.strays.length - 3} more` : ""}: an installed package declares ${one ? "it" : "each"} as an optional peer, and another workspace package depends on ${one ? "it" : "each"} (npm/cli 9847).`, 600) });
+    }
+  }
   limitations.push("Environments run on x86_64 Linux with Alpine (musl) for now. A dependency that ships only glibc binaries, or builds natively, may fail to install.");
   limitations.push("Networking is on while the environment is prepared, and off for every task run and check that starts from it.");
   if (node.unknown || managerVersion.unknown) limitations.push(`Nivra's release index is from ${releases.fetchedAt.slice(0, 10)}, so facts about versions newer than it are checked when preparing.`);
@@ -326,18 +390,32 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
       globs ? `${managerName === "pnpm" ? "pnpm workspace" : "npm workspaces"}, ${memberFolders.length} package${memberFolders.length === 1 ? "" : "s"}` : "a single package",
       globs ? "declared" : "resolved",
       globs ? [decl(managerName === "pnpm" ? "pnpm-workspace.yaml" : "package.json", managerName === "pnpm" ? "packages" : "workspaces", globs.join(", "))] : [],
-      scope.kind === "selected" ? `Installing ${scope.selectors.join(", ")}.` : null,
+      scope.kind === "selected" ? `Installing what ${scope.selectors.join(", ")} select${managerName === "pnpm" ? ", and the workspace root, which pnpm always installs" : ""}.` : chosen ? selectionNote(chosen) : null,
     ),
     row("install", "Install", `${managerName} ${args.join(" ")}`, "resolved", [], null),
     row("builds", "Dependency builds", buildsSummary(builds), builds.source ? "declared" : "default", builds.source ? [decl(builds.source, null, buildsSummary(builds))] : [], builds.notes.length ? builds.notes.join(" ") : null),
     row("platform", "Platform", "Linux x86_64, Alpine (musl)", "default", [], "A Debian (glibc) platform isn't available yet."),
     row("image", "Base image", recipe.image.tag, "resolved", [], "A tag doesn't pin bytes: preparation records the image it made and checks the versions in it."),
   ];
-  return { status: "ready", rows, recipe, warnings: warnings.slice(0, 20), limitations };
+  return { status: "ready", rows, recipe, warnings: warnings.slice(0, 20), limitations, workspace: facts };
 
   function needsChoice(needed: ChoiceNeeded[]): EnvironmentResolution {
-    return { status: "needs-choice", rows: [], choices: needed.slice(0, 4), warnings: warnings.slice(0, 20), limitations };
+    return { status: "needs-choice", rows: [], choices: needed.slice(0, 4), warnings: warnings.slice(0, 20), limitations, workspace: known.facts };
   }
+}
+
+/** What a chosen install installs, in words: the packages chosen, those they need, and the workspace root's own dependencies or not. */
+function selectionNote(chosen: ChosenInstall): string {
+  const label = (item: ChosenInstall["selection"]["packages"][number]) => (item.name ? `${item.name} (${item.folder})` : item.folder);
+  const picked = chosen.selection.packages.filter((item) => item.chosen).map(label);
+  const reached = chosen.selection.packages.filter((item) => !item.chosen).map(label);
+  return [
+    `Installing ${picked.join(", ")}.`,
+    reached.length ? `Also ${reached.join(", ")}, which ${reached.length === 1 ? "is" : "are"} linked from them${chosen.selection.root ? " or from the workspace root" : ""}.` : null,
+    chosen.selection.root ? "With the workspace root's own dependencies." : "Without the workspace root's own dependencies.",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 /** One row of the detected setup, within the contract's bounds. */

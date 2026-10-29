@@ -4,7 +4,7 @@
 // its own bridge, called with string expressions: scripts are compiled without the DOM's types. Nothing here presses
 // Prepare or Start more than once, and nothing reads a key field.
 import { expect, type ElectronApplication, type Page } from "@playwright/test";
-import type { EnvironmentChoices, EnvironmentPreviewV2 } from "@nivra/domain";
+import type { EnvironmentChoices, EnvironmentPreviewV2, InstallScope } from "@nivra/domain";
 import type { BriefFields, EnvironmentView, ProjectView, SettingsView, TaskAttemptView, TaskView } from "../src/shared/ipc.ts";
 
 const arg = (value: unknown) => JSON.stringify(value);
@@ -42,11 +42,50 @@ export async function keysSaved(page: Page, timeoutMs: number): Promise<void> {
 
 /**
  * The environment section's preview of the project's own recipe (NIV-55), as the window shows it, with these choices
- * made in it: a Node version the project leaves to the person, and npm's install options. Its fingerprint from the host.
+ * made in it: what to install, a Node version the project leaves to the person, and npm's install options. Its
+ * fingerprint from the host.
  */
 export async function previewEnvironment(page: Page, projectId: string, choices: EnvironmentChoices = {}): Promise<Extract<EnvironmentPreviewV2, { status: "ready" }>> {
   await open(page, "nav-environment", "page-environment");
   const section = page.getByTestId("environment");
+  // What to install, chosen before the preview that counts: the whole project unless the task file says otherwise.
+  // Workspace packages are ticked in the list a first preview brings (D52), and pnpm selectors are typed under Advanced,
+  // which also shows once the engine says the project supports them; then any rows left over are removed.
+  const scope: InstallScope = choices.scope ?? { kind: "whole" };
+  if (scope.kind !== "whole" && (await section.getByTestId("environment-scope-packages").getAttribute("data-available")) === "unknown") {
+    await section.getByTestId("environment-scope-whole").check();
+    await section.getByTestId("environment-preview").click();
+    await expect(section.getByTestId("environment-scope-packages")).not.toHaveAttribute("data-available", "unknown");
+  }
+  if (scope.kind === "whole") await section.getByTestId("environment-scope-whole").check();
+  if (scope.kind === "packages") {
+    await section.getByTestId("environment-scope-packages").check();
+    // The ones asked for first, then the rest unticked, so the list is never left empty on the way.
+    for (const folder of scope.packages) {
+      const box = section.locator(`[data-testid="environment-package"][data-folder="${folder}"]`);
+      await expect(box).toBeVisible();
+      if (!(await box.isChecked())) await box.check();
+    }
+    for (const box of await section.getByTestId("environment-package").all()) {
+      const folder = await box.getAttribute("data-folder");
+      if (folder !== null && !scope.packages.includes(folder) && (await box.isChecked())) await box.uncheck();
+    }
+    const root = section.getByTestId("environment-package-root");
+    if ((await root.isChecked()) !== scope.root) await root.setChecked(scope.root);
+  }
+  if (scope.kind === "selected") {
+    const advanced = section.getByTestId("environment-scope-advanced");
+    if ((await advanced.getAttribute("aria-expanded")) !== "true") await advanced.click();
+    await section.getByTestId("environment-scope-selected").check();
+    const rows = section.getByTestId("environment-scope-selector");
+    await expect(rows.first()).toBeVisible();
+    for (let extra = (await rows.count()) - scope.selectors.length; extra > 0; extra--) await section.getByTestId("environment-scope-remove").last().click();
+    for (const [index, selector] of scope.selectors.entries()) {
+      if ((await rows.count()) <= index) await section.getByTestId("environment-scope-add").click();
+      await rows.nth(index).fill(selector);
+    }
+    await expect(rows).toHaveCount(scope.selectors.length);
+  }
   await section.getByTestId("environment-preview").click();
   const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (choices.runtime) {
@@ -60,6 +99,10 @@ export async function previewEnvironment(page: Page, projectId: string, choices:
   if (shown.status === "refused") throw new Error(`The environment's preview was refused (${shown.code}): ${shown.message}`);
   if (shown.status === "needs-choice") throw new Error(`The environment's preview needs a choice: ${shown.choices.map((choice) => choice.message).join(" ")}`);
   await expect(section.getByTestId("environment-install")).toContainText([shown.recipe.install.tool, ...shown.recipe.install.args].join(" "));
+  const resolved = section.getByTestId("environment-scope-resolved");
+  await expect(resolved).toHaveAttribute("data-selectors", shown.recipe.scope.kind === "selected" ? shown.recipe.scope.selectors.join(" ") : "");
+  await expect(resolved).toHaveAttribute("data-packages", shown.recipe.scope.kind === "packages" ? shown.recipe.scope.packages.join(" ") : "");
+  await expect(resolved).toHaveAttribute("data-installs", shown.recipe.selection ? shown.recipe.selection.packages.map((item) => item.folder).join(" ") : "");
   return shown;
 }
 

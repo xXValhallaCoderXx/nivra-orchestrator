@@ -3699,3 +3699,77 @@ one place and enforced in another must come from the same numbers.
 - A draft from a plan's New task isn't kept: the sidebar couldn't open it again without the plan.
 - Settings still shows an unreadable `secrets.json` as "no keys". Only the draft check reads the file strictly.
 - Moving the drafts to another store needs its own tested migration, which keeps every draft.
+
+## D52. What an environment installs: the whole project, workspace packages chosen from the engine's list for npm and pnpm, or pnpm selectors under Advanced, each installed from the links its lockfile records and only on checked releases (2026-10-29)
+
+**Decision.** NIV-55's workspace selection, finishing PR 43 after Nate's review of its plan (29 Oct). It supersedes
+D48's "the window offers no scope" and replaces the typed-selectors draft of this entry.
+- **Three ways, offered as the engine says:** the whole project, the default; workspace packages ticked in a list
+  from the engine's resolution, by name and folder, with a switch for the workspace root's own dependencies; and,
+  collapsed under Advanced, PR 43's pnpm selectors, sent as typed. The resolution's `WorkspaceFacts` say which ways a
+  project supports and why not, so the window never reads a refusal's words or a manager's name. Every answer that
+  read the workspace carries them, a refusal included, so a whole project that can't be prepared can still be offered
+  chosen packages.
+- **The scope:** `InstallScope` kind packages names 1 to 20 workspace folders (`WORKSPACE_FOLDER`: plain segments, at
+  most 186 characters, so `--workspace=./` and a folder make one argument of 200 at most), each once and in order, and
+  the root's switch. Its recipe carries `selection`: every workspace package the install reaches, chosen or not, and
+  the root. A refinement on the recipe checks the selection against the scope, and refuses one on any other scope.
+- **What installs comes from the links each lockfile records:**
+  - pnpm: the chosen importers and the root, which pnpm always installs, then every importer their `link:` entries
+    reach. Each is passed by its exact name (`WORKSPACE_NAME`, at most 200 characters).
+  - npm: each dependency resolved as npm records it, from the dependent's own folder upwards, through registry
+    packages too, and the root's only when its switch is on. Each is passed as `./FOLDER`, which matches no name.
+    Peers are followed as npm follows them: peers, and optional peers the lockfile holds, but none at all with
+    legacy-peer-deps, which leaves them out.
+  - So an alias or a relative workspace reference counts by where it links, a same-name registry package isn't a
+    workspace, and a link Nivra can't follow, or a dependency npm's lockfile doesn't record, refuses with words.
+- **Arguments:** pnpm `install --frozen-lockfile --fail-if-no-match --filter NAME ...`; npm `ci --no-audit --no-fund`,
+  the install options, `--workspace=./FOLDER ...`, then `--include-workspace-root` or `--include-workspace-root=false`.
+  The sandbox's `isInstallArgs` takes exactly these forms, and every older one.
+- **Checked releases only**, each against its own release notes (29 Oct 2026):
+  - pnpm 9.5.0 to 9.15.9 and 10.0.0 to 10.34.9 with the isolated node linker, and 11.28.6 to 11.28.9;
+  - npm 9.7.2 to 9.9.4, 10.8.1 to 10.9.9, 11.0.0 to 11.13.0 and 11.15.0 to 11.21.1.
+  - Not pnpm before 9.5.0, whose default dedupe-peer-dependents installed every project; 11.0.0 to 11.27.1, not
+    audited yet; 11.28.0 to 11.28.5, whose resolver could leave out a dependency a package also declares as an
+    optional peer, in the lockfiles it wrote too (fixed in 11.28.6); or 12.x, the Rust CLI. Not npm 8.x and older;
+    11.14.0 and 11.14.1 (npm/cli 9357); or 12.x. Anything newer than the list is unverified until it is added.
+  - Settings that refuse them: sharedWorkspaceLockfile false, and filter or filterProd in pnpm-workspace.yaml (both,
+    for selectors too); excludeLinksFromLockfile, in pnpm-workspace.yaml or the lockfile's own settings, and
+    linkWorkspacePackages deep or a link recorded outside importers (chosen packages only, since selectors don't follow
+    links); npm's omit and include options (npm/cli 6670) and any install-strategy but hoisted.
+  - A bundled npm is judged by the release index's npm for the chosen Node, and the image's own npm again, before
+    anything is uploaded.
+- **Checked twice:** the host refuses a preparation whose preview's recipe doesn't install the scope chosen, as the
+  window does, whatever its fingerprint. The preparation script marks an install whose whole log says pnpm passed over
+  a filter that matched nothing, and a chosen install stops on it; npm's "No workspaces found" gets words.
+- **Protocol 17.** It and D52 are provisional numbers, taken from main when this merges.
+
+**Why.** People know their packages by name and folder, not by a package manager's syntax, and an environment must
+hold what its preview showed. A matching name isn't what a package manager links, so the set comes from what the
+lockfile records. A pinned release can't repair a regression that lives in a lockfile it wrote, so only checked
+releases are offered, and each refusal says which to pin.
+
+**Consequences.**
+- Stored recipes keep their meaning and their digest: the domain's tests pin a whole and a selected one. A newly
+  resolved selectors recipe adds `--fail-if-no-match`, so it has a new digest and needs a fresh preview and
+  preparation.
+- pnpm's root switch is locked on, with the reason. A project pinned to a release outside the list gets the whole
+  project only, with the releases to pin: valhalla-fitness at 3c3c5d7 (pnpm 11.5.3) is one.
+- A lockfile from pnpm 11.28.0 to 11.28.5, by packageManager or the lockfile's own env document, gets a warning on
+  every scope, the whole project's included.
+- npm/cli 9847 is still open: a scoped npm ci also installs a registry package that an installed package declares as
+  an optional peer, when another workspace package depends on it. The preview names each such package. With
+  legacy-peer-deps, no peer is followed, so none arises.
+- With ignore-scripts, the builds a chosen npm install leaves unrun are counted from the packages it takes in, never
+  from the whole lockfile, so another workspace package's build never holds its task runs back.
+- npm passes over a `--workspace` value that matches nothing when another one matches, and says nothing. Each chosen
+  folder, and each one reached, is one of package-lock.json's own workspace entries, which npm wrote, so that would
+  take npm reading the same workspace differently; the record says it isn't tested.
+- Choosing packages narrows only the install: a task still sends the whole commit, and a project whose packages run
+  install hooks stays refused whatever is chosen.
+- The offline tests check commands, refusals and the stand-in's preparation, not a real filtered install. A live
+  check needs its own approved recipe and digest. Yarn and Bun are still refused by name.
+- Follow-ups: audit pnpm 11.0.0 to 11.27.1 to widen the list; put the advisories against pnpm before 10.34.5
+  (GHSA-c59q-g84q-2gj5 and others) in the release index, since they affect every install; have a task's preview say
+  when its environment holds chosen packages only; let `rpc.ts` start a recipe's preparation; and hint that pnpm drops
+  `...` after a `./folder` selector.

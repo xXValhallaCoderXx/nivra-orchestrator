@@ -156,6 +156,16 @@ const INSTALL_SIGNATURES: ReadonlyArray<{ managers: ReadonlyArray<"npm" | "pnpm"
   },
   {
     managers: ["pnpm"],
+    pattern: /^No projects matched the filters in "[^\r\n]*"\r?$/m,
+    words: "None of the workspace packages matched what was chosen, so no environment was prepared. Check the packages or selectors under What to install, then preview and prepare again.",
+  },
+  {
+    managers: ["npm"],
+    pattern: /\bNo workspaces found\b/,
+    words: "npm found none of the chosen workspace packages in the project, so no environment was prepared. Preview again and choose the packages from the list; if it still happens, report it.",
+  },
+  {
+    managers: ["pnpm"],
     pattern: /\bERR_PNPM_IGNORED_BUILDS\b/,
     words: "pnpm stopped because some dependencies have build scripts the project's build policy doesn't decide. Approve or decline them with pnpm approve-builds in the repository, commit what it changes, then prepare again.",
   },

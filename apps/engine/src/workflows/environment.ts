@@ -16,6 +16,7 @@ import { EnvironmentRefusal, environmentInputs, inputsArchive } from "../environ
 import { npmLockFacts, textOf } from "../environment/node-files.ts";
 import { prepareIn, prepareRecipe, type RecipeOutcome } from "../environment/prepare.ts";
 import { environmentPreviewOf, environmentResolutionOf, PREPARE_LIMITS } from "../environment/preview.ts";
+import { npmInstallScripts } from "../environment/workspace.ts";
 import { earlyEnvironmentReport, ENVIRONMENT_STOP_MESSAGES } from "../environment/report.ts";
 import { RepoError } from "../repo/paths.ts";
 import type { ExplainRecorder } from "./explain.ts";
@@ -138,7 +139,9 @@ export function createEnvironmentWorkflow(deps: EnvironmentDeps) {
     const paths = new Set(recipe.configuration.files.map((file) => file.path));
     const files = snapshot.files.filter((file) => paths.has(file.path));
     const lockfile = files.find((file) => file.path === "npm-shrinkwrap.json") ?? files.find((file) => file.path === "package-lock.json");
-    const installScripts = recipe.install.tool === "npm" && lockfile ? (npmLockFacts(textOf(lockfile))?.installScripts ?? []) : [];
+    // What ignore-scripts leaves unbuilt: for chosen workspace packages (D52), only what their install takes in.
+    const npmLock = recipe.install.tool === "npm" && lockfile ? npmLockFacts(textOf(lockfile)) : null;
+    const installScripts = npmLock === null ? [] : recipe.selection ? npmInstallScripts(npmLock, recipe.selection, recipe.install.options["legacy-peer-deps"] === true) : npmLock.installScripts;
     deps.recorder.output(runId, "run", `${files.length} setup files, ${shown.sentBytes} bytes to send; ${recipe.install.tool} on ${recipe.image.tag}; networking on for the preparation only.`, { inputs: files.length, sentBytes: shown.sentBytes });
 
     const path = deps.journalPath(runId);

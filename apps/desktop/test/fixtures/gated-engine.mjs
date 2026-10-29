@@ -35,9 +35,13 @@
 // `applies.log` so a later applyStatus reads it; with an `error-settle` file, either does its work, then answers with an
 // internal error, as an engine whose answer is lost, and with a `hold-settle` file, does its work and never answers.
 // For environments (D41, NIV-55): environment.resolve records what it was asked (`env-resolves.log`) and answers with
-// a ready recipe (a pnpm workspace on Node 24, on the Node a runtime choice names) whose fingerprint covers the choices
-// it was given, and also an `env-changed` file while one exists, as a commit that changed would; it asks for a choice
-// while an `env-needs-choice` file exists, and refuses while an `env-refused` one does. runs.start records each
+// a ready recipe (a pnpm workspace on Node 24, on the Node a runtime choice names, installing the packages a scope
+// chooses with one --filter each, or the whole project while an `env-ignores-scope` file exists, as an engine that
+// ignored the choice would) whose fingerprint covers the choices it was given, and also an `env-changed` file while
+// one exists, as a commit that changed would; it asks for a choice while an `env-needs-choice` file exists, and
+// refuses while an `env-refused` one does. Every answer carries the workspace's facts (D52): packages/data and
+// packages/web, which links data, or one package while an `env-single` file exists; a chosen package it hasn't got is
+// refused with them, and chosen packages install with what they link and the root. runs.start records each
 // preparation with its input and context (`environments.log`). runs.environment answers with a report: in progress
 // while a `running` file exists, cancelled for a run it was asked to cancel, else the outcome an `environment-outcome`
 // file names (prepared unless it says otherwise), with the recipe's environment only when it is prepared, or whatever
@@ -66,9 +70,38 @@ const cancelled = new Set();
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 /** The Nebius project id the host handed over with the secrets, as an engine keeps it in memory. */
 let nebiusProject = null;
-/** A recipe as the gated engine resolves one (NIV-55): a pnpm workspace on Node 24, or on the Node the person chose. */
+/** The gated workspace's packages (NIV-55, D52): web links data, and pnpm always installs the root. */
+const PACKAGES = [
+  { folder: "packages/data", name: "@mono/data", needs: [] },
+  { folder: "packages/web", name: "@mono/web", needs: ["packages/data"] },
+];
+/** The workspace's facts as a resolver sends them: none chosen while an `env-single` file exists, as for one package. */
+const factsFor = () => {
+  const single = existsSync(join(home, "env-single"));
+  const why = "This project is one package, so installing it is installing the whole project.";
+  return {
+    packages: single ? [] : PACKAGES.map(({ folder, name }) => ({ folder, name, unavailable: null })),
+    more: 0,
+    root: { dependencies: 1, examples: ["typescript"], optional: false, reason: "pnpm installs the workspace root's own dependencies whenever it installs chosen packages." },
+    modes: [
+      { mode: "whole", available: true, reason: null },
+      { mode: "packages", available: !single, reason: single ? why : null },
+      { mode: "selectors", available: !single, reason: single ? "This project isn't a pnpm workspace, so there are no packages to choose." : null },
+    ],
+  };
+};
+/** A packages scope's selection as the resolver works it out: the chosen packages and what they link, in folder order. */
+const selectionFor = (scope) => {
+  const installed = new Set(scope.packages);
+  for (const folder of scope.packages) for (const need of PACKAGES.find((item) => item.folder === folder)?.needs ?? []) installed.add(need);
+  return { packages: [...installed].sort().map((folder) => ({ folder, name: PACKAGES.find((item) => item.folder === folder).name, chosen: scope.packages.includes(folder) })), root: true };
+};
+/** A recipe as the gated engine resolves one (NIV-55): a pnpm workspace on Node 24, or on the Node the person chose, installing what they chose. */
 const recipeFor = (choices) => {
   const node = choices?.runtime ?? "24.21.0";
+  const scope = choices?.scope && !existsSync(join(home, "env-ignores-scope")) ? choices.scope : { kind: "whole" };
+  const selection = scope.kind === "packages" ? selectionFor(scope) : undefined;
+  const filters = scope.kind === "selected" ? ["--fail-if-no-match", ...scope.selectors.flatMap((selector) => ["--filter", selector])] : selection ? ["--fail-if-no-match", ...selection.packages.flatMap((item) => ["--filter", item.name])] : [];
   return {
     format: "nivra.environment-recipe.v1",
     profile: "node",
@@ -80,8 +113,9 @@ const recipeFor = (choices) => {
       { name: "pnpm", version: { kind: "exact", version: "11.5.3" }, from: "bootstrap" },
     ],
     bootstrap: [{ tool: "pnpm", version: "11.5.3", via: "corepack-else-npm-global" }],
-    install: { tool: "pnpm", args: ["install", "--frozen-lockfile"], options: {} },
-    scope: { kind: "whole" },
+    install: { tool: "pnpm", args: ["install", "--frozen-lockfile", ...filters], options: {} },
+    scope,
+    ...(selection ? { selection } : {}),
     builds: { tool: "pnpm", runs: "allowed", allowed: ["esbuild"], denied: [], strict: true, source: "pnpm-workspace.yaml", notes: [] },
     configuration: { mode: "manifests", files: ["package.json", "packages/data/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].map((path) => ({ path, bytes: 100, sha256: sha256(path) })), digest: "2".repeat(64) },
     systemPackages: [],
@@ -328,7 +362,7 @@ process.stdin.on("data", (chunk) => {
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
       nebiusProject = request.params.secrets?.NEBIUS_PROJECT_ID ?? null;
-      send({ id: request.id, result: { protocolVersion: 16, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 17, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
@@ -385,13 +419,16 @@ process.stdin.on("data", (chunk) => {
       const { choices } = request.params;
       const recipe = recipeFor(choices);
       const rows = rowsFor(choices, recipe);
-      if (existsSync(join(home, "env-refused"))) {
+      const unknown = choices.scope?.kind === "packages" ? choices.scope.packages.find((folder) => !factsFor().packages.some((item) => item.folder === folder)) : undefined;
+      if (unknown !== undefined) {
+        send({ id: request.id, result: { status: "refused", code: "scope", message: `${JSON.stringify(unknown)} isn't one of this workspace's packages at this commit: it may have been moved or removed. Untick it, or install the whole project, then preview again.`, rows: [], workspace: factsFor() } });
+      } else if (existsSync(join(home, "env-refused"))) {
         send({ id: request.id, result: { status: "refused", code: "unsupported-manager", message: "This project installs with yarn, which Nivra doesn't prepare yet. Use npm or pnpm, then preview the environment again.", rows } });
       } else if (existsSync(join(home, "env-needs-choice")) && !choices.runtime) {
         const options = ["24.21.0", "22.23.4"].map((value) => ({ value, label: `Node ${value}`, note: null }));
-        send({ id: request.id, result: { status: "needs-choice", rows, choices: [{ id: "runtime", why: "conflict", message: ".nvmrc pins Node 24.21.0, and .node-version pins 22.23.4. Choose the one this project uses.", declarations: [{ file: ".nvmrc", field: null, value: "24.21.0" }, { file: ".node-version", field: null, value: "22.23.4" }], options }], warnings: [], limitations: [] } });
+        send({ id: request.id, result: { status: "needs-choice", rows, choices: [{ id: "runtime", why: "conflict", message: ".nvmrc pins Node 24.21.0, and .node-version pins 22.23.4. Choose the one this project uses.", declarations: [{ file: ".nvmrc", field: null, value: "24.21.0" }, { file: ".node-version", field: null, value: "22.23.4" }], options }], warnings: [], limitations: [], workspace: factsFor() } });
       } else {
-        send({ id: request.id, result: { status: "ready", rows, recipe, warnings: [], limitations: [], recipeDigest: digestOf(recipe), baseline: "a".repeat(40), sentBytes: 900, leftOut: [".npmrc"], retention: "Images are retained for 180 days.", fingerprint: sha256(JSON.stringify([choices, existsSync(join(home, "env-changed"))])) } });
+        send({ id: request.id, result: { status: "ready", rows, recipe, warnings: [], limitations: [], workspace: factsFor(), recipeDigest: digestOf(recipe), baseline: "a".repeat(40), sentBytes: 900, leftOut: [".npmrc"], retention: "Images are retained for 180 days.", fingerprint: sha256(JSON.stringify([choices, existsSync(join(home, "env-changed"))])) } });
       }
     } else if (request.method === "runs.events") {
       send({ id: request.id, result: { events: [], next: request.params.after ?? 0, status: cancelled.has(request.params.runId) ? "cancelled" : "succeeded" } });
