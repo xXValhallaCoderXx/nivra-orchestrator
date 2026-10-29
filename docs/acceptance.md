@@ -3144,3 +3144,22 @@ The cross-platform foundation is done when all of these were seen to pass:
 ## Hackathon submission checklist
 
 The dated checklist, with a source link for each requirement, is in [submission.md](submission.md) (NIV-15).
+
+
+## NIV-66 companion prerequisite — local review candidate, 29 October 2026
+
+Base: `5a6606aa22a97a32136c6fbf9e67022e90846f13`, with an uncommitted prerequisite diff in
+`/tmp/nivra-niv66-companion`. Protocol 18; host workspace 10. The saved recovery, counts-only, price-list and
+model-journal work was reused without modifying its original worktrees. No dependencies were added or removed.
+
+- `pnpm verify`: passed, 135 domain + 643 desktop + 960 engine tests (1,738), no skips.
+- Built app `budget-api.spec.ts` and `budget-usage.spec.ts`: 4 passed. The window sets a companion-only monthly request
+  allowance, preserves it over restart and keeps unsupported dollar policies refused.
+- Request tests cover cross-target reservations, duplicate root grants, relabelled extensions, unknown/unpriced inference,
+  complete versus interrupted seals and effective recovery remainder. Usage regressions count uncertain token usage once.
+- Real HTTP stand-ins verify scalar and nested SDK token usage, including cached input and reasoning without duplication.
+- Money/token ceilings and wider feature integration are not claimed. Disconnected target grants remain held until their
+  engine connects. No live provider or sandbox call was made.
+
+Review patch, logs and exact source-tree/patch hashes are in `/tmp/nivra-delivery-review`; they identify the local diff,
+not a published revision. Generated runtime/app outputs are ignored and are not part of either review patch.

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { BudgetGrant, BudgetOperation, JournalSeal } from "./budget.ts";
 import { ApplyParams, ApplyResolution, ApplyView } from "./apply.ts";
 import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { CoachContext, CoachInput, CoachReport } from "./coach.ts";
@@ -77,6 +78,8 @@ export type DoctorReport = z.infer<typeof DoctorReport>;
 const RunRequest = {
   /** Minted by main for each request, so a retry never starts a second run. */
   clientRequestId: z.uuid(),
+  /** A finite grant, kept in memory and the engine journal only, never in a workflow or run input. */
+  budget: BudgetGrant.optional(),
   /** Held in the engine's memory for this run only, never stored with it (D21). */
   context: RunContext,
 };
@@ -84,23 +87,23 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   z.strictObject({ ...RunRequest, workflowId: z.literal("hello"), input: HelloInput }),
   z.strictObject({ ...RunRequest, workflowId: z.literal("explain"), input: ExplainInput }),
   // A conversation's turn carries the conversation so far as well (D26), held in memory like the snapshot.
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ChatContext, workflowId: z.literal("chat"), input: ChatInput }),
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: ChatContext, workflowId: z.literal("chat"), input: ChatInput }),
   // A review of a saved plan version carries the frozen packet too (D30), held in memory like the snapshot.
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ReviewContext, workflowId: z.literal("review"), input: ReviewInput }),
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: ReviewContext, workflowId: z.literal("review"), input: ReviewInput }),
   // A sandbox check carries its own upload consent, never model-context consent (D36).
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: SandboxContext, workflowId: z.literal("sandbox"), input: SandboxInput }),
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: SandboxContext, workflowId: z.literal("sandbox"), input: SandboxInput }),
   // Research of a saved plan's assumptions carries its frozen packet, what no query may name and both permissions
   // (D37), held in memory like the snapshot.
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: ResearchContext, workflowId: z.literal("research"), input: ResearchInput }),
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: ResearchContext, workflowId: z.literal("research"), input: ResearchInput }),
   // A task run carries its frozen brief and both consents, model sharing and uploads, held in memory like the snapshot
   // (D39): neither consent stands in for the other.
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: TaskContext, workflowId: z.literal("task"), input: TaskInput }),
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: TaskContext, workflowId: z.literal("task"), input: TaskInput }),
   // An environment's preparation carries its upload consent and what the person chose: D41's spec, or a project-driven
   // recipe's choices and the versions its last preparation settled on (NIV-55). No model is involved.
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: z.union([EnvironmentContext, EnvironmentContextV2]), workflowId: z.literal("environment"), input: EnvironmentInput }),
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: z.union([EnvironmentContext, EnvironmentContextV2]), workflowId: z.literal("environment"), input: EnvironmentInput }),
   // A coaching of one task carries its frozen packet, the preferences and the project's model sharing (NIV-53), held in
   // memory like the snapshot: the run stores ids and fingerprints only.
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, context: CoachContext, workflowId: z.literal("coach"), input: CoachInput }),
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: CoachContext, workflowId: z.literal("coach"), input: CoachInput }),
 ]);
 export type StartRunParams = z.input<typeof StartRunParams>;
 
@@ -168,6 +171,10 @@ export const Methods = {
   ping: { params: Empty, result: z.strictObject({ instanceId: z.uuid() }) },
   doctor: { params: Empty, result: DoctorReport },
   "providers.check": { params: z.strictObject({ model: z.string().min(1).max(200).optional() }), result: ProviderCheck },
+  "budget.journal": {
+    params: z.strictObject({ grantId: z.uuid(), after: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(500).default(200) }),
+    result: z.strictObject({ accepted: z.boolean(), rows: z.array(BudgetOperation).max(500), seal: JournalSeal.nullable(), providerDate: z.string().nullable(), next: z.number().int().positive().nullable() }),
+  },
   "runs.start": { params: StartRunParams, result: RunSummary },
   "runs.get": { params: z.strictObject({ runId: RunId }), result: RunSummary },
   /** The run a request id created, or null when this store has none (D26): how a send whose answer was lost is found. */

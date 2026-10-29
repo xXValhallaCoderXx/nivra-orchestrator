@@ -825,3 +825,15 @@ distribution. One engine holds a home at a time (D7), so the second to start is 
 - Capturing the login shell's PATH for tools the engine starts. Until then, tools are looked up in the engine's own
   PATH, with WSL's leaked Windows folders removed. **Required before agents run builds (D15)**: nvm and similar are
   invisible to `wsl.exe --exec`.
+
+
+### Companion delivery checks (NIV-66 / NIV-68)
+
+The Companion AI monthly setting counts dispatched inference requests only. An absent limit leaves monthly requests
+unlimited under existing per-turn bounds; zero stops inference. Tokens are reported separately and incomplete totals
+remain unknown. Other agents, research and sandbox operations are not covered by this allowance.
+
+Use isolated homes and loopback provider stand-ins for verification; no live paid call is part of `pnpm verify`.
+The engine's `budget-journal`/`budget-model` tests cover grants, seals and SDK token shapes. Desktop
+`companion-usage-accounting` tests cover unknown usage without double-counting. `budget-usage.spec.ts` exercises the
+companion-only policy through the native window. A disconnected target retains its grants until it reconnects.

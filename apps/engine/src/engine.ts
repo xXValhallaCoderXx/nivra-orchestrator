@@ -70,6 +70,7 @@ import { TOKEN_FACTORY_BASE_URL } from "./providers/tokenfactory.ts";
 import { useEngineTransport } from "./providers/transport.ts";
 import { RunScheduler, type WorkflowEntry, type WorkflowSource } from "./runs/scheduler.ts";
 import { RunStore } from "./runs/store.ts";
+import { BudgetJournal } from "./budget/journal.ts";
 import { SecretVault, stripProviderEnv } from "./secrets/vault.ts";
 import { EnvironmentRefusal, environmentInputs, leftOutFor, setupConfiguration, trackedUnder } from "./environment/inputs.ts";
 import { isNodeSetupPath } from "./environment/node-files.ts";
@@ -321,6 +322,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   // Every failure the engine logs, as one bounded line that never holds an error's own words (NIV-27).
   const diagnose = (diagnostic: Diagnostic) => log(mask(formatDiagnostic(diagnostic)));
   const store = new RunStore({ database, mask: (text) => mask(text) });
+  // The journal of paid operations under the host's grants (NIV-66), in the same database.
+  const journal = new BudgetJournal(database, instanceId);
   // Names this home's store for the host (D26), as its path can't.
   const homeId = store.homeId();
   const backend = createLocalBackend({ baseEnv: env });
@@ -759,10 +762,13 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     instanceId,
     log: { info: log, warn: (m) => log(`warning: ${m}`), error: (m) => log(`error: ${m}`) },
     diagnose,
+    journal,
   });
   scheduler.attach(mastra as unknown as WorkflowSource);
   // This process holds the home's lock, so no other engine can be running these runs (D7).
   scheduler.recover();
+  // Their grants, and any other another instance left unsealed, are sealed interrupted, never complete (NIV-66).
+  journal.interruptOthers();
 
   let initialized = false;
   let stopping: Promise<void> | null = null;
@@ -832,6 +838,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
           throw new RpcFailure(ErrorCode.InternalError, known?.message ?? internalMessage(), { kind: known?.kind ?? "internal" }, { cause: error });
         }
       },
+      "budget.journal": ({ grantId, after, limit }) => ({ ...journal.read(grantId, after, limit), providerDate: journal.providerDate(grantId) }),
       "runs.start": (params) => {
         // One check of a project at a time (D36), for a new request: a repeated one still gets its own run, ended or not.
         // The host refuses a second check as well.

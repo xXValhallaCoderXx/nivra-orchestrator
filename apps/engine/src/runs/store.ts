@@ -87,17 +87,22 @@ export class RunStore {
     return row ? strOrNull(row["client_request_id"]) : null;
   }
 
-  create(run: NewRun): { id: string; created: boolean } {
+  create(run: NewRun, accepted?: (runId: string, created: boolean) => void): { id: string; created: boolean } {
     return this.#database.tx((db) => {
       if (run.clientRequestId) {
         const existing = db.prepare("SELECT id FROM runs WHERE client_request_id = ?").get(run.clientRequestId);
-        if (existing) return { id: str(existing["id"]), created: false };
+        if (existing) {
+          const id = str(existing["id"]);
+          accepted?.(id, false);
+          return { id, created: false };
+        }
       }
       const id = randomUUID();
       db.prepare(
         `INSERT INTO runs (id, workflow_id, title, status, input, client_request_id, instance_id, created_at)
          VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)`,
       ).run(id, run.workflowId, this.#text(run.title), this.#mask(JSON.stringify(run.input ?? null)), run.clientRequestId, run.instanceId, this.#iso());
+      accepted?.(id, true);
       this.#insertEvent(db, id, { type: "run.queued", message: "Queued" });
       return { id, created: true };
     });

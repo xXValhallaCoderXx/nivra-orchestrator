@@ -3,8 +3,8 @@ import { useEffect, useState } from "react";
 import type { RunLimitsView } from "../../../shared/ipc";
 import { runLimitLines } from "../shell/run-limits";
 
-/** Nate's words for this build's budget, verbatim. */
-export const BUDGET_NOT_AVAILABLE = "Shared budget tracking and controls aren't available in this build. Existing per-run limits apply.";
+/** Coverage outside the companion's monthly inference-request allowance. */
+export const BUDGET_NOT_AVAILABLE = "Other agents, research and sandbox operations aren't covered by the Companion AI request allowance. Their existing per-run limits apply.";
 
 /**
  * Settings › Budget and usage, read-only (NIV-56): no shared budget in this build, and the per-run limits the engine

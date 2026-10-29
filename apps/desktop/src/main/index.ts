@@ -367,6 +367,8 @@ function start(): void {
   handle(IPC.cancelCoach, z.tuple([Id, Id]), (_event, id, coachingId) => host.cancelCoach(id, coachingId));
   handle(IPC.acceptCoachChanges, z.tuple([Id, Revision, Id, z.array(CoachField).max(CoachField.options.length)]), (_event, id, revision, coachingId, fields) => host.acceptCoachChanges(id, revision, coachingId, fields));
   // The shared monthly budget (NIV-66).
+  handle(IPC.getCompanionUsage, none, () => host.getCompanionUsage());
+  handle(IPC.setCompanionLimit, z.tuple([z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable()]), (_event, limit) => host.setCompanionLimit(limit));
   handle(IPC.getBudgetPolicy, none, () => host.getBudgetPolicy());
   handle(IPC.setBudgetPolicy, z.tuple([BudgetPolicyDraft.nullable()]), (_event, draft) => host.setBudgetPolicy(draft));
   handle(IPC.budgetSummary, none, () => host.budgetSummary());

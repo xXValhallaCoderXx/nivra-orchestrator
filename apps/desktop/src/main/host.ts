@@ -114,6 +114,16 @@ import {
   type LedgerView,
 } from "./budget-guard.ts";
 import {
+  companionRequestUsage,
+  getGrant,
+  openGrants,
+  writeGrant,
+  markDispatching,
+  markAccepted,
+  markUncertain,
+  releaseGrant,
+  recordJournal,
+  observeProviderTime,
   answeredRecovery,
   budgetSummary,
   chainAt,
@@ -121,8 +131,10 @@ import {
   currentPolicy,
   ensureDurable,
   establishedMonth,
+  keepPendingRecovery,
   latestLedgerTime,
   ledgerState,
+  pendingRecovery,
   recordClockJump,
   setPolicy,
   startNewHistory,
@@ -4936,7 +4948,10 @@ export class Host {
         const last = guard.last();
         const view: LedgerView | null =
           ledger === null ? null : { ...ledger, month: establishedMonth(opening.db), chainAtGuard: last === null ? null : chainAt(opening.db, last.ledgerId, last.revision), answered: answeredRecovery(opening.db) };
-        const check = checkHistory(last, view, opening.notice !== null, Date.now());
+        const pending = pendingRecovery(opening.db);
+        const check = checkHistory(last, view, opening.notice !== null, Date.now(), pending);
+        // A loss found is kept in the workspace first, then in the guard: deleting the guard can't clear it.
+        if (check.state === "needs-recovery" && pending === null) keepPendingRecovery(opening.db, check.recovery, Date.now());
         if (check.append) guard.append(check.append);
         this.#budgetState = check.state === "needs-recovery" ? { kind: "needs-recovery", recovery: check.recovery } : { kind: "ready" };
         if (check.state === "needs-recovery") this.#options.log(`Budget: the history needs recovery (${check.recovery.reason}).`);
@@ -5027,6 +5042,86 @@ export class Host {
   async budgetSummary(): Promise<BudgetSummary> {
     const { workspace, recovery } = this.#budget();
     return budgetSummary(workspace, { now: Date.now(), catalogue: this.#prices, recovery, timezone: this.#budgetZone(workspace) });
+  }
+
+  /** Companion AI only: optional monthly request policy, never a token or dollar ceiling. */
+  async setCompanionLimit(limit: number | null) {
+    if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0)) throw new Error("Choose a non-negative whole number of companion requests, or turn the monthly limit off.");
+    const previous = await this.getBudgetPolicy();
+    if (limit === null && previous === null) return this.getCompanionUsage();
+    const base = previous ?? { preset: "counts" as const, currency: null, monthlyMicros: null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, thresholds: [], sublimits: { dailyMicros: null, perQueueMicros: null, perTaskMicros: null, projects: [], profiles: [] }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, researchCreditMicros: null };
+    const { version: _version, replaces: _replaces, createdAt: _created, ...draft } = base as typeof base & { version?: number; replaces?: number | null; createdAt?: string };
+    await this.setBudgetPolicy({ ...draft, modelRequestLimits: limit === null ? [] : [{ feature: "companion", monthlyRequests: limit }] });
+    return this.getCompanionUsage();
+  }
+
+  async getCompanionUsage() {
+    const { workspace, recovery } = this.#budget();
+    await this.#reconcileCompanionBudgets();
+    const usage = companionRequestUsage(workspace);
+    return { ...usage, historyComplete: !recovery && usage.historyComplete, remaining: recovery ? null : usage.remaining, inputTokens: recovery ? null : usage.inputTokens, outputTokens: recovery ? null : usage.outputTokens, blocked: recovery ? BUDGET_NEEDS_RECOVERY : usage.historyBlocked ?? (usage.remaining === 0 ? "The monthly Companion AI allowance is exhausted. Raise it, wait for the next confirmed month, or continue manually." : null) };
+  }
+
+  /** Writes and guards a finite grant before any companion RPC can be sent. */
+  #companionGrant(requestId: string, targetId: string, homeId: string, projectId: string | null, taskId: string | null) {
+    const { workspace, guard, recovery } = this.#budget();
+    if (recovery) throw new Error(BUDGET_NEEDS_RECOVERY);
+    const last = guard.last();
+    const verified = last ? { ledgerId: last.ledgerId, revision: last.revision, chain: last.chain } : null;
+    const now = Date.now();
+    const written = writeGrant(workspace, { requestId, targetId, workflow: "companion", attribution: { feature: "companion", projectId, taskId, attemptId: null, queueId: null, queueItemId: null, profile: { source: "builtin", id: "companion", version: 1 } }, models: this.#prices.models.map((rate) => rate.model), productive: { requests: 1, outputTokens: 4000 }, finalisation: { requests: 0, outputTokens: 0 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, extends: null, need: null }, { now, catalogue: this.#prices, timezone: this.#budgetZone(workspace), verified });
+    if ("refused" in written) throw new Error(written.refused.message);
+    if (written.authority) this.#guardBudget(guard, workspace, written.authority, now);
+    const record = getGrant(workspace, written.grant.id)!;
+    if (record.state !== "written") throw new Error("This companion request was already dispatched. Check its existing result; it will not be sent again.");
+    const dispatched = markDispatching(workspace, record.id, homeId, now, guard.last());
+    if (!dispatched) throw new Error("The companion grant could not be dispatched.");
+    this.#guardBudget(guard, workspace, dispatched, now);
+    return written.grant;
+  }
+
+  /** Reconciles saved metadata only. Neither a lost response nor a restart resends inference. */
+  async #reconcileCompanionBudgets(): Promise<void> {
+    const { workspace, guard, recovery } = this.#budget();
+    if (recovery) return;
+    for (const grant of openGrants(workspace).filter((one) => one.attribution.feature === "companion")) {
+      const now = Date.now();
+      if (grant.state === "written") {
+        const released = releaseGrant(workspace, grant.id, now, guard.last());
+        if (released) this.#guardBudget(guard, workspace, released, now);
+        continue;
+      }
+      const engine = this.#engines.get(grant.targetId);
+      const state = engine?.supervisor.state;
+      if (!engine || state?.status !== "online" || state.info.homeId !== grant.homeId) continue;
+      try {
+        const rows: import("@nivra/domain").BudgetOperation[] = [];
+        let after = 0;
+        let page;
+        do {
+          page = await engine.supervisor.call("budget.journal", { grantId: grant.id, after, limit: 200 });
+          if (!page.accepted) break;
+          rows.push(...page.rows);
+          if (rows.length > 1000) throw new Error("A companion journal exceeds its bound.");
+          after = page.next ?? 0;
+        } while (page.next !== null);
+        if (!page.accepted) continue;
+        const accepted = markAccepted(workspace, grant.id, now);
+        if (accepted) this.#guardBudget(guard, workspace, accepted, now);
+        if (page.seal) {
+          const settled = recordJournal(workspace, grant.id, rows, page.seal, now);
+          if ("refused" in settled) throw new Error(settled.refused);
+          if (settled.authority) this.#guardBudget(guard, workspace, settled.authority, now);
+        }
+        if (page.providerDate) {
+          const observed = observeProviderTime(workspace, Date.parse(page.providerDate), now, this.#budgetZone(workspace));
+          if (observed.authority) this.#guardBudget(guard, workspace, observed.authority, now);
+        }
+      } catch {
+        const uncertain = markUncertain(workspace, grant.id, now);
+        if (uncertain) this.#guardBudget(guard, workspace, uncertain, now);
+      }
+    }
   }
 
   /** The price list Nivra counts with, and what about it isn't established yet. */

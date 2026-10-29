@@ -12,7 +12,7 @@ import { goTo } from "./places.ts";
  * them, the section says so and shows no figure. A fresh profile, no project needed.
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
-const WORDS = "Shared budget tracking and controls aren't available in this build. Existing per-run limits apply.";
+const WORDS = "Other agents, research and sandbox operations aren't covered by the Companion AI request allowance. Their existing per-run limits apply.";
 
 let root: string;
 let app: ElectronApplication;
@@ -31,9 +31,9 @@ test.afterAll(async () => {
   rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 });
 
-test("shows Nate's words and the engine's per-run limits, the figures the domain's, with nothing to press and no money", async () => {
+test("shows precise companion coverage and the engine's separate per-run limits", async () => {
   await goTo(page, "settings-budget");
-  const section = page.getByTestId("settings-budget");
+  const section = page.getByTestId("budget-usage");
   await expect(page.getByTestId("settings-tab-budget")).toHaveAttribute("aria-current", "page");
   await expect(section.getByTestId("budget-usage-note")).toHaveText(WORDS);
 
@@ -66,9 +66,24 @@ test("when main can't give the limits, the section says so and shows no figure",
   });
   await page.reload();
   await goTo(page, "settings-budget");
-  const section = page.getByTestId("settings-budget");
+  const section = page.getByTestId("budget-usage");
   await expect(section.getByTestId("budget-usage-error")).toHaveText("Nivra couldn't read the per-run limits, so none are shown here. Each run's preview shows its bounds before it starts.");
   await expect(section.getByTestId("budget-usage-note")).toHaveText(WORDS);
   await expect(section.getByTestId("budget-usage-limit")).toHaveCount(0);
   expect(/\d/.test((await section.textContent()) ?? "")).toBe(false);
+});
+
+
+test("sets a companion-only monthly request allowance and keeps other per-run limits separate", async () => {
+  await goTo(page, "settings-budget");
+  const view = page.getByTestId("companion-usage");
+  await expect(view).toContainText("doesn't cover other agents");
+  await view.getByTestId("companion-limit-enabled").check();
+  await view.getByTestId("companion-limit").fill("12");
+  await view.getByTestId("companion-limit-save").click();
+  await expect.poll(async () => (await page.evaluate(() => window.nivra.getCompanionUsage())).limit).toBe(12);
+  await page.reload(); await goTo(page,"settings-budget");
+  await expect(page.getByTestId("companion-limit")).toHaveValue("12");
+  const usage = await page.evaluate(() => window.nivra.getCompanionUsage());
+  expect([usage.used,usage.reserved,usage.remaining]).toEqual([0,0,12]);
 });

@@ -18,10 +18,11 @@ describe("listModels", () => {
       return new Response(JSON.stringify({ data: [{ id: "nvidia/nemotron-3-super-120b-a12b", owned_by: "nvidia" }, { id: "Qwen/Qwen3-30B" }] }));
     }) as typeof fetch;
 
-    const models = await listModels("test-key", { fetch: fetchStub });
+    const { entries, date } = await listModels("test-key", { fetch: fetchStub });
 
     assert.deepEqual(seen, { url: `${TOKEN_FACTORY_BASE_URL}/models?verbose=true`, authorization: "Bearer test-key" });
-    assert.deepEqual(models, [
+    assert.equal(date, null);
+    assert.deepEqual(entries, [
       { id: "nvidia/nemotron-3-super-120b-a12b", ownedBy: "nvidia", contextLength: null },
       { id: "Qwen/Qwen3-30B", ownedBy: null, contextLength: null },
     ]);
@@ -29,8 +30,14 @@ describe("listModels", () => {
 
   it("reads a model's context length under the names providers use, and ignores one that isn't a count", async () => {
     const body = { data: [{ id: "a", context_length: 131072 }, { id: "b", max_model_len: 32768 }, { id: "c", context_window: "lots" }] };
-    const models = await listModels("key", { fetch: respond(200, body) as typeof fetch });
-    assert.deepEqual(models.map((m) => [m.id, m.contextLength]), [["a", 131072], ["b", 32768], ["c", null]]);
+    const { entries } = await listModels("key", { fetch: respond(200, body) as typeof fetch });
+    assert.deepEqual(entries.map((m) => [m.id, m.contextLength]), [["a", 131072], ["b", 32768], ["c", null]]);
+  });
+
+  it("returns the Date its answer carried, the provider's clock (NIV-66), and none when it isn't a date", async () => {
+    const dated = (date: string) => (async () => new Response(JSON.stringify({ data: [{ id: "a" }] }), { headers: { date } })) as typeof fetch;
+    assert.equal((await listModels("key", { fetch: dated("Wed, 28 Oct 2026 01:00:00 GMT") })).date, "Wed, 28 Oct 2026 01:00:00 GMT");
+    assert.equal((await listModels("key", { fetch: dated("not a date") })).date, null);
   });
 
   it("says the key was refused on 401, by status rather than by the body's words", async () => {

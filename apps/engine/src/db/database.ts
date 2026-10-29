@@ -49,7 +49,8 @@ export class Database {
     const db = new DatabaseSync(this.path, { timeout: this.#exclusive ? 0 : 5_000 });
     try {
       if (this.#exclusive) db.exec("PRAGMA locking_mode = EXCLUSIVE;");
-      db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+      // FULL: a write is durable when it returns, so a budget journal row written before a send survives a stop (NIV-66).
+      db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;");
       // A write takes the exclusive lock now, and EXCLUSIVE mode keeps it.
       if (this.#exclusive) db.exec("BEGIN IMMEDIATE; COMMIT;");
       migrate(db);
