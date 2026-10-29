@@ -55,6 +55,7 @@ describe("a failed install's diagnosis (NIV-55)", () => {
       ["npm", "npm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync", /Run npm install in the repository/],
       ["pnpm", `ERR_PNPM_OUTDATED_LOCKFILE ${secret}`, /Run pnpm install in the repository/],
       ["pnpm", `No projects matched the filters in "/workspace/${secret}"`, /Correct the package names or folders under What to install/],
+      ["npm", `npm error No workspaces found:\nnpm error   --workspace=./${secret}`, /npm found none of the chosen workspace packages in the project/],
       ["pnpm", "ERR_PNPM_IGNORED_BUILDS  Ignored build scripts: esbuild", /pnpm approve-builds/],
       ["pnpm", "ERR_PNPM_UNSUPPORTED_ENGINE  Unsupported environment", /choose a Node version every package accepts/],
       ["npm", "npm warn EBADENGINE Unsupported engine", /choose a Node version every package accepts/],

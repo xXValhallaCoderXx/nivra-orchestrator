@@ -161,6 +161,60 @@ describe("Nebius Sandboxes, offline: spawning, one at a time, networking off (NI
     assert.equal(isInstallArgs(["ci", "--no-audit", "--no-fund", "--fail-if-no-match"], "npm"), false);
   });
 
+  it("takes npm's chosen workspace packages only as ./FOLDER, each once and in order, then the root's switch said once (D52)", () => {
+    const ci = ["ci", "--no-audit", "--no-fund"];
+    const folder = (length: number) => `p/${"f".repeat(length - 2)}`;
+    for (const rest of [
+      [],
+      ["--legacy-peer-deps"],
+      ["--workspace=./apps/web", "--include-workspace-root"],
+      ["--legacy-peer-deps", "--workspace=./apps/web", "--workspace=./packages/@scope/data", "--include-workspace-root=false"],
+      [`--workspace=./${folder(186)}`, "--include-workspace-root"],
+    ]) assert.equal(isInstallArgs([...ci, ...rest], "npm"), true, JSON.stringify(rest));
+    for (const rest of [
+      ["--workspace=apps/web", "--include-workspace-root"],
+      ["--workspace=@w/web", "--include-workspace-root"],
+      ["--workspace=./../web", "--include-workspace-root"],
+      ["--workspace=./apps/*", "--include-workspace-root"],
+      ["--workspace=./apps/my web", "--include-workspace-root"],
+      ["--workspace=./-web", "--include-workspace-root"],
+      [`--workspace=./${folder(187)}`, "--include-workspace-root"],
+      ["--workspace=./apps/web"],
+      ["--include-workspace-root"],
+      ["--workspace=./apps/web", "--include-workspace-root", "--include-workspace-root"],
+      ["--workspace=./apps/web", "--include-workspace-root=true"],
+      ["--include-workspace-root", "--workspace=./apps/web"],
+      ["--workspace=./packages/data", "--workspace=./apps/web", "--include-workspace-root"],
+      ["--workspace=./apps/web", "--workspace=./apps/web", "--include-workspace-root"],
+      ["--workspace=./apps/web", "--legacy-peer-deps", "--include-workspace-root"],
+      ["--omit=dev", "--workspace=./apps/web", "--include-workspace-root"],
+      ["--include=dev", "--workspace=./apps/web", "--include-workspace-root"],
+      ["--workspaces"],
+      ["-w", "./apps/web", "--include-workspace-root"],
+    ]) assert.equal(isInstallArgs([...ci, ...rest], "npm"), false, JSON.stringify(rest));
+    assert.equal(isInstallArgs(["ci", "--no-audit", "--no-fund", "--omit=dev"], "npm"), true, "a whole project's options are unchanged");
+  });
+
+  it("marks an install that passed over an unmatched filter, from the whole log, on a line of its own (D52)", { skip: process.platform === "win32" ? "needs a POSIX shell" : false }, () => {
+    const line = ENV_PREPARE_SCRIPT.split("\n").find((item) => item.includes("filters-unmatched"))!;
+    assert.ok(line, "the marker's line wasn't found");
+    const folder = mkdtempSync(join(tmpdir(), "nivra marker "));
+    try {
+      const log = join(folder, "install.log");
+      for (const [text, marked] of [
+        ['No projects matched the filters "/workspace/apps/old" in "/workspace"\nDone in 1s\n', true],
+        [`${"progress line\n".repeat(2_000)}No projects matched the filters "/w/x" in "/w"\n${"more\n".repeat(2_000)}`, true],
+        ["Done in 1s\n", false],
+      ] as const) {
+        writeFileSync(log, text);
+        const ran = spawnSync("/bin/sh", ["-c", line.replaceAll("/nivra/install.log", `'${log}'`)], { encoding: "utf8" });
+        assert.deepEqual([ran.status, ran.stdout], [0, marked ? "filters-unmatched\n" : ""], text.slice(0, 40));
+      }
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
   it("runs a recipe's preparation only in the shapes Nivra allows, with no variable that could steer the install elsewhere (NIV-55)", async () => {
     const service = new FakeService(() => succeed());
     const { sandbox } = sandboxOn(service);

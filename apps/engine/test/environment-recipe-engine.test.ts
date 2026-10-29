@@ -61,6 +61,8 @@ interface Image {
   install?: "ok" | "fails" | "bootstrap-fails";
   /** What a failing install prints. */
   installLog?: string;
+  /** What the preparation script prints after a passed install, such as its unmatched-filter marker. */
+  afterInstall?: string;
   builds?: string;
   /** What readiness sees: the tools, pnpm's settings, and files the install left besides the setup files and node_modules. */
   readiness?: { tools?: string; settings?: string; extraFiles?: string[] };
@@ -95,7 +97,7 @@ async function setup(image: Image) {
       const versions = `${pnpm ? "via corepack\n" : ""}node v${image.node}\nnpm ${image.npm}\n${pnpm ? `pnpm ${image.pnpm ?? "11.5.3"}\n` : ""}arch x86_64\n`;
       if (image.install === "fails") return done({ exitCode: 1, stdout: `${versions}${image.installLog ?? "npm error code ERESOLVE\n"}` });
       const builds = pnpm ? `builds-begin\nAutomatically ignored builds during installation:\n${image.builds ?? "  None"}\nbuilds-end\n` : "";
-      return done({ stdout: `${versions}added 12 packages in 3s\ninstalled\n${builds}` });
+      return done({ stdout: `${versions}added 12 packages in 3s\ninstalled\n${image.afterInstall ?? ""}${builds}` });
     }
     if (args[1] === READINESS_SCRIPT) {
       const tools = image.readiness?.tools ?? ["sh", "tar", "find", "sha256sum", "gzip", "sort"].map((tool) => `tool ${tool} ok`).join("\n");
@@ -294,5 +296,115 @@ describe("a project-driven recipe's preparation through a real engine (NIV-55)",
     assert.equal(both.status, "needs-choice");
     const yarn = await resolve(engine, repoWith({ "package.json": json({ name: "x", packageManager: "yarn@4.1.0" }), "yarn.lock": "# yarn\n" }));
     assert.deepEqual([yarn.status, yarn.status === "refused" ? yarn.code : null], ["refused", "unsupported-manager"]);
+  });
+});
+
+describe("chosen workspace packages prepared through a real engine (NIV-55, D52)", () => {
+  /** A pnpm workspace on a checked pnpm: web links data, the root links lint, and other is linked from nothing. */
+  const LINKED = {
+    "package.json": json({ name: "mono", private: true, packageManager: "pnpm@11.28.9", devDependencies: { "@mono/lint": "workspace:*" } }),
+    ".nvmrc": "24.21.0\n",
+    "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
+    "pnpm-lock.yaml": [
+      "lockfileVersion: '9.0'",
+      "",
+      "importers:",
+      "",
+      "  .:",
+      "    devDependencies:",
+      "      '@mono/lint':",
+      "        specifier: workspace:*",
+      "        version: link:packages/lint",
+      "",
+      "  packages/data: {}",
+      "",
+      "  packages/lint: {}",
+      "",
+      "  packages/other: {}",
+      "",
+      "  packages/web:",
+      "    dependencies:",
+      "      '@mono/data':",
+      "        specifier: workspace:*",
+      "        version: link:../data",
+      "",
+    ].join("\n"),
+    "packages/data/package.json": json({ name: "@mono/data", private: true }),
+    "packages/lint/package.json": json({ name: "@mono/lint", private: true }),
+    "packages/other/package.json": json({ name: "@mono/other", private: true }),
+    "packages/web/package.json": json({ name: "@mono/web", private: true, dependencies: { "@mono/data": "*" } }),
+  };
+  /** The same for npm, with the npm Node 24.21.0 bundles. */
+  const SITE = {
+    "package.json": json({ name: "site", version: "1.0.0", private: true, workspaces: ["packages/*"], devDependencies: { "@site/lint": "*" } }),
+    ".nvmrc": "24.21.0\n",
+    "package-lock.json": json({
+      name: "site",
+      version: "1.0.0",
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "": { name: "site", version: "1.0.0", workspaces: ["packages/*"], devDependencies: { "@site/lint": "*" } },
+        "packages/data": { name: "@site/data", version: "1.0.0" },
+        "packages/lint": { name: "@site/lint", version: "1.0.0" },
+        "packages/web": { name: "@site/web", version: "1.0.0", dependencies: { "@site/data": "*" } },
+        "node_modules/@site/data": { resolved: "packages/data", link: true },
+        "node_modules/@site/lint": { resolved: "packages/lint", link: true },
+        "node_modules/@site/web": { resolved: "packages/web", link: true },
+      },
+    }),
+    "packages/data/package.json": json({ name: "@site/data", version: "1.0.0" }),
+    "packages/lint/package.json": json({ name: "@site/lint", version: "1.0.0" }),
+    "packages/web/package.json": json({ name: "@site/web", version: "1.0.0", dependencies: { "@site/data": "*" } }),
+  };
+  const web = (root: boolean): EnvironmentChoices => ({ scope: { kind: "packages", packages: ["packages/web"], root } });
+
+  it("prepares chosen pnpm packages with exactly the filters previewed, and keeps the scope and the selection", async () => {
+    const { stub, engine } = await setup({ node: "24.21.0", npm: "11.19.0", pnpm: "11.28.9" });
+    const repo = repoWith(LINKED);
+    const shown = ready(await resolve(engine, repo, web(true)));
+    assert.deepEqual(shown.recipe.install.args, ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@mono/data", "--filter", "@mono/lint", "--filter", "@mono/web"]);
+    assert.deepEqual(shown.recipe.selection?.packages.map((item) => [item.folder, item.chosen]), [["packages/data", false], ["packages/lint", false], ["packages/web", true]]);
+    const run = await start(engine, repo, shown.fingerprint, web(true));
+    assert.equal((await ended(engine, run.id)).status, "succeeded");
+    const done = await report(engine, run.id);
+    assert.equal(done.outcome, "prepared", JSON.stringify(done.stopped));
+    assert.deepEqual([done.environment?.recipe.scope, done.environment?.recipe.selection, done.environment?.recipeDigest], [web(true).scope, shown.recipe.selection, shown.recipeDigest]);
+    assert.deepEqual(spawns(stub)[1]!.args.slice(5), ["pnpm", "11.28.9", "corepack-else-npm-global", "none", ...shown.recipe.install.args]);
+  });
+
+  it("keeps no environment when pnpm passed over a chosen package's filter, and says so", async () => {
+    const { stub, engine } = await setup({ node: "24.21.0", npm: "11.19.0", pnpm: "11.28.9", afterInstall: "filters-unmatched\n" });
+    const repo = repoWith(LINKED);
+    const shown = ready(await resolve(engine, repo, web(true)));
+    const run = await start(engine, repo, shown.fingerprint, web(true));
+    await ended(engine, run.id);
+    const result = await report(engine, run.id);
+    assert.deepEqual([result.outcome, result.stopped?.code, result.stopped?.step, result.environment], ["failed", "install", "install", null]);
+    assert.match(result.stopped?.detail ?? "", /^pnpm didn't find every chosen workspace package in the workspace/);
+    assert.equal(spawns(stub).length, 2, "readiness never ran");
+  });
+
+  it("prepares a chosen npm workspace with ./FOLDER for each package and the root's switch, and stops before upload on an npm not checked", async () => {
+    const repo = repoWith(SITE);
+    for (const root of [false, true]) {
+      const { stub, engine } = await setup({ node: "24.21.0", npm: "11.19.0" });
+      const shown = ready(await resolve(engine, repo, web(root)));
+      const expected = ["ci", "--no-audit", "--no-fund", "--workspace=./packages/data", ...(root ? ["--workspace=./packages/lint"] : []), "--workspace=./packages/web", root ? "--include-workspace-root" : "--include-workspace-root=false"];
+      assert.deepEqual(shown.recipe.install.args, expected);
+      const run = await start(engine, repo, shown.fingerprint, web(root));
+      assert.equal((await ended(engine, run.id)).status, "succeeded");
+      const done = await report(engine, run.id);
+      assert.deepEqual([done.outcome, done.environment?.recipe.selection?.root], ["prepared", root]);
+      assert.deepEqual(spawns(stub)[1]!.args.slice(5), ["npm", "bundled", "none", "none", ...expected]);
+    }
+    // The index says Node 24.21.0 comes with npm 11.19.0; an image holding 11.14.0 is caught before anything is sent.
+    const { stub, engine } = await setup({ node: "24.21.0", npm: "11.14.0" });
+    const shown = ready(await resolve(engine, repo, web(false)));
+    const run = await start(engine, repo, shown.fingerprint, web(false));
+    await ended(engine, run.id);
+    const result = await report(engine, run.id);
+    assert.deepEqual([result.outcome, result.stopped?.code, uploads(stub)], ["failed", "inspect", 0]);
+    assert.match(result.stopped?.detail ?? "", /holds npm 11\.14\.0\. npm 11\.14\.0's ci/);
   });
 });

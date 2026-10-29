@@ -4,6 +4,7 @@ import { SandboxCancelledError, SandboxHttpError, SandboxNetworkError, SandboxNo
 import { ENV_PATH, type Journal, type Outcome, type Sandbox } from "../exec/nebius/sandbox.ts";
 import { bootstrapFailure, ignoredBuilds, imageFacts, INSPECT_SCRIPT, installDiagnosis, preparedFacts, READINESS_FILES, READINESS_SCRIPT, readinessFacts } from "./scripts.ts";
 import { versionParts } from "./versions.ts";
+import { filteredInstallProblem } from "./workspace.ts";
 
 /**
  * An environment's preparation, inside Nebius (NIV-49, D41), as the feasibility probe proved it on 27 October:
@@ -229,6 +230,12 @@ export async function prepareRecipe(run: RecipeRun): Promise<RecipeOutcome> {
       pnpmBootstrap?.via === "corepack" && facts.corepack === null ? "no corepack, which the recipe activates pnpm with" : null,
     ].filter((item): item is string => item !== null);
     if (differences.length) return stopped("inspect", `${recipe.image.tag} holds ${differences.join(", ")}.`);
+    // Chosen workspace packages with the npm the image bundles (D52): that npm must be one whose filtered installs were
+    // checked, which only the image can say. A pinned npm was checked when the recipe was resolved.
+    if (manager === "npm" && recipe.scope.kind === "packages" && npmBootstrap === null) {
+      const problem = facts.npm === null ? "Nivra couldn't read its npm version." : filteredInstallProblem("npm", facts.npm);
+      if (problem !== null) return stopped("inspect", `${recipe.image.tag} holds npm ${facts.npm ?? "of an unknown version"}. ${problem}`);
+    }
 
     // 3. The setup configuration, journaled before it is sent.
     at = "upload";
@@ -260,6 +267,10 @@ export async function prepareRecipe(run: RecipeRun): Promise<RecipeOutcome> {
     if (ended.verdict === "command-failed") return stopped("install", installDiagnosis(manager, `${ended.stdout}\n${ended.stderr}`));
     if (ended.verdict !== "passed" || !ended.resultImage) return stopped("sandbox-failed");
     if (!ended.stdout.split("\n").includes("installed")) return stopped("install");
+    // pnpm passes over a chosen package's filter when another one matches: the environment wouldn't hold what was shown.
+    if (recipe.scope.kind === "packages" && ended.stdout.split("\n").includes("filters-unmatched")) {
+      return stopped("install", "pnpm didn't find every chosen workspace package in the workspace, so the environment wouldn't hold what the preview showed. Preview again; if it still happens, report it.");
+    }
     const printed = preparedFacts(ended.stdout);
     const mismatches = [
       printed.node !== node ? `Node ${printed.node ?? "unknown"}, not ${node}` : null,

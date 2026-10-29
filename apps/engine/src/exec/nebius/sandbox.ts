@@ -1,4 +1,4 @@
-import { ENVIRONMENT_FILTER } from "@nivra/domain";
+import { ENVIRONMENT_FILTER, WORKSPACE_FOLDER } from "@nivra/domain";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { readStatus, SandboxCancelledError, SandboxDeadlineError, SandboxHttpError, SandboxNotSentError, sleepFor, TERMINAL, type FileRef, type Operation, type OperationStatus, type SandboxApi, type SpawnAnswer, type SpawnBody } from "./api.ts";
@@ -298,15 +298,33 @@ export const ENV_COMMAND_ENV: Readonly<Record<string, string>> = Object.freeze({
 /** npm's install flags a recipe may pass (NIV-55): each said exactly, off included. */
 const NPM_INSTALL_FLAG = /^--(legacy-peer-deps|install-links|strict-peer-deps|engine-strict|ignore-scripts)(=false)?$|^--install-strategy=(hoisted|nested|shallow|linked)$|^--omit=(dev|optional|peer)$|^--include=(prod|dev|optional|peer)$/;
 
+/** One workspace package npm installs on its own (NIV-55, D52): ./FOLDER, which npm matches by path, never by name. */
+const NPM_WORKSPACE = /^--workspace=\.\/(.+)$/;
+const NPM_ROOT = ["--include-workspace-root", "--include-workspace-root=false"];
+
 /**
  * Whether a preparation's install arguments are the only shape Nivra sends, so a preview and its preparation agree on
  * what runs. With no manager, D41's: `--frozen-lockfile`, then each filter as `--filter <filter>`. For a recipe (NIV-55):
  * pnpm's `install --frozen-lockfile`, optionally followed by `--fail-if-no-match` before one or more filters, every
  * filter one `ENVIRONMENT_FILTER` takes. Older recipes without that flag stay valid. npm's `ci --no-audit --no-fund`
- * takes only the install flags it may be given, each one exactly.
+ * takes only the install flags it may be given, each one exactly; for chosen workspace packages (D52), then one
+ * `--workspace=./FOLDER` for each, in order, and the root's switch said once, last, with no omit or include before them.
  */
 export function isInstallArgs(args: readonly string[], manager?: "npm" | "pnpm"): boolean {
-  if (manager === "npm") return args[0] === "ci" && args[1] === "--no-audit" && args[2] === "--no-fund" && args.slice(3).every((arg) => NPM_INSTALL_FLAG.test(arg));
+  if (manager === "npm") {
+    if (args[0] !== "ci" || args[1] !== "--no-audit" || args[2] !== "--no-fund") return false;
+    let index = 3;
+    while (index < args.length && NPM_INSTALL_FLAG.test(args[index]!)) index++;
+    const folders: string[] = [];
+    for (let match = NPM_WORKSPACE.exec(args[index] ?? ""); match && WORKSPACE_FOLDER.test(match[1]!); match = NPM_WORKSPACE.exec(args[index] ?? "")) {
+      if (folders.length && folders.at(-1)! >= match[1]!) return false;
+      folders.push(match[1]!);
+      index++;
+    }
+    if (folders.length === 0) return index === args.length;
+    const filtering = args.slice(3, index - folders.length).some((arg) => arg.startsWith("--omit=") || arg.startsWith("--include="));
+    return !filtering && index === args.length - 1 && NPM_ROOT.includes(args[index]!);
+  }
   const rest = manager === "pnpm" ? (args[0] === "install" ? args.slice(1) : null) : args;
   if (!rest || rest[0] !== "--frozen-lockfile") return false;
   const firstFilter = manager === "pnpm" && rest[1] === "--fail-if-no-match" ? 2 : 1;
@@ -363,6 +381,8 @@ export const ENV_PREPARE_SCRIPT = [
   'if [ "$manager" = "pnpm" ]; then echo "pnpm $(pnpm --version)"; fi',
   'echo "arch $(uname -m)"',
   'if "$manager" "$@" > /nivra/install.log 2>&1; then tail -c 8000 /nivra/install.log; echo "installed"; else status=$?; tail -c 16000 /nivra/install.log; exit "$status"; fi',
+  // pnpm passes over a filter that matches nothing when another one matches: said on a line of its own, from the whole log.
+  'if grep -q "No projects matched the filters" /nivra/install.log; then echo "filters-unmatched"; fi',
   'major="${version%%.*}"; rest="${version#*.}"; minor="${rest%%.*}"',
   'if [ "$manager" = "pnpm" ] && { [ "$major" -gt 10 ] || { [ "$major" -eq 10 ] && [ "$minor" -ge 1 ]; }; }; then echo "builds-begin"; pnpm ignored-builds 2>&1 | tail -c 4000 || true; echo "builds-end"; fi',
 ].join("\n");
