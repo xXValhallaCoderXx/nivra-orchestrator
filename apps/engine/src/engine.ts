@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   ChatInput,
+  CompanionInput,
+  type CompanionResult,
   ChatResult,
   CoachReport,
   combinedMask,
@@ -49,6 +51,7 @@ import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
 import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, type Diagnostic } from "./diagnostics.ts";
 import { Database, EngineLockedError } from "./db/database.ts";
 import { libsqlFileUrl } from "./db/libsql-url.ts";
+import { inspectRepository } from "./repo/inspection.ts";
 import { runDoctor } from "./doctor/doctor.ts";
 import { CHECK_IMAGE, CHECK_LIMITS, previewOf, readSandboxTask, safeUnresolved } from "./exec/check.ts";
 import { childEnv, insideWsl } from "./exec/child-env.ts";
@@ -101,6 +104,7 @@ export class RuntimeBrokenError extends Error {
 }
 
 const WORKFLOWS: ReadonlyMap<WorkflowId, WorkflowEntry> = new Map<WorkflowId, WorkflowEntry>([
+  ["companion", { id: "companion", title: () => "Companion", mastraInput: (input: unknown) => ({ sessionId: CompanionInput.parse(input).sessionId }) }],
   ["hello", { id: "hello", title: (input: unknown) => `Hello · ${basename(HelloInput.parse(input).repoPath) || "repository"}` }],
   [
     "explain",
@@ -283,6 +287,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     typeof import("./workflows/task.ts"),
     typeof import("./workflows/environment.ts"),
     typeof import("./workflows/coach.ts"),
+    typeof import("./workflows/companion.ts"),
   ];
   try {
     mastraModules = await Promise.all([
@@ -297,6 +302,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       import("./workflows/task.ts"),
       import("./workflows/environment.ts"),
       import("./workflows/coach.ts"),
+      import("./workflows/companion.ts"),
     ]);
   } catch (error) {
     database.close();
@@ -314,6 +320,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     { createTaskWorkflow, TASK_WORKFLOW_ID },
     { createEnvironmentWorkflow, ENVIRONMENT_WORKFLOW_ID },
     { createCoachWorkflow, COACH_WORKFLOW_ID },
+    { createCompanionWorkflow, COMPANION_WORKFLOW_ID },
   ] = mastraModules;
 
   const vault = new SecretVault();
@@ -324,6 +331,9 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const store = new RunStore({ database, mask: (text) => mask(text) });
   // The journal of paid operations under the host's grants (NIV-66), in the same database.
   const journal = new BudgetJournal(database, instanceId);
+  // The only home of a companion reply: bounded process memory, cleared on acknowledgement or session end.
+  const companionReplies = new Map<string, { sessionId: string; result: CompanionResult }>();
+  const endedCompanionSessions = new Set<string>();
   // Names this home's store for the host (D26), as its path can't.
   const homeId = store.homeId();
   const backend = createLocalBackend({ baseEnv: env });
@@ -612,6 +622,19 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
 
   const mastra = new Mastra({
     workflows: {
+      [COMPANION_WORKFLOW_ID]: createCompanionWorkflow({
+        context: (runId) => scheduler.contextOf(runId, "companion"),
+        budget: (runId) => { const grantId = scheduler.grantOf(runId); return grantId ? { journal, grantId, models: journal.models(grantId), seat: "companion" } : null; },
+        apiKey: () => vault.get("NEBIUS_API_KEY"), endpoint, mask,
+        setMeta: (runId, meta) => store.setMeta(runId, meta),
+        received: (runId, data) => { store.append(runId, { type: "step.output", stepId: "context", message: "Received the temporary context", data }); },
+        save: (runId, sessionId, result) => {
+          if (endedCompanionSessions.has(sessionId)) return false;
+          if (companionReplies.size >= 32) companionReplies.delete(companionReplies.keys().next().value!);
+          companionReplies.set(runId, { sessionId, result });
+          return true;
+        },
+      }),
       [HELLO_WORKFLOW_ID]: createHelloWorkflow({
         backend,
         mask,
@@ -838,8 +861,31 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
           throw new RpcFailure(ErrorCode.InternalError, known?.message ?? internalMessage(), { kind: known?.kind ?? "internal" }, { cause: error });
         }
       },
+      "repository.inspect": ({ repoPath }) => inspectRepository(repoPath, backend, locateGit),
+      "companion.result": ({ runId, sessionId }) => {
+        const run = store.summary(runId);
+        if (run?.workflowId !== "companion" || CompanionInput.safeParse(run.input).data?.sessionId !== sessionId) throw new RpcFailure(ErrorCode.InvalidParams, "This temporary turn belongs to another session or is no longer available.");
+        const reply = companionReplies.get(runId);
+        return run.status === "succeeded" && reply?.sessionId === sessionId && !endedCompanionSessions.has(sessionId) ? reply.result : null;
+      },
+      "companion.ack": ({ runId, sessionId }) => {
+        const run = store.summary(runId);
+        if (run?.workflowId !== "companion" || CompanionInput.safeParse(run.input).data?.sessionId !== sessionId || !isTerminal(run.status)) throw new RpcFailure(ErrorCode.InvalidParams, "Wait for this session's temporary turn to finish before acknowledging it.");
+        companionReplies.delete(runId);
+        return { ok: true as const };
+      },
+      "companion.end": ({ sessionId }) => {
+        endedCompanionSessions.add(sessionId);
+        for (const [runId, reply] of companionReplies) if (reply.sessionId === sessionId) companionReplies.delete(runId);
+        for (const runId of store.active()) {
+          const run = store.summary(runId);
+          if (run?.workflowId === "companion" && CompanionInput.safeParse(run.input).data?.sessionId === sessionId) scheduler.cancel(runId);
+        }
+        return { ok: true as const };
+      },
       "budget.journal": ({ grantId, after, limit }) => ({ ...journal.read(grantId, after, limit), providerDate: journal.providerDate(grantId) }),
       "runs.start": (params) => {
+        if (params.workflowId === "companion" && endedCompanionSessions.has(params.input.sessionId)) throw new RpcFailure(ErrorCode.InvalidParams, "This temporary session has ended. Open a new session to ask again.");
         // One check of a project at a time (D36), for a new request: a repeated one still gets its own run, ended or not.
         // The host refuses a second check as well.
         if (params.workflowId === "sandbox" && store.findByRequest(params.clientRequestId) === null && checkGoing(params.input.project)) {

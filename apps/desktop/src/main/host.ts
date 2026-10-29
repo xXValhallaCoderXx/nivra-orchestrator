@@ -184,6 +184,10 @@ import { getResearch, insertResearch, openResearch, recordAmendedPlan, researchO
 import { applySelected, coachBindingFor, coachChangeViews, coachFindingOf, coachMissionOf, coachReportMatches, coachRequest, staleLines, type CoachOwnChange, type CoachProject, type CoachSubject } from "./coach.ts";
 import { coachingsOf, getCoaching, getCoachLink, insertCoaching, markCoachingApplied, openCoachings, settleCoaching, type CoachingRecord, type CoachLink } from "./coach-store.ts";
 import { changeText, compositionOf, missionContextForTask, missionPlanContent, validateBinding } from "./mission-context.ts";
+import { companionSaveFingerprint, companionSaveResult, recordCompanionSave } from "./companion-saves.ts";
+import { CompanionHost, type CompanionDraftSave } from "./companion-host.ts";
+import { knowledgeReferencesCurrent, knowledgeSnapshotFor, resolveCompanionScope } from "./companion-context.ts";
+import type { CompanionContextView, CompanionHint, CompanionScope, CompanionSettingsView, CompanionTurnView, KnowledgeView, ProjectInspectionView } from "../shared/ipc.ts";
 import {
   addMissionTask as addToBacklog,
   getMission,
@@ -305,6 +309,8 @@ export interface HostOptions {
   log: (line: string) => void;
   /** Tests only: the price list the budget prices with, in place of the app's own (CURRENT_PRICES). */
   prices?: PriceCatalogue;
+  /** Tests only: unlock the companion's mocked-provider path before its production acceptance gate. */
+  companionEnabled?: boolean;
   /** Tests only: called between fetching a turn's reply and writing it, so a deletion can land there. */
   testHooks?: {
     beforeProjection?(turnId: string): Promise<void>;
@@ -1299,6 +1305,7 @@ export class Host {
     const result = await coachRequest(subject, {
       known: await this.#knownSecrets(),
       preferences: snapshotFor(this.#options.store.data, project.kind === "project" ? task.projectId : null),
+      knowledge: knowledgeSnapshotFor(workspace, this.#options.store.data.projects, resolveCompanionScope(workspace, this.#options.store.data.projects, { kind: "task", id: taskId })),
       binding,
       busy,
       options,
@@ -1325,6 +1332,7 @@ export class Host {
     if (coaching.applied) own.push("applied");
     const report = coaching.report ? CoachReport.safeParse(coaching.report) : null;
     if (coaching.link.status !== "answered" || !report?.success || report.data.outcome !== "complete") own.push("not-complete");
+    if (report?.success && report.data.knowledge && !knowledgeReferencesCurrent(workspace, report.data.knowledge.records)) return ["Retained knowledge changed since the coach read it. Ask the coach again before saving its suggestions."];
     if (!coaching.binding) return staleLines([], [...own, "unreadable"]);
     return staleLines(validateBinding(workspace, coaching.binding), own);
   }
@@ -1952,12 +1960,24 @@ export class Host {
   }
 
   /** Saves a new mission as v1 (NIV-52). What the person wrote is checked as anything they type is. */
-  async createMission(input: MissionContent): Promise<MissionView> {
+  async createMission(input: MissionContent, actionId?: string, validate?: () => void): Promise<MissionView> {
     const workspace = this.#workspaceDb();
     const content = missionContentOf(input);
     refuseMissionCredentials(content, await this.#knownSecrets());
-    const id = randomUUID();
-    insertMission(workspace, { id, conversationId: randomUUID(), createdAt: new Date().toISOString() }, { id: randomUUID(), content });
+    const fingerprint = companionSaveFingerprint(["mission", content]);
+    const id = workspace.tx(() => {
+      validate?.();
+      const repeated = actionId ? companionSaveResult(workspace, actionId, "mission", fingerprint) : null;
+      if (repeated) {
+        if (!getMission(workspace, repeated)) throw new Error("The mission saved by this action was removed, so it wasn't created again. Start a new idea to save another mission.");
+        return repeated;
+      }
+      const created = randomUUID();
+      const at = new Date().toISOString();
+      insertMission(workspace, { id: created, conversationId: randomUUID(), createdAt: at }, { id: randomUUID(), content });
+      if (actionId) recordCompanionSave(workspace, { id: actionId, kind: "mission", fingerprint, resultId: created, scopeId: null, at });
+      return created;
+    });
     return this.mission(id);
   }
 
@@ -1986,18 +2006,27 @@ export class Host {
   }
 
   /** Makes a direct task, with a title only, in a mission's backlog (NIV-52): its brief is written on the task's own page. */
-  async createMissionTask(missionId: string, title: string): Promise<MissionView> {
+  async createMissionTask(missionId: string, title: string, fieldsInput?: BriefFields, actionId?: string, validate?: () => void): Promise<MissionView> {
     const workspace = this.#workspaceDb();
     if (!getMission(workspace, missionId)) throw new Error("That mission is no longer here.");
     const name = this.#taskTitle(title);
-    const fields = this.#briefFields({ goal: "", acceptanceCriteria: [], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] });
+    const fields = this.#briefFields(fieldsInput ?? { goal: "", acceptanceCriteria: [], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] });
     this.#refuseInBrief(name, fields, await this.#knownSecrets());
     const now = new Date().toISOString();
     const id = randomUUID();
+    const fingerprint = companionSaveFingerprint(["task", missionId, name, fields]);
     workspace.tx(() => {
+      validate?.();
+      if (!getMission(workspace, missionId)) throw new Error("That mission is no longer here.");
+      const repeated = actionId ? companionSaveResult(workspace, actionId, "task", fingerprint) : null;
+      if (repeated) {
+        if (!getTask(workspace, repeated) || missionOfTask(workspace, repeated) !== missionId) throw new Error("The task saved by this action was removed or left this mission, so it wasn't created again. Open the mission to add a new task.");
+        return;
+      }
       insertTask(workspace, { id, title: name, projectId: null, createdAt: now, updatedAt: now }, { id: randomUUID(), content: briefFrom(fields), derivedFrom: null });
       const added = addToBacklog(workspace, missionId, id, now);
       if (added !== "added" && added !== "already-here") throw new Error(addedText(added));
+      if (actionId) recordCompanionSave(workspace, { id: actionId, kind: "task", fingerprint, resultId: id, scopeId: missionId, at: now });
     });
     return this.mission(missionId);
   }
@@ -2208,13 +2237,14 @@ export class Host {
       this.#sharingEpochs.set(projectId, this.#epochOf(projectId) + 1);
       const withdraw = this.#markProjectTurns(projectId, "sharing");
       // Every stop is tried, whatever another's fate, and then any that failed is reported (D39).
-      const [runs, attempts, coachings] = await Promise.allSettled([
+      const [runs, attempts, coachings, companion] = await Promise.allSettled([
         this.#stopProjectRuns(projectId, "model-sharing", (runs, why, them) => `Sharing for this project is off, but Nivra couldn't stop ${runs} (${why}). Restart the project's engine to stop ${them}.`),
         this.#stopProjectAttempts(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop its task run (${why}). Restart the project's engine to stop it.`),
         this.#stopProjectCoachings(projectId, "sharing", (why) => `Sharing for this project is off, but Nivra couldn't stop the coach answering about one of its tasks (${why}). Restart the project's engine to stop it.`),
+        this.#companion?.invalidateProject(projectId),
       ]);
       if (runs.status === "rejected") withdraw();
-      const failed = [runs, attempts, coachings].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
+      const failed = [runs, attempts, coachings, companion].flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
     }
     return this.#view(this.#project(projectId));
@@ -2495,6 +2525,7 @@ export class Host {
         this.#stopProjectAttempts(projectId, "removal", (why) => `Nivra couldn't stop the project's task run (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
         this.#stopProjectPreparations(projectId, "removal", (why) => `Nivra couldn't stop the preparation of the project's environment (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
         this.#stopProjectCoachings(projectId, "removal", (why) => `Nivra couldn't stop the coach answering about one of the project's tasks (${why}), so the project is still in the list. Restart its engine, then remove it again.`),
+        this.#companion?.invalidateProject(projectId),
       ]);
       const failed = stops.flatMap((stop) => (stop.status === "rejected" ? [errorText(stop.reason)] : []));
       if (failed.length) throw new Error(failed.join(" "));
@@ -2665,6 +2696,7 @@ export class Host {
 
   /** Stops every engine in parallel, each in the D4 order, then closes the workspace; none can start afterwards. */
   shutdown(): Promise<void> {
+    this.#companion?.clear();
     this.#closing ??= Promise.allSettled([...this.#engines.values()].map((engine) => engine.supervisor.close())).then(() => {
       if (this.#workspace.state === "ready") this.#workspace.db.close();
       this.#workspace = { state: "unavailable", reason: "Nivra is quitting." };
@@ -4922,6 +4954,51 @@ export class Host {
     if (reason) return { targetId, label, state: { status: "failed", reason, code: "target-unavailable", logPath: null }, warnings: [] };
     return { targetId, label, state: { status: "stopped" }, warnings: [] };
   }
+
+  // ------------------------------------------------------------------------------------------------ the contextual companion (NIV-68)
+
+  #companion: CompanionHost | null = null;
+
+  #companionHost(): CompanionHost {
+    return this.#companion ??= new CompanionHost({
+      workspace: () => this.#workspaceDb(),
+      projects: () => this.#options.store.data.projects,
+      preferences: (projectId) => snapshotFor(this.#options.store.data, projectId),
+      preferenceRevision: () => this.#options.store.data.preferencesRevision,
+      sharingEpoch: (projectId) => this.#epochOf(projectId),
+      secrets: () => this.#knownSecrets(),
+      connect: async (targetId) => (await this.#started(targetId)).supervisor,
+      grant: (requestId, targetId, homeId, projectId, taskId) => this.#companionGrant(requestId, targetId, homeId, projectId, taskId),
+      reconcileBudget: () => this.getCompanionUsage(),
+      budgetStatus: () => this.getCompanionUsage(),
+      settings: () => this.#options.store.data.companion ?? { hidden: false, invitationDismissed: false },
+      setSettings: (value) => {
+        this.#options.store.update((data) => ({ ...data, companion: { hidden: false, invitationDismissed: false, ...data.companion, ...value } }));
+        return this.#options.store.data.companion!;
+      },
+      createMission: (content, actionId, validate) => this.createMission(content, actionId, validate),
+      createMissionTask: (missionId, title, fields, actionId, validate) => this.createMissionTask(missionId, title, fields, actionId, validate),
+      task: (taskId) => this.task(taskId),
+      addPreference: (input) => this.addPreference(input),
+      platform: this.#options.platform,
+      engineState: (targetId) => this.#engineView(targetId).state,
+      ...(this.#options.companionEnabled === undefined ? {} : { enabled: this.#options.companionEnabled }),
+    });
+  }
+
+  getCompanionContext(hint: CompanionHint): Promise<CompanionContextView> { return this.#companionHost().context(hint); }
+  inspectProject(projectId: string): Promise<ProjectInspectionView> { return this.#companionHost().inspect(projectId); }
+  sendCompanionTurn(input: { sessionId: string; clientRequestId: string; hint: CompanionHint; message: string }): Promise<{ runId: string; requestId: string }> { return this.#companionHost().send(input); }
+  getCompanionTurn(sessionId: string, requestId: string): Promise<CompanionTurnView> { return this.#companionHost().turn(sessionId, requestId); }
+  cancelCompanionTurn(sessionId: string, requestId: string): Promise<void> { return this.#companionHost().cancel(sessionId, requestId); }
+  endCompanionSession(sessionId: string): Promise<void> { return this.#companionHost().end(sessionId); }
+  async getCompanionSettings(): Promise<CompanionSettingsView> { return this.#companionHost().settings(); }
+  async setCompanionSettings(value: Partial<CompanionSettingsView>): Promise<CompanionSettingsView> { return this.#companionHost().setSettings(value); }
+  listKnowledge(scope: CompanionScope): Promise<KnowledgeView[]> { return this.#companionHost().knowledge(scope); }
+  captureKnowledge(input: { scope: CompanionScope; statement: string; kind: "decision" | "constraint"; sessionId: string }): Promise<KnowledgeView> { return this.#companionHost().capture(input); }
+  editKnowledge(id: string, revision: number, statement: string): Promise<KnowledgeView> { return this.#companionHost().edit(id, revision, statement); }
+  forgetKnowledge(id: string, revision: number): Promise<void> { return this.#companionHost().forget(id, revision); }
+  saveCompanionDraft(input: CompanionDraftSave): Promise<{ mission?: MissionView; task?: TaskView }> { return this.#companionHost().saveDraft(input); }
 
   // ------------------------------------------------------------------------------------------------ the shared budget (NIV-66)
 

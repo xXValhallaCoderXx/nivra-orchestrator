@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,7 +56,7 @@ test("the workspace opens in the Windows app, keeps a conversation across a rela
 
   let { app, page } = await launch();
   const fresh = await page.evaluate(() => window.nivra.listConversations());
-  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 10, notice: null });
+  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 12, notice: null });
   const created = await page.evaluate(() => window.nivra.createConversation({ kind: "general" }));
   expect([created.kind, created.projectId, created.targetId]).toEqual(["general", null, "local"]);
   expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
@@ -201,6 +201,57 @@ test("a mission on Windows: its backlog and the review's exact preview, refused 
   ({ app, page } = await launch());
   const kept = await page.evaluate((id) => window.nivra.getMission(id), made.id);
   expect([kept.latest.version, kept.backlog.map((entry) => entry.task.title), kept.reviews.map((review) => [review.status, review.tasks.map((task) => task.title)])]).toEqual([1, ["Store runs"], [["failed", ["Store runs"]]]]);
+  await app.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("the companion's Windows bridge saves planning and scoped knowledge without a key, and keeps its unused monthly allowance across a relaunch", async () => {
+  const { root, launch } = setUp("e2e-companion-bridge");
+  const ids = { missionAction: randomUUID(), taskAction: randomUUID(), session: randomUUID() };
+  let { app, page } = await launch();
+  expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");
+  const context = await page.evaluate(() => window.nivra.getCompanionContext({}));
+  expect(context.scope).toEqual({ kind: "general" });
+  expect(context.canAsk).toBe(false);
+  const usage = await page.evaluate(() => window.nivra.setCompanionLimit(2));
+  expect([usage.historyComplete, usage.limit, usage.used, usage.reserved, usage.unknown, usage.remaining]).toEqual([true, 2, 0, 0, 0, 2]);
+
+  const saved = await page.evaluate(async (actionIds) => {
+    const content = { name: "Windows field log", intendedUsers: "", outcome: "Save a field note offline.", successCriteria: [], constraints: [], nonGoals: [] };
+    const first = await window.nivra.createMission(content, actionIds.missionAction);
+    const repeated = await window.nivra.createMission(content, actionIds.missionAction);
+    const fields = { goal: "Retain one note on this device.", acceptanceCriteria: ["A saved note can be reopened."], scope: "One note", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] };
+    await window.nivra.createMissionTask(first.id, "Save one observation", fields, actionIds.taskAction);
+    const mission = await window.nivra.createMissionTask(first.id, "Save one observation", fields, actionIds.taskAction);
+    const task = await window.nivra.getTask(mission.backlog[0]!.task.id);
+    const scope = { kind: "mission" as const, missionId: first.id };
+    const note = await window.nivra.captureKnowledge({ scope, statement: "This field log must work offline.", kind: "constraint", sessionId: actionIds.session });
+    const edited = await window.nivra.editKnowledge(note.id, note.revision, "This field log must work offline on Windows.");
+    const knowledge = await window.nivra.listKnowledge(scope);
+    await window.nivra.forgetKnowledge(edited.id, edited.revision);
+    return { missionId: first.id, repeatedId: repeated.id, backlog: mission.backlog.length, taskId: task.summary.id, state: task.summary.state, projectId: task.summary.projectId, criteria: task.brief.content.acceptanceCriteria, checks: task.brief.content.checks.length, acceptanceCases: task.brief.content.acceptanceCases.length, knowledge: knowledge.map((item) => ({ id: item.id, statement: item.statement, revision: item.revision })), forgotten: (await window.nivra.listKnowledge(scope)).length };
+  }, ids);
+  expect(saved.repeatedId).toBe(saved.missionId);
+  expect([saved.backlog, saved.state, saved.projectId, saved.checks, saved.acceptanceCases]).toEqual([1, "draft", null, 0, 0]);
+  expect(saved.criteria).toEqual(["A saved note can be reopened."]);
+  expect(saved.knowledge).toHaveLength(1);
+  expect(saved.knowledge[0]).toMatchObject({ statement: "This field log must work offline on Windows.", revision: 2 });
+  expect(saved.forgotten).toBe(0);
+  expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
+  await app.close();
+
+  ({ app, page } = await launch());
+  const after = await page.evaluate(async ({ missionId, actionIds }) => {
+    const mission = await window.nivra.createMission({ name: "Windows field log", intendedUsers: "", outcome: "Save a field note offline.", successCriteria: [], constraints: [], nonGoals: [] }, actionIds.missionAction);
+    const knowledge = await window.nivra.listKnowledge({ kind: "mission", missionId });
+    const allowance = await window.nivra.getCompanionUsage();
+    return { id: mission.id, taskIds: mission.backlog.map((entry) => entry.task.id), knowledge: knowledge.length, allowance: [allowance.limit, allowance.used, allowance.reserved, allowance.unknown, allowance.remaining] };
+  }, { missionId: saved.missionId, actionIds: ids });
+  expect(after.id).toBe(saved.missionId);
+  expect(after.taskIds).toEqual([saved.taskId]);
+  expect(after.knowledge).toBe(0);
+  expect(after.allowance).toEqual([2, 0, 0, 0, 2]);
+  expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
   await app.close();
   rmSync(root, { recursive: true, force: true });
 });

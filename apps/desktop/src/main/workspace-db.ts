@@ -647,6 +647,50 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   )
   BEGIN SELECT RAISE(ABORT, 'a pending recovery is removed only with the new history that answers it'); END;
 `,
+  `
+  -- Structured, scoped outcomes retained from the temporary companion (NIV-68). No dialogue is stored. Editing
+  -- replaces the wording; forgetting removes it, keeping a non-content tombstone and action ids against replay.
+  CREATE TABLE knowledge_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch INTEGER NOT NULL CHECK (epoch >= 0)
+  ) STRICT;
+  INSERT INTO knowledge_state (singleton, epoch) VALUES (1, 0);
+  CREATE TABLE knowledge (
+    id TEXT PRIMARY KEY,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'task', 'mission')),
+    scope_id TEXT NOT NULL,
+    project_id TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('decision', 'constraint', 'observation')),
+    statement TEXT,
+    origin TEXT NOT NULL CHECK (origin IN ('user-stated', 'validated-observation')),
+    source_json TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    state TEXT NOT NULL CHECK (state IN ('active', 'stale', 'superseded', 'forgotten')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((state = 'forgotten') = (statement IS NULL)),
+    CHECK (scope_kind <> 'project' OR (project_id IS NOT NULL AND project_id = scope_id))
+  ) STRICT;
+  CREATE INDEX knowledge_scope ON knowledge(scope_kind, scope_id, state);
+  CREATE TABLE knowledge_actions (
+    id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    knowledge_id TEXT NOT NULL REFERENCES knowledge(id),
+    created_at TEXT NOT NULL
+  ) STRICT;
+`,
+  `
+  -- Guided native saves are repeatable by action id after a lost reply, without keeping the companion's dialogue.
+  -- Deleted work is never recreated by replaying an old action. The records contain fingerprints and ids only.
+  CREATE TABLE companion_saves (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('mission', 'task')),
+    fingerprint TEXT NOT NULL,
+    result_id TEXT NOT NULL,
+    scope_id TEXT,
+    created_at TEXT NOT NULL
+  ) STRICT;
+`,
 ];
 
 export type WorkspaceOpening =

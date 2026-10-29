@@ -136,7 +136,7 @@ export async function runCoach(options: CoachRunOptions): Promise<CoachReport> {
     estimatedInputTokens: options.limits?.estimatedInputTokens ?? COACH_RUN_LIMITS.estimatedInputTokens,
   };
   const budget = new RunBudget(limits, { signal: options.signal, now });
-  const message = coachMessage(context.packet, context.preferences, mask);
+  const message = coachMessage(context.packet, context.preferences, mask, context.knowledge);
   const estimated = estimateCoachRequest(message);
   const stage: CoachStage = {
     status: "pending",
@@ -169,6 +169,7 @@ export async function runCoach(options: CoachRunOptions): Promise<CoachReport> {
     bindingDigest: task.bindingDigest,
     packetDigest: task.packetDigest,
     preferencesDigest: task.preferencesDigest,
+    ...(context.knowledge ? { knowledge: { digest: context.knowledge.digest, records: context.knowledge.records.map(({ id, revision }) => ({ id, revision })) } } : {}),
     outcome,
     scope: packet.scope.kind,
     packet: { chars: packetChars, criteria: packet.task.acceptanceCriteria.length, assumptions: packet.task.assumptions.length, gaps: packet.gaps.length, mission: packet.mission !== null, findings: packet.findings.length },
@@ -305,7 +306,7 @@ export async function runCoach(options: CoachRunOptions): Promise<CoachReport> {
   }
   const parsed = CoachAnswer.safeParse(handedIn);
   if (!parsed.success) throw fail(new ModelFailure("malformed", COACH_WORDS.unreadable("its answer didn't match the coach's form")), { problems: parsed.error.issues.slice(0, 10).map((issue) => `${issue.path.join(".") || "answer"}: ${issue.code}`) });
-  const normal = normaliseCoaching(parsed.data, packet, mask);
+  const normal = normaliseCoaching(parsed.data, packet, mask, context.knowledge?.records.length ?? 0);
   kept = normal;
   stage.problems = normal.problems;
   const setAside = Object.values(normal.dropped).reduce((sum, n) => sum + n, 0);

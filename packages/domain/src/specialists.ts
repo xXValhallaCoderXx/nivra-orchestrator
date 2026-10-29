@@ -61,7 +61,7 @@ export const SPECIALISTS: Readonly<Record<SpecialistId, SpecialistProfile>> = {
   },
   "task-readiness-coach": {
     id: "task-readiness-coach",
-    version: 1,
+    version: 2,
     name: "Task readiness coach",
     personality: "Patient, precise, encouraging and concise.",
     purpose: "Asks the few questions that matter most and proposes understandable changes to one task's brief, each with its reason. It never decides readiness, runs nothing and changes nothing by itself.",

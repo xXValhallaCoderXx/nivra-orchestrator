@@ -113,7 +113,7 @@ describe("a coaching, in process (NIV-53)", () => {
       ["in-progress", "running", 1],
       ["complete", "answered", 1],
     ]);
-    assert.deepEqual([report.questions[0]?.id, report.changes[0]?.field, report.sampling.toolChoice, report.profile, report.briefVersion], ["Q1", "acceptanceCriteria", "forced", { id: "task-readiness-coach", version: 1 }, 3]);
+    assert.deepEqual([report.questions[0]?.id, report.changes[0]?.field, report.sampling.toolChoice, report.profile, report.briefVersion], ["Q1", "acceptanceCriteria", "forced", { id: "task-readiness-coach", version: 2 }, 3]);
     const call = model.doGenerateCalls[0] as { toolChoice?: unknown; maxOutputTokens?: number; prompt?: unknown };
     assert.deepEqual([call.toolChoice, call.maxOutputTokens], [{ type: "tool", toolName: COACH_TOOL }, 4_000]);
     assert.match(JSON.stringify(call.prompt), /Nivra coach role: task-readiness-coach/);
@@ -265,7 +265,7 @@ describe("the coach's workflow, in process (NIV-53)", () => {
     const cases: Array<[string, Parameters<typeof workflow>[0], RegExp]> = [
       ["packet", { task: { packetDigest: "0".repeat(64) } }, /internal|Nivra/],
       ["preferences", { task: { preferencesDigest: "0".repeat(64) } }, /internal|Nivra/],
-      ["profile", { task: { profile: { id: "task-readiness-coach", version: 2 } } }, /internal|Nivra/],
+      ["profile", { task: { profile: { id: "task-readiness-coach", version: 1 } } }, /internal|Nivra/],
       ["unreadable", { task: null }, /couldn't read this coaching's task and fingerprints back/],
       [
         "project preference for a general task",

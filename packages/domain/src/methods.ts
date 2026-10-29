@@ -2,6 +2,7 @@ import { z } from "zod";
 import { BudgetGrant, BudgetOperation, JournalSeal } from "./budget.ts";
 import { ApplyParams, ApplyResolution, ApplyView } from "./apply.ts";
 import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
+import { CompanionContext, CompanionInput, CompanionResult, RepositoryInspection } from "./companion.ts";
 import { CoachContext, CoachInput, CoachReport } from "./coach.ts";
 import { RunContext } from "./context.ts";
 import { EnvironmentChoices, EnvironmentContext, EnvironmentContextV2, EnvironmentInput, EnvironmentPreview, EnvironmentPreviewV2, EnvironmentRef, EnvironmentReport, EnvironmentSpec, PreviousSettlement, TaskEnvironment } from "./environment.ts";
@@ -84,6 +85,7 @@ const RunRequest = {
   context: RunContext,
 };
 export const StartRunParams = z.discriminatedUnion("workflowId", [
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: BudgetGrant, context: CompanionContext, workflowId: z.literal("companion"), input: CompanionInput }),
   z.strictObject({ ...RunRequest, workflowId: z.literal("hello"), input: HelloInput }),
   z.strictObject({ ...RunRequest, workflowId: z.literal("explain"), input: ExplainInput }),
   // A conversation's turn carries the conversation so far as well (D26), held in memory like the snapshot.
@@ -171,6 +173,10 @@ export const Methods = {
   ping: { params: Empty, result: z.strictObject({ instanceId: z.uuid() }) },
   doctor: { params: Empty, result: DoctorReport },
   "providers.check": { params: z.strictObject({ model: z.string().min(1).max(200).optional() }), result: ProviderCheck },
+  "repository.inspect": { params: z.strictObject({ repoPath: z.string().min(1).max(4096) }), result: RepositoryInspection },
+  "companion.result": { params: z.strictObject({ runId: RunId, sessionId: z.uuid() }), result: CompanionResult.nullable() },
+  "companion.ack": { params: z.strictObject({ runId: RunId, sessionId: z.uuid() }), result: z.strictObject({ ok: z.literal(true) }) },
+  "companion.end": { params: z.strictObject({ sessionId: z.uuid() }), result: z.strictObject({ ok: z.literal(true) }) },
   "budget.journal": {
     params: z.strictObject({ grantId: z.uuid(), after: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(500).default(200) }),
     result: z.strictObject({ accepted: z.boolean(), rows: z.array(BudgetOperation).max(500), seal: JournalSeal.nullable(), providerDate: z.string().nullable(), next: z.number().int().positive().nullable() }),

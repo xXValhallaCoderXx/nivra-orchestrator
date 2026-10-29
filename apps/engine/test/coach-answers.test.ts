@@ -45,6 +45,11 @@ export const PACKET: CoachPacket = {
 const keep = (value: unknown, packet: CoachPacket = PACKET) => normaliseCoaching(CoachAnswer.parse(value), packet, mask);
 
 describe("what the engine keeps of the coach's answer (NIV-53)", () => {
+  it("accepts only references to retained knowledge that was actually supplied", () => {
+    const answer = CoachAnswer.parse({ summary: "Use the saved constraint.", changes: [{ field: "scope", text: "Preserve offline behaviour", refs: ["K1", "K2", "K13"] }] });
+    assert.deepEqual(normaliseCoaching(answer, PACKET, mask, 1).changes[0]?.refs, ["K1"]);
+    assert.deepEqual(normaliseCoaching(answer, PACKET, mask).changes[0]?.refs, []);
+  });
   it("keeps questions with the field each names, one change per field with its own operation, unverified checks and unknowns", () => {
     const kept = keep({
       summary: "The goal is clear. The first criterion doesn't say what someone would see.",
@@ -182,10 +187,10 @@ describe("what the engine keeps of the coach's answer (NIV-53)", () => {
 describe("what the coach is told (NIV-53)", () => {
   it("names the coach on its first line, and pins its instructions to the profile's version", () => {
     assert.equal(COACH_INSTRUCTIONS.split("\n")[0], "Nivra coach role: task-readiness-coach");
-    assert.equal(COACH_PROFILE.version, 1);
+    assert.equal(COACH_PROFILE.version, 2);
     assert.equal(COACH_INSTRUCTIONS_SHA256, createHash("sha256").update(COACH_INSTRUCTIONS).digest("hex"));
     // Changing the instructions means a new profile version: update this pin together with the version in the catalogue.
-    assert.equal(COACH_INSTRUCTIONS_SHA256, "860d1b125b865327f8ab0f479712905242f7cf27b91448f3d4a63270476c682e");
+    assert.equal(COACH_INSTRUCTIONS_SHA256, "1039c8e9e85729921977909bc7f63b61a7a069b66cd7c72b99294d5c69347422");
   });
 
   it("describes every field the coach fills, in the schema and in the instructions", () => {

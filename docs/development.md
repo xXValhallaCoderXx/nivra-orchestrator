@@ -837,3 +837,9 @@ Use isolated homes and loopback provider stand-ins for verification; no live pai
 The engine's `budget-journal`/`budget-model` tests cover grants, seals and SDK token shapes. Desktop
 `companion-usage-accounting` tests cover unknown usage without double-counting. `budget-usage.spec.ts` exercises the
 companion-only policy through the native window. A disconnected target retains its grants until it reconnects.
+
+For NIV-68, run `companion-engine.test.ts`, `companion-host.test.ts`, `knowledge.test.ts` and the built/packaged
+`companion.spec.ts` journeys. Privacy fixtures scan SQLite/WAL, Mastra, artifacts and logs for synthetic transcript
+markers, permitting separately selected structured outcomes. `pnpm rpc repository.inspect '{"repoPath":"/absolute/path"}'
+--home /tmp/nivra-inspect-check` exercises local inspection without a provider or repository scripts. Guidance never
+runs `environment.resolve` merely to refresh status. The companion composer never uses draft recovery.

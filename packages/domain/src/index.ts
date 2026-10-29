@@ -19,3 +19,6 @@ export * from "./mission.ts";
 export * from "./coach.ts";
 export * from "./budget.ts";
 export * from "./prices.ts";
+export * from "./knowledge.ts";
+
+export * from "./companion.ts";

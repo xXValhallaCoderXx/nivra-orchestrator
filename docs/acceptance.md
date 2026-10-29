@@ -3163,3 +3163,35 @@ model-journal work was reused without modifying its original worktrees. No depen
 
 Review patch, logs and exact source-tree/patch hashes are in `/tmp/nivra-delivery-review`; they identify the local diff,
 not a published revision. Generated runtime/app outputs are ignored and are not part of either review patch.
+
+
+## NIV-68 companion — local review candidate, 29 October 2026
+
+Base: `5a6606aa22a97a32136c6fbf9e67022e90846f13` plus the NIV-66 prerequisite, all local and uncommitted. Protocol 19;
+host workspace 12. No commit, push, merge, tool installation for a user project, scaffolding or live paid test occurred.
+
+- `pnpm verify`: passed, 135 domain + 667 desktop + 970 engine tests (1,772), no skips. The final renderer-only active-panel
+  annotation was subsequently checked by desktop typechecking and the affected built journeys.
+- A broad built-app run passed 133 tests, skipped one conditional case and found two environment-selection failures:
+  preserved hidden project panels shared the active panel's test identity. After correcting that identity, the complete
+  affected `companion.spec.ts` and `environment-scope.spec.ts` files passed all 10 tests. The broad run was not repeated.
+- The final narrow companion uses native client-area screenshots at zoom, checks visible child bounds, and passes with
+  no sideways overflow. Restart clears the temporary composer; native missions/tasks, knowledge and guide settings remain.
+- Packaged Linux app: 41 passed, 18 existing conditional tests skipped, across app security/bridge, companion, budget,
+  shell, workspace, environment and coach checks. Unpackaged-only model/gated fixtures were not represented as packaged
+  provider evidence. `package:dir` and Linux/Windows runtime staging passed.
+- `pnpm dev:win --no-launch`, then `test:windows`: 14 passed. The added Windows bridge case verifies keyless planning,
+  idempotent mission/task saves, scoped knowledge edit/forget and allowance retention without starting an engine.
+- `pnpm verify:windows`: 37/37 native/WSL checks passed. Its isolated WSL home was removed and the release home was unchanged.
+- `apps/engine/scripts/rpc.ts repository.inspect`, with its own temporary home, returned actual Git/HEAD/tracked-state facts
+  and shut down without calling providers or running repository scripts.
+- Host/engine canary tests scan stores, SQLite/WAL, Mastra, artifacts and logs after success, provider/malformed/hostile
+  errors, cancellation and crash/restart. Synthetic prompt/reply markers do not persist; selected structured outcomes do.
+  Forgotten knowledge and earlier dialogue cannot reach the next turn. The production companion gate was enabled only
+  after these checks and guarded-grant tests passed; explicit user requests, credentials and sharing are still required.
+- Scoped knowledge reaches the task coach through its previewed contract and provenance references; no coding-worker
+  knowledge integration is claimed. Conservative conflict detection cannot prove arbitrary prose conflict-free.
+
+The two stacked patches and validation logs are in `/tmp/nivra-delivery-review`. Other agents, research and sandbox work
+are outside the companion request allowance. No monthly token limit, dollar ceiling, all-service accounting or live
+provider acceptance is claimed.

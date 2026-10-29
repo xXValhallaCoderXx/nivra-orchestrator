@@ -95,6 +95,7 @@ const HostData = z.object({
    * turns it on, and again once an older version, which drops it, has rewritten the file.
    */
   webResearch: z.boolean().optional(),
+  companion: z.strictObject({ hidden: z.boolean(), invitationDismissed: z.boolean() }).optional(),
   zoom: z.number().min(0.5).max(3).optional(),
   window: z.object({ bounds: Rect, maximized: z.boolean() }).optional(),
 });
