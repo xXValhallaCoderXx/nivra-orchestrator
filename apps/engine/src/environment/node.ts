@@ -107,8 +107,11 @@ const PLANNED = `Preparing from a project's sources is planned. Until it's built
 
 class Refused extends Error {
   readonly code: string;
-  /** For a refusal of the scope chosen: the workspace's packages and ways to choose, so the choice can be corrected. */
-  readonly workspace: WorkspaceFacts | undefined;
+  /**
+   * Once the workspace was read, its packages and ways to choose: so a scope can be corrected, and a project whose
+   * whole install can't be prepared can still be offered chosen packages.
+   */
+  workspace: WorkspaceFacts | undefined;
   constructor(code: string, message: string, workspace?: WorkspaceFacts) {
     super(message);
     this.code = code;
@@ -195,13 +198,22 @@ export function resolveNodeEnvironment(input: NodeResolveInput): EnvironmentReso
   return result;
 }
 
+/** The resolution, with the workspace's facts on any refusal that came after the workspace was read. */
 function resolve(input: NodeResolveInput): EnvironmentResolution {
+  const known: { facts: WorkspaceFacts | null } = { facts: null };
+  try {
+    return resolveWith(input, known);
+  } catch (error) {
+    if (error instanceof Refused && error.workspace === undefined && known.facts !== null) error.workspace = known.facts;
+    throw error;
+  }
+}
+
+function resolveWith(input: NodeResolveInput, known: { facts: WorkspaceFacts | null }): EnvironmentResolution {
   const releases = input.releases ?? RELEASES;
   const choices = input.choices ?? {};
   const warnings: ResolutionWarning[] = [];
   const limitations: string[] = [];
-  /** The workspace's facts, once the manager is settled: carried by a later answer that waits for a choice. */
-  let knownFacts: WorkspaceFacts | null = null;
   const byPath = new Map(input.snapshot.files.map((file) => [file.path, file]));
   const present = (path: string) => byPath.get(path)?.kind === "file";
 
@@ -245,7 +257,7 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
   // What can be chosen to install (NIV-55): the whole project, workspace packages by folder, or pnpm's own selectors.
   const shape: WorkspaceShape = workspaceShape({ manager: managerName as "npm" | "pnpm", globs, members, lock, lockPath, yaml: workspace?.values ?? null, options: choices.options ?? {} });
   let facts: WorkspaceFacts = shape.facts(null);
-  knownFacts = facts;
+  known.facts = facts;
   const scope: InstallScope = choices.scope ?? { kind: "whole" };
   const refuseScope = (message: string): never => {
     throw new Refused("scope", message, facts);
@@ -290,7 +302,7 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
           ? `Nivra's release index doesn't say which npm Node ${node.version} comes with, so it can't tell whether that npm installs chosen workspace packages. Pin a checked npm in package.json's packageManager, or install the whole project.`
           : ((problem) => (problem === null ? null : `Node ${node.version} comes with npm ${bundledNpm}. ${problem}`))(filteredInstallProblem("npm", bundledNpm));
   facts = shape.facts(release);
-  knownFacts = facts;
+  known.facts = facts;
   if ((scope.kind === "packages" || (scope.kind === "selected" && managerName === "pnpm")) && release !== null) refuseScope(release);
   const pinned = managerPin(stringAt(root["packageManager"]) ?? "");
   const writer = managerName !== "pnpm" ? null : regressedLockfileWriter(lock.writer) ? lock.writer : pinned?.name === "pnpm" && regressedLockfileWriter(pinned.version) ? pinned.version : null;
@@ -384,7 +396,7 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
   return { status: "ready", rows, recipe, warnings: warnings.slice(0, 20), limitations, workspace: facts };
 
   function needsChoice(needed: ChoiceNeeded[]): EnvironmentResolution {
-    return { status: "needs-choice", rows: [], choices: needed.slice(0, 4), warnings: warnings.slice(0, 20), limitations, workspace: knownFacts };
+    return { status: "needs-choice", rows: [], choices: needed.slice(0, 4), warnings: warnings.slice(0, 20), limitations, workspace: known.facts };
   }
 }
 

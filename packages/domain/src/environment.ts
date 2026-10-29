@@ -541,7 +541,7 @@ export type WorkspaceFacts = z.infer<typeof WorkspaceFacts>;
 /**
  * A project's setup, resolved on the engine that owns the checkout with no network: refused, waiting for the person's
  * choices, or ready as a recipe. The workspace's facts come with every answer that got as far as reading the workspace,
- * and with a refusal of the scope chosen, so the choice can be corrected.
+ * a refusal included, so a scope can be corrected, and chosen packages offered when the whole project can't be prepared.
  */
 export const EnvironmentResolution = z.discriminatedUnion("status", [
   z.strictObject({ status: z.literal("refused"), code: Identifier, message: z.string().max(2_000), rows: z.array(ResolutionRow).max(20), workspace: WorkspaceFacts.optional() }),

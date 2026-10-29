@@ -744,7 +744,9 @@ describe("workspace packages chosen by folder, installed from the links each loc
     assert.deepEqual([shown.recipe.scope, shown.recipe.selection?.root], [{ kind: "packages", packages: ["apps/web"], root: true }, true]);
     assert.match(row(shown, "workspace").note ?? "", /^Installing @w\/web \(apps\/web\)\. Also @w\/core \(packages\/core\), .*@w\/ui \(packages\/ui\), which are linked from them or from the workspace root\. With the workspace root's own dependencies\.$/);
     assert.equal(tool(shown, "node")?.kind, "exact", "legacy's range doesn't count: it isn't installed");
-    refused(await resolveIn(mono(), checked), "unavailable-runtime", /<20/);
+    const whole = await resolveIn(mono(), checked);
+    refused(whole, "unavailable-runtime", /<20/);
+    assert.equal(mode(whole, "packages").available, true, "a whole project that can't be prepared still offers chosen packages, which can leave legacy out");
     refused(await resolveIn(mono(), { ...checked, ...packages(["apps/web"], false) }), "scope", /pnpm installs the workspace root's own dependencies whenever it installs chosen packages/);
   });
 
