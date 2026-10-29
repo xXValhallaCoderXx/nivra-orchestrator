@@ -335,6 +335,26 @@ test("a task written directly has the same brief; its states follow the rules, a
   await expect(page.getByTestId("task-title")).toHaveText("Tidy the README");
   for (const field of BRIEF_FIELDS) await expect(page.getByTestId(field)).toBeVisible();
   await expect(page.getByTestId("task-state")).toHaveText("Draft");
+  // The key and project ID, asked for where readiness needs them (NIV-56, G3): Esc with something typed asks first, and
+  // closing without saving keeps nothing anywhere.
+  const before = await page.evaluate(() => window.nivra.getSettings());
+  await expect(page.locator('[data-testid="task-readiness-row"][data-row="keys"]')).toBeVisible();
+  await page.getByTestId("task-readiness-add-keys").click();
+  await expect(page.getByTestId("key-prompt-key")).toBeFocused();
+  await page.getByTestId("key-prompt-key").fill("typed, never saved");
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("key-prompt-leaving")).toBeVisible();
+  await page.getByTestId("key-prompt-discard").click();
+  await expect(page.getByTestId("key-prompt-key")).toBeHidden();
+  const after = await page.evaluate(() => window.nivra.getSettings());
+  expect([after.nebiusKey, after.nebiusProjectId]).toEqual([before.nebiusKey, before.nebiusProjectId]);
+  // The aside's tabs move with the arrow keys.
+  await page.getByTestId("task-tab-brief").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByTestId("task-tab-coach")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("task-coach-back")).toBeVisible();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByTestId("task-tab-brief")).toHaveAttribute("aria-selected", "true");
   await page.getByTestId("task-mark-ready").click();
   await expect(page.getByTestId("task-error")).toHaveText("A task is ready once its brief has a goal and at least one acceptance criterion. Add them, then mark it ready.");
   await page.getByTestId("task-edit-brief").click();
@@ -375,6 +395,7 @@ test("deleting the conversation a plan came from keeps the task's brief, and mov
   await openTask("Plan a CSV export");
   await expect(page.getByTestId("task-plan-gone")).toBeVisible();
   await expect(page.getByTestId("task-brief-context")).toHaveText(/Export as CSV first, then add filters\.$/);
+  await page.getByTestId("task-more").click();
   await page.getByTestId("task-move").click();
   await page.getByTestId("task-move-repository").click();
   await page.getByRole("option", { name: /^beta/ }).click();
