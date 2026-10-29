@@ -3,8 +3,10 @@ import { describe, it } from "node:test";
 import {
   BUDGET_PRESETS,
   BudgetMonthLabel,
+  BudgetPolicy,
   BudgetPolicyDraft,
   canMoveGrant,
+  currencyOf,
   dayOf,
   GRANT_TRANSITIONS,
   GrantRequest,
@@ -20,7 +22,7 @@ import {
   type ModelRate,
 } from "../src/budget.ts";
 import * as domain from "../src/index.ts";
-import { CURRENT_PRICES, rateFor, TOKEN_FACTORY_PRICES } from "../src/prices.ts";
+import { CURRENT_PRICES, rateFor, TOKEN_FACTORY_PRICES, TOKEN_FACTORY_PRICES_2 } from "../src/prices.ts";
 
 /** The shared monthly budget's contract (NIV-66): money in whole micro-units, bounds as a gate, months that only move forward. */
 
@@ -164,6 +166,30 @@ describe("a policy", () => {
       assert.equal(BudgetPolicyDraft.safeParse(bad).success, false, JSON.stringify(bad).slice(0, 120));
     }
   });
+
+  it("takes a counts-only budget: the preset counts, with no currency, amount, money sublimits, thresholds or credit price", () => {
+    const counts = { ...DRAFT, preset: "counts", currency: null, monthlyMicros: null, thresholds: [], sublimits: NO_SUBLIMITS, researchCreditMicros: null };
+    assert.equal(BudgetPolicyDraft.safeParse(counts).success, true);
+    assert.equal(BudgetPolicy.safeParse({ ...counts, version: 1, replaces: null, createdAt: "2026-10-28T01:00:00.000Z" }).success, true);
+  });
+
+  it("refuses a budget that mixes the two kinds, as a draft and as a version kept", () => {
+    const counts = { ...DRAFT, preset: "counts", currency: null, monthlyMicros: null, thresholds: [], sublimits: NO_SUBLIMITS, researchCreditMicros: null };
+    for (const bad of [
+      { ...DRAFT, currency: null },
+      { ...DRAFT, monthlyMicros: null },
+      { ...DRAFT, preset: "counts" },
+      { ...counts, preset: "custom" },
+      { ...counts, currency: "USD" },
+      { ...counts, sublimits: { ...NO_SUBLIMITS, dailyMicros: 1_000_000 } },
+      { ...counts, sublimits: { ...NO_SUBLIMITS, projects: [{ projectId: "6f1d1b3c-2f7e-4c8a-9e6b-1a2b3c4d5e6f", monthlyMicros: 1 }] } },
+      { ...counts, thresholds: [80] },
+      { ...counts, researchCreditMicros: 8_000 },
+    ]) {
+      assert.equal(BudgetPolicyDraft.safeParse(bad).success, false, JSON.stringify(bad).slice(0, 160));
+      assert.equal(BudgetPolicy.safeParse({ ...bad, version: 1, replaces: null, createdAt: "2026-10-28T01:00:00.000Z" }).success, false, JSON.stringify(bad).slice(0, 160));
+    }
+  });
 });
 
 describe("the price list", () => {
@@ -172,8 +198,32 @@ describe("the price list", () => {
     assert.equal(TOKEN_FACTORY_PRICES.currency, null);
     assert.equal(TOKEN_FACTORY_PRICES.listings, "unknown");
     assert.equal(TOKEN_FACTORY_PRICES.models.length, 3);
-    assert.ok(TOKEN_FACTORY_PRICES.models.every((rate) => rate.bounds === null));
-    assert.equal(CURRENT_PRICES.version, TOKEN_FACTORY_PRICES.version);
+    assert.ok(TOKEN_FACTORY_PRICES.models.every((rate) => rate.bounds === null && rate.currency === undefined), "the first version is kept as it was");
+  });
+
+  it("is now the second version: Super VL first, in US dollars from Nebius's announcement, and Super, Lightning and Ultra with no currency yet", () => {
+    assert.equal(CURRENT_PRICES, TOKEN_FACTORY_PRICES_2);
+    assert.equal(PriceCatalogue.safeParse(CURRENT_PRICES).success, true);
+    assert.deepEqual(
+      CURRENT_PRICES.models.map((rate) => [rate.model, rate.inputMicrosPerMillion, rate.cachedInputMicrosPerMillion, rate.outputMicrosPerMillion, currencyOf(CURRENT_PRICES, rate)?.code ?? null]),
+      [
+        ["nvidia/Nemotron-3.5-Super-VL", 300_000, null, 900_000, "USD"],
+        ["nvidia/nemotron-3-super-120b-a12b", 300_000, 60_000, 900_000, null],
+        ["nvidia/Nemotron-3_5-Lightning", 60_000, 30_000, 240_000, null],
+        ["nvidia/Nemotron-3-Ultra-550b-a55b", 1_000_000, 120_000, 3_000_000, null],
+      ],
+    );
+    assert.match(rateFor(CURRENT_PRICES, "nvidia/Nemotron-3.5-Super-VL")?.currency?.source ?? "", /16 October 2026.*0\.30 USD per million input tokens and 0\.90 USD per million output tokens/);
+    assert.deepEqual([CURRENT_PRICES.currency, CURRENT_PRICES.listings, CURRENT_PRICES.models.every((rate) => rate.bounds === null)], [null, "unknown", true]);
+  });
+
+  it("takes a model's own currency, else the list's, else none", () => {
+    const usd = { code: "USD" as const, source: "test" };
+    const rate = TOKEN_FACTORY_PRICES.models[0]!;
+    assert.equal(currencyOf(TOKEN_FACTORY_PRICES, rate), null);
+    assert.equal(currencyOf(TOKEN_FACTORY_PRICES, { ...rate, currency: usd }), usd);
+    assert.equal(currencyOf({ ...TOKEN_FACTORY_PRICES, currency: usd }, rate), usd);
+    assert.equal(currencyOf({ ...TOKEN_FACTORY_PRICES, currency: usd }, { ...rate, currency: null }), usd);
   });
 
   it("finds a model's rate without regard to case, and none for a model it doesn't list", () => {

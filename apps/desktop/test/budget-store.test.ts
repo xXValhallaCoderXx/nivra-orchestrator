@@ -8,6 +8,7 @@ import {
   CODING_WORKER_PROFILE,
   NO_SUBLIMITS,
   TOKEN_FACTORY_PRICES,
+  TOKEN_FACTORY_PRICES_2,
   type BudgetOperation,
   type BudgetPolicyDraft,
   type BudgetRecovery,
@@ -19,6 +20,7 @@ import {
 import {
   BUDGET_UNVERIFIED,
   budgetSummary,
+  companionRequestUsage,
   confirmMonth,
   currentPeriod,
   currentPolicy,
@@ -899,6 +901,259 @@ describe("a budget in dollars", () => {
   });
 });
 
+describe("a counts-only budget", () => {
+  /** No money: two Nebius operations, an hour of sandbox time and five Tavily credits a month. */
+  const COUNTS: BudgetPolicyDraft = {
+    ...DRAFT,
+    preset: "counts",
+    currency: null,
+    monthlyMicros: null,
+    thresholds: [],
+    sublimits: NO_SUBLIMITS,
+    researchCreditMicros: null,
+    allowances: { sandboxOperations: 2, sandboxSeconds: 3_600, researchCredits: 5 },
+  };
+  const operations = (count: number): Partial<GrantRequest> => ({
+    models: [],
+    productive: { requests: 0, outputTokens: 0 },
+    finalisation: { requests: 0, outputTokens: 0 },
+    allowances: { sandboxOperations: count, sandboxSeconds: 0, researchCredits: 0 },
+  });
+
+  it("is set with today's price list, which can keep no dollar budget, since it holds no money", () => {
+    const db = workspace();
+    const saved = setPolicy(db, COUNTS, OCT, TOKEN_FACTORY_PRICES);
+    assert.deepEqual([saved.policy?.version, saved.policy?.preset, saved.policy?.monthlyMicros, saved.policy?.currency], [1, "counts", null, null]);
+  });
+
+  it("admits model calls unpriced, a model the price list doesn't have included, and holds the counted services to their allowance", () => {
+    const db = workspace();
+    setPolicy(db, COUNTS, OCT, TOKEN_FACTORY_PRICES);
+    assert.equal(granted(db, {}, OCT, TOKEN_FACTORY_PRICES).productiveMicros, null, "a model without established bounds");
+    assert.equal(granted(db, { models: [UNLISTED] }, OCT, TOKEN_FACTORY_PRICES).productiveMicros, null, "a model the list doesn't have");
+    granted(db, operations(2), OCT, TOKEN_FACTORY_PRICES);
+    const refused = refusal(db, operations(1), OCT, TOKEN_FACTORY_PRICES);
+    assert.equal(refused.code, "counted");
+    assert.match(refused.message, /past this month's allowance of sandbox operations/);
+  });
+
+  it("shows no pool and nothing available in money, its allowances, and what was counted", () => {
+    const db = workspace();
+    setPolicy(db, COUNTS, OCT, TOKEN_FACTORY_PRICES);
+    granted(db, operations(1), OCT, TOKEN_FACTORY_PRICES);
+    const totals = summary(db, OCT, TOKEN_FACTORY_PRICES);
+    assert.deepEqual([totals.poolMicros, totals.availableMicros, totals.thresholdsCrossed], [null, null, []]);
+    assert.deepEqual([totals.counted.allowed, totals.counted.used?.sandboxOperations], [COUNTS.allowances, 1]);
+  });
+
+  it("is never replaced by a dollar budget the price list can't keep: the refusal says it still holds counts only", () => {
+    const db = workspace();
+    setPolicy(db, COUNTS, OCT, TOKEN_FACTORY_PRICES);
+    assert.throws(() => setPolicy(db, DRAFT, OCT, TOKEN_FACTORY_PRICES), (error: Error) => /Your budget wasn't changed: it still holds counts only\./.test(error.message));
+    assert.deepEqual([currentPolicy(db)?.version, currentPolicy(db)?.preset], [1, "counts"]);
+  });
+
+  it("moves to a dollar budget and back, every version kept, and what was counted stays counted", () => {
+    const db = workspace();
+    setPolicy(db, COUNTS, OCT, TOKEN_FACTORY_PRICES);
+    granted(db, operations(2), OCT, TOKEN_FACTORY_PRICES);
+    assert.equal(setPolicy(db, DRAFT, OCT, ESTABLISHED).policy?.version, 2);
+    assert.equal(setPolicy(db, COUNTS, OCT, ESTABLISHED).policy?.version, 3);
+    assert.equal(refusal(db, operations(1), OCT, TOKEN_FACTORY_PRICES).code, "counted");
+  });
+
+  it("is bound by a lost history as every mode is", () => {
+    const db = workspace();
+    setPolicy(db, COUNTS, OCT, TOKEN_FACTORY_PRICES);
+    startNewHistory(db, { recovery: lost(db), remaining: null, now: OCT, timezone: "UTC" });
+    assert.deepEqual([refusal(db, {}, OCT, TOKEN_FACTORY_PRICES).code, refusal(db, operations(1), OCT, TOKEN_FACTORY_PRICES).code], ["history-wait", "history-wait"]);
+  });
+});
+
+/**
+ * Nate's review of PR 35: a budget in dollars set with a list on which listing models was free must not stay admissible
+ * under a later list on which listing is charged or unknown, since a listing's charge would count as nothing. Each
+ * later list differs from the first only in what it says of listing: its currency and every model's bounds stay
+ * established, so neither of those checks can refuse in its place.
+ */
+describe("listing models, checked again with each price list a grant is priced with", () => {
+  const later = (listings: "unknown" | "charged" | "free", version = `test-listings-${listings}`): PriceCatalogue => ({ ...ESTABLISHED, version, listings });
+  const what = { unknown: "whether listing its models is charged", charged: "a price for listing its models" } as const;
+  const SERVICES = { models: [], productive: { requests: 0, outputTokens: 0 }, finalisation: { requests: 0, outputTokens: 0 }, allowances: { sandboxOperations: 1, sandboxSeconds: 10, researchCredits: 0 } };
+
+  it("admits no call to a model under a dollar budget set while listing was free, once a later list says listing is charged or doesn't know, and writes nothing", () => {
+    for (const listings of ["unknown", "charged"] as const) {
+      const db = workspace();
+      setPolicy(db, { ...DRAFT, monthlyMicros: 1_000_000 }, OCT, ESTABLISHED);
+      granted(db);
+      const before = ledgerState(db);
+      const refused = refusal(db, {}, OCT, later(listings));
+      assert.equal(refused.code, "unestablished", listings);
+      assert.equal(
+        refused.message,
+        `Your monthly budget is in dollars, but Nivra hasn't established ${what[listings]}, so it can't keep this call within your budget. Turn the monthly budget off to use the existing per-run limits, or wait for an update to Nivra that establishes what's missing.`,
+      );
+      assert.deepEqual(ledgerState(db), before, "nothing was granted");
+      assert.deepEqual([currentPolicy(db)?.version, currentPolicy(db)?.monthlyMicros], [1, 1_000_000], "the budget stays as it was");
+      assert.ok(summary(db, OCT, later(listings)).gaps.includes("listings-unpriced"), listings);
+      // The same list saying listing is free admits the call, so listing alone refused it.
+      assert.ok((granted(db, {}, OCT, later("free", `test-listings-${listings}-then-free`)).productiveMicros ?? 0) > 0);
+    }
+  });
+
+  it("still admits a call that reaches no model, which lists none, at no money", () => {
+    const db = workspace();
+    setPolicy(db, DRAFT, OCT, ESTABLISHED);
+    for (const listings of ["unknown", "charged"] as const) {
+      const grant = granted(db, SERVICES, OCT, later(listings));
+      assert.deepEqual([grant.productiveMicros, grant.finalisationMicros], [0, 0], listings);
+    }
+  });
+
+  it("without a budget in dollars, writes a call to a model unpriced while listing isn't known to be free: its money unknown, never 0", () => {
+    for (const listings of ["unknown", "charged"] as const) {
+      const db = workspace();
+      const grant = granted(db, {}, OCT, later(listings));
+      assert.deepEqual([grant.productiveMicros, grant.finalisationMicros], [null, null], listings);
+      const totals = summary(db, OCT, later(listings));
+      assert.deepEqual([totals.settledMicros, totals.unknownMicros, totals.reservedMicros], [null, null, null], listings);
+      for (const gap of ["unpriced-usage", "listings-unpriced"] as const) assert.ok(totals.gaps.includes(gap), `${listings}: ${gap}`);
+    }
+  });
+
+  it("after a loss, holds the money the person said was left only with calls it can price, naming listing when that is what's missing", () => {
+    const db = workspace();
+    startNewHistory(db, { recovery: lost(db), remaining: left(GRANT_TOTAL), now: OCT, timezone: "UTC" });
+    const refused = refusal(db, {}, OCT, later("charged"));
+    assert.equal(refused.code, "unestablished");
+    assert.match(refused.message, /but Nivra hasn't established a price for listing its models, so it can't keep the call within that\. Please wait for 2026-11, /);
+    granted(db);
+  });
+
+  it("names everything a call's own models leave unestablished, with listing, and only those models", () => {
+    const db = workspace();
+    setPolicy(db, DRAFT, OCT, ESTABLISHED);
+    const lightningBare: PriceCatalogue = {
+      ...ESTABLISHED,
+      version: "test-lightning-bare",
+      listings: "unknown",
+      models: ESTABLISHED.models.map((rate) => (rate.model === LIGHTNING ? { ...rate, bounds: null } : rate)),
+    };
+    assert.match(refusal(db, { models: [LIGHTNING] }, OCT, lightningBare).message, /hasn't established the most a request can cost with nvidia\/Nemotron-3_5-Lightning or whether listing its models is charged, so/);
+    assert.match(refusal(db, { models: [SUPER] }, OCT, lightningBare).message, /hasn't established whether listing its models is charged, so/);
+    // A model asked for more than once, in any case, is one model: never "any model on its price list", never twice.
+    for (const models of [[LIGHTNING, LIGHTNING, LIGHTNING], [LIGHTNING, LIGHTNING.toLowerCase()]]) {
+      assert.match(refusal(db, { models }, OCT, lightningBare).message, /hasn't established the most a request can cost with nvidia\/Nemotron-3_5-Lightning or whether listing its models is charged, so/);
+    }
+  });
+
+  it("refuses a call to several models, and an extension, under a list that doesn't say listing is free", () => {
+    const db = workspace();
+    setPolicy(db, { ...DRAFT, monthlyMicros: 1_000_000 }, OCT, ESTABLISHED);
+    const first = granted(db);
+    markDispatching(db, first.id, HOME, OCT, ledgerState(db));
+    for (const listings of ["unknown", "charged"] as const) {
+      assert.equal(refusal(db, { models: [SUPER, LIGHTNING] }, OCT, later(listings)).code, "unestablished", listings);
+      assert.equal(refusal(db, { requestId: first.requestId, extends: first.id, need: `segment-${listings}` }, OCT, later(listings)).code, "unestablished", listings);
+    }
+  });
+
+  it("names what else the list hasn't established when it also lacks a model, under a dollar budget", () => {
+    const db = workspace();
+    setPolicy(db, DRAFT, OCT, ESTABLISHED);
+    // The model it lacks is named once, however often and in whatever case it is asked for.
+    for (const models of [[SUPER, UNLISTED], [SUPER, UNLISTED, UNLISTED.toLowerCase()]]) {
+      const refused = refusal(db, { models }, OCT, later("unknown"));
+      assert.equal(refused.code, "no-price");
+      assert.match(
+        refused.message,
+        /no price for nvidia\/Nemotron-3\.5-Super-VL, and Nivra hasn't established whether listing its models is charged, so it can't keep this call within your budget\. Turn the monthly budget off to use the existing per-run limits, or wait for an update to Nivra whose price list includes it and establishes what's missing\.$/,
+      );
+    }
+  });
+
+  it("never prices a call to a model whose bounds the list leaves out, rather than setting to null", () => {
+    const db = workspace();
+    setPolicy(db, DRAFT, OCT, ESTABLISHED);
+    const { bounds: _left, ...superUnbounded } = ESTABLISHED.models.find((rate) => rate.model === SUPER)!;
+    const leftOut = { ...ESTABLISHED, version: "test-bounds-left-out", models: ESTABLISHED.models.map((rate) => (rate.model === SUPER ? superUnbounded : rate)) } as unknown as PriceCatalogue;
+    assert.match(refusal(db, {}, OCT, leftOut).message, /hasn't established the most a request can cost with nvidia\/nemotron-3-super-120b-a12b, so/);
+    setPolicy(db, null, OCT, ESTABLISHED);
+    assert.equal(granted(db, {}, OCT, leftOut).productiveMicros, null);
+  });
+
+  it("refuses a journal that lists models under a grant for a call that reaches none, which was never checked for listing", () => {
+    const db = workspace();
+    setPolicy(db, DRAFT, OCT, ESTABLISHED);
+    const grant = granted(db, SERVICES, OCT, later("charged"));
+    const listing: BudgetOperation = { ...row(grant.id, 1), kind: "model-listing", model: null, seat: null, state: "reported", boundMicros: null, usage: null, amountMicros: null };
+    const result = sent(db, grant.id, [listing]);
+    assert.ok("refused" in result, "the journal was recorded");
+    assert.equal(result.refused, "A journal row lists models under a grant for a call that reaches none.");
+    assert.equal(getGrant(db, grant.id)?.state, "dispatching");
+  });
+});
+
+/**
+ * A dollar budget kept with a list on which every model's prices name their own currency and the list names none, as
+ * version 2 does for Super VL: the list's currency is never asked for when each model has one.
+ */
+describe("a list whose currency is each model's own", () => {
+  const perModel: PriceCatalogue = {
+    ...ESTABLISHED,
+    version: "test-currency-per-model",
+    currency: null,
+    models: ESTABLISHED.models.map((rate) => ({ ...rate, currency: { code: "USD" as const, source: "test" } })),
+  };
+
+  it("sets a dollar budget, prices its calls and names no currency gap", () => {
+    const db = workspace();
+    assert.equal(dollarBudgetRefusal(perModel, null), null);
+    setPolicy(db, DRAFT, OCT, perModel);
+    assert.equal(granted(db, {}, OCT, perModel).productiveMicros, 2 * WORK_REQUEST);
+    assert.ok(!summary(db, OCT, perModel).gaps.includes("currency-unconfirmed"));
+  });
+});
+
+describe("a model's own currency (price list v2)", () => {
+  /** On the second version's list, unlike the earlier lists these tests use (where it is UNLISTED). */
+  const VL = "nvidia/Nemotron-3.5-Super-VL";
+  /** The second version with every bound established: only Super VL's prices have a currency of their own. */
+  const bounded: PriceCatalogue = {
+    ...TOKEN_FACTORY_PRICES_2,
+    version: "test-v2-bounded",
+    listings: "free",
+    models: TOKEN_FACTORY_PRICES_2.models.map((rate) => ({ ...rate, bounds: { inputTokens: 128_000, outputCappedByMaxTokens: true as const, source: "test", establishedOn: "2026-10-29" } })),
+  };
+
+  it("prices a call only in its models' established currency: Super VL's in US dollars, Lightning's not at all", () => {
+    const db = workspace();
+    assert.ok((granted(db, { models: [VL] }, OCT, bounded).productiveMicros ?? 0) > 0, "Super VL, its currency its own");
+    assert.equal(granted(db, { models: [LIGHTNING] }, OCT, bounded).productiveMicros, null, "Lightning, no currency yet");
+    assert.equal(granted(db, { models: [VL, LIGHTNING] }, OCT, bounded).productiveMicros, null, "one model without a currency leaves the grant unpriced");
+  });
+
+  it("refuses a dollar budget with today's second version, naming the currencies missing (not Super VL's), the bounds and the listings", () => {
+    const db = workspace();
+    assert.throws(
+      () => setPolicy(db, DRAFT, OCT, TOKEN_FACTORY_PRICES_2),
+      (error: Error) =>
+        error.message.startsWith(
+          "Nivra can't keep a monthly budget in dollars yet: it hasn't established the currency of its prices for nvidia/nemotron-3-super-120b-a12b, nvidia/Nemotron-3_5-Lightning and nvidia/Nemotron-3-Ultra-550b-a55b, the most a request can cost with any model on its price list or whether listing its models is charged, so",
+        ),
+    );
+    assert.throws(() => setPolicy(db, DRAFT, OCT, bounded), (error: Error) => /it hasn't established the currency of its prices for nvidia\/nemotron-3-super-120b-a12b, nvidia\/Nemotron-3_5-Lightning and nvidia\/Nemotron-3-Ultra-550b-a55b, so/.test(error.message));
+    assert.equal(ledgerState(db), null);
+  });
+
+  it("names the gap while any model's currency is missing, and not once every model has one", () => {
+    const db = workspace();
+    assert.ok(summary(db, OCT, TOKEN_FACTORY_PRICES_2).gaps.includes("currency-unconfirmed"));
+    const allUsd: PriceCatalogue = { ...bounded, version: "test-v2-usd", models: bounded.models.map((rate) => ({ ...rate, currency: { code: "USD" as const, source: "test" } })) };
+    assert.ok(!summary(db, OCT, allUsd).gaps.includes("currency-unconfirmed"));
+  });
+});
+
 describe("a history that needs recovery", () => {
   it("has no month-wide figures in the summary, and says why", () => {
     const db = workspace();
@@ -972,4 +1227,76 @@ describe("what the ledger refuses outright", () => {
     }
     assert.deepEqual([getGrant(db, grant.id)?.state, getGrant(db, written.id)?.state], ["settled", "written"]);
   });
+});
+
+
+describe("Companion AI monthly request allowance", () => {
+  const policy = (limit: number): BudgetPolicyDraft => ({ ...DRAFT, preset: "counts", currency: null, monthlyMicros: null, thresholds: [], sublimits: NO_SUBLIMITS, researchCreditMicros: null, modelRequestLimits: [{ feature: "companion", monthlyRequests: limit }] });
+  const companion = (over: Partial<GrantRequest> = {}) => request({ workflow: "companion", attribution: { feature: "companion", projectId: null, taskId: null, attemptId: null, queueId: null, queueItemId: null, profile: null }, productive: { requests: 2, outputTokens: 4000 }, finalisation: { requests: 0, outputTokens: 0 }, ...over });
+  it("shares reserved capacity across targets and projects, deduplicates root requests and preserves usage through policy edits", () => {
+    const db = workspace(); setPolicy(db, policy(3), OCT, TOKEN_FACTORY_PRICES);
+    const asked = companion();
+    const first = writeGrant(db, asked, context(db,OCT,TOKEN_FACTORY_PRICES)); assert.ok("grant" in first);
+    const again = writeGrant(db, asked, context(db,OCT,TOKEN_FACTORY_PRICES)); assert.ok("grant" in again); assert.equal(again.grant.id,first.grant.id);
+    assert.equal(companionRequestUsage(db).reserved,2);
+    const refused = writeGrant(db,companion({targetId:"wsl:Ubuntu"}),context(db,OCT,TOKEN_FACTORY_PRICES)); assert.ok("refused" in refused);
+    setPolicy(db,policy(1),OCT+1,TOKEN_FACTORY_PRICES); assert.equal(companionRequestUsage(db).remaining,0);
+    assert.equal(companionRequestUsage(db).reserved,2);
+  });
+  it("counts actual inference rows independently of unknown price/usage; a complete seal releases only unused requests", () => {
+    const db=workspace(); setPolicy(db,policy(3),OCT,TOKEN_FACTORY_PRICES);
+    const result=writeGrant(db,companion(),context(db,OCT,TOKEN_FACTORY_PRICES)); assert.ok("grant" in result);
+    const id=result.grant.id; markDispatching(db,id,HOME,OCT,ledgerState(db));
+    const rows=[row(id,1,{state:"unknown",usage:null,amountMicros:null,boundMicros:null})];
+    assert.ok(!("refused" in recordJournal(db,id,rows,seal(id,"complete",1),OCT)));
+    const view=companionRequestUsage(db); assert.equal(view.used,1); assert.equal(view.reserved,0); assert.equal(view.remaining,2); assert.equal(view.inputTokens,null);
+  });
+  it("retains the entire bound for interrupted work and refuses relabelled extensions", () => {
+    const db=workspace();setPolicy(db,policy(3),OCT,TOKEN_FACTORY_PRICES);
+    const asked=companion(); const result=writeGrant(db,asked,context(db,OCT,TOKEN_FACTORY_PRICES));assert.ok("grant" in result);
+    markDispatching(db,result.grant.id,HOME,OCT,ledgerState(db));
+    const changed=writeGrant(db,{...asked,extends:result.grant.id,need:"extra",attribution:{...asked.attribution,feature:"chat"}},context(db,OCT,TOKEN_FACTORY_PRICES));assert.ok("refused" in changed);
+    recordJournal(db,result.grant.id,[],seal(result.grant.id,"interrupted",0),OCT);
+    const view=companionRequestUsage(db);assert.equal(view.used,2);assert.equal(view.unknown,2);assert.equal(view.remaining,1);
+  });
+  it("confirms a later companion month without releasing an old outstanding grant or moving its late usage", () => {
+    const db = workspace();
+    setPolicy(db, policy(3), OCT, TOKEN_FACTORY_PRICES);
+    const settled = writeGrant(db, companion({ productive: { requests: 1, outputTokens: 4000 } }), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in settled);
+    markDispatching(db, settled.grant.id, HOME, OCT, ledgerState(db));
+    assert.ok(!("refused" in recordJournal(db, settled.grant.id, [row(settled.grant.id, 1, { boundMicros: null, amountMicros: null })], seal(settled.grant.id, "complete", 1), OCT)));
+    const outstanding = writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in outstanding);
+    markDispatching(db, outstanding.grant.id, HOME, OCT, ledgerState(db));
+    const originalPeriod = getGrant(db, outstanding.grant.id)!.periodIndex;
+    assert.deepEqual([companionRequestUsage(db).used, companionRequestUsage(db).reserved, companionRequestUsage(db).remaining], [1, 2, 0]);
+
+    // Reading next month's clock cannot renew an allowance; only the person's exact confirmation opens it.
+    assert.equal(summary(db, NOV).clock.computerMonth, "2026-11");
+    assert.equal(companionRequestUsage(db).remaining, 0);
+    assert.deepEqual(confirmMonth(db, "2026-12", NOV, "UTC"), { refused: "not-shown" });
+    assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
+    assert.deepEqual([companionRequestUsage(db).month, companionRequestUsage(db).used, companionRequestUsage(db).reserved, companionRequestUsage(db).remaining], ["2026-11", 0, 0, 3]);
+    assert.deepEqual([getGrant(db, outstanding.grant.id)!.periodIndex, getGrant(db, outstanding.grant.id)!.state], [originalPeriod, "dispatching"]);
+
+    assert.ok("grant" in writeGrant(db, companion(), context(db, NOV, TOKEN_FACTORY_PRICES)));
+    assert.ok(!("refused" in recordJournal(db, outstanding.grant.id, [row(outstanding.grant.id, 1, { boundMicros: null, amountMicros: null })], seal(outstanding.grant.id, "complete", 1), NOV)));
+    assert.deepEqual([getGrant(db, outstanding.grant.id)!.periodIndex, getGrant(db, outstanding.grant.id)!.state], [originalPeriod, "settled"]);
+    assert.deepEqual([companionRequestUsage(db).used, companionRequestUsage(db).reserved, companionRequestUsage(db).remaining], [0, 2, 1]);
+  });
+});
+
+
+it("shows only the effective companion request remainder after recovery, keeping earlier token totals unknown", () => {
+  const db=workspace();
+  const policy: BudgetPolicyDraft={...DRAFT,preset:"counts",currency:null,monthlyMicros:null,thresholds:[],sublimits:NO_SUBLIMITS,researchCreditMicros:null,modelRequestLimits:[{feature:"companion",monthlyRequests:100}]};
+  setPolicy(db,policy,OCT,TOKEN_FACTORY_PRICES);
+  const recovery=lost(db);
+  startNewHistory(db,{recovery,remaining:{mode:"counts",micros:0,allowances:{sandboxOperations:0,sandboxSeconds:0,researchCredits:0},modelRequestLimits:[{feature:"companion",monthlyRequests:3}]},now:OCT,timezone:"UTC"});
+  const view=companionRequestUsage(db);assert.equal(view.remaining,3);assert.equal(view.historyComplete,false);assert.equal(view.inputTokens,null);
+  const req=request({workflow:"companion",attribution:{feature:"companion",projectId:null,taskId:null,attemptId:null,queueId:null,queueItemId:null,profile:null},productive:{requests:2,outputTokens:4000},finalisation:{requests:0,outputTokens:0}});
+  assert.ok("grant" in writeGrant(db,req,context(db,OCT,TOKEN_FACTORY_PRICES)));
+  assert.equal(companionRequestUsage(db).remaining,1);
+  assert.ok("refused" in writeGrant(db,{...req,requestId:randomUUID()},context(db,OCT,TOKEN_FACTORY_PRICES)));
 });

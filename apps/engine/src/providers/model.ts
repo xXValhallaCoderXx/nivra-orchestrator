@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { Agent } from "@mastra/core/agent";
 import { resolveModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
 import { isMastraTimeoutError } from "@mastra/core/loop";
 import type { ModelEndpoint, ModelFailureKind } from "@nivra/domain";
+import type { BudgetJournal, OpenRefusal, OperationPart } from "../budget/journal.ts";
 import { errorFacts, internalMessage, safeClass, type DiagnosticCode, type FailureFacts } from "../diagnostics.ts";
 import { capCompletionTokens, listModels as fetchModels, TOKEN_FACTORY_BASE_URL, TokenFactoryError, type ModelEntry } from "./tokenfactory.ts";
 
@@ -110,6 +112,8 @@ export interface ModelList {
   ids: string[];
   /** The model's context length, when `/models` gives one. */
   contextLengths: ReadonlyMap<string, number>;
+  /** The Date Token Factory's answer carried: the provider's clock (NIV-66), or null without a readable one. */
+  providerDate: string | null;
 }
 
 /**
@@ -145,9 +149,12 @@ export interface CallOptions {
   stopWhen?: () => boolean;
   /**
    * Before each request. A failure it records through `internal` ends the call there, and the request is never sent.
-   * A request may have an output cap and a deadline of its own, in place of the call's (NIV-35).
+   * A request may have an output cap and a deadline of its own, in place of the call's (NIV-35), and, under a budget
+   * grant, the part of the grant it draws on (the hand-in draws on the finalisation part).
    */
-  prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice; maxOutputTokens?: number; stepMs?: number } | undefined;
+  prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice; maxOutputTokens?: number; stepMs?: number; budgetPart?: OperationPart } | undefined;
+  /** Under a budget grant: the part of it this call's requests draw on, unless a step says otherwise. Productive by default. */
+  budgetPart?: OperationPart;
   /** The person's cancel. */
   signal?: AbortSignal;
   internal?: InternalFailure;
@@ -176,9 +183,22 @@ export interface ModelClient {
   call(agent: ModelAgent, prompt: string, options: CallOptions): Promise<CallResult>;
 }
 
+/**
+ * A client bound to a budget grant (NIV-66): every request it sends is journalled at its send point, under the grant
+ * the host gave its run. A request whose bound doesn't fit what is left of the grant is never sent.
+ */
+export interface BudgetBinding {
+  journal: Pick<BudgetJournal, "open" | "sent" | "close" | "providerTime">;
+  grantId: string;
+  /** The council seat or role the requests are made for, when they have one. */
+  seat: string | null;
+}
+
 export interface ModelClientOptions {
   apiKey: string;
   endpoint?: Endpoint;
+  /** Under a budget grant: where its requests are journalled. */
+  budget?: BudgetBinding;
   /** Tests only: the HTTP client for `/models`. */
   fetch?: typeof fetch;
   /** Tests only, in-process: the model itself (a mock), instead of the endpoint. */
@@ -197,33 +217,53 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       const timeout = AbortSignal.timeout(timeoutMs);
       const both = signal ? AbortSignal.any([signal, timeout]) : timeout;
       let entries: ModelEntry[];
+      let providerDate: string | null;
+      let listing: string | null = null;
+      if (options.budget) {
+        const opened = options.budget.journal.open(options.budget.grantId, { kind: "model-listing", part: "productive", model: null, seat: options.budget.seat, instructionsSha256: null, outputTokens: null, boundUnits: null });
+        if ("refused" in opened) throw failure("budget-exhausted", REFUSED[opened.refused]);
+        listing = opened.id;
+      }
+      let handed = false;
       try {
-        entries = await fetchModels(options.apiKey, { baseUrl: endpoint.url, signal: both, ...(options.fetch ? { fetch: options.fetch } : {}) });
+        ({ entries, date: providerDate } = await fetchModels(options.apiKey, {
+          baseUrl: endpoint.url,
+          signal: both,
+          fetch: (async (url, request) => {
+            if (request?.signal?.aborted) throw new ModelFailure("cancelled", "Cancelled.");
+            if (listing) options.budget!.journal.sent(listing);
+            handed = true;
+            return (options.fetch ?? fetch)(url, request);
+          }) as typeof fetch,
+        }));
+        if (providerDate && options.budget) options.budget.journal.providerTime(options.budget.grantId, providerDate);
       } catch (error) {
         if (signal?.aborted) throw new ModelFailure("cancelled", "Cancelled.");
         if (timeout.aborted) throw new ModelFailure("timeout", `Token Factory didn't list its models within ${Math.round(timeoutMs / 1000)} s. Check the network on this target, then try again.`);
-        // The status names the failure; Token Factory's own words never enter it (they can quote the key or the request).
         if (error instanceof TokenFactoryError) throw failure(kindForStatus(error.status), "", error.status);
         throw toModelFailure(error, "models.list");
+      } finally {
+        if (listing) options.budget!.journal.close(listing, handed ? { kind: "no-usage" } : { kind: "unsent" });
       }
       const contextLengths = new Map<string, number>();
       for (const entry of entries) if (entry.contextLength !== null) contextLengths.set(entry.id, entry.contextLength);
-      return { ids: entries.map((entry) => entry.id), contextLengths };
+      return { ids: entries.map((entry) => entry.id), contextLengths, providerDate };
     },
 
     agent(spec) {
       const configured = options.model?.(spec.modelId) ?? { providerId: "nebius", modelId: spec.modelId, url: endpoint.url, apiKey: options.apiKey };
-      const slot: AttemptSlot = { listener: null };
+      const slot: AttemptSlot = { listener: null, part: "productive", internal: null };
       const agent = new Agent({
         id: spec.id,
         name: spec.name,
         instructions: spec.instructions,
         // Resolved as the Agent would resolve it, then watched, so every provider request is known when it starts.
         // The router's model sends each request's cap as max_completion_tokens (D50); a model a test hands in is left as
-        // it is. countAttempts stays outermost, so it sees each call with its maxOutputTokens before the cap is moved.
+        // it is. countAttempts stays outermost, so it sees each call with its maxOutputTokens before the cap is moved, and
+        // the budget journal works out each request's bound from it.
         model: (async () => {
           const resolved = (await resolveModelConfig(configured as never)) as object;
-          return countAttempts(options.model ? resolved : capCompletionTokens(resolved), slot);
+          return countAttempts(options.model ? resolved : capCompletionTokens(resolved), slot, options.budget ?? null);
         }) as never,
         tools: spec.tools as never,
         maxRetries: 0,
@@ -248,6 +288,8 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       const attempts: Attempt[] = [];
       const slot = slots.get(agent as object);
       if (slot) {
+        slot.part = call.budgetPart ?? "productive";
+        slot.internal = internal;
         slot.listener = (event) => {
           if (event.type === "start") {
             attempts.push({ startedAt: performance.now(), endedAt: null, result: undefined });
@@ -290,7 +332,10 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
           ...(call.prepareStep
             ? {
                 prepareStep: ({ stepNumber, abort }: { stepNumber: number; abort: (reason: string) => never }) => {
-                  const prepared = call.prepareStep!({ stepNumber });
+                  const asked = call.prepareStep!({ stepNumber });
+                  // The grant's part is the journal's to know, never Mastra's.
+                  if (asked?.budgetPart && slot) slot.part = asked.budgetPart;
+                  const prepared = asked === undefined ? undefined : withoutPart(asked);
                   // Mastra's tripwire ends the loop before the request, quietly: a throw here would be logged with its stack.
                   if (internal.failure) abort("stopped before its request");
                   if (!prepared || (prepared.maxOutputTokens === undefined && prepared.stepMs === undefined)) return prepared;
@@ -324,7 +369,10 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
         if (call.signal?.aborted) throw failed(new ModelFailure("cancelled", "Cancelled."));
         throw failed(toModelFailure(error));
       } finally {
-        if (slot) slot.listener = null;
+        if (slot) {
+          slot.listener = null;
+          slot.internal = null;
+        }
       }
       if (internal.failure) throw failed(internal.failure);
       if (output.finishReason === "aborted" || call.signal?.aborted) throw failed(new ModelFailure("cancelled", "Cancelled."));
@@ -393,15 +441,26 @@ function schemaProblems(result: unknown): string[] | null {
   return listed.slice(0, 10).map((line) => line.slice(2, 202));
 }
 
-type AttemptSlot = { listener: ((event: { type: "start" } | { type: "end"; result: unknown }) => void) | null };
+type AttemptSlot = {
+  listener: ((event: { type: "start" } | { type: "end"; result: unknown }) => void) | null;
+  /** The part of the grant the next request draws on. */
+  part: OperationPart;
+  /** The call in progress, so a request its grant refuses fails the call in Nivra's words. */
+  internal: InternalFailure | null;
+};
 type Attempt = { startedAt: number; endedAt: number | null; result: unknown };
 
 /**
  * The model, with each provider request reported to the call in progress as it starts and ends, so a failure can be
  * matched to the request it cut off, and a cancel before or between requests records none (D22). Methods run on the
  * model itself, so its private state is untouched.
+ *
+ * Under a budget grant (NIV-66) this is the real send point: each request's row is written to the journal, as
+ * reserved, before it goes out, with the output cap it actually carries; one the grant refuses is never sent, and the
+ * call fails in Nivra's words. The row is marked sent as the transport takes it, and closed on every path: from the
+ * usage that came back, or unknown, at its bound, when none did. Nothing is ever sent again (D22).
  */
-function countAttempts<T extends object>(model: T, slot: AttemptSlot): T {
+function countAttempts<T extends object>(model: T, slot: AttemptSlot, budget: BudgetBinding | null): T {
   return new Proxy(model, {
     get(target, property) {
       const value: unknown = Reflect.get(target, property);
@@ -409,17 +468,106 @@ function countAttempts<T extends object>(model: T, slot: AttemptSlot): T {
       // Every method runs on the model itself: Mastra's models keep private fields a proxy can't reach.
       if (property !== "doGenerate" && property !== "doStream") return (value as (...a: unknown[]) => unknown).bind(target);
       return async (...args: unknown[]) => {
+        const row = budget ? openRow(budget, slot, target, args[0]) : null;
         slot.listener?.({ type: "start" });
         let result: unknown;
         try {
+          if (row) budget!.journal.sent(row);
           result = await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
           return result;
         } finally {
           slot.listener?.({ type: "end", result });
+          if (row) closeRow(budget!, slot, row, property === "doGenerate" ? result : undefined);
         }
       };
     },
   });
+}
+
+/** Why a grant refused a request, in Nivra's words: the detail of a budget-exhausted failure, never a provider's. */
+const REFUSED: Record<OpenRefusal, string> = {
+  unaccepted: "its budget grant wasn't accepted",
+  sealed: "its budget grant had already ended",
+  requests: "its budget grant allows no more requests",
+  money: "its budget grant has no room for another request",
+  unbounded: "its budget grant can't bound this model's requests",
+  counted: "its budget grant allows no more of that service",
+  model: "its budget grant does not allow that model",
+  output: "its output cap is outside its budget grant",
+};
+
+/** Writes a request's row before it is sent; a refusal fails the call, and nothing is sent. */
+function openRow(budget: BudgetBinding, slot: AttemptSlot, target: object, options: unknown): string {
+  const call = (options ?? {}) as { maxOutputTokens?: unknown; prompt?: unknown };
+  const modelId = (target as { modelId?: unknown }).modelId;
+  let opened: ReturnType<BudgetJournal["open"]>;
+  try {
+    opened = budget.journal.open(budget.grantId, {
+      kind: "model-request",
+      part: slot.part,
+      model: typeof modelId === "string" ? modelId : null,
+      seat: budget.seat,
+      instructionsSha256: instructionsDigest(call.prompt),
+      outputTokens: typeof call.maxOutputTokens === "number" ? call.maxOutputTokens : null,
+      boundUnits: null,
+    });
+  } catch (error) {
+    // The journal couldn't be written: nothing may be sent without its row.
+    slot.internal?.fail(error, { code: "unexpected-error", stage: "budget.open" });
+    throw slot.internal?.failure ?? error;
+  }
+  if ("refused" in opened) {
+    const refused = failure("budget-exhausted", REFUSED[opened.refused]);
+    slot.internal?.fail(refused);
+    throw refused;
+  }
+  return opened.id;
+}
+
+/**
+ * Closes a request's row from what came back: its usage, or unknown at its bound. The output count is the provider's
+ * completion count, which carries the reasoning it generated, so reasoning is billed inside output once, never added
+ * again and never dropped. A reported reasoning count larger than the output count contradicts that, so the usage
+ * can't be trusted and the row keeps its whole bound, as when no usage came back. A row that can't be closed fails
+ * the call.
+ */
+function closeRow(budget: BudgetBinding, slot: AttemptSlot, rowId: string, result: unknown): void {
+  const raw = (result as { usage?: unknown } | undefined)?.usage;
+  // Provider V2 reports scalar counts; V3/V4 report { inputTokens: { total, cacheRead },
+  // outputTokens: { total, reasoning } }. The total already contains reasoning.
+  const usage = (raw ?? {}) as { inputTokens?: unknown; cachedInputTokens?: unknown; outputTokens?: unknown; reasoningTokens?: unknown };
+  const count = (value: unknown) => (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null);
+  const inputDetails = typeof usage.inputTokens === "object" && usage.inputTokens !== null ? usage.inputTokens as { total?: unknown; cacheRead?: unknown } : null;
+  const outputDetails = typeof usage.outputTokens === "object" && usage.outputTokens !== null ? usage.outputTokens as { total?: unknown; reasoning?: unknown } : null;
+  const input = count(inputDetails ? inputDetails.total : usage.inputTokens);
+  const output = count(outputDetails ? outputDetails.total : usage.outputTokens);
+  const cached = count(inputDetails ? inputDetails.cacheRead : usage.cachedInputTokens);
+  const reasoning = count(outputDetails ? outputDetails.reasoning : usage.reasoningTokens);
+  const consistent = reasoning === null || (output !== null && reasoning <= output);
+  try {
+    budget.journal.close(
+      rowId,
+      raw && consistent ? { kind: "answered", usage: { inputTokens: input, cachedInputTokens: cached, outputTokens: output } } : { kind: "no-usage" },
+    );
+  } catch (error) {
+    // An answer whose row can't be closed isn't used: the row stays open, and the journal is sealed interrupted.
+    slot.internal?.fail(error, { code: "unexpected-error", stage: "budget.close" });
+    throw slot.internal?.failure ?? error;
+  }
+}
+
+/** The digest of the system instructions a request actually carried, or null when it carried none. */
+function instructionsDigest(prompt: unknown): string | null {
+  if (!Array.isArray(prompt)) return null;
+  const system = (prompt as Array<{ role?: unknown; content?: unknown }>).filter((message) => message?.role === "system" && typeof message.content === "string");
+  if (system.length === 0) return null;
+  return createHash("sha256").update(system.map((message) => message.content as string).join("\n")).digest("hex");
+}
+
+/** A step's settings without the grant's part, which is the journal's to know. */
+function withoutPart<T extends { budgetPart?: OperationPart }>(prepared: T): Omit<T, "budgetPart"> {
+  const { budgetPart: _part, ...rest } = prepared;
+  return rest;
 }
 
 /** A request Mastra didn't report as a step, because it was cut off: its time, and nothing it didn't say. */

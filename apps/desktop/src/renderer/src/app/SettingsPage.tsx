@@ -1,6 +1,7 @@
 import { Badge, Box, Code, Grid, Group, ScrollArea, Stack, Text, Title, UnstyledButton } from "@mantine/core";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AppInfo, EngineView, PreferencesView, ProjectView, SettingsView, WslView } from "../../../shared/ipc";
+import { CompanionUsage } from "../features/companion-usage";
 import { BudgetAndUsage } from "../features/budget-usage";
 import { Doctor } from "../features/doctor";
 import { EngineNotices } from "../features/engine";
@@ -139,6 +140,7 @@ export function SettingsPage({
 
       {/* A slot: the working budget screen takes BudgetAndUsage's place. */}
       <Box display={shown("budget")} data-testid="settings-budget">
+        <CompanionUsage freshness={opened} />
         <BudgetAndUsage />
       </Box>
 

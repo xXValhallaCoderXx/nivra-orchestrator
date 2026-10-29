@@ -29,13 +29,16 @@ export type Micros = z.infer<typeof Micros>;
 export const BudgetCurrency = z.literal("USD");
 export type BudgetCurrency = z.infer<typeof BudgetCurrency>;
 
-/** Starting points for a monthly amount. Each is a budget setting with the same features, not a subscription or a quota. */
+/**
+ * Starting points for a monthly amount. Each is a budget setting with the same features, not a subscription or a quota.
+ * "counts" is a budget of no money: it holds only the counted services' monthly allowances.
+ */
 export const BUDGET_PRESETS = Object.freeze({
   explore: { label: "Explore", monthlyMicros: 25 * MICROS_PER_UNIT },
   build: { label: "Build", monthlyMicros: 100 * MICROS_PER_UNIT },
   intensive: { label: "Intensive", monthlyMicros: 300 * MICROS_PER_UNIT },
 });
-export const BudgetPreset = z.enum(["explore", "build", "intensive", "custom"]);
+export const BudgetPreset = z.enum(["explore", "build", "intensive", "custom", "counts"]);
 export type BudgetPreset = z.infer<typeof BudgetPreset>;
 
 /** Whether `name` is a time zone this runtime knows, such as `Asia/Singapore` or `UTC`. */
@@ -73,11 +76,33 @@ export const BudgetAllowances = z.strictObject({
 });
 export type BudgetAllowances = z.infer<typeof BudgetAllowances>;
 
+/**
+ * A budget's two kinds, kept consistent: one in money names its currency and monthly amount, and may have money
+ * sublimits, warning thresholds and a price per Tavily credit; a counts-only budget (preset "counts") names none of
+ * them and holds only the counted services' allowances. Neither is ever read as the other.
+ */
+function oneKind(policy: { preset: string; currency: unknown; monthlyMicros: unknown; thresholds: readonly number[]; sublimits: BudgetSublimits; researchCreditMicros: unknown }, ctx: z.RefinementCtx): void {
+  const money = policy.currency !== null || policy.monthlyMicros !== null;
+  if ((policy.currency === null) !== (policy.monthlyMicros === null)) ctx.addIssue({ code: "custom", message: "A budget in money names its currency and its monthly amount together." });
+  if ((policy.preset === "counts") === money) ctx.addIssue({ code: "custom", message: 'A counts-only budget is the preset "counts", with no currency and no monthly amount; every other preset is in money.' });
+  if (money) return;
+  const { dailyMicros, perQueueMicros, perTaskMicros, projects, profiles } = policy.sublimits;
+  if (dailyMicros !== null || perQueueMicros !== null || perTaskMicros !== null || projects.length > 0 || profiles.length > 0) ctx.addIssue({ code: "custom", message: "A counts-only budget has no money sublimits." });
+  if (policy.thresholds.length > 0) ctx.addIssue({ code: "custom", message: "A counts-only budget has no pool to warn about." });
+  if (policy.researchCreditMicros !== null) ctx.addIssue({ code: "custom", message: "A counts-only budget prices nothing, Tavily credits included." });
+}
+
 /** What the person chooses. Choosing one never enables paid work by itself: consents and keys still govern. */
-export const BudgetPolicyDraft = z.strictObject({
+export const ModelRequestLimit = z.strictObject({ feature: z.literal("companion"), monthlyRequests: count });
+export type ModelRequestLimit = z.infer<typeof ModelRequestLimit>;
+const RequestLimits = z.array(ModelRequestLimit).max(1);
+
+const policyDraftShape = {
+  modelRequestLimits: RequestLimits.optional(),
   preset: BudgetPreset,
-  currency: BudgetCurrency,
-  monthlyMicros: Micros.min(1),
+  /** Null, with monthlyMicros, for a counts-only budget. */
+  currency: BudgetCurrency.nullable(),
+  monthlyMicros: Micros.min(1).nullable(),
   /** The calendar months count in this zone. */
   timezone: TimeZone,
   /** Percentages of the pool at which the summary warns, each from 1 to 100. */
@@ -89,17 +114,20 @@ export const BudgetPolicyDraft = z.strictObject({
    * the policy now, and applied once research calls are journalled.
    */
   researchCreditMicros: Micros.nullable(),
-});
+};
+export const BudgetPolicyDraft = z.strictObject(policyDraftShape).superRefine(oneKind);
 export type BudgetPolicyDraft = z.infer<typeof BudgetPolicyDraft>;
 
 /** A policy version: immutable once written. A change is a new version, and never resets what was spent. */
-export const BudgetPolicy = z.strictObject({
-  ...BudgetPolicyDraft.shape,
-  version: z.number().int().positive(),
-  /** The version this one replaced; null for the first. */
-  replaces: z.number().int().positive().nullable(),
-  createdAt: z.iso.datetime(),
-});
+export const BudgetPolicy = z
+  .strictObject({
+    ...policyDraftShape,
+    version: z.number().int().positive(),
+    /** The version this one replaced; null for the first. */
+    replaces: z.number().int().positive().nullable(),
+    createdAt: z.iso.datetime(),
+  })
+  .superRefine(oneKind);
 export type BudgetPolicy = z.infer<typeof BudgetPolicy>;
 
 /**
@@ -117,7 +145,14 @@ export const ModelBounds = z.strictObject({
 });
 export type ModelBounds = z.infer<typeof ModelBounds>;
 
-/** One model's prices per million tokens, in micro-units of the list's currency, and its bounds once established. */
+/** A currency established from a supported source, and where. */
+export const PriceCurrency = z.strictObject({ code: BudgetCurrency, source: z.string().min(1).max(500) });
+export type PriceCurrency = z.infer<typeof PriceCurrency>;
+
+/**
+ * One model's prices per million tokens, in micro-units of its currency, and its bounds once established. A model's
+ * own currency is established where a supported source gives that model's prices in it; otherwise the list's holds.
+ */
 export const ModelRate = z.strictObject({
   model: z.string().min(1).max(200),
   inputMicrosPerMillion: Micros,
@@ -126,6 +161,11 @@ export const ModelRate = z.strictObject({
   outputMicrosPerMillion: Micros,
   /** Null until established: without them the model gets no grant under a money policy. */
   bounds: ModelBounds.nullable(),
+  /**
+   * This model's own currency, once a supported source gives its prices in one. Absent or null leaves the list's, so a
+   * version written before models had their own stays exactly as it was kept.
+   */
+  currency: PriceCurrency.nullable().optional(),
 });
 export type ModelRate = z.infer<typeof ModelRate>;
 
@@ -134,13 +174,19 @@ export const PriceCatalogue = z.strictObject({
   version: z.string().regex(/^[a-z0-9][a-z0-9.-]{0,63}$/),
   source: z.url(),
   retrievedOn: z.iso.date(),
-  /** Null until the list's currency is established from a supported source: no money is enforced before then. */
-  currency: z.strictObject({ code: BudgetCurrency, source: z.string().min(1).max(500) }).nullable(),
+  /**
+   * Null until the list's currency is established from a supported source. A model whose own currency is established
+   * is in that one; a model with neither enforces no money.
+   */
+  currency: PriceCurrency.nullable(),
   /** Whether listing models is charged: unknown until established, and counted unpriced meanwhile. */
   listings: z.enum(["unknown", "free", "charged"]),
   models: z.array(ModelRate).min(1).max(50),
 });
 export type PriceCatalogue = z.infer<typeof PriceCatalogue>;
+
+/** The currency a model's prices are in: its own once established, else the list's; null while neither is. */
+export const currencyOf = (catalogue: PriceCatalogue, rate: ModelRate): PriceCurrency | null => rate.currency ?? catalogue.currency;
 
 /** The profile a piece of work ran as: a built-in one until custom profiles exist (NIV-54). Never a credential. */
 export const ProfileRef = z.strictObject({
@@ -153,7 +199,7 @@ export type ProfileRef = z.infer<typeof ProfileRef>;
 export const CODING_WORKER_PROFILE: ProfileRef = Object.freeze({ source: "builtin", id: "coding-worker", version: 1 });
 
 /** What the money was spent on. `maintenance` is an engine's own recovery and cleanup, outside any run. */
-export const SpendFeature = z.enum(["explain", "chat", "review", "mission-review", "coach", "research", "task", "sandbox-check", "environment", "provider-check", "maintenance"]);
+export const SpendFeature = z.enum(["explain", "chat", "review", "mission-review", "coach", "research", "task", "sandbox-check", "environment", "provider-check", "maintenance", "companion"]);
 export type SpendFeature = z.infer<typeof SpendFeature>;
 
 /** Who and what a grant's spend belongs to, so totals can be broken down without counting anything twice. */
@@ -219,6 +265,9 @@ export type GrantRequest = z.infer<typeof GrantRequest>;
 
 /** What an engine receives with a call: its finite share, never the pool. It travels in memory, never in a workflow. */
 export const BudgetGrant = z.strictObject({
+  /** Explicit allow-list; older journals fall back to their rates. */
+  models: z.array(z.string().min(1).max(200)).max(5).optional(),
+  modelListings: count.optional(),
   id: z.uuid(),
   requestId: z.uuid(),
   catalogueVersion: z.string().min(1).max(64),
@@ -340,7 +389,7 @@ export const BudgetRecovery = z.strictObject({
 export type BudgetRecovery = z.infer<typeof BudgetRecovery>;
 
 /** What the person says is left of the current month after a loss: money, and each counted service. */
-export const BudgetRemaining = z.strictObject({ micros: Micros, allowances: BudgetAllowances });
+export const BudgetRemaining = z.strictObject({ micros: Micros, allowances: BudgetAllowances, mode: z.enum(["money", "counts"]).optional(), modelRequestLimits: RequestLimits.optional() });
 export type BudgetRemaining = z.infer<typeof BudgetRemaining>;
 
 /** Why a total can't be read as complete. Each is said in the summary, never smoothed over. */

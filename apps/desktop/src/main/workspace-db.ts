@@ -628,6 +628,25 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
   CREATE TRIGGER budget_operations_kept BEFORE UPDATE ON budget_operations BEGIN SELECT RAISE(ABORT, 'a recorded operation is kept as it was reported'); END;
   CREATE TRIGGER budget_operations_not_removed BEFORE DELETE ON budget_operations BEGIN SELECT RAISE(ABORT, 'recorded operations are kept'); END;
 `,
+  `
+  -- A lost or rolled-back budget history the check found (NIV-66), kept in the workspace as well as in the guard, so a
+  -- guard deleted or cut short before the person resolves it can't clear it. Written when the loss is found, before the
+  -- guard records it; removed only with the new history that answers it, in that history's own transaction. A matching
+  -- copy put back never holds it. No other table changes.
+  CREATE TABLE budget_pending_recovery (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    recovery_json TEXT NOT NULL,
+    found_at TEXT NOT NULL
+  ) STRICT;
+  CREATE TRIGGER budget_pending_recovery_kept BEFORE UPDATE ON budget_pending_recovery BEGIN SELECT RAISE(ABORT, 'a pending recovery is kept as it was found'); END;
+  CREATE TRIGGER budget_pending_recovery_answered BEFORE DELETE ON budget_pending_recovery
+  WHEN NOT EXISTS (
+    SELECT 1 FROM budget_adjustments
+    WHERE kind = 'history-lost' AND json_extract(recovery_json, '$.detectedAt') = json_extract(OLD.recovery_json, '$.detectedAt')
+      AND json_extract(recovery_json, '$.guard.revision') = json_extract(OLD.recovery_json, '$.guard.revision')
+  )
+  BEGIN SELECT RAISE(ABORT, 'a pending recovery is removed only with the new history that answers it'); END;
+`,
 ];
 
 export type WorkspaceOpening =

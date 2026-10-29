@@ -1,6 +1,7 @@
 import { isTerminal, type JsonObject, type RunStatus, type StartRunParams, type WorkflowId } from "@nivra/domain";
 import type { z } from "zod";
 import { errorFacts, internalMessage, publicFailure, Refusal, type Diagnostic, type DiagnosticCode, type ErrorFacts } from "../diagnostics.ts";
+import type { BudgetJournal } from "../budget/journal.ts";
 import type { NewEvent, RunStore } from "./store.ts";
 
 /**
@@ -71,6 +72,8 @@ export interface SchedulerOptions {
   log: SchedulerLog;
   /** Writes one safe diagnostic line (NIV-27): how each failure is logged, never by an error's own words. */
   diagnose: (diagnostic: Diagnostic) => void;
+  /** The budget journal (NIV-66): a run's grant is sealed in its terminal transition. */
+  journal?: Pick<BudgetJournal, "endWith" | "accept" | "grantForRun">;
 }
 
 interface Slot {
@@ -190,6 +193,9 @@ export class RunScheduler {
   #source: WorkflowSource | null = null;
   #recovered = false;
   #stopping: string | null = null;
+  readonly #journal: Pick<BudgetJournal, "endWith" | "accept" | "grantForRun"> | null;
+  /** Each live run's budget grant, held in memory like its context (NIV-66). */
+  readonly #grants = new Map<string, string>();
 
   constructor(options: SchedulerOptions) {
     this.#store = options.store;
@@ -199,6 +205,12 @@ export class RunScheduler {
     this.#maxTasks = options.maxTasks ?? MAX_TASK_RUNS;
     this.#log = options.log;
     this.#diagnose = options.diagnose;
+    this.#journal = options.journal ?? null;
+  }
+
+  /** The live run's accepted grant ID; no grant or budget context enters workflow data. */
+  grantOf(runId: string): string | null {
+    return this.#grants.get(runId) ?? null;
   }
 
   attach(source: WorkflowSource): void {
@@ -219,12 +231,19 @@ export class RunScheduler {
   submit(request: StartRunParams): string {
     const entry = this.#workflows.get(request.workflowId);
     if (!entry) throw new Error(`Unknown workflow ${request.workflowId}`);
+    if (request.budget && (request.budget.requestId !== request.clientRequestId || !this.#journal)) {
+      throw new Refusal("request-conflict", "This run's budget grant doesn't belong to its request, so nothing was started.");
+    }
     const { id, created } = this.#store.create({
       workflowId: request.workflowId,
       title: entry.title(request.input),
       input: request.input,
       clientRequestId: request.clientRequestId,
       instanceId: this.#instanceId,
+    }, (runId, newlyCreated) => {
+      const held = this.#journal?.grantForRun(runId) ?? null;
+      if ((!newlyCreated && (held ?? undefined) !== request.budget?.id) || (held !== null && held !== request.budget?.id)) throw new Refusal("request-conflict", "This request already has another budget grant, so nothing was started.");
+      if (request.budget) this.#journal!.accept(request.budget, { runId, providerDate: null });
     });
     // A repeated request returns the run it already created, which keeps the context it came with. The same id with
     // other work is refused: a review is bound to its plan version and fingerprints (D30), a check to its preview (D36),
@@ -248,6 +267,7 @@ export class RunScheduler {
     if (created) {
       this.#contexts.set(id, { workflowId: request.workflowId, context: request.context });
       this.#requests.set(id, request.clientRequestId);
+      if (request.budget) this.#grants.set(id, request.budget.id);
     }
     this.pump();
     return id;
@@ -276,7 +296,11 @@ export class RunScheduler {
       slot.run?.cancel().catch((error: unknown) => this.#diagnose({ code: "cancel-failed", stage: "run.cancel", run: runId, error: errorFacts(error) }));
     } else {
       // Queued, or running in no live process of ours: nothing is executing here, so record the cancellation.
-      this.#store.transition(runId, "cancelled", { type: "run.cancelled", message: status === "queued" ? `${message} before it started` : message });
+      const end = () => this.#store.transition(runId, "cancelled", { type: "run.cancelled", message: status === "queued" ? `${message} before it started` : message });
+      const grantId = this.#grants.get(runId);
+      if (grantId !== undefined && this.#journal) this.#journal.endWith(grantId, end);
+      else end();
+      this.#grants.delete(runId);
       this.#contexts.delete(runId);
       this.#requests.delete(runId);
     }
@@ -343,7 +367,12 @@ export class RunScheduler {
       unwatch();
       const elapsedMs = performance.now() - slot.startedAt;
       this.#store.setMeta(runId, { durationMs: elapsedMs });
-      this.#store.transition(runId, settled.status, { ...settled.event, error: settled.error });
+      // The run's grant is sealed in the same transaction as its terminal transition, and only here (NIV-66).
+      const grantId = this.#grants.get(runId);
+      const end = () => this.#store.transition(runId, settled.status, { ...settled.event, error: settled.error });
+      if (grantId !== undefined && this.#journal) this.#journal.endWith(grantId, end);
+      else end();
+      this.#grants.delete(runId);
       // One line per failed run, with what can safely be said about it (NIV-27).
       if (settled.diagnostic) {
         const { code, stage, reason, kind, error } = settled.diagnostic;

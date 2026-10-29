@@ -121,6 +121,20 @@ describe("the budget through the host", () => {
     assert.deepEqual([off.policy, guardAt(at).last()?.revision], [null, (before?.revision ?? 0) + 1]);
   });
 
+  it("saves a counts-only budget with today's price list, keeps it across a restart, and refuses a dollar budget in its place", async () => {
+    const at = root();
+    const counts: BudgetPolicyDraft = { ...DRAFT, preset: "counts", currency: null, monthlyMicros: null, thresholds: [], sublimits: NO_SUBLIMITS, researchCreditMicros: null };
+    const first = hostAt(at, CURRENT_PRICES);
+    const saved = await first.setBudgetPolicy(counts);
+    assert.deepEqual([saved.policy?.preset, saved.poolMicros, saved.availableMicros, saved.counted.allowed], ["counts", null, null, DRAFT.allowances]);
+    assert.equal(guardAt(at).last()?.revision, 1);
+    await first.shutdown();
+    const restarted = hostAt(at, CURRENT_PRICES);
+    assert.equal((await restarted.getBudgetPolicy())?.preset, "counts");
+    await assert.rejects(restarted.setBudgetPolicy(DRAFT), /it still holds counts only/);
+    await assert.rejects(restarted.setBudgetPolicy({ ...counts, thresholds: [80] }));
+  });
+
   it("refuses a policy that isn't valid, and saves nothing", async () => {
     const host = hostAt(root());
     await assert.rejects(host.setBudgetPolicy({ ...DRAFT, monthlyMicros: 1.5 }));
@@ -208,6 +222,29 @@ describe("the budget through the host", () => {
     assert.ok(after.revision > before.revision);
     const saved = await third.setBudgetPolicy(DRAFT);
     assert.equal(saved.policy?.version, 1);
+    await third.shutdown();
+    assert.equal((await hostAt(at).budgetSummary()).recovery, null);
+  });
+
+  it("keeps a loss it found in the workspace too: with the guard deleted and Nivra restarted, every budget change stays refused until a new history", async () => {
+    const at = root();
+    const first = hostAt(at);
+    await first.setBudgetPolicy(DRAFT);
+    await first.shutdown();
+    for (const suffix of ["-wal", "-shm"]) rmSync(join(at, `workspace.db${suffix}`), { force: true });
+    writeFileSync(join(at, "workspace.db"), "this is not a SQLite database at all");
+    const second = hostAt(at);
+    assert.equal((await second.budgetSummary()).recovery?.reason, "workspace-kept-aside");
+    await second.shutdown();
+    rmSync(join(at, "budget-guard.log"));
+    const third = hostAt(at);
+    const still = await third.budgetSummary();
+    assert.equal(still.recovery?.reason, "workspace-kept-aside", "the loss stands though the guard was deleted");
+    await assert.rejects(third.setBudgetPolicy(DRAFT), (error: Error) => error.message === BUDGET_NEEDS_RECOVERY);
+    await assert.rejects(third.confirmBudgetMonth(still.clock.computerMonth), (error: Error) => error.message === BUDGET_NEEDS_RECOVERY);
+    assert.equal(guardAt(at).last()?.recovery?.reason, "workspace-kept-aside", "and the guard records it again");
+    const resumed = await third.startNewBudgetHistory(null);
+    assert.equal(resumed.recovery, null);
     await third.shutdown();
     assert.equal((await hostAt(at).budgetSummary()).recovery, null);
   });

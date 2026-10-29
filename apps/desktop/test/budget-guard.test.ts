@@ -13,9 +13,11 @@ import {
   currentPeriod,
   establishedMonth,
   getGrant,
+  keepPendingRecovery,
   ledgerState,
   markDispatching,
   observeProviderTime,
+  pendingRecovery,
   recordJournal,
   releaseGrant,
   setPolicy,
@@ -330,7 +332,7 @@ describe("a backup put back after paid work, holding the same number of grants",
     const reached = ledgerState(db)!.revision;
     db = restore(db, join(dir, "after-written.db")).db;
     // Changes made to the restored copy without the check, until it stands past the guard's revision.
-    while (ledgerState(db)!.revision <= reached) setPolicy(db, { ...DRAFT, monthlyMicros: DRAFT.monthlyMicros + ledgerState(db)!.revision }, OCT, ESTABLISHED);
+    while (ledgerState(db)!.revision <= reached) setPolicy(db, { ...DRAFT, monthlyMicros: DRAFT.monthlyMicros! + ledgerState(db)!.revision }, OCT, ESTABLISHED);
     const found = check(db, guard);
     assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-diverged");
     assert.equal(getGrant(db, id)?.state, "written");
@@ -652,5 +654,134 @@ describe("the latest month a lost history established, kept by the guard whateve
     const lostOne = checkHistory(record(ledger, null, "2026-11", OCT_BACK), null, false, NOV);
     assert.ok(lostOne.state === "needs-recovery");
     assert.deepEqual([lostOne.recovery.guard.month, lostOne.recovery.guard.at, lostOne.append?.month], ["2026-11", new Date(OCT_BACK).toISOString(), "2026-11"]);
+  });
+});
+
+describe("a loss kept in the workspace too, so a guard deleted or cut short can't clear it", () => {
+  /** What the host does at the first budget call of a session: check, keep a loss found in the workspace, then record. */
+  function checkAsHost(db: WorkspaceDb, guard: BudgetGuard, keptAside = false, now = OCT) {
+    const pending = pendingRecovery(db);
+    const found = checkHistory(guard.last(), view(db, guard), keptAside, now, pending);
+    if (found.state === "needs-recovery" && pending === null) keepPendingRecovery(db, found.recovery, now);
+    if (found.append) guard.append(found.append);
+    return found;
+  }
+
+  /** A history rolled back by a copy put back: November spent in, then October's copy restored, and the loss found. */
+  function rolledBack() {
+    const { dbPath, guard, dir } = profile();
+    let db = opening(dbPath).db;
+    guard.append(recorded(db, setPolicy(db, { ...DRAFT, monthlyMicros: 10_000_000 }, OCT, ESTABLISHED).authority!));
+    const id = written(db, guard);
+    backup(db, join(dir, "october.db"));
+    guard.append(recorded(db, observeProviderTime(db, NOV, NOV, "UTC").authority!, NOV));
+    dispatched(db, guard, id);
+    backup(db, join(dir, "matching.db"));
+    db = restore(db, join(dir, "october.db")).db;
+    const found = checkAsHost(db, guard);
+    assert.ok(found.state === "needs-recovery" && found.recovery.reason === "ledger-behind");
+    assert.deepEqual(pendingRecovery(db), found.recovery, "kept in the workspace before the guard recorded it");
+    return { db, guard, dir, recovery: found.recovery };
+  }
+
+  it("still needs recovery after the guard is deleted and Nivra restarts, with the same loss and the month it names", () => {
+    const { db, guard, recovery } = rolledBack();
+    rmSync(guard.path);
+    const restarted = new BudgetGuard(guard.path);
+    const found = checkAsHost(db, restarted);
+    assert.ok(found.state === "needs-recovery");
+    assert.deepEqual([found.recovery, found.recovery.guard.month], [recovery, "2026-11"]);
+    assert.deepEqual([restarted.last()?.recovery, restarted.last()?.month], [recovery, "2026-11"], "the guard records it again");
+    assert.equal(checkAsHost(db, new BudgetGuard(guard.path)).state, "needs-recovery", "and it survives the next restart too");
+  });
+
+  it("still needs recovery after the guard is emptied, or cut short in its last line", () => {
+    for (const cut of [(text: string) => "", (text: string) => text.slice(0, text.length - 40)]) {
+      const { db, guard, recovery } = rolledBack();
+      writeFileSync(guard.path, cut(readFileSync(guard.path, "utf8")));
+      const found = checkAsHost(db, new BudgetGuard(guard.path));
+      assert.ok(found.state === "needs-recovery" && found.recovery.detectedAt === recovery.detectedAt);
+    }
+  });
+
+  it("keeps a lost workspace's loss in the fresh one Nivra opened, so deleting the guard doesn't make it a fresh install", () => {
+    const { dbPath, guard } = profile();
+    const db = opening(dbPath).db;
+    guard.append(recorded(db, setPolicy(db, DRAFT, OCT, ESTABLISHED).authority!));
+    written(db, guard);
+    db.close();
+    writeFileSync(dbPath, "this is not a SQLite database at all");
+    for (const suffix of ["-wal", "-shm"]) rmSync(`${dbPath}${suffix}`, { force: true });
+    const fresh = opening(dbPath);
+    assert.notEqual(fresh.notice, null);
+    assert.equal(checkAsHost(fresh.db, guard, true).state, "needs-recovery");
+    rmSync(guard.path);
+    const found = checkAsHost(fresh.db, new BudgetGuard(guard.path));
+    assert.ok(found.state === "needs-recovery" && found.recovery.reason === "workspace-kept-aside");
+  });
+
+  it("holds a new history started after the guard was deleted through the month the kept loss names", () => {
+    const { db, guard, recovery } = rolledBack();
+    rmSync(guard.path);
+    const restarted = new BudgetGuard(guard.path);
+    const found = checkAsHost(db, restarted);
+    assert.ok(found.state === "needs-recovery");
+    restarted.append(recorded(db, startNewHistory(db, { recovery: found.recovery, remaining: null, now: OCT, timezone: "UTC" })));
+    assert.equal(pendingRecovery(db), null, "answered, in the new history's own transaction");
+    assert.equal(checkAsHost(db, restarted).state, "ok");
+    assert.equal(observeProviderTime(db, Date.parse("2026-11-05T01:00:00Z"), OCT, "UTC").opened?.label, "2026-11");
+    assert.equal(code(ask(db, {}, OCT)), "history-wait", "a wait through November, as the loss named");
+    assert.equal(recovery.guard.month, "2026-11");
+  });
+
+  it("orders a crash safely: one after the loss was kept and before the guard recorded it finds the same loss at the next start", () => {
+    const { dbPath, guard, dir } = profile();
+    let db = opening(dbPath).db;
+    const id = written(db, guard);
+    backup(db, join(dir, "early.db"));
+    dispatched(db, guard, id);
+    db = restore(db, join(dir, "early.db")).db;
+    // The workspace keeps the loss; the process dies before the guard's record.
+    const first = checkHistory(guard.last(), view(db, guard), false, OCT, null);
+    assert.ok(first.state === "needs-recovery");
+    keepPendingRecovery(db, first.recovery, OCT);
+    assert.equal(guard.last()?.recovery, null);
+    const found = checkAsHost(db, guard, false, NOV);
+    assert.ok(found.state === "needs-recovery");
+    assert.deepEqual([found.recovery.detectedAt, guard.last()?.recovery?.detectedAt], [first.recovery.detectedAt, first.recovery.detectedAt], "the first loss found stands");
+  });
+
+  it("keeps the first loss found: another found later never replaces it, so the month it names is never lost", () => {
+    const { db, recovery } = rolledBack();
+    const later = { ...recovery, detectedAt: new Date(DEC).toISOString(), guard: { ...recovery.guard, month: "2026-10" } };
+    assert.deepEqual(keepPendingRecovery(db, later, DEC), recovery);
+    assert.deepEqual(pendingRecovery(db), recovery);
+  });
+
+  it("clears when the matching copy is put back, which never held the mark", () => {
+    const { db, guard, dir } = rolledBack();
+    const back = restore(db, join(dir, "matching.db")).db;
+    assert.equal(pendingRecovery(back), null);
+    assert.equal(checkAsHost(back, guard).state, "ok");
+  });
+
+  it("can't be removed by hand, only with the new history that answers it", () => {
+    const { db } = rolledBack();
+    assert.throws(() => db.db.prepare("DELETE FROM budget_pending_recovery").run(), /removed only with the new history that answers it/);
+    assert.throws(() => db.db.prepare("UPDATE budget_pending_recovery SET found_at = 'x'").run(), /kept as it was found/);
+    assert.notEqual(pendingRecovery(db), null);
+  });
+
+  it("is what the check honours over whatever the guard holds, recording it again when the guard doesn't hold it", () => {
+    const ledger: LedgerState = { ledgerId: randomUUID(), revision: 5, chain: digest() };
+    const pending = checkHistory(record({ ...ledger, revision: 9 }, null, "2026-11"), { ...ledger, month: "2026-10", chainAtGuard: null, answered: null }, false, OCT);
+    assert.ok(pending.state === "needs-recovery");
+    for (const guard of [null, record(ledger, null, "2026-10")]) {
+      const found = checkHistory(guard, { ...ledger, month: "2026-10", chainAtGuard: ledger.chain, answered: null }, false, NOV, pending.recovery);
+      assert.ok(found.state === "needs-recovery" && found.recovery === pending.recovery);
+      assert.deepEqual([found.append?.recovery, found.append?.month, found.append?.revision], [pending.recovery, "2026-11", 9]);
+    }
+    const recordedAlready = checkHistory(pending.append!, null, false, NOV, pending.recovery);
+    assert.equal(recordedAlready.append, null);
   });
 });

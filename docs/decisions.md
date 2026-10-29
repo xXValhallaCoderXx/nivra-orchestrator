@@ -3773,3 +3773,34 @@ releases are offered, and each refusal says which to pin.
   (GHSA-c59q-g84q-2gj5 and others) in the release index, since they affect every install; have a task's preview say
   when its environment holds chosen packages only; let `rpc.ts` start a recipe's preparation; and hint that pnpm drops
   `...` after a `./folder` selector.
+
+
+## D53. Companion AI request accounting through the guarded ledger (2026-10-29)
+
+**Decision.** NIV-66's companion prerequisite reuses the saved pending-recovery, counts-only, second price-list and
+engine-journal work. One optional monthly inference-request allowance covers Companion AI across this installation's
+scopes, keys and engines. No other feature is represented as covered by this increment.
+
+- The host reserves finite productive/finalisation requests atomically, deduplicates root requests and guards the
+  dispatch revision before RPC. Extensions retain their original attribution. The engine accepts and binds the grant
+  before scheduling, bounds model listings separately, and journals each inference at its send point.
+- A sent/uncertain inference counts even when price or tokens are unknown. Active grants retain their reservation;
+  complete seals count actual sent rows and release only unused capacity. Interrupted, missing and unreachable evidence
+  never releases capacity or causes a resend. Queued cancellation seals too. Reconciliation checks the original home.
+- The guard's verified revision, never a freshly read ledger passed as verification, authorises writing, dispatch and
+  release. The first detected history loss remains recorded in the workspace and guard. Counts recovery explicitly
+  records a remaining companion-request allowance; historical money recovery is never reinterpreted as counts.
+- Policy edits, project/key changes and restart do not reset usage. Calendar rollover retains the existing corroborated
+  month rules. Recovery views label earlier usage unknown and show only retained-record subtotals and effective remaining
+  capacity. Missing tokens stay unknown; SDK scalar and nested token usage are supported without adding reasoning twice.
+- Absent means no monthly companion limit; zero stops companion inference. Per-turn limits still apply. Listings are
+  recorded but consume no inference-request units. The UI offers no token or dollar ceiling. Existing dollar-policy
+  refusals remain in force; setting a companion limit never replaces an existing money policy.
+
+**Why.** A chat message is not a reliable request count. Shared atomic admission and durable send evidence prevent scopes
+or engines from independently spending the last request, while uncertain outcomes cannot become free work.
+
+**Consequences.** Protocol 18 carries grants and paginated journal evidence. Host workspace v10 retains pending recovery.
+Other model features, research and sandbox work still require their own integration. An offline target's outstanding
+reservation stays held until that engine reconnects. This is an installation allowance, not provider billing enforcement.
+No live paid call was required to verify it.

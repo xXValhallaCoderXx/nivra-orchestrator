@@ -191,11 +191,19 @@ export type HistoryCheck = { state: "fresh" | "ok"; append: GuardRecord | null }
  *   lower revision, or the guard's revision reached along another history (whatever the number of grants) needs
  *   recovery; a workspace just kept aside is named as the reason when its ledger is gone. The recovery is recorded in
  *   the guard.
+ * - Before all of these: a loss already found and kept in the workspace (`pending`, budget-store.ts) stands, whatever
+ *   the guard now holds, deleted, cut short or rebuilt; the guard records it again when it doesn't hold it, with the
+ *   month it names. The caller keeps a loss it finds in the workspace before the guard records it.
  */
-export function checkHistory(guard: GuardRecord | null, ledger: LedgerView | null, keptAside: boolean, now: number): HistoryCheck {
+export function checkHistory(guard: GuardRecord | null, ledger: LedgerView | null, keptAside: boolean, now: number, pending: BudgetRecovery | null = null): HistoryCheck {
   const at = new Date(now).toISOString();
   // A record never names an earlier month than the guard's last one: what a lost history established is carried on.
   const recordOf = (state: LedgerView): GuardRecord => ({ ledgerId: state.ledgerId, revision: state.revision, chain: state.chain, month: laterMonth(state.month, guard?.month ?? null), recovery: null, at });
+  if (pending !== null) {
+    const recorded = guard?.recovery != null && sameRecovery(guard.recovery, pending);
+    const again: GuardRecord = { ledgerId: pending.guard.ledgerId, revision: pending.guard.revision, chain: pending.guard.chain, month: laterMonth(pending.guard.month, guard?.month ?? null), recovery: pending, at };
+    return { state: "needs-recovery", recovery: pending, append: recorded ? null : again };
+  }
   if (guard === null) return ledger === null ? { state: "fresh", append: null } : { state: "ok", append: recordOf(ledger) };
   const holds = ledger !== null && ledger.ledgerId === guard.ledgerId && ledger.revision >= guard.revision && ledger.chainAtGuard === guard.chain;
   if (guard.recovery !== null) {

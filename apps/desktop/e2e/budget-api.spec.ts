@@ -8,10 +8,11 @@ import type { BudgetPolicyDraft } from "@nivra/domain";
 /**
  * The shared budget's API in the built app (NIV-66): the calls the budget screen and the development harness both use,
  * through the preload, the trusted-sender check and the argument check. The app's own price list can't keep a budget in
- * dollars yet, so one is refused, saying why, and the budget stays as it was; counts alone (the monthly budget off) stays
- * the person's own choice; bad input never reaches the host; a month is confirmed only by the label shown, and kept
- * across a relaunch; and a damaged history opens with the budget needing recovery and changes refused. A budget in
- * dollars that can be kept is tested through the host, with a test price list (host-budget.test.ts).
+ * dollars yet, so one is refused, saying why, and the budget stays as it was; the budget off (the existing per-run
+ * limits) and a counts-only budget are each the person's own choice, and a counts-only one is saved and kept across a
+ * relaunch; bad input never reaches the host; a month is confirmed only by the label shown; and a damaged history opens
+ * with the budget needing recovery and changes refused. A budget in dollars that can be kept is tested through the
+ * host, with a test price list (host-budget.test.ts).
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 let root: string;
@@ -29,6 +30,8 @@ async function launch(testInfo: TestInfo, userData: string) {
   return { app, page: await app.firstWindow() };
 }
 
+/** A budget of no money: it holds the counted services' monthly allowances alone. */
+const COUNTS = (draft: BudgetPolicyDraft): BudgetPolicyDraft => ({ ...draft, preset: "counts", currency: null, monthlyMicros: null, thresholds: [], researchCreditMicros: null });
 const DRAFT: BudgetPolicyDraft = {
   preset: "build",
   currency: "USD",
@@ -40,7 +43,7 @@ const DRAFT: BudgetPolicyDraft = {
   researchCreditMicros: null,
 };
 
-test("the budget's calls refuse a dollar budget the app can't keep yet, keep counts alone as the person's choice, refuse bad input, keep the month across a relaunch, and block changes after a damaged history", async ({}, testInfo) => {
+test("the budget's calls refuse a dollar budget the app can't keep yet, save a counts-only one, refuse bad input, keep both across a relaunch, and block changes after a damaged history", async ({}, testInfo) => {
   root = mkdtempSync(join(tmpdir(), "nivra budget e2e ü%# "));
   const userData = join(root, "user data");
 
@@ -57,7 +60,10 @@ test("the budget's calls refuse a dollar budget the app can't keep yet, keep cou
     }, draft);
   expect(await page.evaluate(() => window.nivra.getBudgetPolicy())).toBeNull();
   const dollars = await attempt(DRAFT);
-  expect(dollars).toMatch(/Nivra can't keep a monthly budget in dollars yet: it hasn't established the currency of its price list, the most a request can cost with any model on its price list or whether listing its models is charged,/);
+  // Today's list (version 2): Super VL's prices are in US dollars, so the currency missing is the other models'.
+  expect(dollars).toMatch(
+    /Nivra can't keep a monthly budget in dollars yet: it hasn't established the currency of its prices for nvidia\/nemotron-3-super-120b-a12b, nvidia\/Nemotron-3_5-Lightning and nvidia\/Nemotron-3-Ultra-550b-a55b, the most a request can cost with any model on its price list or whether listing its models is charged,/,
+  );
   expect(dollars).toMatch(/Your monthly budget stays off, and the existing per-run limits apply\./);
   expect(await page.evaluate(() => window.nivra.getBudgetPolicy())).toBeNull();
   const off = await page.evaluate(() => window.nivra.setBudgetPolicy(null));
@@ -78,13 +84,16 @@ test("the budget's calls refuse a dollar budget the app can't keep yet, keep cou
   // The ledger's first month opens on the person's word; the same month again is refused.
   expect(months[1]).toBe("confirmed");
   expect(months[2]).toMatch(/still the same budget month/);
+  // Counts only, its own choice: saved with today's price list, since it holds no money.
+  const counts = await page.evaluate((draft) => window.nivra.setBudgetPolicy(draft), COUNTS(DRAFT));
+  expect([counts.policy?.preset, counts.poolMicros, counts.counted.allowed]).toEqual(["counts", null, DRAFT.allowances]);
   expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
   await app.close();
 
   ({ app, page } = await launch(testInfo, userData));
   const relaunched = await page.evaluate(() => window.nivra.budgetSummary());
-  expect([relaunched.policy, relaunched.period?.label, relaunched.recovery]).toEqual([null, off.clock.computerMonth, null]);
-  expect(await attempt(DRAFT)).toMatch(/can't keep a monthly budget in dollars yet/);
+  expect([relaunched.policy?.preset, relaunched.period?.label, relaunched.recovery]).toEqual(["counts", off.clock.computerMonth, null]);
+  expect(await attempt(DRAFT)).toMatch(/can't keep a monthly budget in dollars yet: .* Your budget wasn't changed: it still holds counts only\./);
   await app.close();
 
   writeFileSync(join(userData, "workspace.db"), "this is not a database ".repeat(40));

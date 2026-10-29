@@ -242,7 +242,7 @@ describe("a coach run's input and report (NIV-53)", () => {
   it("starts as a run of its own, with its packet in the context and only ids and fingerprints in its input (since protocol 13)", () => {
     const params = { clientRequestId: randomUUID(), workflowId: "coach", input: input(), context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false }, packet: PACKET } };
     const parsed = StartRunParams.parse(params);
-    assert.deepEqual([parsed.workflowId, WorkflowId.parse("coach"), PROTOCOL_VERSION], ["coach", "coach", 17]);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("coach"), PROTOCOL_VERSION], ["coach", "coach", 18]);
     const refused = [
       { ...params, input: { ...params.input, packet: PACKET } },
       { ...params, context: { ...params.context, packet: { ...PACKET, task: { ...PACKET.task, repoPath: "/repo" } } } },

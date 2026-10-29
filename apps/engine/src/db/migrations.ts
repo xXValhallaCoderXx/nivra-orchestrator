@@ -1,3 +1,5 @@
+import { BUDGET_JOURNAL_SCHEMA } from "../budget/schema.ts";
+
 /**
  * Schema versions of `<home>/nivra.db`, applied in order and tracked with `PRAGMA user_version`. Only ever append,
  * and keep each one additive: never edit a version that has shipped.
@@ -81,4 +83,7 @@ export const MIGRATIONS: readonly string[] = [
    );
    CREATE UNIQUE INDEX applies_open ON applies (destination) WHERE state IN ('claimed', 'writing') OR (state IN ('partial', 'unknown') AND resolution IS NULL);
    CREATE UNIQUE INDEX applies_applied ON applies (run_id) WHERE state = 'applied';`,
+  // v6 (NIV-66): the journal of paid operations under the host's grants: each grant accepted, each operation written at
+  // its send point and closed on every path, and each journal sealed, complete or interrupted (budget/journal.ts).
+  BUDGET_JOURNAL_SCHEMA,
 ];

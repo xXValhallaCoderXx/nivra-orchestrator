@@ -1,9 +1,13 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
-import { requestMsFor, TASK_RUN_BOUNDS } from "@nivra/domain";
+import { CURRENT_PRICES, NO_SUBLIMITS, requestMsFor, TASK_RUN_BOUNDS } from "@nivra/domain";
+import { BudgetGuard } from "../src/main/budget-guard.ts";
+import { establishedMonth, ledgerState, markDispatching, recordJournal, setPolicy, writeGrant } from "../src/main/budget-store.ts";
+import { openWorkspace } from "../src/main/workspace-db.ts";
 import { goTo } from "./places.ts";
 
 /**
@@ -12,7 +16,7 @@ import { goTo } from "./places.ts";
  * them, the section says so and shows no figure. A fresh profile, no project needed.
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
-const WORDS = "Shared budget tracking and controls aren't available in this build. Existing per-run limits apply.";
+const WORDS = "Other agents, research and sandbox operations aren't covered by the Companion AI request allowance. Their existing per-run limits apply.";
 
 let root: string;
 let app: ElectronApplication;
@@ -31,9 +35,9 @@ test.afterAll(async () => {
   rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 });
 
-test("shows Nate's words and the engine's per-run limits, the figures the domain's, with nothing to press and no money", async () => {
+test("shows precise companion coverage and the engine's separate per-run limits", async () => {
   await goTo(page, "settings-budget");
-  const section = page.getByTestId("settings-budget");
+  const section = page.getByTestId("budget-usage");
   await expect(page.getByTestId("settings-tab-budget")).toHaveAttribute("aria-current", "page");
   await expect(section.getByTestId("budget-usage-note")).toHaveText(WORDS);
 
@@ -66,9 +70,106 @@ test("when main can't give the limits, the section says so and shows no figure",
   });
   await page.reload();
   await goTo(page, "settings-budget");
-  const section = page.getByTestId("settings-budget");
+  const section = page.getByTestId("budget-usage");
   await expect(section.getByTestId("budget-usage-error")).toHaveText("Nivra couldn't read the per-run limits, so none are shown here. Each run's preview shows its bounds before it starts.");
   await expect(section.getByTestId("budget-usage-note")).toHaveText(WORDS);
   await expect(section.getByTestId("budget-usage-limit")).toHaveCount(0);
   expect(/\d/.test((await section.textContent()) ?? "")).toBe(false);
+});
+
+
+test("sets a companion-only monthly request allowance and keeps other per-run limits separate", async () => {
+  await goTo(page, "settings-budget");
+  const view = page.getByTestId("companion-usage");
+  await expect(view).toContainText("doesn't cover other agents");
+  await view.getByTestId("companion-limit-enabled").check();
+  await view.getByTestId("companion-limit").fill("12");
+  await view.getByTestId("companion-limit-save").click();
+  await expect.poll(async () => (await page.evaluate(() => window.nivra.getCompanionUsage())).limit).toBe(12);
+  await page.reload(); await goTo(page,"settings-budget");
+  await expect(page.getByTestId("companion-limit")).toHaveValue("12");
+  const usage = await page.evaluate(() => window.nivra.getCompanionUsage());
+  expect([usage.used,usage.reserved,usage.remaining]).toEqual([0,0,12]);
+});
+
+/** An actual exhausted, settled ledger from last month, with no engine or provider involved. */
+function seedExhaustedMonth(userData: string) {
+  mkdirSync(userData, { recursive: true });
+  const today = new Date();
+  const previous = Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 2);
+  const opening = openWorkspace(join(userData, "workspace.db"));
+  expect(opening.state).toBe("ready");
+  if (opening.state !== "ready") throw new Error("The budget fixture couldn't open its workspace.");
+  const workspace = opening.db;
+  try {
+    setPolicy(workspace, { preset: "counts", currency: null, monthlyMicros: null, timezone: "UTC", thresholds: [], sublimits: NO_SUBLIMITS, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, researchCreditMicros: null, modelRequestLimits: [{ feature: "companion", monthlyRequests: 1 }] }, previous, CURRENT_PRICES);
+    const written = writeGrant(workspace, { requestId: randomUUID(), workflow: "companion", targetId: "local", attribution: { feature: "companion", projectId: null, taskId: null, attemptId: null, queueId: null, queueItemId: null, profile: null }, models: [CURRENT_PRICES.models[0]!.model], productive: { requests: 1, outputTokens: 4000 }, finalisation: { requests: 0, outputTokens: 0 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, extends: null, need: null }, { now: previous, catalogue: CURRENT_PRICES, timezone: "UTC", verified: ledgerState(workspace) });
+    expect("grant" in written).toBe(true);
+    if (!("grant" in written)) throw new Error("The budget fixture couldn't reserve its request.");
+    const grantId = written.grant.id;
+    markDispatching(workspace, grantId, "budget-fixture-home", previous, ledgerState(workspace));
+    const settled = recordJournal(workspace, grantId, [{ id: randomUUID(), grantId, seq: 1, kind: "model-request", model: CURRENT_PRICES.models[0]!.model, seat: "worker", instructionsSha256: null, state: "reported", boundMicros: null, usage: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 }, units: null, amountMicros: null }], { grantId, kind: "complete", rows: 1, instanceId: randomUUID(), sealedAt: new Date(previous).toISOString() }, previous);
+    expect("refused" in settled).toBe(false);
+    const state = ledgerState(workspace)!;
+    new BudgetGuard(join(userData, "budget-guard.log")).append({ ...state, month: establishedMonth(workspace), recovery: null, at: new Date(previous).toISOString() });
+    return new Date(previous).toISOString().slice(0, 7);
+  } finally {
+    workspace.close();
+  }
+}
+
+test("only explicit month confirmation renews an exhausted settled allowance, without starting an engine", async ({}, testInfo) => {
+  const fixture = mkdtempSync(join(tmpdir(), "nivra budget month ü "));
+  const userData = join(fixture, "user data");
+  const previousMonth = seedExhaustedMonth(userData);
+  const executable = testInfo.project.metadata["executable"] as string | undefined;
+  const args = [`--user-data-dir=${userData}`, `--nivra-engine-home=${join(fixture, "engine home")}`];
+  const monthApp = await electron.launch(executable ? { executablePath: join(desktop, executable), args, chromiumSandbox: true } : { args: [desktop, ...args], chromiumSandbox: true });
+  try {
+    const monthPage = await monthApp.firstWindow();
+    await goTo(monthPage, "settings-budget");
+    const view = monthPage.getByTestId("companion-usage");
+    await expect(view.getByTestId("companion-usage-count")).toContainText(`${previousMonth}: 1 requests used, 0 reserved`);
+    await expect(view).toContainText("0 requests remain available");
+    const shown = await monthPage.evaluate(() => window.nivra.budgetSummary());
+    const currentMonth = shown.clock.computerMonth;
+    expect(currentMonth > previousMonth).toBe(true);
+    await view.getByTestId("companion-limit-save").click();
+    await view.getByRole("button", { name: "Refresh usage" }).click();
+    await expect(view).toContainText(`${previousMonth}: 1 requests used`);
+    await expect(view).toContainText("0 requests remain available");
+    await expect(view.getByTestId("companion-month-confirm")).toHaveText(`Confirm ${currentMonth} has begun`);
+    await view.getByTestId("companion-month-confirm").click();
+    await expect(view.getByTestId("companion-usage-count")).toContainText(`${currentMonth}: 0 requests used, 0 reserved`);
+    await expect(view).toContainText("1 requests remain available");
+    await expect(view.getByTestId("companion-month-confirmation")).toHaveCount(0);
+    expect(await monthPage.evaluate(() => window.nivra.listEngines())).toEqual([]);
+    await monthPage.reload();
+    await goTo(monthPage, "settings-budget");
+    await expect(monthPage.getByTestId("companion-usage-count")).toContainText(`${currentMonth}: 0 requests used`);
+    expect(new BudgetGuard(join(userData, "budget-guard.log")).last()?.month).toBe(currentMonth);
+  } finally {
+    await monthApp.close();
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
+test("month confirmation cannot bypass budget history recovery", async ({}, testInfo) => {
+  const fixture = mkdtempSync(join(tmpdir(), "nivra budget month recovery ü "));
+  const userData = join(fixture, "user data");
+  seedExhaustedMonth(userData);
+  writeFileSync(join(userData, "workspace.db"), "not a SQLite budget history ".repeat(40));
+  const executable = testInfo.project.metadata["executable"] as string | undefined;
+  const args = [`--user-data-dir=${userData}`, `--nivra-engine-home=${join(fixture, "engine home")}`];
+  const recoveryApp = await electron.launch(executable ? { executablePath: join(desktop, executable), args, chromiumSandbox: true } : { args: [desktop, ...args], chromiumSandbox: true });
+  try {
+    const recoveryPage = await recoveryApp.firstWindow();
+    await goTo(recoveryPage, "settings-budget");
+    await expect(recoveryPage.getByTestId("companion-usage")).toContainText("budget history needs recovery");
+    await expect(recoveryPage.getByTestId("companion-month-confirm")).toBeDisabled();
+    expect(await recoveryPage.evaluate(() => window.nivra.listEngines())).toEqual([]);
+  } finally {
+    await recoveryApp.close();
+    rmSync(fixture, { recursive: true, force: true, maxRetries: 5 });
+  }
 });

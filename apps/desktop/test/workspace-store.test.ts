@@ -115,7 +115,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v9\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v10\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -663,6 +663,29 @@ describe("the shared budget's ledger (NIV-66)", () => {
     assert.ok(added.length >= 8, added.join(", "));
     assert.deepEqual(rows(db), before.rows);
     assert.deepEqual(added.map((table) => Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"])), added.map(() => 0));
+  });
+});
+
+describe("a loss kept in the workspace (NIV-66)", () => {
+  it("keeps v9's text, and moves a v9 file to v10 with every table and row as it was and no loss kept", () => {
+    // v9's text is pinned too, now that v10 (a loss kept in the workspace) follows it.
+    assert.equal(createHash("sha256").update(WORKSPACE_MIGRATIONS[8]!).digest("hex"), "54020d2472d47889286f1d58a9e14f46751a7051fa1ff06170485d5fbe226fc2");
+    const path = join(folder(), "workspace.db");
+    const raw = new DatabaseSync(path);
+    raw.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
+    raw.exec("BEGIN IMMEDIATE");
+    for (const migration of WORKSPACE_MIGRATIONS.slice(0, 9)) raw.exec(migration);
+    raw.exec("PRAGMA user_version = 9; COMMIT;");
+    const schema = (db: DatabaseSync) => db.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name").all();
+    const before = schema(raw);
+    raw.close();
+    const migrated = ready(path);
+    assert.equal(migrated.schemaVersion, WORKSPACE_MIGRATIONS.length);
+    const db = migrated.db.db;
+    const kept = new Set(before.map((row) => String(row["name"])));
+    assert.deepEqual(schema(db).filter((row) => kept.has(String(row["name"]))), before);
+    assert.deepEqual([...new Set(schema(db).filter((row) => !kept.has(String(row["name"]))).map((row) => String(row["tbl_name"])))], ["budget_pending_recovery"]);
+    assert.equal(Number(db.prepare("SELECT count(*) AS n FROM budget_pending_recovery").get()?.["n"]), 0);
   });
 });
 

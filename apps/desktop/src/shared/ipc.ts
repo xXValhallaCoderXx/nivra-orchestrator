@@ -146,6 +146,8 @@ export const IPC = {
   listCoachings: "coach:list",
   cancelCoach: "coach:cancel",
   acceptCoachChanges: "coach:accept",
+  getCompanionUsage: "companion:usage",
+  setCompanionLimit: "companion:limit",
   getBudgetPolicy: "budget:get-policy",
   setBudgetPolicy: "budget:set-policy",
   budgetSummary: "budget:summary",
@@ -1053,6 +1055,8 @@ export interface NivraApi {
   /** Saves the ticked changes as the brief's next version, from the task's revision as it was read; a stale answer is refused. */
   acceptCoachChanges(taskId: string, revision: number, coachingId: string, fields: CoachField[]): Promise<TaskView>;
   /** The person's monthly budget policy (NIV-66), or null before they chose one. */
+  getCompanionUsage(): Promise<CompanionUsageView>;
+  setCompanionLimit(limit: number | null): Promise<CompanionUsageView>;
   getBudgetPolicy(): Promise<BudgetPolicy | null>;
   /** Saves a monthly budget as the next policy version, or with null turns it off. What was already spent or reserved stays as it was. */
   setBudgetPolicy(draft: BudgetPolicyDraft | null): Promise<BudgetSummary>;
@@ -1064,4 +1068,22 @@ export interface NivraApi {
   confirmBudgetMonth(month: string): Promise<BudgetSummary>;
   /** Starts a new budget history after a loss, with what is left of this month (money in micro-units, and each counted service), or null to wait for next month. */
   startNewBudgetHistory(remaining: BudgetRemaining | null): Promise<BudgetSummary>;
+}
+
+
+/** Enforcement covers Companion AI inference only. Tokens are reported separately, never a ceiling. */
+export interface CompanionUsageView {
+  historyComplete: boolean;
+  month: string;
+  limit: number | null;
+  used: number;
+  reserved: number;
+  unknown: number;
+  remaining: number | null;
+  reportedInputTokens: number;
+  reportedOutputTokens: number;
+  unknownTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  blocked: string | null;
 }

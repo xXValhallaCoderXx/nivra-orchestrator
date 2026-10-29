@@ -60,9 +60,10 @@ export interface RequestOptions {
 
 /**
  * Lists the models the key can use, with `verbose=true`, which Token Factory documents as adding each model's
- * `context_length`. The key travels only in the Authorization header.
+ * `context_length`, and the Date its answer carried: the provider's clock (NIV-66). The key travels only in the
+ * Authorization header.
  */
-export async function listModels(apiKey: string, options: RequestOptions = {}): Promise<ModelEntry[]> {
+export async function listModels(apiKey: string, options: RequestOptions = {}): Promise<{ entries: ModelEntry[]; date: string | null }> {
   const doFetch = options.fetch ?? fetch;
   const response = await doFetch(`${options.baseUrl ?? TOKEN_FACTORY_BASE_URL}/models?verbose=true`, {
     headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
@@ -76,11 +77,15 @@ export async function listModels(apiKey: string, options: RequestOptions = {}): 
   const body = ModelsResponse.safeParse(await response.json().catch(() => undefined));
   // An unreadable answer keeps its status, so it is named as one (bad-response), never as Nivra failing.
   if (!body.success) throw new TokenFactoryError(response.status, "Token Factory answered /models with a shape Nivra does not recognise. Try again in a few minutes.");
-  return body.data.data.map((model) => ({
-    id: model.id,
-    ownedBy: model.owned_by ?? null,
-    contextLength: model.context_length ?? model.context_window ?? model.max_model_len ?? model.max_context_length ?? null,
-  }));
+  const date = response.headers.get("date");
+  return {
+    entries: body.data.data.map((model) => ({
+      id: model.id,
+      ownedBy: model.owned_by ?? null,
+      contextLength: model.context_length ?? model.context_window ?? model.max_model_len ?? model.max_context_length ?? null,
+    })),
+    date: date !== null && !Number.isNaN(Date.parse(date)) ? date : null,
+  };
 }
 
 /** NVIDIA's open models, the ones the hackathon requires. */
