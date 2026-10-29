@@ -333,10 +333,10 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
     row("platform", "Platform", "Linux x86_64, Alpine (musl)", "default", [], "A Debian (glibc) platform isn't available yet."),
     row("image", "Base image", recipe.image.tag, "resolved", [], "A tag doesn't pin bytes: preparation records the image it made and checks the versions in it."),
   ];
-  return { status: "ready", rows, recipe, warnings: warnings.slice(0, 20), limitations };
+  return { status: "ready", rows, recipe, warnings: warnings.slice(0, 20), limitations, workspace: null };
 
   function needsChoice(needed: ChoiceNeeded[]): EnvironmentResolution {
-    return { status: "needs-choice", rows: [], choices: needed.slice(0, 4), warnings: warnings.slice(0, 20), limitations };
+    return { status: "needs-choice", rows: [], choices: needed.slice(0, 4), warnings: warnings.slice(0, 20), limitations, workspace: null };
   }
 }
 

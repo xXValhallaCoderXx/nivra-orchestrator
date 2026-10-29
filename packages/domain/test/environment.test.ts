@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
-import { canonicalJson, ENVIRONMENT_BASE, EnvironmentPreview, EnvironmentRecipe, EnvironmentRef, EnvironmentReport, EnvironmentSetup, EnvironmentSpec, InvalidationReason, PreparedEnvironment, projectFingerprint, RECIPE_FORMAT, recipeDigest, REF_FORMAT, SETUP_FORMAT, VERIFIED_FORMAT, verifiedDigest, VerifiedToolRecord, type EnvironmentRecipe as Recipe } from "../src/environment.ts";
+import { canonicalJson, ENVIRONMENT_BASE, ENVIRONMENT_FILTER, ENVIRONMENT_LIMITS, EnvironmentPreview, EnvironmentRecipe, EnvironmentRef, EnvironmentReport, EnvironmentResolution, EnvironmentSetup, EnvironmentSpec, InstallScope, InvalidationReason, PreparedEnvironment, projectFingerprint, RECIPE_FORMAT, recipeDigest, REF_FORMAT, SETUP_FORMAT, VERIFIED_FORMAT, verifiedDigest, VerifiedToolRecord, WORKSPACE_FOLDER, WORKSPACE_NAME, WorkspaceFacts, type EnvironmentRecipe as Recipe, type InstallSelection } from "../src/environment.ts";
 import { StartRunParams } from "../src/methods.ts";
 import { baselinePattern, TaskBrief, taskBriefDigest, TaskInput, TaskReport, type TaskBrief as Brief } from "../src/task.ts";
 
@@ -238,5 +238,139 @@ describe("a project-driven environment's contract (NIV-55)", () => {
 
   it("never lists a release-index refresh as a reason to prepare again", () => {
     assert.deepEqual(InvalidationReason.options, ["inputs-changed", "recipe-changed", "advisory", "project-changed", "target-changed", "image-missing", "legacy"]);
+  });
+});
+
+describe("workspace packages chosen by folder (NIV-55)", () => {
+  const configuration = { mode: "manifests" as const, files: [{ path: "pnpm-lock.yaml", bytes: 12, sha256: "1".repeat(64) }], digest: "2".repeat(64) };
+  /** The same toy recipe as the contract's: chosen packages are no more Node-shaped than the rest of it. */
+  const toy: Recipe = {
+    format: RECIPE_FORMAT,
+    profile: "toy",
+    platform: { os: "linux", arch: "x86_64", libc: "glibc" },
+    image: { registryUrl: "docker://docker.io/library/toylang:3.1.4-slim", tag: "toylang:3.1.4-slim" },
+    tools: [
+      { name: "toyc", version: { kind: "exact", version: "3.1.4" }, from: "image" },
+      { name: "toypkg", version: { kind: "bundled", with: "toyc" }, from: "image" },
+    ],
+    bootstrap: [],
+    install: { tool: "toypkg", args: ["fetch", "--locked"], options: { offline: false } },
+    scope: { kind: "whole" },
+    builds: { tool: "toypkg", runs: "all", allowed: [], denied: [], strict: null, source: null, notes: [] },
+    configuration: { ...configuration, files: [{ path: "toy.lock", bytes: 12, sha256: "1".repeat(64) }] },
+    systemPackages: ["pkg-config"],
+    workdir: "/workspace",
+    env: { preparation: { TOY_HOME: "/root/.toy" }, task: { TOY_OFFLINE: "1" } },
+    artifacts: { dependency: ["target"], caches: ["/root/.toy"] },
+    network: { preparation: "on", tasks: "off", hosts: ["registry.toylang.org"], imageRegistry: "docker.io" },
+    probes: ["tool-versions"],
+    limits: { importSeconds: 900, prepareSeconds: 600, probeSeconds: 120 },
+  };
+  const packages = (list: string[], root = true): InstallScope => ({ kind: "packages", packages: list, root });
+  const selection = (chosen: string[], reached: string[] = [], root = true): InstallSelection => ({
+    packages: [...chosen.map((folder) => ({ folder, name: `@w/${folder.split("/").at(-1)}`, chosen: true })), ...reached.map((folder) => ({ folder, name: null, chosen: false }))].sort((a, b) => (a.folder < b.folder ? -1 : 1)),
+    root,
+  });
+  const chosenRecipe = (scope: InstallScope, picked: InstallSelection | undefined): unknown => ({ ...toy, scope, ...(picked ? { selection: picked } : {}) });
+  const issues = (value: unknown) => {
+    const parsed = EnvironmentRecipe.safeParse(value);
+    return parsed.success ? [] : parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`);
+  };
+
+  it("takes 1 to 20 folders, each once and in order, of plain segments a package manager reads literally, and the root's switch", () => {
+    assert.equal(InstallScope.safeParse(packages(["apps/web", "packages/@scope/data", "packages/data"])).success, true);
+    assert.equal(InstallScope.safeParse(packages(["apps/web"], false)).success, true, "the root's own dependencies can be left out");
+    const many = Array.from({ length: ENVIRONMENT_LIMITS.packages + 1 }, (_, index) => `packages/p${String(index).padStart(2, "0")}`);
+    assert.equal(ENVIRONMENT_LIMITS.packages, 20);
+    assert.equal(InstallScope.safeParse(packages(many.slice(0, 20))).success, true);
+    for (const [list, why] of [
+      [[], "none"],
+      [many, "21"],
+      [["packages/web", "apps/web"], "out of order"],
+      [["apps/web", "apps/web"], "twice"],
+      [["../web"], "a way up"],
+      [["apps/../web"], "a way up inside"],
+      [["/apps/web"], "absolute"],
+      [["apps/web/"], "a trailing slash"],
+      [["apps/my web"], "a space"],
+      [["apps/*"], "a glob"],
+      [[".github/action"], "a hidden folder"],
+      [["apps/.hidden"], "a hidden segment"],
+      [["-web"], "a leading hyphen"],
+      [[""], "empty"],
+    ] as const) assert.equal(InstallScope.safeParse(packages([...list])).success, false, why);
+    assert.equal(InstallScope.safeParse({ kind: "packages", packages: ["apps/web"] }).success, false, "the root's switch is always said");
+    assert.equal(InstallScope.safeParse({ ...packages(["apps/web"]), selectors: ["x"] }).success, false, "nothing beyond the contract");
+  });
+
+  it("bounds a folder at 186 characters and a name at 200, so the arguments built from them keep the 200-character rule", () => {
+    const folder = (length: number) => `p/${"f".repeat(length - 2)}`;
+    assert.deepEqual([WORKSPACE_FOLDER.test(folder(186)), WORKSPACE_FOLDER.test(folder(187))], [true, false]);
+    // npm's argument for the longest folder is exactly as long as an argument may be; one more is refused.
+    const install = (arg: string) => EnvironmentRecipe.safeParse({ ...toy, install: { ...toy.install, args: ["ci", arg] } }).success;
+    assert.deepEqual([`--workspace=./${folder(186)}`.length, install(`--workspace=./${folder(186)}`), install(`--workspace=./${folder(187)}`)], [200, true, false]);
+    const name = (length: number) => `@s/${"n".repeat(length - 3)}`;
+    assert.deepEqual([WORKSPACE_NAME.test(name(200)), WORKSPACE_NAME.test(name(201)), install(name(200)), install(name(201))], [true, false, true, false]);
+    for (const good of ["web", "@scope/web", "web-app_2.v~x", "Web"]) assert.equal(WORKSPACE_NAME.test(good), true, good);
+    for (const bad of ["@scope", "a/b", "@a/b/c", "web.", "web...", "*", "web*", "web?", "!web", "{web}", "[web]", "^web", ".web", "_web", "-web", "we b", ""]) assert.equal(WORKSPACE_NAME.test(bad), false, bad);
+    // Every name it takes is one pnpm filter, as the sandbox already checks a filter.
+    for (const good of ["web", "@scope/web", "web-app_2.v~x", name(200)]) assert.equal(ENVIRONMENT_FILTER.test(good), true, good);
+  });
+
+  it("requires a chosen install's selection, with its root and exactly its chosen packages, and allows none anywhere else", () => {
+    const scope = packages(["apps/web", "packages/data"]);
+    assert.deepEqual(issues(chosenRecipe(scope, selection(["apps/web", "packages/data"], ["packages/tokens"]))), []);
+    for (const [value, why] of [
+      [chosenRecipe(scope, undefined), "no selection"],
+      [chosenRecipe(scope, selection(["apps/web", "packages/data"], [], false)), "another root"],
+      [chosenRecipe(scope, selection(["apps/web"], ["packages/data"])), "a chosen package marked reached"],
+      [chosenRecipe(packages(["apps/web"]), selection(["apps/web", "packages/data"])), "a package marked chosen that wasn't"],
+      [chosenRecipe(scope, { ...selection(["apps/web", "packages/data"]), packages: [...selection(["apps/web", "packages/data"]).packages].reverse() }), "out of order"],
+      [chosenRecipe(packages(["apps/web"]), { packages: [{ folder: "apps/web", name: "web", chosen: true }, { folder: "apps/web", name: "web", chosen: false }], root: true }), "twice"],
+      [chosenRecipe({ kind: "whole" }, selection(["apps/web"])), "a whole project with one"],
+      [chosenRecipe({ kind: "selected", selectors: ["@w/web"] }, selection(["apps/web"])), "selectors with one"],
+    ] as const) {
+      const found = issues(value);
+      assert.equal(found.length, 1, `${why}: ${found.join("; ")}`);
+      assert.match(found[0]!, /^selection: /, why);
+    }
+    const many = Array.from({ length: 21 }, (_, index) => ({ folder: `p/${String(index).padStart(2, "0")}`, name: null, chosen: index === 0 }));
+    assert.notDeepEqual(issues(chosenRecipe(packages(["p/00"]), { packages: many, root: true })), [], "at most 20 packages installed");
+  });
+
+  it("keeps every recipe written before chosen packages: it parses, and digests exactly as it did", async () => {
+    // Pinned on main c2c1bb2, before chosen packages: neither recipe carries a selection, so their digests can't move.
+    const selected: Recipe = { ...toy, install: { ...toy.install, args: ["install", "--frozen-lockfile", "--filter", "@w/data..."] }, scope: { kind: "selected", selectors: ["@w/data..."] } };
+    for (const recipe of [toy, selected]) assert.equal(EnvironmentRecipe.safeParse(recipe).success, true);
+    assert.deepEqual(
+      [await recipeDigest(toy), await recipeDigest(selected)],
+      ["0b25ab9bb12661351b09c692a8a1c9fe29eff7857eed39a77c7c06b81e9e2ba0", "d4969de5bcd28f3de8001f5baa7b3de20a53fe80e8d5b10678a000c787a838cc"],
+    );
+  });
+
+  it("carries the workspace's facts with every answer that read the workspace, and with a refusal of the scope chosen", () => {
+    const facts: WorkspaceFacts = {
+      packages: [
+        { folder: "apps/web", name: "@w/web", unavailable: null },
+        { folder: "apps/no name", name: null, unavailable: "Its folder's name has a space, which Nivra doesn't pass to a package manager." },
+      ],
+      more: 0,
+      root: { dependencies: 3, examples: ["eslint", "typescript", "vitest"], optional: false, reason: "pnpm installs the workspace root's own dependencies whenever it installs chosen packages." },
+      modes: [
+        { mode: "whole", available: true, reason: null },
+        { mode: "packages", available: true, reason: null },
+        { mode: "selectors", available: false, reason: "pnpm selectors are pnpm's own syntax, and this project installs with npm." },
+      ],
+    };
+    assert.equal(WorkspaceFacts.safeParse(facts).success, true);
+    assert.equal(WorkspaceFacts.safeParse({ ...facts, modes: [...facts.modes, facts.modes[0]] }).success, false, "one row per mode");
+    assert.equal(WorkspaceFacts.safeParse({ ...facts, packages: Array.from({ length: 501 }, (_, index) => ({ folder: `p/${index}`, name: null, unavailable: null })) }).success, false, "a bounded list");
+    const ready = { status: "ready", rows: [], recipe: toy, warnings: [], limitations: [], workspace: facts };
+    const choice = { status: "needs-choice", rows: [], choices: [{ id: "runtime", why: "conflict", message: "Choose.", declarations: [], options: [{ value: "24.21.0", label: "Node 24.21.0", note: null }] }], warnings: [], limitations: [], workspace: facts };
+    for (const answer of [ready, { ...ready, workspace: null }, choice, { ...choice, workspace: null }]) assert.equal(EnvironmentResolution.safeParse(answer).success, true, answer.status);
+    const { workspace: _, ...unsaid } = ready;
+    assert.equal(EnvironmentResolution.safeParse(unsaid).success, false, "a ready answer always says whether it read a workspace");
+    const refused = { status: "refused", code: "scope", message: "apps/old isn't one of this workspace's packages.", rows: [] };
+    assert.deepEqual([EnvironmentResolution.safeParse(refused).success, EnvironmentResolution.safeParse({ ...refused, workspace: facts }).success], [true, true]);
   });
 });

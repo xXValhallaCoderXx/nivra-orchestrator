@@ -23,14 +23,17 @@ export const scopeOf = (choices: EnvironmentChoices): InstallScope => choices.sc
 export function withScope(choices: EnvironmentChoices, scope: InstallScope): EnvironmentChoices {
   const next = { ...choices };
   if (scope.kind === "whole") delete next.scope;
-  else next.scope = { kind: "selected", selectors: [...scope.selectors] };
+  else next.scope = scope.kind === "selected" ? { kind: "selected", selectors: [...scope.selectors] } : { kind: "packages", packages: [...scope.packages], root: scope.root };
   return next;
 }
 
-/** Whether two scopes install the same: the same kind, and the same selectors in the same order. */
+const sameList = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((item, index) => item === b[index]);
+
+/** Whether two scopes install the same: the same kind, the same selectors or packages in the same order, and the same root. */
 export function sameScope(a: InstallScope, b: InstallScope): boolean {
   if (a.kind === "whole" || b.kind === "whole") return a.kind === b.kind;
-  return a.selectors.length === b.selectors.length && a.selectors.every((selector, index) => selector === b.selectors[index]);
+  if (a.kind === "selected") return b.kind === "selected" && sameList(a.selectors, b.selectors);
+  return b.kind === "packages" && a.root === b.root && sameList(a.packages, b.packages);
 }
 
 /**
@@ -50,4 +53,9 @@ export function selectorHint(selector: string): string | null {
 export const selectorList = (selectors: readonly string[]): string => (selectors.length < 2 ? selectors.join("") : `${selectors.slice(0, -1).join(", ")} and ${selectors.at(-1)}`);
 
 /** What a scope installs, in words. */
-export const scopeText = (scope: InstallScope): string => (scope.kind === "whole" ? "the whole project" : `only the workspace packages that ${selectorList(scope.selectors)} select`);
+export const scopeText = (scope: InstallScope): string =>
+  scope.kind === "whole"
+    ? "the whole project"
+    : scope.kind === "selected"
+      ? `only the workspace packages that ${selectorList(scope.selectors)} select`
+      : `the workspace packages in ${selectorList(scope.packages)}${scope.root ? ", with the workspace root's own dependencies" : ""}`;

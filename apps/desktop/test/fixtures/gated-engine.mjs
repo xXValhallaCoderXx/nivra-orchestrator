@@ -332,7 +332,7 @@ process.stdin.on("data", (chunk) => {
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
       nebiusProject = request.params.secrets?.NEBIUS_PROJECT_ID ?? null;
-      send({ id: request.id, result: { protocolVersion: 16, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 17, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
@@ -393,9 +393,9 @@ process.stdin.on("data", (chunk) => {
         send({ id: request.id, result: { status: "refused", code: "unsupported-manager", message: "This project installs with yarn, which Nivra doesn't prepare yet. Use npm or pnpm, then preview the environment again.", rows } });
       } else if (existsSync(join(home, "env-needs-choice")) && !choices.runtime) {
         const options = ["24.21.0", "22.23.4"].map((value) => ({ value, label: `Node ${value}`, note: null }));
-        send({ id: request.id, result: { status: "needs-choice", rows, choices: [{ id: "runtime", why: "conflict", message: ".nvmrc pins Node 24.21.0, and .node-version pins 22.23.4. Choose the one this project uses.", declarations: [{ file: ".nvmrc", field: null, value: "24.21.0" }, { file: ".node-version", field: null, value: "22.23.4" }], options }], warnings: [], limitations: [] } });
+        send({ id: request.id, result: { status: "needs-choice", rows, choices: [{ id: "runtime", why: "conflict", message: ".nvmrc pins Node 24.21.0, and .node-version pins 22.23.4. Choose the one this project uses.", declarations: [{ file: ".nvmrc", field: null, value: "24.21.0" }, { file: ".node-version", field: null, value: "22.23.4" }], options }], warnings: [], limitations: [], workspace: null } });
       } else {
-        send({ id: request.id, result: { status: "ready", rows, recipe, warnings: [], limitations: [], recipeDigest: digestOf(recipe), baseline: "a".repeat(40), sentBytes: 900, leftOut: [".npmrc"], retention: "Images are retained for 180 days.", fingerprint: sha256(JSON.stringify([choices, existsSync(join(home, "env-changed"))])) } });
+        send({ id: request.id, result: { status: "ready", rows, recipe, warnings: [], limitations: [], workspace: null, recipeDigest: digestOf(recipe), baseline: "a".repeat(40), sentBytes: 900, leftOut: [".npmrc"], retention: "Images are retained for 180 days.", fingerprint: sha256(JSON.stringify([choices, existsSync(join(home, "env-changed"))])) } });
       }
     } else if (request.method === "runs.events") {
       send({ id: request.id, result: { events: [], next: request.params.after ?? 0, status: cancelled.has(request.params.runId) ? "cancelled" : "succeeded" } });
