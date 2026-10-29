@@ -2985,7 +2985,9 @@ stand-in, so these show commands, refusals and preparations' records, not a real
 | `bf8e384` | The journey ticks packages and opens Advanced (for Track A's review) |
 | `fca5958`, `0d92919` | The e2e specs for both managers, and the live run's recipe test |
 | `6883c76`, `89f5ac1` | The independent review's findings, and one test's types |
-| `194ed76`, this record | D52, the development notes and this section, then the full round's counts |
+| `194ed76`, `035f091` | D52, the development notes and this section, then the full round's counts |
+| `9787c2e` | Nate's review of `035f091`: npm's peers followed as npm follows them (none with legacy-peer-deps), npm/cli 9847's extra packages found where they arise, and ignore-scripts' missing builds counted from what a chosen install takes in |
+| this record's update | D52's wording for those three, and the checks on `9787c2e` |
 
 **What it shows, offline:**
 
@@ -2994,7 +2996,7 @@ stand-in, so these show commands, refusals and preparations' records, not a real
 | The whole project is unchanged for npm and pnpm | `environment-node.test.ts`, `environment-recipe-engine.test.ts`, both e2e specs | The same arguments and preparations as before; no selection on its recipe |
 | Packages chosen by name and folder, no syntax | `environment.spec.ts`, `environment-scope.spec.ts` | The list from the engine's facts, ticked; Preview off while nothing is ticked; pnpm selectors only under Advanced |
 | What the chosen packages and the root reach is installed and said | `environment-node.test.ts`, `environment-workspace.test.ts`, both e2e specs | From recorded links: aliases and relative references by where they link, a same-name registry package not counted, the root's links counted when it installs (always for pnpm), a workspace reached through a registry package (npm); each package listed in the preview and the recipe |
-| Each manager's chosen install, on its own | `environment-node.test.ts`, `environment-recipe-engine.test.ts`, `environment-scope.spec.ts` | pnpm by exact name and npm as `./FOLDER`, root on and off for npm, sent to the stand-in exactly as previewed, scope and selection kept with the environment |
+| Each manager's chosen install, on its own | `environment-node.test.ts`, `environment-recipe-engine.test.ts`, `environment-scope.spec.ts` | pnpm by exact name and npm as `./FOLDER`, root on and off for npm, sent to the stand-in exactly as previewed, scope and selection kept with the environment; npm's peers as npm follows them, none with legacy-peer-deps; npm/cli 9847's extra packages named; with ignore-scripts, only the builds the chosen install takes in counted as missing |
 | One package, several, empty, removed and unknown | `environment-node.test.ts`, `environment.test.ts`, both e2e specs | One package offers only the whole project, with the reason; an empty choice refused by the domain and the host; a removed or unlisted package refused by name and flagged until unticked; 21 in all refused |
 | Releases and settings that can't do it are said | `environment-workspace.test.ts`, `environment-node.test.ts` | Each checked range at its boundaries, majors 12 out; a hoisted linker on pnpm 9 and 10, a lockfile per package, links left out, filter in pnpm-workspace.yaml, deep links, npm's omit, include and other install strategies; each refusal says what to pin or change; a lockfile from pnpm 11.28.0 to 11.28.5 warned about on every scope |
 | Frozen lockfiles, inside the boundary | `nebius-sandbox.test.ts`, `environment-recipe-engine.test.ts` | Only the fixed argument forms pass the sandbox's check, near misses refused; an image's unchecked npm stops before any upload; a passed-over filter keeps no environment |
@@ -3012,7 +3014,19 @@ installed, no repository script run; the answers are in `~/nivra-acceptance/env-
 - An npm-workspaces fixture (built for this, not a real project): web with data, root off; with data and lint, which
   the root links, root on; a selector refused in npm's words.
 
-**Checks**, at `89f5ac1`, the code this records, one at a time under the shared lock:
+**Checks** at `9787c2e`, the code after Nate's review of `035f091`, one at a time under the shared lock:
+- `pnpm verify`: exit 0, 1,661 tests passed (domain 131, engine 924, desktop 606), none failed, skipped, cancelled or
+  todo, and all three typechecks clean.
+- The built app's end-to-end suite under xvfb: 128 passed and none failed; 1 skipped, `explain.spec.ts`'s "only a
+  packaged app ignores the switch".
+- The real-engine resolutions again (`~/nivra-acceptance/env-scope/rpc/`; the ones at `0d92919` kept in `rpc-0d92919/`):
+  the same answers, but for humin's refusal of chosen packages, which since `6883c76` also says to choose the whole
+  project.
+- `test:packaged` and `test:windows` carry from `89f5ac1`: `9787c2e` changes only engine code, and no packaging, main or
+  preload file.
+- Mutations: 17 of 17 caught, the 14 before and three for the review's findings.
+
+**Checks** at `89f5ac1`, before Nate's review, one at a time under the shared lock:
 - `pnpm verify`: exit 0, 1,657 tests passed (domain 131, engine 920, desktop 606), none failed, skipped, cancelled or
   todo, and all three typechecks clean.
 - The built app's end-to-end suite under xvfb: 128 passed and none failed; 1 skipped, `explain.spec.ts`'s "only a
@@ -3029,8 +3043,9 @@ installed, no repository script run; the answers are in `~/nivra-acceptance/env-
 
 Mutations: 14 of 14 caught (`~/nivra-acceptance/env-scope/mutate.mjs`), at `0d92919` and again at `6883c76`.
 
-Review: an independent review of `0d92919` found no high-severity defect and twelve smaller ones; ten are fixed in
-`6883c76`, the npm pass-over is answered by the lockfile cross-check, and the docs are this record.
+Reviews: an independent review of `0d92919` found no high-severity defect and twelve smaller ones; ten are fixed in
+`6883c76`, the npm pass-over is answered by the lockfile cross-check, and the docs are this record. Nate's review of
+`035f091` held it for three P2 findings, each fixed in `9787c2e` with a regression test.
 
 ### Deferred to a later milestone (kept, not dropped)
 

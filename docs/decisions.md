@@ -3719,6 +3719,8 @@ D48's "the window offers no scope" and replaces the typed-selectors draft of thi
     reach. Each is passed by its exact name (`WORKSPACE_NAME`, at most 200 characters).
   - npm: each dependency resolved as npm records it, from the dependent's own folder upwards, through registry
     packages too, and the root's only when its switch is on. Each is passed as `./FOLDER`, which matches no name.
+    Peers are followed as npm follows them: peers, and optional peers the lockfile holds, but none at all with
+    legacy-peer-deps, which leaves them out.
   - So an alias or a relative workspace reference counts by where it links, a same-name registry package isn't a
     workspace, and a link Nivra can't follow, or a dependency npm's lockfile doesn't record, refuses with words.
 - **Arguments:** pnpm `install --frozen-lockfile --fail-if-no-match --filter NAME ...`; npm `ci --no-audit --no-fund`,
@@ -3755,8 +3757,11 @@ releases are offered, and each refusal says which to pin.
   project only, with the releases to pin: valhalla-fitness at 3c3c5d7 (pnpm 11.5.3) is one.
 - A lockfile from pnpm 11.28.0 to 11.28.5, by packageManager or the lockfile's own env document, gets a warning on
   every scope, the whole project's included.
-- npm/cli 9847 is still open: a scoped npm ci can also install an optional peer another workspace declares. The
-  preview warns when one does.
+- npm/cli 9847 is still open: a scoped npm ci also installs a registry package that an installed package declares as
+  an optional peer, when another workspace package depends on it. The preview names each such package. With
+  legacy-peer-deps, no peer is followed, so none arises.
+- With ignore-scripts, the builds a chosen npm install leaves unrun are counted from the packages it takes in, never
+  from the whole lockfile, so another workspace package's build never holds its task runs back.
 - npm passes over a `--workspace` value that matches nothing when another one matches, and says nothing. Each chosen
   folder, and each one reached, is one of package-lock.json's own workspace entries, which npm wrote, so that would
   take npm reading the same workspace differently; the record says it isn't tested.
