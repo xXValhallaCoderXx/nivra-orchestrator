@@ -691,6 +691,32 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
     created_at TEXT NOT NULL
   ) STRICT;
 `,
+  `
+  -- Explicit reviewed planning outcomes, never temporary dialogue. Versions and save receipts are immutable.
+  CREATE TABLE planning_requests (id TEXT PRIMARY KEY, created_at TEXT NOT NULL) STRICT;
+  CREATE TABLE planning_versions (
+    planning_id TEXT NOT NULL REFERENCES planning_requests(id), revision INTEGER NOT NULL CHECK (revision > 0),
+    request_json TEXT NOT NULL, proposal_json TEXT, evidence_json TEXT, binding TEXT NOT NULL, references_json TEXT NOT NULL,
+    created_at TEXT NOT NULL, PRIMARY KEY (planning_id, revision)
+  ) STRICT;
+  CREATE TRIGGER planning_versions_immutable BEFORE UPDATE ON planning_versions BEGIN SELECT RAISE(ABORT, 'planning versions are immutable'); END;
+  CREATE TABLE planning_saves (
+    save_key TEXT PRIMARY KEY, planning_id TEXT NOT NULL REFERENCES planning_requests(id), revision INTEGER NOT NULL,
+    fingerprint TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE (planning_id, revision)
+  ) STRICT;
+  CREATE TABLE planning_task_sources (
+    planning_id TEXT NOT NULL REFERENCES planning_requests(id), item_id TEXT NOT NULL, revision INTEGER NOT NULL,
+    task_id TEXT NOT NULL UNIQUE, brief_id TEXT NOT NULL, metadata_json TEXT NOT NULL,
+    PRIMARY KEY (planning_id, item_id)
+  ) STRICT;
+  -- No task foreign key: deleting a result must never let a repeated save recreate it.
+  CREATE TABLE planning_operations (
+    id TEXT PRIMARY KEY, planning_id TEXT NOT NULL REFERENCES planning_requests(id), revision INTEGER NOT NULL,
+    fingerprint TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('submitting','running','succeeded','failed','cancelled','interrupted','unknown')),
+    run_id TEXT, max_requests INTEGER NOT NULL CHECK (max_requests BETWEEN 1 AND 8), message TEXT,
+    created_at TEXT NOT NULL
+  ) STRICT;
+  `,
 ];
 
 export type WorkspaceOpening =

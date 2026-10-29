@@ -3,13 +3,12 @@ import { useEffect, useState } from "react";
 import type { RunLimitsView } from "../../../shared/ipc";
 import { runLimitLines } from "../shell/run-limits";
 
-/** Coverage outside the companion's monthly inference-request allowance. */
-export const BUDGET_NOT_AVAILABLE = "Other agents, research and sandbox operations aren't covered by the Companion AI request allowance. Their existing per-run limits apply.";
+/** Coverage outside the shared monthly inference-request allowance. */
+export const BUDGET_NOT_AVAILABLE = "Coding runs, research, sandbox operations and other agents aren't covered by the Companion and planning request allowance. Their existing per-run limits apply.";
 
 /**
- * Settings › Budget and usage, read-only (NIV-56): no shared budget in this build, and the per-run limits the engine
- * enforces, read through main (getRunLimits). No usage, no money, no controls. It takes no props, so the working budget
- * screen can take its place in Settings without other changes.
+ * Settings › Budget and usage: the coverage outside the Companion and planning allowance and the existing per-run
+ * bounds read through main. The adjacent request control owns its combined usage and editable monthly limit.
  */
 export function BudgetAndUsage() {
   const [limits, setLimits] = useState<RunLimitsView | null>(null);

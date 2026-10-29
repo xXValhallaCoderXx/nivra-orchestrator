@@ -5,6 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, requestMsFor, TASK_RUN_BOUNDS, type EnvironmentChoices } from "@nivra/domain";
 import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining } from "@nivra/domain";
+import { PlanningBrief, PlanningProposal, PlanningRequest } from "@nivra/domain";
 import { z } from "zod";
 import { containsSavedKey, DRAFT_CHECK_FAILED, DRAFT_KEY_NAMES } from "./draft-keys.ts";
 import { COPY_TEXT_CHARS, DRAFT_CHECK_CHARS, MESSAGE_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
@@ -386,6 +387,14 @@ function start(): void {
   handle(IPC.saveCompanionDraft,z.tuple([z.strictObject({sessionId:Id,requestId:Id,actionId:Id,fingerprint:Fingerprint,draft:CompanionDraft})]),(_event,input)=>host.saveCompanionDraft(input));
   // The shared monthly budget (NIV-66).
   handle(IPC.getCompanionUsage, none, () => host.getCompanionUsage());
+  handle(IPC.createPlanning, z.tuple([PlanningRequest]), (_event, request) => host.createPlanning(request));
+  handle(IPC.listPlanning, z.tuple([z.uuid().nullable().optional()]), (_event, projectId?: string | null) => host.listPlanning(projectId));
+  handle(IPC.getPlanning, z.tuple([z.uuid()]), (_event, id) => host.getPlanning(id));
+  handle(IPC.revisePlanning, z.tuple([z.uuid(), z.number().int().positive(), z.strictObject({ brief: PlanningBrief, proposal: PlanningProposal.nullable(), refresh: z.boolean().optional() })]), (_event, id, revision, input) => host.revisePlanning(id, revision, input));
+  handle(IPC.savePlanning, z.tuple([z.strictObject({ id: z.uuid(), revision: z.number().int().positive(), key: z.uuid(), itemIds: z.array(z.string().max(80)).min(1).max(5) })]), (_event, input) => host.savePlanning(input));
+  handle(IPC.generatePlanning, z.tuple([z.uuid(), z.number().int().positive(), z.strictObject({ inspectRepository: z.boolean(), operationId: z.uuid() })]), (_event, id, revision, input) => host.generatePlanning(id, revision, input));
+  handle(IPC.getPlanningOperation, z.tuple([z.uuid(), z.uuid()]), (_event, id, operationId) => host.getPlanningOperation(id, operationId));
+  handle(IPC.cancelPlanning, z.tuple([z.uuid(), z.uuid()]), (_event, id, operationId) => host.cancelPlanning(id, operationId));
   handle(IPC.setCompanionLimit, z.tuple([z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable()]), (_event, limit) => host.setCompanionLimit(limit));
   handle(IPC.getBudgetPolicy, none, () => host.getBudgetPolicy());
   handle(IPC.setBudgetPolicy, z.tuple([BudgetPolicyDraft.nullable()]), (_event, draft) => host.setBudgetPolicy(draft));

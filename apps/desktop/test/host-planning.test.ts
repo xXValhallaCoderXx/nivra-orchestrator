@@ -1,0 +1,40 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, it } from "node:test";
+import type { PlanningProposal } from "@nivra/domain";
+import { Host } from "../src/main/host.ts";
+import { HostStore } from "../src/main/host-store.ts";
+import { LocalTarget } from "../src/main/targets/local.ts";
+import type { ExecutionTarget } from "../src/main/targets/types.ts";
+
+const roots: string[] = []; const hosts: Host[] = [];
+after(async () => { await Promise.all(hosts.map((host) => host.shutdown())); for (const root of roots) rmSync(root, { recursive: true, force: true }); });
+
+it("keeps manual planning offline and clears project-derived planning context on explicit task reassignment", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nivra-host-planning-")); roots.push(root);
+  const store = new HostStore(join(root, "nivra.json"));
+  const first = randomUUID(); const second = randomUUID();
+  const at = "2026-10-29T15:00:00.000Z";
+  store.update((data) => ({ ...data, projects: [first, second].map((id) => ({ id, targetId: "local", nativePath: join(root, id), label: id, addedAt: at, sharing: { modelContext: false, cloudExecution: false } })) }));
+  let starts = 0;
+  const local = new LocalTarget({ platform: "linux", runtime: { node: process.execPath, entry: join(root, "unused-engine.mjs"), runtimeHash: null }, home: join(root, "unused-engine-home") });
+  const target: ExecutionTarget = { descriptor: local.descriptor, probe: () => local.probe(), prepare: (request) => { starts++; return local.prepare(request); } };
+  const host = new Host({ targets: { local: target, discoverWsl: async () => null }, platform: "linux", store, workspacePath: join(root, "workspace.db"), logsDir: join(root, "logs"), client: { name: "host-planning-test", version: "0" }, credentials: async () => ({}), log: () => undefined });
+  hosts.push(host); host.init();
+  const plan = await host.createPlanning({ projectId: first, missionId: null, source: { kind: "manual" }, brief: { title: "One change", outcome: "One visible result", intendedUsers: "Engineers", scope: "One flow", exclusions: "", constraints: [], decisions: [], uncertainties: [], questions: [] } });
+  const proposal: PlanningProposal = { summary: "Project A context marker", challenges: [], decisions: [], uncertainties: ["Project A uncertainty marker"], questions: [], deferred: [], inspection: "not-assessed", inspectionScope: "Brief and native records only", gaps: [], impacts: [], items: [{ id: "one", title: "A draft change", goal: "One visible result", scope: "One flow", exclusions: "", acceptanceCriteria: ["The result is visible"], impactIds: [], prerequisites: [], overlapTaskIds: [], questions: [] }] };
+  const reviewed = await host.revisePlanning(plan.id, plan.revision, { brief: plan.request.brief, proposal });
+  const saved = await host.savePlanning({ id: reviewed.id, revision: reviewed.revision, key: randomUUID(), itemIds: ["one"] });
+  const initial = host.task(saved[0]!.taskId);
+  assert.match(initial.brief.content.context, /Project A context marker/);
+  assert.equal(initial.planningSources?.[0]?.planningId, plan.id);
+  const moved = host.setTaskProject(initial.summary.id, initial.revision, second);
+  assert.equal(moved.summary.projectId, second);
+  assert.equal(moved.brief.content.context, ""); assert.equal(moved.brief.content.assumptions.length, 0);
+  assert.deepEqual(moved.brief.content.revalidate, ["context", "assumptions"]);
+  assert.equal(moved.planningSources?.[0]?.planningId, plan.id);
+  assert.equal(starts, 0);
+});

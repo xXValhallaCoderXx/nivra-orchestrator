@@ -10,6 +10,7 @@ release
 # Test output
 test-results
 playwright-report
+.artifacts/
 
 # Local caches
 .cache

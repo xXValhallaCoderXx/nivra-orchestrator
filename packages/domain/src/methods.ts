@@ -8,6 +8,7 @@ import { RunContext } from "./context.ts";
 import { EnvironmentChoices, EnvironmentContext, EnvironmentContextV2, EnvironmentInput, EnvironmentPreview, EnvironmentPreviewV2, EnvironmentRef, EnvironmentReport, EnvironmentSpec, PreviousSettlement, TaskEnvironment } from "./environment.ts";
 import { ExplainResult } from "./explain.ts";
 import { ModelEndpoint, ModelFailureKind } from "./models.ts";
+import { PlanningContext, PlanningEvidence, PlanningInput, PlanningResult } from "./planning.ts";
 import { ResearchContext, ResearchInput, ResearchReport } from "./research.ts";
 import { ReviewContext, ReviewInput, ReviewReport } from "./review.ts";
 import { ExplainInput, HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
@@ -85,6 +86,7 @@ const RunRequest = {
   context: RunContext,
 };
 export const StartRunParams = z.discriminatedUnion("workflowId", [
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: BudgetGrant, context: PlanningContext, workflowId: z.literal("planning"), input: PlanningInput }),
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: BudgetGrant, context: CompanionContext, workflowId: z.literal("companion"), input: CompanionInput }),
   z.strictObject({ ...RunRequest, workflowId: z.literal("hello"), input: HelloInput }),
   z.strictObject({ ...RunRequest, workflowId: z.literal("explain"), input: ExplainInput }),
@@ -177,6 +179,12 @@ export const Methods = {
   "companion.result": { params: z.strictObject({ runId: RunId, sessionId: z.uuid() }), result: CompanionResult.nullable() },
   "companion.ack": { params: z.strictObject({ runId: RunId, sessionId: z.uuid() }), result: z.strictObject({ ok: z.literal(true) }) },
   "companion.end": { params: z.strictObject({ sessionId: z.uuid() }), result: z.strictObject({ ok: z.literal(true) }) },
+  "planning.result": { params: z.strictObject({ runId: RunId, operationId: z.uuid() }), result: PlanningResult.nullable() },
+  "planning.pending": { params: z.strictObject({ runId: RunId, operationId: z.uuid() }), result: z.strictObject({ request: z.number().int().min(1).max(8).nullable(), sharingEpoch: z.number().int().nonnegative().nullable() }) },
+  "planning.authorize": { params: z.strictObject({ runId: RunId, operationId: z.uuid(), request: z.number().int().min(1).max(8), sharingEpoch: z.number().int().nonnegative() }), result: Ok },
+  "planning.ack": { params: z.strictObject({ runId: RunId, operationId: z.uuid() }), result: Ok },
+  "planning.end": { params: z.strictObject({ operationId: z.uuid() }), result: Ok },
+  "planning.validateEvidence": { params: z.strictObject({ repoPath: z.string().min(1).max(4_096), evidence: PlanningEvidence }), result: z.strictObject({ current: z.boolean(), reason: z.string().max(1_000).nullable() }) },
   "budget.journal": {
     params: z.strictObject({ grantId: z.uuid(), after: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(500).default(200) }),
     result: z.strictObject({ accepted: z.boolean(), rows: z.array(BudgetOperation).max(500), seal: JournalSeal.nullable(), providerDate: z.string().nullable(), next: z.number().int().positive().nullable() }),

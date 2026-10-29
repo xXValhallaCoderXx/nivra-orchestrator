@@ -260,7 +260,7 @@ export class RunScheduler {
           (request.workflowId === "research" && !sameResearch(existing.input, request.input)) ||
           (request.workflowId === "task" && !sameTask(existing.input, request.input)) ||
           (request.workflowId === "coach" && !sameCoach(existing.input, request.input)) ||
-          (request.workflowId === "companion" && JSON.stringify(existing.input) !== JSON.stringify(request.input)));
+          ((request.workflowId === "companion" || request.workflowId === "planning") && JSON.stringify(existing.input) !== JSON.stringify(request.input)));
       if (existing && (existing.workflowId !== request.workflowId || other)) {
         throw new Refusal("request-conflict", "This request id already started another run, with other input. Send the new request with a new id.");
       }

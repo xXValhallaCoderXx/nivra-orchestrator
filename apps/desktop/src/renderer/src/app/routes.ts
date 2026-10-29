@@ -1,4 +1,5 @@
 import type { PlanView } from "../../../shared/ipc";
+import type { PlanningBrief } from "@nivra/domain";
 
 /**
  * Where the window is (NIV-56, G3): a scope, General or one project, and a place in it. There is no router dependency:
@@ -16,6 +17,7 @@ export type SettingsSection = "connections" | "sharing" | "preferences" | "budge
 export type Route =
   | { kind: "home" }
   | { kind: "tasks" }
+  | { kind: "planning"; id: string | null; sourceTaskId?: string; missionId?: string; initialBrief?: PlanningBrief; entryId?: string }
   /** A task page (Next A). `tab` picks its side panel; the shell keeps it so Back and Activity land where you were. */
   | { kind: "task"; id: string; tab: TaskTab }
   /**

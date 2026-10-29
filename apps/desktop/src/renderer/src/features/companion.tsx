@@ -1,5 +1,6 @@
 import { Alert, Badge, Box, Button, Group, Paper, Stack, Text, Textarea, TextInput, Title } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
+import type { PlanningBrief } from "@nivra/domain";
 import type { CompanionAction, CompanionContextView, CompanionHint, CompanionSettingsView, CompanionTurnView, KnowledgeView, MissionView, ProjectInspectionView } from "../../../shared/ipc";
 import { CONSENT_COVERS, ConsentModal } from "../shared/evidence";
 import { errorMessage } from "../shared/ui";
@@ -27,13 +28,14 @@ const freshBuffer = (): Buffer => ({ sessionId: crypto.randomUUID(), lines: [], 
 const emptySettings: CompanionSettingsView = { hidden: false, invitationDismissed: false };
 
 /** One optional surface over native work. Its text lives only in these session buffers, never in DraftStore. */
-export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, onVisibilityChange, projectIds, refreshKey = 0 }: {
+export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, onPlan, onVisibilityChange, projectIds, refreshKey = 0 }: {
   hint: CompanionHint;
   narrow: boolean;
   handle: { current: CompanionHandle | null };
   onNavigate(action: CompanionAction): void;
   onAdd(): void;
   onExplain(projectId: string): void;
+  onPlan(brief: PlanningBrief, hint: CompanionHint): void;
   onVisibilityChange(open: boolean): void;
   projectIds: readonly string[];
   refreshKey?: number;
@@ -238,6 +240,13 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
   };
   const stale = buffer.askedFrom !== null && context !== null && buffer.askedFrom !== context.fingerprint;
   const projectId = hint.projectId ?? context?.sources.find((source) => source.kind === "project")?.id;
+  const openPlanner = (brief: PlanningBrief, binding?: CompanionHint) => {
+    if (!context && !binding) return;
+    const scope = context?.scope;
+    const resolvedHint = binding ?? { ...(scope?.kind === "task" ? { taskId: scope.taskId } : scope?.kind === "mission" ? { missionId: scope.missionId } : {}), ...(context?.projectId ? { projectId: context.projectId } : {}) };
+    setOpen(false);
+    onPlan(brief, resolvedHint);
+  };
 
   return (
     <>
@@ -256,7 +265,7 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
             </Group>
             {contextError && <Alert color="red" data-testid="companion-context-error">{contextError}</Alert>}
             {context && <Stack gap={4} data-testid="companion-context"><Text size="sm" fw={600}>Using: {context.label}</Text><Text size="xs" c="var(--nivra-text-2)">{context.sources.map((source) => `${source.label} · ${source.revision}`).join("; ") || "General guidance, with no repository"}</Text><Group gap="xs">{context.sources.filter((source) => source.kind === "task" || source.kind === "mission").map((source) => <Button key={`${source.kind}:${source.id}`} variant="subtle" size="xs" onClick={() => go({ id: `source:${source.id}`, kind: source.kind === "task" ? "open-task" : "open-mission", entityId: source.id, label: source.label })}>Open {source.label}</Button>)}</Group></Stack>}
-            <Box display={mode === "idea" ? undefined : "none"}><IdeaGuide key={buffer.sessionId} onNavigate={go} /></Box>
+            <Box display={mode === "idea" ? undefined : "none"}><IdeaGuide key={buffer.sessionId} onNavigate={go} onPlan={openPlanner} /></Box>
             {mode === "setup" && <SetupGuide projectId={projectId ?? null} refreshKey={refresh + refreshKey} onNavigate={go} onAdd={onAdd} onExplain={(id) => { setOpen(false); onExplain(id); }} />}
             {context && <Stack gap="xs">{context.blockers.map((blocker) => <Alert key={blocker.id} color="yellow"><Text size="sm" fw={600}>{blocker.title}</Text><Text size="sm">{blocker.detail}</Text>{blocker.action && <Button mt="xs" size="xs" variant="default" onClick={() => blocker.action === "recheck" ? setRefresh((n) => n + 1) : go({ id: blocker.id, kind: blocker.action === "environment" ? "environment" : "settings", ...(projectId ? { entityId: projectId } : {}), label: blocker.action === "settings" ? "Open Settings" : "Open environment" })}>{blocker.action === "recheck" ? "Recheck" : blocker.action === "settings" ? "Open Settings" : "Open environment"}</Button>}</Alert>)}</Stack>}
             <Stack gap="xs" data-testid="companion-dialogue">
@@ -270,13 +279,14 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
                   if (buffer.requestId && buffer.askedFrom) setProposal({ action, sessionId: buffer.sessionId, requestId: buffer.requestId, fingerprint: action.fingerprint ?? buffer.askedFrom });
                 } else go(action);
               }} disabled={stale}>{action.label}</Button>)}
-              {proposal?.sessionId === buffer.sessionId && buffer.actions.some((action) => action.id === proposal.action.id) && <ProposalReview key={proposal.action.id} proposal={proposal} stale={stale} onSaved={go} onCancel={() => setProposal(null)} />}
+              {proposal?.sessionId === buffer.sessionId && buffer.actions.some((action) => action.id === proposal.action.id) && <ProposalReview key={proposal.action.id} proposal={proposal} stale={stale} onSaved={go} onPlan={openPlanner} onCancel={() => setProposal(null)} />}
               {buffer.answering ? <Group><Text size="sm" role="status">Nivra is answering…</Text><Button size="xs" variant="default" disabled={!buffer.requestId} onClick={() => void window.nivra.cancelCompanionTurn(buffer.sessionId, buffer.requestId!).catch((reason: unknown) => patch(key, buffer.sessionId, { error: errorMessage(reason) }))}>Cancel turn</Button></Group> : null}
               <Textarea label="Ask Nivra" description="Sends only when you press Ask. This message box is never recovered after restart." value={buffer.composer} maxLength={8_000} autosize minRows={2} onChange={(event) => patch(key, buffer.sessionId, { composer: event.currentTarget.value })} data-testid="companion-message" />
               {!context?.canAsk && context?.askBlocked && <Text size="sm" c="var(--nivra-text-2)" data-testid="companion-ask-blocked">{context.askBlocked} You can keep planning by hand.</Text>}
               {context?.sharingRequired && context.projectId && <Button variant="default" size="xs" onClick={() => setSharingConsent(true)} data-testid="companion-sharing-preview">Review sharing for this project</Button>}
               <Group><Button onClick={() => void send()} disabled={!context?.canAsk || !buffer.composer.trim() || buffer.answering} data-testid="companion-send">Ask Nivra</Button><Button variant="subtle" size="xs" onClick={() => void end()} data-testid="companion-end">End this dialogue</Button></Group>
             </Stack>
+            {context && <PlanningHandoff key={buffer.sessionId} onPlan={(brief) => openPlanner(brief)} />}
             {context && <KnowledgePanel key={key} context={context} sessionId={buffer.sessionId} onChanged={() => setRefresh((n) => n + 1)} />}
             {settings.hidden && <Button variant="default" size="xs" onClick={() => void saveSettings({ hidden: false })} data-testid="companion-show-launcher">Show launcher again</Button>}
             <Group><Button variant="subtle" size="xs" onClick={() => void saveSettings({ hidden: true }).then((saved) => { if (saved) dismiss(); })} data-testid="companion-hide">Hide launcher</Button><Text size="xs" c="var(--nivra-text-2)">Reopen from Settings or Ctrl+Shift+Space.</Text></Group>
@@ -292,10 +302,11 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
   );
 }
 
-function ProposalReview({ proposal, stale, onSaved, onCancel }: {
+function ProposalReview({ proposal, stale, onSaved, onPlan, onCancel }: {
   proposal: { action: CompanionAction; sessionId: string; requestId: string; fingerprint: string };
   stale: boolean;
   onSaved(action: CompanionAction): void;
+  onPlan(brief: PlanningBrief): void;
   onCancel(): void;
 }) {
   const draft = proposal.action.draft;
@@ -328,11 +339,11 @@ function ProposalReview({ proposal, stale, onSaved, onCancel }: {
     {stale && <Alert color="yellow">The source work changed. Ask again before saving this proposal.</Alert>}
     {saved && <Alert color="green">Saved to native work.</Alert>}
     {error && <Alert color="red">{error}</Alert>}
-    <Group><Button size="xs" loading={busy} disabled={stale || saved || !title.trim() || (mission && !goal.trim())} onClick={() => void save()} data-testid="companion-proposal-save">Save reviewed {mission ? "mission" : "draft task"}</Button><Button variant="subtle" size="xs" onClick={onCancel}>Close proposal</Button></Group>
+    <Group><Button size="xs" loading={busy} disabled={stale || saved || !title.trim() || (mission && !goal.trim())} onClick={() => void save()} data-testid="companion-proposal-save">Save reviewed {mission ? "mission" : "draft task"}</Button><Button size="xs" variant="default" disabled={stale || busy || !title.trim() || !goal.trim()} onClick={() => onPlan({ title: title.trim(), outcome: goal.trim(), intendedUsers: "", scope: scope.trim(), exclusions: "", constraints: [], decisions: [], uncertainties: [], questions: [] })}>Break into tasks</Button><Button variant="subtle" size="xs" onClick={onCancel}>Close proposal</Button></Group>
   </Stack></Paper>;
 }
 
-function IdeaGuide({ onNavigate }: { onNavigate(action: CompanionAction): void }) {
+function IdeaGuide({ onNavigate, onPlan }: { onNavigate(action: CompanionAction): void; onPlan(brief: PlanningBrief, hint: CompanionHint): void }) {
   const [name, setName] = useState("");
   const [outcome, setOutcome] = useState("");
   const [users, setUsers] = useState("");
@@ -365,6 +376,7 @@ function IdeaGuide({ onNavigate }: { onNavigate(action: CompanionAction): void }
     </> : <>
       <Alert color="green" data-testid="companion-idea-saved">Saved as mission “{mission.latest.content.name}”, v{mission.latest.version}. This saves the brief; no application or repository was created.</Alert>
       <Button variant="default" size="xs" onClick={() => onNavigate({ id: "open-saved-mission", kind: "open-mission", entityId: mission.id, label: "Open saved mission" })}>Open saved mission</Button>
+      <Button variant="default" size="xs" onClick={() => onPlan({ title: mission.latest.content.name, outcome: mission.latest.content.outcome, intendedUsers: mission.latest.content.intendedUsers, scope: "", exclusions: mission.latest.content.nonGoals.join("\n"), constraints: mission.latest.content.constraints, decisions: [], uncertainties: [], questions: [] }, { missionId: mission.id })} data-testid="companion-idea-plan">Break this idea into tasks</Button>
       <Text size="sm" fw={600}>First manageable task (optional)</Text>
       <TextInput label="Task title" value={taskTitle} onChange={(event) => setTaskTitle(event.currentTarget.value)} data-testid="companion-first-title" />
       <Textarea label="Task outcome" value={taskGoal} onChange={(event) => setTaskGoal(event.currentTarget.value)} data-testid="companion-first-goal" />
@@ -380,6 +392,28 @@ function IdeaGuide({ onNavigate }: { onNavigate(action: CompanionAction): void }
       })} data-testid="companion-first-save">Save first draft task</Button>
     </>}
     {error && <Alert color="red" data-testid="companion-save-error">{error}{mission ? " Your mission remains saved; retry this task step." : " Your idea hasn't been confirmed saved yet."}</Alert>}
+  </Stack></Paper>;
+}
+
+/** Only these deliberately entered fields cross to durable planning; temporary dialogue is never copied. */
+function PlanningHandoff({ onPlan }: { onPlan(brief: PlanningBrief): void }) {
+  const [opened, setOpened] = useState(false);
+  const [title, setTitle] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const [scope, setScope] = useState("");
+  const [constraints, setConstraints] = useState("");
+  const [decisions, setDecisions] = useState("");
+  return <Paper withBorder p="sm" data-testid="companion-planning"><Stack gap="sm">
+    <Button variant="default" size="xs" onClick={() => setOpened((value) => !value)} aria-expanded={opened} data-testid="companion-planning-open">Break into tasks</Button>
+    {opened && <>
+      <Text size="sm">Review the brief to take into planning. Only these fields are transferred; this dialogue is not saved or copied. Opening the planner uses no AI request.</Text>
+      <TextInput label="Planning brief title" value={title} maxLength={200} onChange={(event) => setTitle(event.currentTarget.value)} />
+      <Textarea label="Planning brief outcome" value={outcome} maxLength={4_000} onChange={(event) => setOutcome(event.currentTarget.value)} autosize />
+      <Textarea label="Planning brief scope" value={scope} maxLength={4_000} onChange={(event) => setScope(event.currentTarget.value)} autosize />
+      <Textarea label="Planning brief constraints, one per line" value={constraints} maxLength={8_000} onChange={(event) => setConstraints(event.currentTarget.value)} autosize />
+      <Textarea label="Planning brief decisions, one per line" value={decisions} maxLength={8_000} onChange={(event) => setDecisions(event.currentTarget.value)} autosize />
+      <Button size="xs" disabled={!title.trim() || !outcome.trim()} onClick={() => onPlan({ title: title.trim(), outcome: outcome.trim(), intendedUsers: "", scope: scope.trim(), exclusions: "", constraints: separateLines(constraints), decisions: separateLines(decisions), uncertainties: [], questions: [] })} data-testid="companion-planning-transfer">Review this brief in planning</Button>
+    </>}
   </Stack></Paper>;
 }
 

@@ -644,6 +644,7 @@ export function TaskDetail({
   onOpenConversation,
   renderStrip,
   onOpenEnvironment,
+  onOpenPlanning,
 }: {
   taskId: string;
   projects: ProjectView[];
@@ -656,6 +657,7 @@ export function TaskDetail({
   renderStrip?(items: StripItem[]): ReactNode;
   /** Opens the project's environment where readiness points to it; without it, readiness only says what it needs. */
   onOpenEnvironment?(projectId: string): void;
+  onOpenPlanning?(planningId: string): void;
 }) {
   const [readCount, setReadCount] = useState(0);
   const task = usePoll<TaskView>(() => window.nivra.getTask(taskId), () => null, [taskId, readCount]);
@@ -864,6 +866,7 @@ export function TaskDetail({
 
   return (
     <Stack gap="md" data-testid="task" data-task-id={taskId} data-revision={revision}>
+      {view.planningSources?.map((source) => <Alert key={`${source.planningId}:${source.itemId}`} color={source.questions.length || source.missingPrerequisites.length ? "yellow" : "gray"} title={`From reviewed planning v${source.revision}`}><Button size="xs" variant="subtle" disabled={!onOpenPlanning} onClick={() => onOpenPlanning?.(source.planningId)}>Review source plan</Button>{source.questions.map((question, index) => <Text key={index} size="sm">Needs a decision: {question}</Text>)}{source.missingPrerequisites.length > 0 && <Text size="sm">Unresolved advisory prerequisites: {source.missingPrerequisites.join(", ")}</Text>}</Alert>)}
       <Group justify="space-between" align="flex-start" wrap="wrap" gap="md">
         <Stack gap={6} style={{ minWidth: 0, flex: "1 1 320px" }}>
           {editing === "title" ? (

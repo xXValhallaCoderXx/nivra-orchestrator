@@ -3242,3 +3242,133 @@ failed/aborted evidence. The full built-app suite was not repeated; packaged cov
 
 No paid calls were made. The companion-only allowance, explicit turn/sharing requirements and stated exclusions remain
 in force. No newer planning work is included in either review branch.
+
+## NIV-69: reviewed task planning and the shared request allowance (29 October 2026)
+
+Candidate: local uncommitted work on `main` at `5a6606a`, integrated with the existing NIV-68/NIV-66 changes. This is
+local implementation evidence, not a merge or release claim. The changed application/domain source manifest is kept
+at `.artifacts/niv69/source-manifest.json`; its SHA-256 fingerprint is
+`6f3665f0a2e23ece680115b431dad768f6605f7040a98d4e5c321c8b7b509645`.
+
+Implemented behaviours:
+
+- Both entry routes use the same durable planner and allowance. The companion transfers an explicitly reviewed brief,
+  never its dialogue. Repository-free/manual planning needs no key, Git, prepared environment or external tracker.
+- Proposals hold constructive challenge, decisions and uncertainty, a bounded impact assessment and at most five
+  editable items. Native source/brief/attempt versions and saved item mappings are bound. Changed decisions or evidence
+  make advice provisional/stale; existing active tasks, pending results and saved briefs are not rewritten. Knowledge
+  bindings use the exact request retrieval, including inherited mission notes, rather than a parallel selection.
+- Selected drafts, first briefs, optional mission membership, provenance and receipts commit atomically. Repeated and
+  concurrent saves do not duplicate work; failures roll back; deleted results are never recreated. Omitted prerequisites
+  remain visible. Human criteria do not become commands or Ready state.
+- Repository-enabled AI binds current sharing consent/epoch, rechecks after engine startup and requires a fresh permit
+  before each inference. Revocation/removal cancels and rejects late results. Commit/file/search/inventory freshness is
+  checked before using observed advice. An answer with no observations can still save drafts while its engine is offline.
+- The Companion and planning pool keeps the prior limit, month, usage and reservations through an appended guarded policy.
+  Feature rows and combined totals count actual inference once. Eight is a maximum; a reduced finite grant protects one
+  final answer and explains missing exploration. Unknown outcomes stay counted. Other services and dollar ceilings are
+  not claimed.
+
+Verification receipts (working directory: this repository):
+
+| Check | Evidence |
+| --- | --- |
+| Full source verification | `env TMPDIR=/var/tmp taskset --cpu-list 0-3 pnpm verify`: 136 domain, 695 desktop and 983 engine cases passed (1,814 total), with no skips or failures. `.artifacts/niv69/verify-final.log` |
+| Final planning regressions | 23 host/transport/native-host cases passed, including offline unassessed saves, inherited mission-note edits/forgetting rejecting late results, and unrelated-scope changes remaining valid. `.artifacts/niv69/planning-final.log` |
+| Engine planner | Ten real-stdio/mocked-provider cases, three evidence cases, and an isolated `rpc.ts planning.validateEvidence` check passed. These include current sharing permits, lower grants, early final answers, context saturation, uncommitted source edits, cancellation, privacy and no replay. |
+| Built app | All 138 applicable cases passed across the full run and corrected contract-expectation rerun; one existing packaged-only case skipped. Final focused planning/budget run passed 6/6. `.artifacts/niv69/built-all`, `built-corrections` and `built` |
+| Packaged app | Earlier full run: 68 passed, 71 existing stand-in-only cases skipped. Corrected frozen-build planning/IPC run: 9/9 passed, including source-plan navigation, keyboard newlines, selected tasks, dependency discard protection and companion handoff. `.artifacts/niv69/packaged-all` and `packaged-final` |
+| Native Windows and WSL engines | Final staged runtimes passed 37/37 checks, including runtime loading, cancellation and unchanged release-home checks. `.artifacts/niv69/targets-windows-retry.log` |
+| Native Windows UI | Corrected source: 15/15 passed, no skips or failures; source/installed/native-Windows hashes matched before and after. `.artifacts/niv69/windows-ui-final` and `windows-build-identity-bound.json`. |
+
+The final Windows UI run was launched only after source and installed `app.asar` matched SHA-256
+`adec059e1537b99a500362c151e870006b17d298e00ee865b478317b45cd4c6e` (3,553,186 bytes), with the planning bridge,
+planning schema and source-plan action present. Native PowerShell independently verified the same bytes before and after the run. The complete receipt is
+`.artifacts/niv69/windows-build-identity-bound.json`; earlier candidate receipts remain separate.
+
+Earlier failed attempts are retained. Managed sandbox restrictions prevented Electron/loopback/staged self-checks;
+those were rerun with approved execution permission and Chromium sandboxing retained. An ambient read-only `/tmp/.git`
+invalidated the plain-folder fixture, so the full check used `/var/tmp` rather than weakening its assertion. Excessive
+parallel test load caused timing failures; bounding CPU affinity changed worker count without skipping checks or
+extending deadlines. Exact bridge/schema expectations were updated for the new authorised API and v13 migration. An
+older Windows archive at the shared dev location caused three stale-binary failures; that run is not acceptance for
+this candidate. The target harness's first cache-replacement attempt also failed; its retry passed all 37 checks.
+
+The source and new files were reviewed for scope, credentials, generated output and cross-project leakage; whitespace
+checks passed. Generated evidence is ignored under `.artifacts/`. No new dependencies, paid provider calls, commits,
+pushes, deployments or external tracker mutations occurred. Mocked tests establish mechanics and safeguards, not live
+model planning quality or exhaustive semantic impact coverage; token/input estimates are not provider billing ceilings.
+
+
+## NIV-69 PR integration after the prerequisite merges (29 October 2026)
+
+The publication candidate is on `feature/niv-69-reviewed-planning`, based on main `ac2d574` after PRs #44 and #45
+merged. The NIV-69 patch was applied relative to the initial companion checkpoint, preserving the later guarded month
+confirmation, task-scoped preferences, dialogue lifecycle and Settings-return fixes. The PR contains only the NIV-69
+increment; the original dirty checkout was preserved. D55 remains the merged preference-scope decision, and planning is
+D56. This checkpoint supersedes the earlier uncommitted candidate as evidence for the PR.
+
+Validation in `/tmp/nivra-niv69-pr`, without live paid providers:
+
+| Check | Result |
+| --- | --- |
+| `env TMPDIR=/var/tmp taskset --cpu-list 0-3 pnpm verify` | 1,826 passed: 136 domain, 707 desktop, 983 engine; zero skipped or failed |
+| Built planning, budget and companion lifecycle | 15 passed; includes explicit month confirmation/recovery and all seven merged lifecycle cases |
+| Packaged app, planning, budget and companion lifecycle | 21 passed; zero skipped or failed |
+| Windows UI after `pnpm dev:win --no-launch --skip-stage` | 15 passed; zero skipped or failed |
+| Windows archive identity | Source, installed and native PowerShell SHA-256 matched before and after: `8efa08fcbb06333261e99d40621e2b9b2b92d20e7e7ab0e6f1f912637d2240a9`, 3,556,750 bytes |
+| Engine/runtime evidence | Engine and domain production sources are byte-identical to the preceding validated NIV-69 candidate; its real-stdio, isolated RPC and 37/37 Windows/WSL target checks carry forward |
+| Scope and hygiene | 52 changed/new files; no generated artefacts or new credential literals staged; diff whitespace checks passed |
+
+Local receipts are under this worktree's ignored `.artifacts/niv69-pr/`: `verify.log`, `built.log`, `packaged.log`,
+`windows-build.log`, `windows-ui.log` and `windows-build-identity.json`. The earlier candidate's receipts remain in the
+original checkout. Tests retained Chromium sandboxing, isolated native/WSL profiles and the release-home protections.
+No dependency changes, live model-quality evaluation, paid calls, deployment or merge is authorised by publication.
+
+## NIV-69 PR review corrections (30 October 2026)
+
+PR #46 is held as a draft for re-review. This checkpoint corrects the seven P2 findings against `34f2937`; the older
+passing receipts above do not establish these corrected behaviours. The frozen production-source manifest is
+`.artifacts/niv69-review/source-manifest.json` (261 files), fingerprint
+`7602a2c3c08c4c22d3eb77f8cdfa727da9190308cd12d35dae9891fbb46e3eb2`.
+
+1. Commentary alongside list/read/search calls remains exploratory; only a response without exploratory tools is parsed
+   as a text final proposal. Structured final submission and invalid-final refusal remain enforced.
+2. Model input and host bindings use the same bounded task/selected-mission/project knowledge selection. A busy
+   project cannot crowd out all mission notes. Editing or forgetting either included scope rejects pending results;
+   foreign-project records remain excluded.
+3. Engine and host share the same merger for overlapping/consecutive inclusive ranges. Citations spanning consecutive
+   reads save successfully; unread gaps and inconsistent hashes/revisions are refused.
+4. Partial saves require an explicit Review remaining tasks step. It creates another reviewed version even when the
+   content is unchanged, while the existing one-save-per-version and receipt protections remain enforced.
+5. Every new companion handoff receives a fresh planner identity; assigning a saved ID to that same form preserves its
+   identity. Two successive handoffs replace an already open unsaved form with their reviewed briefs.
+6. If first proposal validation fails after brief creation, the UI retains the record ID and unsaved edits. Correcting
+   and retrying updates that record instead of creating another.
+7. First creation and navigation within the window preserve task selection. The selection cache remains transient;
+   durable planning content and task provenance retain their existing storage rules.
+
+Fresh verification in `/tmp/nivra-niv69-pr`, with local/loopback stand-ins and no paid calls:
+
+| Check | Result |
+| --- | --- |
+| `env TMPDIR=/var/tmp taskset --cpu-list 0-3 pnpm verify` | 1,832 passed: 136 domain, 711 desktop, 985 engine; zero skipped or failed |
+| Focused host/runner regressions | 26 passed; the new initial reproductions failed against the original code, then passed after correction |
+| Engine planning and citation regressions | 42 passed, including real-stdio prose/tool responses, text final JSON, consecutive reads and unread-gap refusal |
+| Real engine through `rpc.ts` | Current tracked-file evidence accepted; a changed hash rejected, using an isolated temporary home |
+| Built app under Xvfb | 19 passed across app security/bridge, planning and companion lifecycle |
+| Linux packaged app under Xvfb | 24 passed across app, planning, shared-budget recovery and companion lifecycle; zero skipped or failed |
+| Fresh runtime staging and Windows/WSL harness | Staging smoke checks passed; 37/37 harness checks passed, including unchanged release-home checks |
+| Native Windows UI | 15 passed; zero skipped or failed, after rebuilding and copying the corrected development package |
+| Native Windows archive identity | Source, installed and native PowerShell hashes matched before and after: `feee40687c5be73fd61effc581b0539780ced63c510098fef1b19d7ae8d52998`, 3,559,924 bytes |
+
+Receipts are in this worktree's ignored `.artifacts/niv69-review/`, including `host-before.log`, `host-after.log`,
+`verify.log`, `built-xvfb.log`, `packaged.log`, `rpc.json`, `stage.log`, `targets-windows.log`, `windows-ui.log` and
+`windows-before.json`/`windows-after.json`. The initial focused UI attempt passed five cases and failed one fixture
+because its handoff panel was already open; the fixture now checks its expanded state before toggling. All six
+planning cases then passed, followed by the broader built and packaged runs. No production test was skipped or
+weakened to obtain these results.
+
+The original checkout was left unchanged. No dependencies, schema, IPC surface, budget policy, paid-provider scope or
+execution authority changed. These checks establish offline mechanics and platform integration; live planning quality
+and exhaustive semantic impact coverage remain unassessed. The PR stays on hold and has not been merged.

@@ -169,6 +169,7 @@ export function ProjectHome({
               Create task
             </Button>
           </Group>
+          <Button variant="subtle" size="xs" style={{ alignSelf: "flex-start" }} onClick={() => onNavigate({ kind: "planning", id: null })} data-testid="home-break-into-tasks">Break into tasks</Button>
           <DraftNotice result={draft.result} />
           <Text size="xs" c="var(--nivra-text-3)">
             {tasks?.workspace.state === "unavailable"
@@ -388,6 +389,7 @@ export function GeneralHome({
             <Button variant="default" onClick={onNewTask} data-testid="home-new-task">
               New task
             </Button>
+            <Button variant="default" onClick={() => onNavigate({ kind: "planning", id: null })} data-testid="home-break-into-tasks">Break into tasks</Button>
           </Group>
           <Text size="xs" c="var(--nivra-text-3)">
             A mission is optional. It says who the work is for and what is true once it's done; a task can stand on its own.
