@@ -301,14 +301,17 @@ const NPM_INSTALL_FLAG = /^--(legacy-peer-deps|install-links|strict-peer-deps|en
 /**
  * Whether a preparation's install arguments are the only shape Nivra sends, so a preview and its preparation agree on
  * what runs. With no manager, D41's: `--frozen-lockfile`, then each filter as `--filter <filter>`. For a recipe (NIV-55):
- * pnpm's `install --frozen-lockfile` with filters, every filter one `ENVIRONMENT_FILTER` takes; npm's `ci --no-audit
- * --no-fund` with the install flags it may be given, each one exactly.
+ * pnpm's `install --frozen-lockfile`, optionally followed by `--fail-if-no-match` before one or more filters, every
+ * filter one `ENVIRONMENT_FILTER` takes. Older recipes without that flag stay valid. npm's `ci --no-audit --no-fund`
+ * takes only the install flags it may be given, each one exactly.
  */
 export function isInstallArgs(args: readonly string[], manager?: "npm" | "pnpm"): boolean {
   if (manager === "npm") return args[0] === "ci" && args[1] === "--no-audit" && args[2] === "--no-fund" && args.slice(3).every((arg) => NPM_INSTALL_FLAG.test(arg));
   const rest = manager === "pnpm" ? (args[0] === "install" ? args.slice(1) : null) : args;
-  if (!rest || rest[0] !== "--frozen-lockfile" || (rest.length - 1) % 2 !== 0) return false;
-  for (let index = 1; index < rest.length; index += 2) {
+  if (!rest || rest[0] !== "--frozen-lockfile") return false;
+  const firstFilter = manager === "pnpm" && rest[1] === "--fail-if-no-match" ? 2 : 1;
+  if ((rest.length - firstFilter) % 2 !== 0 || (firstFilter === 2 && rest.length === 2)) return false;
+  for (let index = firstFilter; index < rest.length; index += 2) {
     if (rest[index] !== "--filter" || !ENVIRONMENT_FILTER.test(rest[index + 1]!)) return false;
   }
   return true;

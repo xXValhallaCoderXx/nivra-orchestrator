@@ -336,8 +336,28 @@ describe("install options, build policies and what task operations get (NIV-55)"
     });
     assert.equal((await resolveIn(files)).status, "needs-choice", "the whole workspace can't agree");
     const scoped = ready(await resolveIn(files, { choices: { scope: { kind: "selected", selectors: ["@w/data..."] } } }));
-    assert.deepEqual(scoped.recipe.install.args, ["install", "--frozen-lockfile", "--filter", "@w/data..."]);
+    assert.deepEqual(scoped.recipe.install.args, ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@w/data..."]);
     refused(await resolveIn(npmProject(), { choices: { scope: { kind: "selected", selectors: ["app"] } } }), "scope", /npm workspaces/);
+  });
+});
+
+describe("pnpm selections that must match packages", () => {
+  it("asks pnpm to fail an empty selection while leaving the whole project's install unchanged", async () => {
+    const files = pnpmProject({}, {
+      "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
+      "packages/data/package.json": json({ name: "@w/data" }),
+    });
+    const whole = ready(await resolveIn(files));
+    assert.deepEqual(whole.recipe.install.args, ["install", "--frozen-lockfile"]);
+    // pnpm decides which packages match inside the boundary, including exclusions and selectors Nivra cannot expand.
+    for (const selectors of [["@w/missing"], ["!*"], ["@w/data", "!@w/other"]]) {
+      const scope = { kind: "selected" as const, selectors };
+      const selected = ready(await resolveIn(files, { choices: { scope } }));
+      assert.deepEqual(selected.recipe.scope, scope);
+      assert.deepEqual(selected.recipe.install.args, ["install", "--frozen-lockfile", "--fail-if-no-match", ...selectors.flatMap((selector) => ["--filter", selector])]);
+      const older = { ...selected.recipe, install: { ...selected.recipe.install, args: selected.recipe.install.args.filter((arg) => arg !== "--fail-if-no-match") } };
+      assert.notEqual(await recipeDigest(selected.recipe), await recipeDigest(older), "the preview must bind the new install flag");
+    }
   });
 });
 

@@ -278,7 +278,7 @@ function resolve(input: NodeResolveInput): EnvironmentResolution {
     bootstrap.push({ tool: "pnpm", version: managerVersion.version, via: corepackRunsIt ? "corepack-else-npm-global" : "npm-global" });
   }
 
-  const args = managerName === "npm" ? ["ci", "--no-audit", "--no-fund", ...npmFlags(options)] : ["install", "--frozen-lockfile", ...(scope.kind === "selected" ? scope.selectors.flatMap((selector) => ["--filter", selector]) : [])];
+  const args = managerName === "npm" ? ["ci", "--no-audit", "--no-fund", ...npmFlags(options)] : ["install", "--frozen-lockfile", ...(scope.kind === "selected" ? ["--fail-if-no-match", ...scope.selectors.flatMap((selector) => ["--filter", selector])] : [])];
   const recipe: EnvironmentRecipe = {
     format: RECIPE_FORMAT,
     profile: "node",

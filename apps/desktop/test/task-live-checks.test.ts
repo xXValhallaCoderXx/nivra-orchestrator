@@ -281,7 +281,7 @@ describe("the packages a live run's recipe installs (NIV-55)", () => {
     const whole = checked("whole", {});
     const chosen = checked("chosen", { scope: { kind: "selected", selectors: ["@live/data...", "./packages/web"] } });
     assert.deepEqual([whole.choices, whole.install], ["{}", "pnpm install --frozen-lockfile"]);
-    assert.deepEqual([chosen.choices, chosen.install], ['{"scope":{"kind":"selected","selectors":["@live/data...","./packages/web"]}}', "pnpm install --frozen-lockfile --filter @live/data... --filter ./packages/web"]);
+    assert.deepEqual([chosen.choices, chosen.install], ['{"scope":{"kind":"selected","selectors":["@live/data...","./packages/web"]}}', "pnpm install --frozen-lockfile --fail-if-no-match --filter @live/data... --filter ./packages/web"]);
     assert.notEqual(chosen.recipe, whole.recipe);
     assert.notEqual(chosen.preview, whole.preview);
     // The same packages in another order are another install, so another recipe.

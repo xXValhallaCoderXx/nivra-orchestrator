@@ -72,7 +72,7 @@ let nebiusProject = null;
 const recipeFor = (choices) => {
   const node = choices?.runtime ?? "24.21.0";
   const scope = choices?.scope && !existsSync(join(home, "env-ignores-scope")) ? choices.scope : { kind: "whole" };
-  const filters = scope.kind === "selected" ? scope.selectors.flatMap((selector) => ["--filter", selector]) : [];
+  const filters = scope.kind === "selected" ? ["--fail-if-no-match", ...scope.selectors.flatMap((selector) => ["--filter", selector])] : [];
   return {
     format: "nivra.environment-recipe.v1",
     profile: "node",

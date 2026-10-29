@@ -5228,7 +5228,12 @@ function preparationReportMatches(report: EnvironmentReport, preparation: Prepar
 /** The person's choices, as the domain takes them (NIV-55), or why not, in their words. */
 function environmentChoicesOf(choices: EnvironmentChoices): EnvironmentChoices {
   const parsed = EnvironmentChoices.safeParse(choices);
-  if (!parsed.success) throw new Error("Those choices can't be sent as they are: a version is exact, such as 24.21.0, and an option is one the preview offers. Preview the environment again.");
+  if (!parsed.success) {
+    if (parsed.error.issues.some((issue) => issue.path[0] === "scope")) {
+      throw new Error("Those package selectors can't be sent as they are. Use 1 to 8 selectors, each up to 200 characters, with no spaces or leading dash. Correct them, then preview again.");
+    }
+    throw new Error("Those choices can't be sent as they are: a version is exact, such as 24.21.0, and an option is one the preview offers. Preview the environment again.");
+  }
   return parsed.data;
 }
 

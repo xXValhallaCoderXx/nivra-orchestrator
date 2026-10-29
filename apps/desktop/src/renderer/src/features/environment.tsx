@@ -388,8 +388,9 @@ function ScopeControl({ scope, disabled, onChange }: { scope: InstallScope; disa
             </Button>
           </Group>
           <Text size="xs" c="var(--nivra-text-3)">
-            Up to {MAX_SELECTORS} selectors, each as pnpm install --filter takes it, such as @scope/app... or ./packages/data. They are sent as you type them, and the preview shows
-            the install command they make.
+            Use a package name such as @scope/app, or a folder such as ./packages/data. Add ... to a package name
+            to include its dependencies, for example @scope/app... . You can enter up to {MAX_SELECTORS} selectors.
+            The preview shows the install command. Preparation checks the matches and stops if no packages match.
           </Text>
         </Stack>
       )}

@@ -230,6 +230,22 @@ describe("a project-driven recipe's preparation through a real engine (NIV-55)",
     }
   });
 
+  it("keeps no environment when pnpm reports an empty selection, and asks the person to correct it", async () => {
+    const { stub, engine } = await setup({ node: "24.21.0", npm: "11.19.0", install: "fails", installLog: 'No projects matched the filters in "/workspace"\n' });
+    const repo = repoWith(PNPM);
+    const choices: EnvironmentChoices = { scope: { kind: "selected", selectors: ["@mono/missing"] } };
+    const shown = ready(await resolve(engine, repo, choices));
+    assert.deepEqual(shown.recipe.install.args, ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@mono/missing"]);
+    const run = await start(engine, repo, shown.fingerprint, choices);
+    assert.equal((await ended(engine, run.id)).status, "failed");
+    const result = await report(engine, run.id);
+    assert.deepEqual([result.outcome, result.stopped?.code, result.stopped?.step, result.install?.exitCode, result.prepared, result.environment], ["failed", "install", "install", 1, null, null]);
+    assert.match(result.stopped?.detail ?? "", /None of the workspace packages matched.*Correct the package names or folders under What to install/);
+    const operations = spawns(stub);
+    assert.equal(operations.length, 2, "a failed selection must not run readiness");
+    assert.deepEqual(operations[1]!.args.slice(5), ["pnpm", "11.5.3", "corepack-else-npm-global", "none", ...shown.recipe.install.args]);
+  });
+
   it("refuses a run whose recipe isn't the one previewed, on the same commit, before anything is sent", async () => {
     // The same commit, other choices: only the recipe's digest tells the two apart.
     const { stub, engine } = await setup({ node: "22.23.4", npm: "10.9.9" });

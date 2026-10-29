@@ -13,13 +13,14 @@ import { succeed, type Behaviour } from "../../engine/test/fake-sandboxes.ts";
 import { RealGuest } from "../../engine/test/real-guest.ts";
 import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandboxes.ts";
 import { addProject, prepareOnce, previewEnvironment } from "../scripts/task-journey.ts";
+import { goTo } from "./places.ts";
 
 /**
  * What a project's environment installs, chosen in the window (NIV-55, option a1), through the real host and engine,
  * offline: the built app against a stand-in for Nebius Sandboxes on this machine, reached through the unpackaged-only
  * switch. The engine resolves each project's own setup; the stand-in answers the inspect, preparation and readiness steps
  * as an image would, never installs anything, and fails any other step, so nothing runs here. It shows that the packages
- * typed in the window are the ones the preparation installs: the preview's install command is the one the sandbox is
+ * typed in the window are the ones the preparation requests: the preview's install command is the one the sandbox is
  * given, and the prepared recipe records the scope; that a start previewed for another scope is refused; and that an npm
  * project, and a pnpm project that isn't a workspace, refuse chosen packages in the engine's words, with the selectors
  * kept and Prepare off. A packaged app ignores the switch, so this skips there.
@@ -51,7 +52,7 @@ const REPOS: Record<string, Record<string, string>> = {
   },
 };
 const SCOPE: InstallScope = { kind: "selected", selectors: ["@mono/data", "./packages/web"] };
-const COMMAND = "pnpm install --frozen-lockfile --filter @mono/data --filter ./packages/web";
+const COMMAND = "pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data --filter ./packages/web";
 
 let root: string;
 let sandbox: SandboxStub<RealGuest>;
@@ -119,9 +120,10 @@ const resolveIn = (projectId: string, choices: EnvironmentChoices) => page.evalu
 const startWith = (projectId: string, choices: EnvironmentChoices, fingerprint: string) =>
   page.evaluate(`window.nivra.prepareEnvironment(${arg(projectId)}, ${arg(choices)}, ${arg(fingerprint)}).then(() => "started", (error) => String(error))`) as Promise<string>;
 
-test("installs only the packages chosen in the window: the install the preview shows is the one the sandbox is given, and the prepared recipe records them", async () => {
+test("sends the packages chosen in the window: the install the preview shows is the one the sandbox is given, and the prepared recipe records them", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
   const projectId = await addProject(app, page, join(root, "mono"));
+  await goTo(page, "environment");
   await saveKeys();
   const section = page.getByTestId("environment");
   const row = (fact: string) => section.locator(`[data-testid="environment-row"][data-fact="${fact}"]`);
@@ -135,6 +137,11 @@ test("installs only the packages chosen in the window: the install the preview s
 
   // Two packages, typed as the live run's journey types a task file's: the engine's install has one --filter each, and
   // its own rows say so too.
+  await previewEnvironment(page, projectId, { scope: SCOPE });
+  // A later recipe may have fewer selectors: remove stale rows before entering the new selection.
+  await previewEnvironment(page, projectId, { scope: { kind: "selected", selectors: ["@mono/data"] } });
+  await expect(section.getByTestId("environment-scope-selector")).toHaveCount(1);
+  await expect(section.getByTestId("environment-scope-selector")).toHaveValue("@mono/data");
   const shown = await previewEnvironment(page, projectId, { scope: SCOPE });
   await expect(section.getByTestId("environment-install")).toHaveText(`Then, in the sandbox: ${COMMAND}`);
   await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: only the workspace packages that @mono/data and ./packages/web select.");
@@ -149,13 +156,13 @@ test("installs only the packages chosen in the window: the install the preview s
   await page.evaluate(`window.nivra.setCloudExecution(${arg(projectId)}, true)`);
   expect(await startWith(projectId, { scope: SCOPE }, whole.fingerprint)).toContain(CHANGED);
   expect(await startWith(projectId, {}, shown.fingerprint)).toContain(CHANGED);
-  expect(sandbox.requests).toHaveLength(0);
+  expect(sandbox.requests.length).toBe(0);
 
   // Prepared from the window: the sandbox is given exactly the install shown, and the environment's recipe records it.
   const log: string[] = [];
   const prepared = await prepareOnce(page, projectId, 120_000, (line) => log.push(line));
   expect([prepared.preparation?.status, prepared.ready], log.join("\n")).toEqual(["answered", true]);
-  expect(installs).toHaveLength(1);
+  expect(installs.length).toBe(1);
   expect(installs[0]!.slice(5)).toEqual(["pnpm", "11.5.3", "corepack-else-npm-global", "none", ...COMMAND.split(" ").slice(1)]);
   expect([prepared.prepared?.recipe.scope, prepared.prepared?.recipe.install.args, prepared.prepared?.recipeDigest, prepared.choices?.scope]).toEqual([SCOPE, shown.recipe.install.args, shown.recipeDigest, SCOPE]);
   await expect(section.getByTestId("environment-prepared-scope")).toHaveText(`Installed with ${COMMAND}: only the workspace packages that @mono/data and ./packages/web select.`);
@@ -171,6 +178,7 @@ test("refuses chosen packages for an npm project and for a pnpm project that isn
   ] as const) {
     await addProject(app, page, join(root, folder));
     await expect(page.getByTestId("project-select")).toHaveValue(folder);
+    await goTo(page, "environment");
     const section = page.getByTestId("environment");
     await section.getByTestId("environment-scope-selected").check();
     await section.getByTestId("environment-scope-selector").fill(folder);

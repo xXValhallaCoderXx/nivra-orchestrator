@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { fetchTransport, SandboxApi, SandboxDeadlineError, SandboxHttpError, SandboxNetworkError, SandboxNotSentError, SandboxTooLargeError, type SpawnBody, type Transport, type TransportRequest, type TransportResponse } from "../src/exec/nebius/api.ts";
 import { CLEANUP_MAX_SECONDS, evaluate, insideRepository, probePlan, PROBE_LIMITS, runStageOne, stageZeroSummary, tokenOutlasts, type ProbeResults, type StepResult, type SubprocessResult } from "../src/exec/nebius/probe.ts";
-import { classify, ENV_PREPARE_SCRIPT, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
+import { classify, ENV_PREPARE_SCRIPT, isInstallArgs, Journal, Sandbox, SandboxRefusal, type Outcome } from "../src/exec/nebius/sandbox.ts";
 import { ANY_SIZE, clock, encode, FakeService, holding, PATCH, REPORT, sandboxOn, settles, sha, spawned, step, succeed } from "./fake-sandboxes.ts";
 
 /**
@@ -139,11 +139,33 @@ describe("Nebius Sandboxes, offline: spawning, one at a time, networking off (NI
     assert.equal(journal.spawnsOf("environment preparation"), 1);
   });
 
+  it("accepts only the fixed no-match flag before a recipe's pnpm filters, alongside older valid commands", () => {
+    for (const args of [
+      ["install", "--frozen-lockfile"],
+      ["install", "--frozen-lockfile", "--filter", "@w/data..."],
+      ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@w/data...", "--filter", "!@w/web"],
+    ]) assert.equal(isInstallArgs(args, "pnpm"), true, JSON.stringify(args));
+    assert.equal(isInstallArgs(["--frozen-lockfile", "--filter", "@w/data..."]), true, "D41's command stays valid");
+    assert.equal(isInstallArgs(["--frozen-lockfile", "--fail-if-no-match", "--filter", "data"]), false, "D41's shape is unchanged");
+    for (const rest of [
+      ["--fail-if-no-match"],
+      ["--fail-if-no-match=false", "--filter", "data"],
+      ["--no-fail-if-no-match", "--filter", "data"],
+      ["--fail-if-no-match", "--fail-if-no-match", "--filter", "data"],
+      ["--filter", "data", "--fail-if-no-match"],
+      ["--fail-if-no-match", "--filter"],
+      ["--fail-if-no-match", "--filter", "--prod"],
+      ["--fail-if-no-match", "--filter", "data; curl x"],
+      ["--fail-if-no-match", "--filter", "data", "--registry=https://other.invalid"],
+    ]) assert.equal(isInstallArgs(["install", "--frozen-lockfile", ...rest], "pnpm"), false, JSON.stringify(rest));
+    assert.equal(isInstallArgs(["ci", "--no-audit", "--no-fund", "--fail-if-no-match"], "npm"), false);
+  });
+
   it("runs a recipe's preparation only in the shapes Nivra allows, with no variable that could steer the install elsewhere (NIV-55)", async () => {
     const service = new FakeService(() => succeed());
     const { sandbox } = sandboxOn(service);
     type Recipe = { manager: "npm" | "pnpm"; version: string; via: string; npmPin: string | null; installArgs: string[]; env: Record<string, string> };
-    const pnpm: Recipe = { manager: "pnpm", version: "11.5.3", via: "corepack-else-npm-global", npmPin: null, installArgs: ["install", "--frozen-lockfile", "--filter", "@w/data..."], env: { COREPACK_ENABLE_STRICT: "0", pnpm_config_pm_on_fail: "ignore" } };
+    const pnpm: Recipe = { manager: "pnpm", version: "11.5.3", via: "corepack-else-npm-global", npmPin: null, installArgs: ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@w/data..."], env: { COREPACK_ENABLE_STRICT: "0", pnpm_config_pm_on_fail: "ignore" } };
     const npm: Recipe = { manager: "npm", version: "bundled", via: "none", npmPin: "10.9.9", installArgs: ["ci", "--no-audit", "--no-fund", "--legacy-peer-deps", "--install-links=false", "--omit=dev"], env: {} };
     const base = { image: "img-node", inputs: { uuid: "inputs" }, timeoutSeconds: 120 };
     const refusals: Array<[Recipe, RegExp]> = [
@@ -167,7 +189,7 @@ describe("Nebius Sandboxes, offline: spawning, one at a time, networking off (NI
     await sandboxOn(service).sandbox.prepareEnvironment({ ...base, recipe: npm });
     const bodies = spawned(service) as unknown as Array<{ args: string[]; env: Record<string, string>; networking: { enabled: boolean } }>;
     assert.deepEqual(bodies.map((body) => body.args.slice(5)), [
-      ["pnpm", "11.5.3", "corepack-else-npm-global", "none", "install", "--frozen-lockfile", "--filter", "@w/data..."],
+      ["pnpm", "11.5.3", "corepack-else-npm-global", "none", "install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@w/data..."],
       ["npm", "bundled", "none", "10.9.9", "ci", "--no-audit", "--no-fund", "--legacy-peer-deps", "--install-links=false", "--omit=dev"],
     ]);
     assert.deepEqual([bodies[0]!.env["pnpm_config_pm_on_fail"], bodies[0]!.env["PATH"]?.startsWith("/usr/local/sbin"), bodies.every((body) => body.networking.enabled)], ["ignore", true, true]);

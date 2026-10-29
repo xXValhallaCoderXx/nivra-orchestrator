@@ -3269,9 +3269,10 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     // So are chosen packages the domain's rule doesn't take, which the window sends as typed (NIV-55): none, more than
     // eight, an empty one, a space, a leading dash.
     const nine = Array.from({ length: 9 }, (_, index) => `@scope/p${index}`);
-    for (const selectors of [[], nine, [""], ["web app"], ["-r"]]) {
-      await assert.rejects(host.resolveEnvironment(linux, { scope: { kind: "selected", selectors } }), WRONG, JSON.stringify(selectors));
-      await assert.rejects(host.prepareEnvironment(linux, { scope: { kind: "selected", selectors } }, fingerprint), WRONG, JSON.stringify(selectors));
+    const WRONG_SCOPE = /^Error: Those package selectors can't be sent as they are\. Use 1 to 8 selectors, each up to 200 characters, with no spaces or leading dash\. Correct them, then preview again\.$/;
+    for (const selectors of [[], nine, [""], ["web app"], ["-r"], ["a".repeat(201)]]) {
+      await assert.rejects(host.resolveEnvironment(linux, { scope: { kind: "selected", selectors } }), WRONG_SCOPE, JSON.stringify(selectors));
+      await assert.rejects(host.prepareEnvironment(linux, { scope: { kind: "selected", selectors } }, fingerprint), WRONG_SCOPE, JSON.stringify(selectors));
     }
     assert.deepEqual([stateOf(host, "wsl:Test")?.status, stateOf(host, "local")?.status], ["stopped", "stopped"]);
   });

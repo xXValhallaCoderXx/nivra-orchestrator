@@ -176,7 +176,7 @@ test("writes a brief's baseline checks and frozen files, previews a run from the
 
 test("chooses what to install: the whole project unless packages are named, each sent as typed and refused in the host's words with the selectors kept, and a change cleared until it is previewed", async () => {
   test.skip(packaged, "a packaged app ignores the test engine switch");
-  await page.getByTestId("nav-projects").click();
+  await goTo(page, "environment");
   const section = page.getByTestId("environment");
   const selectors = section.getByTestId("environment-scope-selector");
   const prepare = section.getByTestId("environment-prepare");
@@ -209,7 +209,7 @@ test("chooses what to install: the whole project unless packages are named, each
   await selectors.first().fill("web app");
   await expect(section.getByTestId("environment-scope-hint")).toHaveText("A selector holds only letters, digits and @ . _ / ^ ~ * ! -. Take the space out of it.");
   await section.getByTestId("environment-preview").click();
-  await expect(section.getByTestId("environment-action-error")).toHaveText("Those choices can't be sent as they are: a version is exact, such as 24.21.0, and an option is one the preview offers. Preview the environment again.");
+  await expect(section.getByTestId("environment-action-error")).toHaveText("Those package selectors can't be sent as they are. Use 1 to 8 selectors, each up to 200 characters, with no spaces or leading dash. Correct them, then preview again.");
   await expect(selectors.first()).toHaveValue("web app");
   await expect(section.getByTestId("environment-scope-selected")).toBeChecked();
   await expect(prepare).toBeDisabled();
@@ -224,7 +224,7 @@ test("chooses what to install: the whole project unless packages are named, each
   await selectors.nth(1).fill("./packages/web");
   await section.getByTestId("environment-preview").click();
   await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: only the workspace packages that @mono/data... and ./packages/web select.");
-  await expect(section.getByTestId("environment-install")).toHaveText("Then, in the sandbox: pnpm install --frozen-lockfile --filter @mono/data... --filter ./packages/web");
+  await expect(section.getByTestId("environment-install")).toHaveText("Then, in the sandbox: pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data... --filter ./packages/web");
   await expect(prepare).toBeEnabled();
   expect(resolved().at(-1)?.choices).toEqual({ runtime: "22.23.4", scope: CHOSEN });
 
@@ -266,14 +266,23 @@ test("chooses what to install: the whole project unless packages are named, each
   // with the same filters.
   await prepare.click();
   await expect(section.getByTestId("environment-prepared-scope")).toHaveText(
-    "Installed with pnpm install --frozen-lockfile --filter @mono/data... --filter ./packages/web: only the workspace packages that @mono/data... and ./packages/web select.",
+    "Installed with pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data... --filter ./packages/web: only the workspace packages that @mono/data... and ./packages/web select.",
     { timeout: 30_000 },
   );
   await expect(section.getByTestId("environment-preparation")).toContainText("with your choices: Node 22.23.4, installing @mono/data... and ./packages/web");
   const sent = JSON.parse(lines("environments.log").at(-1)!.split(" ").slice(1).join(" ")) as { context: { choices: unknown } };
   expect(sent.context.choices).toEqual({ runtime: "22.23.4", scope: CHOSEN });
   const view = await page.evaluate((id) => window.nivra.getEnvironment(id), projectId);
-  expect([view.prepared?.recipe.scope, view.prepared?.recipe.install.args, view.choices?.scope]).toEqual([CHOSEN, ["install", "--frozen-lockfile", "--filter", "@mono/data...", "--filter", "./packages/web"], CHOSEN]);
+  expect([view.prepared?.recipe.scope, view.prepared?.recipe.install.args, view.choices?.scope]).toEqual([CHOSEN, ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@mono/data...", "--filter", "./packages/web"], CHOSEN]);
+
+  // A renderer restart restores the saved choice, without the component's edited in-memory state.
+  await page.reload();
+  await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
+  await goTo(page, "environment");
+  await expect(section.getByTestId("environment-scope-selected")).toBeChecked();
+  await expect(selectors).toHaveCount(2);
+  await expect(selectors.first()).toHaveValue("@mono/data...");
+  await expect(selectors.nth(1)).toHaveValue("./packages/web");
 
   // The whole project again: the selectors are put away, kept for later, and nothing is prepared until it is previewed.
   await section.getByTestId("environment-scope-whole").check();

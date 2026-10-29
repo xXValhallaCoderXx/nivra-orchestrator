@@ -54,6 +54,7 @@ describe("a failed install's diagnosis (NIV-55)", () => {
       ["npm", `npm error code ERESOLVE ${secret}`, /legacy-peer-deps/],
       ["npm", "npm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync", /Run npm install in the repository/],
       ["pnpm", `ERR_PNPM_OUTDATED_LOCKFILE ${secret}`, /Run pnpm install in the repository/],
+      ["pnpm", `No projects matched the filters in "/workspace/${secret}"`, /Correct the package names or folders under What to install/],
       ["pnpm", "ERR_PNPM_IGNORED_BUILDS  Ignored build scripts: esbuild", /pnpm approve-builds/],
       ["pnpm", "ERR_PNPM_UNSUPPORTED_ENGINE  Unsupported environment", /choose a Node version every package accepts/],
       ["npm", "npm warn EBADENGINE Unsupported engine", /choose a Node version every package accepts/],
@@ -66,6 +67,9 @@ describe("a failed install's diagnosis (NIV-55)", () => {
       assert.match(said ?? "", words, log);
       assert.ok(!said!.includes(secret), "the diagnosis repeated text from the log");
     }
+    // pnpm also warns when only some filters miss: that is not an empty selection or its failure.
+    assert.equal(installDiagnosis("pnpm", 'No projects matched the filters "@w/missing" in "/workspace"'), null);
+    assert.equal(installDiagnosis("npm", 'No projects matched the filters in "/workspace"'), null);
     // Another manager's signature isn't read as this one's, and an unknown failure gets no diagnosis.
     assert.deepEqual([installDiagnosis("pnpm", "npm error code ERESOLVE"), installDiagnosis("npm", "ERR_PNPM_OUTDATED_LOCKFILE"), installDiagnosis("npm", "npm error code E404")], [null, null, null]);
   });
