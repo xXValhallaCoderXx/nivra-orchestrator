@@ -843,3 +843,8 @@ For NIV-68, run `companion-engine.test.ts`, `companion-host.test.ts`, `knowledge
 markers, permitting separately selected structured outcomes. `pnpm rpc repository.inspect '{"repoPath":"/absolute/path"}'
 --home /tmp/nivra-inspect-check` exercises local inspection without a provider or repository scripts. Guidance never
 runs `environment.resolve` merely to refresh status. The companion composer never uses draft recovery.
+
+When the host's computer month is later than its established budget month, Settings > Budget and usage > Companion
+requests offers explicit month confirmation. Check the displayed month before confirming. Save and Refresh never
+renew an exhausted allowance. The existing guard/recovery checks remain authoritative, and older outstanding requests
+stay in their original month.

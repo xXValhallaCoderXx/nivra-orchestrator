@@ -3195,3 +3195,16 @@ host workspace 12. No commit, push, merge, tool installation for a user project,
 The two stacked patches and validation logs are in `/tmp/nivra-delivery-review`. Other agents, research and sandbox work
 are outside the companion request allowance. No monthly token limit, dollar ceiling, all-service accounting or live
 provider acceptance is claimed.
+
+## NIV-66 review correction — explicit month confirmation, 29 October 2026
+
+The review of PR 44 at `7622442` found that an exhausted, settled companion allowance had no Settings action to
+establish the next month. Companion requests now shows the host's established month and computer month, with the
+existing guarded confirmation action. Saving a limit or refreshing usage never advances the month. Recovery keeps
+confirmation disabled; old outstanding grants and their late usage remain attached to their original month.
+
+- Budget-store and host-budget tests: 98 passed, no skips.
+- Final built `budget-api.spec.ts` and `budget-usage.spec.ts`: 6 passed. Real-ledger offline fixtures exhaust and settle
+  a previous month, confirm the displayed later month, check the guard after reload and refuse a recovery bypass.
+- Tests start no engine or paid inference for the month-confirmation journeys. Companion AI request coverage and
+  existing money-policy refusals are unchanged. Broader verification results accompany the PR update.
