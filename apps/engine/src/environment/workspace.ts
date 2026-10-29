@@ -1,5 +1,5 @@
 import { ENVIRONMENT_LIMITS, WORKSPACE_FOLDER, WORKSPACE_NAME, type InstallOptions, type InstallScope, type InstallSelection, type WorkspaceFacts } from "@nivra/domain";
-import { dependencySpecs, linkedFolder, stringAt, type LockfileFacts, type Manifest, type NpmLockEntry, type YamlValue } from "./node-files.ts";
+import { dependencySpecs, linkedFolder, stringAt, type LockfileFacts, type Manifest, type NpmEdgeKind, type NpmLockEntry, type YamlValue } from "./node-files.ts";
 import { compareVersions, versionParts } from "./versions.ts";
 
 /**
@@ -187,13 +187,18 @@ export interface ChosenInstall {
   selection: InstallSelection;
   /** pnpm's --filter values (names) or npm's --workspace values (./FOLDER), in the selection's order. */
   targets: string[];
+  /**
+   * npm: registry packages the install takes in only through an installed package's optional peer, because another
+   * workspace package depends on them (npm/cli 9847). Empty for pnpm.
+   */
+  strays: string[];
 }
 
 /**
  * Every workspace package an install of the chosen ones reaches, from the links the lockfile records, or why it can't
  * be worked out. The release's own gate is checked apart, once the versions are settled.
  */
-export function chosenInstall(scope: Extract<InstallScope, { kind: "packages" }>, shape: WorkspaceShape, input: Pick<ShapeInput, "manager" | "lock" | "lockPath">): ChosenInstall | { problem: string } {
+export function chosenInstall(scope: Extract<InstallScope, { kind: "packages" }>, shape: WorkspaceShape, input: Pick<ShapeInput, "manager" | "lock" | "lockPath" | "options">): ChosenInstall | { problem: string } {
   const { manager, lock, lockPath } = input;
   if (shape.packagesBlocked) return { problem: shape.single ? `${shape.packagesBlocked} Choose the whole project, then preview again.` : shape.packagesBlocked };
   for (const folder of scope.packages) {
@@ -202,7 +207,7 @@ export function chosenInstall(scope: Extract<InstallScope, { kind: "packages" }>
     if (why) return { problem: `${quoted(folder)} can't be chosen. ${why}` };
   }
   if (manager === "pnpm" && !scope.root) return { problem: "pnpm installs the workspace root's own dependencies whenever it installs chosen packages, so they can't be left out. Turn them on, then preview again." };
-  const reach = manager === "pnpm" ? pnpmReach(lock, scope.packages, lockPath) : npmReach(lock.tree ?? new Map(), scope.root ? ["", ...scope.packages] : scope.packages, lockPath);
+  const reach = manager === "pnpm" ? pnpmReach(lock, scope.packages, lockPath) : npmReach(lock.tree ?? new Map(), scope.root ? ["", ...scope.packages] : scope.packages, lockPath, input.options["legacy-peer-deps"] === true);
   if ("problem" in reach) return reach;
   const installed = [...new Set([...scope.packages, ...reach.reached])].sort();
   for (const folder of installed) {
@@ -216,11 +221,12 @@ export function chosenInstall(scope: Extract<InstallScope, { kind: "packages" }>
   return {
     selection: { packages, root: manager === "pnpm" ? true : scope.root },
     targets: packages.map((item) => (manager === "pnpm" ? item.name! : `./${item.folder}`)),
+    strays: reach.strays,
   };
 }
 
 /** pnpm: the importers the chosen ones and the root (always installed) link to, through every link recorded in importers. */
-function pnpmReach(lock: LockfileFacts, chosen: readonly string[], lockPath: string): { reached: string[] } | { problem: string } {
+function pnpmReach(lock: LockfileFacts, chosen: readonly string[], lockPath: string): { reached: string[]; strays: string[] } | { problem: string } {
   const projects = new Set(lock.workspaces);
   const seen = new Set<string>();
   const queue = ["", ...chosen];
@@ -233,22 +239,23 @@ function pnpmReach(lock: LockfileFacts, chosen: readonly string[], lockPath: str
       queue.push(target);
     }
   }
-  return { reached: [...seen].filter((folder) => folder !== "") };
+  return { reached: [...seen].filter((folder) => folder !== ""), strays: [] };
 }
 
 /**
- * npm: the workspace folders the starts reach, through every dependency as npm records it. A name resolves to the first
- * node_modules entry found from the dependent's own folder upwards (Node's lookup, which arborist records); a link
- * leads to its workspace folder, and a registry package is followed through its own dependencies.
+ * npm: every lockfile entry an install of the starts takes in, through each dependency as npm records it. A name
+ * resolves to the first node_modules entry found from the dependent's own folder upwards (Node's lookup, which arborist
+ * records); a link leads to its workspace folder, and a registry package is followed through its own dependencies.
+ * With legacy-peer-deps npm leaves peers out, so no peer is followed. Only a missing dependency refuses: a missing
+ * optional one, or peer, is one npm went without.
  */
-function npmReach(tree: ReadonlyMap<string, NpmLockEntry>, starts: readonly string[], lockPath: string): { reached: string[] } | { problem: string } {
-  const reached = new Set<string>();
-  const seen = new Set<string>();
+function npmWalk(tree: ReadonlyMap<string, NpmLockEntry>, starts: readonly string[], lockPath: string, follows: (kind: NpmEdgeKind) => boolean): { visited: Set<string> } | { problem: string } {
+  const visited = new Set<string>();
   const stack = [...starts];
   while (stack.length) {
     const key = stack.pop()!;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (visited.has(key)) continue;
+    visited.add(key);
     const entry = tree.get(key);
     if (!entry) continue;
     if (entry.link) {
@@ -258,14 +265,44 @@ function npmReach(tree: ReadonlyMap<string, NpmLockEntry>, starts: readonly stri
       stack.push(target);
       continue;
     }
-    if (key !== "" && !key.includes("node_modules/")) reached.add(key);
     for (const dependency of entry.requires) {
+      if (!follows(dependency.kind)) continue;
       const found = lookup(tree, key, dependency.name);
       if (found !== null) stack.push(found);
-      else if (!dependency.optional) return { problem: `${lockPath} doesn't record where ${quoted(dependency.name)}, which ${named(key)} needs, comes from. Run npm install in the repository, commit ${lockPath}, then preview again.` };
+      else if (dependency.kind === "dependency") return { problem: `${lockPath} doesn't record where ${quoted(dependency.name)}, which ${named(key)} needs, comes from. Run npm install in the repository, commit ${lockPath}, then preview again.` };
     }
   }
-  return { reached: [...reached] };
+  return { visited };
+}
+
+/** Which edges npm's install of chosen workspaces follows: all of them, optional peers included (npm/cli 9847), and no peers with legacy-peer-deps. */
+const npmFollows = (legacyPeers: boolean) => (kind: NpmEdgeKind) => !(legacyPeers && (kind === "peer" || kind === "peer-optional"));
+
+/**
+ * npm: the workspace folders an install of the starts reaches, and the registry packages it takes in only through an
+ * installed package's optional peer, whose entry the lockfile has because another workspace package depends on it:
+ * npm/cli 9847 installs those too, so they are said, by name. A workspace reached that way is installed and listed.
+ */
+function npmReach(tree: ReadonlyMap<string, NpmLockEntry>, starts: readonly string[], lockPath: string, legacyPeers: boolean): { reached: string[]; strays: string[] } | { problem: string } {
+  const all = npmWalk(tree, starts, lockPath, npmFollows(legacyPeers));
+  if ("problem" in all) return all;
+  const firm = npmWalk(tree, starts, lockPath, (kind) => kind !== "peer-optional" && npmFollows(legacyPeers)(kind));
+  if ("problem" in firm) return firm;
+  const reached = [...all.visited].filter((key) => key !== "" && !key.includes("node_modules/"));
+  const strays = [...all.visited].filter((key) => key.includes("node_modules/") && !tree.get(key)?.link && !firm.visited.has(key)).map((key) => key.replace(/^.*node_modules\//, ""));
+  return { reached, strays: [...new Set(strays)].sort() };
+}
+
+/**
+ * npm: the packages with install scripts that a chosen install takes in, by name: what ignore-scripts leaves unbuilt,
+ * where a whole project's install would count every one in the lockfile.
+ */
+export function npmInstallScripts(lock: LockfileFacts, selection: InstallSelection, legacyPeers: boolean): string[] {
+  const tree = lock.tree ?? new Map<string, NpmLockEntry>();
+  const starts = [...(selection.root ? [""] : []), ...selection.packages.map((item) => item.folder)];
+  const walked = npmWalk(tree, starts, "package-lock.json", npmFollows(legacyPeers));
+  if ("problem" in walked) return lock.installScripts;
+  return [...new Set([...walked.visited].filter((key) => tree.get(key)?.installScript === true).map((key) => key.replace(/^.*node_modules\//, "")))].sort();
 }
 
 /** The lockfile entry a dependency name resolves to from a location, as Node looks it up: its own node_modules, then each parent's. */
@@ -280,8 +317,3 @@ function lookup(tree: ReadonlyMap<string, NpmLockEntry>, from: string, name: str
   }
 }
 
-/** The workspace packages outside an npm install that declare optional peers, which npm/cli 9847 installs anyway. */
-export function npmStrayPeers(lock: LockfileFacts, installed: readonly string[]): string[] {
-  const inside = new Set(installed);
-  return lock.workspaces.filter((folder) => !inside.has(folder) && (lock.tree?.get(folder)?.optionalPeers.length ?? 0) > 0);
-}

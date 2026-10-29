@@ -259,15 +259,22 @@ export interface LockfileFacts {
   tree: Map<string, NpmLockEntry> | null;
 }
 
+/**
+ * How an npm entry declares a dependency, which decides whether an install follows it: a dependency (and a root's or a
+ * workspace's devDependency), an optional dependency, a peer, or an optional peer. legacy-peer-deps makes npm leave
+ * peers of both kinds out entirely.
+ */
+export type NpmEdgeKind = "dependency" | "optional" | "peer" | "peer-optional";
+
 /** An npm lockfile entry, for following what a workspace package reaches (NIV-55). */
 export interface NpmLockEntry {
   /** A link to a folder in the repository: a workspace package. */
   link: boolean;
   resolved: string | null;
-  /** Its dependencies by name, and whether an install can go without each (optional dependencies, and peers). */
-  requires: Array<{ name: string; optional: boolean }>;
-  /** The peers it declares optional, by name: npm/cli 9847 installs those even for another workspace's install. */
-  optionalPeers: string[];
+  /** Its dependencies by name, each with how it is declared. */
+  requires: Array<{ name: string; kind: NpmEdgeKind }>;
+  /** Whether the lockfile says it has an install script, which ignore-scripts leaves unrun. */
+  installScript: boolean;
 }
 
 /** A link's target from the repository's top, "" for the top itself, or null when it leaves the repository. */
@@ -356,25 +363,25 @@ export function npmLockFacts(text: string): LockfileFacts | null {
 }
 
 /**
- * An npm lockfile entry's dependencies, as npm installs them: a folder's own entry (the root, a workspace package) keeps
- * its devDependencies, anything else has none recorded. A peer counts as optional: npm installs one the lockfile holds,
- * and one it doesn't hold was left out on purpose (legacy-peer-deps) or makes npm ci fail by itself.
+ * An npm lockfile entry's dependencies, as npm installs them, each with how it is declared: a folder's own entry (the
+ * root, a workspace package) keeps its devDependencies, anything else has none recorded. A name declared twice takes
+ * the kind npm gives it: a dependency over a peer, and an optional dependency over a dependency, as npm's own
+ * optionalDependencies override.
  */
 function npmEntry(key: string, entry: Record<string, unknown>): NpmLockEntry {
   const names = (field: string) => Object.keys(objectAt(entry[field]));
   const meta = objectAt(entry["peerDependenciesMeta"]);
-  const optionalPeers = names("peerDependencies").filter((name) => objectAt(meta[name])["optional"] === true);
-  const required = new Set([...names("dependencies"), ...(key.includes("node_modules/") ? [] : names("devDependencies"))]);
-  const optional = [...names("optionalDependencies"), ...names("peerDependencies")].filter((name) => !required.has(name));
+  const kinds = new Map<string, NpmEdgeKind>();
+  for (const name of names("peerDependencies")) kinds.set(name, objectAt(meta[name])["optional"] === true ? "peer-optional" : "peer");
+  for (const name of [...names("dependencies"), ...(key.includes("node_modules/") ? [] : names("devDependencies"))]) kinds.set(name, "dependency");
+  for (const name of names("optionalDependencies")) kinds.set(name, "optional");
   return {
     link: entry["link"] === true,
     resolved: stringAt(entry["resolved"]),
-    requires: [...[...required].map((name) => ({ name, optional: false })), ...unique(optional).map((name) => ({ name, optional: true }))],
-    optionalPeers,
+    requires: [...kinds].map(([name, kind]) => ({ name, kind })),
+    installScript: entry["hasInstallScript"] === true,
   };
 }
-
-const unique = <T>(items: readonly T[]) => [...new Set(items)];
 
 /** A lockfile line beneath an entry: its indentation, and its text without it. */
 interface LockLine {

@@ -5,7 +5,7 @@ import { satisfies, setupConfiguration } from "./inputs.ts";
 import { dependencySpecs, INSTALL_HOOKS, isLocalSpec, isNodeSetupPath, LOCKFILES, npmLockFacts, objectAt, PNPMFILES, pnpmLockFacts, simpleYaml, stringAt, SUPPORTED_MANAGERS, textOf, unreadGlob, VERSION_FILES, versionFileValue, workspaceMembers, type LockfileFacts, type Manifest, type YamlValue } from "./node-files.ts";
 import { advisoryFor, RELEASES, standing, type NodeRelease, type ReleaseIndex, type ToolRelease } from "./releases.ts";
 import { versionParts } from "./versions.ts";
-import { chosenInstall, filteredInstallProblem, npmStrayPeers, regressedLockfileWriter, workspaceShape, type ChosenInstall, type WorkspaceShape } from "./workspace.ts";
+import { chosenInstall, filteredInstallProblem, regressedLockfileWriter, workspaceShape, type ChosenInstall, type WorkspaceShape } from "./workspace.ts";
 
 /**
  * Node's resolver (NIV-55, NIV-58): a project's declared setup, read from Nivra's own snapshot of the commit, settled into
@@ -270,7 +270,7 @@ function resolveWith(input: NodeResolveInput, known: { facts: WorkspaceFacts | n
   }
   let chosen: ChosenInstall | null = null;
   if (scope.kind === "packages") {
-    const worked = chosenInstall(scope, shape, { manager: managerName as "npm" | "pnpm", lock, lockPath });
+    const worked = chosenInstall(scope, shape, { manager: managerName as "npm" | "pnpm", lock, lockPath, options: choices.options ?? {} });
     chosen = "problem" in worked ? refuseScope(worked.problem) : worked;
   }
   const installed = new Set(chosen?.selection.packages.map((item) => item.folder) ?? []);
@@ -361,8 +361,11 @@ function resolveWith(input: NodeResolveInput, known: { facts: WorkspaceFacts | n
   }
   if (chosen) {
     limitations.push("Only the packages listed get their dependencies installed. A check that needs another workspace package's will fail; the task still sends the whole commit.");
-    const stray = managerName === "npm" ? npmStrayPeers(lock, [...installed]) : [];
-    if (stray.length) warnings.push({ code: "npm-optional-peers", message: clip(`npm may also install optional peer dependencies that other workspace packages declare, such as ${quoted(stray[0]!)}'s (npm/cli 9847).`, 600) });
+    if (chosen.strays.length) {
+      const named = chosen.strays.slice(0, 3).map(quoted).join(", ");
+      const one = chosen.strays.length === 1;
+      warnings.push({ code: "npm-optional-peers", message: clip(`npm also installs ${named}${chosen.strays.length > 3 ? ` and ${chosen.strays.length - 3} more` : ""}: an installed package declares ${one ? "it" : "each"} as an optional peer, and another workspace package depends on ${one ? "it" : "each"} (npm/cli 9847).`, 600) });
+    }
   }
   limitations.push("Environments run on x86_64 Linux with Alpine (musl) for now. A dependency that ships only glibc binaries, or builds natively, may fail to install.");
   limitations.push("Networking is on while the environment is prepared, and off for every task run and check that starts from it.");

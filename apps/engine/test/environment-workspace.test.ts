@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { linkedFolder, npmLockFacts, pnpmLockFacts } from "../src/environment/node-files.ts";
-import { filteredInstallProblem, regressedLockfileWriter } from "../src/environment/workspace.ts";
+import { filteredInstallProblem, npmInstallScripts, regressedLockfileWriter } from "../src/environment/workspace.ts";
 
 /**
  * Workspace packages chosen by folder (NIV-55, D52): which package manager releases Nivra offers them on, each range
@@ -139,18 +139,46 @@ describe("what the lockfile readers record of the links an install follows (D52)
     )!;
     assert.deepEqual(facts.workspaces, ["packages/ui"]);
     const entry = (key: string) => facts.tree!.get(key)!;
-    assert.deepEqual([entry("").requires, entry("packages/ui").requires, entry("packages/ui").optionalPeers, entry("node_modules/x").requires], [
-      [{ name: "@w/lint", optional: false }],
+    assert.deepEqual([entry("").requires, entry("packages/ui").requires, entry("node_modules/x").requires], [
+      [{ name: "@w/lint", kind: "dependency" }],
       [
-        { name: "a", optional: false },
-        { name: "c", optional: false },
-        { name: "b", optional: true },
-        { name: "react", optional: true },
-        { name: "vue", optional: true },
+        { name: "react", kind: "peer-optional" },
+        { name: "vue", kind: "peer" },
+        { name: "a", kind: "dependency" },
+        { name: "c", kind: "dependency" },
+        { name: "b", kind: "optional" },
       ],
-      ["react"],
-      [{ name: "a", optional: false }],
+      [{ name: "a", kind: "dependency" }],
     ]);
+    // A name declared twice takes npm's kind: a dependency over a peer, an optional dependency over a dependency.
+    const twice = npmLockFacts(json({ lockfileVersion: 3, packages: { "": { name: "r", dependencies: { a: "1", b: "1" }, peerDependencies: { a: "1" }, optionalDependencies: { b: "1" } } } }))!;
+    assert.deepEqual(twice.tree!.get("")!.requires, [{ name: "a", kind: "dependency" }, { name: "b", kind: "optional" }]);
+    assert.deepEqual([entry("node_modules/x").installScript, entry("packages/ui").installScript], [false, false]);
     assert.deepEqual([entry("node_modules/@w/ui").link, entry("node_modules/@w/ui").resolved], [true, "packages/ui"]);
+  });
+});
+
+describe("what ignore-scripts leaves unbuilt for chosen npm workspaces (Nate's review)", () => {
+  it("counts only the install scripts a chosen install takes in, never another workspace package's", () => {
+    const lock = npmLockFacts(
+      json({
+        lockfileVersion: 3,
+        packages: {
+          "": { name: "site", workspaces: ["packages/*"] },
+          "packages/web": { name: "@s/web", dependencies: { "@s/data": "*" } },
+          "packages/data": { name: "@s/data", dependencies: { "left-pad": "1" } },
+          "packages/tools": { name: "@s/tools", dependencies: { esbuild: "0.25.0" } },
+          "node_modules/@s/web": { resolved: "packages/web", link: true },
+          "node_modules/@s/data": { resolved: "packages/data", link: true },
+          "node_modules/@s/tools": { resolved: "packages/tools", link: true },
+          "node_modules/esbuild": { version: "0.25.0", resolved: "https://registry.npmjs.org/esbuild/-/esbuild-0.25.0.tgz", hasInstallScript: true },
+          "node_modules/left-pad": { version: "1.3.0", resolved: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz", hasInstallScript: true },
+        },
+      }),
+    )!;
+    const selection = (folders: string[], root = false) => ({ packages: folders.map((folder) => ({ folder, name: null, chosen: true })), root });
+    assert.deepEqual(lock.installScripts.sort(), ["esbuild", "left-pad"], "a whole project counts every one");
+    assert.deepEqual(npmInstallScripts(lock, selection(["packages/data", "packages/web"]), false), ["left-pad"], "esbuild only comes with tools, which isn't chosen");
+    assert.deepEqual(npmInstallScripts(lock, selection(["packages/tools"]), false), ["esbuild"]);
   });
 });

@@ -758,11 +758,40 @@ describe("workspace packages chosen by folder, installed from the links each loc
     assert.deepEqual([installed(without), without.recipe.install.args.at(-1), without.recipe.selection?.root], [["+apps/web", "packages/core", "packages/data"], "--include-workspace-root=false", false]);
     const tool = ready(await resolveIn(site(), packages(["apps/tool"], false)));
     assert.deepEqual(installed(tool), ["+apps/tool", "packages/core"], "core is reached through plugin-x, a registry package");
-    assert.deepEqual(tool.warnings.map((item) => item.code), ["npm-optional-peers"], "ui's optional peer may come anyway (npm/cli 9847)");
+    assert.deepEqual(tool.warnings.map((item) => item.code), [], "an unselected workspace's own optional peer is nothing npm takes in");
     const options = ready(await resolveIn(site(), { choices: { scope: scopeOf(["apps/web"]), options: { "legacy-peer-deps": true } } }));
     assert.deepEqual(options.recipe.install.args.slice(0, 4), ["ci", "--no-audit", "--no-fund", "--legacy-peer-deps"], "install options stay before the workspaces");
     assert.deepEqual(facts(withRoot).root, { dependencies: 2, examples: ["@w/lint", "typescript"], optional: true, reason: null });
     assert.deepEqual([mode(withRoot, "selectors").available, mode(withRoot, "selectors").reason], [false, "pnpm selectors are pnpm's own syntax, and this project installs with npm."]);
+  });
+
+  it("follows npm's peers as npm does: a peer-only workspace comes with its dependent, and nothing comes through a peer with legacy-peer-deps (Nate's review)", async () => {
+    // ui declares shared as a peer only, and data as an optional peer only; both are workspace packages.
+    const tree = npmTree({
+      "packages/shared": { name: "@w/shared", version: "1.0.0" },
+      "node_modules/@w/shared": { resolved: "packages/shared", link: true },
+    });
+    Object.assign(tree["packages/ui"] as Record<string, unknown>, { peerDependencies: { "@w/shared": "*", "@w/data": "*" }, peerDependenciesMeta: { "@w/data": { optional: true } } });
+    const ui = (options: Record<string, unknown> = {}) => resolveIn(site(tree), { choices: { scope: scopeOf(["packages/ui"], false), options } as never });
+    assert.deepEqual(installed(ready(await ui())), ["packages/core", "packages/data", "packages/shared", "+packages/ui"], "npm installs a peer, and an optional peer the tree holds (npm/cli 9847)");
+    const legacy = ready(await ui({ "legacy-peer-deps": true }));
+    assert.deepEqual([installed(legacy), legacy.recipe.install.args], [["+packages/ui"], ["ci", "--no-audit", "--no-fund", "--legacy-peer-deps", "--workspace=./packages/ui", "--include-workspace-root=false"]]);
+  });
+
+  it("warns about what npm/cli 9847 takes in: an installed package's optional peer that only another workspace package depends on", async () => {
+    // The upstream reproducer's shape: tool's plugin-x declares zod an optional peer; twin, not chosen, depends on zod.
+    const tree = npmTree({ "node_modules/zod": { version: "3.23.8", resolved: "https://registry.npmjs.org/zod/-/zod-3.23.8.tgz", integrity: "sha512-z" } });
+    Object.assign(tree["node_modules/plugin-x"] as Record<string, unknown>, { peerDependencies: { zod: "^3" }, peerDependenciesMeta: { zod: { optional: true } } });
+    (tree["packages/twin"] as Record<string, unknown>)["dependencies"] = { zod: "^3" };
+    const tool = (extra: Record<string, unknown> = {}) => resolveIn(site(tree), { choices: { scope: scopeOf(["apps/tool"], false), ...extra } as never });
+    const warned = ready(await tool());
+    assert.deepEqual(warned.warnings.map((item) => item.code), ["npm-optional-peers"]);
+    assert.match(warned.warnings[0]!.message, /^npm also installs zod: an installed package declares it as an optional peer, and another workspace package depends on it \(npm\/cli 9847\)\.$/);
+    assert.deepEqual(installed(warned), ["+apps/tool", "packages/core"], "zod is a registry package, so no workspace is added for it");
+    assert.deepEqual(ready(await tool({ options: { "legacy-peer-deps": true } })).warnings.map((item) => item.code), [], "no peer is followed with legacy-peer-deps");
+    // When tool itself depends on zod, zod is no extra.
+    (tree["apps/tool"] as { dependencies: Record<string, string> }).dependencies["zod"] = "^3";
+    assert.deepEqual(ready(await tool()).warnings.map((item) => item.code), []);
   });
 
   it("refuses an npm dependency the lockfile doesn't record, npm's omit and include, and a package with a workspace directly inside it", async () => {

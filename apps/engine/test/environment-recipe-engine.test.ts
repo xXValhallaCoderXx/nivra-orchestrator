@@ -385,6 +385,28 @@ describe("chosen workspace packages prepared through a real engine (NIV-55, D52)
     assert.equal(spawns(stub).length, 2, "readiness never ran");
   });
 
+  it("lists as missing only the builds a chosen npm install takes in, with ignore-scripts, never another workspace package's (Nate's review)", async () => {
+    // tools, not chosen, is the only one needing esbuild, whose install script ignore-scripts leaves unrun.
+    const lock = JSON.parse(SITE["package-lock.json"]) as { packages: Record<string, unknown> };
+    Object.assign(lock.packages, {
+      "packages/tools": { name: "@site/tools", version: "1.0.0", dependencies: { esbuild: "0.25.0" } },
+      "node_modules/@site/tools": { resolved: "packages/tools", link: true },
+      "node_modules/esbuild": { version: "0.25.0", resolved: "https://registry.npmjs.org/esbuild/-/esbuild-0.25.0.tgz", integrity: "sha512-e", hasInstallScript: true },
+    });
+    const repo = repoWith({ ...SITE, "package-lock.json": json(lock), "packages/tools/package.json": json({ name: "@site/tools", version: "1.0.0", dependencies: { esbuild: "0.25.0" } }) });
+    const builds = async (choices: EnvironmentChoices) => {
+      const { engine } = await setup({ node: "24.21.0", npm: "11.19.0" });
+      const shown = ready(await resolve(engine, repo, choices));
+      const run = await start(engine, repo, shown.fingerprint, choices);
+      assert.equal((await ended(engine, run.id)).status, "succeeded");
+      const done = await report(engine, run.id);
+      assert.equal(done.outcome, "prepared", JSON.stringify(done.stopped));
+      return done.environment!.verified.builds;
+    };
+    assert.deepEqual(await builds({ ...web(false), options: { "ignore-scripts": true } }), { state: "complete", missing: [] }, "web's install doesn't take esbuild in");
+    assert.deepEqual(await builds({ options: { "ignore-scripts": true } }), { state: "missing", missing: ["esbuild"] }, "the whole project's does");
+  });
+
   it("prepares a chosen npm workspace with ./FOLDER for each package and the root's switch, and stops before upload on an npm not checked", async () => {
     const repo = repoWith(SITE);
     for (const root of [false, true]) {
