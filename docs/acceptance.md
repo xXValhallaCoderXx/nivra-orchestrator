@@ -3417,3 +3417,27 @@ TypeScript/unit fixtures establish Nivra's gate, not SHE-65's production correct
 PR 46 / NIV-69 is not integrated into this checkout: it reserves protocol 20 and D56. This change uses 21 and D57;
 whichever lands second must reconcile the combined contracts and advance the protocol as needed. No commit or push
 was made, and the historical submission/release evidence above is preserved.
+
+### PR candidate after NIV-69 integration — 30 October 2026
+
+The publishing candidate integrates merged PR 46 (`67a12de62d9d828093b4e26af60ada4af2f4cb71`) with the NIV-67
+implementation (`889d17e80b8061a6df4769863a46dff5f7f2194c`) in source commit
+`ffc4961e34258bbf09c249f7ac8b29dd5302b814`. Protocol 21 now contains both planning and task-admission contracts;
+D56 and its historical protocol-20 evidence are retained. The earlier local candidate above is pre-integration
+evidence, rather than the final publishing candidate.
+
+The source/test diff SHA-256 against merged main is
+`3e4b0fd66147ad7165e0aeed3951fda8eb11fbe4f9fccf134a5ac0054990387e`
+(`git diff --binary 67a12de -- apps packages`). The final follow-up commit records this validation only.
+
+| Integrated check | Result |
+| --- | --- |
+| `pnpm verify` | 140 domain + 717 desktop + 999 engine = 1,856 passed; no failures/skips; all typechecks passed. |
+| Built task and planning journeys | All 13 passed, without skips: `test:e2e --project=built task-run.spec.ts task-apply.spec.ts task-journey.spec.ts planning.spec.ts`. |
+| Both runtime stages | Passed; Linux `11cc8692f95ffa3f`, Windows `3fa1aab9100d0621`. These are rebuilt combined runtimes, not the earlier protocol-21 artifacts. |
+| Real engine through `rpc.ts` | Stand-ins passed again: version-4 evidence, failed-before/passing-final check and eligible hash-bound admission. |
+| Windows development build and UI | Build/copy passed; all 15 Windows/native/WSL tests passed without skips, including NIV-69 planning save/resume and the release-home guard. |
+| Linux packaged build and UI | Build passed; 80 packaged checks passed, 72 conditional cases skipped, no failures. Task stand-in journeys remain built-app evidence. |
+
+Local integrated receipts and logs are retained under `.cache/niv67/`, including `integrated-verification.json`.
+No live/paid validation was used. SHE-65 production correctness and NIV-35 live acceptance remain separate.
