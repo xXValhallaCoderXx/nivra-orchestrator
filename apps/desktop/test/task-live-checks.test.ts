@@ -247,10 +247,11 @@ describe("the packages a live run's recipe installs (NIV-55)", () => {
   for (const [path, text] of Object.entries({
     "package.json": json({ name: "live-mono", private: true, packageManager: "pnpm@11.28.9" }),
     ".nvmrc": "24.21.0\n",
-    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    // The importers pnpm records, web linking data, for workspace packages chosen by folder (D52).
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  packages/data: {}\n\n  packages/web:\n    dependencies:\n      '@live/data':\n        specifier: workspace:*\n        version: link:../data\n",
     "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
     "packages/data/package.json": json({ name: "@live/data", private: true }),
-    "packages/web/package.json": json({ name: "@live/web", private: true }),
+    "packages/web/package.json": json({ name: "@live/web", private: true, dependencies: { "@live/data": "workspace:*" } }),
   })) {
     mkdirSync(dirname(join(repository, path)), { recursive: true });
     writeFileSync(join(repository, path), text);
@@ -287,5 +288,14 @@ describe("the packages a live run's recipe installs (NIV-55)", () => {
     // The same packages in another order are another install, so another recipe.
     const reordered = checked("reordered", { scope: { kind: "selected", selectors: ["./packages/web", "@live/data..."] } });
     assert.deepEqual([reordered.install === chosen.install, reordered.recipe === chosen.recipe], [false, false]);
+  });
+
+  it("binds workspace packages chosen by folder: what their links reach goes into the install, and the recipe and preview change with them (D52)", () => {
+    const whole = checked("whole-again", {});
+    const web = checked("web", { scope: { kind: "packages", packages: ["packages/web"], root: true } });
+    assert.deepEqual([web.choices, web.install], ['{"scope":{"kind":"packages","packages":["packages/web"],"root":true}}', "pnpm install --frozen-lockfile --fail-if-no-match --filter @live/data --filter @live/web"]);
+    const data = checked("data", { scope: { kind: "packages", packages: ["packages/data"], root: true } });
+    assert.equal(data.install, "pnpm install --frozen-lockfile --fail-if-no-match --filter @live/data");
+    assert.deepEqual([new Set([whole.recipe, web.recipe, data.recipe]).size, new Set([whole.preview, web.preview, data.preview]).size], [3, 3]);
   });
 });
