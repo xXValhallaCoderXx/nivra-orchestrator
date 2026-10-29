@@ -39,6 +39,8 @@ import {
   releaseGrant,
   setPolicy,
   startNewHistory,
+  sharedRequestLimitDraft,
+  writeAdaptivePlanningGrant,
   writeGrant,
   writeOff,
 } from "../src/main/budget-store.ts";
@@ -1299,4 +1301,101 @@ it("shows only the effective companion request remainder after recovery, keeping
   assert.ok("grant" in writeGrant(db,req,context(db,OCT,TOKEN_FACTORY_PRICES)));
   assert.equal(companionRequestUsage(db).remaining,1);
   assert.ok("refused" in writeGrant(db,{...req,requestId:randomUUID()},context(db,OCT,TOKEN_FACTORY_PRICES)));
+});
+
+describe("Companion and planning shared allowance", () => {
+  const policy = (limit: number): BudgetPolicyDraft => ({ ...DRAFT, preset: "counts", currency: null, monthlyMicros: null, thresholds: [], sublimits: NO_SUBLIMITS, researchCreditMicros: null, modelRequestLimits: [{ pool: "companion-and-planning", monthlyRequests: limit }] });
+  const companion = () => request({ workflow: "companion", attribution: { feature: "companion", projectId: PROJECT, taskId: null, attemptId: null, queueId: null, queueItemId: null, profile: null }, productive: { requests: 1, outputTokens: 4_000 }, finalisation: { requests: 0, outputTokens: 0 } });
+  const planning = () => request({ workflow: "planning", targetId: "wsl:Ubuntu", attribution: { feature: "planning", projectId: randomUUID(), taskId: null, attemptId: null, queueId: null, queueItemId: null, profile: null }, productive: { requests: 7, outputTokens: 8_000 }, finalisation: { requests: 1, outputTokens: 8_000 } });
+
+  it("migrates by appending a policy and preserves the month, old record and active reservations", () => {
+    const db = workspace();
+    setPolicy(db, { ...policy(4), modelRequestLimits: [{ feature: "companion", monthlyRequests: 4 }] }, OCT, TOKEN_FACTORY_PRICES);
+    const legacy = currentPolicy(db)!;
+    const before = db.db.prepare("SELECT policy_json FROM budget_policies WHERE version = ?").get(legacy.version)?.["policy_json"];
+    const consumed = writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in consumed);
+    markDispatching(db, consumed.grant.id, HOME, OCT, ledgerState(db));
+    assert.ok(!("refused" in recordJournal(db, consumed.grant.id, [row(consumed.grant.id, 1, { state: "unknown", usage: null, amountMicros: null, boundMicros: null })], seal(consumed.grant.id, "complete", 1), OCT)));
+    const first = writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in first);
+    const month = currentPeriod(db)?.label;
+    const draft = sharedRequestLimitDraft(legacy);
+    assert.ok(draft);
+    setPolicy(db, draft, OCT + 1, TOKEN_FACTORY_PRICES);
+    assert.equal(currentPolicy(db)?.version, legacy.version + 1);
+    assert.equal(db.db.prepare("SELECT policy_json FROM budget_policies WHERE version = ?").get(legacy.version)?.["policy_json"], before);
+    assert.equal(currentPeriod(db)?.label, month);
+    assert.equal(companionRequestUsage(db).reserved, 1);
+    assert.equal(companionRequestUsage(db).used, 1);
+    assert.equal(companionRequestUsage(db).remaining, 2);
+    const planned = writeAdaptivePlanningGrant(db, planning(), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in planned);
+    assert.equal(planned.grant.productive.requests, 1);
+    assert.equal(planned.grant.finalisation.requests, 1);
+    const view = companionRequestUsage(db);
+    assert.equal(view.reserved, 3);
+    assert.equal(view.used, 1);
+    assert.equal(view.features.companion.reserved, 1);
+    assert.equal(view.features.planning.reserved, 2);
+    assert.equal(view.remaining, 0);
+    assert.ok("refused" in writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES)));
+  });
+
+  it("reserves the only remaining request for the answer and deduplicates the original maximum", () => {
+    const db = workspace();
+    setPolicy(db, policy(1), OCT, TOKEN_FACTORY_PRICES);
+    const asked = planning();
+    const first = writeAdaptivePlanningGrant(db, asked, context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in first);
+    assert.deepEqual([first.grant.productive.requests, first.grant.finalisation.requests], [0, 1]);
+    const repeated = writeAdaptivePlanningGrant(db, asked, context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in repeated);
+    assert.equal(repeated.grant.id, first.grant.id);
+    assert.equal(companionRequestUsage(db).reserved, 1);
+    assert.ok("refused" in writeAdaptivePlanningGrant(db, planning(), context(db, OCT, TOKEN_FACTORY_PRICES)));
+    const changed = writeAdaptivePlanningGrant(db, { ...asked, productive: { ...asked.productive, requests: 6 } }, context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("refused" in changed);
+    assert.equal(changed.refused.code, "duplicate-need");
+  });
+
+  it("does not bypass legacy coverage or a zero shared limit", () => {
+    const db = workspace();
+    setPolicy(db, { ...policy(3), modelRequestLimits: [{ feature: "companion", monthlyRequests: 3 }] }, OCT, TOKEN_FACTORY_PRICES);
+    assert.ok("refused" in writeAdaptivePlanningGrant(db, planning(), context(db, OCT, TOKEN_FACTORY_PRICES)));
+    setPolicy(db, policy(0), OCT + 1, TOKEN_FACTORY_PRICES);
+    assert.ok("refused" in writeAdaptivePlanningGrant(db, planning(), context(db, OCT, TOKEN_FACTORY_PRICES)));
+    assert.ok("refused" in writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES)));
+    assert.equal(companionRequestUsage(db).reserved, 0);
+  });
+
+  it("settles actual planner calls once, releases unused capacity and partitions feature usage", () => {
+    const db = workspace();
+    setPolicy(db, policy(8), OCT, TOKEN_FACTORY_PRICES);
+    const result = writeAdaptivePlanningGrant(db, planning(), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in result);
+    markDispatching(db, result.grant.id, HOME, OCT, ledgerState(db));
+    const rows = [row(result.grant.id, 1, { state: "unknown", usage: null, amountMicros: null, boundMicros: null })];
+    assert.ok(!("refused" in recordJournal(db, result.grant.id, rows, seal(result.grant.id, "complete", 1), OCT)));
+    const view = companionRequestUsage(db);
+    assert.deepEqual([view.used, view.reserved, view.remaining, view.unknown], [1, 0, 7, 1]);
+    assert.equal(view.features.planning.used, 1);
+    assert.equal(view.features.companion.used, 0);
+    assert.equal(view.inputTokens, null);
+  });
+
+  it("holds the original legacy recovery cap across both features without rewriting it", () => {
+    const db = workspace();
+    setPolicy(db, policy(100), OCT, TOKEN_FACTORY_PRICES);
+    startNewHistory(db, { recovery: lost(db), remaining: { mode: "counts", micros: 0, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, modelRequestLimits: [{ feature: "companion", monthlyRequests: 3 }] }, now: OCT, timezone: "UTC" });
+    assert.ok("grant" in writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES)));
+    const result = writeAdaptivePlanningGrant(db, planning(), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in result);
+    assert.deepEqual([result.grant.productive.requests, result.grant.finalisation.requests], [1, 1]);
+    const view = companionRequestUsage(db);
+    assert.equal(view.remaining, 0);
+    assert.equal(view.historyComplete, false);
+    assert.equal(view.inputTokens, null);
+    assert.ok("refused" in writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES)));
+  });
 });

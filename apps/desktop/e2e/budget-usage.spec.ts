@@ -16,7 +16,7 @@ import { goTo } from "./places.ts";
  * them, the section says so and shows no figure. A fresh profile, no project needed.
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
-const WORDS = "Other agents, research and sandbox operations aren't covered by the Companion AI request allowance. Their existing per-run limits apply.";
+const WORDS = "Coding runs, research, sandbox operations and other agents aren't covered by the Companion and planning request allowance. Their existing per-run limits apply.";
 
 let root: string;
 let app: ElectronApplication;
@@ -35,7 +35,7 @@ test.afterAll(async () => {
   rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 });
 
-test("shows precise companion coverage and the engine's separate per-run limits", async () => {
+test("shows precise Companion and planning coverage and the engine's separate per-run limits", async () => {
   await goTo(page, "settings-budget");
   const section = page.getByTestId("budget-usage");
   await expect(page.getByTestId("settings-tab-budget")).toHaveAttribute("aria-current", "page");
@@ -78,18 +78,23 @@ test("when main can't give the limits, the section says so and shows no figure",
 });
 
 
-test("sets a companion-only monthly request allowance and keeps other per-run limits separate", async () => {
+test("sets one Companion and planning monthly request allowance and shows separate feature usage", async () => {
   await goTo(page, "settings-budget");
   const view = page.getByTestId("companion-usage");
-  await expect(view).toContainText("doesn't cover other agents");
+  await expect(view).toContainText("Coding runs, research and other agents are outside this allowance");
+  await expect(view.getByRole("heading", { name: "Companion and planning", exact: true })).toBeVisible();
   await view.getByTestId("companion-limit-enabled").check();
   await view.getByTestId("companion-limit").fill("12");
+  await expect(view.getByLabel("Monthly AI request limit", { exact: true })).toHaveValue("12");
   await view.getByTestId("companion-limit-save").click();
   await expect.poll(async () => (await page.evaluate(() => window.nivra.getCompanionUsage())).limit).toBe(12);
   await page.reload(); await goTo(page,"settings-budget");
   await expect(page.getByTestId("companion-limit")).toHaveValue("12");
   const usage = await page.evaluate(() => window.nivra.getCompanionUsage());
   expect([usage.used,usage.reserved,usage.remaining]).toEqual([0,0,12]);
+  expect([usage.features.companion.used, usage.features.planning.used]).toEqual([0, 0]);
+  await expect(page.getByTestId("ai-usage-companion")).toContainText("Companion: 0 used, 0 reserved");
+  await expect(page.getByTestId("ai-usage-planning")).toContainText("Planning AI: 0 used, 0 reserved");
 });
 
 /** An actual exhausted, settled ledger from last month, with no engine or provider involved. */

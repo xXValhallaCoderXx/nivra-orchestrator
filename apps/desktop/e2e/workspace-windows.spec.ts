@@ -56,7 +56,7 @@ test("the workspace opens in the Windows app, keeps a conversation across a rela
 
   let { app, page } = await launch();
   const fresh = await page.evaluate(() => window.nivra.listConversations());
-  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 12, notice: null });
+  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 13, notice: null });
   const created = await page.evaluate(() => window.nivra.createConversation({ kind: "general" }));
   expect([created.kind, created.projectId, created.targetId]).toEqual(["general", null, "local"]);
   expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
@@ -251,6 +251,50 @@ test("the companion's Windows bridge saves planning and scoped knowledge without
   expect(after.taskIds).toEqual([saved.taskId]);
   expect(after.knowledge).toBe(0);
   expect(after.allowance).toEqual([2, 0, 0, 0, 2]);
+  expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
+  await app.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("reviewed planning on Windows saves only the selected native draft and resumes it without spending or replaying", async () => {
+  const { root, launch } = setUp("e2e-reviewed-planning");
+  let { app, page } = await launch();
+  const key = randomUUID();
+  const created = await page.evaluate(async (saveKey) => {
+    await window.nivra.setCompanionLimit(5);
+    const brief = { title: "Windows observation export", outcome: "Export one saved observation.", intendedUsers: "A field observer", scope: "One local export", exclusions: "Cloud sync", constraints: ["Works offline"], decisions: [], uncertainties: [], questions: [] };
+    const planning = await window.nivra.createPlanning({ brief, projectId: null, missionId: null, source: { kind: "manual" } });
+    const item = { id: "format", title: "Choose an export format", goal: "Record the first supported format.", scope: "One format", exclusions: "", acceptanceCriteria: ["The chosen format is written down."], impactIds: [], prerequisites: [], overlapTaskIds: [], questions: [] };
+    const reviewed = await window.nivra.revisePlanning(planning.id, planning.revision, { brief, proposal: { summary: "A small offline export increment.", challenges: [], decisions: [], uncertainties: [], questions: [], deferred: [], inspection: "greenfield", inspectionScope: "The brief only; no repository exists.", gaps: [], impacts: [], items: [item, { ...item, id: "export", title: "Export one observation", goal: "Write the selected observation to a file.", acceptanceCriteria: ["The file contains the selected observation."], prerequisites: ["format"], questions: ["Which format is the first increment using?"] }] } });
+    const save = { id: reviewed.id, revision: reviewed.revision, key: saveKey, itemIds: ["export"] };
+    const first = await window.nivra.savePlanning(save);
+    const again = await window.nivra.savePlanning(save);
+    const task = await window.nivra.getTask(first[0]!.taskId);
+    const usage = await window.nivra.getCompanionUsage();
+    return { planningId: reviewed.id, taskId: task.summary.id, count: first.length, repeatedId: again[0]?.taskId, missing: first[0]!.missingPrerequisites, state: task.summary.state, projectId: task.summary.projectId, context: task.brief.content.context, checks: task.brief.content.checks.length, cases: task.brief.content.acceptanceCases.length, usage: [usage.used, usage.reserved, usage.remaining] };
+  }, key);
+  expect([created.count, created.state, created.projectId, created.checks, created.cases]).toEqual([1, "draft", null, 0, 0]);
+  expect(created.repeatedId).toBe(created.taskId);
+  expect(created.missing).toEqual(["format"]);
+  expect(created.context).toContain("Which format is the first increment using?");
+  expect(created.usage).toEqual([0, 0, 5]);
+  expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
+  await app.close();
+  ({ app, page } = await launch());
+  const resumed = await page.evaluate(async (planningId) => {
+    const planning = await window.nivra.getPlanning(planningId);
+    const tasks = await window.nivra.listTasks();
+    const usage = await window.nivra.getCompanionUsage();
+    return { ids: planning.saved.map((item) => item.taskId), taskCount: tasks.tasks.length, featureUsage: [usage.features.companion.used, usage.features.planning.used], allowance: [usage.limit, usage.used, usage.reserved, usage.remaining] };
+  }, created.planningId);
+  expect(resumed.ids).toEqual([created.taskId]);
+  expect(resumed.taskCount).toBe(1);
+  expect(resumed.featureUsage).toEqual([0, 0]);
+  expect(resumed.allowance).toEqual([5, 0, 0, 5]);
+  await goTo(page, "tasks");
+  await page.getByRole("button", { name: "Windows observation export", exact: true }).click();
+  await expect(page.getByTestId("planning-page")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open saved draft", exact: true })).toBeVisible();
   expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
   await app.close();
   rmSync(root, { recursive: true, force: true });

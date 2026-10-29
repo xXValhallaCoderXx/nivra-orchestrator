@@ -37,6 +37,8 @@ import type {
 import type { CoachingView, CoachPreview, CoachSelection } from "./coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView } from "./research.ts";
 import type { BudgetPolicy, BudgetPolicyDraft, BudgetRemaining, BudgetSummary, PriceCatalogue } from "@nivra/domain";
+import type { PlanningBrief, PlanningProposal, PlanningRequest, PlanningSave, PlanningView, PlanningOperationView, PlanningSavedItem } from "@nivra/domain";
+export type { PlanningBrief, PlanningProposal, PlanningRequest, PlanningSave, PlanningView, PlanningOperationView, PlanningSavedItem } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -46,6 +48,14 @@ import type { BudgetPolicy, BudgetPolicyDraft, BudgetRemaining, BudgetSummary, P
  */
 
 export const IPC = {
+  createPlanning: "planning:create",
+  listPlanning: "planning:list",
+  getPlanning: "planning:get",
+  revisePlanning: "planning:revise",
+  savePlanning: "planning:save",
+  generatePlanning: "planning:generate",
+  getPlanningOperation: "planning:operation",
+  cancelPlanning: "planning:cancel",
   getAppInfo: "app:info",
   copyText: "app:copy-text",
   draftHasSavedKey: "drafts:has-saved-key",
@@ -601,6 +611,7 @@ export interface TaskSummary {
 }
 
 export interface TaskView {
+  planningSources?: Array<{ planningId: string; revision: number; itemId: string; questions: string[]; missingPrerequisites: string[] }>;
   summary: TaskSummary;
   revision: number;
   brief: { id: string; version: number; sha256: string; content: BriefContent; createdAt: string };
@@ -848,6 +859,14 @@ export interface MissionReviewPreview {
 }
 
 export interface NivraApi {
+  createPlanning(request: PlanningRequest): Promise<PlanningView>;
+  listPlanning(projectId?: string | null): Promise<PlanningView[]>;
+  getPlanning(id: string): Promise<PlanningView>;
+  revisePlanning(id: string, revision: number, input: { brief: PlanningBrief; proposal: PlanningProposal | null; refresh?: boolean }): Promise<PlanningView>;
+  savePlanning(input: PlanningSave): Promise<PlanningSavedItem[]>;
+  generatePlanning(id: string, revision: number, input: { inspectRepository: boolean; operationId: string }): Promise<PlanningOperationView>;
+  getPlanningOperation(id: string, operationId: string): Promise<PlanningOperationView>;
+  cancelPlanning(id: string, operationId: string): Promise<void>;
   getAppInfo(): Promise<AppInfo>;
   /**
    * Puts text a person asked to copy on the clipboard, for the window's copy buttons: the window itself has no clipboard
@@ -1099,6 +1118,7 @@ export interface NivraApi {
 
 /** Enforcement covers Companion AI inference only. Tokens are reported separately, never a ceiling. */
 export interface CompanionUsageView {
+  features: Record<"companion" | "planning", { used: number; reserved: number; unknown: number; reportedInputTokens: number; reportedOutputTokens: number; unknownTokens: number }>;
   historyComplete: boolean;
   month: string;
   limit: number | null;

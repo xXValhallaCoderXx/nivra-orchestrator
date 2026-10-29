@@ -827,16 +827,16 @@ distribution. One engine holds a home at a time (D7), so the second to start is 
   invisible to `wsl.exe --exec`.
 
 
-### Companion delivery checks (NIV-66 / NIV-68)
+### Companion and planning delivery checks (NIV-66 / NIV-68 / NIV-69)
 
-The Companion AI monthly setting counts dispatched inference requests only. An absent limit leaves monthly requests
+The Companion and planning setting, labelled Monthly AI request limit, counts dispatched inference requests from both features across all projects and engines. An absent limit leaves monthly requests
 unlimited under existing per-turn bounds; zero stops inference. Tokens are reported separately and incomplete totals
-remain unknown. Other agents, research and sandbox operations are not covered by this allowance.
+remain unknown. Coding, research, sandbox operations and other agents are not covered by this allowance; it is not a dollar ceiling.
 
 Use isolated homes and loopback provider stand-ins for verification; no live paid call is part of `pnpm verify`.
 The engine's `budget-journal`/`budget-model` tests cover grants, seals and SDK token shapes. Desktop
 `companion-usage-accounting` tests cover unknown usage without double-counting. `budget-usage.spec.ts` exercises the
-companion-only policy through the native window. A disconnected target retains its grants until it reconnects.
+shared request policy through the native window. A disconnected target retains its grants until it reconnects.
 
 For NIV-68, run `companion-engine.test.ts`, `companion-host.test.ts`, `knowledge.test.ts` and the built/packaged
 `companion.spec.ts` journeys. Privacy fixtures scan SQLite/WAL, Mastra, artifacts and logs for synthetic transcript
@@ -863,3 +863,33 @@ pnpm --filter @nivra/desktop run test:e2e companion.spec.ts companion-lifecycle.
 
 The package script supplies the absolute Node executable needed by source engines; a direct `pnpm exec playwright`
 invocation does not supply it in this checkout.
+
+For NIV-69, run the desktop `planning-host`, `planning-runner` and `host-planning` tests and engine `planning` and
+`planning-evidence` tests. The planner tests drive a real engine over stdio against loopback model stand-ins; no paid
+provider is needed. `planning.spec.ts` exercises manual review, selected draft saves, restart, unresolved prerequisites,
+multiline acceptance entry and the explicit companion handoff in built and packaged apps. The Windows workspace
+suite also covers manual selected saves, idempotency and restart with no provider key.
+
+Repository-enabled planning requires the project's current model-context sharing consent. The original sharing epoch
+is checked after asynchronous engine startup, before each inference and before retaining a result. Revocation/removal
+cancels the operation; late results cannot update its plan. Only structured briefs, validated proposals and selected
+outcomes persist; temporary companion discussion, repository excerpts, grants and raw model replies do not.
+
+An explicit repository planning pass permits **up to eight** inference requests, not eight guaranteed requests. The
+host sizes its finite grant against the shared allowance and reserves the final answer. A one-request grant skips
+exploration and explains that repository impact was not assessed. Time/context limits can end exploration earlier.
+Requests without repository exploration use one inference. All calls retain their existing deadlines and no automatic
+repair/retry follows an invalid final response.
+
+The shared pool migrates a legacy companion limit by appending a guarded policy version, preserving the month, limit,
+usage and active reservations. Historical policy, grant and recovery records are never rewritten. The renderer's
+existing companion usage methods remain named compatibility entries; their returned totals now cover both features.
+
+Planning records use workspace schema v13; the planner RPC/result/authorisation handoff uses protocol v20. Native task
+creation, first brief versions, mission membership, provenance and save receipts commit in one workspace transaction.
+Saving does not create executable checks, mark tasks Ready or authorise execution. Existing active tasks are untouched.
+
+Verification fixtures require a genuinely plain temporary directory. If the environment places a `.git` marker under
+`/tmp`, use an isolated `TMPDIR` without a Git-marked ancestor; retain the production uncertainty refusal and the test's
+plain-folder assertion. On machines with many CPUs, bounding CPU affinity for `pnpm verify` limits Node's automatic
+worker count without skipping tests or changing deadlines. Preserve failed-run logs alongside the final receipt.

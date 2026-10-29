@@ -21,6 +21,7 @@ export function sectionOf(route: Route): Section {
     case "explain":
       return "home";
     case "tasks":
+    case "planning":
     case "task":
     case "new-task":
       return "tasks";
@@ -56,6 +57,8 @@ export function routeAfterSwitch(route: Route, scope: Scope): Route {
       return route;
     case "task":
     case "new-task":
+      return { kind: "tasks" };
+    case "planning":
       return { kind: "tasks" };
     case "conversation":
       return { kind: "conversations" };

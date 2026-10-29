@@ -12,6 +12,9 @@ import {
   GrantRequest,
   GrantState,
   isTimeZone,
+  ModelRequestLimit,
+  modelRequestPoolLimit,
+  hasSharedRequestPool,
   monthOf,
   NO_SUBLIMITS,
   priceTokens,
@@ -41,6 +44,18 @@ const DRAFT: Draft = {
 };
 
 const iso = (at: number) => new Date(at).toISOString();
+
+it("keeps legacy request policies byte-shaped and makes expanded coverage explicit", () => {
+  const legacy = { feature: "companion" as const, monthlyRequests: 12 };
+  assert.equal(JSON.stringify(ModelRequestLimit.parse(legacy)), JSON.stringify(legacy));
+  assert.equal(hasSharedRequestPool([legacy]), false);
+  const shared = { pool: "companion-and-planning" as const, monthlyRequests: 12 };
+  assert.deepEqual(ModelRequestLimit.parse(shared), shared);
+  assert.equal(hasSharedRequestPool([shared]), true);
+  assert.equal(modelRequestPoolLimit([shared]), 12);
+  assert.equal(ModelRequestLimit.safeParse({ ...shared, feature: "companion" }).success, false);
+  assert.equal(BudgetPolicyDraft.safeParse({ ...DRAFT, modelRequestLimits: [legacy, shared] }).success, false);
+});
 
 describe("prices in micro-units", () => {
   it("rounds every cost up, so a price under a micro-unit a token is never 0", () => {

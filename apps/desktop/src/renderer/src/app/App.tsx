@@ -12,6 +12,7 @@ import { MissionDetail, MissionsPage } from "../features/missions";
 import { PlanningHome } from "../features/navigation";
 import { AddedWarning, useAddProject, type AddOutcome } from "../features/projects";
 import { NewTask, TaskDetail, TasksPage } from "../features/tasks";
+import { PlanningList, PlanningPage } from "../features/planning";
 import { errorMessage, usePoll } from "../shared/ui";
 import { browserStorage, DraftsProvider, useDraftList, useDrafts } from "../shell/drafts";
 import { composerDraftKey, newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
@@ -385,9 +386,12 @@ function Shell() {
             )}
             {shown.kind === "tasks" && (
               <Box data-testid="page-tasks">
+                <Button variant="default" size="xs" mb="md" onClick={() => navigate({ kind: "planning", id: null })}>Break into tasks</Button>
                 <TasksPage onOpen={(id) => navigate({ kind: "task", id, tab: "brief" })} onNew={() => navigate({ kind: "new-task", draftKey: newTaskDraftKey(scope), plan: null, title: "" })} />
+                <PlanningList projectId={project?.id ?? null} onOpen={(id) => navigate({ kind: "planning", id })} />
               </Box>
             )}
+            {shown.kind === "planning" && <PlanningPage key={shown.id ?? `new:${shown.sourceTaskId ?? shown.missionId ?? "manual"}`} id={shown.id} projectId={project?.id ?? null} {...(shown.sourceTaskId ? { sourceTaskId: shown.sourceTaskId } : {})} {...(shown.missionId ? { missionId: shown.missionId } : {})} {...(shown.initialBrief ? { initialBrief: shown.initialBrief } : {})} projects={list} onOpened={(id) => navigate({ kind: "planning", id })} onTask={(id) => navigate({ kind: "task", id, tab: "brief" })} />}
             {shown.kind === "new-task" && (
               <Box data-testid="page-new-task">
                 <NewTask
@@ -411,6 +415,7 @@ function Shell() {
             )}
             {shown.kind === "task" && (
               <Box data-testid="page-task">
+                <Button variant="default" size="xs" mb="md" onClick={() => navigate({ kind: "planning", id: null, sourceTaskId: shown.id })}>Plan follow-up tasks</Button>
                 <TaskDetail
                   key={shown.id}
                   taskId={shown.id}
@@ -421,6 +426,7 @@ function Shell() {
                   onOpenConversation={(id) => navigate({ kind: "conversation", id })}
                   renderStrip={(items) => <TaskStrip items={items} />}
                   onOpenEnvironment={openEnvironment}
+                  onOpenPlanning={(id) => navigate({ kind: "planning", id })}
                 />
               </Box>
             )}
@@ -454,6 +460,7 @@ function Shell() {
             )}
             {shown.kind === "mission" && (
               <Box data-testid="page-mission">
+                <Button variant="default" size="xs" mb="md" onClick={() => navigate({ kind: "planning", id: null, missionId: shown.id })}>Break into tasks</Button>
                 <MissionDetail key={shown.id} missionId={shown.id} onOpenTask={(id) => navigate({ kind: "task", id, tab: "brief" })} onDeleted={() => navigate({ kind: "missions" })} />
               </Box>
             )}
@@ -509,7 +516,10 @@ function Shell() {
         </Box>
       </AppShell.Main>
       {adding.dialog}
-      <Companion hint={companionContextHint} narrow={narrow} handle={companion} onVisibilityChange={setCompanionOpen} projectIds={list.map((item) => item.id)} refreshKey={credentialsSaved + projectsVersion} onAdd={() => void adding.add()} onExplain={(id) => { setChosen({ kind: "project", projectId: id }); navigate({ kind: "explain" }); }} onNavigate={(action) => {
+      <Companion hint={companionContextHint} narrow={narrow} handle={companion} onVisibilityChange={setCompanionOpen} projectIds={list.map((item) => item.id)} refreshKey={credentialsSaved + projectsVersion} onAdd={() => void adding.add()} onExplain={(id) => { setChosen({ kind: "project", projectId: id }); navigate({ kind: "explain" }); }} onPlan={(brief, binding) => {
+        setChosen(binding.projectId ? { kind: "project", projectId: binding.projectId } : { kind: "general" });
+        navigate({ kind: "planning", id: null, initialBrief: brief, ...(binding.taskId ? { sourceTaskId: binding.taskId } : {}), ...(binding.missionId ? { missionId: binding.missionId } : {}) });
+      }} onNavigate={(action) => {
         if (action.kind === "settings" || action.kind === "environment") {
           setSetupReturn(setupReturn && detour ? setupReturn : { scope, route: shown, hint: companionContextHint, projectId: action.entityId ?? null }); setReturnError(null);
           if (action.kind === "environment" && action.entityId) openEnvironment(action.entityId);
