@@ -139,6 +139,62 @@ describe("planning over real engine stdio with mocked inference", () => {
     assert.equal(stub.chats().length, 1);
   });
 
+  it("keeps prose accompanying read tools exploratory, then accepts a text proposal spanning consecutive reads", async () => {
+    const root = tempDir("planning exploratory prose"); dirs.push(root);
+    const repo = makeRepo(root);
+    const source = "export const first = 1;\nexport const shared = 2;\nexport const next = 3;\nexport const last = 4;\n";
+    writeFileSync(join(repo, "shared.ts"), source);
+    assert.equal(spawnSync("git", ["add", "shared.ts"], { cwd: repo }).status, 0);
+    const revision = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+    const expected = proposal("A final proposal after inspection"); expected.inspection = "assessed";
+    expected.impacts[0] = { ...expected.impacts[0]!, evidence: "repository", citations: [{ path: "shared.ts", startLine: 2, endLine: 3, sha256: createHash("sha256").update(source).digest("hex"), revision }] };
+    const exploratory = [
+      ["list_files", {}],
+      ["read_file", { path: "shared.ts", startLine: 1, endLine: 2 }],
+      ["read_file", { path: "shared.ts", startLine: 3, endLine: 4 }],
+      ["search_code", { query: "first", glob: "shared.ts" }],
+    ] as const;
+    const { engine, stub } = await setup((index) => {
+      const call = exploratory[index];
+      if (!call) return text(JSON.stringify(expected));
+      const reply = toolCall(call[0], call[1]);
+      const body = reply.body as { choices: Array<{ message: { content: string | null } }> };
+      body.choices[0]!.message.content = "I'll inspect the files before proposing the change.";
+      return reply;
+    });
+    const given = request("Inspect the shared flow", { repoPath: repo, projectId: randomUUID(), sharingEpoch: 9 }, 5);
+    const run = await engine.client.call("runs.start", given);
+    for (let n = 1; n <= 5; n++) await permit(engine, run.id, given.input.operationId, n, 9);
+    const page = await finished(engine, run.id);
+    assert.equal(page.status, "succeeded", page.events.map((event) => event.message).join(" | "));
+    const result = await engine.client.call("planning.result", { runId: run.id, operationId: given.input.operationId });
+    assert.equal(result?.proposal.summary, expected.summary);
+    assert.equal(result?.evidence.files.length, 3);
+    assert.equal(result?.evidence.inventory.length, 1);
+    assert.equal(result?.evidence.searches.length, 1);
+    assert.equal(stub.chats().length, 5);
+    const finalPrompt = stub.chats().at(-1)!.raw;
+    assert.equal(finalPrompt.includes("shared.ts"), true, "the final request includes the read observations");
+  });
+
+  it("rejects citations crossing an unread line between separate reads", async () => {
+    const root = tempDir("planning unread gap"); dirs.push(root);
+    const repo = makeRepo(root);
+    const source = "first\nsecond\nunread\nlast\n";
+    writeFileSync(join(repo, "shared.ts"), source);
+    assert.equal(spawnSync("git", ["add", "shared.ts"], { cwd: repo }).status, 0);
+    const revision = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+    const expected = proposal(); expected.inspection = "assessed";
+    expected.impacts[0] = { ...expected.impacts[0]!, evidence: "repository", citations: [{ path: "shared.ts", startLine: 2, endLine: 4, sha256: createHash("sha256").update(source).digest("hex"), revision }] };
+    const { engine, stub } = await setup((index) => index < 2 ? toolCall("read_file", { path: "shared.ts", startLine: index === 0 ? 1 : 4, endLine: index === 0 ? 2 : 4 }) : toolCall("submit_plan", expected));
+    const given = request("Do not infer unread evidence", { repoPath: repo, projectId: randomUUID(), sharingEpoch: 10 }, 3);
+    const run = await engine.client.call("runs.start", given);
+    for (let n = 1; n <= 3; n++) await permit(engine, run.id, given.input.operationId, n, 10);
+    assert.equal((await finished(engine, run.id)).status, "failed");
+    assert.equal(await engine.client.call("planning.result", { runId: run.id, operationId: given.input.operationId }), null);
+    assert.equal(stub.chats().length, 3, "an invalid final citation is never repaired with another request");
+  });
+
   it("stops after a useful first answer even when eight requests were granted", async () => {
     const root = tempDir("planning early answer"); dirs.push(root);
     const repo = makeRepo(root);

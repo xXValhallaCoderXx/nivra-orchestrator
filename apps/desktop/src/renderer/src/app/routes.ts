@@ -17,7 +17,7 @@ export type SettingsSection = "connections" | "sharing" | "preferences" | "budge
 export type Route =
   | { kind: "home" }
   | { kind: "tasks" }
-  | { kind: "planning"; id: string | null; sourceTaskId?: string; missionId?: string; initialBrief?: PlanningBrief }
+  | { kind: "planning"; id: string | null; sourceTaskId?: string; missionId?: string; initialBrief?: PlanningBrief; entryId?: string }
   /** A task page (Next A). `tab` picks its side panel; the shell keeps it so Back and Activity land where you were. */
   | { kind: "task"; id: string; tab: TaskTab }
   /**

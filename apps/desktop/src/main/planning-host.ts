@@ -1,8 +1,9 @@
-import { PlanningBrief, PlanningProposal, PlanningRequest, PlanningResult, type PlanningEvidence, type PlanningOperationView, type PlanningSave, type PlanningSavedItem, type PlanningView, type PreferenceSnapshot } from "@nivra/domain";
+import { mergeRanges, PlanningBrief, PlanningProposal, PlanningRequest, PlanningResult, type PlanningEvidence, type PlanningOperationView, type PlanningSave, type PlanningSavedItem, type PlanningView, type PreferenceSnapshot } from "@nivra/domain";
 import { z } from "zod";
-import { knowledgeSnapshotFor, resolveCompanionScope } from "./companion-context.ts";
+import { resolveCompanionScope } from "./companion-context.ts";
 import type { ProjectRecord } from "./host-store.ts";
 import { getMission, latestMissionVersion, missionTaskIds } from "./mission-store.ts";
+import { planningContextFor } from "./planning-context.ts";
 import { getPlanning, getPlanningOperation, insertPlanning, insertPlanningOperation, interruptPlanningOperations, listPlanning, planningDigest, planningSaveReceipt, planningSourcesOf, revisePlanning, savePlanningTasks, updatePlanningOperation, type PlanningRecord } from "./planning-store.ts";
 import { refuseCredentials, type KnownSecrets } from "./protect.ts";
 import { getArtifact, getTask, listTasks, versionsOf } from "./workspace.ts";
@@ -106,9 +107,7 @@ export class PlanningHost {
       const latestAttempt = inScope ? resolveCompanionScope(workspace, this.#options.projects(), { kind: "task", id: task.id }).latestAttempt : null;
       return [String(row["item_id"]), String(row["task_id"]), String(row["brief_id"]), Number(row["revision"]), task ? [task.revision, task.state, task.projectId, brief?.id ?? null, brief?.sha256 ?? null, latestAttempt] : null];
     });
-    const hint = request.source.kind === "task" ? { kind: "task" as const, id: request.source.id } : project ? { kind: "project" as const, id: project.id } : request.missionId ? { kind: "mission" as const, id: request.missionId } : { kind: "general" as const };
-    const resolved = resolveCompanionScope(workspace, this.#options.projects(), hint);
-    const knowledge = knowledgeSnapshotFor(workspace, this.#options.projects(), resolved, { forModel: true, includeMission: true }).records.map((record) => [record.id, record.revision]);
+    const knowledge = planningContextFor(workspace, this.#options.projects(), request).knowledge.records.map((record) => [record.id, record.revision]);
     const preferences = this.#options.preferences?.(request.projectId).records.map((record) => [record.id, record.revision]) ?? [];
     return ["nivra.planning-binding.v2", project ? [project.id, project.targetId] : null, source, mission ? [mission.id, mission.version, mission.sha256] : null, tasks, knowledge, preferences, saved];
   }
@@ -172,7 +171,10 @@ export class PlanningHost {
   }
   #checkProposalEvidence(proposal: PlanningProposal | null, evidence: PlanningEvidence | null): void {
     for (const impact of proposal?.impacts ?? []) if (impact.evidence === "repository") for (const citation of impact.citations) {
-      if (!evidence?.files.some((file) => file.path === citation.path && file.sha256 === citation.sha256 && file.revision === citation.revision && file.startLine <= citation.startLine && file.endLine >= citation.endLine)) throw new Error("An observed impact has no checked source evidence. Refresh repository inspection, or label it as a provisional inference before saving.");
+      const files = evidence?.files.filter((file) => file.path === citation.path) ?? [];
+      const consistent = files.every((file) => file.sha256 === citation.sha256 && file.revision === citation.revision);
+      const ranges = mergeRanges(files.map((file) => [file.startLine, file.endLine] as const));
+      if (!consistent || !ranges.some(([start, end]) => start <= citation.startLine && end >= citation.endLine)) throw new Error("An observed impact has no checked source evidence. Refresh repository inspection, or label it as a provisional inference before saving.");
     }
   }
   async save(input: PlanningSave): Promise<PlanningSavedItem[]> {

@@ -1,8 +1,9 @@
 import { isTerminal, PLANNING_LIMITS, PlanningContext, type BudgetGrant, type PlanningEvidence, type PlanningResult, type PreferenceSnapshot } from "@nivra/domain";
-import { knowledgeSnapshotFor, resolveCompanionScope } from "./companion-context.ts";
+import { resolveCompanionScope } from "./companion-context.ts";
 import type { ProjectRecord } from "./host-store.ts";
 import { getMission, latestMissionVersion } from "./mission-store.ts";
 import { PlanningFailure, type PlanningGeneration } from "./planning-host.ts";
+import { planningContextFor } from "./planning-context.ts";
 import { refuseCredentials, type KnownSecrets } from "./protect.ts";
 import type { EngineSupervisor } from "./supervisor.ts";
 import { getTask, listTasks, versionsOf } from "./workspace.ts";
@@ -77,9 +78,7 @@ export class PlanningRunner {
       if (connection.state.status !== "online" || connection.state.info.homeId !== homeId) throw new PlanningFailure("The planning engine changed. Its request will not be replayed; review the saved brief before requesting another pass.");
     };
     const workspace = this.#options.workspace();
-    const hint = view.request.source.kind === "task" ? { kind: "task" as const, id: view.request.source.id } : project ? { kind: "project" as const, id: project.id } : view.request.missionId ? { kind: "mission" as const, id: view.request.missionId } : { kind: "general" as const };
-    const resolved = resolveCompanionScope(workspace, this.#options.projects(), hint);
-    const knowledge = knowledgeSnapshotFor(workspace, this.#options.projects(), resolved, { forModel: true, includeMission: true });
+    const { resolved, knowledge } = planningContextFor(workspace, this.#options.projects(), view.request);
     const mission = view.request.missionId ? getMission(workspace, view.request.missionId) : null;
     const missionVersion = mission ? latestMissionVersion(workspace, mission.id) : null;
     const tasks = listTasks(workspace).filter((task) => task.projectId === view.request.projectId && !view.saved.some((saved) => saved.taskId === task.id)).slice(0, 20).map((task) => {

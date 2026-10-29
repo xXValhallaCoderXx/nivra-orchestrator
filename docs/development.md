@@ -870,6 +870,19 @@ provider is needed. `planning.spec.ts` exercises manual review, selected draft s
 multiline acceptance entry and the explicit companion handoff in built and packaged apps. The Windows workspace
 suite also covers manual selected saves, idempotency and restart with no provider key.
 
+The planning regressions also cover commentary alongside exploratory tools, citations spanning consecutive reads,
+combined mission/project knowledge and its invalidation, first-save validation recovery, selection preservation and
+handoffs into an already open planner. Relevant task, selected mission and project notes share the existing bounded
+snapshot; the host binds exactly the records sent to the engine. A selected mission replaces an inherited mission,
+and another project's notes remain excluded. Engine and host use the same inclusive-range merger: consecutive reads
+may support one citation, while unread gaps or inconsistent hashes/revisions cannot.
+
+After saving a subset, choose Review remaining tasks to create a new reviewed version before saving more drafts.
+Save reviewed version also creates a revision when the content is unchanged. Selection survives first creation and
+navigation within the same window; it is not durable application data. If proposal validation fails after first brief
+creation, the planner retains that draft's ID and the unsaved edits, so correcting and retrying reuses the record.
+Each new companion handoff receives its own planner identity.
+
 Repository-enabled planning requires the project's current model-context sharing consent. The original sharing epoch
 is checked after asynchronous engine startup, before each inference and before retaining a result. Revocation/removal
 cancels the operation; late results cannot update its plan. Only structured briefs, validated proposals and selected

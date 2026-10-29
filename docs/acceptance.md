@@ -3324,3 +3324,51 @@ Local receipts are under this worktree's ignored `.artifacts/niv69-pr/`: `verify
 `windows-build.log`, `windows-ui.log` and `windows-build-identity.json`. The earlier candidate's receipts remain in the
 original checkout. Tests retained Chromium sandboxing, isolated native/WSL profiles and the release-home protections.
 No dependency changes, live model-quality evaluation, paid calls, deployment or merge is authorised by publication.
+
+## NIV-69 PR review corrections (30 October 2026)
+
+PR #46 is held as a draft for re-review. This checkpoint corrects the seven P2 findings against `34f2937`; the older
+passing receipts above do not establish these corrected behaviours. The frozen production-source manifest is
+`.artifacts/niv69-review/source-manifest.json` (261 files), fingerprint
+`7602a2c3c08c4c22d3eb77f8cdfa727da9190308cd12d35dae9891fbb46e3eb2`.
+
+1. Commentary alongside list/read/search calls remains exploratory; only a response without exploratory tools is parsed
+   as a text final proposal. Structured final submission and invalid-final refusal remain enforced.
+2. Model input and host bindings use the same bounded task/selected-mission/project knowledge selection. A busy
+   project cannot crowd out all mission notes. Editing or forgetting either included scope rejects pending results;
+   foreign-project records remain excluded.
+3. Engine and host share the same merger for overlapping/consecutive inclusive ranges. Citations spanning consecutive
+   reads save successfully; unread gaps and inconsistent hashes/revisions are refused.
+4. Partial saves require an explicit Review remaining tasks step. It creates another reviewed version even when the
+   content is unchanged, while the existing one-save-per-version and receipt protections remain enforced.
+5. Every new companion handoff receives a fresh planner identity; assigning a saved ID to that same form preserves its
+   identity. Two successive handoffs replace an already open unsaved form with their reviewed briefs.
+6. If first proposal validation fails after brief creation, the UI retains the record ID and unsaved edits. Correcting
+   and retrying updates that record instead of creating another.
+7. First creation and navigation within the window preserve task selection. The selection cache remains transient;
+   durable planning content and task provenance retain their existing storage rules.
+
+Fresh verification in `/tmp/nivra-niv69-pr`, with local/loopback stand-ins and no paid calls:
+
+| Check | Result |
+| --- | --- |
+| `env TMPDIR=/var/tmp taskset --cpu-list 0-3 pnpm verify` | 1,832 passed: 136 domain, 711 desktop, 985 engine; zero skipped or failed |
+| Focused host/runner regressions | 26 passed; the new initial reproductions failed against the original code, then passed after correction |
+| Engine planning and citation regressions | 42 passed, including real-stdio prose/tool responses, text final JSON, consecutive reads and unread-gap refusal |
+| Real engine through `rpc.ts` | Current tracked-file evidence accepted; a changed hash rejected, using an isolated temporary home |
+| Built app under Xvfb | 19 passed across app security/bridge, planning and companion lifecycle |
+| Linux packaged app under Xvfb | 24 passed across app, planning, shared-budget recovery and companion lifecycle; zero skipped or failed |
+| Fresh runtime staging and Windows/WSL harness | Staging smoke checks passed; 37/37 harness checks passed, including unchanged release-home checks |
+| Native Windows UI | 15 passed; zero skipped or failed, after rebuilding and copying the corrected development package |
+| Native Windows archive identity | Source, installed and native PowerShell hashes matched before and after: `feee40687c5be73fd61effc581b0539780ced63c510098fef1b19d7ae8d52998`, 3,559,924 bytes |
+
+Receipts are in this worktree's ignored `.artifacts/niv69-review/`, including `host-before.log`, `host-after.log`,
+`verify.log`, `built-xvfb.log`, `packaged.log`, `rpc.json`, `stage.log`, `targets-windows.log`, `windows-ui.log` and
+`windows-before.json`/`windows-after.json`. The initial focused UI attempt passed five cases and failed one fixture
+because its handoff panel was already open; the fixture now checks its expanded state before toggling. All six
+planning cases then passed, followed by the broader built and packaged runs. No production test was skipped or
+weakened to obtain these results.
+
+The original checkout was left unchanged. No dependencies, schema, IPC surface, budget policy, paid-provider scope or
+execution authority changed. These checks establish offline mechanics and platform integration; live planning quality
+and exhaustive semantic impact coverage remain unassessed. The PR stays on hold and has not been merged.

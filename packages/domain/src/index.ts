@@ -1,5 +1,6 @@
 export * from "./protocol.ts";
 export * from "./lines.ts";
+export * from "./ranges.ts";
 export * from "./runs.ts";
 export * from "./context.ts";
 export * from "./models.ts";

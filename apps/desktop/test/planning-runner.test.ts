@@ -9,7 +9,11 @@ import type { ProjectRecord } from "../src/main/host-store.ts";
 import { PlanningFailure, type PlanningGeneration } from "../src/main/planning-host.ts";
 import { PlanningRunner } from "../src/main/planning-runner.ts";
 import type { EngineSupervisor } from "../src/main/supervisor.ts";
+import { knowledgeEpoch, saveKnowledge } from "../src/main/knowledge-store.ts";
+import { addMissionTask, insertMission } from "../src/main/mission-store.ts";
+import { insertTask } from "../src/main/workspace.ts";
 import { openWorkspace, type WorkspaceDb } from "../src/main/workspace-db.ts";
+import { BRIEFS } from "./fixtures/briefs.ts";
 
 const opened: WorkspaceDb[] = []; const roots: string[] = [];
 after(() => { for (const db of opened) db.close(); for (const root of roots) rmSync(root, { recursive: true, force: true }); });
@@ -43,6 +47,43 @@ function fixture() {
 }
 
 describe("planning engine transport consent and lifecycle", () => {
+  it("sends the selected mission and project knowledge together, including mission planning from a task in another mission", async () => {
+    for (const taskSource of [false, true]) {
+      const f = fixture(); const db = f.options.workspace(); const missionId = randomUUID(); const oldMissionId = randomUUID(); const at = f.project.addedAt;
+      for (const id of [missionId, oldMissionId]) insertMission(db, { id, conversationId: randomUUID(), createdAt: at }, { id: randomUUID(), content: { name: "An increment", outcome: "One result", intendedUsers: "", successCriteria: [], constraints: [], nonGoals: [] } });
+      const note = (scope: { kind: "project" | "mission"; id: string }, projectId: string | null, statement: string) => saveKnowledge(db, { scope, projectId, kind: "constraint", statement, origin: "user-stated", source: { kind: "user", sessionId: "fixture", requestId: randomUUID() } }, { operationId: randomUUID(), expectedEpoch: knowledgeEpoch(db), known: [], at });
+      const selectedMission = note({ kind: "mission", id: missionId }, null, "The selected mission works offline.");
+      const selectedProject = note({ kind: "project", id: f.project.id }, f.project.id, "The project stores data locally.");
+      note({ kind: "mission", id: oldMissionId }, null, "Another mission uses cloud sync.");
+      const foreignProjectId = randomUUID();
+      f.projects.push({ ...f.project, id: foreignProjectId });
+      note({ kind: "mission", id: missionId }, foreignProjectId, "A different repository uses remote data.");
+      f.view.request.missionId = missionId;
+      if (taskSource) {
+        const id = randomUUID(); insertTask(db, { id, title: "Existing task", projectId: f.project.id, createdAt: at, updatedAt: at }, { id: randomUUID(), content: BRIEFS.vague, derivedFrom: null });
+        addMissionTask(db, oldMissionId, id, at);
+        f.view.request.source = { kind: "task", id, version: 1 };
+      } else f.view.request.source = { kind: "mission", id: missionId, version: 1 };
+      const runner = new PlanningRunner(f.options); await runner.generate(f.input);
+      const context = f.calls.find((call) => call.method === "runs.start")!.params["context"] as { knowledge: { records: Array<{ id: string }> } };
+      assert.equal(context.knowledge.records.length, 2);
+      assert.deepEqual(new Set(context.knowledge.records.map((record) => record.id)), new Set([selectedMission.id, selectedProject.id]));
+      await runner.acknowledge(f.input.operationId);
+    }
+  });
+  it("protects mission knowledge when project notes fill the bounded context", async () => {
+    const f = fixture(); const db = f.options.workspace(); const missionId = randomUUID(); const at = f.project.addedAt;
+    insertMission(db, { id: missionId, conversationId: randomUUID(), createdAt: at }, { id: randomUUID(), content: { name: "An increment", outcome: "One result", intendedUsers: "", successCriteria: [], constraints: [], nonGoals: [] } });
+    const note = (scope: { kind: "project" | "mission"; id: string }, projectId: string | null, statement: string) => saveKnowledge(db, { scope, projectId, kind: "constraint", statement, origin: "user-stated", source: { kind: "user", sessionId: "fixture", requestId: randomUUID() } }, { operationId: randomUUID(), expectedEpoch: knowledgeEpoch(db), known: [], at });
+    const missionNote = note({ kind: "mission", id: missionId }, null, "The mission must work offline.");
+    for (let index = 0; index < 13; index++) note({ kind: "project", id: f.project.id }, f.project.id, `Project constraint ${index}`);
+    f.view.request.missionId = missionId;
+    const runner = new PlanningRunner(f.options); await runner.generate(f.input);
+    const context = f.calls.find((call) => call.method === "runs.start")!.params["context"] as { knowledge: { records: Array<{ id: string }> } };
+    assert.equal(context.knowledge.records.length, 12);
+    assert.equal(context.knowledge.records.filter((record) => record.id === missionNote.id).length, 1);
+    await runner.acknowledge(f.input.operationId);
+  });
   it("rechecks sharing after asynchronous engine startup, before granting or sending", async () => {
     const f = fixture(); let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

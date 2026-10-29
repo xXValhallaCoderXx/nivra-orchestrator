@@ -53,6 +53,46 @@ async function completed(service: PlanningHost, id: string, operationId: string)
 }
 
 describe("reviewed native planning", () => {
+  it("binds both selected mission and project knowledge and rejects pending results after either note is edited or forgotten", async () => {
+    for (const scope of ["mission", "project"] as const) for (const change of ["edit", "forget"] as const) {
+      const db = workspace(); const p = project(); const missionId = randomUUID();
+      insertMission(db, { id: missionId, conversationId: randomUUID(), createdAt: AT }, { id: randomUUID(), content: { name: "Offline logger", outcome: "Record and reopen", intendedUsers: "", successCriteria: [], constraints: [], nonGoals: [] } });
+      const notes = ["mission", "project"].map((kind) => saveKnowledge(db, { scope: { kind: kind as "mission" | "project", id: kind === "mission" ? missionId : p.id }, projectId: kind === "mission" ? null : p.id, kind: "constraint", statement: kind === "mission" ? "The mission works offline." : "The project keeps local records.", origin: "user-stated", source: { kind: "user", sessionId: "fixture", requestId: randomUUID() } }, { operationId: randomUUID(), expectedEpoch: knowledgeEpoch(db), known: [], at: AT }));
+      const note = notes[scope === "mission" ? 0 : 1]!;
+      let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+      const service = host(db, { projects: () => [p], generate: async ({ assertCurrent }) => { await gate; assertCurrent(); return result(); } });
+      const plan = await service.create({ ...request(), projectId: p.id, missionId, source: { kind: "mission", id: missionId, version: 1 } });
+      const operation = await service.generate(plan.id, plan.revision, { inspectRepository: true, operationId: randomUUID() });
+      const options = { operationId: randomUUID(), expectedEpoch: knowledgeEpoch(db), known: [], at: AT };
+      if (change === "edit") editKnowledge(db, note.id, note.revision, "The retained constraint changed.", options);
+      else forgetKnowledge(db, note.id, note.revision, options);
+      const stale = service.get(plan.id).stale; release();
+      assert.equal((await completed(service, plan.id, operation.id)).status, "failed", `${scope} ${change} must reject a late proposal`);
+      assert.match(stale ?? "", /changed/);
+      assert.equal(service.get(plan.id).revision, plan.revision);
+    }
+  });
+  it("accepts citations across consecutive reads but rejects gaps and changed source identities", async () => {
+    for (const observation of ["consecutive", "overlapping", "gap", "hash", "revision"] as const) {
+      const db = workspace(); const p = project(); const generated = result();
+      const first = { path: "src/store.ts", startLine: 1, endLine: 2, sha256: "a".repeat(64), revision: "b".repeat(40) };
+      const second = { ...first, startLine: observation === "overlapping" ? 2 : observation === "gap" ? 4 : 3, endLine: 4, ...(observation === "hash" ? { sha256: "c".repeat(64) } : {}), ...(observation === "revision" ? { revision: "d".repeat(40) } : {}) };
+      generated.evidence = { baseline: first.revision, files: [first, second], searches: [], inventory: [] };
+      generated.proposal.inspection = "assessed";
+      generated.proposal.impacts[0]!.evidence = "repository";
+      generated.proposal.impacts[0]!.citations = [{ ...first, startLine: 2, endLine: 3 }];
+      const service = host(db, { projects: () => [p], generate: async () => generated, checkEvidence: async () => undefined });
+      const plan = await service.create({ ...request(), projectId: p.id });
+      const op = await service.generate(plan.id, plan.revision, { inspectRepository: true, operationId: randomUUID() });
+      const succeeded = observation === "consecutive" || observation === "overlapping";
+      assert.equal((await completed(service, plan.id, op.id)).status, succeeded ? "succeeded" : "failed", observation);
+      if (succeeded) {
+        const reviewed = service.get(plan.id);
+        const saved = await service.save({ id: plan.id, revision: reviewed.revision, key: randomUUID(), itemIds: ["first"] });
+        assert.equal(saved.length, 1);
+      } else assert.equal(listTasks(db).length, 0);
+    }
+  });
   it("saves a reduced answer-only proposal without reconnecting an engine when no repository evidence was observed", async () => {
     const db = workspace(); const p = project(); let evidenceChecks = 0;
     const service = host(db, { projects: () => [p], generate: async () => { const answer = result(); answer.proposal.inspection = "not-assessed"; return answer; }, checkEvidence: async () => { evidenceChecks++; throw new Error("The target is offline"); } });

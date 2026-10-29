@@ -77,6 +77,8 @@ function Shell() {
   const [chosen, setChosen] = useState<Scope | null>(null);
   const [route, setRoute] = useState<Route>({ kind: "home" });
   const companion = useRef<CompanionHandle | null>(null);
+  // Selection is local to this window; leaving and reopening a saved plan keeps the review choices.
+  const planningSelections = useRef(new Map<string, string[]>());
   const [companionOpen, setCompanionOpen] = useState(false);
   const [setupReturn, setSetupReturn] = useState<SetupReturn | null>(null);
   const [returnError, setReturnError] = useState<string | null>(null);
@@ -173,6 +175,7 @@ function Shell() {
     if (narrow && navOpen) requestAnimationFrame(() => main.current?.focus());
     setNavOpen(false);
     if (next.kind !== "new-task") setComposerOrigin(null);
+    if (next.kind === "planning" && next.id === null && !next.entryId) return setRoute({ ...next, entryId: crypto.randomUUID() });
     if (next.kind !== "settings") return setRoute(next);
     const section = shownSection(next.section);
     setSettingsSection(section);
@@ -391,7 +394,7 @@ function Shell() {
                 <PlanningList projectId={project?.id ?? null} onOpen={(id) => navigate({ kind: "planning", id })} />
               </Box>
             )}
-            {shown.kind === "planning" && <PlanningPage key={shown.id ?? `new:${shown.sourceTaskId ?? shown.missionId ?? "manual"}`} id={shown.id} projectId={project?.id ?? null} {...(shown.sourceTaskId ? { sourceTaskId: shown.sourceTaskId } : {})} {...(shown.missionId ? { missionId: shown.missionId } : {})} {...(shown.initialBrief ? { initialBrief: shown.initialBrief } : {})} projects={list} onOpened={(id) => navigate({ kind: "planning", id })} onTask={(id) => navigate({ kind: "task", id, tab: "brief" })} />}
+            {shown.kind === "planning" && <PlanningPage key={shown.entryId ?? shown.id ?? `new:${shown.sourceTaskId ?? shown.missionId ?? "manual"}`} id={shown.id} projectId={project?.id ?? null} {...(shown.sourceTaskId ? { sourceTaskId: shown.sourceTaskId } : {})} {...(shown.missionId ? { missionId: shown.missionId } : {})} {...(shown.initialBrief ? { initialBrief: shown.initialBrief } : {})} projects={list} selections={planningSelections.current} onOpened={(id) => navigate({ ...shown, id })} onTask={(id) => navigate({ kind: "task", id, tab: "brief" })} />}
             {shown.kind === "new-task" && (
               <Box data-testid="page-new-task">
                 <NewTask

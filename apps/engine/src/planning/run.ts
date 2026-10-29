@@ -151,7 +151,9 @@ export async function runPlanning(deps: PlanningDeps, runId: string, input: Plan
       deps.setMeta(runId, { usage: usageOf(steps) });
       if (generated.finishReason === "length") throw failure("malformed", "the planning reply was cut off");
       if (invalid || generated.steps.some((step) => step.rejectedTools.length > 0)) throw failure("malformed", "the planning reply did not match its required shape");
-      if (!proposal && generated.text) {
+      // Providers may accompany a read-tool call with prose. That text belongs to exploration, not the final proposal.
+      const explored = generated.steps.some((step) => step.toolNames.some((name) => name === "list_files" || name === "search_code" || name === "read_file"));
+      if (!proposal && generated.text && !explored) {
         let raw: unknown;
         try { raw = JSON.parse(generated.text); } catch { throw failure("malformed", "the planning reply did not have the required shape"); }
         accept(raw);

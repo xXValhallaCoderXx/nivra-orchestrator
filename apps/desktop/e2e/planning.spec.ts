@@ -144,3 +144,103 @@ test("the companion transfers only the explicitly reviewed brief without spendin
   expect((await page.evaluate(() => window.nivra.getCompanionUsage())).used).toBe(0);
   expect((await page.evaluate(() => window.nivra.listConversations())).conversations.length).toBe(0);
 });
+
+
+test("first-save proposal validation keeps one record and retains the edited selection through navigation", async () => {
+  await goTo(page, "tasks");
+  await page.getByRole("button", { name: "Break into tasks", exact: true }).click();
+  const planning = page.getByTestId("planning-page");
+  const title = "Validate before keeping observation drafts";
+  await planning.getByLabel("Planning title", { exact: true }).fill(title);
+  await planning.getByLabel("Desired outcome", { exact: true }).fill("Keep the selected observation work for review.");
+  await planning.getByRole("button", { name: "Plan manually", exact: true }).click();
+  await planning.getByRole("button", { name: "Add task", exact: true }).click();
+  await planning.getByLabel("Task 1 title", { exact: true }).fill("Keep one observation");
+  await planning.getByLabel("Task 1 goal", { exact: true }).fill("Reopen one saved observation.");
+  await planning.getByRole("button", { name: "Add task", exact: true }).click();
+  await planning.getByLabel("Task 2 title", { exact: true }).fill("An incomplete proposed task");
+  await planning.getByLabel("Save task 2", { exact: true }).uncheck();
+  await planning.getByRole("button", { name: "Save planning brief", exact: true }).click();
+  await expect(planning.getByTestId("planning-error")).toBeVisible();
+  const afterFailure = (await page.evaluate(() => window.nivra.listPlanning(null))).filter((record) => record.request.brief.title === title);
+  expect(afterFailure.length).toBe(1);
+  await expect(planning.getByLabel("Task 2 title", { exact: true })).toHaveValue("An incomplete proposed task");
+  await expect(planning.getByLabel("Save task 2", { exact: true })).not.toBeChecked();
+  await planning.getByLabel("Task 2 goal", { exact: true }).fill("Review a second observation without saving it yet.");
+  await planning.getByRole("button", { name: "Save reviewed version", exact: true }).click();
+  await expect(planning.getByTestId("planning-error")).toBeHidden();
+  await expect(planning.getByLabel("Save task 1", { exact: true })).toBeChecked();
+  await expect(planning.getByLabel("Save task 2", { exact: true })).not.toBeChecked();
+  const afterCorrection = (await page.evaluate(() => window.nivra.listPlanning(null))).filter((record) => record.request.brief.title === title);
+  expect(afterCorrection.length).toBe(1);
+  expect(afterCorrection[0]!.id).toBe(afterFailure[0]!.id);
+  expect(afterCorrection[0]!.proposal!.items[1]!.goal).toBe("Review a second observation without saving it yet.");
+  await goTo(page, "tasks");
+  await page.getByRole("button", { name: title, exact: true }).click();
+  await expect(planning.getByLabel("Save task 1", { exact: true })).toBeChecked();
+  await expect(planning.getByLabel("Save task 2", { exact: true })).not.toBeChecked();
+});
+
+test("a valid first save preserves selection and an unchanged remainder can be explicitly reviewed and saved", async () => {
+  await goTo(page, "tasks");
+  await page.getByRole("button", { name: "Break into tasks", exact: true }).click();
+  const planning = page.getByTestId("planning-page");
+  const title = "Save observation work in two reviews";
+  await planning.getByLabel("Planning title", { exact: true }).fill(title);
+  await planning.getByLabel("Desired outcome", { exact: true }).fill("Save two reviewed tasks in separate increments.");
+  await planning.getByRole("button", { name: "Plan manually", exact: true }).click();
+  for (let index = 1; index <= 2; index++) {
+    await planning.getByRole("button", { name: "Add task", exact: true }).click();
+    await planning.getByLabel(`Task ${index} title`, { exact: true }).fill(`Observation increment ${index}`);
+    await planning.getByLabel(`Task ${index} goal`, { exact: true }).fill(`Keep observation increment ${index} separate.`);
+  }
+  await planning.getByLabel("Save task 2", { exact: true }).uncheck();
+  await planning.getByRole("button", { name: "Save planning brief", exact: true }).click();
+  await expect(planning.getByLabel("Save task 1", { exact: true })).toBeChecked();
+  await expect(planning.getByLabel("Save task 2", { exact: true })).not.toBeChecked();
+  const save = planning.getByRole("button", { name: "Save selected drafts", exact: true });
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(planning.getByRole("button", { name: "Open saved draft", exact: true })).toHaveCount(1);
+  await expect(planning.getByLabel("Save task 2", { exact: true })).not.toBeChecked();
+  await planning.getByLabel("Save task 2", { exact: true }).check();
+  await expect(save).toBeDisabled();
+  const first = (await page.evaluate(() => window.nivra.listPlanning(null))).find((record) => record.request.brief.title === title)!;
+  await planning.getByRole("button", { name: "Review remaining tasks", exact: true }).click();
+  await expect(save).toBeEnabled();
+  const reviewed = await page.evaluate((id) => window.nivra.getPlanning(id), first.id);
+  expect(reviewed.revision).toBe(first.revision + 1);
+  expect(reviewed.proposal).toEqual(first.proposal);
+  await save.click();
+  await expect(planning.getByRole("button", { name: "Open saved draft", exact: true })).toHaveCount(2);
+  await expect(planning.getByTestId("planning-error")).toBeHidden();
+  const saved = await page.evaluate((id) => window.nivra.getPlanning(id), first.id);
+  expect(saved.saved.length).toBe(2);
+  expect(new Set(saved.saved.map((item) => item.taskId)).size).toBe(2);
+  expect(saved.saved[0]!.taskId).toBe(first.saved[0]!.taskId);
+});
+
+test("a companion handoff replaces an already-open unsaved planner with the newly reviewed brief", async () => {
+  await goTo(page, "tasks");
+  await page.getByRole("button", { name: "Break into tasks", exact: true }).click();
+  const planning = page.getByTestId("planning-page");
+  await planning.getByLabel("Planning title", { exact: true }).fill("An older unsaved planner");
+  await planning.getByLabel("Desired outcome", { exact: true }).fill("This is the previous form.");
+  for (const title of ["Transferred observation sorting", "Transferred observation search"]) {
+    await page.getByTestId("companion-launcher").click();
+    const handoff = page.getByTestId("companion-planning-open");
+    if (await handoff.getAttribute("aria-expanded") !== "true") await handoff.click();
+    await page.getByLabel("Planning brief title", { exact: true }).fill(title);
+    await page.getByLabel("Planning brief outcome", { exact: true }).fill(`Review ${title.toLowerCase()}.`);
+    await page.getByTestId("companion-planning-transfer").click();
+    await expect(planning.getByLabel("Planning title", { exact: true })).toHaveValue(title);
+    await expect(planning.getByLabel("Desired outcome", { exact: true })).toHaveValue(`Review ${title.toLowerCase()}.`);
+  }
+  await planning.getByRole("button", { name: "Save planning brief", exact: true }).click();
+  await expect(planning.getByRole("button", { name: "Save reviewed version", exact: true })).toBeVisible();
+  const records = await page.evaluate(() => window.nivra.listPlanning(null));
+  expect(records.some((record) => record.request.brief.title === "An older unsaved planner")).toBe(false);
+  expect(records.some((record) => record.request.brief.title === "Transferred observation sorting")).toBe(false);
+  expect(records.filter((record) => record.request.brief.title === "Transferred observation search").length).toBe(1);
+  expect((await page.evaluate(() => window.nivra.getCompanionUsage())).used).toBe(0);
+});
