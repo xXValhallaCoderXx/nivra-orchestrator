@@ -354,7 +354,10 @@ function ScopeControl({ scope, facts, disabled, onChange }: { scope: InstallScop
     else if (kind === "packages" && scope.kind !== "packages") onChange({ kind: "packages", ...ticked.current, root: facts && !facts.root.optional ? true : ticked.current.root });
     else if (kind === "selected" && scope.kind !== "selected") onChange({ kind: "selected", selectors: typed.current });
   };
-  const showSelectors = scope.kind === "selected" || selectorsMode?.available === true;
+  // What was ticked or typed is kept while another way is chosen, and so is the way back to it, until the facts say no.
+  const packagesOpen = packages?.available === true || (packages === null && ticked.current.packages.length > 0);
+  const selectorsOpen = selectorsMode?.available === true || (selectorsMode === null && typed.current.some((selector) => selector !== ""));
+  const showSelectors = scope.kind === "selected" || selectorsOpen;
   return (
     <Stack gap={4} data-testid="environment-scope" data-kind={scope.kind}>
       <Radio.Group label="What to install" value={scope.kind} onChange={choose}>
@@ -364,7 +367,7 @@ function ScopeControl({ scope, facts, disabled, onChange }: { scope: InstallScop
             value="packages"
             label="Chosen workspace packages"
             description={packages === null ? "Preview to see whether this project's packages can be chosen." : packages.available ? "Only the packages you tick, with the workspace packages they need." : packages.reason}
-            disabled={disabled || (scope.kind !== "packages" && packages?.available !== true)}
+            disabled={disabled || (scope.kind !== "packages" && !packagesOpen)}
             data-testid="environment-scope-packages"
             data-available={packages === null ? "unknown" : String(packages.available)}
           />
@@ -382,7 +385,7 @@ function ScopeControl({ scope, facts, disabled, onChange }: { scope: InstallScop
                     value="selected"
                     label="pnpm selectors"
                     description="pnpm's own --filter syntax, sent as you type it. pnpm decides what each selects, and always installs the workspace root too."
-                    disabled={disabled || (scope.kind !== "selected" && selectorsMode?.available !== true)}
+                    disabled={disabled || (scope.kind !== "selected" && !selectorsOpen)}
                     data-testid="environment-scope-selected"
                   />
                   {scope.kind === "selected" && <SelectorRows selectors={scope.selectors} disabled={disabled} onChange={(next) => onChange({ kind: "selected", selectors: (typed.current = next) })} />}

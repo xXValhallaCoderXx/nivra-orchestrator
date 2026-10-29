@@ -194,7 +194,10 @@ test("chooses what to install: the whole project unless packages are named, each
   await expect(prepare).toBeEnabled();
   expect(resolved().at(-1)?.choices).toEqual({ runtime: "22.23.4" });
 
-  // Choosing packages clears the preview shown: nothing can be prepared until the choice is previewed.
+  // pnpm's selectors are under Advanced, which the preview's facts offer for this pnpm workspace. Choosing them clears
+  // the preview shown: nothing can be prepared until the choice is previewed.
+  await expect(section.getByTestId("environment-scope-selected")).toBeHidden();
+  await section.getByTestId("environment-scope-advanced").click();
   await section.getByTestId("environment-scope-selected").check();
   await expect(section.getByTestId("environment-scope")).toHaveAttribute("data-kind", "selected");
   await expect(section.getByTestId("environment-preview-panel")).toHaveCount(0);
@@ -223,7 +226,7 @@ test("chooses what to install: the whole project unless packages are named, each
   await section.getByTestId("environment-scope-add").click();
   await selectors.nth(1).fill("./packages/web");
   await section.getByTestId("environment-preview").click();
-  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: only the workspace packages that @mono/data... and ./packages/web select.");
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: only the workspace packages that @mono/data... and ./packages/web select, and the workspace root, which pnpm always installs.");
   await expect(section.getByTestId("environment-install")).toHaveText("Then, in the sandbox: pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data... --filter ./packages/web");
   await expect(prepare).toBeEnabled();
   expect(resolved().at(-1)?.choices).toEqual({ runtime: "22.23.4", scope: CHOSEN });
@@ -266,7 +269,7 @@ test("chooses what to install: the whole project unless packages are named, each
   // with the same filters.
   await prepare.click();
   await expect(section.getByTestId("environment-prepared-scope")).toHaveText(
-    "Installed with pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data... --filter ./packages/web: only the workspace packages that @mono/data... and ./packages/web select.",
+    "Installed with pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data... --filter ./packages/web: only the workspace packages that @mono/data... and ./packages/web select, and the workspace root, which pnpm always installs.",
     { timeout: 30_000 },
   );
   await expect(section.getByTestId("environment-preparation")).toContainText("with your choices: Node 22.23.4, installing @mono/data... and ./packages/web");
@@ -275,10 +278,11 @@ test("chooses what to install: the whole project unless packages are named, each
   const view = await page.evaluate((id) => window.nivra.getEnvironment(id), projectId);
   expect([view.prepared?.recipe.scope, view.prepared?.recipe.install.args, view.choices?.scope]).toEqual([CHOSEN, ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@mono/data...", "--filter", "./packages/web"], CHOSEN]);
 
-  // A renderer restart restores the saved choice, without the component's edited in-memory state.
+  // A renderer restart restores the saved choice, without the component's edited in-memory state, with Advanced open.
   await page.reload();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
   await goTo(page, "environment");
+  await expect(section.getByTestId("environment-scope-advanced")).toHaveAttribute("aria-expanded", "true");
   await expect(section.getByTestId("environment-scope-selected")).toBeChecked();
   await expect(selectors).toHaveCount(2);
   await expect(selectors.first()).toHaveValue("@mono/data...");
@@ -292,3 +296,87 @@ test("chooses what to install: the whole project unless packages are named, each
   await expect(selectors).toHaveCount(2);
   await expect(selectors.nth(1)).toHaveValue("./packages/web");
 });
+
+test("chooses workspace packages from the list: ticked by name and folder, previewed with what they need, kept across a restart, a removed one flagged, and offered only as the engine says", async () => {
+  test.skip(packaged, "a packaged app ignores the test engine switch");
+  await goTo(page, "environment");
+  const section = page.getByTestId("environment");
+  const prepare = section.getByTestId("environment-prepare");
+  const preview = section.getByTestId("environment-preview");
+  const box = (folder: string) => section.locator(`[data-testid="environment-package"][data-folder="${folder}"]`);
+  const resolved = () => lines("env-resolves.log").map((line) => JSON.parse(line) as { choices: EnvironmentChoices });
+  const CHOSEN: InstallScope = { kind: "packages", packages: ["packages/web"], root: true };
+
+  // The list comes with a preview. Choosing packages starts with none ticked, so there is nothing to preview yet; pnpm's
+  // root switch is on, and locked on with its reason.
+  await section.getByTestId("environment-scope-whole").check();
+  await preview.click();
+  await expect(section.getByTestId("environment-scope-packages")).toHaveAttribute("data-available", "true");
+  await section.getByTestId("environment-scope-packages").check();
+  await expect(section.getByTestId("environment-package")).toHaveCount(2);
+  await expect(box("packages/data")).not.toBeChecked();
+  await expect(section.getByTestId("environment-packages-hint")).toHaveText("Tick at least one package, or choose the whole project.");
+  await expect(preview).toBeDisabled();
+  const rootSwitch = section.getByTestId("environment-package-root");
+  await expect(rootSwitch).toBeChecked();
+  await expect(rootSwitch).toBeDisabled();
+  await expect(section.getByTestId("environment-packages")).toContainText("pnpm installs the workspace root's own dependencies whenever it installs chosen packages.");
+
+  // A tick clears the preview, and the list stays; previewed, it installs web with data, which web needs, and the root.
+  await box("packages/web").check();
+  await expect(section.getByTestId("environment-preview-panel")).toHaveCount(0);
+  await expect(section.getByTestId("environment-package")).toHaveCount(2);
+  await expect(prepare).toBeDisabled();
+  await preview.click();
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: @mono/web (packages/web), with @mono/data (packages/data), which it needs, and the workspace root's own dependencies.");
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveAttribute("data-installs", "packages/data packages/web");
+  await expect(section.getByTestId("environment-install")).toHaveText("Then, in the sandbox: pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data --filter @mono/web");
+  await expect(section.getByTestId("environment-package")).toHaveCount(2, { timeout: 1_000 });
+  await expect(section.getByTestId("environment-scope-mismatch")).toHaveCount(0);
+  await expect(section.getByTestId("environment-blocked")).toHaveCount(0);
+  await expect(section.getByTestId("environment-stale")).toHaveCount(0);
+  await expect(prepare).toBeEnabled();
+  expect(resolved().at(-1)?.choices.scope).toEqual(CHOSEN);
+
+  // An engine that would install the whole project instead is never prepared from.
+  writeFileSync(join(home(), "env-ignores-scope"), "");
+  await preview.click();
+  await expect(section.getByTestId("environment-scope-mismatch")).toContainText("This preview doesn't install what you chose: it installs the whole project, not the workspace packages in packages/web");
+  await expect(prepare).toBeDisabled();
+  rmSync(join(home(), "env-ignores-scope"));
+  await preview.click();
+  await expect(prepare).toBeEnabled();
+
+  // Prepared: the environment records what it installed; the choice is kept, and comes back after a restart, shown by
+  // folder until a preview checks it against the commit.
+  await prepare.click();
+  await expect(section.getByTestId("environment-prepared-scope")).toHaveText(
+    "Installed with pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data --filter @mono/web: @mono/web (packages/web), with @mono/data (packages/data), which it needs, and the workspace root's own dependencies.",
+    { timeout: 30_000 },
+  );
+  await page.reload();
+  await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
+  await goTo(page, "environment");
+  await expect(section.getByTestId("environment-scope-packages")).toBeChecked();
+  await expect(box("packages/web")).toBeChecked();
+  await expect(section.getByTestId("environment-packages")).toContainText("Your choice is checked against this commit when you preview it.");
+
+  // The workspace no longer has web: the preview is refused naming it, and web stays ticked and flagged until it is
+  // unticked; then nothing is ticked, and Preview waits.
+  writeFileSync(join(home(), "env-single"), "");
+  await preview.click();
+  await expect(section.getByTestId("environment-preview-refused")).toContainText('"packages/web" isn\'t one of this workspace\'s packages at this commit');
+  await expect(box("packages/web")).toHaveAttribute("data-flagged", "true");
+  await expect(box("packages/web")).toBeChecked();
+  // Unticked, a flagged row goes: it was only there because it was chosen.
+  await box("packages/web").click();
+  await expect(box("packages/web")).toHaveCount(0);
+  await expect(preview).toBeDisabled();
+  // The whole project again: chosen packages are now off, with the engine's reason.
+  await section.getByTestId("environment-scope-whole").check();
+  await preview.click();
+  await expect(section.getByTestId("environment-scope-packages")).toBeDisabled();
+  await expect(section.getByTestId("environment-scope")).toContainText("This project is one package, so installing it is installing the whole project.");
+  rmSync(join(home(), "env-single"));
+});
+
