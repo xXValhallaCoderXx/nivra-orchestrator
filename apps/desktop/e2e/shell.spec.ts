@@ -327,6 +327,56 @@ test("the brief editor's draft stays with the version it was begun on: a newer b
   await expect(page.getByTestId("nav-draft")).toHaveCount(0);
 });
 
+test("saving a key from a task's key prompt takes a draft holding it out of storage and the sidebar, and an edit open meanwhile keeps its text", async () => {
+  // A synthetic key in no recognised format: only the check against the saved keys can catch it.
+  const key = "test-key-prompt-0123456789";
+  await composer().fill(`Rotate ${key} on Friday`);
+  await expect(page.getByTestId("nav-draft")).toHaveCount(1);
+  await page.getByTestId("nav-tasks").click();
+  await page.getByTestId("task-row").filter({ hasText: "Export invoices as CSV" }).getByTestId("task-open").click();
+  await page.getByTestId("task-edit-brief").click();
+  const typed = "Edited while the key is saved";
+  await page.getByTestId("brief-goal").fill(typed);
+  await page.getByTestId("task-readiness-add-keys").click();
+  await page.getByTestId("key-prompt-key").fill(key);
+  await page.getByTestId("key-prompt-project-id").fill("project-shell-prompt");
+  await page.getByTestId("key-prompt-save").click();
+  await expect(page.getByTestId("key-prompt")).toBeHidden();
+  await expect.poll(async () => (await stored()).includes(key)).toBe(false);
+  await expect(page.getByTestId("nav-draft").filter({ hasText: "Rotate" })).toHaveCount(0);
+  await expect(page.getByTestId("brief-goal")).toHaveValue(typed);
+  await page.getByTestId("task-brief-cancel").click();
+  await page.evaluate(() => window.nivra.setNebiusKey(null).then(() => window.nivra.setNebiusProjectId(null)));
+  await goTo(page, "home");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+});
+
+test("a key prompt's save that fails still has the drafts checked again and listed, none hidden for good", async ({}, testInfo) => {
+  await composer().fill("Draft through a failed key save");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(1);
+  // The key's save, in this app only, waits until the test makes it fail; a relaunch brings back the real one.
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler("settings:nebius-key");
+    ipcMain.handle("settings:nebius-key", () => new Promise((_resolve, reject) => ((globalThis as { failSave?: () => void }).failSave = () => reject(new Error("The test made this save fail.")))));
+  });
+  await page.getByTestId("nav-tasks").click();
+  await page.getByTestId("task-row").filter({ hasText: "Export invoices as CSV" }).getByTestId("task-open").click();
+  await page.getByTestId("task-readiness-add-keys").click();
+  await page.getByTestId("key-prompt-key").fill("test-key-prompt-failing-0123456789");
+  await page.getByTestId("key-prompt-project-id").fill("project-shell-prompt");
+  await page.getByTestId("key-prompt-save").click();
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+  await app.evaluate(() => (globalThis as { failSave?: () => void }).failSave?.());
+  await expect(page.getByTestId("key-prompt")).toContainText("The test made this save fail.");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(1);
+
+  await relaunch(testInfo);
+  await page.evaluate(() => window.nivra.setNebiusProjectId(null));
+  await expect(composer()).toHaveValue("Draft through a failed key save");
+  await composer().fill("");
+  await expect(page.getByTestId("nav-draft")).toHaveCount(0);
+});
+
 test("Ctrl+K opens the switcher on the project in view, Esc closes it and leaves the typed text, F6 moves between the sidebar and the page, Ctrl+comma opens Settings", async () => {
   await composer().fill(TITLE);
   await page.getByTestId("main").focus();

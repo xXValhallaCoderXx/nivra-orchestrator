@@ -1,7 +1,7 @@
 import { Alert, Text } from "@mantine/core";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { DraftWrite } from "../app/routes";
-import { createDraftStore, type KeyValueStorage, type SavedKeyCheck, type ShellDraftStore } from "./draft-store";
+import { createDraftStore, duringKeyChange, type KeyValueStorage, type SavedKeyCheck, type ShellDraftStore } from "./draft-store";
 
 /**
  * Drafts for pages (NIV-56, R30). `useDraft` keeps one draft for a page: it writes on change, a moment after the last
@@ -54,6 +54,12 @@ export function useDraftList() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const list = useMemo(() => store.list(), [store, version]);
   return { available: store.available, unchecked: store.unchecked, list };
+}
+
+/** Runs a key's save or removal, wherever it is made, with the drafts out of sight until it settles (duringKeyChange). */
+export function useKeySave(): <T>(save: () => Promise<T>) => Promise<T> {
+  const store = useDrafts();
+  return useCallback(<T,>(save: () => Promise<T>) => duringKeyChange(store, save), [store]);
 }
 
 /** How long typing pauses before a draft is written. */

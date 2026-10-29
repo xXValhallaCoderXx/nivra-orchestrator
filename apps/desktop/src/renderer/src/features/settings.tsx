@@ -3,7 +3,7 @@ import type { ProviderCheck } from "@nivra/domain";
 import { useEffect, useState, type ReactNode } from "react";
 import type { ProjectView, SettingsView } from "../../../shared/ipc";
 import { RESEARCH_RETENTION } from "../../../shared/research";
-import { useDrafts } from "../shell/drafts";
+import { useKeySave } from "../shell/drafts";
 import { errorMessage } from "../shared/ui";
 
 const KEY_LOOK = {
@@ -49,7 +49,7 @@ export function NebiusConnection({ project, online, onCredentialsSaved, freshnes
   const [nebiusProject, setNebiusProject] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const drafts = useDrafts();
+  const keySave = useKeySave();
   const projectId = project?.id ?? null;
   const usableKey = settings !== null && (settings.nebiusKey === "encrypted" || settings.nebiusKey === "unencrypted");
 
@@ -75,16 +75,14 @@ export function NebiusConnection({ project, online, onCredentialsSaved, freshnes
   async function save(value: string | null) {
     setBusy(true);
     setError(null);
-    const settled = drafts.keysChanging();
     try {
-      setSettings(await window.nivra.setNebiusKey(value));
+      setSettings(await keySave(() => window.nivra.setNebiusKey(value)));
       setKey("");
       onCredentialsSaved();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
       setBusy(false);
-      void settled();
     }
   }
 
@@ -234,7 +232,7 @@ export function NebiusConnection({ project, online, onCredentialsSaved, freshnes
  * drafts are out of sight while it is saved or removed, and checked against the keys again once that settles.
  */
 export function TavilyConnection({ freshness = 0, onSaved }: { freshness?: number; onSaved?(): void }) {
-  const drafts = useDrafts();
+  const keySave = useKeySave();
   const [settings, setSettings] = useState<SettingsView | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
@@ -247,15 +245,13 @@ export function TavilyConnection({ freshness = 0, onSaved }: { freshness?: numbe
   async function act(change: () => Promise<SettingsView>) {
     setBusy(true);
     setError(null);
-    const settled = drafts.keysChanging();
     try {
-      setSettings(await change());
+      setSettings(await keySave(change));
       onSaved?.();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
       setBusy(false);
-      void settled();
     }
   }
 

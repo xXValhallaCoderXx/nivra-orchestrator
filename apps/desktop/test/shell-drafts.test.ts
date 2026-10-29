@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { secretShapes } from "@nivra/domain";
 import { holdsCredential, looksLikeCredential } from "../src/renderer/src/shell/credentials.ts";
-import { createDraftStore, DRAFT_PREFIX, type SavedKeyCheck } from "../src/renderer/src/shell/draft-store.ts";
+import { createDraftStore, DRAFT_PREFIX, duringKeyChange, type SavedKeyCheck } from "../src/renderer/src/shell/draft-store.ts";
 import { FakeStorage } from "./fixtures/fake-storage.ts";
 
 // Shapes only: none of these is a real credential.
@@ -332,5 +332,32 @@ describe("the draft store (NIV-56, R30)", () => {
     assert.equal(keys.state.calls, 0);
     assert.deepEqual(await store.write("a:c", { fields: { [`note ${SAVED}`]: true } }, "label"), { kept: false, reason: "credential" });
     assert.equal(storage.entries.size, 0);
+  });
+
+  it("runs a key's save with every draft out of sight, and checks them all once it settles, a failed save too", async () => {
+    const storage = new FakeStorage();
+    const keys = savedKeys();
+    const store = createDraftStore(storage, keys.check);
+    await store.write("a:b", { title: `Use ${LATER}` }, "Use");
+    await store.write("a:c", "clean", "Clean");
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+    let during = -1;
+    const saved = await duringKeyChange(store, async () => {
+      during = store.list().length;
+      keys.state.keys.add(LATER);
+      return "saved";
+    });
+    await settle();
+    assert.deepEqual([saved, during, store.list().map((draft) => draft.key)], ["saved", 0, ["a:c"]]);
+    during = -1;
+    await assert.rejects(
+      duringKeyChange(store, async () => {
+        during = store.list().length;
+        throw new Error("The save was refused.");
+      }),
+      /refused/,
+    );
+    await settle();
+    assert.deepEqual([during, store.list().map((draft) => draft.key)], [0, ["a:c"]]);
   });
 });

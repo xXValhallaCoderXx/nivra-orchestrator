@@ -94,6 +94,19 @@ export interface ShellDraftStore extends DraftStore {
   version(): number;
 }
 
+/**
+ * A key's save or removal, wherever it is made (Settings, a task's key prompt): every draft is out of sight while it
+ * runs, and all are checked against the keys as they are once it settles, whether it succeeded or failed.
+ */
+export async function duringKeyChange<T>(store: Pick<ShellDraftStore, "keysChanging">, save: () => Promise<T>): Promise<T> {
+  const settled = store.keysChanging();
+  try {
+    return await save();
+  } finally {
+    void settled();
+  }
+}
+
 /** `storage` is null when even reaching it threw (a browser that refuses local storage). */
 export function createDraftStore(storage: KeyValueStorage | null, hasSavedKey: SavedKeyCheck, now: () => Date = () => new Date()): ShellDraftStore {
   let available = storage !== null;
