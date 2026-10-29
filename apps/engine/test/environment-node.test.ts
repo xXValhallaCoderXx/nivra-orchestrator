@@ -857,7 +857,8 @@ describe("workspace packages chosen by folder, installed from the links each loc
     // refused, since Nivra follows links for them, while pnpm's own selectors still work.
     const excluded = MONO_LOCK.replace("lockfileVersion: '9.0'\n", "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: true\n");
     const calm = { "packages/legacy/package.json": json({ name: "@w/legacy" }) };
-    for (const extra of [{ "pnpm-lock.yaml": excluded }, { "pnpm-workspace.yaml": "packages:\n  - packages/*\n  - apps/*\nlinkWorkspacePackages: deep\n" }]) {
+    const hiding: Array<Record<string, Content>> = [{ "pnpm-lock.yaml": excluded }, { "pnpm-workspace.yaml": "packages:\n  - packages/*\n  - apps/*\nlinkWorkspacePackages: deep\n" }];
+    for (const extra of hiding) {
       const answer = ready(await resolveIn(mono({}, { ...calm, ...extra }), checked));
       assert.deepEqual([mode(answer, "packages").available, mode(answer, "selectors").available], [false, true], JSON.stringify(Object.keys(extra)));
       assert.equal(ready(await resolveIn(mono({}, { ...calm, ...extra }), { ...checked, choices: { scope: { kind: "selected", selectors: ["@w/web..."] } } })).recipe.scope.kind, "selected");
