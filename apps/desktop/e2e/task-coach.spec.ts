@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { openSwitcher } from "./places.ts";
 import { startSandboxStub, type SandboxStub } from "../../engine/test/stub-sandboxes.ts";
 import { startStub, text, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 import { startTavilyStub, type TavilyStub } from "../../engine/test/stub-tavily.ts";
@@ -298,7 +299,7 @@ test("a project's task needs its sharing: the preview says so, Ask is off, and n
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, repo);
-  await page.getByTestId("nav-projects").click();
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   const projects = await page.evaluate(() => window.nivra.listProjects());
   const projectId = projects.find((project) => project.label === "records")!.id;

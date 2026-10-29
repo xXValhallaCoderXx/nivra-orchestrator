@@ -10,11 +10,21 @@ import type { BriefFields, EnvironmentView, ProjectView, SettingsView, TaskAttem
 const arg = (value: unknown) => JSON.stringify(value);
 const call = <T>(page: Page, expression: string) => page.evaluate(expression) as Promise<T>;
 
+/**
+ * Navigation in the window's shell (NIV-56), by test id only: presses `place` (a sidebar link, or the switcher's field),
+ * then waits, within 30 s, for `shown`, a test id only the place it opens shows. It presses nothing that sends.
+ */
+async function open(page: Page, place: string, shown: string): Promise<void> {
+  await page.getByTestId(place).click();
+  await expect(page.getByTestId(shown)).toBeVisible({ timeout: 30_000 });
+}
+
 /** The checkout picked as Add project would pick it, then added; the project's id once its engine is online. */
 export async function addProject(app: ElectronApplication, page: Page, folder: string): Promise<string> {
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, folder);
+  await open(page, "project-select", "project-switcher-list");
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online", { timeout: 60_000 });
   return (await call<ProjectView[]>(page, "window.nivra.listProjects()")).at(-1)!.id;
@@ -35,6 +45,7 @@ export async function keysSaved(page: Page, timeoutMs: number): Promise<void> {
  * made in it: a Node version the project leaves to the person, and npm's install options. Its fingerprint from the host.
  */
 export async function previewEnvironment(page: Page, projectId: string, choices: EnvironmentChoices = {}): Promise<Extract<EnvironmentPreviewV2, { status: "ready" }>> {
+  await open(page, "nav-environment", "page-environment");
   const section = page.getByTestId("environment");
   await section.getByTestId("environment-preview").click();
   const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -56,6 +67,7 @@ export const environmentOf = (page: Page, projectId: string) => call<Environment
 
 /** Presses Prepare once, allows uploads in their own dialog when asked, and waits for the preparation to end. */
 export async function prepareOnce(page: Page, projectId: string, timeoutMs: number, log: (line: string) => void): Promise<EnvironmentView> {
+  await open(page, "nav-environment", "page-environment");
   const section = page.getByTestId("environment");
   await section.getByTestId("environment-prepare").click();
   const consent = page.getByTestId("environment-consent-allow");

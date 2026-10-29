@@ -1,18 +1,13 @@
-import { TASK_BRIEF_LIMITS, type TaskRunLimits } from "@nivra/domain";
+import { minutesMs, requestMsFor, TASK_BRIEF_LIMITS, TASK_RUN_BOUNDS, type TaskRunLimits } from "@nivra/domain";
 import { MAX_WRITE_BYTES } from "./scripts.ts";
 
 /**
- * A request's answer, its cap and its time, sized together (NIV-35): the time holds the whole of an answer of the cap
- * at the slowest rate the live runs saw, 10 tokens a second (run 3's ninth request gave 634 in 58.5 s), with time for
- * its input and the queue besides. A request isn't streamed, so its reply's headers come with its whole answer: the
- * engine's fetch waits for them longer than any request's time (`FETCH_HEADERS_MS`, providers/transport.ts).
+ * The bounds no brief changes, their numbers and why, are the domain's (`TASK_RUN_BOUNDS`), as the brief's are
+ * (`TASK_BRIEF_LIMITS`); each request's time comes from its cap there too (`requestMsFor`). A request isn't streamed, so
+ * its reply's headers come with its whole answer: the engine's fetch waits for them longer than any request's time
+ * (`FETCH_HEADERS_MS`, providers/transport.ts).
  */
-const OUTPUT_TOKENS_PER_REQUEST = 8_000;
-/** The hand-in only calls submit with a short summary: its answer has a cap, and so a time, of its own. */
-const HAND_IN_OUTPUT_TOKENS = 1_500;
-const TOKENS_PER_SECOND = 10;
-const REQUEST_INPUT_MS = 30_000;
-const requestMs = (outputTokens: number) => REQUEST_INPUT_MS + (outputTokens / TOKENS_PER_SECOND) * 1000;
+const BOUNDS = TASK_RUN_BOUNDS;
 
 /**
  * A task run's bounds (NIV-7, D39), all enforced by the engine. There is one run deadline, and each phase has a cap
@@ -26,34 +21,35 @@ export const TASK_LIMITS = {
    * Hard: requests, each one's time, and the output cap sent with each; estimated: the run's input budget (D30).
    * Room for a real repository's discovery, change and check (NIV-35): the first live run spent all of 12 requests,
    * about 133,000 input tokens, finding its way, so the requests, the tool calls and the input estimate rise together.
-   * Each request's time is its cap's, at `tokensPerSecond`, with its input's time besides (above); the hand-in's too.
+   * Each request's time is its cap's, at `tokensPerSecond`, with its input's time besides (the domain's `requestMsFor`);
+   * the hand-in's too.
    */
   model: {
-    requests: 24,
-    stepMs: requestMs(OUTPUT_TOKENS_PER_REQUEST),
-    outputTokensPerRequest: OUTPUT_TOKENS_PER_REQUEST,
-    handIn: { outputTokens: HAND_IN_OUTPUT_TOKENS, stepMs: requestMs(HAND_IN_OUTPUT_TOKENS) },
-    tokensPerSecond: TOKENS_PER_SECOND,
-    estimatedInputTokens: 480_000,
+    requests: BOUNDS.modelRequests,
+    stepMs: requestMsFor(BOUNDS.outputTokensPerRequest),
+    outputTokensPerRequest: BOUNDS.outputTokensPerRequest,
+    handIn: { outputTokens: BOUNDS.handInOutputTokens, stepMs: requestMsFor(BOUNDS.handInOutputTokens) },
+    tokensPerSecond: BOUNDS.tokensPerSecond,
+    estimatedInputTokens: BOUNDS.estimatedInputTokens,
   },
   /**
    * Tool calls the model may make, of which writes and runs of a case or check are operations. A search returns at most
    * `searchMatches` matches, each line cut to `searchLineChars` characters.
    */
-  tools: { calls: 48, writes: 8, runs: 4, readBytes: 16_384, readTotalBytes: 256 * 1024, searchMatches: 40, searchLineChars: 200 },
+  tools: { calls: BOUNDS.toolCalls, writes: BOUNDS.writes, runs: BOUNDS.runs, readBytes: 16_384, readTotalBytes: 256 * 1024, searchMatches: 40, searchLineChars: 200 },
   write: { timeoutMs: 30_000, downloadMs: 30_000, maxBytes: MAX_WRITE_BYTES },
   /** Acceptance cases plus repository checks, as the brief gives them (the domain's brief limits). */
-  checks: { max: TASK_BRIEF_LIMITS.finalChecks, timeoutMs: 60_000, outputTailBytes: 16_384, expectedOutputBytes: TASK_BRIEF_LIMITS.expectedOutputBytes, commandChars: TASK_BRIEF_LIMITS.commandChars },
+  checks: { max: TASK_BRIEF_LIMITS.finalChecks, timeoutMs: BOUNDS.checkSeconds * 1000, outputTailBytes: 16_384, expectedOutputBytes: TASK_BRIEF_LIMITS.expectedOutputBytes, commandChars: TASK_BRIEF_LIMITS.commandChars },
   toolchain: { timeoutMs: 30_000 },
   prepareTimeoutSeconds: 60,
   collect: { timeoutMs: 60_000, downloadMs: 60_000 },
   snapshotMs: 2 * 60_000,
   /** Room in the work window for requests of their whole time, the hand-in's kept besides (NIV-35), and the reserve. */
-  sessionMs: 45 * 60_000,
+  sessionMs: minutesMs(BOUNDS.sessionMinutes),
   closeMs: 7 * 60_000,
   patchMs: 3 * 60_000,
   reportMs: 15_000,
-  runMs: 58 * 60_000,
+  runMs: minutesMs(BOUNDS.runMinutes),
   /**
    * As the Nebius session counts them (D33): the request that starts an operation, which comes before its timeout does;
    * how long it is watched past its timeout; and what a write needs left to be sent.

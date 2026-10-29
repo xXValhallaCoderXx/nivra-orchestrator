@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { SecretStore, type KeyCrypto } from "../src/main/secret-store.ts";
+import { SECRETS_UNREADABLE, SecretStore, type KeyCrypto } from "../src/main/secret-store.ts";
 
 const dirs: string[] = [];
 after(() => {
@@ -134,5 +134,78 @@ describe("SecretStore", () => {
     assert.equal(await reading, TAVILY);
     await Promise.all([saving, removing]);
     assert.deepEqual([await secrets.all(), file().includes("TAVILY_API_KEY")], [{ NEBIUS_API_KEY: KEY }, false]);
+  });
+});
+
+/**
+ * The draft check's own read (NIV-56; Nate: an unreadable key or a failed check never counts as safe): strict where every
+ * other read takes a file it can't read as no keys, and read-only, since it runs on every change to a draft.
+ */
+describe("SecretStore's strict read for the draft check (NIV-56)", () => {
+  const NAMES = ["NEBIUS_API_KEY", "TAVILY_API_KEY"] as const;
+  function strict() {
+    const dir = mkdtempSync(join(tmpdir(), "nivra secrets strict "));
+    dirs.push(dir);
+    const path = join(dir, "secrets.json");
+    const crypto = fakeCrypto();
+    return { secrets: new SecretStore(path, crypto), crypto, path };
+  }
+  /** The read fails in its fixed words, which hold none of `secrets`. */
+  async function refused(read: Promise<string[]>, ...secrets: string[]) {
+    await assert.rejects(read, (error: Error) => {
+      assert.equal(error.message, SECRETS_UNREADABLE);
+      assert.deepEqual(secrets.filter((text) => error.message.includes(text)), []);
+      return true;
+    });
+  }
+
+  it("reads no keys from a missing file", async () => {
+    assert.deepEqual(await strict().secrets.draftCheckValues(NAMES), []);
+  });
+
+  it("returns an unencrypted and an encrypted key's values, and skips a name that isn't saved", async () => {
+    const { secrets, crypto } = strict();
+    await secrets.set("NEBIUS_API_KEY", KEY);
+    crypto.keychain = true;
+    await secrets.set("TAVILY_API_KEY", TAVILY);
+    assert.deepEqual([await secrets.draftCheckValues(NAMES), await secrets.draftCheckValues(["NEBIUS_PROJECT_ID", "TAVILY_API_KEY"])], [[KEY, TAVILY], [TAVILY]]);
+  });
+
+  it("never writes: no re-encryption of an unencrypted key under a keychain, or of one the keychain asks to re-encrypt", async () => {
+    const { secrets, crypto, path } = strict();
+    await secrets.set("NEBIUS_API_KEY", KEY);
+    crypto.keychain = true;
+    await secrets.set("TAVILY_API_KEY", TAVILY);
+    const decrypt = crypto.decrypt;
+    crypto.decrypt = async (data) => ({ ...(await decrypt(data)), shouldReEncrypt: true });
+    const before = [readFileSync(path, "utf8"), statSync(path).mtimeMs];
+    assert.deepEqual(await secrets.draftCheckValues(NAMES), [KEY, TAVILY]);
+    await pause(20);
+    assert.deepEqual([readFileSync(path, "utf8"), statSync(path).mtimeMs], before);
+  });
+
+  it("throws on a file it can't read, never taking it as no keys", async () => {
+    const { secrets, path } = strict();
+    mkdirSync(path);
+    await refused(secrets.draftCheckValues(NAMES));
+  });
+
+  it("throws on a file that isn't the store's JSON, in words that hold none of it", async () => {
+    const { secrets, path } = strict();
+    const fragment = Buffer.from("secret-fragment").toString("base64");
+    const files = [`{"NEBIUS_API_KEY": {"scheme": "plain", "value": "${fragment}`, "null", "[]", '"text"', '{"NEBIUS_API_KEY": {"scheme": "other", "value": "x"}}', '{"TAVILY_API_KEY": null}'];
+    for (const text of files) {
+      writeFileSync(path, text);
+      await refused(secrets.draftCheckValues(NAMES), fragment, "secret-fragment");
+    }
+  });
+
+  it("throws when a saved key can't be decrypted, where the other reads give no key", async () => {
+    const { secrets, crypto } = strict();
+    crypto.keychain = true;
+    await secrets.set("NEBIUS_API_KEY", KEY);
+    crypto.broken = true;
+    await refused(secrets.draftCheckValues(NAMES), KEY);
+    assert.deepEqual([await secrets.get("NEBIUS_API_KEY"), await secrets.state("NEBIUS_API_KEY")], [null, "unreadable"]);
   });
 });

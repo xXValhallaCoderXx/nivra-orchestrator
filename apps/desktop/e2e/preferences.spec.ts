@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 
 /**
  * Preferences through the real UI (D21, NIV-5): a preference confirmed in the window is kept by the host, survives a
@@ -50,6 +51,7 @@ async function pick(path: string): Promise<void> {
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, path);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
 }
 
@@ -57,10 +59,12 @@ async function choose(label: string): Promise<void> {
   await page.getByTestId("project-select").click();
   await page.getByRole("option", { name: new RegExp(`^${label}`) }).click();
   await expect(page.getByTestId("project-select")).toHaveValue(label);
+  await goTo(page, "home");
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 }
 
 async function confirmPreference(statement: string, scope: "Every project" | string, intent?: "Default for this project" | "Decision to change existing conventions"): Promise<void> {
+  await goTo(page, "settings-preferences");
   await page.getByTestId("preference-scope").getByText(scope, { exact: true }).click();
   if (intent) await page.getByTestId("preference-intent-choice").getByText(intent, { exact: true }).click();
   await page.getByTestId("preference-input").fill(statement);
@@ -79,6 +83,7 @@ async function expectedFor(label: string): Promise<{ digest: string; ids: string
 
 /** Runs hello on the chosen project and returns what its engine recorded about the context it received. */
 async function runHello(): Promise<Context> {
+  await goTo(page, "settings-diagnostics");
   await page.getByTestId("hello-start").click();
   const status = page.getByTestId("hello-status");
   const runId = await expect
@@ -139,6 +144,7 @@ test("an edit reaches the next run", async () => {
   // Found by id: while it is being edited, the row's words are in an input, not its text.
   const id = await page.getByTestId("preference-row").filter({ hasText: PORTABLE }).getAttribute("data-preference-id");
   const row = page.locator(`[data-testid="preference-row"][data-preference-id="${id}"]`);
+  await goTo(page, "settings-preferences");
   await row.getByTestId("preference-edit").click();
   await row.getByTestId("preference-edit-input").fill(EDITED);
   await row.getByTestId("preference-save").click();
@@ -161,6 +167,7 @@ test("preferences survive a restart of the app, and the next run gets them as th
 });
 
 test("a deleted preference is gone from the next run", async () => {
+  await goTo(page, "settings-preferences");
   await page.getByTestId("preference-row").filter({ hasText: EDITED }).getByTestId("preference-delete").click();
   await expect(page.getByTestId("preference-row")).toHaveCount(1);
   await expect(page.getByTestId("preferences-summary")).toContainText("Runs on beta get 0 confirmed preferences");
@@ -200,6 +207,7 @@ test("preferences go to a file the person picks and come back as they choose, ne
   mkdirSync(dirname(file), { recursive: true });
   await pickFile(file);
 
+  await goTo(page, "settings-preferences");
   await page.getByTestId("preference-export").click();
   await page.getByTestId("preference-export-scopes").getByLabel("alpha's own (1)").check();
   await page.getByTestId("preference-export-save").click();

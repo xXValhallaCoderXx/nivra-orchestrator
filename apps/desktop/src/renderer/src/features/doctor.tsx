@@ -26,7 +26,7 @@ export function Doctor({ projectId, online, targetLabel }: { projectId: string |
 
   return (
     <Section
-      title="Doctor"
+      title="Diagnose setup"
       description={
         targetLabel
           ? `Git, the engine's data folder, and the execution boundaries ${targetLabel} can offer.`
@@ -34,7 +34,7 @@ export function Doctor({ projectId, online, targetLabel }: { projectId: string |
       }
       actions={
         <Button size="xs" variant="default" onClick={() => void run()} loading={busy} disabled={!projectId || !online} data-testid="doctor-run">
-          Run checks
+          Diagnose setup
         </Button>
       }
     >

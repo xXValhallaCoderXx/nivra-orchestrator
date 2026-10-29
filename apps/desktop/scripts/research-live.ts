@@ -466,7 +466,7 @@ async function live(approved: string): Promise<number> {
 
   // Before Start: any failure removes the keys, closes the app, and sends nothing.
   try {
-    log("Over to you: open Projects & settings, paste the Token Factory key and the Tavily key, and save each. Don't press Check Token Factory.");
+    log("Over to you: open Settings, then Connections, paste the Token Factory key and the Tavily key, and save each. Don't press Check Token Factory.");
     await waitFor(
       async () => {
         const settings = await ui.settings();

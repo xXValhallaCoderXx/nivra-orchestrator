@@ -107,12 +107,30 @@ export class Ui {
     }, timeoutMs, `the ${targetId} engine`);
   }
 
+  /**
+   * Navigation in the window's shell (NIV-56), by test id only: each step presses a sidebar link, a Settings section's
+   * link, a Home button or the switcher's field, then waits, within 30 s, for a test id only the place it opened shows.
+   */
+  private async open(...steps: Array<[press: string, shown: string]>): Promise<void> {
+    for (const [press, shown] of steps) {
+      await this.page.getByTestId(press).click();
+      await this.page.getByTestId(shown).waitFor({ state: "visible", timeout: 30_000 });
+    }
+  }
+  /** The project's Explain, from its Home. */
+  readonly toExplain = () => this.open(["nav-home", "page-home"], ["home-explain", "page-explain"]);
+  /** Settings' sections: Connections (the keys), Preferences, and Advanced diagnostics (hello, the engine's notices). */
+  readonly toConnections = () => this.open(["nav-settings", "page-settings"], ["settings-tab-connections", "settings-connections"]);
+  readonly toPreferences = () => this.open(["nav-settings", "page-settings"], ["settings-tab-preferences", "settings-preferences"]);
+  readonly toDiagnostics = () => this.open(["nav-settings", "page-settings"], ["settings-tab-diagnostics", "settings-diagnostics"]);
+
   /** Adds a folder as the native dialog would return it, and waits for its engine. */
   async pick(path: string, targetId: string): Promise<ProjectView> {
     await this.app.evaluate(async ({ dialog }, picked) => {
       dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
     }, path);
     const before = new Set((await this.projects()).map((p) => p.id));
+    await this.open(["project-select", "project-switcher-list"]);
     await this.page.getByTestId("project-add").click();
     const added = await waitFor(async () => (await this.projects()).find((p) => !before.has(p.id)) ?? null, 30_000, "the project to be added");
     if (added.targetId !== targetId) throw new Error(`the folder went to ${added.targetId}, not ${targetId}`);
@@ -145,6 +163,7 @@ export class Ui {
   /** Presses Explain and refuses consent in the dialog. Returns whether a run appeared within five seconds. */
   async refuseConsent(): Promise<boolean> {
     const before = await this.shownRun();
+    await this.toExplain();
     await this.page.getByTestId("explain-start").click();
     const dialog = this.page.getByRole("dialog");
     await dialog.getByRole("button", { name: "Cancel" }).click();
@@ -155,6 +174,7 @@ export class Ui {
 
   /** Starts an explanation with the question and choices given, allowing consent if asked, and returns its run id. */
   async explain(question: string, choices: readonly string[] = []): Promise<string> {
+    await this.toExplain();
     await this.page.getByTestId("explain-question").fill(question);
     while (await this.page.getByTestId("explain-choice-remove").count()) await this.page.getByTestId("explain-choice-remove").first().click();
     for (const choice of choices) {
@@ -176,6 +196,7 @@ export class Ui {
   async hello(seconds: 0 | 5 | 60): Promise<string> {
     const status = this.page.getByTestId("hello-status");
     const before = (await status.count()) ? await status.getAttribute("data-run-id") : null;
+    await this.toDiagnostics();
     await this.page.getByText(`${seconds} s`, { exact: true }).click();
     await this.page.getByTestId("hello-start").click();
     const runId = await waitFor(async () => {
@@ -187,6 +208,7 @@ export class Ui {
   }
 
   async confirmPreference(statement: string, scope: string, intent?: "Default for this project" | "Decision to change existing conventions"): Promise<string> {
+    await this.toPreferences();
     await this.page.getByTestId("preference-scope").getByText(scope, { exact: true }).click();
     if (intent) await this.page.getByTestId("preference-intent-choice").getByText(intent, { exact: true }).click();
     await this.page.getByTestId("preference-input").fill(statement);
@@ -195,18 +217,21 @@ export class Ui {
   }
   private row = (id: string) => this.page.locator(`[data-testid="preference-row"][data-preference-id="${id}"]`);
   async editPreference(id: string, statement: string): Promise<void> {
+    await this.toPreferences();
     await this.row(id).getByTestId("preference-edit").click();
     await this.row(id).getByTestId("preference-edit-input").fill(statement);
     await this.row(id).getByTestId("preference-save").click();
     await waitFor(async () => (await this.preferences()).records.find((r) => r.id === id)?.statement === statement, 15_000, "the edit to be saved");
   }
   async replacePreference(id: string, statement: string): Promise<string> {
+    await this.toPreferences();
     await this.row(id).getByTestId("preference-replace").click();
     await this.row(id).getByTestId("preference-edit-input").fill(statement);
     await this.row(id).getByTestId("preference-replace-save").click();
     return waitFor(async () => (await this.preferences()).records.find((r) => r.supersedes === id && r.status === "confirmed")?.id ?? null, 15_000, "the replacement to be saved");
   }
   async deletePreference(id: string): Promise<void> {
+    await this.toPreferences();
     await this.row(id).getByTestId("preference-delete").click();
     await waitFor(async () => !(await this.preferences()).records.some((r) => r.id === id), 15_000, "the preference to be deleted");
   }

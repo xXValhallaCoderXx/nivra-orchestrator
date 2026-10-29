@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 import { startStub, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 
 /**
@@ -45,6 +46,7 @@ async function pick(path: string): Promise<void> {
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, path);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 }
@@ -54,6 +56,7 @@ async function explain(consent: boolean): Promise<string> {
   const before = stub.chats().length;
   const status = page.getByTestId("explain-status");
   const previous = (await status.count()) ? await status.getAttribute("data-run-id") : null;
+  await goTo(page, "explain");
   await page.getByTestId("explain-start").click();
   if (consent) await page.getByTestId("explain-consent-allow").click();
   await expect.poll(async () => ((await status.count()) ? await status.getAttribute("data-run-id") : previous)).not.toBe(previous);
@@ -109,6 +112,7 @@ test("the D20 sequence: evidence from A, a preference that follows to B without 
   });
 
   await test.step("2. A portable preference is confirmed, and one of A's own", async () => {
+    await goTo(page, "settings-preferences");
     await page.getByTestId("preference-scope").getByText("Every project", { exact: true }).click();
     await page.getByTestId("preference-input").fill(PORTABLE);
     await page.getByTestId("preference-confirm").click();
@@ -157,6 +161,7 @@ test("the D20 sequence: evidence from A, a preference that follows to B without 
 
   await test.step("5. An edit, then a deletion, reach the next request; the old result stops quoting the preference", async () => {
     const row = page.locator(`[data-testid="preference-row"][data-preference-id="${portable}"]`);
+    await goTo(page, "settings-preferences");
     await row.getByTestId("preference-edit").click();
     await row.getByTestId("preference-edit-input").fill(EDITED);
     await row.getByTestId("preference-save").click();
@@ -166,6 +171,7 @@ test("the D20 sequence: evidence from A, a preference that follows to B without 
     expect([afterEdit.includes(EDITED), afterEdit.includes(PORTABLE)]).toEqual([true, false]);
     await expect(shown.getByTestId("explain-conflict-others")).toContainText(`your personal default “${EDITED}”`);
 
+    await goTo(page, "settings-preferences");
     await row.getByTestId("preference-delete").click();
     await expect(shown.getByTestId("explain-conflict-others")).toContainText("changed or was deleted since this run");
     answer = bAnswer([]);

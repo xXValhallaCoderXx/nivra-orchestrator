@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { TASK_MODEL } from "@nivra/domain";
+import { openSwitcher } from "./places.ts";
 import { CHECK_IMAGE } from "../../engine/src/exec/check.ts";
 import { FIXED_GREET, TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
 import { RealGuest } from "../../engine/test/real-guest.ts";
@@ -83,6 +84,7 @@ test.beforeAll(async ({}, testInfo) => {
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, repo);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 });
@@ -216,9 +218,9 @@ test("sends a third run's change back for a revision: the note goes into the bri
 
 test("in a narrow window the preview and the apply dialog fill it with their buttons in view, and the decision follows the result", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switches");
-  // Narrower than the page's 48em breakpoint (NIV-56, G3: NW1, NW3): 820 by 900, the window's least width, at 125% zoom.
-  // The design's 547 by 600 (150%) needs the shell's navigation to collapse below its own breakpoint, which today's
-  // doesn't: the branch that lands second with Next B's shell checks that width too.
+  // The design's narrow window (NIV-56, G3: NW1, NW3): 820 by 900, the window's least width, at 150% zoom, so 547 CSS px,
+  // under both the page's 48em breakpoint and the shell's: the sidebar folds behind the menu button, and the page scrolls
+  // inside main, never sideways.
   const was = await app.evaluate(({ BrowserWindow }) => {
     const win = BrowserWindow.getAllWindows()[0]!;
     return { size: win.getContentSize(), zoom: win.webContents.getZoomFactor() };
@@ -226,10 +228,10 @@ test("in a narrow window the preview and the apply dialog fill it with their but
   await app.evaluate(({ BrowserWindow }) => {
     const win = BrowserWindow.getAllWindows()[0]!;
     win.setContentSize(820, 900);
-    win.webContents.setZoomFactor(1.25);
+    win.webContents.setZoomFactor(1.5);
   });
   try {
-    await expect.poll(() => page.evaluate(() => Math.round(window.innerWidth))).toBe(656);
+    await expect.poll(() => page.evaluate(() => Math.round(window.innerWidth))).toBe(547);
     const card = page.getByTestId("task-attempt");
     const previous = await card.getAttribute("data-attempt-id");
     await page.getByTestId("task-run").click();
@@ -246,6 +248,11 @@ test("in a narrow window the preview and the apply dialog fill it with their but
       return [before("task-attempt-result", "task-attempt-decision-ask"), before("task-attempt-decision-ask", "task-attempt-change")];
     });
     expect(order).toEqual([true, true]);
+    const sideways = await page.evaluate(() => {
+      const main = document.getElementById("page")!;
+      return [document.documentElement.scrollWidth > window.innerWidth, main.scrollWidth > main.clientWidth];
+    });
+    expect(sideways).toEqual([false, false]);
     await expect(page.getByTestId("task-attempt-approve-bar")).toBeInViewport();
     // The bar's Approve opens the same confirmation, filling the window with Apply in view; Esc closes it, and nothing is written.
     await page.getByTestId("task-attempt-approve-bar").click();

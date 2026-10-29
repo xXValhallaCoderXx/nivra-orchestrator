@@ -7,6 +7,8 @@ import { IPC, type NivraApi } from "../shared/ipc.ts";
  */
 const api = {
   getAppInfo: () => ipcRenderer.invoke(IPC.getAppInfo),
+  copyText: (text) => ipcRenderer.invoke(IPC.copyText, text),
+  draftHasSavedKey: (text) => ipcRenderer.invoke(IPC.draftHasSavedKey, text),
   listEngines: () => ipcRenderer.invoke(IPC.listEngines),
   openProject: (projectId) => ipcRenderer.invoke(IPC.openProject, projectId),
   restartEngine: (projectId) => ipcRenderer.invoke(IPC.restartEngine, projectId),
@@ -77,6 +79,7 @@ const api = {
   setTaskState: (taskId, revision, state) => ipcRenderer.invoke(IPC.setTaskState, taskId, revision, state),
   renameTask: (taskId, revision, title) => ipcRenderer.invoke(IPC.renameTask, taskId, revision, title),
   deleteTask: (taskId) => ipcRenderer.invoke(IPC.deleteTask, taskId),
+  getRunLimits: () => ipcRenderer.invoke(IPC.getRunLimits),
   previewTaskRun: (taskId) => ipcRenderer.invoke(IPC.previewTaskRun, taskId),
   startTaskRun: (taskId, expected, snapshot) => ipcRenderer.invoke(IPC.startTaskRun, taskId, expected, snapshot),
   cancelTaskRun: (taskId, attemptId) => ipcRenderer.invoke(IPC.cancelTaskRun, taskId, attemptId),

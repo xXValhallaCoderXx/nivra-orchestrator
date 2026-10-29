@@ -2,20 +2,22 @@ import { Alert, Badge, Box, Button, Code, Group, Stack, Text, Tooltip } from "@m
 import { useState } from "react";
 import type { EngineView, ProjectView } from "../../../shared/ipc";
 import { errorMessage } from "../shared/ui";
+import { CopyButton } from "../shell/CopyButton";
 
 const LOOK = {
   online: { dot: "var(--nivra-success)", label: "Engine online" },
   starting: { dot: "var(--nivra-text-3)", label: "Engine starting…" },
   stopped: { dot: "var(--nivra-text-3)", label: "Engine stopped" },
-  failed: { dot: "var(--nivra-error-icon)", label: "Engine stopped" },
+  failed: { dot: "var(--nivra-error-icon)", label: "Engine failed" },
 } as const;
 
 /** An engine's state at a glance: a dot and a word, with the details on hover. */
-export function EngineDot({ engine, stoppedLabel, testId }: { engine: EngineView | null; stoppedLabel?: string; testId: string }) {
+export function EngineDot({ engine, stoppedLabel, testId, unknown }: { engine: EngineView | null; stoppedLabel?: string; testId: string; unknown?: string | null }) {
   const state = engine?.state;
-  const look = state ? LOOK[state.status] : { dot: "var(--nivra-text-3)", label: "Engine…" };
+  // A read of the engines that failed says so, rather than waiting for ever.
+  const look = state ? LOOK[state.status] : { dot: "var(--nivra-text-3)", label: unknown ? "Engine state unknown" : "Engine…" };
   const detail = !state
-    ? "Checking the engine…"
+    ? (unknown ?? "Checking the engine…")
     : state.status === "online"
       ? `Engine ${state.info.engineVersion} on ${state.info.platform}/${state.info.arch}, Node ${state.info.node} · data in ${state.info.home}`
       : state.status === "starting"
@@ -36,10 +38,11 @@ export function EngineDot({ engine, stoppedLabel, testId }: { engine: EngineView
 }
 
 /**
- * Where the chosen project's work runs (D1: always visible where work starts) and its engine's state at a glance.
- * There is nothing to choose: the folder decides (D17).
+ * Where the project in view runs (D1: always visible where work starts), its folder, and its engine's state in words
+ * (PN2), under the project's name on its Home. There is nothing to choose: the folder decides (D17). General has no
+ * folder, and says so.
  */
-export function EngineBadge({ project, engine }: { project: ProjectView | null; engine: EngineView | null }) {
+export function EngineBadge({ project, engine, unknown }: { project: ProjectView | null; engine: EngineView | null; unknown?: string | null }) {
   if (!project) {
     return (
       <Text size="xs" c="var(--nivra-text-3)" data-testid="engine-badge">
@@ -48,11 +51,14 @@ export function EngineBadge({ project, engine }: { project: ProjectView | null; 
     );
   }
   return (
-    <Group gap="sm" wrap="nowrap">
-      <Badge variant="light" color="gray" data-testid="engine-target">
+    <Group gap="sm" wrap="wrap" align="center">
+      <Badge variant="outline" color="gray" radius="sm" c="var(--mantine-color-text)" style={{ borderColor: "var(--nivra-border)" }} data-testid="engine-target">
         {project.targetLabel}
       </Badge>
-      <EngineDot engine={engine} testId="engine-badge" />
+      <Code fz="xs" style={{ background: "transparent", color: "var(--nivra-text-2)", padding: 0, overflowWrap: "anywhere" }} data-testid="engine-path">
+        {project.displayPath}
+      </Code>
+      <EngineDot engine={engine} testId="engine-badge" unknown={unknown} />
     </Group>
   );
 }
@@ -85,9 +91,12 @@ export function EngineNotices({ engine, onRestart, testId = "engine" }: { engine
           <Stack gap={6}>
             <Text size="sm">{state.reason}</Text>
             {state.logPath && (
-              <Text size="xs" c="var(--nivra-text-3)">
-                Its log: <Code fz="xs">{state.logPath}</Code>
-              </Text>
+              <Group gap="sm" wrap="nowrap" align="center">
+                <Text size="xs" c="var(--nivra-text-3)" style={{ overflowWrap: "anywhere" }}>
+                  Its log: <Code fz="xs">{state.logPath}</Code>
+                </Text>
+                <CopyButton text={state.logPath} label="Copy the log's path" testId={`${testId}-copy-log`} />
+              </Group>
             )}
             {error && (
               <Text size="sm" c="var(--nivra-error)">

@@ -70,9 +70,9 @@ function MissionForm({ draft, onChange }: { draft: Draft; onChange(draft: Draft)
 }
 
 /** Every mission, and a new one. */
-export function MissionsPage({ onOpen }: { onOpen(missionId: string): void }) {
+export function MissionsPage({ onOpen, startNew = false }: { onOpen(missionId: string): void; startNew?: boolean }) {
   const missions = usePoll<MissionsView>(() => window.nivra.listMissions(), () => 5_000, []);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(startNew ? EMPTY : null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const view = missions.value;

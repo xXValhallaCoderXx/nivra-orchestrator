@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync,
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test } from "@playwright/test";
+import { goTo } from "./places.ts";
 import { build } from "esbuild";
 import { REMOVE_TEST_HOME, testWslHome } from "../scripts/test-homes.ts";
 
@@ -133,6 +134,7 @@ test("the window on Windows: a turn with no key is refused on the native engine 
   await app.close();
 
   ({ app, page } = await launch());
+  await goTo(page, "conversations");
   await page.getByTestId("nav-conversation").filter({ hasText: "No key on Windows?" }).click();
   await expect(page.getByTestId("conversation-title")).toHaveText("No key on Windows?");
   await expect(page.getByTestId("turn-status")).toHaveText("Failed");

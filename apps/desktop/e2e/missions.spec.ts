@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
+import { openSwitcher } from "./places.ts";
 import { startStub, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 
 /**
@@ -128,7 +129,7 @@ test("a repository-linked task stays on the board but can't be selected, and say
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, join(root, "linked"));
-  await page.getByTestId("nav-projects").click();
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("project-select")).toHaveValue("linked");
   const projectId = (await page.evaluate(() => window.nivra.listProjects()))[0]!.id;

@@ -1,6 +1,7 @@
 import { Alert, Button, Group, Modal, PasswordInput, Stack, Text } from "@mantine/core";
 import { useEffect, useState } from "react";
 import type { SettingsView } from "../../../shared/ipc";
+import { useKeySave } from "../shell/drafts";
 import { errorMessage } from "../shared/ui";
 
 /**
@@ -36,13 +37,15 @@ export function KeyPrompt({ opened, settings, onClose, onSaved }: { opened: bool
   // Esc, the close button or Cancel: with something typed, ask first; it's never kept as a draft.
   const askClose = () => (typed && !busy ? setLeaving(true) : busy ? undefined : close());
 
+  // Drafts are out of sight while a key is saved here too, and checked against it once each save settles (NIV-56).
+  const keySave = useKeySave();
   async function save() {
     setBusy(true);
     const failed: { key: string | null; projectId: string | null } = { key: null, projectId: null };
     // Two calls, each refused with its own words: a key saved stays saved if the project ID is refused.
     if (key.trim() !== "") {
       try {
-        await window.nivra.setNebiusKey(key.trim());
+        await keySave(() => window.nivra.setNebiusKey(key.trim()));
         setKey("");
       } catch (reason) {
         failed.key = errorMessage(reason);
@@ -50,7 +53,7 @@ export function KeyPrompt({ opened, settings, onClose, onSaved }: { opened: bool
     }
     if (projectId.trim() !== "") {
       try {
-        await window.nivra.setNebiusProjectId(projectId.trim());
+        await keySave(() => window.nivra.setNebiusProjectId(projectId.trim()));
         setProjectId("");
       } catch (reason) {
         failed.projectId = errorMessage(reason);
