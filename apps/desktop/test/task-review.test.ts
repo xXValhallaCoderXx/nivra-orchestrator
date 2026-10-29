@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { diffFilesOf, modeChangeOf } from "../src/shared/task-diff.ts";
+import { diffFilesOf, fileSummaryOf, modeChangeOf } from "../src/shared/task-diff.ts";
 import { initialRepositoryOf } from "../src/shared/task-form.ts";
 import { decisionLead, failingReportedChecks, outcomeLookOf, unapprovableText } from "../src/shared/task-verdict.ts";
 
@@ -112,6 +112,33 @@ describe("a proposal's patch, file by file (P1i)", () => {
     assert.equal(modeChangeOf({ change: "changed", before: at("100644"), after: at("100644") }), null);
     assert.equal(modeChangeOf({ change: "added", before: null, after: at("100644") }), null);
     assert.equal(modeChangeOf({ change: "deleted", before: at("100755"), after: null }), null);
+  });
+
+  it("says mode only, its content unchanged, only when the content hashes match and the modes differ (Nate's re-review)", () => {
+    const same = "a".repeat(64);
+    const mode = (mode: string, sha256 = same) => ({ mode, sha256 });
+    const header = ["diff --git a/run.sh b/run.sh", "old mode 100644", "new mode 100755"];
+    // The true mode-only change: the same content, a new mode.
+    const only = diffFilesOf([...header, ""].join("\n"), ["run.sh"], false)[0]!;
+    assert.deepEqual(
+      [fileSummaryOf({ change: "changed", before: mode("100644"), after: mode("100755") }, only)].map((it) => [it.counts, it.shown, it.mode?.text]),
+      [["mode only", "unchanged", "Mode 100644 to 100755: made executable"]],
+    );
+    // A patch cut before this file's lines, with its content changed too: never mode only or unchanged, the cut said.
+    const cut = diffFilesOf([...header, "index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222", ""].join("\n"), ["run.sh"], true)[0]!;
+    assert.deepEqual([cut.lines.length, cut.cut], [0, true]);
+    const changed = { change: "changed" as const, before: mode("100644"), after: mode("100755", "b".repeat(64)) };
+    assert.deepEqual([fileSummaryOf(changed, cut)].map((it) => [it.counts, it.shown, it.mode?.text]), [[null, "cut", "Mode 100644 to 100755: made executable"]]);
+    // Past the cut altogether: its diff isn't shown, and nothing says it's unchanged.
+    assert.deepEqual([fileSummaryOf(changed, null)].map((it) => [it.counts, it.shown]), [[null, "past-cut"]]);
+  });
+
+  it("never says mode only for a new executable file, empty or not", () => {
+    const executable = { change: "added" as const, before: null, after: { mode: "100755", sha256: "c".repeat(64) } };
+    const empty = diffFilesOf(["diff --git a/tool.sh b/tool.sh", "new file mode 100755", "index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391", ""].join("\n"), ["tool.sh"], false)[0]!;
+    assert.deepEqual([fileSummaryOf(executable, empty)].map((it) => [it.counts, it.shown, it.mode?.text]), [[null, "no-lines", "An executable file (mode 100755)"]]);
+    const written = diffFilesOf(["diff --git a/tool.sh b/tool.sh", "new file mode 100755", "--- /dev/null", "+++ b/tool.sh", "@@ -0,0 +1 @@", "+echo tool", ""].join("\n"), ["tool.sh"], false)[0]!;
+    assert.deepEqual([fileSummaryOf(executable, written)].map((it) => [it.counts, it.shown]), [["+1 \u22120", "diff"]]);
   });
 
   it("marks the file the cut ends in, and claims nothing past it", () => {
