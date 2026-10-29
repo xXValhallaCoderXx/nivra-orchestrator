@@ -115,7 +115,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v10\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v12\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -659,10 +659,10 @@ describe("the shared budget's ledger (NIV-66)", () => {
     const kept = new Set(before.schema.map((row) => String(row["name"])));
     assert.deepEqual(schema(db).filter((row) => kept.has(String(row["name"]))), before.schema);
     const added = [...new Set(schema(db).filter((row) => !kept.has(String(row["name"]))).map((row) => String(row["tbl_name"])))];
-    assert.deepEqual(added.filter((table) => !table.startsWith("budget_") && table !== "price_catalogues"), []);
+    assert.deepEqual(added.filter((table) => !table.startsWith("budget_") && table !== "price_catalogues"), ["companion_saves", "knowledge", "knowledge_actions", "knowledge_state"]);
     assert.ok(added.length >= 8, added.join(", "));
     assert.deepEqual(rows(db), before.rows);
-    assert.deepEqual(added.map((table) => Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"])), added.map(() => 0));
+    assert.deepEqual(added.map((table) => Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"])), added.map((table) => table === "knowledge_state" ? 1 : 0));
   });
 });
 
@@ -684,7 +684,7 @@ describe("a loss kept in the workspace (NIV-66)", () => {
     const db = migrated.db.db;
     const kept = new Set(before.map((row) => String(row["name"])));
     assert.deepEqual(schema(db).filter((row) => kept.has(String(row["name"]))), before);
-    assert.deepEqual([...new Set(schema(db).filter((row) => !kept.has(String(row["name"]))).map((row) => String(row["tbl_name"])))], ["budget_pending_recovery"]);
+    assert.deepEqual([...new Set(schema(db).filter((row) => !kept.has(String(row["name"]))).map((row) => String(row["tbl_name"])))], ["budget_pending_recovery", "companion_saves", "knowledge", "knowledge_actions", "knowledge_state"]);
     assert.equal(Number(db.prepare("SELECT count(*) AS n FROM budget_pending_recovery").get()?.["n"]), 0);
   });
 });

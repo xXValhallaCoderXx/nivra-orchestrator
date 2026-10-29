@@ -464,7 +464,7 @@ describe("Host: the task readiness coach (NIV-53)", () => {
     insertTask(opening.db, { id: taskId, title: "Personal records use one unit", projectId: null, createdAt: AT, updatedAt: AT }, { id: randomUUID(), content: briefFrom(VAGUE), derivedFrom: null });
     const brief = versionsOf(opening.db, taskId).at(-1)!;
     const coachingId = randomUUID();
-    const older = { id: "task-readiness-coach" as const, version: 2 };
+    const older = { id: "task-readiness-coach" as const, version: 1 };
     const binding = { mission: null, tasks: [{ taskId, briefId: brief.id, briefVersion: 1, briefSha256: brief.sha256, title: "Personal records use one unit" }], findings: [], specialists: [older] };
     insertCoaching(
       opening.db,

@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { COACH_PROFILE, COACH_RUN_LIMITS, coachPacketDigest, preferencesDigest, type CoachContext, type CoachReport, type Mask, type RunRoute, type RunUsage } from "@nivra/domain";
+import { COACH_PROFILE, COACH_RUN_LIMITS, coachPacketDigest, preferencesDigest, knowledgeDigest, type CoachContext, type CoachReport, type Mask, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
 import { runCoach, type CoachRunOptions } from "../coach/run.ts";
 import { coachUnreadable, type CoachTask } from "../coach/task.ts";
@@ -86,12 +86,18 @@ export function createCoachWorkflow(deps: CoachDeps) {
           if (packet !== task.packetDigest || preferences !== task.preferencesDigest) {
             throw failure("internal", "what was sent isn't what this coaching was asked for").because("input-refused", "coach.context");
           }
+          if ((sent.knowledge?.digest ?? undefined) !== task.knowledgeDigest || (sent.knowledge && await knowledgeDigest(sent.knowledge.records) !== sent.knowledge.digest)) {
+            throw failure("internal", "the retained knowledge isn't what this coaching was asked for").because("input-refused", "coach.context");
+          }
           if (sent.packet.task.briefVersion !== task.briefVersion) {
             throw failure("internal", "the packet holds another brief version than this coaching was asked for").because("input-refused", "coach.context");
           }
           // A task with no repository gets personal preferences only (D21).
           if (sent.packet.scope.kind === "general" && sent.preferences.records.some((record) => record.scope === "project")) {
             throw failure("internal", "a coaching of a task with no repository was sent a project's own preference").because("input-refused", "coach.context");
+          }
+          if (sent.packet.scope.kind === "general" && sent.knowledge?.records.some((record) => record.projectId !== null || record.scope.kind === "project")) {
+            throw failure("internal", "a coaching of a task with no repository was sent a project's retained knowledge").because("input-refused", "coach.context");
           }
           const described = await describePreferences(sent.preferences);
           const counts = sent.packet;
@@ -108,6 +114,7 @@ export function createCoachWorkflow(deps: CoachDeps) {
               mission: counts.mission !== null,
               findings: counts.findings.length,
               packetDigest: packet,
+              ...(sent.knowledge ? { knowledgeDigest: sent.knowledge.digest, knowledge: sent.knowledge.records.map(({ id, revision }) => ({ id, revision })) } : {}),
               ...described.data,
             },
           );

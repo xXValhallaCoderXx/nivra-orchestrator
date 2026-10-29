@@ -62,7 +62,7 @@ export const RunEvent = z.strictObject({
 });
 export type RunEvent = z.infer<typeof RunEvent>;
 
-export const WorkflowId = z.enum(["hello", "explain", "chat", "review", "sandbox", "research", "task", "environment", "coach"]);
+export const WorkflowId = z.enum(["hello", "explain", "chat", "review", "sandbox", "research", "task", "environment", "coach", "companion"]);
 export type WorkflowId = z.infer<typeof WorkflowId>;
 
 /**

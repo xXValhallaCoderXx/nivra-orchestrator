@@ -190,6 +190,8 @@ export interface ModelClient {
 export interface BudgetBinding {
   journal: Pick<BudgetJournal, "open" | "sent" | "close" | "providerTime">;
   grantId: string;
+  /** Allowed candidate IDs for selection. The journal enforces them again at send. */
+  models?: readonly string[];
   /** The council seat or role the requests are made for, when they have one. */
   seat: string | null;
 }

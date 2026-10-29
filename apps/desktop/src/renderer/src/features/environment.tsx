@@ -83,7 +83,7 @@ const answerOf = (choices: EnvironmentChoices, id: ChoiceNeeded["id"]) => (id ==
 const answered = (choices: EnvironmentChoices, id: ChoiceNeeded["id"], value: string): EnvironmentChoices =>
   id === "runtime" ? { ...choices, runtime: value } : id === "manager" ? { ...choices, manager: value } : { ...choices, managerVersion: value };
 
-export function Environment({ project, online, credentialsSaved, onProjectChanged }: { project: ProjectView | null; online: boolean; credentialsSaved: number; onProjectChanged(): void }) {
+export function Environment({ project, online, credentialsSaved, onProjectChanged, active = true }: { active?: boolean; project: ProjectView | null; online: boolean; credentialsSaved: number; onProjectChanged(): void }) {
   const projectId = project?.id ?? null;
   const state = usePoll<EnvironmentView>(
     () => window.nivra.getEnvironment(projectId!),
@@ -189,7 +189,7 @@ export function Environment({ project, online, credentialsSaved, onProjectChange
       title="Environment"
       description="Install this project's dependencies once, in a Nebius sandbox, as its own setup files say: its Node version, its package manager and its lockfile. Its task runs then start from the result, with networking off."
     >
-      <Stack gap="sm" data-testid="environment">
+      <Stack gap="sm" data-testid={active ? "environment" : "environment-preserved"}>
         {!projectId && (
           <Text size="sm" c="var(--nivra-text-3)">
             Add or choose a repository first.

@@ -1,8 +1,8 @@
-import { Badge, Box, Code, Grid, Group, ScrollArea, Stack, Text, Title, UnstyledButton } from "@mantine/core";
+import { Badge, Box, Button, Code, Grid, Group, ScrollArea, Stack, Text, Title, UnstyledButton } from "@mantine/core";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AppInfo, EngineView, PreferencesView, ProjectView, SettingsView, WslView } from "../../../shared/ipc";
-import { CompanionUsage } from "../features/companion-usage";
 import { BudgetAndUsage } from "../features/budget-usage";
+import { CompanionUsage } from "../features/companion-usage";
 import { Doctor } from "../features/doctor";
 import { EngineNotices } from "../features/engine";
 import { HelloRun, type RunRef } from "../features/hello";
@@ -61,6 +61,7 @@ export function SettingsPage({
   enginesError,
   appInfoError,
   visible,
+  onOpenCompanion,
 }: {
   section: SettingsSection;
   onSection(section: SettingsSection): void;
@@ -85,6 +86,7 @@ export function SettingsPage({
   appInfoError: string | null;
   /** Settings is the place in view: its sections read the settings again each time it is opened. */
   visible: boolean;
+  onOpenCompanion(): void;
 }) {
   // Other places change settings too (research turned on in a conversation, say): each opening reads them again.
   const [opened, setOpened] = useState(0);
@@ -133,6 +135,7 @@ export function SettingsPage({
           <Grid.Col span={{ base: 12, md: 4 }}>
             <SettingsCard title="Appearance" testId="settings-appearance">
               <Appearance />
+              <Button mt="md" size="xs" variant="default" onClick={onOpenCompanion} data-testid="settings-open-companion">Open Nivra companion</Button>
             </SettingsCard>
           </Grid.Col>
         </Grid>

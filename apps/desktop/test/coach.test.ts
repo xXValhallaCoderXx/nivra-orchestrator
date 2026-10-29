@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
-import { bindingDigest, COACH_PROFILE, COACH_RUN_LIMITS, coachPacketDigest, preferencesDigest, renderCoachPacket, type CoachChange, type CoachReport, type ContextChange, type PreferenceSnapshot } from "@nivra/domain";
+import { bindingDigest, COACH_PROFILE, COACH_RUN_LIMITS, coachPacketDigest, preferencesDigest, renderCoachPacket, knowledgeDigest, type CoachChange, type CoachReport, type ContextChange, type PreferenceSnapshot, type KnowledgeRecord } from "@nivra/domain";
 import {
   applySelected,
   COACH_NOT_SENT,
@@ -171,6 +171,21 @@ describe("the coach's packet (NIV-53)", () => {
 });
 
 describe("a coaching's preview and what it is bound to (NIV-53)", () => {
+  it("reads retained scoped decisions with provenance through shared context, bound to the preview without dialogue", async () => {
+    const task = subject();
+    const record: KnowledgeRecord = { id: randomUUID(), scope: { kind: "task", id: task.taskId }, projectId: null, kind: "constraint", statement: "This task must work offline.", origin: "user-stated", source: { kind: "user", sessionId: "temporary-session", requestId: randomUUID() }, revision: 1, state: "active", createdAt: "2026-10-29T10:00:00.000Z", updatedAt: "2026-10-29T10:00:00.000Z" };
+    const knowledge = { epoch: 1, records: [record], digest: await knowledgeDigest([record]) };
+    const request = await coachRequest(task, state(task, { knowledge }));
+    assert.match(request.preview.text, /K1 \(constraint/);
+    assert.equal(record.source.kind, "user");
+    if (record.source.kind !== "user") throw new Error("The retained decision must come from a user statement.");
+    assert.equal(request.preview.text.includes(record.source.requestId), true);
+    assert.equal(request.input.knowledgeDigest, knowledge.digest);
+    assert.equal(request.context.knowledge?.records[0]?.id, record.id);
+    const without = await coachRequest(task, state(task));
+    assert.notEqual(request.preview.expected, without.preview.expected);
+    await assert.rejects(coachRequest(subject(), state(task, { knowledge })), /bound to isn't this task/);
+  });
   it("previews exactly the text the coach reads, bound by the binding, the packet, the preferences, the sharing and the profile", async () => {
     const task = subject();
     const given = state(task);
@@ -269,12 +284,13 @@ describe("a coaching's preview and what it is bound to (NIV-53)", () => {
       model: null as string | null,
     };
     const fingerprint = coachPreviewFingerprint(parts);
-    assert.equal(fingerprint, createHash("sha256").update(JSON.stringify(["nivra.coach-preview.v2", "1".repeat(64), "2".repeat(64), "3".repeat(64), true, "5a1f1c1e-0000-4000-8000-000000000001", "wsl:Ubuntu", "task-readiness-coach", 1, null])).digest("hex"));
-    assert.equal(fingerprint, "e885bc671995a36b4998c704218ca9eec74b232ff3abadf304d1ed1614ef3ac5");
+    assert.equal(fingerprint, createHash("sha256").update(JSON.stringify(["nivra.coach-preview.v3", "1".repeat(64), "2".repeat(64), "3".repeat(64), null, true, "5a1f1c1e-0000-4000-8000-000000000001", "wsl:Ubuntu", "task-readiness-coach", 1, null])).digest("hex"));
+    assert.equal(fingerprint, "b66c2206f80156b190d687d0c26633e905e7295644f5009faecbc0aea41ecff4");
     const variants = [
       { ...parts, bindingDigest: "4".repeat(64) },
       { ...parts, packetDigest: "4".repeat(64) },
       { ...parts, preferencesDigest: "4".repeat(64) },
+      { ...parts, knowledgeDigest: "4".repeat(64) },
       { ...parts, sharing: false },
       { ...parts, sharing: null },
       // The same packet and sharing from another project, from none, or on another engine target.

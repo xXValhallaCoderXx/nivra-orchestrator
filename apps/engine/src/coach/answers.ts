@@ -57,7 +57,7 @@ export const CoachAnswer = z.object({
           .default([])
           .describe("For acceptanceCriteria or assumptions only: existing items to reword, by number, at most 5"),
         reason: z.string().default("").describe("Why this change makes the brief clearer or easier to check. At most 300 characters"),
-        refs: Ids.describe("What it answers: G1 for a gap, C2 for a criterion, A1 for an assumption, M for the mission, F1 for a finding"),
+        refs: Ids.describe("What it answers: G1 for a gap, C2 for a criterion, A1 for an assumption, M for the mission, F1 for a finding, K1 for retained knowledge"),
       }),
     )
     .default([])
@@ -113,7 +113,7 @@ const plain = (text: string) =>
  * The coach's answer as the engine keeps it. `packet` says what its references and rewordings may name: the gaps, the
  * criteria and the assumptions by number, the mission only when it was sent, and each finding sent.
  */
-export function normaliseCoaching(answer: CoachAnswer, packet: CoachPacket, mask: Mask): NormalisedCoaching {
+export function normaliseCoaching(answer: CoachAnswer, packet: CoachPacket, mask: Mask, knowledgeCount = 0): NormalisedCoaching {
   const dropped: CoachDropped = { questions: 0, changes: 0, items: 0, refs: 0, checks: 0, unknowns: 0 };
   const problems: string[] = [];
   const problem = (text: string) => {
@@ -136,7 +136,7 @@ export function normaliseCoaching(answer: CoachAnswer, packet: CoachPacket, mask
     const kept: string[] = [];
     for (const given of ids(raw)) {
       const ref = given.replace(/^\[|\]$/g, "").toUpperCase();
-      const match = /^([GCAF])([1-9]\d{0,2})$/.exec(ref);
+      const match = /^([GCAFK])([1-9]\d{0,2})$/.exec(ref);
       const n = match ? Number(match[2]) : 0;
       const known =
         ref === "M"
@@ -149,7 +149,7 @@ export function normaliseCoaching(answer: CoachAnswer, packet: CoachPacket, mask
                 ? n <= packet.task.assumptions.length
                 : match?.[1] === "F"
                   ? n <= packet.findings.length
-                  : false;
+                  : match?.[1] === "K" ? n <= Math.min(12, knowledgeCount) : false;
       if (!known || kept.includes(ref) || kept.length >= L.refs) {
         dropped.refs++;
         problem(`${path}: a reference that names nothing in the packet, repeats or is past the ${L.refs} allowed was set aside`);

@@ -139,3 +139,36 @@
   background: var(--mantine-color-body);
   z-index: 1;
 }
+
+/* The optional companion reserves page space on a wide window. Existing consent dialogs remain above it. */
+.nivra-companion-launcher {
+  position: fixed;
+  right: 20px;
+  bottom: 18px;
+  z-index: 110;
+}
+.nivra-companion-panel {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 420px;
+  max-width: 100vw;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  z-index: 150;
+  background: var(--mantine-color-body);
+  border-radius: 0;
+  outline: none;
+}
+.nivra-companion-narrow {
+  width: 100%;
+}
+.nivra-companion-panel > .mantine-Stack-root {
+  min-width: 0;
+}
+.nivra-companion-panel summary {
+  cursor: pointer;
+  font-size: 13px;
+}

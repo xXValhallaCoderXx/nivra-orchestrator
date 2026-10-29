@@ -146,6 +146,19 @@ export const IPC = {
   listCoachings: "coach:list",
   cancelCoach: "coach:cancel",
   acceptCoachChanges: "coach:accept",
+  saveCompanionDraft: "companion:save-draft",
+  getCompanionContext: "companion:context",
+  inspectProject: "companion:inspect",
+  sendCompanionTurn: "companion:send",
+  getCompanionTurn: "companion:get",
+  cancelCompanionTurn: "companion:cancel",
+  endCompanionSession: "companion:end",
+  getCompanionSettings: "companion:settings",
+  setCompanionSettings: "companion:settings-set",
+  listKnowledge: "companion:knowledge-list",
+  captureKnowledge: "companion:knowledge-save",
+  editKnowledge: "companion:knowledge-edit",
+  forgetKnowledge: "companion:knowledge-forget",
   getCompanionUsage: "companion:usage",
   setCompanionLimit: "companion:limit",
   getBudgetPolicy: "budget:get-policy",
@@ -1028,13 +1041,13 @@ export interface NivraApi {
   /** Opens a mission: a review left open by an earlier session is followed on its engine, never resent. */
   openMission(missionId: string): Promise<MissionView>;
   /** Saves a new mission as v1; needs a name and an outcome. */
-  createMission(content: MissionContent): Promise<MissionView>;
+  createMission(content: MissionContent, actionId?: string): Promise<MissionView>;
   /** Saves an edit as the mission's next version, only from the version the person read. */
   reviseMission(missionId: string, version: number, content: MissionContent): Promise<MissionView>;
   /** Deletes a mission with its versions, backlog and reviews; its tasks stay, in no mission. */
   deleteMission(missionId: string): Promise<void>;
   /** Makes a direct task with a title only, in the mission's backlog. */
-  createMissionTask(missionId: string, title: string): Promise<MissionView>;
+  createMissionTask(missionId: string, title: string, fields?: BriefFields, actionId?: string): Promise<MissionView>;
   /** Puts an existing task in the mission's backlog; the task itself doesn't change. */
   addMissionTask(missionId: string, taskId: string): Promise<MissionView>;
   /** Takes a task out of the mission's backlog; the task itself doesn't change. */
@@ -1055,6 +1068,19 @@ export interface NivraApi {
   /** Saves the ticked changes as the brief's next version, from the task's revision as it was read; a stale answer is refused. */
   acceptCoachChanges(taskId: string, revision: number, coachingId: string, fields: CoachField[]): Promise<TaskView>;
   /** The person's monthly budget policy (NIV-66), or null before they chose one. */
+  saveCompanionDraft(input: {sessionId: string; requestId: string; actionId: string; fingerprint: string; draft: CompanionDraft}): Promise<{mission?: MissionView; task?: TaskView}>;
+  getCompanionContext(hint: CompanionHint): Promise<CompanionContextView>;
+  inspectProject(projectId: string): Promise<ProjectInspectionView>;
+  sendCompanionTurn(input: {sessionId: string; clientRequestId: string; hint: CompanionHint; message: string}): Promise<{runId: string; requestId: string}>;
+  getCompanionTurn(sessionId: string, requestId: string): Promise<CompanionTurnView>;
+  cancelCompanionTurn(sessionId: string, requestId: string): Promise<void>;
+  endCompanionSession(sessionId: string): Promise<void>;
+  getCompanionSettings(): Promise<CompanionSettingsView>;
+  setCompanionSettings(value: Partial<CompanionSettingsView>): Promise<CompanionSettingsView>;
+  listKnowledge(scope: CompanionScope): Promise<KnowledgeView[]>;
+  captureKnowledge(input: {scope: CompanionScope; statement: string; kind: "decision" | "constraint"; sessionId: string}): Promise<KnowledgeView>;
+  editKnowledge(id: string, revision: number, statement: string): Promise<KnowledgeView>;
+  forgetKnowledge(id: string, revision: number): Promise<void>;
   getCompanionUsage(): Promise<CompanionUsageView>;
   setCompanionLimit(limit: number | null): Promise<CompanionUsageView>;
   getBudgetPolicy(): Promise<BudgetPolicy | null>;
@@ -1087,3 +1113,24 @@ export interface CompanionUsageView {
   outputTokens: number | null;
   blocked: string | null;
 }
+
+
+export type CompanionHint = {projectId?: string; taskId?: string; missionId?: string};
+export type CompanionScope = {kind: "general"} | {kind: "project"; projectId: string} | {kind: "task"; taskId: string} | {kind: "mission"; missionId: string};
+export interface CompanionSettingsView { hidden: boolean; invitationDismissed: boolean }
+export interface KnowledgeView { id: string; revision: number; statement: string | null; status: "active" | "stale" | "superseded" | "forgotten"; kind: string; origin: string; sourceLabel: string }
+export interface CompanionContextView {
+  scope: CompanionScope; fingerprint: string; dialogueEpoch: string; label: string;
+  sources: Array<{kind: string; id: string; label: string; revision: string | number}>;
+  blockers: Array<{id: string; title: string; detail: string; action: "settings" | "environment" | "recheck" | null}>;
+  knowledge: KnowledgeView[]; canAsk: boolean; askBlocked: string | null; sharingRequired?: boolean; projectId?: string | null;
+}
+export interface ProjectInspectionView {
+  projectId: string; checkedAt: string;
+  git: {status: "available" | "missing" | "unsupported" | "failed"; version: string | null; message: string};
+  repository: {status: "ready" | "not-repository" | "no-commits" | "unavailable"; head: string | null; message: string};
+}
+export interface CompanionAction { id: string; kind: "open-task" | "open-mission" | "settings" | "environment" | "explain" | "draft-mission" | "draft-task"; entityId?: string; label: string; draft?: CompanionDraft; fingerprint?: string }
+export interface CompanionTurnView {status: "running" | "answered" | "failed" | "cancelled" | "interrupted" | "unknown"; reply?: string; message?: string; actions?: CompanionAction[]; retained?: KnowledgeView[]; proposals?: string[]; dialogueEpoch?: string; fingerprint?: string}
+
+export interface CompanionDraft {title: string; outcome?: string; goal?: string; scope?: string; acceptance?: string[]}

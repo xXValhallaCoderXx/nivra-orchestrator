@@ -148,7 +148,7 @@ function sameTask(stored: unknown, input: unknown): boolean {
  * with the run it started.
  */
 function sameCoach(stored: unknown, input: unknown): boolean {
-  const keys = ["taskId", "briefId", "briefVersion", "bindingDigest", "packetDigest", "preferencesDigest", "model"] as const;
+  const keys = ["taskId", "briefId", "briefVersion", "bindingDigest", "packetDigest", "preferencesDigest", "knowledgeDigest", "model"] as const;
   const a = (stored ?? {}) as Record<string, unknown>;
   const b = (input ?? {}) as Record<string, unknown>;
   const profile = (value: Record<string, unknown>) => (value["profile"] ?? {}) as Record<string, unknown>;
@@ -259,7 +259,8 @@ export class RunScheduler {
           (request.workflowId === "environment" && !sameSandbox(existing.input, request.input)) ||
           (request.workflowId === "research" && !sameResearch(existing.input, request.input)) ||
           (request.workflowId === "task" && !sameTask(existing.input, request.input)) ||
-          (request.workflowId === "coach" && !sameCoach(existing.input, request.input)));
+          (request.workflowId === "coach" && !sameCoach(existing.input, request.input)) ||
+          (request.workflowId === "companion" && JSON.stringify(existing.input) !== JSON.stringify(request.input)));
       if (existing && (existing.workflowId !== request.workflowId || other)) {
         throw new Refusal("request-conflict", "This request id already started another run, with other input. Send the new request with a new id.");
       }

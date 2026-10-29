@@ -77,6 +77,12 @@ export class BudgetJournal {
     });
   }
 
+  /** Allowed model identifiers; a missing price never widens the grant. */
+  models(grantId: string): readonly string[] {
+    const accepted = acceptedIn(this.#database.open(), grantId);
+    return accepted ? (accepted.grant.models ?? accepted.grant.rates.map((rate) => rate.model)) : [];
+  }
+
   /** The accepted grant bound to this run, including after a restart. */
   grantForRun(runId: string): string | null {
     const row = this.#database.open().prepare("SELECT grant_id FROM budget_accepted WHERE run_id = ?").get(runId);

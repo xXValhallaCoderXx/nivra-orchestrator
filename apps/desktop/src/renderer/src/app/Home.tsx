@@ -87,6 +87,7 @@ export function ProjectHome({
   tasksError,
   running,
   onNavigate,
+  onGuide,
   onCreateTask,
   onStartConversation,
   onRemoved,
@@ -102,6 +103,7 @@ export function ProjectHome({
   /** A hello or explain run of this window is going for this project. */
   running: boolean;
   onNavigate: Navigate;
+  onGuide(): void;
   onCreateTask(title: string): void;
   /** Starts a conversation about the project and opens it; a failure is shown under its button. */
   onStartConversation(): Promise<void>;
@@ -132,6 +134,7 @@ export function ProjectHome({
           {project.label}
         </Title>
         <EngineBadge project={project} engine={engine} unknown={enginesError} />
+        <Button variant="default" size="xs" style={{ alignSelf: "flex-start" }} onClick={onGuide} data-testid="home-guided-setup">Help set up this project</Button>
       </Stack>
       <EngineNotices engine={engine} onRestart={() => window.nivra.restartEngine(project.id)} testId="home-engine" />
       <ProjectNotice project={project} />
@@ -340,6 +343,7 @@ export function GeneralHome({
   onOpenProject,
   onNavigate,
   onNewTask,
+  onStartIdea,
 }: {
   projects: ProjectView[];
   settings: SettingsView | null;
@@ -351,6 +355,7 @@ export function GeneralHome({
   onOpenProject(projectId: string): void;
   onNavigate: Navigate;
   onNewTask(): void;
+  onStartIdea(): void;
 }) {
   const first = projects.length === 0;
   const key = settings?.nebiusKey === "encrypted" || settings?.nebiusKey === "unencrypted";
@@ -376,6 +381,7 @@ export function GeneralHome({
       <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
         <Card title="Plan without a repository" description="Write a mission and its tasks before any repository exists. Planning by hand sends nothing and needs no key." testId="home-plan">
           <Group gap="sm">
+            <Button variant="default" onClick={onStartIdea} data-testid="home-start-idea">Start an idea</Button>
             <Button onClick={() => onNavigate({ kind: "missions", startNew: true })} data-testid="home-new-mission">
               New mission
             </Button>

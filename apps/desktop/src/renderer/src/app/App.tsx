@@ -1,8 +1,10 @@
-import { ActionIcon, Alert, AppShell, Box, Overlay, Stack, Text, UnstyledButton } from "@mantine/core";
+import { ActionIcon, Alert, AppShell, Box, Button, Group, Overlay, Stack, Text, UnstyledButton } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AppInfo, ConversationsView, ConversationSummary, EngineView, PreferencesView, ProjectView, SettingsView, TasksView, WslView } from "../../../shared/ipc";
 import { Conversation } from "../features/conversation";
+import { Companion, type CompanionHandle } from "../features/companion";
+import { companionHint, returnProjectPresent, type SetupReturn } from "../features/companion-state";
 import { Environment } from "../features/environment";
 import { Explain } from "../features/explain";
 import { TERMINAL, type RunRef } from "../features/hello";
@@ -10,7 +12,7 @@ import { MissionDetail, MissionsPage } from "../features/missions";
 import { PlanningHome } from "../features/navigation";
 import { AddedWarning, useAddProject, type AddOutcome } from "../features/projects";
 import { NewTask, TaskDetail, TasksPage } from "../features/tasks";
-import { usePoll } from "../shared/ui";
+import { errorMessage, usePoll } from "../shared/ui";
 import { browserStorage, DraftsProvider, useDraftList, useDrafts } from "../shell/drafts";
 import { composerDraftKey, newTaskDraftKey, openTaskCount, placeOfDraft, projectOnly, routeAfterSwitch, shownSection } from "../shell/places";
 import { TaskStrip } from "../shell/TaskStrip";
@@ -73,6 +75,11 @@ function Shell() {
   const [credentialsSaved, setCredentialsSaved] = useState(0);
   const [chosen, setChosen] = useState<Scope | null>(null);
   const [route, setRoute] = useState<Route>({ kind: "home" });
+  const companion = useRef<CompanionHandle | null>(null);
+  const [companionOpen, setCompanionOpen] = useState(false);
+  const [setupReturn, setSetupReturn] = useState<SetupReturn | null>(null);
+  const [returnError, setReturnError] = useState<string | null>(null);
+  const [environmentProjects, setEnvironmentProjects] = useState<string[]>([]);
   // Hello and Explain runs this window started, by project: their pages find them again after any navigation.
   const [helloRuns, setHelloRuns] = useState<Record<string, RunRef>>({});
   const [explainRuns, setExplainRuns] = useState<Record<string, RunRef>>({});
@@ -91,6 +98,7 @@ function Shell() {
     setNavOpen(false);
     if (refocus) menuButton.current?.focus();
   };
+  useEffect(() => { if (companionOpen) setNavOpen(false); }, [companionOpen]);
   useEffect(() => {
     if (!narrow) setNavOpen(false);
   }, [narrow]);
@@ -190,7 +198,24 @@ function Shell() {
     setNavOpen(false);
     setChosen({ kind: "project", projectId });
     setRoute({ kind: "environment" });
+    setEnvironmentProjects((ids) => ids.includes(projectId) ? ids : [...ids, projectId]);
   };
+  const detour = route.kind === "settings" || route.kind === "environment";
+  const companionContextHint = setupReturn && detour ? setupReturn.hint : companionHint(shown, scope);
+  useEffect(() => {
+    if (route.kind === "environment" && project) setEnvironmentProjects((ids) => ids.includes(project.id) ? ids : [...ids, project.id]);
+  }, [route.kind, project?.id]);
+  // The companion remains available after hiding its launcher, without changing any existing shortcut.
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || dialogOpen()) return;
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.code === "Space") {
+        event.preventDefault(); companion.current?.open();
+      }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, []);
   const opened = (summary: ConversationSummary) => {
     setConversationsVersion((n) => n + 1);
     navigate({ kind: "conversation", id: summary.id });
@@ -227,7 +252,7 @@ function Shell() {
         Skip to the page
       </UnstyledButton>
       {narrow && (
-        <AppShell.Header ref={topBar} px={12} style={{ display: "flex", alignItems: "center", gap: 8 }} data-testid="top-bar">
+        <AppShell.Header ref={topBar} inert={companionOpen ? true : undefined} px={12} style={{ display: "flex", alignItems: "center", gap: 8 }} data-testid="top-bar">
           <ActionIcon
             ref={menuButton}
             variant="default"
@@ -275,9 +300,26 @@ function Shell() {
         onConversationCreated={opened}
       />
       {/* The page scrolls inside the main area, never the window: the sidebar and the top bar stay where they are. */}
-      <AppShell.Main ref={main} id="page" tabIndex={-1} aria-label="Page" style={{ outline: "none", height: "100dvh", overflowY: "auto" }} data-testid="main">
+      <AppShell.Main ref={main} id="page" tabIndex={-1} aria-label="Page" inert={companionOpen && narrow ? true : undefined} style={{ outline: "none", height: "100dvh", overflowY: "auto", ...(companionOpen && !narrow ? { paddingRight: 420 } : {}) }} data-testid="main">
         <Box px={{ base: 16, sm: 40 }} pt={28} pb={40} maw={1120}>
           <Stack gap="md">
+            {setupReturn && detour && <Group><Button variant="default" size="xs" data-testid="companion-return" onClick={async () => {
+              const destination = setupReturn;
+              try {
+                if (!returnProjectPresent(destination, list.map((item) => item.id))) throw new Error("The original project was removed.");
+                if (destination.hint.taskId) {
+                  const task = await window.nivra.getTask(destination.hint.taskId);
+                  if (destination.projectId !== undefined && task.summary.projectId !== destination.projectId) throw new Error("This task's repository changed while setup was open.");
+                }
+                if (destination.hint.missionId) await window.nivra.getMission(destination.hint.missionId);
+                setChosen(destination.scope); navigate(destination.route); setReturnError(null);
+                setSetupReturn(null); companion.current?.open("setup");
+              } catch (reason) {
+                setChosen({ kind: "general" }); navigate({ kind: "home" }); setSetupReturn(null);
+                setReturnError(`${errorMessage(reason)} Returned to General; no work was reassigned.`);
+              }
+            }}>Return to setup</Button></Group>}
+            {returnError && <Alert color="yellow" withCloseButton onClose={() => setReturnError(null)}>{returnError}</Alert>}
             {hostError && (
               <Alert color="red" title="Nivra couldn't load its state" data-testid="host-error">
                 <Text size="sm">{hostError} If this keeps happening, quit Nivra and open it again.</Text>
@@ -305,6 +347,7 @@ function Shell() {
                       tasksError={tasks.error}
                       running={busyIds.includes(project.id)}
                       onNavigate={navigate}
+                      onGuide={() => companion.current?.open("setup")}
                       onCreateTask={(title) => {
                         navigate({ kind: "new-task", draftKey: newTaskDraftKey(scope, true), plan: null, title });
                         setComposerOrigin(composerDraftKey(scope));
@@ -334,6 +377,7 @@ function Shell() {
                       onOpenProject={(id) => switchTo({ kind: "project", projectId: id })}
                       onNavigate={navigate}
                       onNewTask={() => navigate({ kind: "new-task", draftKey: newTaskDraftKey(scope), plan: null, title: "" })}
+                      onStartIdea={() => companion.current?.open("idea")}
                     />
                   )}
                 </Box>
@@ -428,7 +472,12 @@ function Shell() {
               />
             </Page>
             <Page shown={shown.kind === "environment"} testId="page-environment">
-              <Environment key={`environment:${project?.id ?? "none"}`} project={project} online={online} credentialsSaved={credentialsSaved} onProjectChanged={() => setProjectsVersion((n) => n + 1)} />
+              {environmentProjects.map((id) => {
+                const environmentProject = list.find((item) => item.id === id);
+                if (!environmentProject) return null;
+                const environmentEngine = engines.value?.find((item) => item.targetId === environmentProject.targetId);
+                return <Box key={id} display={project?.id === id ? undefined : "none"}><Environment active={project?.id === id} project={environmentProject} online={environmentEngine?.state.status === "online"} credentialsSaved={credentialsSaved} onProjectChanged={() => setProjectsVersion((n) => n + 1)} /></Box>;
+              })}
             </Page>
             <Page shown={shown.kind === "settings"} testId="page-settings">
               <SettingsPage
@@ -453,12 +502,26 @@ function Shell() {
                 onHelloRun={(id, ref) => setHelloRuns((current) => (current[id]?.runId === ref.runId && current[id]?.status === ref.status ? current : { ...current, [id]: ref }))}
                 credentialsSaved={credentialsSaved}
                 onCredentialsSaved={() => setCredentialsSaved((count) => count + 1)}
+                onOpenCompanion={() => companion.current?.open()}
               />
             </Page>
           </Stack>
         </Box>
       </AppShell.Main>
       {adding.dialog}
+      <Companion hint={companionContextHint} narrow={narrow} handle={companion} onVisibilityChange={setCompanionOpen} projectIds={list.map((item) => item.id)} refreshKey={credentialsSaved + projectsVersion} onAdd={() => void adding.add()} onExplain={(id) => { setChosen({ kind: "project", projectId: id }); navigate({ kind: "explain" }); }} onNavigate={(action) => {
+        if (action.kind === "settings" || action.kind === "environment") {
+          setSetupReturn(setupReturn && detour ? setupReturn : { scope, route: shown, hint: companionContextHint, projectId: action.entityId ?? null }); setReturnError(null);
+          if (action.kind === "environment" && action.entityId) openEnvironment(action.entityId);
+          else {
+            // Settings acts on the companion's resolved work, while Return restores the earlier sidebar selection.
+            setChosen(action.entityId ? { kind: "project", projectId: action.entityId } : { kind: "general" });
+            navigate({ kind: "settings", section: "connections" });
+          }
+        } else if (action.kind === "explain" && action.entityId) { setChosen({ kind: "project", projectId: action.entityId }); navigate({ kind: "explain" }); }
+        else if (action.entityId && action.kind === "open-task") navigate({ kind: "task", id: action.entityId, tab: "brief" });
+        else if (action.entityId && action.kind === "open-mission") navigate({ kind: "mission", id: action.entityId });
+      }} />
     </AppShell>
   );
 }

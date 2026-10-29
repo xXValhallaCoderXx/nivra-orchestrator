@@ -4,6 +4,7 @@ import { PreferenceSnapshot } from "./context.ts";
 import { ModelFailureKind, RunBudgetRecord, RunRoute, RunUsage } from "./models.ts";
 import { SPECIALISTS } from "./specialists.ts";
 import { TASK_BRIEF_LIMITS } from "./task.ts";
+import { KnowledgeSnapshot } from "./knowledge.ts";
 
 /**
  * The task readiness coach (NIV-53): one bounded model call, asked for by the person, that reads one task's brief and
@@ -237,6 +238,7 @@ export const CoachContext = z.strictObject({
   preferences: PreferenceSnapshot,
   sharing: z.strictObject({ modelContext: z.boolean() }),
   packet: CoachPacket,
+  knowledge: KnowledgeSnapshot.optional(),
 });
 export type CoachContext = z.infer<typeof CoachContext>;
 
@@ -256,6 +258,7 @@ export const CoachInput = z.strictObject({
   bindingDigest: Sha256Hex,
   packetDigest: Sha256Hex,
   preferencesDigest: Sha256Hex,
+  knowledgeDigest: Sha256Hex.optional(),
   profile: CoachProfileRef,
   model: z.string().min(1).max(200).optional(),
 });
@@ -269,6 +272,7 @@ export const StoredCoachInput = z.object({
   bindingDigest: z.string().min(1),
   packetDigest: z.string().min(1),
   preferencesDigest: z.string().min(1),
+  knowledgeDigest: z.string().min(1).optional(),
   profile: z.object({ id: z.string().min(1), version: z.number().int().positive() }),
   model: z.string().min(1).optional(),
 });
@@ -304,7 +308,7 @@ export const COACH_REPORT_LIMITS = {
 const R = COACH_REPORT_LIMITS;
 
 /** What in the packet an answer may name: a gap (G1), a criterion (C1), an assumption (A1), the mission (M) or a finding (F1). */
-export const CoachRef = z.string().regex(/^(G[1-9][0-9]?|C[1-9][0-9]?|A[1-9][0-9]?|M|F[1-3])$/);
+export const CoachRef = z.string().regex(/^(G[1-9][0-9]?|C[1-9][0-9]?|A[1-9][0-9]?|M|F[1-3]|K([1-9]|1[0-2]))$/);
 const Refs = z.array(CoachRef).max(R.refs);
 
 export const CoachQuestion = z.strictObject({
@@ -388,6 +392,7 @@ export const CoachReport = z.strictObject({
   bindingDigest: z.string(),
   packetDigest: z.string(),
   preferencesDigest: z.string(),
+  knowledge: z.strictObject({ digest: Sha256Hex, records: z.array(z.strictObject({ id: z.uuid(), revision: z.number().int().positive() })).max(12) }).optional(),
   outcome: CoachOutcome,
   scope: z.enum(["general", "project"]),
   packet: z.strictObject({ chars: count, criteria: count, assumptions: count, gaps: count, mission: z.boolean(), findings: count }),

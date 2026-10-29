@@ -3804,3 +3804,51 @@ or engines from independently spending the last request, while uncertain outcome
 Other model features, research and sandbox work still require their own integration. An offline target's outstanding
 reservation stays held until that engine reconnects. This is an installation allowance, not provider billing enforcement.
 No live paid call was required to verify it.
+
+
+## D54. An optional companion with temporary dialogue and scoped retained outcomes (2026-10-29)
+
+**Decision.** NIV-68 adds a labelled launcher and contextual panel without replacing direct navigation. Manual idea and
+project-setup guidance requires no provider key, repository or execution environment. Ideas save as native mission
+versions; first tasks save atomically with mission membership and human-readable draft briefs.
+
+- The host resolves task/mission/project bindings, current attempt decisions, environment evidence, confirmed preferences
+  and permitted knowledge. A task's own project wins over shell selection. Inspection is a bounded read-only Git check;
+  the full environment/run preview remains authoritative. Tracked changes prevent snapshots; untracked files are excluded.
+- Companion messages, unsent text, history and replies remain in memory, including an acknowledged-result outbox in the
+  engine. Metadata-only workflow inputs/events and accounting records contain no dialogue. Existing saved chats are not
+  reused. Ending/revoking/removing scope clears affected buffers; restart interrupts without replay.
+- One requested, tool-free ModelClient call returns a bounded answer and proposals, with no retries or repair call.
+  The same response may propose exact quotes to retain. Clear decisions use the narrowest native scope and visible
+  acknowledgement; engineering preferences use the existing store. Ambiguity, inferred choices, detected conflicts and
+  approved-brief changes require the person's selection. No knowledge grants permission to act or spend.
+- Minimal host knowledge records retain selected wording, origin, source/revision and state. Edit/forget invalidates later
+  context and pending actions; a forgotten statement cannot be recreated by stale dialogue. Source observations become
+  stale when their evidence changes. The task-readiness coach is the second consumer, with previewed knowledge and bound
+  references; its calls are outside the companion request allowance.
+- Saves use stable action IDs and revalidate fingerprints synchronously after credential waits. Ordinary record changes
+  mark generated actions stale. Scope/sharing/knowledge/preference changes clear affected temporary context. Settings and
+  Environment detours keep original IDs; removed destinations return Home without substituting a different project.
+
+**Why.** Beginners need saved work and one useful next step without a forced setup wizard. Temporary discussion can help
+without becoming another transcript or silently turning AI guesses into instructions.
+
+**Consequences.** Protocol 19 adds companion result/ack/end and repository inspection. Host workspace v11 adds scoped
+knowledge and v12 adds content-free save idempotency records. Existing records migrate additively. The companion request
+allowance alone is enforced by NIV-66; generation, decomposition, coding-worker preference adoption, wider spending
+integration and live paid evaluation remain separate. Conservative conflict checks do not prove arbitrary prose
+conflict-free. Verification distinguishes source, mocked-provider, built, packaged and Windows evidence.
+
+## D55. Keep a companion preference at its stated native scope (2026-10-29)
+
+**Decision.** Supersedes D54's blanket routing of engineering preferences into the preference store. A task or mission's
+preference is retained as knowledge on that task or mission. The project/personal preference store receives a broader
+default only when the selected scope or the person's explicit wording establishes that breadth. A task-specific
+statement never becomes a project or personal default; "my default" and "always" alone do not broaden a task's scope.
+
+**Why.** A preference for one piece of work does not authorise changing defaults for other work. The existing preference
+store has project and personal scopes, so routing every engineering preference there would widen a task's instruction.
+
+**Consequences.** No new preference scope or schema is introduced. The native knowledge consumer supplies a task's own
+preference to its readiness coach, while other tasks do not inherit it. Explicit broader defaults still use the existing
+preference store. Conservative wording checks leave unresolved scope as a proposal and grant no permission to act.

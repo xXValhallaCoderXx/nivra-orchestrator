@@ -838,7 +838,28 @@ The engine's `budget-journal`/`budget-model` tests cover grants, seals and SDK t
 `companion-usage-accounting` tests cover unknown usage without double-counting. `budget-usage.spec.ts` exercises the
 companion-only policy through the native window. A disconnected target retains its grants until it reconnects.
 
+For NIV-68, run `companion-engine.test.ts`, `companion-host.test.ts`, `knowledge.test.ts` and the built/packaged
+`companion.spec.ts` journeys. Privacy fixtures scan SQLite/WAL, Mastra, artifacts and logs for synthetic transcript
+markers, permitting separately selected structured outcomes. `pnpm rpc repository.inspect '{"repoPath":"/absolute/path"}'
+--home /tmp/nivra-inspect-check` exercises local inspection without a provider or repository scripts. Guidance never
+runs `environment.resolve` merely to refresh status. The companion composer never uses draft recovery.
+
 When the host's computer month is later than its established budget month, Settings > Budget and usage > Companion
 requests offers explicit month confirmation. Check the displayed month before confirming. Save and Refresh never
 renew an exhausted allowance. The existing guard/recovery checks remain authoritative, and older outstanding requests
 stay in their original month.
+
+`companion-lifecycle.spec.ts` uses named IPC stand-ins to order context refreshes and replies without a provider. It
+checks that own retained outcomes preserve the reply, external forgetting clears it, old polls cannot complete a newer
+turn, and End clears text before cancellation is acknowledged. Its native navigation cases open a task's project
+Settings from another sidebar selection and General, inspect the actual project controls, and return to the prior scope.
+`companion-engine.test.ts` also checks that one task's preference is absent from another task's model context.
+
+For the affected built journeys, use the package script:
+
+```bash
+pnpm --filter @nivra/desktop run test:e2e companion.spec.ts companion-lifecycle.spec.ts environment-scope.spec.ts
+```
+
+The package script supplies the absolute Node executable needed by source engines; a direct `pnpm exec playwright`
+invocation does not supply it in this checkout.

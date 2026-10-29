@@ -7,7 +7,7 @@ import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, request
 import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining } from "@nivra/domain";
 import { z } from "zod";
 import { containsSavedKey, DRAFT_CHECK_FAILED, DRAFT_KEY_NAMES } from "./draft-keys.ts";
-import { COPY_TEXT_CHARS, DRAFT_CHECK_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
+import { COPY_TEXT_CHARS, DRAFT_CHECK_CHARS, MESSAGE_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
@@ -349,10 +349,10 @@ function start(): void {
   handle(IPC.listMissions, none, () => host.missions());
   handle(IPC.getMission, z.tuple([Id]), (_event, id) => host.mission(id));
   handle(IPC.openMission, z.tuple([Id]), (_event, id) => host.openMission(id));
-  handle(IPC.createMission, z.tuple([Mission]), (_event, content) => host.createMission(content));
+  handle(IPC.createMission, z.tuple([Mission, Id.optional()]), (_event, content, actionId?: string) => host.createMission(content, actionId));
   handle(IPC.reviseMission, z.tuple([Id, Revision, Mission]), (_event, id, version, content) => host.reviseMission(id, version, content));
   handle(IPC.deleteMission, z.tuple([Id]), (_event, id) => host.deleteMission(id));
-  handle(IPC.createMissionTask, z.tuple([Id, LongText]), (_event, id, title) => host.createMissionTask(id, title));
+  handle(IPC.createMissionTask, z.tuple([Id, LongText, Fields.optional(), Id.optional()]), (_event, id, title, fields?: z.infer<typeof Fields>, actionId?: string) => host.createMissionTask(id, title, fields, actionId));
   handle(IPC.addMissionTask, z.tuple([Id, Id]), (_event, id, taskId) => host.addMissionTask(id, taskId));
   handle(IPC.removeMissionTask, z.tuple([Id, Id]), (_event, id, taskId) => host.removeMissionTask(id, taskId));
   handle(IPC.prepareMissionReview, z.tuple([Id, Picked]), (_event, id, taskIds) => host.prepareMissionReview(id, taskIds));
@@ -366,6 +366,24 @@ function start(): void {
   handle(IPC.listCoachings, z.tuple([Id]), (_event, id) => host.coachings(id));
   handle(IPC.cancelCoach, z.tuple([Id, Id]), (_event, id, coachingId) => host.cancelCoach(id, coachingId));
   handle(IPC.acceptCoachChanges, z.tuple([Id, Revision, Id, z.array(CoachField).max(CoachField.options.length)]), (_event, id, revision, coachingId, fields) => host.acceptCoachChanges(id, revision, coachingId, fields));
+  // Companion calls are named and validated; paths and commands never cross this bridge.
+  const CompanionHint = z.strictObject({ projectId: Id.optional(), taskId: Id.optional(), missionId: Id.optional() });
+  const CompanionScope = z.discriminatedUnion("kind", [z.strictObject({kind: z.literal("general")}), z.strictObject({kind:z.literal("project"),projectId:Id}), z.strictObject({kind:z.literal("task"),taskId:Id}), z.strictObject({kind:z.literal("mission"),missionId:Id})]);
+  const CompanionSettings = z.strictObject({hidden:z.boolean().optional(),invitationDismissed:z.boolean().optional()});
+  const CompanionDraft = z.strictObject({title:z.string().min(1).max(200),outcome:z.string().max(2000).optional(),goal:z.string().max(4000).optional(),scope:z.string().max(4000).optional(),acceptance:z.array(z.string().max(1000)).max(20).optional()});
+  handle(IPC.getCompanionContext, z.tuple([CompanionHint]), (_event,hint) => host.getCompanionContext(hint));
+  handle(IPC.inspectProject, project, (_event,id) => host.inspectProject(id));
+  handle(IPC.getCompanionSettings, none, () => host.getCompanionSettings());
+  handle(IPC.setCompanionSettings, z.tuple([CompanionSettings]), (_event,input) => host.setCompanionSettings(input));
+  handle(IPC.sendCompanionTurn, z.tuple([z.strictObject({sessionId:Id,clientRequestId:Id,hint:CompanionHint,message:z.string().trim().min(1).max(MESSAGE_CHARS)})]), (_event,input) => host.sendCompanionTurn(input));
+  handle(IPC.getCompanionTurn,z.tuple([Id,Id]),(_event,sessionId,id)=>host.getCompanionTurn(sessionId,id));
+  handle(IPC.cancelCompanionTurn,z.tuple([Id,Id]),(_event,sessionId,id)=>host.cancelCompanionTurn(sessionId,id));
+  handle(IPC.endCompanionSession,z.tuple([Id]),(_event,id)=>host.endCompanionSession(id));
+  handle(IPC.listKnowledge,z.tuple([CompanionScope]),(_event,scope)=>host.listKnowledge(scope));
+  handle(IPC.captureKnowledge,z.tuple([z.strictObject({scope:CompanionScope,statement:z.string().min(1).max(500),kind:z.enum(["decision","constraint"]),sessionId:Id})]),(_event,input)=>host.captureKnowledge(input));
+  handle(IPC.editKnowledge,z.tuple([Id,Revision,z.string().min(1).max(500)]),(_event,id,revision,statement)=>host.editKnowledge(id,revision,statement));
+  handle(IPC.forgetKnowledge,z.tuple([Id,Revision]),(_event,id,revision)=>host.forgetKnowledge(id,revision));
+  handle(IPC.saveCompanionDraft,z.tuple([z.strictObject({sessionId:Id,requestId:Id,actionId:Id,fingerprint:Fingerprint,draft:CompanionDraft})]),(_event,input)=>host.saveCompanionDraft(input));
   // The shared monthly budget (NIV-66).
   handle(IPC.getCompanionUsage, none, () => host.getCompanionUsage());
   handle(IPC.setCompanionLimit, z.tuple([z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable()]), (_event, limit) => host.setCompanionLimit(limit));

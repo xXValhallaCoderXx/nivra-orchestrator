@@ -10,6 +10,7 @@ import {
   coachPacketDigest,
   preferencesDigest,
   renderCoachPacket,
+  renderKnowledge,
   type CoachContext,
   type CoachInput,
   type CoachReport,
@@ -18,6 +19,7 @@ import {
   type MissionContent,
   type MissionRef,
   type PreferenceSnapshot,
+  type KnowledgeSnapshot,
 } from "@nivra/domain";
 import { applyCoachChange, COACH_FIELD_LABELS, fieldValue, type CoachBriefFields, type CoachChangeView, type CoachPreview, type CoachSelection } from "../shared/coach.ts";
 import { TASK_LIMITS, type BriefContent, type BriefFields } from "../shared/ipc.ts";
@@ -167,6 +169,7 @@ export function coachPreviewFingerprint(parts: {
   bindingDigest: string;
   packetDigest: string;
   preferencesDigest: string;
+  knowledgeDigest?: string;
   sharing: boolean | null;
   projectId: string | null;
   targetId: string;
@@ -174,7 +177,7 @@ export function coachPreviewFingerprint(parts: {
   profileVersion: number;
   model: string | null;
 }): string {
-  const canonical = ["nivra.coach-preview.v2", parts.bindingDigest, parts.packetDigest, parts.preferencesDigest, parts.sharing, parts.projectId, parts.targetId, parts.profileId, parts.profileVersion, parts.model];
+  const canonical = ["nivra.coach-preview.v3", parts.bindingDigest, parts.packetDigest, parts.preferencesDigest, parts.knowledgeDigest ?? null, parts.sharing, parts.projectId, parts.targetId, parts.profileId, parts.profileVersion, parts.model];
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
@@ -211,6 +214,7 @@ export function coachBindingFor(subject: Pick<CoachSubject, "taskId" | "title" |
 export interface CoachState {
   known: KnownSecrets;
   preferences: PreferenceSnapshot;
+  knowledge?: KnowledgeSnapshot;
   /** What the coaching is bound to (`coachBindingFor`), whose fingerprint binds the preview and the run. */
   binding: ContextBinding;
   /** Why the task can't be coached now (a coaching still open, the task completed), in plain words; null when it can. */
@@ -313,11 +317,17 @@ export async function coachRequest(subject: CoachSubject, state: CoachState): Pr
     throw new Error("A task with no repository is sent your personal preferences only, so nothing was sent. Open the task again, then ask the coach again.");
   }
   for (const record of state.preferences.records) refuseCredentials("A preference", record.statement, state.known, "send");
+  for (const record of state.knowledge?.records ?? []) {
+    const allowed = record.scope.kind === "task" ? record.scope.id === subject.taskId : record.scope.kind === "project" ? project.kind === "project" && record.scope.id === project.projectId : record.scope.id === state.binding.mission?.missionId;
+    if (!allowed || (record.projectId !== null && (project.kind !== "project" || record.projectId !== project.projectId))) throw new Error("A retained note belongs to another scope, so nothing was sent. Refresh this task, then ask the coach again.");
+    refuseCredentials("A retained note", record.statement ?? "", state.known, "send");
+  }
+  refuseCredentials("The retained knowledge", renderKnowledge(state.knowledge?.records ?? []), state.known, "send");
   const packet = coachPacketFor(
     { title: subject.title, brief: { version: subject.brief.version, content: subject.brief.content }, scope: project.kind === "project" ? "project" : "general", mission: state.mission, findings: state.findings },
     state.known,
   );
-  const text = renderCoachPacket(packet);
+  const text = [renderCoachPacket(packet), renderKnowledge(state.knowledge?.records ?? [])].filter(Boolean).join("\n\n");
   const [boundDigest, packetDigest, prefsDigest] = await Promise.all([bindingDigest(state.binding), coachPacketDigest(packet), preferencesDigest(state.preferences.records)]);
   const estimate = coachEstimatedInputTokens(text.length, state.preferences.records.map((record) => record.statement));
   const budget = COACH_RUN_LIMITS.estimatedInputTokens;
@@ -352,6 +362,7 @@ export async function coachRequest(subject: CoachSubject, state: CoachState): Pr
       bindingDigest: boundDigest,
       packetDigest,
       preferencesDigest: prefsDigest,
+      ...(state.knowledge ? { knowledgeDigest: state.knowledge.digest } : {}),
       sharing,
       // A task with no repository runs on the local engine; one with a project, on that project's target.
       projectId: project.kind === "project" ? project.projectId : null,
@@ -368,10 +379,11 @@ export async function coachRequest(subject: CoachSubject, state: CoachState): Pr
     bindingDigest: boundDigest,
     packetDigest,
     preferencesDigest: prefsDigest,
+    ...(state.knowledge ? { knowledgeDigest: state.knowledge.digest } : {}),
     profile: { id: COACH_PROFILE.id, version: profile.version },
     ...(state.model ? { model: state.model } : {}),
   };
-  return { preview, input, context: { preferences: state.preferences, sharing: { modelContext: sharing === true }, packet }, packet };
+  return { preview, input, context: { preferences: state.preferences, sharing: { modelContext: sharing === true }, packet, ...(state.knowledge ? { knowledge: state.knowledge } : {}) }, packet };
 }
 
 /** What a coaching was bound to, as the workspace keeps it, for `coachReportMatches`. */
