@@ -837,3 +837,8 @@ Use isolated homes and loopback provider stand-ins for verification; no live pai
 The engine's `budget-journal`/`budget-model` tests cover grants, seals and SDK token shapes. Desktop
 `companion-usage-accounting` tests cover unknown usage without double-counting. `budget-usage.spec.ts` exercises the
 companion-only policy through the native window. A disconnected target retains its grants until it reconnects.
+
+When the host's computer month is later than its established budget month, Settings > Budget and usage > Companion
+requests offers explicit month confirmation. Check the displayed month before confirming. Save and Refresh never
+renew an exhausted allowance. The existing guard/recovery checks remain authoritative, and older outstanding requests
+stay in their original month.

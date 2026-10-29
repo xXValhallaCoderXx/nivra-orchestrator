@@ -1259,6 +1259,32 @@ describe("Companion AI monthly request allowance", () => {
     recordJournal(db,result.grant.id,[],seal(result.grant.id,"interrupted",0),OCT);
     const view=companionRequestUsage(db);assert.equal(view.used,2);assert.equal(view.unknown,2);assert.equal(view.remaining,1);
   });
+  it("confirms a later companion month without releasing an old outstanding grant or moving its late usage", () => {
+    const db = workspace();
+    setPolicy(db, policy(3), OCT, TOKEN_FACTORY_PRICES);
+    const settled = writeGrant(db, companion({ productive: { requests: 1, outputTokens: 4000 } }), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in settled);
+    markDispatching(db, settled.grant.id, HOME, OCT, ledgerState(db));
+    assert.ok(!("refused" in recordJournal(db, settled.grant.id, [row(settled.grant.id, 1, { boundMicros: null, amountMicros: null })], seal(settled.grant.id, "complete", 1), OCT)));
+    const outstanding = writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES));
+    assert.ok("grant" in outstanding);
+    markDispatching(db, outstanding.grant.id, HOME, OCT, ledgerState(db));
+    const originalPeriod = getGrant(db, outstanding.grant.id)!.periodIndex;
+    assert.deepEqual([companionRequestUsage(db).used, companionRequestUsage(db).reserved, companionRequestUsage(db).remaining], [1, 2, 0]);
+
+    // Reading next month's clock cannot renew an allowance; only the person's exact confirmation opens it.
+    assert.equal(summary(db, NOV).clock.computerMonth, "2026-11");
+    assert.equal(companionRequestUsage(db).remaining, 0);
+    assert.deepEqual(confirmMonth(db, "2026-12", NOV, "UTC"), { refused: "not-shown" });
+    assert.ok("opened" in confirmMonth(db, "2026-11", NOV, "UTC"));
+    assert.deepEqual([companionRequestUsage(db).month, companionRequestUsage(db).used, companionRequestUsage(db).reserved, companionRequestUsage(db).remaining], ["2026-11", 0, 0, 3]);
+    assert.deepEqual([getGrant(db, outstanding.grant.id)!.periodIndex, getGrant(db, outstanding.grant.id)!.state], [originalPeriod, "dispatching"]);
+
+    assert.ok("grant" in writeGrant(db, companion(), context(db, NOV, TOKEN_FACTORY_PRICES)));
+    assert.ok(!("refused" in recordJournal(db, outstanding.grant.id, [row(outstanding.grant.id, 1, { boundMicros: null, amountMicros: null })], seal(outstanding.grant.id, "complete", 1), NOV)));
+    assert.deepEqual([getGrant(db, outstanding.grant.id)!.periodIndex, getGrant(db, outstanding.grant.id)!.state], [originalPeriod, "settled"]);
+    assert.deepEqual([companionRequestUsage(db).used, companionRequestUsage(db).reserved, companionRequestUsage(db).remaining], [0, 2, 1]);
+  });
 });
 
 
