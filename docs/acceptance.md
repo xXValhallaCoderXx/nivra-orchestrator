@@ -2984,8 +2984,8 @@ stand-in, so these show commands, refusals and preparations' records, not a real
 | `f82bca5` | The window's picker, the root's switch, Advanced; the host's words; the gated engine |
 | `bf8e384` | The journey ticks packages and opens Advanced (for Track A's review) |
 | `fca5958`, `0d92919` | The e2e specs for both managers, and the live run's recipe test |
-| `6883c76` | The independent review's findings |
-| this record | D52, the development notes and this section |
+| `6883c76`, `89f5ac1` | The independent review's findings, and one test's types |
+| `194ed76`, this record | D52, the development notes and this section, then the full round's counts |
 
 **What it shows, offline:**
 
@@ -3012,7 +3012,20 @@ installed, no repository script run; the answers are in `~/nivra-acceptance/env-
 - An npm-workspaces fixture (built for this, not a real project): web with data, root off; with data and lint, which
   the root links, root on; a selector refused in npm's words.
 
-**Checks:** CHECKS_PENDING
+**Checks**, at `89f5ac1`, the code this records, one at a time under the shared lock:
+- `pnpm verify`: exit 0, 1,657 tests passed (domain 131, engine 920, desktop 606), none failed, skipped, cancelled or
+  todo, and all three typechecks clean.
+- The built app's end-to-end suite under xvfb: 128 passed and none failed; 1 skipped, `explain.spec.ts`'s "only a
+  packaged app ignores the switch".
+- `test:packaged`, on the electron-builder `--dir` output after `stage:runtime all`: 58 passed and none failed; 71
+  skipped, the tests whose test-only switches a packaged app ignores. A first packaged run, before this worktree had
+  staged a runtime, failed 25 tests on "Engine failed": it isn't counted.
+- Windows, after `stage:runtime all` and `dev:win --no-launch`: `test:windows` 13 passed, none failed or skipped; no
+  Nivra.exe was left running, `~/.nivra` was unchanged, and candidate 3's files read the same before and after.
+- Not run: `verify:windows`, since no target, the supervisor or staging changed.
+- A first `pnpm verify`, at `194ed76`, stopped at the engine's typecheck on one test's fixture types; `89f5ac1` types
+  them, and nothing else changed.
+- While working: each step's own test files and the three typechecks, as each commit says.
 
 Mutations: 14 of 14 caught (`~/nivra-acceptance/env-scope/mutate.mjs`), at `0d92919` and again at `6883c76`.
 
