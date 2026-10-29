@@ -3,7 +3,7 @@ import type { ApplyPath, ApplyResolution, ApplyStatus, TaskReport } from "@nivra
 import { useEffect, useId, useRef, useState } from "react";
 import type { AttemptDecision, BriefContent, TaskApplyView, TaskAttemptView, TaskView, TurnStatus } from "../../../shared/ipc";
 import { modeChangeOf } from "../../../shared/task-diff";
-import { decisionLead, failingReportedChecks, outcomeLookOf, unapprovableText } from "../../../shared/task-verdict";
+import { currentlyVerified, decisionLead, legacyVerification, outcomeLookOf, unapprovableText } from "../../../shared/task-verdict";
 import { useNarrow } from "./narrow";
 
 /**
@@ -119,14 +119,13 @@ export const applyGoing = (value: Pick<TaskAttemptView, "decision" | "apply">) =
 /**
  * The person's decision on a run's change (P1i, RS1, RS5), in the aside: approve it by its hash, ask for a revision, or
  * reject it, exactly as the host offers. A change that can't be approved says why, and Request revision leads; a
- * verified change whose reported check failed says so first, and approving it stays possible. `act` runs one of the
+ * change whose required check failed can't be approved. `act` runs one of the
  * host's calls and reads the run again. Once decided, it says what was decided.
  */
 export function DecisionCard({
   value,
   busy,
   act,
-  content,
   confirmAsked = 0,
 }: {
   value: TaskAttemptView;
@@ -147,7 +146,6 @@ export function DecisionCard({
   }, [confirmAsked]);
   const [revising, setRevising] = useState(false);
   const [note, setNote] = useState("");
-  const warningId = useId();
   const { report, proposal, actions, decision } = value;
   const can = (action: TaskAttemptView["actions"][number]) => actions.includes(action);
 
@@ -162,11 +160,8 @@ export function DecisionCard({
     );
   }
   if (decision || (!can("approve") && !can("reject") && !can("revise"))) return null;
-  const { lead, approve: approveWords } = decisionLead(report, can("approve"), proposal !== null);
+  const { lead, approve: approveWords } = decisionLead(report, can("approve"), proposal !== null, value.admission);
   const approvable = approveWords !== null && proposal !== null;
-  const failing = approvable ? failingReportedChecks(report) : [];
-  // A failing check's command, run before the worker too? Only the run's own brief version can say.
-  const ranBefore = content === null ? null : failing.some((check) => content.baseline.some((selection) => selection.command === check.name));
   const revisionLeads = lead === "revise";
   const approve = approvable && (
     <Stack gap={2}>
@@ -199,27 +194,15 @@ export function DecisionCard({
             </Text>
           )}
         </Stack>
-        {!can("approve") && report?.outcome === "proposed" && !report.verified && (
+        {!approvable && report?.outcome === "proposed" && (
           <Text size="sm" c="var(--nivra-text-2)" data-testid="task-attempt-unapprovable">
-            {unapprovableText(report)}
+            {unapprovableText(report, value.admission)}
           </Text>
         )}
         {can("approve") && !proposal && (
           <Text size="sm" c="var(--nivra-warning)" data-testid="task-attempt-approve-unavailable">
             The change can't be read from its engine now, so it can't be approved. Open the project to start its engine, then try again.
           </Text>
-        )}
-        {failing.length > 0 && (
-          <Alert color="yellow" variant="light" role="note" aria-labelledby={warningId} data-testid="task-attempt-check-warning">
-            <Text id={warningId} size="sm" fw={600}>
-              {failing.length === 1 ? `Check ${failing[0]!.number}, a repository check, didn't pass` : `${failing.length} repository checks didn't pass`}
-            </Text>
-            <Text size="sm">
-              A repository check is reported and doesn't decide the result, so the change still counts as verified and can be approved.
-              {ranBefore === false ? ` Nivra didn't run ${failing.length === 1 ? "this check" : "these checks"} on the commit before the change, so it can't tell whether what ${failing.length === 1 ? "it reports is" : "they report is"} new.` : ""} Read
-              {failing.length === 1 ? " its output" : " their output"} under Acceptance cases and checks before you decide.
-            </Text>
-          </Alert>
         )}
         {revisionLeads ? revise : approve}
         {revisionLeads ? approve : revise}
@@ -576,7 +559,7 @@ export function CompletedCards({ task, value, project }: { task: TaskView; value
   const events: Array<{ at: string; text: string }> = [];
   if (used) events.push({ at: used.createdAt, text: `Brief v${used.version} saved.` });
   events.push({ at: value.createdAt, text: `Run ${run} started.` });
-  if (value.settledAt) events.push({ at: value.settledAt, text: `Run ${run} ended with ${value.report?.verified ? "a verified change" : "a change"}.` });
+  if (value.settledAt) events.push({ at: value.settledAt, text: `Run ${run} ended with ${currentlyVerified(value) ? "a verified change" : "a change"}.` });
   if (value.decidedAt) events.push({ at: value.decidedAt, text: `You approved ${value.proposal ? `change ${short(value.proposal.hash)}, made from commit ${short(value.proposal.baseline)}` : "the change"}, and Nivra applied it, unstaged.` });
   if (value.acceptedAt) events.push({ at: value.acceptedAt, text: "You accepted the change." });
   return (
@@ -652,7 +635,7 @@ export function RunSummary({ value, number, reviewing, onReview }: { value: Task
         {report.checks.map((check) => (
           <Group key={`${check.kind}-${check.number}`} justify="space-between" wrap="nowrap" gap="sm">
             <Text size="sm" style={{ overflowWrap: "anywhere" }}>
-              {check.kind === "case" ? `Case ${check.number}, ${check.name}` : `Check ${check.number} (reported)`}
+              {check.kind === "case" ? `Case ${check.number}, ${check.name}` : `Check ${check.number} (${legacyVerification(report) ? "legacy advisory" : "required"})`}
             </Text>
             <Badge size="sm" variant="light" color={check.verdict === "passed" ? "green" : check.verdict === "not-run" ? "gray" : check.verdict === "unknown" ? "yellow" : "red"}>
               {check.verdict === "passed" ? "Passed" : check.verdict === "failed" ? "Failed" : check.verdict === "couldnt-run" ? "Couldn't run" : check.verdict === "unknown" ? "Unknown" : "Not run"}
@@ -721,7 +704,7 @@ export function AttemptsList({ attempts, shown, onChoose }: { attempts: TaskView
       {[...attempts].reverse().map((attempt) => {
         const number = attempts.indexOf(attempt) + 1;
         const parts = [`brief v${attempt.briefVersion}`, STATUS_WORD[attempt.status]];
-        if (attempt.outcome) parts.push(attempt.outcome === "proposed" ? (attempt.verified ? "a verified change" : "an unverified change") : OUTCOME_WORD[attempt.outcome]);
+        if (attempt.outcome) parts.push(attempt.outcome === "proposed" ? (attempt.verified ? "recorded as verified" : "recorded as not verified") : OUTCOME_WORD[attempt.outcome]);
         if (attempt.decision) parts.push(DECISION_WORD[attempt.decision]);
         if (attempt.apply) parts.push(applyWord(attempt, attempt.apply));
         return (

@@ -33,6 +33,7 @@ let app: ElectronApplication;
 let page: Page;
 let packaged = false;
 let taskId = "";
+let regressionMode = false;
 
 const git = (args: string[]) => {
   const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
@@ -72,7 +73,9 @@ test.beforeAll(async ({}, testInfo) => {
     models: [{ id: TASK_MODEL, context_length: 131_072 }],
     chat: (request) => {
       const step = (request.body?.messages ?? []).filter((message) => (message as { role?: string }).role === "tool").length;
-      const [tool, input] = calls[Math.min(step, calls.length - 1)]!;
+      const [tool, original] = calls[Math.min(step, calls.length - 1)]!;
+      // The regression run fixes the no-name case but breaks the existing one-argument caller.
+      const input = regressionMode && tool === "edit_file" ? { ...TASK_FIX, new_text: '"${2:-world}"' } : original;
       return toolCall(tool, input, { id: `call_${step}` });
     },
   });
@@ -87,6 +90,57 @@ test.beforeAll(async ({}, testInfo) => {
   await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
+});
+
+test("a required check that passed before the worker and fails afterwards blocks verification and approval despite a passing acceptance case", async () => {
+  test.skip(packaged, "a packaged app ignores the test endpoint switches");
+  await page.evaluate(async ([key, project]) => {
+    await window.nivra.setNebiusKey(key!);
+    await window.nivra.setNebiusProjectId(project!);
+  }, [KEY, PROJECT_ID]);
+  regressionMode = true;
+  const fields: BriefFields = {
+    ...FIELDS,
+    checks: [". ./greet.sh; got=$(greet Ada); test \"$got\" = 'Hello, Ada'"],
+    acceptanceCases: [{ name: "default greeting", command: ". ./greet.sh; greet", expectedOutput: "Hello, world\n", expectedExitCode: 0 }],
+  };
+  taskId = await page.evaluate(async (fields) => {
+    const projectId = (await window.nivra.listProjects())[0]!.id;
+    await window.nivra.setSharing(projectId, true);
+    await window.nivra.setCloudExecution(projectId, true);
+    const created = await window.nivra.createTask({ title: "Keep callers compatible", fields, projectId, planId: null });
+    return (await window.nivra.setTaskState(created.summary.id, created.revision, "ready")).summary.id;
+  }, fields);
+  await page.getByTestId("nav-tasks").click();
+  await page.locator(`[data-testid="task-row"][data-task-id="${taskId}"]`).getByTestId("task-open").click();
+  await runOnce();
+  const card = page.getByTestId("task-attempt");
+  const view = await page.evaluate(async ([task, attempt]) => window.nivra.getTaskAttempt(task!, attempt!), [taskId, (await card.getAttribute("data-attempt-id"))!]);
+  expect([view.report?.verified, view.admission?.eligible, view.report?.checks.map((check) => [check.kind, check.verdict])]).toEqual([false, false, [["case", "passed"], ["check", "failed"]]]);
+  await expect(card.getByTestId("task-attempt-report")).toHaveAttribute("data-verified", "false");
+  await expect(card.getByTestId("task-attempt-outcome-badge")).toHaveText("Checks failed");
+  await expect(card.getByTestId("task-attempt-verdict")).toContainText("required repository check 1 wasn't shown to pass");
+  await expect(card.getByTestId("task-attempt-check").first()).toHaveAttribute("data-verdict", "passed");
+  await expect(card.getByTestId("task-attempt-before-check")).toHaveAttribute("data-verdict", "passed");
+  await expect(card.getByTestId("task-attempt-check-comparison")).toHaveAttribute("data-comparison", "Regression");
+  await expect(card.getByTestId("task-attempt-approve")).toHaveCount(0);
+  await expect(page.getByTestId("task-attempt-approve-bar")).toHaveCount(0);
+  await expect(card.getByTestId("task-attempt-revise")).toBeVisible();
+  await expect(card.getByTestId("task-attempt-reject")).toBeVisible();
+  const refusal = await page.evaluate(async ({ taskId, attemptId, hash }) => {
+    try {
+      await window.nivra.approveTaskChange(taskId, attemptId, hash);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, { taskId, attemptId: view.id, hash: view.proposal!.hash });
+  expect(refusal).toMatch(/required repository check/i);
+  expect([greet(), git(["status", "--porcelain"])]).toEqual([ORIGINAL, ""]);
+  await card.getByTestId("task-attempt-reject").click();
+  await expect(card.getByTestId("task-attempt-decision")).toHaveAttribute("data-decision", "rejected");
+  expect([greet(), git(["status", "--porcelain"])]).toEqual([ORIGINAL, ""]);
+  regressionMode = false;
 });
 
 test.afterAll(async () => {

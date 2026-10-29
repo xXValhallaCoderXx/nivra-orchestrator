@@ -77,7 +77,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
   /** The bounds a run of its brief runs under, as its preview showed them; null when its context is gone. */
   const limitsOf = (runId: string) => {
     const brief = deps.context(runId)?.brief;
-    return brief ? runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0) : null;
+    return brief ? runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0, brief.checks.length) : null;
   };
   const early = (runId: string, task: StoredTaskInput, outcome: TaskReport["outcome"], code: TaskStopCode | null, step: string | null, finished: boolean) =>
     deps.saveReport(runId, earlyTaskReport({ outcome, code, step, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, limits: limitsOf(runId), now: now(), finished }));

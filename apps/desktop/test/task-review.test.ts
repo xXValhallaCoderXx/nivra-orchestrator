@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { TaskAdmission, TaskCheck } from "@nivra/domain";
 import { diffFilesOf, fileSummaryOf, modeChangeOf } from "../src/shared/task-diff.ts";
 import { initialRepositoryOf } from "../src/shared/task-form.ts";
-import { decisionLead, failingReportedChecks, outcomeLookOf, unapprovableText } from "../src/shared/task-verdict.ts";
+import { comparisonOf, decisionLead, outcomeLookOf, unapprovableText, verdictText } from "../src/shared/task-verdict.ts";
 
 /**
  * What the review of a run's change shows (NIV-56, G3: P1i, RS1, RS5), worked out from the run's own data: the patch
@@ -148,45 +149,89 @@ describe("a proposal's patch, file by file (P1i)", () => {
   });
 });
 
-const check = (kind: "case" | "check", verdict: string) => ({ kind, number: 1, name: "n", verdict, reason: null, exitCode: 0, stdoutTail: "", stderrTail: "", difference: null, changedFiles: [], unclear: false, durationMs: null }) as never;
+const digest = "a".repeat(64);
+const check = (kind: "case" | "check", verdict: TaskCheck["verdict"], over: Partial<TaskCheck> = {}): TaskCheck => ({ kind, number: 1, name: "pnpm typecheck", commandSha256: digest, verdict, reason: null, exitCode: verdict === "passed" ? 0 : 1, stdoutTail: "", stderrTail: "", difference: null, changedFiles: [], unclear: false, durationMs: null, ...over });
+const current = { version: 4 as const, manifest: { policy: "required-checks-v1" as const, checks: [{ kind: "check" as const, number: 1, commandSha256: digest }], frozen: [], setupRequired: false } };
+const admission: TaskAdmission = { eligible: true, reason: null, proposalHash: digest, reportSha256: digest, legacy: false };
 
 describe("the Outcome badge and the decision (RS1, RS5)", () => {
-  it("tells a case that failed from one not shown to pass, and says how a run without a report ended", () => {
-    assert.deepEqual(outcomeLookOf({ status: "answered", report: { outcome: "proposed", verified: true, checks: [] } }), { label: "Verified change", color: "green" });
-    assert.deepEqual(outcomeLookOf({ status: "answered", report: { outcome: "proposed", verified: false, checks: [check("case", "failed")] } }), { label: "Checks failed", color: "red" });
-    assert.deepEqual(outcomeLookOf({ status: "answered", report: { outcome: "proposed", verified: false, checks: [check("case", "unknown")] } }), { label: "Not verified", color: "yellow" });
-    // A reported check that failed never makes a case's verdict.
-    assert.deepEqual(outcomeLookOf({ status: "answered", report: { outcome: "proposed", verified: false, checks: [check("check", "failed")] } }), { label: "Not verified", color: "yellow" });
+  it("requires engine admission for a current verified badge and counts required failures", () => {
+    assert.deepEqual(outcomeLookOf({ status: "answered", report: { ...current, outcome: "proposed", verified: true, checks: [] }, admission }), { label: "Verified change", color: "green" });
+    assert.deepEqual(outcomeLookOf({ status: "answered", report: { ...current, outcome: "proposed", verified: true, checks: [] } }), { label: "Verification unavailable", color: "yellow" });
+    assert.deepEqual(outcomeLookOf({ status: "answered", report: { ...current, outcome: "proposed", verified: false, checks: [check("case", "failed")] } }), { label: "Checks failed", color: "red" });
+    assert.deepEqual(outcomeLookOf({ status: "answered", report: { ...current, outcome: "proposed", verified: false, checks: [check("case", "unknown")] } }), { label: "Not verified", color: "yellow" });
+    assert.deepEqual(outcomeLookOf({ status: "answered", report: { ...current, outcome: "proposed", verified: false, checks: [check("case", "passed"), check("check", "failed")] } }), { label: "Checks failed", color: "red" });
     assert.deepEqual(outcomeLookOf({ status: "answered", report: { outcome: "cancelled", verified: false, checks: [] } }), { label: "Stopped", color: "gray" });
     assert.deepEqual(outcomeLookOf({ status: "interrupted", report: null }), { label: "Interrupted", color: "yellow" });
     assert.deepEqual(outcomeLookOf({ status: "not-sent", report: null }), { label: "Not sent", color: "gray" });
   });
 
-  it("gives the first reason a change can't be approved, the cases' sentence as it was", () => {
-    assert.equal(unapprovableText({ frozen: [], setup: null }), "This change can't be approved: not every acceptance case was shown to pass. You can reject it, or ask for a revision.");
-    assert.match(unapprovableText({ frozen: [{ path: "a", unchanged: false }] as never, setup: { unchanged: false, changed: ["package.json"] } }), /a frozen file isn't shown to be unchanged/);
-    assert.match(unapprovableText({ frozen: [], setup: { unchanged: false, changed: ["package.json"] } }), /it changes a setup file the environment was prepared from \(package\.json\)\. You can reject it, or ask for a revision that leaves the setup files as they are\.$/);
-    assert.match(unapprovableText({ frozen: [], setup: { unchanged: null, changed: [] } }), /couldn't tell whether the setup files are unchanged/);
+  it("gives the failed or missing required check without hiding frozen/setup protections", () => {
+    const base = { ...current, verified: false, frozen: [], setup: null, checks: [check("check", "passed")] };
+    assert.equal(unapprovableText(base), "This change can't be approved: not every acceptance case was shown to pass. You can reject it, or ask for a revision.");
+    assert.match(unapprovableText({ ...base, frozen: [{ path: "a", unchanged: false }] as never, setup: { unchanged: false, changed: ["package.json"] } }), /a frozen file isn't shown to be unchanged/);
+    assert.match(unapprovableText({ ...base, setup: { unchanged: false, changed: ["package.json"] } }), /it changes a setup file the environment was prepared from \(package\.json\)\. You can reject it, or ask for a revision that leaves the setup files as they are\.$/);
+    assert.match(unapprovableText({ ...base, setup: { unchanged: null, changed: [] } }), /couldn't tell whether the setup files are unchanged/);
+    assert.match(unapprovableText({ ...base, checks: [check("case", "passed"), check("check", "failed")] }), /required repository check 1 wasn't shown to pass \(pnpm typecheck\)/);
+    assert.match(unapprovableText({ ...base, checks: [check("case", "passed")] }), /required repository check 1 has no matching final result/);
   });
 
-  it("finds a verified change's reported checks that didn't pass, and none for anything else", () => {
-    assert.equal(failingReportedChecks({ outcome: "proposed", verified: true, checks: [check("case", "passed"), check("check", "failed"), check("check", "couldnt-run")] }).length, 2);
-    assert.equal(failingReportedChecks({ outcome: "proposed", verified: false, checks: [check("check", "failed")] }).length, 0);
-    assert.equal(failingReportedChecks(null).length, 0);
+  it("retains the legacy recorded verdict without presenting it as current verification", () => {
+    const old = { outcome: "proposed" as const, verified: true, frozen: [], setup: null, checks: [check("case", "passed"), check("check", "failed")] };
+    assert.deepEqual(outcomeLookOf({ status: "answered", report: old }), { label: "Legacy result", color: "yellow" });
+    assert.match(verdictText(old), /recorded as verified under the earlier rule/);
+    assert.match(verdictText(old), /hasn't been verified under the required-check rule/);
+    assert.match(unapprovableText(old), /Preview and start a new authorised run/);
+  });
+  it("keeps eligible legacy evidence consistent across the sentence, badge and approval", () => {
+    const old = { outcome: "proposed" as const, verified: true, frozen: [], setup: null, checks: [check("case", "passed"), check("check", "passed")] };
+    const admitted = { ...admission, legacy: true };
+    const words = verdictText(old, admitted);
+    assert.match(words, /recorded as verified under the earlier rule/);
+    assert.match(words, /engine has checked the original proposal evidence against the current rule/);
+    assert.match(words, /Before-change comparisons weren't recorded/);
+    assert.doesNotMatch(words, /hasn't been verified|start a new/);
+    assert.deepEqual(outcomeLookOf({ status: "answered", report: old, admission: admitted }), { label: "Verified change", color: "green" });
+    assert.deepEqual(decisionLead(old, true, true, admitted), { lead: "approve", approve: "Approve and apply" });
+    assert.match(unapprovableText(old, admitted), /eligible for approval/);
   });
 });
 
 describe("which decision leads (RS5)", () => {
-  const verified = { outcome: "proposed" as const, verified: true };
-  it("leads with Approve and apply for a verified change whose checks passed", () => {
-    assert.deepEqual(decisionLead({ ...verified, checks: [check("case", "passed"), check("check", "passed")] }, true, true), { lead: "approve", approve: "Approve and apply" });
+  const verified = { ...current, outcome: "proposed" as const, verified: true };
+  it("leads with Approve and apply only with current engine admission", () => {
+    assert.deepEqual(decisionLead({ ...verified, checks: [check("case", "passed"), check("check", "passed")] }, true, true, admission), { lead: "approve", approve: "Approve and apply" });
   });
-  it("makes Request revision the primary when a reported check failed, and approving stays possible", () => {
-    assert.deepEqual(decisionLead({ ...verified, checks: [check("case", "passed"), check("check", "failed")] }, true, true), { lead: "revise", approve: "Approve and apply anyway" });
+  it("never offers an override for required failures or stale verification", () => {
+    assert.deepEqual(decisionLead({ ...verified, checks: [check("case", "passed"), check("check", "failed")] }, true, true, { ...admission, eligible: false, reason: "Required check failed." }), { lead: "revise", approve: null });
+    assert.deepEqual(decisionLead({ ...verified, checks: [] }, true, true), { lead: "revise", approve: null });
   });
   it("offers no approval the host doesn't, or for a change it can't show", () => {
     assert.deepEqual(decisionLead({ outcome: "proposed", verified: false, checks: [check("case", "failed")] }, false, true), { lead: "revise", approve: null });
-    assert.deepEqual(decisionLead({ ...verified, checks: [] }, true, false), { lead: "revise", approve: null });
+    assert.deepEqual(decisionLead({ ...verified, checks: [] }, true, false, admission), { lead: "revise", approve: null });
+  });
+});
+
+describe("required repository check comparisons (NIV-67)", () => {
+  it("distinguishes a regression, a fixed check and a pass on both sides", () => {
+    assert.equal(comparisonOf(check("check", "failed"), [check("check", "passed")]).label, "Regression");
+    assert.equal(comparisonOf(check("check", "passed"), [check("check", "failed")]).label, "Passes after change");
+    assert.equal(comparisonOf(check("check", "passed"), [check("check", "passed")]).label, "Passed before and after");
+  });
+  it("never calls matching failed output unchanged, including clipped output with different errors", () => {
+    const before = check("check", "failed", { stderrTail: "... TS2339" });
+    for (const stderrTail of ["... TS2339", "... TS2554"]) {
+      const result = comparisonOf(check("check", "failed", { stderrTail }), [before]);
+      assert.equal(result.label, "Failed before and after");
+      assert.match(result.detail, /don't show that the errors are unchanged/);
+      assert.match(result.detail, /final failure still blocks verification/);
+    }
+  });
+  it("requires one matching command result and preserves unavailable or incomplete evidence", () => {
+    const after = check("check", "failed");
+    const variants = [[], [check("check", "passed", { commandSha256: "b".repeat(64) })], [check("case", "passed")], [check("check", "unknown")], [check("check", "not-run")], [check("check", "passed"), check("check", "passed")]];
+    for (const before of variants) assert.equal(comparisonOf(after, before).label, "Comparison unavailable");
+    assert.equal(comparisonOf(check("check", "unknown"), [check("check", "passed")]).label, "Comparison unavailable");
   });
 });
 

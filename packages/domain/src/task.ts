@@ -7,8 +7,8 @@ import { SandboxCleanup, SandboxStep, SandboxStopCode, SnapshotPreview, TargetNa
  * A task run (NIV-7, D39): one ready task's brief, one worker in a Nebius sandbox with networking off, and a change
  * the engine has checked. The worker edits a copy of one commit, reads files from the engine's own copy of it, and runs
  * only the brief's own acceptance cases and repository checks, by number: it never chooses a command. The verdict comes
- * from the acceptance cases alone, each a command with the exact output and exit code it must give, compared by the
- * engine outside every process that ran the workspace's code. Repository checks are reported, and never decide it.
+ * from complete passing acceptance cases and required repository checks, compared by the engine outside every
+ * process that ran the workspace's code. Before-change observations explain failures but never waive them.
  *
  * Both consents travel in the run's context, held in memory with the brief (D21): the project's model sharing (file
  * contents go to Token Factory) and its uploads (the commit goes to Nebius). Neither stands in for the other. The input
@@ -128,7 +128,7 @@ export const TaskBrief = z
     scope: z.string().max(TASK_BRIEF_LIMITS.scopeChars),
     exclusions: z.string().max(TASK_BRIEF_LIMITS.scopeChars),
     context: z.string().max(TASK_BRIEF_LIMITS.contextChars),
-    /** Repository checks: the repository's own commands, reported, never deciding. */
+    /** Repository checks: every listed command is required for new runs. */
     checks: z.array(Command).max(TASK_BRIEF_LIMITS.finalChecks - 1),
     acceptanceCases: z.array(AcceptanceCase).min(1).max(TASK_BRIEF_LIMITS.finalChecks),
     baseline: z.array(BaselineSelection).max(TASK_BRIEF_LIMITS.baseline).optional(),
@@ -268,6 +268,8 @@ export const TaskRunLimits = z.strictObject({
   runs: count,
   /** The brief's baseline selections, each run once before the model (D41). */
   baselineChecks: count,
+  /** Observed repository checks before worker edits; absent in historical limits. */
+  comparisonChecks: count.optional(),
   /** Nebius operations at most: prepare, the toolchain probe, the writes, the runs, collect and the final checks. */
   operations: count,
   checkSeconds: count,
@@ -319,6 +321,8 @@ export const TaskCheck = z.strictObject({
   kind: z.enum(["case", "check"]),
   /** 1-based, as the brief lists them. */
   number: z.number().int().min(1).max(TASK_BRIEF_LIMITS.finalChecks),
+  /** Exact command identity for current-policy results; absent in historical records. */
+  commandSha256: Sha256Hex.optional(),
   name: z.string().max(TASK_BRIEF_LIMITS.commandChars),
   verdict: TaskVerdict,
   /** Why, in Nivra's words, for anything but a pass. */
@@ -336,6 +340,15 @@ export const TaskCheck = z.strictObject({
   durationMs: count.nullable(),
 });
 export type TaskCheck = z.infer<typeof TaskCheck>;
+
+/** What must be evidenced, bound into every version-4 proposal report before the worker starts. */
+export const TaskVerificationManifest = z.strictObject({
+  policy: z.literal("required-checks-v1"),
+  checks: z.array(z.strictObject({ kind: z.enum(["case", "check"]), number: z.number().int().min(1).max(TASK_BRIEF_LIMITS.finalChecks), commandSha256: Sha256Hex })).max(TASK_BRIEF_LIMITS.finalChecks),
+  frozen: z.array(z.string().max(1_024)).max(TASK_BRIEF_LIMITS.frozen),
+  setupRequired: z.boolean(),
+});
+export type TaskVerificationManifest = z.infer<typeof TaskVerificationManifest>;
 
 /** What the worker did, as its own record: handing in is its claim, never what Nivra checked. */
 export const TaskWorker = z.strictObject({
@@ -392,6 +405,10 @@ export type TaskSetupCheck = z.infer<typeof TaskSetupCheck>;
  * What the worker said is kept apart from what Nivra checked, and cleanup's record is its own.
  */
 export const TaskReport = z.strictObject({
+  /** Historical reports have no version marker. Version 4 always carries its expected evidence. */
+  version: z.literal(4).optional(),
+  manifest: TaskVerificationManifest.optional(),
+  beforeChecks: z.array(TaskCheck).max(TASK_BRIEF_LIMITS.finalChecks - 1).optional(),
   outcome: TaskOutcome,
   stopped: z.strictObject({ code: TaskStopCode, step: z.string().max(64).nullable(), message: z.string().max(600) }).nullable(),
   task: z.strictObject({ taskId: z.string(), attemptId: z.string(), briefVersion: z.number().int().positive(), briefDigest: z.string() }),
@@ -414,7 +431,7 @@ export const TaskReport = z.strictObject({
   frozen: z.array(z.strictObject({ path: z.string().max(1_024), unchanged: z.boolean().nullable() })).max(TASK_BRIEF_LIMITS.frozen).default([]),
   worker: TaskWorker.nullable(),
   checks: z.array(TaskCheck).max(TASK_BRIEF_LIMITS.finalChecks),
-  /** Every acceptance case passed in the final checks: the only thing that makes a change verified. */
+  /** The recorded verdict. Current approval is independently established from the hash-bound proposal report. */
   verified: z.boolean(),
   steps: z.array(SandboxStep).max(24),
   proposal: z.strictObject({ hash: Sha256Hex, patchSha256: Sha256Hex, patchBytes: count, files: count }).nullable(),
@@ -425,7 +442,7 @@ export const TaskReport = z.strictObject({
   request: z.strictObject({ runId: z.uuid(), clientRequestId: z.uuid() }),
   updatedAt: z.iso.datetime(),
   finishedAt: z.iso.datetime().nullable(),
-});
+}).refine((report) => report.version !== 4 || (report.manifest !== undefined && report.beforeChecks !== undefined), "A version-4 report must retain its expected-check manifest and before-change observations.");
 export type TaskReport = z.infer<typeof TaskReport>;
 
 /** The most of a patch `runs.proposal` gives as text, in bytes: the stored bytes are exact, whatever is shown. */

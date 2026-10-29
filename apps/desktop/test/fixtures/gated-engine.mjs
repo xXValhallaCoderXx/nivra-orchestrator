@@ -362,7 +362,7 @@ process.stdin.on("data", (chunk) => {
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
       nebiusProject = request.params.secrets?.NEBIUS_PROJECT_ID ?? null;
-      send({ id: request.id, result: { protocolVersion: 19, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 21, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
@@ -498,6 +498,9 @@ process.stdin.on("data", (chunk) => {
           limits: { modelRequests: 12, requestSeconds: 150, outputTokensPerRequest: 8000, estimatedInputTokens: 160000, toolCalls: 24, writes: 8, writeBytes: 32768, runs: 4, baselineChecks, operations: 17 + baselineChecks, checkSeconds: 60, sessionMinutes: 20, runMinutes: 33 },
         },
       });
+    } else if (request.method === "task.admission") {
+      const denied = existsSync(join(home, "deny-admission"));
+      send({ id: request.id, result: { eligible: !denied, reason: denied ? "Required repository check 1 wasn't shown to pass, so this change can't be approved. Reject it, or request a revision." : null, proposalHash: request.params.approvedHash, reportSha256: "a".repeat(64), legacy: true } });
     } else if (request.method === "task.apply") {
       const { requestId, runId } = request.params;
       const known = logged("applies.log", requestId);

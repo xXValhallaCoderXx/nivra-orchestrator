@@ -3852,3 +3852,43 @@ store has project and personal scopes, so routing every engineering preference t
 **Consequences.** No new preference scope or schema is introduced. The native knowledge consumer supplies a task's own
 preference to its readiness coach, while other tasks do not inherit it. Explicit broader defaults still use the existing
 preference store. Conservative wording checks leave unresolved scope as a proposal and grant no permission to act.
+
+## D57. Required repository checks, before-change observations and approval from the intact proposal report (2026-10-30)
+
+**Decision.** NIV-67 supersedes D39's reported-only repository checks for new runs. Every command in the brief's
+repository-check list is required. A change is verified only with at least one acceptance case, a complete, uniquely
+identified passing final result for every case and check, and complete unchanged frozen/setup evidence. There is no
+optional-check editor or approval override.
+
+- Before the worker edits anything, each repository check runs as a disposable operation from the same snapshot and
+  prepared environment as its later final check. These observations do not change D41's explicit baseline assertions.
+  Known before-change failures allow repair; uncertain dispatch, cancellation or lost session state stops the run.
+- Passing before and failing after is a regression. Failures on both sides are described as failed before and after,
+  never proof that the errors are unchanged. Unknown comparison evidence stays unknown. Every required final failure
+  still blocks verification; a passing final check may count even if the before-change observation was unavailable.
+- Version-4 report cores require a manifest of expected command digests and integrity conditions. The engine retains
+  every structured result separately from the clipped diagnostic trace, and masks and bounds before/final output.
+  A command's passing exit code still proves only that command passed; changed-script warnings remain.
+- The read-only `task.admission` call validates the exact hash-bound proposal report, its original verdict, and its
+  home/run/attempt/brief bindings. Only this admission enables the host's approval button. Applying independently
+  repeats admission after queueing, then revalidates the checkout before writing. A fitted report or cached boolean
+  cannot authorise writes.
+- Historical report bytes, verdicts and proposal hashes remain unchanged. An intact version-3 proposal may be admitted
+  when the supplied original brief matches its bound digest and establishes complete passing final checks and integrity
+  evidence. Missing comparison observations alone do not disqualify it. Originally unverified or insufficiently evidenced
+  proposals require a new authorised run, which never starts automatically.
+- Three added comparison checks increase the calculated maximum from 22 to 25 operations and can consume 7 minutes
+  36 seconds of the existing worker window. Session, model and run limits stay fixed; final-check and cleanup reserves
+  cannot be consumed by comparisons. Insufficient worker time is reported, never hidden by omitting checks.
+
+**Why.** NIV-35's historical run passed acceptance while introducing an incompatible caller and a failing typecheck.
+A reported-only check could leave that proposal labelled verified. Comparison evidence explains the prior state but
+cannot establish that a failing final check contains no new errors. Approval must use the evidence actually hashed
+into the proposal, rather than a separately fitted display report.
+
+**Consequences.** Protocol 21 adds admission and the new evidence contracts. NIV-69/PR 46 already reserves protocol 20
+and decision D56; this change reserves D57 without altering that work. Whichever change lands second must reconcile
+both contract sets and advance the protocol as needed (NIV-69 landing after this version 21 requires a newer version).
+Proposal binding version 2 already binds the report bytes and remains unchanged. No dependency, provider, paid run,
+new task system or execution-boundary change is introduced. The deterministic fixtures prove Nivra's verdict handling,
+not that SHE-65 is fixed; NIV-35's real-task acceptance remains separate.

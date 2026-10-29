@@ -56,14 +56,14 @@ describe("a task run's time (NIV-7, D39)", () => {
       // The worker hands in as its window ends: collect starts with only the reserve left.
       beforeRequest: (index) => void (index === 1 && time.advance(windowEnd - time.now() - 1_000)),
       wrap: (transport, guest) => async (request) => {
-        if (request.method === "POST" && request.path === "/v1/instances" && after.test(String(request.body))) {
+        if (request.method === "POST" && request.path === "/v1/instances" && (collecting || /nivra-collect/.test(String(request.body))) && after.test(String(request.body))) {
           collecting = true;
           time.advance(TASK_LIMITS.startRequestMs - 500);
         }
         const answer = await transport(request);
         const read = /^\/v1\/operations\/([^/]+)$/.exec(request.path);
         const op = read && request.method === "GET" ? guest.service.operations.find((candidate) => candidate.uuid === read[1]) : undefined;
-        if (op && after.test(JSON.stringify(op.body["args"])) && !slowed.has(op.uuid)) {
+        if (collecting && op && after.test(JSON.stringify(op.body["args"])) && !slowed.has(op.uuid)) {
           slowed.add(op.uuid);
           // Seen to end 5 s before its watch would have: its timeout, then 55 s of the minute's margin.
           time.advance(TASK_LIMITS.checks.timeoutMs + 55_000);
@@ -102,7 +102,7 @@ describe("a task run's time (NIV-7, D39)", () => {
     const run = await attempt({
       signal: cancel.signal,
       calls: [["edit_file", FIX], ["run_case", { number: 1 }]],
-      setup: (guest) => void (guest.override = ({ label }) => (label === "command" ? { waits: true } : undefined)),
+      setup: (guest) => void (guest.override = ({ args }) => (args.some((arg) => arg.includes("greet Ada")) ? { waits: true } : undefined)),
       wrap: (transport, guest) => async (request) => {
         const answer = await transport(request);
         const read = /^\/v1\/operations\/([^/]+)$/.exec(request.path);

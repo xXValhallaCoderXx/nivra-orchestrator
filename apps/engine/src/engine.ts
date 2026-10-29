@@ -46,6 +46,7 @@ import {
 } from "@nivra/domain";
 import { installGitAdvice } from "./advice.ts";
 import { ApplyRequestRefusal, ApplyService } from "./apply/service.ts";
+import { taskAdmission, unavailableAdmission } from "./task/admission.ts";
 import type { ApplyHook } from "./apply/writer.ts";
 import { ArgsError, readArgs, type EngineArgs } from "./args.ts";
 import { errorFacts, formatDiagnostic, internalMessage, publicFailure, Refusal, type Diagnostic } from "./diagnostics.ts";
@@ -345,9 +346,10 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     ...(options.applyHold ? { before: applyHold(options.applyHold) } : {}),
     database,
     proposal: (runId) => store.proposal(runId),
-    verified: (runId) => {
-      const stored = store.artifact(runId, "task");
-      return stored !== null && TaskReport.parse(JSON.parse(stored)).verified;
+    admission: (params, proposal) => {
+      const run = store.summary(params.runId);
+      if (!run || run.workflowId !== "task" || run.status !== "succeeded" || store.requestIdOf(params.runId) !== params.task.attempt.attemptId) return Promise.resolve(unavailableAdmission());
+      return taskAdmission({ proposal, params, homeId });
     },
     homeId,
     backend,
@@ -993,6 +995,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         rescan();
         return sandboxStatus();
       },
+      "task.admission": (params) => applies.admission(params),
       "task.apply": (params) => applyCall(() => applies.apply(params)),
       "task.applyStatus": ({ requestId }) => applies.status(requestId),
       "task.restore": ({ applyId }) => applyCall(() => applies.restore(applyId)),

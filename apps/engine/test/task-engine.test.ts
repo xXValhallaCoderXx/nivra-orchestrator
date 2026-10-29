@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { isTerminal, projectFingerprint, TASK_MODEL, taskBriefDigest, type ApplyParams, type ApplyView, type EngineInfo, type RunSummary, type SandboxStatus, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskReport } from "@nivra/domain";
 import { CHECK_IMAGE } from "../src/exec/check.ts";
@@ -108,7 +109,7 @@ async function proposedRun(setup: Setup): Promise<{ run: RunSummary; done: TaskR
   const done = await report(setup.engine, run.id);
   assert.equal(done.outcome, "proposed", done.stopped?.message ?? "");
   const task = { attempt: { taskId: TASK_ID, attemptId: done.request.clientRequestId, runId: run.id }, engine: { homeId: setup.info.homeId }, brief: { version: 2, sha256: await taskBriefDigest(BRIEF) } };
-  return { run, done, params: { requestId: randomUUID(), runId: run.id, approvedHash: done.proposal!.hash, repoPath: setup.repo, project: PROJECT, target: "local", task } };
+  return { run, done, params: { requestId: randomUUID(), runId: run.id, approvedHash: done.proposal!.hash, repoPath: setup.repo, project: PROJECT, target: "local", task, brief: BRIEF } };
 }
 const apply = (engine: EngineProcess, params: ApplyParams): Promise<ApplyView> => engine.client.call("task.apply", params);
 
@@ -143,6 +144,8 @@ describe("applying a task's proposal through a real engine (NIV-8, D40)", () => 
     const setup_ = await setup();
     const { engine, repo } = setup_;
     const { params } = await proposedRun(setup_);
+    const admitted = await engine.client.call("task.admission", { runId: params.runId, approvedHash: params.approvedHash, task: params.task, brief: BRIEF });
+    assert.deepEqual([admitted.eligible, admitted.proposalHash, admitted.reason], [true, params.approvedHash, null]);
     const applied = await apply(engine, params);
     assert.deepEqual([applied.status, applied.paths.map((one) => `${one.path} ${one.change} ${one.place}`), applied.refusal, applied.recovery], ["applied", ["greet.sh changed post"], null, `nivra-apply/${applied.applyId}`]);
     assert.deepEqual([readFileSync(join(repo, "greet.sh"), "utf8"), git(repo, ["diff", "--cached", "--name-only"]), git(repo, ["status", "--porcelain"])], [FIXED_GREET, "", " M greet.sh\n"]);
@@ -183,6 +186,36 @@ describe("applying a task's proposal through a real engine (NIV-8, D40)", () => 
     assert.ok(!existsSync(join(repo, ".git", "nivra-apply")), "an apply made something in the git folder");
     assert.ok(changedSince(before, repo).every((name) => name === "." || name === "greet.sh" || name.startsWith(".git")), changedSince(before, repo).join(", "));
   });
+
+  it("refuses a newly failing required check even if its display artifact claims verified, while acceptance cases pass (NIV-67)", async () => {
+    const setup_ = await setup();
+    const brief: TaskBrief = { ...BRIEF, checks: ['. ./greet.sh; test "$(greet)" = "Hello, "'] };
+    const shown = ready(await preview(setup_.engine, setup_.repo, brief));
+    const run = await start(setup_.engine, setup_.repo, shown.snapshot.fingerprint, { brief });
+    await ended(setup_.engine, run.id);
+    const done = await report(setup_.engine, run.id);
+    assert.deepEqual([done.outcome, done.verified, done.beforeChecks?.map((check) => check.verdict), verdicts(done)], ["proposed", false, ["passed"], ["case 1 passed", "check 1 failed"]]);
+    await setup_.engine.client.call("shutdown", {});
+    await setup_.engine.exited;
+    // A stale or damaged public artifact must never be approval authority. The proposal's bound report stays exact.
+    const database = new DatabaseSync(join(setup_.home, "nivra.db"));
+    try {
+      database.prepare("UPDATE artifacts SET content = ? WHERE run_id = ? AND kind = 'task'").run(JSON.stringify({ ...done, verified: true }), run.id);
+    } finally {
+      database.close();
+    }
+    const later = engineAt(setup_.home, setup_.sandbox, setup_.model);
+    await later.initialize(CREDENTIALS);
+    assert.equal((await report(later, run.id)).verified, true, "fixture didn't retain its stale display boolean");
+    const task = { attempt: { taskId: TASK_ID, attemptId: done.request.clientRequestId, runId: run.id }, engine: { homeId: setup_.info.homeId }, brief: { version: 2, sha256: await taskBriefDigest(brief) } };
+    const request = { runId: run.id, approvedHash: done.proposal!.hash, task, brief };
+    const admitted = await later.client.call("task.admission", request);
+    assert.equal(admitted.eligible, false);
+    assert.match(admitted.reason!, /Required repository check 1/);
+    const before = folderState(setup_.repo);
+    const refused = await apply(later, { ...request, requestId: randomUUID(), repoPath: setup_.repo, project: PROJECT, target: "local" });
+    assert.deepEqual([refused.status, refused.refusal?.code, changedSince(before, setup_.repo)], ["refused", "unverified", []]);
+  });
 });
 
 describe("a task run through a real engine (NIV-7)", () => {
@@ -197,7 +230,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     // Nivra's own checks of the change, apart from the worker's failure.
     assert.deepEqual([verdicts(done), done.verified, spawned(sandbox, "nivra-collect")], [["case 1 passed", "check 1 passed"], true, 1]);
     // The bounds it ran under, beside what it used: a brief of one case, one check and no baseline (D41).
-    assert.deepEqual([done.limits?.operations, done.limits?.baselineChecks, done.environment, done.baseline], [17, 0, null, []]);
+    assert.deepEqual([done.limits?.operations, done.limits?.baselineChecks, done.environment, done.baseline], [18, 0, null, []]);
     assert.equal(model.chats().length, 3, "the request that failed was sent again");
   });
 
@@ -205,7 +238,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     const { sandbox, model, engine, repo } = await setup();
     const shown = ready(await preview(engine, repo));
     assert.deepEqual([shown.snapshot.files, shown.programs, shown.unprobed, shown.caseFiles], [2, [".", "/bin/sh"], 0, [{ number: 1, files: ["greet.sh"], unclear: false }]]);
-    assert.deepEqual([shown.limits.operations, shown.limits.requestSeconds, shown.limits.outputTokensPerRequest, shown.limits.sessionMinutes, shown.limits.runMinutes, shown.limits.writes, shown.limits.writeBytes], [operationsFor(2), 830, 8_000, 45, 58, 8, 32_768]);
+    assert.deepEqual([shown.limits.operations, shown.limits.requestSeconds, shown.limits.outputTokensPerRequest, shown.limits.sessionMinutes, shown.limits.runMinutes, shown.limits.writes, shown.limits.writeBytes], [operationsFor(2, 0, 1), 830, 8_000, 45, 58, 8, 32_768]);
     assert.match(shown.snapshot.retention, /^Images are retained for 180 days/);
     // A first word that isn't a plain program is never guessed: it runs, and isn't looked for.
     const quoted = ready(await preview(engine, repo, { ...BRIEF, checks: ['"./check.sh"'] }));
@@ -451,7 +484,7 @@ describe("a task run through a real engine (NIV-7)", () => {
     const shown = await report(engine, run.id);
     assert.deepEqual([shown.outcome, shown.proposal, shown.worker?.written, shown.worker?.tools.refused, verdicts(shown)], ["unchanged", null, [], 1, ["case 1 failed", "check 1 failed"]]);
     // A write that was never sent is no step of the run's.
-    assert.deepEqual(shown.steps.map((step) => step.label), ["toolchain", "collect", "final check", "final check"]);
+    assert.deepEqual(shown.steps.map((step) => step.label), ["toolchain", "before check", "collect", "final check", "final check"]);
     assert.ok(!sandbox.requests.some((request) => request.body.includes(PROJECT_ID)), "a request carried the project id");
     assert.equal(spawned(sandbox, "nivra-write"), 0);
   });

@@ -440,8 +440,10 @@ node scripts/research-live.ts --cleanup     # opens the last live profile and re
   `~/nivra-acceptance/research-r3-<mode>-<UTC>-<revision>/`.
 
 A task run (NIV-7, D39) changes a copy of one commit in Nebius Sandboxes with a model, and checks the result itself:
-the brief's acceptance cases decide it, each a command with the exact output and exit code it must give, judged by
-the engine. The brief's checks are the repository's own commands, reported and never deciding. A run needs the key and
+the brief's acceptance cases require their exact output and exit code, judged by the engine. Every listed repository
+check is also required to pass (NIV-67, D57), alongside complete frozen-file and setup-integrity evidence. Repository
+checks run before the worker as comparison observations and again on the final result; these are separate from the
+brief's explicit baseline assertions. A failure before the change never waives a final failure. A run needs the key and
 the project id (Settings, or `NEBIUS_API_KEY` and `NEBIUS_PROJECT_ID` for `rpc.ts`) and both of the project's
 consents, model sharing and uploads. Windows itself is refused; Linux and Windows-to-WSL are the targets. Without the
 real services, point the engine at the stand-ins with `--sandboxes-url` and `--token-factory-url` (loopback only):
@@ -863,3 +865,19 @@ pnpm --filter @nivra/desktop run test:e2e companion.spec.ts companion-lifecycle.
 
 The package script supplies the absolute Node executable needed by source engines; a direct `pnpm exec playwright`
 invocation does not supply it in this checkout.
+
+Required task verification (NIV-67, D57): version-4 task reports retain their expected-check manifest and before-change
+repository-check observations. Every final check must pass, with at least one acceptance case and complete integrity
+evidence. The host uses `task.admission`, which reads the exact proposal-bound report; `task.apply` repeats that gate.
+Older reports retain their original recorded result, with current eligibility shown separately. The original brief
+is supplied for legacy admission and must match the proposal's brief digest. No check failure can be approved anyway.
+
+Focused offline checks and the affected built journeys:
+
+```bash
+pnpm --filter @nivra/engine exec node --test test/task-required-checks.test.ts test/task-admission.test.ts test/task-engine.test.ts test/task-timing.test.ts
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e --project=built task-run.spec.ts task-apply.spec.ts task-journey.spec.ts
+```
+
+Packaged apps ignore the stand-in endpoint switches, so those task journeys remain built-app evidence; the packaged
+suite and Windows project cover their own stated scenarios.

@@ -68,7 +68,7 @@ export interface RevalidationInput {
 export type ApplyRefusalCode =
   /** Not intact, not the approved hash, or not for this project, target, folder, attempt, engine or brief. */
   | "proposal"
-  /** Its run didn't show every acceptance case passing: only a verified change is applied. */
+  /** Its trustworthy report didn't establish all required verification conditions. */
   | "unverified"
   /** HEAD isn't the commit the proposal was made from. */
   | "baseline-moved"
@@ -101,7 +101,7 @@ export type ApplyRefusalCode =
 
 const APPLY_REFUSALS: Readonly<Record<ApplyRefusalCode, string>> = {
   proposal: "This proposal isn't the one you approved, isn't intact, or wasn't made for this folder, run or engine, so nothing was written. Run the task again.",
-  unverified: "Not every acceptance case was shown to pass for this change, so it isn't applied, and nothing was written.",
+  unverified: "This run's trustworthy evidence doesn't establish every acceptance case and required repository check passed with its protected files unchanged, so nothing was applied. Reject it, request a revision, or start a new authorised task run.",
   "baseline-moved": "Your checkout has moved to another commit since the proposal was made, so nothing was written. Run the task again from the commit it is on now.",
   uncommitted: "Your checkout has uncommitted changes, or git can't show whether it has (files it is told not to look at, or a split index), so nothing was written. Commit or stash the changes, or clear those settings, then apply again.",
   operation: "A merge, rebase, cherry-pick, revert or bisect is under way in this checkout, so nothing was written. Finish or abort it, then apply again.",

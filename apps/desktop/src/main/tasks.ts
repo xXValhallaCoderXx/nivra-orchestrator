@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AcceptanceCase, TASK_BRIEF_LIMITS, TASK_MODEL, TaskBrief, type ChatResult, type EnvironmentRef, type TaskEnvironment } from "@nivra/domain";
+import { AcceptanceCase, TASK_RUN_BOUNDS, TASK_BRIEF_LIMITS, TASK_MODEL, TaskBrief, type ChatResult, type EnvironmentRef, type TaskEnvironment } from "@nivra/domain";
 import { z } from "zod";
 import { TASK_LIMITS, type BriefContent, type BriefFields, type BriefSource, type TaskState } from "../shared/ipc.ts";
 import { planText } from "../shared/plans.ts";
@@ -200,6 +200,7 @@ export function taskRunFingerprint(parts: {
   targetId: string;
   sharing: { modelContext: boolean; cloudExecution: boolean };
   snapshot: string;
+  requiredChecks?: { finalChecks: number; baselineChecks: number; comparisonChecks: number };
   environment?: Pick<TaskEnvironment, "image" | "inputsDigest" | "projectFingerprint"> | EnvironmentRef | null;
 }): string {
   const bound = [parts.taskId, parts.briefId, parts.briefVersion, parts.briefDigest, parts.projectId, parts.targetId, parts.sharing.modelContext, parts.sharing.cloudExecution, parts.snapshot];
@@ -209,7 +210,11 @@ export function taskRunFingerprint(parts: {
     : "format" in environment
       ? ["nivra.task-run-preview.v3", ...bound, environment.recipe, environment.verified, environment.image, environment.configuration, environment.projectFingerprint, environment.target]
       : ["nivra.task-run-preview.v2", ...bound, environment.image, environment.inputsDigest, environment.projectFingerprint];
-  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+  const checks = parts.requiredChecks;
+  const approved = checks ? ["nivra.task-run-preview.v4", canonical, "required-checks-v1", checks,
+    3 + TASK_RUN_BOUNDS.writes + TASK_RUN_BOUNDS.runs + checks.finalChecks + checks.baselineChecks + checks.comparisonChecks,
+    TASK_RUN_BOUNDS] : canonical;
+  return createHash("sha256").update(JSON.stringify(approved)).digest("hex");
 }
 
 /** What a run sends to each service, in plain words (D39). */

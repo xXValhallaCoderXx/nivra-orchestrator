@@ -3242,3 +3242,48 @@ failed/aborted evidence. The full built-app suite was not repeated; packaged cov
 
 No paid calls were made. The companion-only allowance, explicit turn/sharing requirements and stated exclusions remain
 in force. No newer planning work is included in either review branch.
+
+## Required repository checks and trustworthy approval (NIV-67, D57) — 30 October 2026
+
+**Candidate:** local, uncommitted changes on `ac2d57421b63c1e28d64d9271d9f286deca721bf` (main). The source/test diff
+SHA-256 is `c8a40e6a3181368775a17a2c428e31367433cc267058d44bc5a04a71ab7dcda7`: `git diff --binary -- apps packages`,
+followed by each sorted untracked source/test path, NUL, byte length, NUL and bytes. Documentation and ignored build
+output are excluded. The local receipt and copied logs are in `.cache/niv67/verification.json` and its folder.
+
+**Shown:** every repository check in a new brief is required. Before-change observations remain separate from explicit
+baseline assertions. Passing acceptance with a newly failing typecheck is unverified; both-sides failures are not
+waived; failed-before/passing-after may verify. Missing/unknown final results, missing integrity evidence and zero
+acceptance cases cannot verify. Command identities, bounded output and all structured results survive report fitting.
+The maximum allowance is 25 operations; comparisons consume the existing worker window, preserving final/cleanup time.
+
+The approval button uses the engine's validation of the intact proposal-bound report. Applying independently repeats
+admission. A fitted report altered to `verified: true` cannot enable admission or apply. Historical bytes and recorded
+verdicts remain unchanged; complete all-pass version-3 evidence is admitted only with its digest-bound original brief,
+without inventing before-change results. Insufficient evidence or an originally unverified result requires a new
+explicitly started run. Reject and Request revision remain available; there is no required-check override.
+
+| Check | Evidence |
+| --- | --- |
+| `pnpm verify` | 139 domain + 685 desktop + 984 engine tests = 1,808 passed; zero failures/skips. All typechecks passed. |
+| Final `pnpm typecheck` | Passed, including renderer, main and E2E types. |
+| Focused engine execution checks | 89 passed across 12 suites; includes the missed fifth argument and mixed/same-unit kg/lb fixtures, uncertain dispatch, comparison bounds and reserve protection. |
+| Trusted admission/apply checks | 16 focused tests and 17 real-engine task tests passed; included malformed/legacy evidence, altered bound bytes and a forged fitted verdict. Included in the full suite. |
+| Real engine through `apps/engine/scripts/rpc.ts` | Stand-ins only: four model requests; baseline check failed, final case/check passed, report version 4 verified, hash-bound admission eligible. Disposable home cleaned up. |
+| Affected built task journeys | Seven passed: required-check regression and direct host approval refusal with untouched checkout; successful apply/accept; reject/revision; prepared-environment and preview/report journeys. |
+| Linux runtime staging | Protocol 21, runtime `639004f8f5c04de8`; real-engine initialisation/shutdown smoke passed. |
+| Windows runtime staging | Protocol 21, runtime `aa65b931bba8d0a5`; native validation followed in the Windows UI project. |
+| Linux `package:dir` + `test:packaged` | Build passed; full packaged project: 74 passed, 72 conditional tests skipped, no failures. Task stand-in journeys are built-app evidence because packaged apps ignore endpoint overrides. |
+| `pnpm dev:win --no-launch --skip-stage` + `test:windows` | Development build/copy passed; all 14 Windows tests passed without skips, including native/WSL routing, release-home invariance and disposable WSL-home cleanup. Existing current staging was reused. |
+| Diff/untracked review | Scope and credential-shape review completed; no new credential-shape flags or generated tracked files. `git diff --check` passed. |
+
+Earlier attempts are not passing evidence: the managed-sandbox full run was aborted after fixture engine-start failures;
+a direct host check passed outside it. An initial unrestricted full run failed one old preview-fingerprint expectation,
+which was corrected before the full passing rerun. Initial direct Playwright runs failed before task execution because
+`pnpm exec` omitted the absolute Node executable; all affected files passed through the supported `test:e2e` script.
+
+No target, supervisor or staging source changed, so `verify:windows` was not repeated; the Windows UI project and
+staged-runtime checks above are the stated platform evidence. No live models or paid services were used. The owned
+TypeScript/unit fixtures establish Nivra's gate, not SHE-65's production correctness or NIV-35's live acceptance.
+PR 46 / NIV-69 is not integrated into this checkout: it reserves protocol 20 and D56. This change uses 21 and D57;
+whichever lands second must reconcile the combined contracts and advance the protocol as needed. No commit or push
+was made, and the historical submission/release evidence above is preserved.

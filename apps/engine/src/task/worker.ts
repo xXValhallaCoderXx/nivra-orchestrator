@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createTool } from "@mastra/core/tools";
-import { isEnvironmentRef, type BaselineSelection, type EnvironmentRef, type JsonObject, type Mask, type TaskBaselineCheck, type TaskEnvironment, type TaskSetupCheck } from "@nivra/domain";
+import { evaluateTaskVerification, isEnvironmentRef, taskVerificationManifest, type BaselineSelection, type EnvironmentRef, type JsonObject, type Mask, type TaskBaselineCheck, type TaskEnvironment, type TaskSetupCheck, type TaskVerificationManifest } from "@nivra/domain";
 import { z } from "zod";
 import { ExecRefusedError, ExecUncertainError, type ExecResult, type ExecutionBackend, type ExecutionSession } from "../exec/backend.ts";
 import { WorkspaceRefusal } from "../exec/git-tool.ts";
@@ -16,9 +16,9 @@ import { RunBudget, type Hold, type Refusal } from "../providers/run-budget.ts";
 import { EnvironmentRefusal, environmentInputs, leftOutFor, setupCheck, setupConfiguration, trackedUnder } from "../environment/inputs.ts";
 import { isNodeSetupPath } from "../environment/node-files.ts";
 import { SEARCH_COUNT_MAX, WorkspaceCopy } from "./copy.ts";
-import { checkRequest, commandFiles, couldntRun, failedToSend, judgeBaseline, judgeCase, judgeCheck, notRun, programsOf, refusalWords, verified, type AcceptanceCase, type CheckResult, type NamedFiles } from "./harness.ts";
+import { checkRequest, commandFiles, couldntRun, failedToSend, judgeBaseline, judgeCase, judgeCheck, notRun, programsOf, refusalWords, type AcceptanceCase, type CheckResult, type NamedFiles } from "./harness.ts";
 import { AFTER_SESSION_MS, operationsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
-import { frozenIn } from "./report.ts";
+import { frozenIn, kept } from "./report.ts";
 import { firstWord, toolchainFindings, toolchainRequest, writeContentProblem, writeRequest } from "./scripts.ts";
 
 /**
@@ -45,7 +45,7 @@ export interface TaskBrief {
   scope: string;
   exclusions: string;
   context: string;
-  /** Repository checks: reported, never deciding. */
+  /** Repository checks: every final result is required to pass. */
   checks: string[];
   acceptanceCases: AcceptanceCase[];
   /** Run once before the model, on the commit as it is (D41). */
@@ -74,7 +74,7 @@ export interface WorkerSummary {
 
 /** What the report binds about the task, besides the change: built before the proposal, so its digest is bound. */
 export interface TaskReportCore {
-  version: 3;
+  version: 4;
   kind: "task";
   task: { taskId: string; attemptId: string; runId: string; briefVersion: number; briefSha256: string };
   baseline: string;
@@ -87,6 +87,10 @@ export interface TaskReportCore {
   setup: TaskSetupCheck | null;
   /** The brief's baseline selections, as they ran before the model (D41). */
   baselineChecks: TaskBaselineCheck[];
+  /** Bound identities and integrity conditions for all required final checks. */
+  manifest: TaskVerificationManifest;
+  /** Repository checks observed on the unchanged snapshot, distinct from explicit baseline selections. */
+  beforeChecks: CheckResult[];
   /** The frozen files in the collected workspace, each compared with the commit's; null when it wasn't collected. */
   frozen: Array<{ path: string; unchanged: boolean | null }>;
   toolchain: Array<{ program: string; finding: "present" | "missing" | "unknown" }>;
@@ -169,7 +173,7 @@ const ANSWER_ROOM = 1_500;
 
 /** The worker's instructions: what it may do, and what it can't. */
 export const WORKER_INSTRUCTIONS = [
-  "You are Nivra's coding worker. You change files in a copy of one commit of a repository so that the task's acceptance cases pass.",
+  "You are Nivra's coding worker. You change files in a copy of one commit of a repository so that the task's acceptance cases and required repository checks pass.",
   "You can't run commands of your own. You can find, list and read files, edit or create files with the tools, and run the brief's acceptance cases and repository checks by number.",
   "search_files finds files by name, or lines by their text, in one call: use it to find where something is defined or used, then read_file to read what it found.",
   "Every change goes through edit_file or create_file. A write can be refused: read the reason, and fix the request.",
@@ -192,7 +196,7 @@ export function workerPrompt(brief: TaskBrief, paths: readonly string[]): string
     brief.exclusions ? `Out of scope: ${brief.exclusions}` : "",
     brief.context ? `Context: ${brief.context}` : "",
     `Acceptance cases (run_case by number; judged by Nivra):\n${brief.acceptanceCases.map((given, index) => `${index + 1}. ${given.name}\n   command: ${given.command}\n   expected exit code: ${given.expectedExitCode}\n   expected output: ${JSON.stringify(given.expectedOutput)}`).join("\n") || "(none)"}`,
-    `Repository checks (run_check by number; reported, never deciding):\n${brief.checks.map((check, index) => `${index + 1}. ${check}`).join("\n") || "(none)"}`,
+    `Required repository checks (run_check by number; every final check must pass):\n${brief.checks.map((check, index) => `${index + 1}. ${check}`).join("\n") || "(none)"}`,
     brief.frozen?.length ? `Frozen files (the task is judged by them, so edit_file and create_file refuse them):\n${list(brief.frozen)}` : "",
     `This attempt may make ${TASK_LIMITS.model.requests} model requests, the last of which can only hand in, and ${TASK_LIMITS.tools.calls} tool calls, of which ${TASK_LIMITS.tools.writes} writes and ${TASK_LIMITS.tools.runs} runs of cases and checks. An answer may be at most ${TASK_LIMITS.model.outputTokensPerRequest.toLocaleString("en-US")} tokens long, and the hand-in's ${TASK_LIMITS.model.handIn.outputTokens.toLocaleString("en-US")}: a longer one is cut off before its tool call is made, and the attempt ends there, so make a large change as several smaller edit_file calls.`,
     `Files (${paths.length}${paths.length > shown.length ? `, the first ${shown.length} shown; list_files shows more and search_files finds them` : ""}):\n${shown.join("\n")}`,
@@ -256,10 +260,13 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   const finalChecks = brief.acceptanceCases.length + brief.checks.length;
   const commands = [...brief.acceptanceCases.map((given) => given.command), ...brief.checks];
   const programs = programsOf(commands);
+  const manifest = await taskVerificationManifest(brief, Boolean(run.environment));
+  const identified = (result: CheckResult): CheckResult => ({ ...result, commandSha256: manifest.checks.find((check) => check.kind === result.kind && check.number === result.number)!.commandSha256 });
   let copy: WorkspaceCopy | null = null;
   let findings = new Map<string, "present" | "missing" | "unknown">();
   const results: CheckResult[] = [];
   const baselineChecks: TaskBaselineCheck[] = [];
+  const beforeChecks: CheckResult[] = brief.checks.map((command, index) => identified(notRun("check", index + 1, command, "this before-change check wasn't reached")));
   const frozenFiles: Array<{ path: string; unchanged: boolean | null }> = [];
   /** The setup files after collect (NIV-55): a change to one leaves the result unverified, as a frozen file's does. */
   let setup: TaskSetupCheck | null = null;
@@ -299,7 +306,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   };
   const coreOf = (): TaskReportCore | null =>
     copy && {
-      version: 3,
+      version: 4,
       kind: "task",
       task: { taskId: run.binding.taskId, attemptId: run.binding.attemptId, runId: run.binding.runId, briefVersion: run.binding.briefVersion, briefSha256: run.binding.briefSha256 },
       baseline: copy.snapshot.baseline,
@@ -308,13 +315,15 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       environmentRef: run.environment && isEnvironmentRef(run.environment) ? run.environment : null,
       setup,
       // Masked as the checks are: the report is bound into the proposal and kept (D41).
-      baselineChecks: baselineChecks.map((check) => ({ ...check, name: mask(check.name), reason: check.reason === null ? null : mask(check.reason), stdoutTail: mask(check.stdoutTail), stderrTail: mask(check.stderrTail) })),
+      baselineChecks: baselineChecks.map((check) => ({ ...check, name: kept(check.name, 200, mask), reason: check.reason === null ? null : kept(check.reason, 600, mask), stdoutTail: kept(check.stdoutTail, 4_000, mask, "end"), stderrTail: kept(check.stderrTail, 4_000, mask, "end") })),
+      manifest,
+      beforeChecks: beforeChecks.map((check) => ({ ...check, name: kept(check.name, 1_000, mask), reason: check.reason === null ? null : kept(check.reason, 600, mask), stdoutTail: kept(check.stdoutTail, 4_000, mask, "end"), stderrTail: kept(check.stderrTail, 4_000, mask, "end") })),
       frozen: [...frozenFiles],
       toolchain: programs.map((program) => ({ program, finding: findings.get(program) ?? "unknown" })),
       worker: { ...worker, written: [...copy.written] },
-      checks: results.map((result) => ({ ...result, name: mask(result.name), reason: result.reason === null ? null : mask(result.reason), stdoutTail: mask(result.stdoutTail), stderrTail: mask(result.stderrTail), difference: result.difference && { line: result.difference.line, expected: mask(result.difference.expected), got: mask(result.difference.got) } })),
+      checks: results.map((result) => ({ ...result, name: kept(result.name, 1_000, mask), reason: result.reason === null ? null : kept(result.reason, 600, mask), stdoutTail: kept(result.stdoutTail, 4_000, mask, "end"), stderrTail: kept(result.stderrTail, 4_000, mask, "end"), difference: result.difference && { line: result.difference.line, expected: kept(result.difference.expected, 200, mask), got: kept(result.difference.got, 200, mask) } })),
       // The setup files count as held ones: any change to them and the result isn't verified (NIV-55).
-      verified: verifiedWith(results, [...frozenFiles, ...(setup ? [{ unchanged: setup.unchanged }] : [])]),
+      verified: evaluateTaskVerification({ manifest, checks: results, frozen: frozenFiles, setup }).verified,
     };
 
   /** One operation, its record kept whatever happens. A command refused before it was sent never ran: it is no step. */
@@ -349,7 +358,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
           const number = kind === "case" ? index + 1 : index - brief.acceptanceCases.length + 1;
           const name = kind === "case" ? brief.acceptanceCases[index]!.name : command;
           const program = missingFor(command);
-          return program ? couldntRun(kind, number, name, program) : notRun(kind, number, name, "the run stopped before it: a program the brief needs isn't in the sandbox image");
+          return identified(program ? couldntRun(kind, number, name, program) : notRun(kind, number, name, "the run stopped before it: a program the brief needs isn't in the sandbox image"));
         }));
         return { going: false, outcome: "refused", stopped: { code: "toolchain", message: `The sandbox image has no ${first.program}, which ${which} needs. Nothing was installed, and nothing ran on your computer.`, step: "toolchain", detail: null } };
       }
@@ -377,6 +386,32 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
         baselineChecks.push(...rest("the run stopped before it"));
         return { going: false, outcome: "refused", stopped: { code: "baseline", message: `baseline: selection ${number} didn't give what the brief expects, so the model wasn't called.`, step: "baseline", detail: null } };
       }
+    }
+    // Observed comparison checks are not baseline assertions: a known failure may be the bug this task repairs.
+    // Every operation is disposable, so each sees the same unchanged snapshot and prepared environment.
+    for (const [index, command] of brief.checks.entries()) {
+      const number = index + 1;
+      context.stage = "before check";
+      if (run.signal?.aborted) {
+        beforeChecks[index] = identified(notRun("check", number, command, "the run was cancelled before it ran"));
+        return { going: false, outcome: "cancelled", stopped: { code: "cancelled", message: "before check: the run was cancelled.", step: "before check", detail: null } };
+      }
+      if (sessionDeadline - now() - reserveMs(finalChecks) < runNeedsMs()) {
+        beforeChecks[index] = identified(notRun("check", number, command, "there wasn't time left in the session for it"));
+        return { going: false, outcome: "failed", stopped: { code: "time", message: "before check: there wasn't time left outside the final-check reserve.", step: "before check", detail: null } };
+      }
+      let judged: CheckResult;
+      try {
+        const ran = await recorded(session, context, "before check", () => session.exec(checkRequest({ workspace, command, label: "before check" })));
+        judged = judgeCheck(number, command, ran, { files: [], unclear: false });
+        beforeChecks[index] = identified(judged);
+        if (ran.cancelled || run.signal?.aborted) return { going: false, outcome: "cancelled", stopped: { code: "cancelled", message: "before check: the run was cancelled while it ran.", step: "before check", detail: null } };
+      } catch (error) {
+        beforeChecks[index] = identified(failedToSend("check", number, command, error));
+        // A refusal or unsettled operation stops here. Nothing runs twice, or against unknown session state.
+        throw error;
+      }
+      progress(`Before-change check ${number}: ${judged.verdict}`, { number, verdict: judged.verdict });
     }
     context.stage = "worker";
     return await workLoop(session, context, copy);
@@ -811,9 +846,9 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
         return failedToSend(kind, number, name, error);
       }
     };
-    for (const [index, given] of brief.acceptanceCases.entries()) results.push(await finalOne("case", index + 1, given.command, given.name));
-    for (const [index, check] of brief.checks.entries()) results.push(await finalOne("check", index + 1, check, check));
-    progress(`Final checks: ${results.map((result) => `${result.kind} ${result.number} ${result.verdict}`).join(", ")}`, { verified: verified(results) });
+    for (const [index, given] of brief.acceptanceCases.entries()) results.push(identified(await finalOne("case", index + 1, given.command, given.name)));
+    for (const [index, check] of brief.checks.entries()) results.push(identified(await finalOne("check", index + 1, check, check)));
+    progress(`Final checks: ${results.map((result) => `${result.kind} ${result.number} ${result.verdict}`).join(", ")}`, { verified: evaluateTaskVerification({ manifest, checks: results, frozen: frozenFiles, setup }).verified });
     // Every verdict is kept; what may still be running is closing's to record, and nothing is proposed.
     if (unsettled) throw unsettled;
   };
@@ -906,8 +941,5 @@ function changedNamed(command: string, copy: WorkspaceCopy): NamedFiles {
   return { files: named.files, unclear: named.unclear && copy.written.length > 0 };
 }
 
-/** A change is verified only when every acceptance case passed and every frozen file came back as the commit holds it (D41). */
-export const verifiedWith = (results: readonly CheckResult[], frozen: ReadonlyArray<{ unchanged: boolean | null }>): boolean => verified(results) && frozen.every((file) => file.unchanged === true);
-
 /** The operations a run's backend allows, for its brief: its baseline selections among them (D41). */
-export const operationsForBrief = (brief: Pick<TaskBrief, "acceptanceCases" | "checks" | "baseline">): number => operationsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0);
+export const operationsForBrief = (brief: Pick<TaskBrief, "acceptanceCases" | "checks" | "baseline">): number => operationsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0, brief.checks.length);

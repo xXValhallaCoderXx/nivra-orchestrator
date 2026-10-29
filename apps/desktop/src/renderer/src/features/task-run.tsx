@@ -4,7 +4,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "rea
 import type { AcceptanceCaseView, BriefContent, TaskAttemptView, TaskRunPreview, TaskView, TurnStatus } from "../../../shared/ipc";
 import { startedFrom } from "../../../shared/task-started";
 import { diffFilesOf, fileSummaryOf, type DiffFile } from "../../../shared/task-diff";
-import { outcomeLookOf, verdictText } from "../../../shared/task-verdict";
+import { comparisonOf, currentlyVerified, legacyVerification, outcomeLookOf, verdictText } from "../../../shared/task-verdict";
 import { CONSENT_COVERS } from "../shared/evidence";
 import { errorMessage, usePoll } from "../shared/ui";
 import { useNarrow } from "./narrow";
@@ -12,8 +12,8 @@ import { applyGoing } from "./task-apply";
 
 /**
  * A task's runs (D39): its acceptance cases, written with the brief; a preview of what a run would send and where, from
- * its repository's own engine; then the run, its progress, and what Nivra found. The verdict comes from the acceptance
- * cases alone; what the worker said is shown apart from it. A run never writes the checkout: a verified change reaches
+ * its repository's own engine; then the run, its progress, and what Nivra found. Acceptance cases and required checks
+ * decide verification; what the worker said is shown apart from it. A run never writes the checkout: a verified change reaches
  * it only once the person approves it, and applying it is shown file by file (D40, `task-apply.tsx`).
  */
 
@@ -613,7 +613,7 @@ function RunPreview({
         <Text size="sm">
           Every acceptance case must print exactly what it should and give its exit code. Nivra compares that itself, on this computer; the worker can't change the cases
           themselves.
-          {preview.checks.length ? " The repository's checks run too: they're reported, and don't decide the result." : ""}
+          {preview.checks.length ? " Every repository check listed here is required and must pass on the proposed result. Nivra also runs each one before the worker changes anything, for comparison. A failure before the change is evidence, not a waiver for a final failure." : ""}
         </Text>
         <List size="sm">
           {preview.cases.map((given) => (
@@ -623,7 +623,7 @@ function RunPreview({
           ))}
           {preview.checks.map((check) => (
             <List.Item key={`check-${check.number}`}>
-              Check {check.number}: <Code>{check.command}</Code>
+              Required check {check.number}: <Code>{check.command}</Code>
             </List.Item>
           ))}
         </List>
@@ -644,7 +644,8 @@ function RunPreview({
           Bounds: at most {plural(limits.modelRequests, "model request")} of up to {limits.requestSeconds} s and {limits.outputTokensPerRequest.toLocaleString()} output tokens
           each, admitted against an estimated {limits.estimatedInputTokens.toLocaleString()} input tokens (an estimate, not a cap); {plural(limits.toolCalls, "tool call")}, of
           which {plural(limits.writes, "write")} of up to {sizeText(limits.writeBytes)} and {plural(limits.runs, "run")} of a case or check;{" "}
-          {limits.baselineChecks ? `${plural(limits.baselineChecks, "baseline check")} before the worker; ` : ""}at most {plural(limits.operations, "Nebius operation")}, each
+          {limits.baselineChecks ? `${plural(limits.baselineChecks, "explicit baseline check")} before the worker; ` : ""}
+          {limits.comparisonChecks ? `${plural(limits.comparisonChecks, "required check")} before the worker for comparison; ` : ""}at most {plural(limits.operations, "Nebius operation")}, each
           command up to {limits.checkSeconds} s; the sandbox for {limits.sessionMinutes} minutes, and the whole run for {limits.runMinutes} minutes.
         </Text>
       )}
@@ -930,8 +931,8 @@ export function RunResult({ value, number, task }: { value: TaskAttemptView; num
           </Labelled>
         </Group>
         {report?.outcome === "proposed" && (
-          <Alert color={report.verified ? "green" : outcome.color === "red" ? "red" : "yellow"} variant="light" data-testid="task-attempt-verdict">
-            <Text size="sm">{verdictText(report)}</Text>
+          <Alert color={currentlyVerified(value) ? "green" : outcome.color === "red" ? "red" : "yellow"} variant="light" data-testid="task-attempt-verdict">
+            <Text size="sm">{verdictText(report, value.admission)}</Text>
           </Alert>
         )}
         {report && report.outcome !== "proposed" && (
@@ -1072,15 +1073,16 @@ const ran = (exitCode: number | null, durationMs: number | null) => [exitCode !=
 
 /**
  * What Nivra ran itself (P1i, RS1, RS5): the baseline checks on the commit as it was, then each acceptance case, the frozen
- * and setup files, and the repository's checks, reported only. A command is shown only from the brief version the run
+ * and setup files, and the repository's required checks with their observed before-change results. A command is shown only from the brief version the run
  * ran (`content`, null when the brief has moved on), since the report keeps names, not commands.
  */
 export function RunChecks({ report, content }: { report: TaskReport; content: BriefContent | null }) {
   const setup = report.setup ?? null;
+  const legacy = legacyVerification(report);
   const changedSetup = setup?.unchanged === false ? setup.changed : [];
   const any = report.baseline.length + report.checks.length + report.frozen.length + changedSetup.length + (setup?.unchanged === null ? 1 : 0);
   if (!any) return null;
-  const decides = ["the acceptance cases", report.frozen.length ? "the frozen files" : null, setup ? "the setup files" : null].filter(Boolean) as string[];
+  const decides = ["the acceptance cases", !legacy && report.checks.some((check) => check.kind === "check") ? "the required repository checks" : null, report.frozen.length ? "the frozen files" : null, setup ? "the setup files" : null].filter(Boolean) as string[];
   const listed = decides.length > 1 ? `${decides.slice(0, -1).join(", ")} and ${decides.at(-1)}` : decides[0]!;
   const deciding = listed.charAt(0).toUpperCase() + listed.slice(1);
   return (
@@ -1088,13 +1090,12 @@ export function RunChecks({ report, content }: { report: TaskReport; content: Br
       <Stack gap={0}>
         <Text fw={600}>Acceptance cases and checks</Text>
         <Text size="sm" c="var(--nivra-text-2)" pb="xs">
-          Nivra ran these itself, with networking off{report.baseline.length ? ": the baseline checks on the commit as it was, the rest on the run's copy" : ", on the run's copy"}. {deciding} decide the result
-          {report.checks.some((check) => check.kind === "check") ? "; the repository's checks are reported only." : "."}
+          Nivra ran these itself, with networking off. {legacy ? `${deciding} decided this legacy run's recorded result; repository checks were advisory.` : `${deciding} decide verification. Required checks must pass on the proposed result, even if they failed before the worker's changes.`}
         </Text>
         {report.baseline.map((check) => (
           <CheckRow
             key={`baseline-${check.number}`}
-            label={`Baseline ${check.number}`}
+            label={`Explicit baseline ${check.number}`}
             title={check.name}
             command={content?.baseline[check.number - 1]?.command ?? null}
             detail={[check.reason, ran(check.exitCode, check.durationMs)].filter(Boolean).join(" · ") || null}
@@ -1139,7 +1140,7 @@ export function RunChecks({ report, content }: { report: TaskReport; content: Br
         {report.checks
           .filter((check) => check.kind === "check")
           .map((check) => (
-            <CaseOrCheck key={`check-${check.number}`} check={check} command={check.name} />
+            <CaseOrCheck key={`check-${check.number}`} check={check} command={content?.checks[check.number - 1] ?? check.name} legacy={legacy} beforeChecks={report.beforeChecks} />
           ))}
       </Stack>
     </Paper>
@@ -1148,12 +1149,13 @@ export function RunChecks({ report, content }: { report: TaskReport; content: Br
 
 const FROZEN_WORD = { unchanged: "Unchanged", changed: "Changed", unknown: "Unknown" } as const;
 
-function CaseOrCheck({ check, command }: { check: TaskCheck; command: string | null }) {
+function CaseOrCheck({ check, command, legacy = false, beforeChecks }: { check: TaskCheck; command: string | null; legacy?: boolean; beforeChecks?: TaskCheck[] }) {
   const isCase = check.kind === "case";
+  const comparison = !isCase && !legacy ? comparisonOf(check, beforeChecks) : null;
   const detail = [
     check.reason ? `${check.reason}${check.difference ? ` (line ${check.difference.line}: expected "${check.difference.expected}", got "${check.difference.got}")` : ""}` : null,
     ran(check.exitCode, check.durationMs),
-    isCase ? null : "reported, and doesn't decide the result",
+    isCase ? null : legacy ? "advisory under this run's earlier verification rule" : "required: the final result must pass",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -1166,7 +1168,7 @@ function CaseOrCheck({ check, command }: { check: TaskCheck; command: string | n
           <>
             Check {check.number}{" "}
             <Text span size="sm" c="var(--nivra-text-3)">
-              (reported)
+              ({legacy ? "legacy advisory" : "required"})
             </Text>
           </>
         )
@@ -1179,6 +1181,18 @@ function CaseOrCheck({ check, command }: { check: TaskCheck; command: string | n
       data-testid="task-attempt-check"
       data-verdict={check.verdict}
     >
+      {comparison && (
+        <Stack gap={2} data-testid="task-attempt-check-comparison" data-comparison={comparison.label}>
+          <Group gap="xs">
+            <Badge size="xs" variant="light" color={comparison.color}>{comparison.label}</Badge>
+            {comparison.before && <Text size="xs" c="var(--nivra-text-2)" data-testid="task-attempt-before-check" data-verdict={comparison.before.verdict}>Before the worker: {VERDICT_LOOK[comparison.before.verdict].label}{ran(comparison.before.exitCode, comparison.before.durationMs) ? ` · ${ran(comparison.before.exitCode, comparison.before.durationMs)}` : ""}</Text>}
+          </Group>
+          <Text size="xs" c="var(--nivra-text-2)">{comparison.detail}</Text>
+          {comparison.before?.verdict !== "passed" && (comparison.before?.stdoutTail || comparison.before?.stderrTail) && (
+            <Code block fz="xs" style={{ maxHeight: 200, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }} data-testid="task-attempt-before-output">{[comparison.before.stdoutTail, comparison.before.stderrTail].filter(Boolean).join("\n")}</Code>
+          )}
+        </Stack>
+      )}
       {(check.changedFiles.length > 0 || check.unclear) && (
         <Text size="xs" c="var(--nivra-warning)" data-testid="task-attempt-check-files">
           {checkFilesText(check)}
@@ -1380,7 +1394,7 @@ export function RunWorker({ report }: { report: TaskReport }) {
 export function RunReview({ value, number, task, content, decision = null }: { value: TaskAttemptView; number: number; task: { label: string; color: string }; content: BriefContent | null; /** The decision, right after the result when the columns stack (NW3). */ decision?: ReactNode }) {
   const report = value.report;
   return (
-    <Stack gap="md" data-testid={report ? "task-attempt-report" : undefined} data-outcome={report?.outcome} data-verified={report ? report.verified : undefined}>
+    <Stack gap="md" data-testid={report ? "task-attempt-report" : undefined} data-outcome={report?.outcome} data-verified={report ? currentlyVerified(value) : undefined} data-recorded-verified={report?.verified}>
       <RunResult value={value} number={number} task={task} />
       {decision}
       {report && <RunChecks report={report} content={content} />}

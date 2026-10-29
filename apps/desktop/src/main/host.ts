@@ -57,6 +57,8 @@ import {
   type SandboxStatus,
   type SecretName,
   type SpecialistId,
+  type TaskAdmission,
+  type TaskAdmissionParams,
   type TaskBrief,
   type TaskContext,
   type TaskInput,
@@ -1657,6 +1659,7 @@ export class Host {
       targetId: project.targetId,
       sharing: consents,
       snapshot: shown.snapshot.fingerprint,
+      requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length },
       environment: prepared,
     });
     return {
@@ -1735,22 +1738,17 @@ export class Host {
       const engine = await this.#attemptEngine(attempt);
       const report = await this.#reportOf(engine, attempt);
       if (!report.proposal) throw new Error("This run proposed no change, so there is nothing to approve.");
-      if (!report.verified) {
-        // A frozen file that isn't shown unchanged leaves a change unverified whatever its cases printed (D41).
-        throw new Error(
-          report.frozen.some((file) => file.unchanged !== true)
-            ? "A frozen file isn't shown to be unchanged, so this change can't be approved. Reject it, or ask for a revision."
-            : "Not every acceptance case was shown to pass, so this change can't be approved. Reject it, or ask for a revision.",
-        );
-      }
       if (report.proposal.hash !== approvedHash) throw new Error("This isn't the change you were shown: the run's proposal is another one. Open the run again, then decide.");
       const brief = getArtifact(workspace, attempt.briefId);
       const packet = brief ? taskBriefOf(BriefContentSchema.parse(brief.content)) : null;
       if (!brief || !packet || "blocked" in packet) throw new Error("The brief this run ran can't be read as it was, so its change can't be approved. Run the task again.");
+      const admission = await this.#admissionOf(engine, attempt, approvedHash);
+      if (!admission.eligible) throw new Error(admission.reason ?? "This change isn't eligible for approval. Request a revision, or start a new authorised task run.");
       const requestId = randomUUID();
       // Saved before anything is sent: after this, the apply is only ever asked about by its request id.
       if (!decide(workspace, attempt.id, { kind: "approved", requestId, projectId: project.id }, new Date().toISOString())) throw new Error(DECIDED);
       const params: ApplyParams = {
+        brief: packet.brief,
         requestId,
         runId: attempt.runId!,
         approvedHash,
@@ -2747,7 +2745,7 @@ export class Host {
     // The prepared environment the preview was bound to, if any (D41): one prepared again since then changes the fingerprint.
     const prepared = this.#preparedFor(project);
     if (prepared && "refused" in prepared) throw new Error(prepared.refused);
-    const current = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot, environment: prepared });
+    const current = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length }, environment: prepared });
     if (current !== expected) throw new Error("What this run would send has changed since you previewed it. Preview it again, then start.");
     // Checked again after the waits: consent, and the project itself, can change while the keys are read.
     const now = this.#options.store.data.projects.find((p) => p.id === project.id);
@@ -2993,6 +2991,7 @@ export class Host {
       runId: attempt.runId,
       cancelRequested: attempt.cancelRequested,
       report: null,
+      admission: null,
       proposal: null,
       progress: [],
       unresolved: null,
@@ -3003,7 +3002,7 @@ export class Host {
       acceptedAt: record.acceptedAt,
       acceptNote: record.acceptNote,
       // From what was kept when the run ended, until its report is read below.
-      actions: this.#actionsOf(attempt, record, record.outcome?.verified ?? false, Boolean(record.outcome?.proposalHash)),
+      actions: this.#actionsOf(attempt, record, false, Boolean(record.outcome?.proposalHash)),
       createdAt: attempt.createdAt,
       settledAt: attempt.settledAt,
     };
@@ -3019,12 +3018,36 @@ export class Host {
       if (report && (report.request.clientRequestId !== attempt.id || report.request.runId !== attempt.runId)) return { ...base, unresolved: "Its engine's report is about another run, so none of it is shown." };
       if (report && attempt.status === "answered") this.#keepOutcome(attempt.id, report);
       const proposal = report?.proposal ? await engine.supervisor.call("runs.proposal", { runId: attempt.runId }) : null;
-      const actions = report ? this.#actionsOf(attempt, attemptRecord(workspace, attempt.id), report.verified, report.proposal !== null) : base.actions;
-      return { ...base, report: report && maskValue(report, known), proposal: proposal && maskValue(proposal, known), progress: maskValue(await this.#progressOf(engine, attempt.runId), known), actions };
+      let admission: TaskAdmission | null = null;
+      if (report?.proposal && proposal && report.proposal.hash === proposal.hash) {
+        try {
+          admission = await this.#admissionOf(engine, attempt, proposal.hash);
+        } catch {
+          admission = { eligible: false, reason: "Nivra couldn't validate this proposal's original report. Open the run again to retry; approval is unavailable until validation succeeds.", proposalHash: proposal.hash, reportSha256: null, legacy: report.version !== 4 };
+        }
+      }
+      const actions = report ? this.#actionsOf(attempt, attemptRecord(workspace, attempt.id), admission?.eligible === true, proposal !== null) : base.actions;
+      return { ...base, report: report && maskValue(report, known), admission: admission && maskValue(admission, known), proposal: proposal && maskValue(proposal, known), progress: maskValue(await this.#progressOf(engine, attempt.runId), known), actions };
     } catch (error) {
       if (isRunNotFound(error)) return { ...base, unresolved: "Its engine has no record of this run any more." };
       return { ...base, unresolved: `Nivra can't read this run from its engine now (${errorText(error)}).` };
     }
+  }
+
+  /** Approval comes from the engine's intact proposal report, never the fitted presentation report. */
+  async #admissionOf(engine: Engine, attempt: AttemptRecord, approvedHash: string): Promise<TaskAdmission> {
+    const brief = getArtifact(this.#workspaceDb(), attempt.briefId);
+    const packet = brief ? taskBriefOf(BriefContentSchema.parse(brief.content)) : null;
+    if (!brief || !packet || "blocked" in packet || !attempt.runId || !attempt.homeId) throw new Error("The brief this run ran can't be read as it was. Start a new authorised task run.");
+    const params: TaskAdmissionParams = {
+      runId: attempt.runId,
+      approvedHash,
+      task: { attempt: { taskId: attempt.taskId, attemptId: attempt.id, runId: attempt.runId }, engine: { homeId: attempt.homeId }, brief: { version: brief.version, sha256: await taskBriefDigest(packet.brief) } },
+      brief: packet.brief,
+    };
+    const admission = await engine.supervisor.call("task.admission", params);
+    if ((admission.eligible && admission.proposalHash !== approvedHash) || (admission.proposalHash !== null && admission.proposalHash !== approvedHash)) throw new Error("The engine validated another proposal. Open the run again, then decide.");
+    return admission;
   }
 
   /** Runs a decision, or a call about an apply, on an attempt with nothing else out on it: it offers nothing meanwhile. */

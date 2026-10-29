@@ -8,9 +8,8 @@ import { isNodeSetupPath } from "../src/environment/node-files.ts";
 import { ENV_PATH } from "../src/exec/nebius/sandbox.ts";
 import { taskStopWords } from "../src/task/report.ts";
 import type { ExecResult } from "../src/exec/backend.ts";
-import { judgeBaseline, notRun, type CheckResult } from "../src/task/harness.ts";
+import { judgeBaseline } from "../src/task/harness.ts";
 import { reserveMs, runNeedsMs, TASK_LIMITS } from "../src/task/limits.ts";
-import { verifiedWith } from "../src/task/worker.ts";
 import { attempt, BRIEF, FIX, FIXTURE, PROJECT, verdicts } from "./task-fixtures.ts";
 import { cleanUp, repoWith, scratch, snap } from "./workspace-fixtures.ts";
 
@@ -73,16 +72,6 @@ describe("a baseline selection's judgement (D41)", () => {
     const judged = judgeBaseline(1, { name: "p", command: "x", expectedExitCode: 1, outputPattern: "(a+)+" }, ran(`${"a".repeat(40)}!`, 1));
     assert.deepEqual([judged.matched, judged.reason], [false, "matching its pattern took longer than 1 s, so it was stopped"]);
     assert.ok(performance.now() - started < 5_000, "the pattern wasn't stopped at its limit");
-  });
-});
-
-describe("a change's verification with frozen files (D41)", () => {
-  it("is verified only when every case passed and every frozen file came back unchanged", () => {
-    const passed: CheckResult = { ...notRun("case", 1, "c", ""), verdict: "passed", reason: null };
-    assert.deepEqual(
-      [verifiedWith([passed], []), verifiedWith([passed], [{ unchanged: true }]), verifiedWith([passed], [{ unchanged: false }]), verifiedWith([passed], [{ unchanged: null }]), verifiedWith([{ ...passed, verdict: "failed" }], [{ unchanged: true }])],
-      [true, true, false, false, false],
-    );
   });
 });
 

@@ -60,6 +60,10 @@ test.beforeAll(async ({}, testInfo) => {
   }, repo);
   await openSwitcher(page);
   await page.getByTestId("project-add").click();
+  await expect.poll(async () => page.evaluate(async () => {
+    const state = (await window.nivra.listEngines())[0]?.state;
+    return state?.status === "failed" ? `failed: ${state.reason}` : state?.status;
+  })).toBe("online");
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 });
 
@@ -122,7 +126,8 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   await expect(preview).toContainText("To Nebius Sandboxes, as the project's uploads allow (on)");
   await expect(preview.getByTestId("task-run-preview-keeps")).toContainText("Nebius keeps each operation's arguments in its records, so what the worker writes stays there too.");
   await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Case 1, greet with and without a name");
-  await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Check 1:");
+  await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Required check 1:");
+  await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Every repository check listed here is required");
   await expect(preview.getByTestId("task-run-preview-limits")).toContainText("(an estimate, not a cap)");
   // The allowances a real repository needs room for (NIV-35), shown before Start.
   await expect(preview.getByTestId("task-run-preview-limits")).toContainText("Bounds: at most 24 model requests of up to 830 s and 8,000 output tokens each, admitted against an estimated 480,000 input tokens (an estimate, not a cap); 48 tool calls, of which 8 writes");
@@ -141,7 +146,8 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   const report = attempt.getByTestId("task-attempt-report");
   await expect(report).toHaveAttribute("data-outcome", "proposed");
   await expect(report).toHaveAttribute("data-verified", "true");
-  await expect(report.getByTestId("task-attempt-verdict")).toContainText("Every acceptance case passed: the change is verified.");
+  await expect(report.getByTestId("task-attempt-verdict")).toContainText("Every acceptance case and required repository check passed: the change is verified.");
+  await expect(report.getByTestId("task-attempt-check-comparison")).toHaveAttribute("data-comparison", "Passes after change");
   await expect(report.getByTestId("task-attempt-environment")).toHaveText("Started from Nivra's own base image, with nothing installed.");
   await expect(report.getByTestId("task-attempt-check")).toHaveCount(2);
   for (const row of await report.getByTestId("task-attempt-check").all()) await expect(row).toHaveAttribute("data-verdict", "passed");

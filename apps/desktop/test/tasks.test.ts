@@ -49,6 +49,15 @@ describe("native tasks and plans (D26, NIV-32)", () => {
     assert.equal(taskRunFingerprint({ ...parts }), one);
   });
 
+  it("binds required-check policy and calculated comparison allowances into new previews", () => {
+    const parts = { taskId: "t", briefId: "b", briefVersion: 1, briefDigest: "d".repeat(64), projectId: "p", targetId: "local", sharing: { modelContext: true, cloudExecution: true }, snapshot: "f".repeat(64) };
+    const requiredChecks = { finalChecks: 4, baselineChecks: 3, comparisonChecks: 3 };
+    const current = taskRunFingerprint({ ...parts, requiredChecks });
+    assert.notEqual(current, taskRunFingerprint(parts));
+    assert.notEqual(current, taskRunFingerprint({ ...parts, requiredChecks: { ...requiredChecks, comparisonChecks: 2 } }));
+    assert.notEqual(current, taskRunFingerprint({ ...parts, requiredChecks: { ...requiredChecks, baselineChecks: 2 } }));
+  });
+
   it("binds a run from a recipe's environment by both its digests, its image, its setup files, the Nebius project and the target, and leaves v1 and v2 as they were (NIV-55)", () => {
     const parts = { taskId: "t", briefId: "b", briefVersion: 2, briefDigest: "d".repeat(64), projectId: "p", targetId: "wsl:Ubuntu", sharing: { modelContext: true, cloudExecution: true }, snapshot: "f".repeat(64) };
     const canonical = (form: unknown[]) => createHash("sha256").update(JSON.stringify(form)).digest("hex");

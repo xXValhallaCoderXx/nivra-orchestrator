@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ApplyParams, ApplyResolution, ApplyView } from "@nivra/domain";
+import type { ApplyParams, ApplyResolution, ApplyView, TaskAdmission, TaskAdmissionParams } from "@nivra/domain";
 import type { Database } from "../db/database.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
 import { WorkspaceCancelled } from "../exec/git-tool.ts";
@@ -9,6 +9,7 @@ import { ApplyJournal, type ApplyRecord } from "./journal.ts";
 import { ApplyRefusal, applyRefusalWords } from "./plan.ts";
 import { revalidate } from "./revalidate.ts";
 import { reconcile, release, restore, writeChange, type ApplyHook, type ApplyResult } from "./writer.ts";
+import { unavailableAdmission } from "../task/admission.ts";
 
 /**
  * Applying proposals on the engine that owns the checkout (D40): one at a time, each claimed, checked again and
@@ -20,8 +21,8 @@ import { reconcile, release, restore, writeChange, type ApplyHook, type ApplyRes
 export interface ApplyServiceDeps {
   database: Database;
   proposal(runId: string): Proposal | null;
-  /** Whether the run's report shows every acceptance case passing: only a verified change is applied (D39, D40). */
-  verified(runId: string): boolean;
+  /** Assesses the intact hash-bound report and all expected final checks, never a display artifact's boolean. */
+  admission(params: TaskAdmissionParams, proposal: Proposal): Promise<TaskAdmission>;
   /** This engine's home: the proposal must have been made on it, and a lock it left is its own. */
   homeId: string;
   backend: ExecutionBackend;
@@ -86,18 +87,22 @@ export class ApplyService {
     // A claim that finds the request already there gives that apply, never a second.
     const { record, repeated: again } = this.#journal.claim({ applyId, requestId: params.requestId, runId: params.runId, proposalHash: proposal.hash, destination: proposal.binding.destination.root });
     if (again || record.state === "refused") return Promise.resolve(this.view(record));
-    // Only a verified change is applied, whoever asks: the host offers Approve only then, and this is the backstop.
-    if (!this.#deps.verified(params.runId)) {
-      this.#journal.refuse(applyId, new ApplyRefusal("unverified"));
-      return Promise.resolve(this.view(this.#journal.get(applyId)!));
-    }
     return this.#serialised(() => this.#write(applyId, params, proposal, git));
+  }
+
+  /** The same admission as apply, without claiming or writing anything. */
+  admission(params: TaskAdmissionParams): Promise<TaskAdmission> {
+    const proposal = this.#deps.proposal(params.runId);
+    return proposal ? this.#deps.admission(params, proposal) : Promise.resolve(unavailableAdmission());
   }
 
   async #write(applyId: string, params: ApplyParams, proposal: Proposal, git: string): Promise<ApplyView> {
     {
       let session: Awaited<ReturnType<ExecutionBackend["open"]>> | null = null;
       try {
+        // Repeated after the queue: another request's cached assessment never authorises this write.
+        const admission = await this.#deps.admission(params, proposal);
+        if (!admission.eligible || admission.proposalHash !== proposal.hash || admission.reportSha256 !== proposal.binding.reportSha256) throw new ApplyRefusal(admission.proposalHash === proposal.hash ? "unverified" : "proposal");
         session = await this.#deps.backend.open({ workspace: params.repoPath });
         const plan = await revalidate({ proposal, approvedHash: params.approvedHash, repoPath: params.repoPath, project: params.project, target: params.target, task: params.task, git: { session, git } });
         await writeChange({ applyId, plan, journal: this.#journal, engineId: this.#deps.homeId, io: this.#io, ...(this.#deps.before ? { before: this.#deps.before } : {}) });

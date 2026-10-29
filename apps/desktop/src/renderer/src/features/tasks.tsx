@@ -162,7 +162,7 @@ function BriefInputs({ draft, onChange, reveal = null }: { draft: Draft; onChang
       <FormCard
         title="Acceptance cases"
         note="Commands that must pass"
-        description="How Nivra checks a run itself: a command, run in the sandbox, and exactly what it must print and the exit code it must give. The result comes from these and the frozen files. A run needs at least one."
+        description="How Nivra checks a run itself: a command, run in the sandbox, and exactly what it must print and the exit code it must give. Every case and required repository check must pass, with the frozen and setup files unchanged. A run needs at least one case."
       >
         <CasesInput cases={draft.cases} onChange={(cases) => onChange({ ...draft, cases })} />
         <Text size="xs" c="var(--nivra-text-3)" data-testid="brief-cases-count">
@@ -186,10 +186,10 @@ function BriefInputs({ draft, onChange, reveal = null }: { draft: Draft; onChang
       >
         <BaselineInput checks={draft.baseline} onChange={(baseline) => onChange({ ...draft, baseline })} />
       </FormCard>
-      <FormCard title="Repository checks" note="Reported only">
+      <FormCard title="Repository checks" note="Required on new runs">
         <Textarea
           label="Checks"
-          description="The repository's own commands to run, such as sh test.sh. One per line. A run reports them; they don't decide its result."
+          description="The repository's own commands, such as sh test.sh. One per line. Nivra runs each before the worker for comparison and afterwards; every final result must pass for verification."
           autosize
           minRows={1}
           maxRows={8}
@@ -841,7 +841,7 @@ export function TaskDetail({
   const marks = value ? applyMarks(value) : null;
   // Nothing to decide on the latest run (RS1): the page says so, with the next step.
   const decisionCard = phase === "review" && value ? <DecisionCard value={value} busy={run.busy} act={run.act} content={ranContent} confirmAsked={confirmAsked} /> : null;
-  const leads = value ? decisionLead(value.report, value.actions.includes("approve"), value.proposal !== null) : null;
+  const leads = value ? decisionLead(value.report, value.actions.includes("approve"), value.proposal !== null, value.admission) : null;
   const settledQuietly = phase === "review" && value !== null && value.id === latest?.id && value.decision === null && !value.actions.some((action) => action === "approve" || action === "reject" || action === "revise");
   // Readiness leads until the latest run goes or waits on the person; a draft always shows it, with Mark ready.
   const leading = summary.state === "draft" || !latestHolds(latest);

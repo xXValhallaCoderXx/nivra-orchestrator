@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TaskBrief } from "./task.ts";
 
 /**
  * Applying a task's proposal to the person's checkout (NIV-8, D40), on the engine that owns the checkout's filesystem.
@@ -78,6 +79,25 @@ export const ApplyTaskBinding = z.strictObject({
 });
 export type ApplyTaskBinding = z.infer<typeof ApplyTaskBinding>;
 
+/** The evidence the engine rechecks before offering approval, without writing the checkout. */
+export const TaskAdmission = z.strictObject({
+  eligible: z.boolean(),
+  reason: z.string().max(600).nullable(),
+  proposalHash: Sha256Hex.nullable(),
+  reportSha256: Sha256Hex.nullable(),
+  legacy: z.boolean(),
+});
+export type TaskAdmission = z.infer<typeof TaskAdmission>;
+
+export const TaskAdmissionParams = z.strictObject({
+  runId: z.uuid(),
+  approvedHash: Sha256Hex,
+  task: ApplyTaskBinding,
+  /** An older report's expected checks can be recovered only from its original, digest-bound brief. */
+  brief: TaskBrief.optional(),
+});
+export type TaskAdmissionParams = z.infer<typeof TaskAdmissionParams>;
+
 export const ApplyParams = z.strictObject({
   /** The host's id for this approval, saved before it is sent: a repeat gets the same apply. */
   requestId: z.uuid(),
@@ -89,5 +109,6 @@ export const ApplyParams = z.strictObject({
   project: z.string().min(1).max(200),
   target: z.string().min(1).max(200),
   task: ApplyTaskBinding,
+  brief: TaskBrief.optional(),
 });
 export type ApplyParams = z.infer<typeof ApplyParams>;

@@ -1,4 +1,5 @@
 import type {
+  TaskAdmission,
   ApplyPath,
   ApplyRefusalCode,
   ApplyResolution,
@@ -725,6 +726,8 @@ export interface TaskAttemptView {
   cancelRequested: boolean;
   /** The engine's report: what the worker did, each case's and check's verdict, cleanup's record; null until there is one. */
   report: TaskReport | null;
+  /** Current engine validation of the exact hash-bound proposal report; never inferred from a fitted report. */
+  admission?: TaskAdmission | null;
   /** The change it proposes, as text to read; null when it proposed none, or can't be read now. */
   proposal: TaskProposal | null;
   /** The run's latest progress, oldest first. */

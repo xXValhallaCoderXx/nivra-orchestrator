@@ -5,7 +5,8 @@ import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, linkSync, o
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ApplyView } from "@nivra/domain";
+import { ApplyView, type TaskAdmissionParams } from "@nivra/domain";
+import type { Proposal } from "../src/exec/proposal.ts";
 import type { ExecutionBackend } from "../src/exec/backend.ts";
 import { ApplyJournal } from "../src/apply/journal.ts";
 import { ApplyService } from "../src/apply/service.ts";
@@ -30,6 +31,7 @@ after(() => {
 });
 const CHILD = fileURLToPath(new URL("./apply-kill-child.ts", import.meta.url));
 const ENGINE = "engine-home-a";
+const admitted = async (_params: TaskAdmissionParams, proposal: Proposal) => ({ eligible: true, reason: null, proposalHash: proposal.hash, reportSha256: proposal.binding.reportSha256, legacy: false });
 
 /** An apply in a child process, killed before call `killAt`, or counted when `killAt` is null. */
 async function cut(fresh: () => string, killAt: number | null) {
@@ -51,7 +53,7 @@ async function cut(fresh: () => string, killAt: number | null) {
 }
 
 const nodeIoForTests = () => ({ ...nodeIo });
-const serviceOn = (database: string) => new ApplyService({ database: new Database(database), proposal: () => null, verified: () => true, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
+const serviceOn = (database: string) => new ApplyService({ database: new Database(database), proposal: () => null, admission: admitted, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
 
 describe("the apply service at start (NIV-8, D40)", () => {
   it("reconciles an apply its engine stopped part way as partial, from the disk and writing nothing; restores it on request; then settles it", async () => {
@@ -123,7 +125,7 @@ describe("the apply service at start (NIV-8, D40)", () => {
       }
     } });
     assert.deepEqual([result.state, result.paths[0]?.place, result.paths[0]?.changedSince], ["partial", "theirs", true]);
-    const service = new ApplyService({ database, proposal: () => null, verified: () => true, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
+    const service = new ApplyService({ database, proposal: () => null, admission: admitted, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
     const restored = await service.restore(applyId);
     assert.deepEqual([restored.status, restored.paths[0]?.place, restored.paths[0]?.changedSince], ["partial", "theirs", true]);
   });
@@ -143,7 +145,7 @@ describe("the apply service at start (NIV-8, D40)", () => {
     const proposal = run.result.proposal!;
     const work = tempDir();
     dirs.push(work);
-    const service = new ApplyService({ database: new Database(join(work, "nivra.db")), proposal: () => proposal, verified: () => false, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
+    const service = new ApplyService({ database: new Database(join(work, "nivra.db")), proposal: () => proposal, admission: async (_params, proposal) => ({ ...await admitted(_params, proposal), eligible: false, reason: "A required check failed." }), homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
     const before = folderState(run.root);
     const refused = await service.apply({ requestId: randomUUID(), runId: proposal.binding.task!.attempt.runId, approvedHash: proposal.hash, repoPath: run.root, project: proposal.binding.project, target: proposal.binding.target, task: proposal.binding.task! });
     assert.deepEqual([refused.status, refused.refusal?.code, changedSince(before, run.root)], ["refused", "unverified", []]);
@@ -162,7 +164,7 @@ describe("the apply service at start (NIV-8, D40)", () => {
     const editor = openSync(join(root, "README.md"), "r+");
     try {
       assert.equal((await writeChange({ applyId, plan, journal, engineId: ENGINE })).state, "applied");
-      const service = new ApplyService({ database, proposal: () => null, verified: () => true, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
+      const service = new ApplyService({ database, proposal: () => null, admission: admitted, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
       const accepted = await service.dismiss(applyId, "accepted");
       // Every copy stays, both originals among them, whatever their bytes.
       const recovery = join(plan.gitDir, "nivra-apply", applyId);
@@ -213,7 +215,7 @@ describe("the apply service at start (NIV-8, D40)", () => {
           return stats;
         },
       };
-      const service = new ApplyService({ database, proposal: () => null, verified: () => true, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux", io });
+      const service = new ApplyService({ database, proposal: () => null, admission: admitted, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux", io });
       const dismissed = await service.dismiss(applyId, "dismissed");
       replace();
       // The program then saves through what it had open: the original, still named in the recovery folder.
@@ -245,7 +247,7 @@ describe("the apply service at start (NIV-8, D40)", () => {
     const work = tempDir();
     dirs.push(work);
     const proposals = new Map(runs.map((run) => [run.result.proposal!.binding.task!.attempt.runId, run.result.proposal!]));
-    const service = new ApplyService({ database: new Database(join(work, "nivra.db")), proposal: (runId) => proposals.get(runId) ?? null, verified: () => true, homeId: ENGINE, backend: slow, findGit: () => GIT, platform: "linux" });
+    const service = new ApplyService({ database: new Database(join(work, "nivra.db")), proposal: (runId) => proposals.get(runId) ?? null, admission: admitted, homeId: ENGINE, backend: slow, findGit: () => GIT, platform: "linux" });
     const params = runs.map((run) => {
       const proposal = run.result.proposal!;
       return { requestId: randomUUID(), runId: proposal.binding.task!.attempt.runId, approvedHash: proposal.hash, repoPath: run.root, project: proposal.binding.project, target: proposal.binding.target, task: proposal.binding.task! };
@@ -262,7 +264,7 @@ describe("the apply service at start (NIV-8, D40)", () => {
     dirs.push(work);
     const database = new Database(join(work, "nivra.db"));
     const journal = new ApplyJournal(database);
-    const service = new ApplyService({ database, proposal: () => null, verified: () => true, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
+    const service = new ApplyService({ database, proposal: () => null, admission: admitted, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "linux" });
     const applyId = randomUUID();
     journal.claim({ applyId, requestId: randomUUID(), runId: randomUUID(), proposalHash: "a".repeat(64), destination: "/repo" });
     const intent = { version: 1 as const, applyId, folder: "/repo", gitDir: "/repo/.git", recovery: `/repo/.git/nivra-apply/${applyId}`, folders: [], paths: [{ path: "a.txt", change: "added" as const, pre: { kind: "absent" as const, mode: null, size: null, sha256: null }, post: { mode: "100644" as const, size: 1, sha256: "b".repeat(64) }, perm: 0o644, temp: "new-0", aside: null }] };
@@ -278,7 +280,7 @@ describe("the apply service at start (NIV-8, D40)", () => {
   it("refuses to apply on Windows itself, before claiming anything", async () => {
     const work = tempDir();
     dirs.push(work);
-    const service = new ApplyService({ database: new Database(join(work, "nivra.db")), proposal: () => null, verified: () => true, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "win32" });
+    const service = new ApplyService({ database: new Database(join(work, "nivra.db")), proposal: () => null, admission: admitted, homeId: ENGINE, backend: createLocalBackend({ baseEnv: process.env }), findGit: () => GIT, platform: "win32" });
     const task = { attempt: { taskId: "task", attemptId: randomUUID(), runId: randomUUID() }, engine: { homeId: randomUUID() }, brief: { version: 1, sha256: "b".repeat(64) } };
     const requestId = randomUUID();
     await assert.rejects(service.apply({ requestId, runId: task.attempt.runId, approvedHash: "a".repeat(64), repoPath: work, project: "project", target: "local", task }), /^ApplyRequestRefusal: Applying changes on Windows itself isn't available yet/);
