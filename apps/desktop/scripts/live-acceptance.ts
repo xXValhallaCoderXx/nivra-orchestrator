@@ -544,6 +544,7 @@ async function rehearsal(): Promise<void> {
   expect("handoff.snapshot", "A", got !== null && got.digest === want.digest && got.count === 0, `hello received ${got?.count ?? "nothing"} preferences, fingerprint ${got?.digest.slice(0, 12) ?? "none"}`);
 
   const cancelled = await hello(a, "A", 60);
+  await ui!.toDiagnostics();
   await ui!.page.getByTestId("hello-cancel").click();
   await ui!.ended(cancelled, 30_000);
   const c = await ui!.events(cancelled);
@@ -562,6 +563,7 @@ async function rehearsal(): Promise<void> {
   if (!isEngine(victim.pid, victim.instanceId, uid)) throw new Refused(`pid ${victim.pid} isn't engine ${victim.instanceId}; nothing was killed.`);
   keepLogs(profiles.main, "before-kill");
   process.kill(victim.pid, "SIGKILL");
+  await ui!.toDiagnostics();
   await ui!.page.getByTestId("engine-failed").waitFor({ timeout: 30_000 });
   await ui!.page.getByTestId("engine-restart").click();
   const revived = await engineOnline("after a kill");
@@ -624,6 +626,7 @@ async function live(): Promise<void> {
   const headA = acceptance.fixtures.A!.head;
 
   // 1. The key: typed by the person; this only waits for Settings to say one is saved.
+  await ui!.toConnections();
   await ui!.page.getByTestId("nebius-key").focus();
   log("→ Type your Nebius key into Settings in the Nivra window and press Save. Waiting up to 15 minutes…");
   await waitFor(async () => ["encrypted", "unencrypted"].includes((await ui!.settings()).nebiusKey), 15 * 60_000, "a saved key");
@@ -771,6 +774,7 @@ async function live(): Promise<void> {
     const callsBefore = (await ui!.events(runId)).events.filter((e) => e.type === "model.call").length;
     keepLogs(profiles.main, "before-kill");
     process.kill(victim.pid, "SIGKILL");
+    await ui!.toDiagnostics();
     await ui!.page.getByTestId("engine-failed").waitFor({ timeout: 30_000 });
     await ui!.page.getByTestId("engine-restart").click();
     const revived = await engineOnline("after a kill");

@@ -1,11 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
 import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, type EnvironmentChoices } from "@nivra/domain";
+import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, requestMsFor, TASK_RUN_BOUNDS, type EnvironmentChoices } from "@nivra/domain";
+import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining } from "@nivra/domain";
 import { z } from "zod";
-import { IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type SettingsView } from "../shared/ipc.ts";
+import { containsSavedKey, DRAFT_CHECK_FAILED, DRAFT_KEY_NAMES } from "./draft-keys.ts";
+import { COPY_TEXT_CHARS, DRAFT_CHECK_CHARS, IPC, REVIEW_PANELS, TASK_STATES, type AppInfo, type ExportResult, type ImportPreviewResult, type RunLimitsView, type SettingsView } from "../shared/ipc.ts";
 import { Host } from "./host.ts";
 import { HostStore, readSmallFile, writePrivateFile } from "./host-store.ts";
 import { SecretStore, type KeyCrypto } from "./secret-store.ts";
@@ -115,6 +117,26 @@ function start(): void {
     platform: process.platform,
     packaged: app.isPackaged,
   }));
+  // Copy buttons (NIV-56): only text a person asked to copy, and only so much of it; the window never reaches the clipboard.
+  handle(IPC.copyText, z.tuple([z.unknown()]), (_event, text) => {
+    if (typeof text !== "string") throw new Error("Nivra copies only text, so nothing was copied.");
+    if (text.length > COPY_TEXT_CHARS) throw new Error(`That is ${text.length.toLocaleString("en-GB")} characters, more than the ${COPY_TEXT_CHARS.toLocaleString("en-GB")} Nivra copies at once, so nothing was copied.`);
+    clipboard.writeText(text);
+  });
+  // Drafts (NIV-56): whether typed text holds a whole saved API key. Only the answer goes back, and nothing is logged: a
+  // failure, such as a key that can't be read, gets fixed words, never the draft or a key, and the window counts the
+  // draft as unchecked.
+  handle(IPC.draftHasSavedKey, z.tuple([z.unknown()]), async (_event, text) => {
+    if (typeof text !== "string" || text.length > DRAFT_CHECK_CHARS) throw new Error(`Nivra checks a draft of at most ${DRAFT_CHECK_CHARS.toLocaleString("en-GB")} characters of text, so this one wasn't checked.`);
+    // The strict read: a file or a key that can't be read throws, so it is never taken as no keys.
+    let values: string[];
+    try {
+      values = await secrets.draftCheckValues(DRAFT_KEY_NAMES);
+    } catch {
+      throw new Error(DRAFT_CHECK_FAILED);
+    }
+    return containsSavedKey(text, values);
+  });
   handle(IPC.listEngines, none, () => host.engines());
   handle(IPC.openProject, project, (_event, id) => host.open(id));
   handle(IPC.restartEngine, project, (_event, id) => host.restart(id));
@@ -297,6 +319,20 @@ function start(): void {
   handle(IPC.setTaskState, z.tuple([Id, Revision, z.enum(TASK_STATES)]), (_event, id, revision, state) => host.setTaskState(id, revision, state));
   handle(IPC.renameTask, z.tuple([Id, Revision, LongText]), (_event, id, revision, title) => host.renameTask(id, revision, title));
   handle(IPC.deleteTask, z.tuple([Id]), (_event, id) => host.deleteTask(id));
+  // The bounds no brief changes (Settings › Budget and usage): the domain's own values and derivations, as the engine
+  // reads them; none is copied or worked out again here, and the engine stays the one that enforces them.
+  handle(IPC.getRunLimits, none, (): RunLimitsView => ({
+    modelRequests: TASK_RUN_BOUNDS.modelRequests,
+    requestSeconds: requestMsFor(TASK_RUN_BOUNDS.outputTokensPerRequest) / 1000,
+    outputTokensPerRequest: TASK_RUN_BOUNDS.outputTokensPerRequest,
+    estimatedInputTokens: TASK_RUN_BOUNDS.estimatedInputTokens,
+    toolCalls: TASK_RUN_BOUNDS.toolCalls,
+    writes: TASK_RUN_BOUNDS.writes,
+    runs: TASK_RUN_BOUNDS.runs,
+    checkSeconds: TASK_RUN_BOUNDS.checkSeconds,
+    sessionMinutes: TASK_RUN_BOUNDS.sessionMinutes,
+    runMinutes: TASK_RUN_BOUNDS.runMinutes,
+  }));
   handle(IPC.previewTaskRun, z.tuple([Id]), (_event, id) => host.previewTaskRun(id));
   handle(IPC.startTaskRun, z.tuple([Id, Fingerprint, Fingerprint]), (_event, id, expected, snapshot) => host.startTaskRun(id, expected, snapshot));
   handle(IPC.cancelTaskRun, z.tuple([Id, Id]), (_event, id, attemptId) => host.cancelTaskRun(id, attemptId));
@@ -330,6 +366,13 @@ function start(): void {
   handle(IPC.listCoachings, z.tuple([Id]), (_event, id) => host.coachings(id));
   handle(IPC.cancelCoach, z.tuple([Id, Id]), (_event, id, coachingId) => host.cancelCoach(id, coachingId));
   handle(IPC.acceptCoachChanges, z.tuple([Id, Revision, Id, z.array(CoachField).max(CoachField.options.length)]), (_event, id, revision, coachingId, fields) => host.acceptCoachChanges(id, revision, coachingId, fields));
+  // The shared monthly budget (NIV-66).
+  handle(IPC.getBudgetPolicy, none, () => host.getBudgetPolicy());
+  handle(IPC.setBudgetPolicy, z.tuple([BudgetPolicyDraft.nullable()]), (_event, draft) => host.setBudgetPolicy(draft));
+  handle(IPC.budgetSummary, none, () => host.budgetSummary());
+  handle(IPC.budgetPrices, none, () => host.budgetPrices());
+  handle(IPC.confirmBudgetMonth, z.tuple([BudgetMonthLabel]), (_event, month) => host.confirmBudgetMonth(month));
+  handle(IPC.startNewBudgetHistory, z.tuple([BudgetRemaining.nullable()]), (_event, remaining) => host.startNewBudgetHistory(remaining));
   handle(IPC.getSettings, none, () => settings());
   handle(IPC.checkTokenFactory, project, (_event, id) => host.checkTokenFactory(id));
   handle(IPC.setNebiusKey, z.tuple([z.string().trim().min(8).max(4_096).nullable()]), async (_event, key) => {

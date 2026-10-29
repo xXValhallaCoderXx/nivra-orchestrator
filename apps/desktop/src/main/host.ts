@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   baselinePattern,
   CHAT_LIMITS,
@@ -61,6 +62,7 @@ import {
   type TaskInput,
   type TaskReport,
 } from "@nivra/domain";
+import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining, CURRENT_PRICES, monthOf, type BudgetPolicy, type BudgetRecovery, type BudgetSummary, type PriceCatalogue } from "@nivra/domain";
 import type {
   AddProjectResult,
   AttemptAction,
@@ -99,6 +101,32 @@ import type {
 } from "../shared/ipc.ts";
 import type { CoachingView, CoachPreview, CoachSelection } from "../shared/coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView, StopCause } from "../shared/research.ts";
+import {
+  BUDGET_GUARD_FAILED,
+  BUDGET_GUARD_FAILED_AFTER_SAVE,
+  BUDGET_HISTORY_UNREADABLE,
+  BUDGET_NEEDS_RECOVERY,
+  BudgetGuard,
+  checkHistory,
+  CLOCK_TOLERANCE_MS,
+  guardErrorCode,
+  type LedgerView,
+} from "./budget-guard.ts";
+import {
+  answeredRecovery,
+  budgetSummary,
+  chainAt,
+  confirmMonth,
+  currentPolicy,
+  ensureDurable,
+  establishedMonth,
+  latestLedgerTime,
+  ledgerState,
+  recordClockJump,
+  setPolicy,
+  startNewHistory,
+  type LedgerState,
+} from "./budget-store.ts";
 import {
   acceptBuilds,
   environmentOf,
@@ -262,6 +290,8 @@ export interface HostOptions {
   /** Supervisor timings; tests shorten them. */
   supervisor?: Pick<SupervisorOptions, "heartbeatMs" | "shutdownGraceMs" | "eofGraceMs" | "startTimeoutMs">;
   log: (line: string) => void;
+  /** Tests only: the price list the budget prices with, in place of the app's own (CURRENT_PRICES). */
+  prices?: PriceCatalogue;
   /** Tests only: called between fetching a turn's reply and writing it, so a deletion can land there. */
   testHooks?: {
     beforeProjection?(turnId: string): Promise<void>;
@@ -4875,6 +4905,168 @@ export class Host {
     const reason = this.#unavailable.get(targetId);
     if (reason) return { targetId, label, state: { status: "failed", reason, code: "target-unavailable", logPath: null }, warnings: [] };
     return { targetId, label, state: { status: "stopped" }, warnings: [] };
+  }
+
+  // ------------------------------------------------------------------------------------------------ the shared budget (NIV-66)
+
+  /** The budget this session: checked once, before the first budget call, against the guard beside the workspace. */
+  #budgetState: { kind: "ready" } | { kind: "needs-recovery"; recovery: BudgetRecovery } | { kind: "unavailable"; message: string } | null = null;
+  #budgetGuard: BudgetGuard | null = null;
+  /** The wall clock and the monotonic clock when the budget was first checked, for noting a clock that jumps. */
+  #budgetClock: { wall: number; mono: number } | null = null;
+
+  /**
+   * The workspace's ledger, checked against its guard once per session. A ledger that is missing, another, behind the
+   * guard's revision (a backup put back, even holding the same number of grants) or diverged from it means the budget
+   * history needs recovery, which the guard records so it survives a restart. A guard that can't be read or written
+   * stops all spending.
+   */
+  #budget(): { workspace: WorkspaceDb; guard: BudgetGuard; recovery: BudgetRecovery | null } {
+    const opening = this.#workspace;
+    if (opening.state !== "ready") throw new Error(`Nivra keeps your budget with your history, which isn't available: ${opening.reason}`);
+    const guard = (this.#budgetGuard ??= new BudgetGuard(join(dirname(this.#options.workspacePath), "budget-guard.log")));
+    if (this.#budgetState === null) {
+      try {
+        ensureDurable(opening.db);
+        const ledger = ledgerState(opening.db);
+        const last = guard.last();
+        const view: LedgerView | null =
+          ledger === null ? null : { ...ledger, month: establishedMonth(opening.db), chainAtGuard: last === null ? null : chainAt(opening.db, last.ledgerId, last.revision), answered: answeredRecovery(opening.db) };
+        const check = checkHistory(last, view, opening.notice !== null, Date.now());
+        if (check.append) guard.append(check.append);
+        this.#budgetState = check.state === "needs-recovery" ? { kind: "needs-recovery", recovery: check.recovery } : { kind: "ready" };
+        if (check.state === "needs-recovery") this.#options.log(`Budget: the history needs recovery (${check.recovery.reason}).`);
+      } catch (error) {
+        // A file system error is the guard's; anything else, such as SQLite's, is the history's own.
+        const guardFailed = typeof (error as NodeJS.ErrnoException | null)?.code === "string" && !String((error as NodeJS.ErrnoException).code).startsWith("ERR_SQLITE");
+        this.#budgetState = { kind: "unavailable", message: guardFailed ? BUDGET_GUARD_FAILED : BUDGET_HISTORY_UNREADABLE };
+        this.#options.log(`Budget: ${guardFailed ? "the guard" : "the history"} couldn't be read or written (${guardErrorCode(error)}).`);
+      }
+    }
+    if (this.#budgetState.kind === "unavailable") throw new Error(this.#budgetState.message);
+    this.#noteBudgetClock(opening.db);
+    return { workspace: opening.db, guard, recovery: this.#budgetState.kind === "needs-recovery" ? this.#budgetState.recovery : null };
+  }
+
+  /**
+   * Records the ledger's new revision in the guard, with the latest month it has established, after its transaction
+   * committed and before anything that depends on it. When that fails, the change stands (the guard catches up at the
+   * next start) but nothing more is spent this session.
+   */
+  #guardBudget(guard: BudgetGuard, workspace: WorkspaceDb, authority: LedgerState, now: number): void {
+    let month: string | null;
+    try {
+      month = establishedMonth(workspace);
+    } catch (error) {
+      // The change is saved, but its month can't be read back, so it can't be recorded and nothing more is spent.
+      this.#budgetState = { kind: "unavailable", message: BUDGET_HISTORY_UNREADABLE };
+      this.#options.log(`Budget: the history couldn't be read after a change (${guardErrorCode(error)}).`);
+      throw new Error(BUDGET_HISTORY_UNREADABLE);
+    }
+    try {
+      guard.append({ ledgerId: authority.ledgerId, revision: authority.revision, chain: authority.chain, month, recovery: null, at: new Date(now).toISOString() });
+    } catch (error) {
+      this.#budgetState = { kind: "unavailable", message: BUDGET_GUARD_FAILED };
+      this.#options.log(`Budget: the guard couldn't be written (${guardErrorCode(error)}).`);
+      throw new Error(BUDGET_GUARD_FAILED_AFTER_SAVE);
+    }
+  }
+
+  /** Notes a jump of the computer's clock: back past the ledger's last record, or apart from the monotonic clock. A jump changes no allowance. */
+  #noteBudgetClock(workspace: WorkspaceDb): void {
+    const now = Date.now();
+    const mono = performance.now();
+    if (this.#budgetClock === null) {
+      this.#budgetClock = { wall: now, mono };
+      const latest = latestLedgerTime(workspace);
+      if (latest !== null && now < latest - CLOCK_TOLERANCE_MS) recordClockJump(workspace, "jump-back", now, now - latest);
+      return;
+    }
+    const drift = now - this.#budgetClock.wall - (mono - this.#budgetClock.mono);
+    if (Math.abs(drift) <= CLOCK_TOLERANCE_MS) return;
+    recordClockJump(workspace, drift > 0 ? "jump-forward" : "jump-back", now, drift);
+    this.#budgetClock = { wall: now, mono };
+  }
+
+  /** The price list new grants are priced with: the app's own, unless a test gives another. */
+  get #prices(): PriceCatalogue {
+    return this.#options.prices ?? CURRENT_PRICES;
+  }
+
+  /** The zone budget months count in: the policy's, or this computer's before there is one. */
+  #budgetZone(workspace: WorkspaceDb): string {
+    return currentPolicy(workspace)?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  }
+
+  /** The person's current budget policy, or null before they chose one. */
+  async getBudgetPolicy(): Promise<BudgetPolicy | null> {
+    return currentPolicy(this.#budget().workspace);
+  }
+
+  /**
+   * Saves the person's choice as the next policy version, or with null turns the monthly budget off, recording its
+   * revision in the guard before answering. What was spent, reserved or left uncertain stays as it was. Refused while
+   * the budget history needs recovery, and for a budget in dollars the price list can't keep yet, saying why and
+   * leaving the budget as it was: never turned off or into counts alone, which stays the person's own choice.
+   */
+  async setBudgetPolicy(draft: BudgetPolicyDraft | null): Promise<BudgetSummary> {
+    const parsed = draft === null ? null : BudgetPolicyDraft.parse(draft);
+    const { workspace, guard, recovery } = this.#budget();
+    if (recovery) throw new Error(BUDGET_NEEDS_RECOVERY);
+    const now = Date.now();
+    const { authority } = setPolicy(workspace, parsed, now, this.#prices);
+    if (authority) this.#guardBudget(guard, workspace, authority, now);
+    return budgetSummary(workspace, { now, catalogue: this.#prices, recovery: null, timezone: this.#budgetZone(workspace) });
+  }
+
+  /** The current month as the ledger counts it, with every reason its totals can't be read as complete. */
+  async budgetSummary(): Promise<BudgetSummary> {
+    const { workspace, recovery } = this.#budget();
+    return budgetSummary(workspace, { now: Date.now(), catalogue: this.#prices, recovery, timezone: this.#budgetZone(workspace) });
+  }
+
+  /** The price list Nivra counts with, and what about it isn't established yet. */
+  async budgetPrices(): Promise<PriceCatalogue> {
+    return this.#prices;
+  }
+
+  /**
+   * The person confirms that a new budget month has begun, when the provider's clock hasn't shown it yet: the month
+   * the summary showed them by this computer's clock, by its label.
+   */
+  async confirmBudgetMonth(month: string): Promise<BudgetSummary> {
+    const label = BudgetMonthLabel.parse(month);
+    const { workspace, guard, recovery } = this.#budget();
+    if (recovery) throw new Error(BUDGET_NEEDS_RECOVERY);
+    const now = Date.now();
+    const zone = this.#budgetZone(workspace);
+    const confirmed = confirmMonth(workspace, label, now, zone);
+    if ("refused" in confirmed) {
+      throw new Error(
+        confirmed.refused === "not-shown"
+          ? `By this computer's clock it's now ${monthOf(now, zone).label}, not ${label}, so that month wasn't confirmed. Look at your budget again, then confirm the month it shows.`
+          : "By this computer's clock it's still the same budget month, so there's no new month to confirm.",
+      );
+    }
+    this.#guardBudget(guard, workspace, confirmed.authority, now);
+    return budgetSummary(workspace, { now, catalogue: this.#prices, recovery: null, timezone: zone });
+  }
+
+  /**
+   * Starts a new budget history after a loss, with what the person says is left of this month (money, and each counted
+   * service), or null to wait for the next. The ledger takes a new id, so no copy of the lost history can later pass for
+   * it, and every grant still open becomes uncertain. Spend before it stays unknown, never zero. Only while the budget
+   * history needs recovery.
+   */
+  async startNewBudgetHistory(remaining: BudgetRemaining | null): Promise<BudgetSummary> {
+    const left = remaining === null ? null : BudgetRemaining.parse(remaining);
+    const { workspace, guard, recovery } = this.#budget();
+    if (!recovery) throw new Error("Nivra's budget history doesn't need recovery, so there's nothing to start again.");
+    const now = Date.now();
+    const zone = this.#budgetZone(workspace);
+    this.#guardBudget(guard, workspace, startNewHistory(workspace, { recovery, remaining: left, now, timezone: zone }), now);
+    this.#budgetState = { kind: "ready" };
+    return budgetSummary(workspace, { now, catalogue: this.#prices, recovery: null, timezone: zone });
   }
 }
 

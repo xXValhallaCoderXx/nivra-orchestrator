@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 import { RELEASE_HOME_STATE, releaseHomeChange, REMOVE_TEST_HOME, STALE_TEST_HOMES, testWslHome } from "../scripts/test-homes.ts";
 
 /**
@@ -83,6 +84,7 @@ async function pick(path: string) {
   await app.evaluate(async ({ dialog }, picked) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [picked] })) as typeof dialog.showOpenDialog;
   }, path);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
 }
 
@@ -99,6 +101,7 @@ async function expectedFor(targetId: string): Promise<{ ids: string[]; digest: s
 async function helloContext(): Promise<{ ids: string[]; digest: string }> {
   const status = page.getByTestId("hello-status");
   const previous = (await status.count()) ? await status.getAttribute("data-run-id") : null;
+  await goTo(page, "settings-diagnostics");
   await page.getByTestId("hello-start").click();
   await expect.poll(async () => ((await status.count()) ? await status.getAttribute("data-run-id") : previous) !== previous).toBe(true);
   const runId = (await status.getAttribute("data-run-id"))!;
@@ -109,6 +112,7 @@ async function helloContext(): Promise<{ ids: string[]; digest: string }> {
 }
 
 async function confirmPreference(statement: string, scope: string) {
+  await goTo(page, "settings-preferences");
   await page.getByTestId("preference-scope").getByText(scope, { exact: true }).click();
   await page.getByTestId("preference-input").fill(statement);
   await page.getByTestId("preference-confirm").click();
@@ -147,6 +151,7 @@ test("a \\\\wsl.localhost folder runs in its distribution, provisioned on first 
 });
 
 test("a run held on WSL keeps going on its own engine while a Windows folder starts and works on the native engine (the review's race)", async () => {
+  await goTo(page, "settings-diagnostics");
   await page.getByText("60 s", { exact: true }).click();
   await page.getByTestId("hello-start").click();
   await expect(page.getByTestId("hello-timeline")).toContainText("Holding a child process");
@@ -158,6 +163,7 @@ test("a run held on WSL keeps going on its own engine while a Windows folder sta
   const native = (await engineInfo("local"))!;
   expect(native.platform).toBe("win32");
   engines.native = native.pid;
+  await goTo(page, "settings-diagnostics");
   await page.getByText("0 s", { exact: true }).click();
   await confirmPreference("Windows checkouts keep CRLF line endings", "repo ü%# only");
   const forNative = await expectedFor("local");
@@ -185,6 +191,7 @@ test("explaining on either engine asks for the project's consent, then fails bef
   expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");
   for (const target of [`${distro} · WSL`, "Windows · Local"]) {
     await choose(target);
+    await goTo(page, "explain");
     const status = page.getByTestId("explain-status");
     const previous = (await status.count()) ? await status.getAttribute("data-run-id") : null;
     await page.getByTestId("explain-start").click();

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 import type { EnvironmentChoices, InstallScope } from "@nivra/domain";
 import type { BriefFields } from "../src/shared/ipc";
 
@@ -54,6 +55,7 @@ test.beforeAll(async ({}, testInfo) => {
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, repo);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 });
@@ -69,6 +71,7 @@ test("prepares a project's environment from the window: its own setup shown, its
     await window.nivra.setNebiusKey("test-key-0123456789");
     await window.nivra.setNebiusProjectId("project-e00e2eenvironment");
   });
+  await goTo(page, "environment");
   const section = page.getByTestId("environment");
   await expect(section.getByTestId("environment-none")).toContainText("No environment is prepared for this project yet");
   // The project pins two Nodes: the person chooses, and nothing can be prepared until they do.

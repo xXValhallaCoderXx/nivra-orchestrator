@@ -29,6 +29,9 @@ export type KeyState = "none" | "encrypted" | "unencrypted" | "unreadable";
 
 type Stored = { scheme: "safeStorage" | "plain"; value: string };
 
+/** The strict read's failure (`draftCheckValues`), in fixed words: never the file's text or a value. */
+export const SECRETS_UNREADABLE = "Nivra couldn't read the keys it keeps.";
+
 export class SecretStore {
   readonly #path: string;
   readonly #crypto: KeyCrypto;
@@ -137,6 +140,40 @@ export class SecretStore {
       else data[name] = entry;
       this.#write(data);
     });
+  }
+
+  /**
+   * The saved values of `names`, for the draft check only (NIV-56; Nate: an unreadable key or a failed check never
+   * counts as safe). Unlike every other read here, it is strict: a missing file means no keys, but a file that can't be
+   * read or isn't the store's JSON, or a key that can't be decrypted, throws. It reads the file once and decrypts each key
+   * once, and never re-encrypts or writes: it runs on every change to a draft. Its error is fixed words, never the file's
+   * text or a value.
+   */
+  async draftCheckValues(names: readonly SecretName[]): Promise<string[]> {
+    let data: unknown;
+    try {
+      data = JSON.parse(readFileSync(this.#path, "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw new Error(SECRETS_UNREADABLE);
+    }
+    if (data === null || typeof data !== "object" || Array.isArray(data)) throw new Error(SECRETS_UNREADABLE);
+    const values: string[] = [];
+    for (const name of names) {
+      if (!Object.hasOwn(data, name)) continue;
+      const stored = (data as Record<string, unknown>)[name] as Partial<Stored> | null;
+      if (!stored || typeof stored.value !== "string" || (stored.scheme !== "plain" && stored.scheme !== "safeStorage")) throw new Error(SECRETS_UNREADABLE);
+      if (stored.scheme === "plain") {
+        values.push(Buffer.from(stored.value, "base64").toString("utf8"));
+        continue;
+      }
+      try {
+        values.push((await this.#crypto.decrypt(Buffer.from(stored.value, "base64"))).result);
+      } catch {
+        throw new Error(SECRETS_UNREADABLE);
+      }
+    }
+    return values;
   }
 
   /**

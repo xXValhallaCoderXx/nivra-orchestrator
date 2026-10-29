@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { TASK_MODEL } from "@nivra/domain";
+import { openSwitcher } from "./places.ts";
 import { CHECK_IMAGE } from "../../engine/src/exec/check.ts";
 import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
 import { RealGuest } from "../../engine/test/real-guest.ts";
@@ -57,6 +58,7 @@ test.beforeAll(async ({}, testInfo) => {
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, repo);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 });
@@ -102,6 +104,12 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   // Neither consent is given yet: each is asked for in the preview, in its own dialog's words, and the start waits.
   await page.getByTestId("task-run").click();
   const preview = page.getByTestId("task-run-preview-body");
+  await expect(preview.getByTestId("task-run-preview-snapshot")).toContainText("2 files");
+  // Esc closes the preview and sends nothing; previewing again works it out afresh (NIV-56, G3).
+  await page.keyboard.press("Escape");
+  await expect(preview).toBeHidden();
+  expect([sandbox.requests.length, model.chats().length]).toEqual([0, 0]);
+  await page.getByTestId("task-run").click();
   await expect(preview.getByTestId("task-run-preview-snapshot")).toContainText("2 files");
   await expect(preview).toContainText("To Token Factory, as the project's sharing allows (off)");
   await expect(preview.getByTestId("task-run-ask-uploads")).toContainText("it is for this project only: its sandbox checks, its environment and its task runs");

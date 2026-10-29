@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { goTo, openSwitcher } from "./places.ts";
 import { httpError, startStub, toolCall, type Reply, type Stub, type StubRequest } from "../../engine/test/stub-token-factory.ts";
 
 /**
@@ -58,6 +59,7 @@ test.beforeAll(async ({}, testInfo) => {
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, repo);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 });
@@ -71,6 +73,7 @@ test.afterAll(async () => {
 test("explaining asks for the project's consent first, then shows checked and unchecked citations", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
   await page.evaluate(() => window.nivra.setNebiusKey("test-key-0123456789"));
+  await goTo(page, "explain");
   await page.getByTestId("explain-question").fill("Which naming convention do component files follow?");
   await page.getByTestId("explain-start").click();
   await expect(page.getByTestId("explain-consent").getByText("excerpts and paths from the project's tracked files")).toBeVisible();
@@ -106,6 +109,7 @@ test("explaining asks for the project's consent first, then shows checked and un
 test("turning sharing off refuses the next explanation before any request", async () => {
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
   const before = stub.requests.length;
+  await goTo(page, "explain");
   await page.getByTestId("explain-sharing-off").click();
   await expect(page.getByTestId("explain-sharing")).toHaveCount(0);
   await page.getByTestId("explain-start").click();
@@ -120,6 +124,7 @@ test("a conflict shows what the code does now, what governs this task and why, a
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
   const statement = "Name component files in PascalCase";
   const choice = "Keep kebab-case for this task";
+  await goTo(page, "settings-preferences");
   await page.getByTestId("preference-scope").getByText("Every project", { exact: true }).click();
   await page.getByTestId("preference-input").fill(statement);
   await page.getByTestId("preference-confirm").click();
@@ -128,6 +133,7 @@ test("a conflict shows what the code does now, what governs this task and why, a
   const conflict = { topic: "component file names", repositoryConvention: "Component files use kebab-case.", citations: [{ path: "README.md", startLine: 2, endLine: 2 }], preferenceIds: [id], choiceIds: ["c1"] };
   more = (request) => (request.raw.includes('"role":"tool"') ? toolCall("submit_answer", { ...ANSWER, conflicts: [conflict] }, { id: "d1" }) : toolCall("read_file", { path: "README.md" }, { id: "d0" }));
 
+  await goTo(page, "explain");
   await page.getByTestId("explain-choice-add").click();
   await page.getByTestId("explain-choice").fill(choice);
   // The previous test turned sharing off, so consent is asked for again.
@@ -143,6 +149,7 @@ test("a conflict shows what the code does now, what governs this task and why, a
   await expect(shown.getByTestId("explain-conflict-others")).toContainText("the repository's convention Component files use kebab-case.");
 
   const row = page.locator(`[data-testid="preference-row"][data-preference-id="${id}"]`);
+  await goTo(page, "settings-preferences");
   await row.getByTestId("preference-edit").click();
   await row.getByTestId("preference-edit-input").fill(`${statement}, always`);
   await row.getByTestId("preference-save").click();
@@ -160,6 +167,7 @@ test("a suggestion can be kept, in the person's own wording, as the project's ow
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
   const suggestion = { statement: "Name component files in kebab-case", citations: [{ path: "README.md", startLine: 2, endLine: 2 }] };
   more = (request) => (request.raw.includes('"role":"tool"') ? toolCall("submit_answer", { ...ANSWER, suggestions: [suggestion] }, { id: "k1" }) : toolCall("read_file", { path: "README.md" }, { id: "k0" }));
+  await goTo(page, "explain");
   while (await page.getByTestId("explain-choice-remove").count()) await page.getByTestId("explain-choice-remove").first().click();
   await page.getByTestId("explain-start").click();
   const item = page.getByTestId("explain-suggestion");
@@ -180,6 +188,7 @@ test("an answer with no findings is asked for them once, then shown labelled, ne
   test.skip(packaged, "a packaged app ignores the test endpoint switch");
   const before = stub.chats().length;
   more = (request) => (request.raw.includes('"role":"tool"') ? toolCall("submit_answer", { ...ANSWER, findings: [] }, { id: "n1" }) : toolCall("read_file", { path: "README.md" }, { id: "n0" }));
+  await goTo(page, "explain");
   while (await page.getByTestId("explain-choice-remove").count()) await page.getByTestId("explain-choice-remove").first().click();
   await page.getByTestId("explain-start").click();
   await expect(page.getByTestId("explain-standing")).toHaveAttribute("data-standing", "no-findings");
@@ -196,8 +205,10 @@ test("an answer with no findings is asked for them once, then shown labelled, ne
 
 test("a packaged app ignores the test endpoint switch, and explaining without a key fails before any request", async () => {
   test.skip(!packaged, "only a packaged app ignores the switch");
+  await goTo(page, "settings-diagnostics");
   await page.getByTestId("doctor-run").click();
   await expect(page.getByTestId("doctor-report")).toContainText("Nebius Token Factory");
+  await goTo(page, "explain");
   await page.getByTestId("explain-start").click();
   await page.getByTestId("explain-consent-allow").click();
   await expect(page.getByTestId("explain-status")).toHaveText("failed");

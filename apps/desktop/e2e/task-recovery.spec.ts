@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { TASK_MODEL } from "@nivra/domain";
+import { openSwitcher } from "./places.ts";
 import { CHECK_IMAGE } from "../../engine/src/exec/check.ts";
 import { TOOLCHAIN_SCRIPT } from "../../engine/src/task/scripts.ts";
 import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
@@ -157,6 +158,7 @@ test.beforeAll(async ({}, testInfo) => {
   await app.evaluate(async ({ dialog }, path) => {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog;
   }, repo);
+  await openSwitcher(page);
   await page.getByTestId("project-add").click();
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
   if (packaged) return;
@@ -189,6 +191,10 @@ test("cancels a run while its worker waits on the model: it ends cancelled, and 
   const card = await startRun();
   await expect.poll(() => model.chats().length, { timeout: 60_000 }).toBe(chats + 1);
   const sent = { spawns: spawns(), uploads: uploads(), chats: model.chats().length };
+  // Esc never stops a run: only Stop does (NIV-56, G3).
+  await page.keyboard.press("Escape");
+  await expect(card).toHaveAttribute("data-status", "running");
+  await expect(card.getByTestId("task-attempt-cancel")).toHaveText("Stop");
   await card.getByTestId("task-attempt-cancel").click();
   await expect(card).toHaveAttribute("data-status", "cancelled", { timeout: 60_000 });
   // The held request may still answer; nothing after the cancel was admitted: no operation, upload or model request.

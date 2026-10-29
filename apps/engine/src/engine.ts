@@ -389,9 +389,10 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     const project = vault.get("NEBIUS_PROJECT_ID");
     return key && project ? { key, project } : null;
   };
-  // The key refuses a commit, or a change, that holds it (D34). The project id doesn't: it names the account the
-  // upload goes to, so a commit naming it, as infrastructure code does, sends Nebius nothing it doesn't know.
-  const knownValues = () => (["NEBIUS_API_KEY"] as const).flatMap((name) => vault.get(name) ?? []);
+  // The keys refuse a commit, or a change, that holds them (D34, D37): the Nebius key and the Tavily key, as for a task.
+  // The project id doesn't: it names the account the upload goes to, so a commit naming it, as infrastructure code
+  // does, sends Nebius nothing it doesn't know.
+  const knownValues = () => (["NEBIUS_API_KEY", "TAVILY_API_KEY"] as const).flatMap((name) => vault.get(name) ?? []);
   const sandboxLimits = {
     ...NEBIUS_LIMITS,
     maxOperations: CHECK_LIMITS.maxOperations,

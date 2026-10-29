@@ -467,6 +467,14 @@ cd apps/desktop && xvfb-run -a pnpm -s test:e2e task-run.spec.ts
   `task-run.spec.ts` writes an acceptance case into a brief, gives both consents in the Run preview, runs the task,
   and reads what Nivra found, with the checkout untouched. The host's tests run the WSL stand-in target, since a host
   on Windows refuses a task on the local one; `wslEntry` puts the gated engine there for lost answers.
+- **The task page's hooks** (NIV-56, G3). The shown run's area carries `task-attempt` (its status and id) and, once
+  approved, `task-apply` (its status and resolution) around both columns, so a spec finds a run's parts inside them
+  wherever the layout puts them: the result, checks and change in the main column, the decision in the aside, or
+  after the result in a narrow window. Rename, Change repository and Delete sit behind `task-more`; the aside's tabs
+  are `task-tab-brief`, `task-tab-coach` and `task-tab-runs`, and choosing the coach's gives it the main column.
+  Every tab and the coach stay mounted when hidden, so a count or a text can be read without opening them; a press
+  needs them open. The narrow-window test runs at 656 px (820 at 125%), below the page's 48em breakpoint: at 547 px
+  the shell's navigation covers the page until it collapses below its own breakpoint.
 - **The live toolchain probe** (`apps/engine/scripts/task-probe.ts`): five operations on Nebius with no model, the
   fixture only. `--plan` prints the recipe with no network; `--run --credentials <file>` needs an approval of that
   recipe, and refuses a fixture or write that isn't the pinned one; `--recover <folder>` settles what a cut-short
@@ -661,6 +669,13 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-journey.spec.ts task-reco
   run passes only on exactly that stop, with nothing kept (and, for an install, its log's end), and no task is created.
   Nothing in the script names a repository. A rehearsal reads the protected homes only once its app is closed.
 
+A task run's bounds that no brief changes live in `packages/domain/src/task.ts`: `TASK_RUN_BOUNDS` (requests, the
+output cap, the hand-in's cap, the rate, a request's input time, the input estimate, tool calls, writes, runs, a check's
+seconds, and the session's and the run's minutes), with `requestMsFor` (a request's time from its cap: 830 s for 8,000
+tokens, 180 s for the hand-in's 1,500) and `minutesMs`. The engine's `TASK_LIMITS` (`apps/engine/src/task/limits.ts`)
+reads them as it reads `TASK_BRIEF_LIMITS`, and copies none; so does main's `getRunLimits`, which Settings › Budget and
+usage shows. The engine is the only one that enforces them. The tests still pin each number on its own.
+
 The engine's fetch (D47): at start, before any request, the engine makes undici's agent, with 15 minutes' waits for a
 reply's headers and body, the global dispatcher that Node's own fetch reads (`apps/engine/src/providers/transport.ts`),
 since a model's reply is not streamed and comes whole; with `NODE_USE_ENV_PROXY=1` it is undici's `EnvHttpProxyAgent`,
@@ -708,6 +723,66 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-coach.spec.ts
   version and before the applied mark. The host's test throws there to show that both or neither are kept.
 - **Track B's seam** (D42): `validateBinding` runs inside that transaction; `missionContextForTask` lists a task's
   mission and the findings about it for the person to tick.
+
+The shared monthly budget (NIV-66, D49): the host keeps its ledger in `workspace.db` and its guard, `budget-guard.log`,
+beside it in Electron's user-data folder. Nothing spends through it yet: grants reach model calls with lane C's PR 2a.
+Six calls on `window.nivra` drive it, for the budget screen and the development harness alike:
+
+```
+getBudgetPolicy()                         the current policy, or null
+setBudgetPolicy(draft)                    saves the next policy version; null turns the monthly budget off
+budgetSummary()                           this month: money (null when unknown), usage, counted services, gaps, clock
+budgetPrices()                            the price list Nivra counts with
+confirmBudgetMonth(month)                 confirms the new month the summary showed, by its label, such as 2026-11
+startNewBudgetHistory(remaining)          after a loss: what is left this month ({ micros, allowances }), or null to wait
+```
+
+```bash
+(cd packages/domain && node --test test/budget.test.ts)
+(cd apps/desktop && node --test test/budget-store.test.ts test/budget-guard.test.ts test/host-budget.test.ts)
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e budget-api.spec.ts
+```
+
+- **The harness sets a policy** the way it already calls `window.nivra` for keys and checks, through
+  `apps/desktop/scripts/live-ui.ts`: the same preload, IPC, trusted-sender check and validation the screen uses.
+- **Amounts** are integer micro-units (25 dollars is 25000000). A budget in dollars is set only when the price list's
+  currency, every model's bounds and free listings are established, and today's aren't: `setBudgetPolicy` refuses one
+  with the reason and saves nothing, and `null` (the budget off: the existing per-run limits apply) keeps recording.
+  With the budget off, a call to a model the price list doesn't have is counted, its money unknown; under a dollar
+  budget it is refused. Tests set dollar budgets through the host's `prices` option (tests only), with a test list. A
+  call that reaches no model costs no money.
+- **A history put back.** Close Nivra, replace `workspace.db` with the matching copy, and open Nivra: the check at the
+  first budget call clears the recovery once the ledger holds the guard's last revision and digest again. Deleting
+  `budget-guard.log` while the workspace exists rebuilds it from the ledger (after a loss was found and before it was
+  resolved, that clears the recorded recovery: one of D49's known limits). `budget-guard.test.ts` makes these faults
+  with real files: it takes backups at each point the plan names, does paid work, and puts them back.
+- **A new history's restriction** (the wait, or what is left) holds through the summary's `afterLoss.through`: the
+  latest month the lost history established, which every guard record keeps (`month` in `budget-guard.log`), or the
+  ledger's own when that is later, never a clock's. A history put back from an older month keeps its own month until
+  the later one is established again, and the restriction holds in both.
+- **The parts** (`apps/desktop/src/main/`): `budget-store.ts` (grants, journals, months and the summary, synchronous,
+  each write in one transaction), `budget-guard.ts` (the log and the start-of-session check), migration 9 in
+  `workspace-db.ts`, and the budget block at the end of `host.ts`. The contract is `packages/domain/src/budget.ts`, and
+  the price list `packages/domain/src/prices.ts`.
+- **Writing, dispatching and releasing a grant** (`writeGrant`, `markDispatching`, `releaseGrant`) take the ledger state
+  the guard last verified: the host's check at the first budget call, or its latest append. On a ledger that no longer
+  holds it they throw `BUDGET_UNVERIFIED`. Code that spends passes that state, never the ledger's own, which would
+  verify nothing (the tests may, since they aren't checking the guard).
+- **A new price list.** `(cd apps/engine && node scripts/prices.ts --version token-factory-YYYY-MM-DD)` prints one from
+  Token Factory's public model list, for review. It sends no key and never runs in tests. A new version is added beside
+  the old ones in `prices.ts`, never edited into one.
+
+## A preview of the integrated build
+
+To try the app without touching your own profile or engine homes, start it from `apps/desktop` with folders of its own
+(never `~/.nivra` or `~/.nivra-dev`, D27):
+
+```bash
+pnpm dev -- --user-data-dir="$HOME/nivra-preview/user-data" --nivra-engine-home="$HOME/nivra-preview/engine-home"
+```
+
+Everything after `--` goes to Electron. Under WSLg, if the window or the focus misbehaves, add
+`--ozone-platform=wayland` or `--ozone-platform=x11` there too. Delete the folders afterwards to start fresh.
 
 ## Where things will live
 

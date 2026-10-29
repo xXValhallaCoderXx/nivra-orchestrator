@@ -36,6 +36,7 @@ import type {
 } from "@nivra/domain";
 import type { CoachingView, CoachPreview, CoachSelection } from "./coach.ts";
 import type { ResearchPreview, ResearchSelection, ResearchView } from "./research.ts";
+import type { BudgetPolicy, BudgetPolicyDraft, BudgetRemaining, BudgetSummary, PriceCatalogue } from "@nivra/domain";
 
 /**
  * The renderer's whole view of the app: named, typed calls on `window.nivra`, each an `ipcRenderer.invoke` (AGENTS.md,
@@ -46,6 +47,8 @@ import type { ResearchPreview, ResearchSelection, ResearchView } from "./researc
 
 export const IPC = {
   getAppInfo: "app:info",
+  copyText: "app:copy-text",
+  draftHasSavedKey: "drafts:has-saved-key",
   listEngines: "engines:list",
   openProject: "projects:open",
   restartEngine: "engine:restart",
@@ -116,6 +119,7 @@ export const IPC = {
   setTaskState: "tasks:state",
   renameTask: "tasks:rename",
   deleteTask: "tasks:delete",
+  getRunLimits: "tasks:run-limits",
   previewTaskRun: "tasks:preview-run",
   startTaskRun: "tasks:start-run",
   cancelTaskRun: "tasks:cancel-run",
@@ -142,10 +146,22 @@ export const IPC = {
   listCoachings: "coach:list",
   cancelCoach: "coach:cancel",
   acceptCoachChanges: "coach:accept",
+  getBudgetPolicy: "budget:get-policy",
+  setBudgetPolicy: "budget:set-policy",
+  budgetSummary: "budget:summary",
+  budgetPrices: "budget:prices",
+  confirmBudgetMonth: "budget:confirm-month",
+  startNewBudgetHistory: "budget:start-new-history",
 } as const;
 
 /** The longest message a conversation's turn carries (D26): `CHAT_LIMITS.messageChars`, which a test keeps equal. */
 export const MESSAGE_CHARS = 8_000;
+
+/** The most text a copy button may put on the clipboard (copyText), in characters. */
+export const COPY_TEXT_CHARS = 65_536;
+
+/** The most text one draft check takes (draftHasSavedKey), in characters: a draft's value and its label together. */
+export const DRAFT_CHECK_CHARS = 262_144;
 
 /** What the host takes in a task's title, brief and plan (D26); the window counts a plan's characters as they are typed. */
 export const TASK_LIMITS = { titleChars: 200, textChars: 4_000, contextChars: 20_000, itemChars: 1_000, items: 20, planChars: 20_000 } as const;
@@ -597,6 +613,16 @@ export interface TaskView {
 }
 
 /**
+ * A task run's bounds that no brief changes, as the engine enforces them (Settings › Budget and usage): the
+ * brief-independent fields of TaskRunLimits, read by main from the domain's one source (TASK_RUN_BOUNDS). The ones a
+ * brief changes, its Nebius operations and baseline checks, are in each run's preview.
+ */
+export type RunLimitsView = Pick<
+  TaskRunLimits,
+  "modelRequests" | "requestSeconds" | "outputTokensPerRequest" | "estimatedInputTokens" | "toolCalls" | "writes" | "runs" | "checkSeconds" | "sessionMinutes" | "runMinutes"
+>;
+
+/**
  * What a run of a task would send, and where, worked out from its brief and its repository's commit as they are now
  * (D39). Nothing is sent. `expected` binds a start to this preview: starting is refused when anything here changed.
  */
@@ -808,6 +834,18 @@ export interface MissionReviewPreview {
 
 export interface NivraApi {
   getAppInfo(): Promise<AppInfo>;
+  /**
+   * Puts text a person asked to copy on the clipboard, for the window's copy buttons: the window itself has no clipboard
+   * access (every permission is refused), so main writes it. Text of at most COPY_TEXT_CHARS characters; anything else is
+   * refused, saying so, and nothing is copied.
+   */
+  copyText(text: string): Promise<void>;
+  /**
+   * Whether a draft's text holds one of the API keys Nivra keeps, whole, anywhere in it: true or false, and nothing
+   * else (no key, no fragment, no place). Text of at most DRAFT_CHECK_CHARS characters; anything else is refused. It
+   * fails when a saved key can't be read: the window then treats the draft as unchecked, never as clean.
+   */
+  draftHasSavedKey(text: string): Promise<boolean>;
   /** One view per engine a project uses or that is running; nothing is started by asking. */
   listEngines(): Promise<EngineView[]>;
   /** Starts the engine of the project's folder if it isn't running yet, never another one (D17). */
@@ -958,6 +996,8 @@ export interface NivraApi {
   renameTask(taskId: string, revision: number, title: string): Promise<TaskView>;
   /** Deletes a task with its brief versions and runs; refused while a run of it goes. */
   deleteTask(taskId: string): Promise<void>;
+  /** A task run's bounds that no brief changes, from the domain's one source; nothing is asked of an engine. */
+  getRunLimits(): Promise<RunLimitsView>;
   /** What a run of the task would send, and where, with its fingerprint. Nothing is sent or stored. */
   previewTaskRun(taskId: string): Promise<TaskRunPreview>;
   /** Starts the run previewed; refused when anything it would send changed since (`expected`, `snapshot`). */
@@ -1012,4 +1052,16 @@ export interface NivraApi {
   cancelCoach(taskId: string, coachingId: string): Promise<void>;
   /** Saves the ticked changes as the brief's next version, from the task's revision as it was read; a stale answer is refused. */
   acceptCoachChanges(taskId: string, revision: number, coachingId: string, fields: CoachField[]): Promise<TaskView>;
+  /** The person's monthly budget policy (NIV-66), or null before they chose one. */
+  getBudgetPolicy(): Promise<BudgetPolicy | null>;
+  /** Saves a monthly budget as the next policy version, or with null turns it off. What was already spent or reserved stays as it was. */
+  setBudgetPolicy(draft: BudgetPolicyDraft | null): Promise<BudgetSummary>;
+  /** This month's budget as Nivra counts it, with every reason its totals can't be read as complete. */
+  budgetSummary(): Promise<BudgetSummary>;
+  /** The price list Nivra counts with, and what about it isn't established yet. */
+  budgetPrices(): Promise<PriceCatalogue>;
+  /** Confirms the new budget month the summary showed by this computer's clock (its label, such as 2026-11), when the provider's clock hasn't shown it yet. */
+  confirmBudgetMonth(month: string): Promise<BudgetSummary>;
+  /** Starts a new budget history after a loss, with what is left of this month (money in micro-units, and each counted service), or null to wait for next month. */
+  startNewBudgetHistory(remaining: BudgetRemaining | null): Promise<BudgetSummary>;
 }

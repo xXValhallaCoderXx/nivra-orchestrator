@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync,
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test } from "@playwright/test";
+import { goTo } from "./places.ts";
 import { build } from "esbuild";
 import { REMOVE_TEST_HOME, testWslHome } from "../scripts/test-homes.ts";
 
@@ -55,7 +56,7 @@ test("the workspace opens in the Windows app, keeps a conversation across a rela
 
   let { app, page } = await launch();
   const fresh = await page.evaluate(() => window.nivra.listConversations());
-  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 8, notice: null });
+  expect(fresh.workspace).toMatchObject({ state: "ready", schemaVersion: 9, notice: null });
   const created = await page.evaluate(() => window.nivra.createConversation({ kind: "general" }));
   expect([created.kind, created.projectId, created.targetId]).toEqual(["general", null, "local"]);
   expect(await page.evaluate(() => window.nivra.listEngines())).toEqual([]);
@@ -133,6 +134,7 @@ test("the window on Windows: a turn with no key is refused on the native engine 
   await app.close();
 
   ({ app, page } = await launch());
+  await goTo(page, "conversations");
   await page.getByTestId("nav-conversation").filter({ hasText: "No key on Windows?" }).click();
   await expect(page.getByTestId("conversation-title")).toHaveText("No key on Windows?");
   await expect(page.getByTestId("turn-status")).toHaveText("Failed");
