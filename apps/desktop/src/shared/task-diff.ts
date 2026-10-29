@@ -3,6 +3,7 @@
  * `--no-renames` and `--binary`, so each file section starts with its `diff --git` line. Paths are matched against the
  * proposal's own list first; a section only the patch names keeps the name its header gives. Nothing is guessed: a binary
  * section says so, and a section the cut at PATCH_SHOWN_BYTES ends in is marked cut, its counts only for the part shown.
+ * A file's modes are kept from its header lines, so a change of mode alone is never shown as an empty change.
  */
 
 export interface DiffLine {
@@ -19,6 +20,8 @@ export interface DiffFile {
   binary: boolean;
   /** The patch shown ends inside this file's section: what's here is only its start. */
   cut: boolean;
+  /** Its modes from the header lines (`old mode`, `new mode`, `new file mode`, `deleted file mode`); null when none says. */
+  modes: { before: string | null; after: string | null } | null;
 }
 
 /** Undoes git's C-style quoting of a path ("a/\303\251.txt"), byte escapes decoded as UTF-8. */
@@ -64,7 +67,7 @@ export function diffFilesOf(patch: string, known: readonly string[], truncated: 
     if (line.startsWith("diff --git ")) {
       const header = line.slice("diff --git ".length);
       const path = known.find((one) => header === `a/${one} b/${one}`) ?? header;
-      file = { path, lines: [], added: 0, removed: 0, binary: false, cut: false };
+      file = { path, lines: [], added: 0, removed: 0, binary: false, cut: false, modes: null };
       files.push(file);
       inHunks = false;
       continue;
@@ -76,6 +79,12 @@ export function diffFilesOf(patch: string, known: readonly string[], truncated: 
         file.lines.push({ kind: "hunk", text: line });
       } else if (line.startsWith("GIT binary patch") || (line.startsWith("Binary files ") && line.endsWith(" differ"))) {
         file.binary = true;
+      } else if (/^(old|new|new file|deleted file) mode [0-7]{6}$/.test(line)) {
+        const mode = line.slice(-6);
+        const modes = file.modes ?? { before: null, after: null };
+        if (line.startsWith("old mode ") || line.startsWith("deleted file mode ")) modes.before = mode;
+        else modes.after = mode;
+        file.modes = modes;
       } else if (line.startsWith("+++ ") || line.startsWith("--- ")) {
         // The header couldn't be matched to a known path: the side lines name it.
         if (!known.includes(file.path)) file.path = sidePath(line, line.startsWith("+++ ") ? "b/" : "a/") ?? file.path;
@@ -94,4 +103,35 @@ export function diffFilesOf(patch: string, known: readonly string[], truncated: 
   }
   if (truncated && files.length) files.at(-1)!.cut = true;
   return files;
+}
+
+/** A mode by what it makes the path: git's regular, executable, link and submodule entries. */
+const MODE_KIND: Readonly<Record<string, string>> = { "100644": "a regular file", "100755": "an executable file", "120000": "a link", "160000": "a submodule" };
+
+export interface ModeChange {
+  before: string | null;
+  after: string | null;
+  /** What it is, in a few words, with the modes named. */
+  text: string;
+  /** Whether Nivra's apply puts it in place: it refuses a changed mode and any new mode but a regular or executable file. */
+  applies: boolean;
+}
+
+/**
+ * What a proposed path's mode is, when it's worth saying (D40): a mode that changes, or a new file that isn't an ordinary
+ * one. The engine's apply refuses a changed file whose mode differs, and a new path that isn't 100644 or 100755
+ * (apps/engine/src/apply/revalidate.ts), so `applies` says the same. Null when the mode is ordinary and unchanged, and
+ * for a deletion, which says what it is by itself.
+ */
+export function modeChangeOf(path: { change: "added" | "changed" | "deleted"; before: { mode: string } | null; after: { mode: string } | null }): ModeChange | null {
+  const before = path.before?.mode ?? null;
+  const after = path.after?.mode ?? null;
+  if (path.change === "added") {
+    if (after === null || after === "100644") return null;
+    const kind = MODE_KIND[after];
+    return { before: null, after, text: `${kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "A new path"} (mode ${after})`, applies: after === "100755" };
+  }
+  if (path.change !== "changed" || before === null || after === null || before === after) return null;
+  const words = before === "100644" && after === "100755" ? "made executable" : before === "100755" && after === "100644" ? "no longer executable" : `${MODE_KIND[before] ?? `mode ${before}`} made ${MODE_KIND[after] ?? `mode ${after}`}`;
+  return { before, after, text: `Mode ${before} to ${after}: ${words}`, applies: false };
 }

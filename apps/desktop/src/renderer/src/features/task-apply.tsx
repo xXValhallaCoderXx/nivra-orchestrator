@@ -2,6 +2,7 @@ import { Alert, Anchor, Badge, Button, Code, Group, List, Modal, Paper, Stack, T
 import type { ApplyPath, ApplyResolution, ApplyStatus, TaskReport } from "@nivra/domain";
 import { useEffect, useId, useRef, useState } from "react";
 import type { AttemptDecision, BriefContent, TaskApplyView, TaskAttemptView, TaskView, TurnStatus } from "../../../shared/ipc";
+import { modeChangeOf } from "../../../shared/task-diff";
 import { decisionLead, failingReportedChecks, outcomeLookOf, unapprovableText } from "../../../shared/task-verdict";
 import { useNarrow } from "./narrow";
 
@@ -275,25 +276,32 @@ export function DecisionCard({
               repository's git folder and kept there, and each new file is put in place without replacing anything. Nothing is staged or committed.
             </Text>
             <Stack gap={0} data-testid="task-apply-confirm-files">
-              {proposal.paths.map((one) => (
+              {proposal.paths.map((one) => {
+                // A mode the apply refuses reads as a deletion does: what it is, and that nothing would be written.
+                const mode = modeChangeOf(one);
+                const refused = one.change === "deleted" || (mode !== null && !mode.applies);
+                return (
                 <Group key={one.path} justify="space-between" align="flex-start" wrap="nowrap" gap="sm" py={6} style={{ borderTop: "1px solid var(--nivra-border)" }} data-testid="task-apply-confirm-file" data-change={one.change}>
                   <Stack gap={2} style={{ minWidth: 0 }}>
                     <Text size="sm" ff="monospace" style={{ overflowWrap: "anywhere" }}>
                       {one.path}
                     </Text>
-                    <Text size="xs" c={one.change === "deleted" ? "var(--nivra-warning)" : "var(--nivra-text-2)"}>
-                      {one.change === "added"
-                        ? "Put in place, replacing nothing."
-                        : one.change === "changed"
-                          ? "Your copy is moved aside into the recovery folder and kept, then the changed file goes in its place."
-                          : "A deletion, which Nivra doesn't apply: the apply is refused, and nothing is written."}
+                    <Text size="xs" c={refused ? "var(--nivra-warning)" : "var(--nivra-text-2)"}>
+                      {one.change === "deleted"
+                        ? "A deletion, which Nivra doesn't apply: the apply is refused, and nothing is written."
+                        : mode !== null && !mode.applies
+                          ? `${mode.text}, which Nivra doesn't apply: the apply is refused, and nothing is written.`
+                          : one.change === "added"
+                            ? `Put in place, replacing nothing.${mode ? ` ${mode.text}.` : ""}`
+                            : "Your copy is moved aside into the recovery folder and kept, then the changed file goes in its place."}
                     </Text>
                   </Stack>
-                  <Badge size="sm" variant="light" color={one.change === "deleted" ? "yellow" : "gray"} style={{ flexShrink: 0 }}>
-                    {one.change === "added" ? "New file" : one.change === "changed" ? "Changed" : "Deleted"}
+                  <Badge size="sm" variant="light" color={refused ? "yellow" : "gray"} style={{ flexShrink: 0 }}>
+                    {one.change === "deleted" ? "Deleted" : mode !== null && !mode.applies ? "Mode change" : one.change === "added" ? "New file" : "Changed"}
                   </Badge>
                 </Group>
-              ))}
+                );
+              })}
             </Stack>
             <Text size="sm" c="var(--nivra-text-2)">
               Afterwards the change is in your checkout, unstaged, for you to look at before you accept it.
