@@ -254,6 +254,9 @@ function resolveWith(input: NodeResolveInput, known: { facts: WorkspaceFacts | n
   const memberFolders = globs ? workspaceMembers(globs, folders) : [];
   const members = manifests.filter((manifest) => manifest.folder === "" || memberFolders.includes(manifest.folder));
 
+  // Layouts that need the sources refuse the whole project, whatever is chosen: said before any scope's refusal.
+  refuseSourceLayouts(root, members, workspace, present, lock);
+
   // What can be chosen to install (NIV-55): the whole project, workspace packages by folder, or pnpm's own selectors.
   const shape: WorkspaceShape = workspaceShape({ manager: managerName as "npm" | "pnpm", globs, members, lock, lockPath, yaml: workspace?.values ?? null, options: choices.options ?? {} });
   let facts: WorkspaceFacts = shape.facts(null);
@@ -272,8 +275,6 @@ function resolveWith(input: NodeResolveInput, known: { facts: WorkspaceFacts | n
   }
   const installed = new Set(chosen?.selection.packages.map((item) => item.folder) ?? []);
   const inScope = scope.kind === "selected" ? scopedMembers(scope.selectors, members, warnings) : chosen ? members.filter((member) => member.folder === "" || installed.has(member.folder)) : members;
-
-  refuseSourceLayouts(root, members, workspace, present, lock);
 
   // The runtime, from every declaration in scope.
   const runtime = resolveRuntime({ releases, byPath, root, inScope, lock, choices, previous: input.previous ?? null, configuration: configuration.digest, warnings });

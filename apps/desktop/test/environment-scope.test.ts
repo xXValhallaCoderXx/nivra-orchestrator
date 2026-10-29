@@ -135,6 +135,7 @@ describe("what an environment installs, as the window chooses it (NIV-55)", () =
     it("keeps a chosen folder the workspace no longer lists, flagged, until it is unticked", () => {
       assert.deepEqual(flaggedFolders(packages(["apps/old", "apps/web"]), facts), ["apps/old"]);
       assert.deepEqual([flaggedFolders(packages(["apps/old"]), null), flaggedFolders(selected("apps/old"), facts)], [[], []], "nothing to compare with yet, or nothing chosen by folder");
+      assert.deepEqual(flaggedFolders(packages(["apps/old"]), { ...facts, more: 3 }), [], "a list cut short can't tell");
     });
 
     it("reads the facts and the ways of choosing from any answer that carries them, and none from one that doesn't", () => {
@@ -145,7 +146,8 @@ describe("what an environment installs, as the window chooses it (NIV-55)", () =
 
     it("says what an install of chosen packages installs, from the recipe's selection, and what pnpm selectors leave to pnpm", () => {
       const selection = { packages: [{ folder: "apps/web", name: "@w/web", chosen: true }, { folder: "packages/data", name: "@w/data", chosen: false }, { folder: "packages/lint", name: null, chosen: false }], root: true };
-      assert.equal(selectionText(selection), "@w/web (apps/web), with @w/data (packages/data) and packages/lint, which they need, and the workspace root's own dependencies");
+      assert.equal(selectionText(selection), "@w/web (apps/web), with @w/data (packages/data) and packages/lint, linked from it or from the workspace root, and the workspace root's own dependencies");
+      assert.equal(selectionText({ ...selection, root: false }), "@w/web (apps/web), with @w/data (packages/data) and packages/lint, linked from it, without the workspace root's own dependencies");
       assert.equal(selectionText({ packages: [selection.packages[0]!], root: false }), "@w/web (apps/web), without the workspace root's own dependencies");
       assert.equal(installsText({ scope: packages(["apps/web"]), selection }), selectionText(selection));
       assert.equal(installsText({ scope: { kind: "whole" } }), "the whole project");

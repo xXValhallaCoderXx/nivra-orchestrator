@@ -245,7 +245,7 @@ describe("a project-driven recipe's preparation through a real engine (NIV-55)",
     assert.equal((await ended(engine, run.id)).status, "failed");
     const result = await report(engine, run.id);
     assert.deepEqual([result.outcome, result.stopped?.code, result.stopped?.step, result.install?.exitCode, result.prepared, result.environment], ["failed", "install", "install", 1, null, null]);
-    assert.match(result.stopped?.detail ?? "", /None of the workspace packages matched.*Correct the package names or folders under What to install/);
+    assert.match(result.stopped?.detail ?? "", /None of the workspace packages matched what was chosen.*Check the packages or selectors under What to install/);
     const operations = spawns(stub);
     assert.equal(operations.length, 2, "a failed selection must not run readiness");
     assert.deepEqual(operations[1]!.args.slice(5), ["pnpm", "11.28.9", "corepack-else-npm-global", "none", ...shown.recipe.install.args]);

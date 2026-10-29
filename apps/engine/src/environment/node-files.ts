@@ -251,6 +251,8 @@ export interface LockfileFacts {
   links: Map<string, string[]>;
   /** pnpm: whether a link is recorded outside the importers, as linkWorkspacePackages deep writes them. */
   deepLinks: boolean;
+  /** pnpm: whether the lockfile's own settings say links were left out of it (excludeLinksFromLockfile). */
+  excludesLinks: boolean;
   /** pnpm: the pnpm that the lockfile's own env document names as the project's package manager, or null. */
   writer: string | null;
   /** npm: every entry, by its location, as resolving what a workspace reaches needs it; null for pnpm. */
@@ -317,7 +319,7 @@ export function npmLockFacts(text: string): LockfileFacts | null {
   } catch {
     return null;
   }
-  const facts: LockfileFacts = { format: lock["lockfileVersion"] === undefined ? null : String(lock["lockfileVersion"]), hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [], workspaces: [], links: new Map(), deepLinks: false, writer: null, tree: new Map() };
+  const facts: LockfileFacts = { format: lock["lockfileVersion"] === undefined ? null : String(lock["lockfileVersion"]), hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [], workspaces: [], links: new Map(), deepLinks: false, excludesLinks: false, writer: null, tree: new Map() };
   const hosts = new Set<string>();
   for (const [key, raw] of Object.entries(objectAt(lock["packages"]))) {
     facts.tree!.set(key, npmEntry(key, objectAt(raw)));
@@ -492,7 +494,7 @@ function lockList(field: LockField): string[] | null {
  * passed over. pnpm records a registry tarball's address only when it isn't the standard one.
  */
 export function pnpmLockFacts(text: string): LockfileFacts {
-  const facts: LockfileFacts = { format: null, hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [], workspaces: [], links: new Map(), deepLinks: false, writer: null, tree: null };
+  const facts: LockfileFacts = { format: null, hosts: [], git: [], local: [], engines: [], installScripts: [], libc: [], unreadable: [], workspaces: [], links: new Map(), deepLinks: false, excludesLinks: false, writer: null, tree: null };
   facts.format = /^lockfileVersion:\s*['"]?([0-9.]+)['"]?\s*$/m.exec(text)?.[1] ?? null;
   const hosts = new Set<string>();
   const entries: Array<{ section: string; key: string; body: LockLine[] }> = [];
@@ -525,6 +527,7 @@ export function pnpmLockFacts(text: string): LockfileFacts {
     // A link recorded beside a package's own dependencies: linkWorkspacePackages deep, which Nivra doesn't follow. Only a
     // value counts, never a name that ends in link, such as terminal-link.
     if ((section === "packages" || section === "snapshots") && /:\s*['"]?link:/.test(line)) facts.deepLinks = true;
+    if (section === "settings" && /^\s+excludeLinksFromLockfile:\s*true\s*$/.test(line)) facts.excludesLinks = true;
     if (section !== "packages" && section !== "importers") continue;
     if (entryIndent === 0) entryIndent = indent;
     if (indent === entryIndent) {

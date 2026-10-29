@@ -328,7 +328,7 @@ test("chooses workspace packages from the list: ticked by name and folder, previ
   await expect(section.getByTestId("environment-package")).toHaveCount(2);
   await expect(prepare).toBeDisabled();
   await preview.click();
-  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: @mono/web (packages/web), with @mono/data (packages/data), which it needs, and the workspace root's own dependencies.");
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: @mono/web (packages/web), with @mono/data (packages/data), linked from it or from the workspace root, and the workspace root's own dependencies.");
   await expect(section.getByTestId("environment-scope-resolved")).toHaveAttribute("data-installs", "packages/data packages/web");
   await expect(section.getByTestId("environment-install")).toHaveText("Then, in the sandbox: pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data --filter @mono/web");
   await expect(section.getByTestId("environment-package")).toHaveCount(2, { timeout: 1_000 });
@@ -351,7 +351,7 @@ test("chooses workspace packages from the list: ticked by name and folder, previ
   // folder until a preview checks it against the commit.
   await prepare.click();
   await expect(section.getByTestId("environment-prepared-scope")).toHaveText(
-    "Installed with pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data --filter @mono/web: @mono/web (packages/web), with @mono/data (packages/data), which it needs, and the workspace root's own dependencies.",
+    "Installed with pnpm install --frozen-lockfile --fail-if-no-match --filter @mono/data --filter @mono/web: @mono/web (packages/web), with @mono/data (packages/data), linked from it or from the workspace root, and the workspace root's own dependencies.",
     { timeout: 30_000 },
   );
   await page.reload();

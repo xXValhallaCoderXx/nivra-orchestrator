@@ -250,7 +250,7 @@ test("offers only the whole project for an npm project and a pnpm project that a
     const refused = await resolveIn(projectId, { scope: { kind: "selected", selectors: [folder] } });
     expect(refused.status === "refused" ? refused.message : refused.status).toBe(words);
     const chosen = await resolveIn(projectId, { scope: { kind: "packages", packages: ["packages/web"], root: true } });
-    expect(chosen.status === "refused" ? [chosen.code, chosen.message] : chosen.status).toEqual(["scope", "This project is one package, so installing it is installing the whole project."]);
+    expect(chosen.status === "refused" ? [chosen.code, chosen.message] : chosen.status).toEqual(["scope", "This project is one package, so installing it is installing the whole project. Choose the whole project, then preview again."]);
   }
   expect(sandbox.requests.length).toBe(requests);
 });
@@ -264,7 +264,7 @@ test("installs chosen pnpm packages with every package their links and the root'
   const shown = await previewEnvironment(page, projectId, { scope: { kind: "packages", packages: ["packages/web"], root: true } });
   const command = "pnpm install --frozen-lockfile --fail-if-no-match --filter @linked/data --filter @linked/lint --filter @linked/web";
   await expect(section.getByTestId("environment-install")).toHaveText(`Then, in the sandbox: ${command}`);
-  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: @linked/web (packages/web), with @linked/data (packages/data) and @linked/lint (packages/lint), which they need, and the workspace root's own dependencies.");
+  await expect(section.getByTestId("environment-scope-resolved")).toHaveText("What it installs: @linked/web (packages/web), with @linked/data (packages/data) and @linked/lint (packages/lint), linked from it or from the workspace root, and the workspace root's own dependencies.");
   await expect(section.getByTestId("environment-package-root")).toBeDisabled();
   const before = installs.length;
   const prepared = await prepareOnce(page, projectId, 120_000, () => undefined);

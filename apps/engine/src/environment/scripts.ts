@@ -157,7 +157,7 @@ const INSTALL_SIGNATURES: ReadonlyArray<{ managers: ReadonlyArray<"npm" | "pnpm"
   {
     managers: ["pnpm"],
     pattern: /^No projects matched the filters in "[^\r\n]*"\r?$/m,
-    words: "None of the workspace packages matched the chosen selectors, so no environment was prepared. Correct the package names or folders under What to install, then preview and prepare again.",
+    words: "None of the workspace packages matched what was chosen, so no environment was prepared. Check the packages or selectors under What to install, then preview and prepare again.",
   },
   {
     managers: ["npm"],

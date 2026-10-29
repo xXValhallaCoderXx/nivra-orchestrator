@@ -3316,6 +3316,11 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     assert.deepEqual(JSON.parse(lines(home, "env-resolves.log").at(-1)!).choices, chosen, "the packages reached the project's engine as chosen");
     await assert.rejects(host.prepareEnvironment(id, CHOICES, chosenFingerprint), { message: CHANGED });
     await assert.rejects(host.prepareEnvironment(id, scoped, chosenFingerprint), { message: CHANGED });
+    // An engine whose recipe doesn't install the scope chosen is refused by the host too, whatever its fingerprint says.
+    writeFileSync(join(home, "env-ignores-scope"), "");
+    const ignored = await fingerprintOf(host, id, chosen);
+    await assert.rejects(host.prepareEnvironment(id, chosen, ignored), { message: "This preview doesn't install what was chosen, so nothing was prepared. Preview again; if it still differs, report it." });
+    rmSync(join(home, "env-ignores-scope"));
     assert.deepEqual([calls(home, "runs.start"), (await host.environment(id)).choices], [0, null], "nothing was sent, and no choices were kept");
     // An install that fails keeps no environment, even one its report holds.
     writeFileSync(join(home, "environment-outcome"), "failed");

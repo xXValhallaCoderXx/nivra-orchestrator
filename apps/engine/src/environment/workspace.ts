@@ -74,6 +74,8 @@ export interface WorkspaceShape {
   /** Why chosen packages, and pnpm selectors, aren't offered whatever the release, or null. */
   packagesBlocked: string | null;
   selectorsBlocked: string | null;
+  /** Whether chosen packages aren't offered only because there are none to choose: refused with what to choose instead. */
+  single: boolean;
   /** The facts for the window, with the reason a release can't do it once that is known. */
   facts(release: string | null): WorkspaceFacts;
 }
@@ -96,7 +98,7 @@ export function workspaceShape(input: ShapeInput): WorkspaceShape {
   const { manager, members, lock, lockPath, yaml } = input;
   const byFolder = new Map(members.map((member) => [member.folder, member]));
   const listed = members.filter((member) => member.folder !== "").sort((a, b) => (a.folder < b.folder ? -1 : 1));
-  const nameOf = (member: Manifest) => stringAt(member.json["name"]);
+  const nameOf = (member: Manifest) => stringAt(member.json["name"]) || null;
   const nameCount = new Map<string, number>();
   for (const member of members) {
     const name = nameOf(member);
@@ -111,6 +113,7 @@ export function workspaceShape(input: ShapeInput): WorkspaceShape {
     if (manager === "pnpm") {
       const name = nameOf(member);
       if (name === null) return "It has no name in its package.json, and pnpm installs a package on its own by name. Give it one, or install the whole project.";
+      if (name.length > 200) return "Its name is longer than the 200 characters Nivra passes to pnpm as one argument. Install the whole project.";
       if (!WORKSPACE_NAME.test(name)) return "pnpm would read its name as a pattern, so Nivra can't install it on its own. Install the whole project.";
       if ((nameCount.get(name) ?? 0) > 1) return "Another package in the workspace has the same name, so pnpm can't install it on its own. Rename one, or install the whole project.";
     } else {
@@ -122,28 +125,36 @@ export function workspaceShape(input: ShapeInput): WorkspaceShape {
   };
 
   const setting = (key: string) => yaml?.get(key);
-  const pnpmBlocked =
+  // What changes which projects pnpm's filters select: refused for chosen packages and selectors alike.
+  const pnpmFiltering =
     setting("sharedWorkspaceLockfile") === false
       ? "This workspace keeps a lockfile for each package (sharedWorkspaceLockfile is off in pnpm-workspace.yaml), which Nivra doesn't install chosen packages from. Install the whole project."
-      : setting("excludeLinksFromLockfile") === true
-        ? "pnpm-workspace.yaml sets excludeLinksFromLockfile, so pnpm-lock.yaml doesn't record the links Nivra follows to tell what a package needs. Install the whole project."
-        : setting("filter") !== undefined || setting("filterProd") !== undefined
-          ? "pnpm-workspace.yaml sets filter, which pnpm would combine with the packages chosen in a way Nivra hasn't checked. Install the whole project."
-          : setting("linkWorkspacePackages") === "deep" || lock.deepLinks
-            ? "This workspace links workspace packages from inside other dependencies (linkWorkspacePackages deep), which Nivra doesn't follow. Install the whole project."
-            : null;
+      : setting("filter") !== undefined || setting("filterProd") !== undefined
+        ? "pnpm-workspace.yaml sets filter, which pnpm would combine with the packages chosen in a way Nivra hasn't checked. Install the whole project."
+        : null;
+  // What hides the links Nivra follows to work out what chosen packages reach: selectors don't follow them.
+  const pnpmLinks =
+    setting("excludeLinksFromLockfile") === true || lock.excludesLinks
+      ? "This workspace leaves links out of pnpm-lock.yaml (excludeLinksFromLockfile), so Nivra can't tell what a package needs. Install the whole project."
+      : setting("linkWorkspacePackages") === "deep" || lock.deepLinks
+        ? "This workspace links workspace packages from inside other dependencies (linkWorkspacePackages deep), which Nivra doesn't follow. Install the whole project."
+        : null;
   const single = input.globs === null ? "This project is one package, so installing it is installing the whole project." : listed.length === 0 ? "The workspace lists no package folders that hold a package.json, so there are no packages to choose." : null;
   const options = input.options;
   const filtering = (["omit", "include"] as const).find((key) => Array.isArray(options[key]) && (options[key] as readonly string[]).length > 0);
-  const packagesBlocked =
-    single ??
-    (manager === "pnpm" ? pnpmBlocked : filtering ? `npm's ${filtering} option doesn't combine reliably with chosen workspace packages (npm/cli 6670). Remove it, or install the whole project.` : null);
+  const strategy = typeof options["install-strategy"] === "string" && options["install-strategy"] !== "hoisted" ? options["install-strategy"] : null;
+  const npmBlocked = filtering
+    ? `npm's ${filtering} option doesn't combine reliably with chosen workspace packages (npm/cli 6670). Remove it, or install the whole project.`
+    : strategy
+      ? `Nivra hasn't checked how npm installs chosen workspace packages with install-strategy ${strategy}. Remove the option, or install the whole project.`
+      : null;
+  const packagesBlocked = single ?? (manager === "pnpm" ? (pnpmFiltering ?? pnpmLinks) : npmBlocked);
   const selectorsBlocked =
     manager === "npm"
       ? "pnpm selectors are pnpm's own syntax, and this project installs with npm."
       : input.globs === null
         ? "This project isn't a pnpm workspace, so there are no packages to choose."
-        : (single ?? pnpmBlocked);
+        : (single ?? pnpmFiltering);
 
   const root = byFolder.get("")!;
   const rootDependencies = [...new Set(dependencySpecs(root.json).map((dependency) => dependency.name))].sort();
@@ -152,6 +163,7 @@ export function workspaceShape(input: ShapeInput): WorkspaceShape {
     unavailable,
     packagesBlocked,
     selectorsBlocked,
+    single: single !== null,
     facts: (release) => ({
       packages: listed.slice(0, 500).map((member) => ({ folder: member.folder, name: nameOf(member)?.slice(0, 214) ?? null, unavailable: unavailable(member.folder)?.slice(0, 300) ?? null })),
       more: Math.max(0, listed.length - 500),
@@ -183,7 +195,7 @@ export interface ChosenInstall {
  */
 export function chosenInstall(scope: Extract<InstallScope, { kind: "packages" }>, shape: WorkspaceShape, input: Pick<ShapeInput, "manager" | "lock" | "lockPath">): ChosenInstall | { problem: string } {
   const { manager, lock, lockPath } = input;
-  if (shape.packagesBlocked) return { problem: shape.packagesBlocked };
+  if (shape.packagesBlocked) return { problem: shape.single ? `${shape.packagesBlocked} Choose the whole project, then preview again.` : shape.packagesBlocked };
   for (const folder of scope.packages) {
     if (!shape.byFolder.has(folder) || folder === "") return { problem: `${quoted(folder)} isn't one of this workspace's packages at this commit: it may have been moved or removed. Untick it, or install the whole project, then preview again.` };
     const why = shape.unavailable(folder);
@@ -196,11 +208,11 @@ export function chosenInstall(scope: Extract<InstallScope, { kind: "packages" }>
   for (const folder of installed) {
     if (!shape.byFolder.has(folder)) return { problem: `${lockPath} links the chosen packages to ${quoted(folder)}, which isn't one of the workspace's packages Nivra reads. Install the whole project.` };
     const why = shape.unavailable(folder);
-    if (why) return { problem: `The chosen packages need ${quoted(folder)}, which can't be installed on its own. ${why}` };
+    if (why) return { problem: `The install would also need ${quoted(folder)}, linked from the chosen packages or the workspace root, which can't be installed on its own. ${why}` };
   }
   if (installed.length > ENVIRONMENT_LIMITS.packages) return { problem: `Those choices install ${installed.length} workspace packages, counting the ones they need, more than the ${ENVIRONMENT_LIMITS.packages} a chosen install takes. Choose fewer, or install the whole project.` };
   const chosen = new Set(scope.packages);
-  const packages = installed.map((folder) => ({ folder, name: stringAt(shape.byFolder.get(folder)!.json["name"])?.slice(0, 214) ?? null, chosen: chosen.has(folder) }));
+  const packages = installed.map((folder) => ({ folder, name: stringAt(shape.byFolder.get(folder)!.json["name"])?.slice(0, 214) || null, chosen: chosen.has(folder) }));
   return {
     selection: { packages, root: manager === "pnpm" ? true : scope.root },
     targets: packages.map((item) => (manager === "pnpm" ? item.name! : `./${item.folder}`)),
@@ -242,6 +254,7 @@ function npmReach(tree: ReadonlyMap<string, NpmLockEntry>, starts: readonly stri
     if (entry.link) {
       const target = entry.resolved === null ? null : linkedFolder("", entry.resolved);
       if (target === null) return { problem: `${lockPath} links ${quoted(key)} to a folder outside the repository. Install the whole project.` };
+      if (!tree.has(target)) return { problem: `${lockPath} links ${quoted(key)} to ${quoted(target)}, which it doesn't record. Run npm install in the repository, commit ${lockPath}, then preview again.` };
       stack.push(target);
       continue;
     }

@@ -410,7 +410,9 @@ function PackagePicker({ scope, facts, disabled, onChange }: { scope: Extract<In
   const flagged = flaggedFolders(scope, facts);
   const chosen = new Set(scope.packages);
   const tick = (folder: string, on: boolean) => onChange({ ...scope, packages: toggled(scope.packages, folder, on) });
-  const listed = (facts?.packages ?? scope.packages.map((folder) => ({ folder, name: null, unavailable: null }))).filter((item) => find === "" || item.folder.includes(find) || (item.name ?? "").includes(find));
+  // A chosen folder beyond a list cut short is shown with the rest, ticked, for the engine to check at the next preview.
+  const beyond = facts !== null && facts.more > 0 ? scope.packages.filter((folder) => !facts.packages.some((item) => item.folder === folder)).map((folder) => ({ folder, name: null, unavailable: null })) : [];
+  const listed = [...beyond, ...(facts?.packages ?? scope.packages.map((folder) => ({ folder, name: null, unavailable: null })))].filter((item) => find === "" || item.folder.includes(find) || (item.name ?? "").includes(find));
   const root = facts?.root ?? null;
   return (
     <Stack gap={4} pl="xl" data-testid="environment-packages">
@@ -420,7 +422,7 @@ function PackagePicker({ scope, facts, disabled, onChange }: { scope: Extract<In
         </Text>
       )}
       {flagged.map((folder) => (
-        <Checkbox key={folder} checked label={folder} description="Not in this commit: untick it, or choose the whole project." onChange={() => tick(folder, false)} disabled={disabled} data-testid="environment-package" data-folder={folder} data-flagged="true" />
+        <Checkbox key={folder} checked label={folder} description="Not one of this workspace's packages at this commit: untick it, or choose the whole project." onChange={() => tick(folder, false)} disabled={disabled} data-testid="environment-package" data-folder={folder} data-flagged="true" />
       ))}
       {(facts?.packages.length ?? 0) > 12 && <TextInput size="xs" placeholder="Find a package by name or folder" value={find} onChange={(event) => setFind(event.currentTarget.value)} aria-label="Find a package" data-testid="environment-package-find" />}
       {listed.map((item) => (
@@ -449,7 +451,8 @@ function PackagePicker({ scope, facts, disabled, onChange }: { scope: Extract<In
             : [root.dependencies ? `${plural(root.dependencies, "dependency", "dependencies")} of its own${root.examples.length ? `, such as ${selectorList(root.examples)}` : ""}.` : "It declares none of its own.", root.reason].filter(Boolean).join(" ")
         }
         onChange={(event) => onChange({ ...scope, root: event.currentTarget.checked })}
-        disabled={disabled || root?.optional === false}
+        // Locked on where the manager always installs the root; a saved choice that left it off can still be turned on.
+        disabled={disabled || (root?.optional === false && scope.root)}
         data-testid="environment-package-root"
       />
       <Text size="xs" c={scope.packages.length === 0 ? "var(--nivra-warning)" : "var(--nivra-text-3)"} data-testid="environment-packages-hint">

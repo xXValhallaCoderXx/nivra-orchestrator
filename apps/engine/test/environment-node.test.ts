@@ -792,7 +792,7 @@ describe("workspace packages chosen by folder, installed from the links each loc
     refused(await resolveIn(unlisted, { ...checked, ...packages(["packages/new"]) }), "scope", /"packages\/new" can't be chosen/);
     const nameless = ready(await resolveIn(mono({}, { ...calm, "packages/ui/package.json": json({ private: true }) }), checked));
     assert.match(facts(nameless).packages.find((item) => item.folder === "packages/ui")!.unavailable ?? "", /no name/);
-    refused(await resolveIn(mono({}, { "packages/ui/package.json": json({ private: true }) }), { ...checked, ...packages(["apps/web"]) }), "scope", /need "packages\/ui", which can't be installed on its own/);
+    refused(await resolveIn(mono({}, { "packages/ui/package.json": json({ private: true }) }), { ...checked, ...packages(["apps/web"]) }), "scope", /would also need "packages\/ui", linked from the chosen packages or the workspace root, which can't be installed on its own/);
     const twins = ready(await resolveIn(mono({}, { ...calm, "packages/twin/package.json": json({ name: "@w/core" }) }), checked));
     assert.match(facts(twins).packages.find((item) => item.folder === "packages/core")!.unavailable ?? "", /same name/);
   });
@@ -852,10 +852,41 @@ describe("workspace packages chosen by folder, installed from the links each loc
     assert.equal(clean.warnings.some((item) => item.code === "lockfile-regression"), false);
   });
 
+  it("keeps selectors apart from what only hides links, refuses npm's untried install strategies and an unrecorded link, and says what to do instead", async () => {
+    // Links left out of the lockfile, by its own settings or pnpm-workspace.yaml, or written deep: chosen packages are
+    // refused, since Nivra follows links for them, while pnpm's own selectors still work.
+    const excluded = MONO_LOCK.replace("lockfileVersion: '9.0'\n", "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: true\n");
+    const calm = { "packages/legacy/package.json": json({ name: "@w/legacy" }) };
+    for (const extra of [{ "pnpm-lock.yaml": excluded }, { "pnpm-workspace.yaml": "packages:\n  - packages/*\n  - apps/*\nlinkWorkspacePackages: deep\n" }]) {
+      const answer = ready(await resolveIn(mono({}, { ...calm, ...extra }), checked));
+      assert.deepEqual([mode(answer, "packages").available, mode(answer, "selectors").available], [false, true], JSON.stringify(Object.keys(extra)));
+      assert.equal(ready(await resolveIn(mono({}, { ...calm, ...extra }), { ...checked, choices: { scope: { kind: "selected", selectors: ["@w/web..."] } } })).recipe.scope.kind, "selected");
+    }
+    // npm's install strategies other than the default hoisted aren't checked with chosen workspaces.
+    for (const strategy of ["nested", "shallow", "linked"]) {
+      refused(await resolveIn(site(), { choices: { scope: scopeOf(["apps/web"]), options: { "install-strategy": strategy } } }), "scope", new RegExp(`install-strategy ${strategy}`));
+    }
+    assert.equal(ready(await resolveIn(site(), { choices: { scope: scopeOf(["apps/web"]), options: { "install-strategy": "hoisted" } } })).recipe.selection?.packages.length, 4);
+    // A link to a folder the lockfile doesn't record is refused, never passed over.
+    const tree = npmTree({ "node_modules/@w/ghost": { resolved: "packages/ghost", link: true } });
+    (tree["packages/data"] as { dependencies: Record<string, string> }).dependencies["@w/ghost"] = "*";
+    refused(await resolveIn(site(tree), packages(["apps/web"])), "scope", /links "node_modules\/@w\/ghost" to "packages\/ghost", which it doesn't record/);
+    // An empty name is no name: npm's package is chosen by folder, and the selection says it has none.
+    const empty = npmTree();
+    (empty["packages/core"] as { name: string }).name = "";
+    assert.deepEqual(ready(await resolveIn(site(empty), packages(["apps/web"]))).recipe.selection?.packages.find((item) => item.folder === "packages/core")?.name, null);
+    // pnpm's names past the argument limit are said to be that, not a pattern.
+    const long = ready(await resolveIn(mono({}, { ...calm, "packages/ui/package.json": json({ name: `@w/${"u".repeat(200)}` }) }), checked));
+    assert.match(facts(long).packages.find((item) => item.folder === "packages/ui")!.unavailable ?? "", /longer than the 200 characters/);
+    // Install hooks refuse the whole project before any scope is looked at, so a scope's advice to install the whole
+    // project never leads straight to another refusal.
+    refused(await resolveIn(mono({}, { ...calm, "packages/core/package.json": json({ name: "@w/core", scripts: { postinstall: "node build.js" } }) }), { ...checked, ...packages(["apps/old"]) }), "needs-sources", /postinstall/);
+  });
+
   it("answers a single package with only the whole project, and a choice waiting on Node with the facts known so far", async () => {
     const single = ready(await resolveIn(pnpmProject({ packageManager: "pnpm@11.28.9" }), checked));
     assert.deepEqual([facts(single).packages.length, mode(single, "packages").reason, mode(single, "selectors").reason], [0, "This project is one package, so installing it is installing the whole project.", "This project isn't a pnpm workspace, so there are no packages to choose."]);
-    refused(await resolveIn(pnpmProject({ packageManager: "pnpm@11.28.9" }), { ...checked, ...packages(["src"]) }), "scope", /one package/);
+    refused(await resolveIn(pnpmProject({ packageManager: "pnpm@11.28.9" }), { ...checked, ...packages(["src"]) }), "scope", /^This project is one package, so installing it is installing the whole project\. Choose the whole project, then preview again\.$/);
     const waiting = await resolveIn(mono({}, { ".nvmrc": "24.21.0\n", ".node-version": "22.23.4\n", "packages/legacy/package.json": json({ name: "@w/legacy" }) }), checked);
     assert.equal(waiting.status, "needs-choice");
     assert.equal(facts(waiting).packages.length, 7, "the picker can be used while Node is chosen");

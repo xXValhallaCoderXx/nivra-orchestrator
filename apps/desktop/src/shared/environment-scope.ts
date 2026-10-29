@@ -78,7 +78,7 @@ export function selectionText(selection: InstallSelection): string {
   const chosen = selection.packages.filter((item) => item.chosen).map(labelOf);
   const reached = selection.packages.filter((item) => !item.chosen).map(labelOf);
   return [
-    `${selectorList(chosen)}${reached.length ? `, with ${selectorList(reached)}, which ${reached.length === 1 ? "it needs" : "they need"}` : ""}`,
+    `${selectorList(chosen)}${reached.length ? `, with ${selectorList(reached)}, linked from ${chosen.length === 1 ? "it" : "them"}${selection.root ? " or from the workspace root" : ""}` : ""}`,
     selection.root ? "and the workspace root's own dependencies" : "without the workspace root's own dependencies",
   ].join(", ");
 }
@@ -91,9 +91,12 @@ export function toggled(folders: readonly string[], folder: string, on: boolean)
   return [...next].sort();
 }
 
-/** The chosen folders the workspace no longer lists: shown flagged, and kept until unticked, never dropped. */
+/**
+ * The chosen folders the workspace's list doesn't hold: shown flagged, and kept until unticked, never dropped. A list cut
+ * short (more than it shows) can't tell, so nothing is flagged then, and the engine decides at the next preview.
+ */
 export const flaggedFolders = (scope: InstallScope, facts: WorkspaceFacts | null): string[] =>
-  scope.kind !== "packages" || facts === null ? [] : scope.packages.filter((folder) => !facts.packages.some((item) => item.folder === folder));
+  scope.kind !== "packages" || facts === null || facts.more > 0 ? [] : scope.packages.filter((folder) => !facts.packages.some((item) => item.folder === folder));
 
 /** The workspace's facts an answer carries, or null: a refusal carries them only once the workspace was read. */
 export const factsOf = (answer: EnvironmentPreviewV2): WorkspaceFacts | null => (answer.status === "refused" ? (answer.workspace ?? null) : answer.workspace);

@@ -233,7 +233,7 @@ export async function prepareRecipe(run: RecipeRun): Promise<RecipeOutcome> {
     // Chosen workspace packages with the npm the image bundles (D52): that npm must be one whose filtered installs were
     // checked, which only the image can say. A pinned npm was checked when the recipe was resolved.
     if (manager === "npm" && recipe.scope.kind === "packages" && npmBootstrap === null) {
-      const problem = facts.npm === null ? "Nivra couldn't read its npm version." : filteredInstallProblem("npm", facts.npm);
+      const problem = facts.npm === null ? "Nivra couldn't read its npm version, so it can't tell whether that npm installs chosen workspace packages. Pin a checked npm in package.json's packageManager, or install the whole project." : filteredInstallProblem("npm", facts.npm);
       if (problem !== null) return stopped("inspect", `${recipe.image.tag} holds npm ${facts.npm ?? "of an unknown version"}. ${problem}`);
     }
 
