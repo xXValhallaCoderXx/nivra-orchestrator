@@ -135,3 +135,37 @@ export function modeChangeOf(path: { change: "added" | "changed" | "deleted"; be
   const words = before === "100644" && after === "100755" ? "made executable" : before === "100755" && after === "100644" ? "no longer executable" : `${MODE_KIND[before] ?? `mode ${before}`} made ${MODE_KIND[after] ?? `mode ${after}`}`;
   return { before, after, text: `Mode ${before} to ${after}: ${words}`, applies: false };
 }
+
+/** A proposed path as the summary reads it: its kind, and its state before and after, mode and content hash. */
+type ProposedPath = { change: "added" | "changed" | "deleted"; before: { mode: string; sha256: string } | null; after: { mode: string; sha256: string } | null };
+
+/**
+ * Whether a proposed path changes its mode and nothing else (Nate's re-review): an existing file whose content hashes
+ * match before and after while its modes differ. A diff that shows no lines is never enough by itself: a patch cut
+ * before a file's lines shows none either, and so does an empty new file.
+ */
+export function modeOnly(path: ProposedPath): boolean {
+  return path.change === "changed" && path.before !== null && path.after !== null && path.before.sha256 === path.after.sha256 && path.before.mode !== path.after.mode;
+}
+
+/** What a file's panel shows in place of its diff, or its diff. */
+export type FileShown = "unchanged" | "past-cut" | "binary" | "cut" | "no-lines" | "diff";
+
+/**
+ * What the Changes list says of one file: its counts, or null when there are none to give; what its open panel shows;
+ * and its mode. "Mode only" and an unchanged content rest on the proposal's content hashes alone. When content changes
+ * aren't shown, the panel says why: past the cut, binary, or cut in this file.
+ */
+export function fileSummaryOf(path: ProposedPath, file: DiffFile | null): { counts: string | null; shown: FileShown; mode: ModeChange | null } {
+  // The proposal's own states lead, since they hold past the cut too; the patch's header backs a changed one.
+  const mode =
+    modeChangeOf(path) ??
+    (path.change === "changed" && file?.modes?.before && file.modes.after && file.modes.before !== file.modes.after
+      ? modeChangeOf({ change: "changed", before: { mode: file.modes.before }, after: { mode: file.modes.after } })
+      : null);
+  if (modeOnly(path)) return { counts: "mode only", shown: "unchanged", mode };
+  if (file === null) return { counts: null, shown: "past-cut", mode };
+  if (file.binary) return { counts: null, shown: "binary", mode };
+  if (file.lines.length === 0) return { counts: null, shown: file.cut ? "cut" : "no-lines", mode };
+  return { counts: `+${file.added} \u2212${file.removed}`, shown: "diff", mode };
+}

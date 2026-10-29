@@ -3,7 +3,7 @@ import type { BaselineSelection, TaskBaselineCheck, TaskCheck, TaskProposal, Tas
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AcceptanceCaseView, BriefContent, TaskAttemptView, TaskRunPreview, TaskView, TurnStatus } from "../../../shared/ipc";
 import { startedFrom } from "../../../shared/task-started";
-import { diffFilesOf, modeChangeOf, type DiffFile } from "../../../shared/task-diff";
+import { diffFilesOf, fileSummaryOf, type DiffFile } from "../../../shared/task-diff";
 import { outcomeLookOf, verdictText } from "../../../shared/task-verdict";
 import { CONSENT_COVERS } from "../shared/evidence";
 import { errorMessage, usePoll } from "../shared/ui";
@@ -1256,13 +1256,9 @@ export function RunChanges({ proposal }: { proposal: TaskProposal }) {
             const file = byPath.get(one.path) ?? null;
             const isOpen = opened.has(one.path);
             const diffId = `${listId}-${proposal.paths.indexOf(one)}`;
-            // Its mode, from the proposal's own states, which hold past the cut too; the patch's header backs a changed one.
-            const mode =
-              modeChangeOf(one) ??
-              (one.change === "changed" && file?.modes?.before && file.modes.after && file.modes.before !== file.modes.after
-                ? modeChangeOf({ change: "changed", before: { mode: file.modes.before }, after: { mode: file.modes.after } })
-                : null);
-            const contentless = file !== null && !file.binary && file.lines.length === 0;
+            // "Mode only" and an unchanged content rest on the content hashes alone, never on a diff that shows no lines.
+            const summary = fileSummaryOf(one, file);
+            const mode = summary.mode;
             return (
               <Stack key={one.path} gap={6} py={6} style={{ borderTop: "1px solid var(--nivra-border)" }} data-testid="task-attempt-change-file" data-path={one.path} data-change={one.change}>
                 <UnstyledButton onClick={() => toggle(one.path)} aria-expanded={isOpen} aria-controls={diffId}>
@@ -1282,9 +1278,9 @@ export function RunChanges({ proposal }: { proposal: TaskProposal }) {
                           {mode.after && mode.before ? `Mode ${mode.before} to ${mode.after}` : `Mode ${mode.after}`}
                         </Badge>
                       )}
-                      {file && !file.binary && (
+                      {summary.counts && (
                         <Text size="xs" c="var(--nivra-text-3)">
-                          {contentless ? (mode ? "mode only" : "no lines") : `+${file.added} −${file.removed}`}
+                          {summary.counts}
                         </Text>
                       )}
                     </Group>
@@ -1297,17 +1293,25 @@ export function RunChanges({ proposal }: { proposal: TaskProposal }) {
                         {mode.text}.{mode.applies ? "" : " Nivra doesn't apply this: approving the change would be refused, and nothing written."}
                       </Text>
                     )}
-                    {file === null ? (
+                    {summary.shown === "unchanged" ? (
+                      <Text size="xs" c="var(--nivra-text-3)">
+                        Its content is unchanged.
+                      </Text>
+                    ) : summary.shown === "past-cut" || file === null ? (
                       <Text size="xs" c="var(--nivra-text-3)">
                         Its diff is past the part of the change shown.
                       </Text>
-                    ) : file.binary ? (
+                    ) : summary.shown === "binary" ? (
                       <Text size="xs" c="var(--nivra-text-3)">
                         A binary file: its contents aren't shown.
                       </Text>
-                    ) : contentless ? (
+                    ) : summary.shown === "cut" ? (
                       <Text size="xs" c="var(--nivra-text-3)">
-                        {mode ? "Its content is unchanged." : "The patch shows no lines for it."}
+                        The part of the change shown ends in this file.
+                      </Text>
+                    ) : summary.shown === "no-lines" ? (
+                      <Text size="xs" c="var(--nivra-text-3)">
+                        The patch shows no lines for it.
                       </Text>
                     ) : (
                       <>
