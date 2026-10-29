@@ -589,6 +589,7 @@ this machine.
 
 ```bash
 cd apps/engine && node --test test/environment-recipe-engine.test.ts test/environment-prepare.test.ts test/task-recipe-engine.test.ts test/task-environment.test.ts
+cd apps/engine && node --test test/environment-node.test.ts test/environment-workspace.test.ts test/nebius-sandbox.test.ts
 cd apps/engine && node --test test/snapshot.test.ts test/patch.test.ts test/prepared-image.test.ts test/nebius-session.test.ts
 cd apps/desktop && node --test test/environment-store.test.ts test/environment-scope.test.ts test/tasks.test.ts test/task-started.test.ts test/task-live-checks.test.ts
 cd apps/desktop && node --test --test-name-pattern="from its own recipe" test/host.test.ts
@@ -607,16 +608,28 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e environment.spec.ts environmen
 - **The host and the store**: `resolveEnvironment`, `prepareEnvironment(choices)` and `acceptMissingBuilds`. The store
   reads its rows with the domain's schemas, D41's as legacy, and workspace migration 8 keeps an acceptance of missing
   builds bound to one verified record. The run preview's fingerprint v3 binds a run to the environment.
-- **What to install** (option a1): the window offers the whole project, the default, or packages of a pnpm workspace
-  as up to eight typed selectors, sent as typed. The host's and the engine's refusals are shown in their words with
-  the selectors kept; a change of scope clears the preview, and a preview whose recipe doesn't install the scope chosen
-  is never prepared. `src/shared/environment-scope.ts` copies the domain's selector rule and limit for a hint under
-  each selector, held to them by `test/environment-scope.test.ts`. `e2e/environment-scope.spec.ts` drives it against
-  the real engine and the stand-in, whose guest fails any step it doesn't stand in for; the gated engine applies a
-  scope as the engine does, and ignores it while an `env-ignores-scope` file exists.
+- **What to install** (D52): the whole project, the default; workspace packages ticked in the list the engine sends,
+  with a switch for the root's own dependencies; or, under Advanced, pnpm selectors sent as typed. Which ways a project
+  supports, and why not, comes with the resolution's `WorkspaceFacts`, on every answer that read the workspace.
+  - `environment/workspace.ts` works out what a chosen install reaches from the lockfile's own links: pnpm's importers
+    (`version: link:PATH`), and npm's tree, each name looked up as Node does from the dependent's folder. It passes
+    every package reached: pnpm by exact name, npm as `./FOLDER`. It also holds the releases chosen installs are
+    offered on (`filteredInstallProblem`, each range checked against its release notes) and the settings that refuse
+    them. `node-files.ts` reads the links; the sandbox's `isInstallArgs` takes exactly the forms the resolver builds.
+  - The preparation stops a chosen install whose log says pnpm passed over a filter (the script's `filters-unmatched`
+    marker), and checks an image's bundled npm against the list before any upload.
+  - The window keeps the facts apart from the preview, so a tick clears the preview and keeps the list. A folder the
+    workspace no longer lists stays ticked and flagged until it is unticked. `src/shared/environment-scope.ts` holds
+    the pure helpers, held to the domain's limits by `test/environment-scope.test.ts`.
+  - The gated engine answers with fixed facts (packages/data, and packages/web, which links it), refuses a package it
+    hasn't got, and answers as one package while an `env-single` file exists.
+  - These tests check commands, refusals and the stand-in's preparation, offline. They don't prove a real filtered
+    install: a live check needs its own approved recipe and digest. Choosing packages narrows only the install, never
+    what a task sends.
 - **Live runs**: `task-live.ts`'s recipe (kind v3 since the live checks' state folders) takes the person's choices for
-  the project's own recipe in the task file's `environment` (`{}` for none; a `scope` names the packages to install,
-  which the journey's preview types into the window by test id), and binds the resolution's fingerprint and
+  the project's own recipe in the task file's `environment` (`{}` for none; a `scope` says what to install, which the
+  journey's preview chooses in the window by test id: packages ticked, or selectors typed under Advanced), and binds
+  the resolution's fingerprint and
   warnings, the recipe's digest and the setup files' digest. Each live run needs Nate's approval of its own recipe and
   digest. Run the window's e2e through `pnpm --filter @nivra/desktop test:e2e`: the development engine runs on the Node
   that started pnpm's script.

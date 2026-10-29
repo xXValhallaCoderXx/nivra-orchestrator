@@ -2965,6 +2965,60 @@ Reviews:
   `42c9c47`.
 - A third, of `0c4a71c..e4ba2d6`, found none blocking; its points are fixed or named above. D49 lists all three.
 
+### Workspace package selection (D52, NIV-55, PR 43)
+
+What an environment installs, chosen in the window: the whole project, workspace packages ticked in the list the
+engine sends (npm and pnpm), or pnpm selectors under Advanced. On `feature/env-scope` (PR 43), with main `c2c1bb2`
+merged in, after Nate's review of its plan (29 Oct). Offline: the engine resolves setup files and the sandbox is a
+stand-in, so these show commands, refusals and preparations' records, not a real filtered install.
+
+| Commit | What |
+|---|---|
+| `0ba335c`, `b7fb263` | PR 43 as it was: typed pnpm selectors, and the journey typing them |
+| `f70b6eb` | Main `c2c1bb2` merged in (one import conflict, both lines kept) |
+| `12f7aa3` | The uncommitted draft's fixes, run for the first time: `--fail-if-no-match`, the empty-match words, the host's selector words, the new shell's navigation in the specs |
+| `e996493` | The domain: the packages scope, the selection and its refinement, the workspace's facts, protocol 17 |
+| `f33bd44` | The lockfile readers and the resolver: what each manager's install reaches, from recorded links; the checked releases and settings |
+| `2b33615` | The sandbox's check of npm's workspace arguments; the preparation's marker and its check of the image's npm |
+| `35b95d1` | Facts on any refusal after the workspace was read |
+| `f82bca5` | The window's picker, the root's switch, Advanced; the host's words; the gated engine |
+| `bf8e384` | The journey ticks packages and opens Advanced (for Track A's review) |
+| `fca5958`, `0d92919` | The e2e specs for both managers, and the live run's recipe test |
+| `6883c76` | The independent review's findings |
+| this record | D52, the development notes and this section |
+
+**What it shows, offline:**
+
+| Criterion | Where | What it shows |
+|---|---|---|
+| The whole project is unchanged for npm and pnpm | `environment-node.test.ts`, `environment-recipe-engine.test.ts`, both e2e specs | The same arguments and preparations as before; no selection on its recipe |
+| Packages chosen by name and folder, no syntax | `environment.spec.ts`, `environment-scope.spec.ts` | The list from the engine's facts, ticked; Preview off while nothing is ticked; pnpm selectors only under Advanced |
+| What the chosen packages and the root reach is installed and said | `environment-node.test.ts`, `environment-workspace.test.ts`, both e2e specs | From recorded links: aliases and relative references by where they link, a same-name registry package not counted, the root's links counted when it installs (always for pnpm), a workspace reached through a registry package (npm); each package listed in the preview and the recipe |
+| Each manager's chosen install, on its own | `environment-node.test.ts`, `environment-recipe-engine.test.ts`, `environment-scope.spec.ts` | pnpm by exact name and npm as `./FOLDER`, root on and off for npm, sent to the stand-in exactly as previewed, scope and selection kept with the environment |
+| One package, several, empty, removed and unknown | `environment-node.test.ts`, `environment.test.ts`, both e2e specs | One package offers only the whole project, with the reason; an empty choice refused by the domain and the host; a removed or unlisted package refused by name and flagged until unticked; 21 in all refused |
+| Releases and settings that can't do it are said | `environment-workspace.test.ts`, `environment-node.test.ts` | Each checked range at its boundaries, majors 12 out; a hoisted linker on pnpm 9 and 10, a lockfile per package, links left out, filter in pnpm-workspace.yaml, deep links, npm's omit, include and other install strategies; each refusal says what to pin or change; a lockfile from pnpm 11.28.0 to 11.28.5 warned about on every scope |
+| Frozen lockfiles, inside the boundary | `nebius-sandbox.test.ts`, `environment-recipe-engine.test.ts` | Only the fixed argument forms pass the sandbox's check, near misses refused; an image's unchecked npm stops before any upload; a passed-over filter keeps no environment |
+| A change needs a fresh preview; a mismatch is refused | `environment.spec.ts`, `host.test.ts` | A tick clears the preview and keeps the list; fingerprints crossing scopes refused either way; a recipe that doesn't install the scope chosen refused by the window and the host |
+| Choices kept, per project, after a restart | `environment.spec.ts`, `host.test.ts` | `page.reload` restores a saved packages choice and a saved selectors choice (Advanced open); two projects keep their own |
+| Older recipes keep their meaning and digest | `environment.test.ts`, `nebius-sandbox.test.ts` | Pinned digests of a whole and a selected recipe from `c2c1bb2`; older argument forms still pass |
+
+**Through a real engine** (`apps/engine/scripts/rpc.ts` at `0d92919`, offline, in `~/.nivra-dev-env-scope/rpc`; nothing
+installed, no repository script run; the answers are in `~/nivra-acceptance/env-scope/rpc/`):
+- valhalla-fitness at `3c3c5d7` (pnpm 11.5.3, six packages): the whole project is ready; apps/web and a selector are
+  refused, because pnpm 11.5.3 isn't a checked release, with the releases to pin.
+- The same setup files pinned to pnpm 11.28.9 (a modified copy): apps/web installs with data, domain, tokens and
+  workout-share, reached through the lockfile's links, and the root.
+- humin at `1712af4`, one package: the whole project only, with each other way's reason.
+- An npm-workspaces fixture (built for this, not a real project): web with data, root off; with data and lint, which
+  the root links, root on; a selector refused in npm's words.
+
+**Checks:** CHECKS_PENDING
+
+Mutations: 14 of 14 caught (`~/nivra-acceptance/env-scope/mutate.mjs`), at `0d92919` and again at `6883c76`.
+
+Review: an independent review of `0d92919` found no high-severity defect and twelve smaller ones; ten are fixed in
+`6883c76`, the npm pass-over is answered by the lockfile cross-check, and the docs are this record.
+
 ### Deferred to a later milestone (kept, not dropped)
 
 | Test | Required result |
