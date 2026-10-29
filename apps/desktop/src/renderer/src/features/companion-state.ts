@@ -30,5 +30,5 @@ export interface SetupReturn { scope: Scope; route: Route; hint: CompanionHint; 
 /** Return never silently uses another project after the original was removed. Work IDs are checked by the host too. */
 export function returnProjectPresent(destination: SetupReturn, projectIds: readonly string[]): boolean {
   const projectId = destination.projectId !== undefined ? destination.projectId : destination.scope.kind === "project" ? destination.scope.projectId : null;
-  return projectId === null || projectIds.includes(projectId);
+  return (projectId === null || projectIds.includes(projectId)) && (destination.scope.kind !== "project" || projectIds.includes(destination.scope.projectId));
 }

@@ -55,6 +55,23 @@ function fixture() {
   insertMission(db, { id: missionId, conversationId: randomUUID(), createdAt: AT }, { id: randomUUID(), content: { name: "Offline notes", outcome: "Save notes offline", intendedUsers: "", successCriteria: [], constraints: [], nonGoals: [] } });
   return { db, companion, options, missionId, calls, projects, preferences, grants: () => grants, setBudget: (value: string | null) => { budgetBlocked = value; }, answer: (value: CompanionResult) => { result = value; } };
 }
+function addProject(f: ReturnType<typeof fixture>): string {
+  const id = randomUUID();
+  f.projects.push({ id, targetId: "local", nativePath: "/synthetic", label: "Synthetic", addedAt: AT, sharing: { modelContext: true, cloudExecution: false } });
+  return id;
+}
+function addTask(f: ReturnType<typeof fixture>, projectId: string | null): string {
+  const id = randomUUID();
+  insertTask(f.db, { id, title: "A small task", projectId, createdAt: AT, updatedAt: AT }, { id: randomUUID(), content: BRIEFS.vague, derivedFrom: null });
+  return id;
+}
+async function capturedTurn(f: ReturnType<typeof fixture>, hint: Parameters<CompanionHost["context"]>[0], message: string) {
+  const sessionId = randomUUID();
+  const clientRequestId = randomUUID();
+  f.answer({ reply: "Understood.", actions: [], captures: [{ kind: "constraint", statement: message, quote: message, start: 0, end: message.length }] });
+  await f.companion.send({ sessionId, clientRequestId, hint, message });
+  return f.companion.turn(sessionId, clientRequestId);
+}
 
 describe("the host's transient companion", () => {
   it("makes no model call from context; retains selected knowledge without storing canary dialogue; forgetting clears later history", async () => {
@@ -172,6 +189,86 @@ describe("the host's transient companion", () => {
     assert.equal(companionCaptureConflicts("Use npm.", ["This project must use pnpm."]), true);
     assert.equal(companionCaptureConflicts("This app must not work offline.", ["This app must work offline."]), true);
     assert.equal(companionCaptureConflicts("This app must work offline.", ["This app must work offline."]), false);
+  });
+
+  for (const message of [
+    "For this task, I prefer one small pull request.",
+    "I prefer one small pull request.",
+    "For this task, I prefer my default of one small pull request.",
+    "I prefer my default of one small pull request.",
+    "I always prefer one small pull request.",
+    "For this one task, I prefer one small pull request.",
+  ]) {
+    it(`keeps the task preference local: ${message}`, async () => {
+      const f = fixture();
+      const projectId = addProject(f);
+      const taskId = addTask(f, projectId);
+      const otherTaskId = addTask(f, projectId);
+      const view = await capturedTurn(f, { taskId }, message);
+      assert.equal(view.status, "answered");
+      assert.equal(view.retained?.length, 1);
+      assert.equal(f.preferences.length, 0);
+      const notes = listKnowledge(f.db, { kind: "task", id: taskId });
+      assert.equal(notes.length, 1);
+      assert.equal(notes[0]?.statement, message);
+      assert.equal(notes[0]?.projectId, projectId);
+      assert.equal(listKnowledge(f.db, { kind: "project", id: projectId }).length, 0);
+      assert.equal((await f.companion.context({ taskId })).knowledge.length, 1);
+      assert.equal((await f.companion.context({ taskId: otherTaskId })).knowledge.length, 0);
+      assert.equal((await f.companion.context({ projectId })).knowledge.length, 0);
+    });
+  }
+
+  it("retains preferences on a task without a project and on a mission without promoting either to defaults", async () => {
+    const f = fixture();
+    const taskId = addTask(f, null);
+    const taskMessage = "For this task, I prefer one small pull request.";
+    const missionMessage = "For this mission, I prefer one small pull request.";
+    assert.equal((await capturedTurn(f, { taskId }, taskMessage)).retained?.length, 1);
+    assert.equal((await capturedTurn(f, { missionId: f.missionId }, missionMessage)).retained?.length, 1);
+    assert.equal(f.preferences.length, 0);
+    assert.equal(listKnowledge(f.db, { kind: "task", id: taskId })[0]?.projectId, null);
+    assert.equal(listKnowledge(f.db, { kind: "mission", id: f.missionId })[0]?.statement, missionMessage);
+  });
+
+  it("broadens a task preference only when the user explicitly names the project or every project", async () => {
+    const f = fixture();
+    const projectId = addProject(f);
+    const taskId = addTask(f, projectId);
+    const projectMessage = "For this project, I prefer one small pull request.";
+    const globalMessage = "I prefer small pull requests for all my projects.";
+    await capturedTurn(f, { taskId }, projectMessage);
+    await capturedTurn(f, { taskId }, globalMessage);
+    assert.equal(f.preferences.length, 2);
+    assert.equal(f.preferences[0]?.scope, "project");
+    assert.equal(f.preferences[0]?.projectId, projectId);
+    assert.equal(f.preferences[1]?.scope, "personal");
+    assert.equal(f.preferences[1]?.projectId, null);
+    assert.equal(listKnowledge(f.db, { kind: "task", id: taskId }).length, 0);
+  });
+
+  it("keeps a default on the selected project and requires broader wording before making a personal preference", async () => {
+    const f = fixture();
+    const projectId = addProject(f);
+    const message = "I prefer my default of one small pull request.";
+    const general = await capturedTurn(f, {}, message);
+    assert.equal(general.proposals?.[0], message);
+    assert.equal(f.preferences.length, 0);
+    await capturedTurn(f, { projectId }, message);
+    assert.equal(f.preferences.length, 1);
+    assert.equal(f.preferences[0]?.scope, "project");
+    assert.equal(f.preferences[0]?.projectId, projectId);
+  });
+
+  it("leaves task-specific wording for review when no task is selected rather than saving a project default", async () => {
+    const f = fixture();
+    const projectId = addProject(f);
+    const message = "For this task, I prefer one small pull request.";
+    const view = await capturedTurn(f, { projectId }, message);
+    assert.equal(view.proposals?.length, 1);
+    assert.equal(view.proposals?.[0], message);
+    assert.equal(f.preferences.length, 0);
+    assert.equal(listKnowledge(f.db, { kind: "project", id: projectId }).length, 0);
   });
 
   it("revalidates ordinary source revisions inside a draft's native save after a credential wait", async () => {

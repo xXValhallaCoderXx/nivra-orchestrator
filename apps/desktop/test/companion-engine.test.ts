@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, it } from "node:test";
 import { Host } from "../src/main/host.ts";
-import { HostStore } from "../src/main/host-store.ts";
+import { HostStore, NO_SHARING } from "../src/main/host-store.ts";
 import { LocalTarget } from "../src/main/targets/local.ts";
 import { httpError, startStub, text, type Stub } from "../../engine/test/stub-token-factory.ts";
 
@@ -114,4 +114,33 @@ it("retains a scoped selected outcome, then excludes forgotten knowledge and old
   assert.equal(JSON.stringify(stub.chats()[1]!.body).includes(statement), false);
   assert.equal((await host.listKnowledge({ kind: "task", taskId: task.summary.id })).length, 0);
   await host.shutdown(); absent(at, [promptMarker, replyMarker]);
+});
+
+it("keeps a task-specific preference out of its project's defaults and another task's model context", async () => {
+  const statement = "For this task, I prefer one small pull request.";
+  const stub = await startStub({ models: [{ id: "nvidia/Nemotron-3.5-Super-VL", context_length: 131_072 }], chat: (_request, index) => text(JSON.stringify({
+    reply: "Use the current task's scope.", actions: [], captures: index ? [] : [{ kind: "decision", statement, quote: statement, start: 0, end: statement.length }],
+  })) }); stubs.push(stub);
+  const at = root(), projectId = randomUUID();
+  new HostStore(join(at, "settings.json")).update((data) => ({ ...data, projects: [{ id: projectId, targetId: "local", nativePath: join(at, "project"), label: "Field log", addedAt: new Date().toISOString(), sharing: { ...NO_SHARING, modelContext: true } }] }));
+  const host = open(at, stub);
+  await host.setCompanionLimit(2);
+  const fields = { goal: "Retain a field note", scope: "One note", acceptanceCriteria: [], exclusions: "", assumptions: [], context: "", checks: [], acceptanceCases: [] };
+  const first = await host.createTask({ title: "First task", projectId, planId: null, fields });
+  const second = await host.createTask({ title: "Second task", projectId, planId: null, fields });
+  const sessionId = randomUUID(), clientRequestId = randomUUID();
+  await host.sendCompanionTurn({ sessionId, clientRequestId, hint: { taskId: first.summary.id }, message: statement });
+  const answer = await finished(host, sessionId, clientRequestId);
+  assert.equal(answer.status, "answered");
+  assert.equal(answer.retained?.length, 1);
+  assert.equal(host.preferences().records.length, 0);
+  assert.equal((await host.listKnowledge({ kind: "task", taskId: first.summary.id }))[0]?.statement, statement);
+  assert.equal((await host.listKnowledge({ kind: "project", projectId })).length, 0);
+  assert.equal((await host.getCompanionContext({ taskId: second.summary.id })).knowledge.length, 0);
+  const secondSession = randomUUID(), secondRequest = randomUUID();
+  await host.sendCompanionTurn({ sessionId: secondSession, clientRequestId: secondRequest, hint: { taskId: second.summary.id }, message: "What should I do for this task?" });
+  assert.equal((await finished(host, secondSession, secondRequest)).status, "answered");
+  assert.equal(stub.chats().length, 2);
+  assert.equal(JSON.stringify(stub.chats()[1]!.body).includes(statement), false);
+  await host.shutdown();
 });

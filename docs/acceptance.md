@@ -3208,3 +3208,37 @@ confirmation disabled; old outstanding grants and their late usage remain attach
   a previous month, confirm the displayed later month, check the guard after reload and refuse a recovery bypass.
 - Tests start no engine or paid inference for the month-confirmation journeys. Companion AI request coverage and
   existing money-policy refusals are unchanged. Broader verification results accompany the PR update.
+
+## NIV-68 review corrections — scope, dialogue and Settings, 29 October 2026
+
+The review of PR 45 at `8643db4` found four companion defects, corrected on its own branch above the NIV-66 month fix:
+
+- A task or mission's engineering preference stays knowledge at that native scope. Project/personal defaults require
+  appropriate broader scope; bare "my default" and "always" do not broaden a task. Host tests and a real engine with a
+  loopback provider verify that a second task receives neither the note nor a new project default.
+- A changed context epoch is checked against the same turn's answered epoch and fresh host context before discarding
+  the dialogue. Own saves preserve the reply; external edits/forgetting still invalidate it. Session/request identities
+  reject stale context reads and duplicate results from earlier turns.
+- End replaces the local dialogue and composer before awaiting cancellation, with a warning in the new empty buffer if
+  cancellation cannot be confirmed. A late answer cannot repopulate the retired buffer.
+- Settings selects the task's host-resolved project for the detour and restores the previous sidebar scope and work on
+  return. Tests cover an earlier project A selection and General while the task belongs to B, including B's actual
+  diagnostics controls. A removed origin or reassigned task still refuses the return.
+
+- Independent NIV-66 `pnpm verify`: 135 domain + 644 desktop + 960 engine tests (1,739), no skips.
+- Integrated `pnpm verify`: 135 domain + 679 desktop + 970 engine tests (1,784), no skips. Both full runs passed with
+  bounded CPU affinity; test assertions, deadlines and skips were not weakened.
+- Focused host/knowledge/privacy checks: 29 passed, including the real-engine task-preference isolation regression.
+- Final built `companion.spec.ts`, `companion-lifecycle.spec.ts` and `environment-scope.spec.ts`: 17 passed. The seven
+  new lifecycle cases also passed as a separate run. Independent NIV-66 built budget journeys: 6 passed.
+- Final Linux packaged subset: 50 passed, 18 existing conditional cases skipped, including the new lifecycle and guarded
+  month-confirmation fixtures. Windows development package build and its full UI project: 14 passed. Runtime staging
+  also passed. No target, supervisor or staging source changed; the native/WSL harness was not repeated for this correction.
+
+An earlier unbounded full run was stopped after timeouts while other suites were active. An initial direct
+`pnpm exec playwright` run omitted the absolute Node executable source engines need (5 failures, 1 not run, 11 passed);
+the complete affected files then passed through the normal `test:e2e` package script. These attempts are retained as
+failed/aborted evidence. The full built-app suite was not repeated; packaged coverage is the named subset above.
+
+No paid calls were made. The companion-only allowance, explicit turn/sharing requirements and stated exclusions remain
+in force. No newer planning work is included in either review branch.

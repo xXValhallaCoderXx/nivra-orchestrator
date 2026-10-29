@@ -43,6 +43,7 @@ describe("the companion's scoped temporary state (NIV-68)", () => {
     assert.equal(returnProjectPresent(destination, ["original", "different"]), true);
     assert.equal(returnProjectPresent({ ...destination, scope: { kind: "general" } }, []), true);
     assert.equal(returnProjectPresent({ ...destination, projectId: "task-project" }, ["original"]), false);
-    assert.equal(returnProjectPresent({ ...destination, projectId: "task-project" }, ["task-project"]), true);
+    assert.equal(returnProjectPresent({ ...destination, projectId: "task-project" }, ["task-project"]), false);
+    assert.equal(returnProjectPresent({ ...destination, projectId: "task-project" }, ["original", "task-project"]), true);
   });
 });

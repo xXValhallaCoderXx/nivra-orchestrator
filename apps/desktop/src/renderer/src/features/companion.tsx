@@ -1,6 +1,6 @@
 import { Alert, Badge, Box, Button, Group, Paper, Stack, Text, Textarea, TextInput, Title } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
-import type { CompanionAction, CompanionContextView, CompanionHint, CompanionSettingsView, KnowledgeView, MissionView, ProjectInspectionView } from "../../../shared/ipc";
+import type { CompanionAction, CompanionContextView, CompanionHint, CompanionSettingsView, CompanionTurnView, KnowledgeView, MissionView, ProjectInspectionView } from "../../../shared/ipc";
 import { CONSENT_COVERS, ConsentModal } from "../shared/evidence";
 import { errorMessage } from "../shared/ui";
 import { dialogOpen } from "../shell/keyboard";
@@ -62,6 +62,18 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
     buffers.current.set(bufferKey, { ...current, ...update });
     render((n) => n + 1);
   };
+  const receive = (bufferKey: string, sessionId: string, requestId: string, result: CompanionTurnView) => {
+    const latest = buffers.current.get(bufferKey);
+    if (!latest || latest.sessionId !== sessionId || latest.requestId !== requestId || !latest.answering || result.status === "running") return;
+    patch(bufferKey, sessionId, {
+      answering: false,
+      lines: result.reply ? appendDialogue(latest.lines, { role: "assistant", text: result.reply }) : latest.lines,
+      actions: result.actions ?? [], retained: result.retained ?? [], proposals: result.proposals ?? [],
+      askedFrom: result.fingerprint ?? result.actions?.find((action) => action.fingerprint)?.fingerprint ?? latest.askedFrom,
+      epoch: result.dialogueEpoch ?? latest.epoch,
+      error: result.status === "answered" ? null : result.message ?? `The companion turn ${result.status}. Ask again when you're ready.`,
+    });
+  };
   const dismiss = () => {
     setOpen(false);
     requestAnimationFrame(() => launcher.current?.focus());
@@ -99,31 +111,50 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
   useEffect(() => {
     if (!open) return;
     let active = true;
+    let reading = 0;
     setContextError(null);
-    const read = () => window.nivra.getCompanionContext(hint).then((value) => {
-      if (!active) return;
-      const current = buffers.current.get(key);
-      if (current && current.epoch !== null && current.epoch !== value.dialogueEpoch) {
-        void window.nivra.endCompanionSession(current.sessionId).catch(() => undefined);
-        buffers.current.set(key, { ...freshBuffer(), epoch: value.dialogueEpoch, projectId: value.sources.find((source) => source.kind === "project")?.id ?? null });
-        render((n) => n + 1);
-      } else if (current) {
-        current.epoch = value.dialogueEpoch;
-        current.projectId = value.sources.find((source) => source.kind === "project")?.id ?? null;
+    const read = async () => {
+      const readId = ++reading;
+      const readSessionId = buffers.current.get(key)?.sessionId;
+      const valid = () => active && readId === reading && buffers.current.get(key)?.sessionId === readSessionId;
+      try {
+        let value = await window.nivra.getCompanionContext(hint);
+        if (!valid()) return;
+        let current = buffers.current.get(key);
+        if (current && current.epoch !== null && current.epoch !== value.dialogueEpoch && current.requestId) {
+          const sessionId = current.sessionId;
+          const requestId = current.requestId;
+          // Own retained outcomes change the epoch before the answer RPC finishes. Read that same turn, never resend it,
+          // then check fresh context: external edits/forgetting interrupt it in the host and must still clear this buffer.
+          const result = await window.nivra.getCompanionTurn(sessionId, requestId);
+          if (!valid() || buffers.current.get(key)?.requestId !== requestId) return;
+          value = await window.nivra.getCompanionContext(hint);
+          if (!valid() || buffers.current.get(key)?.requestId !== requestId) return;
+          if (result.status === "answered" && result.dialogueEpoch === value.dialogueEpoch) receive(key, sessionId, requestId, result);
+          current = buffers.current.get(key);
+        }
+        if (current && current.epoch !== null && current.epoch !== value.dialogueEpoch) {
+          void window.nivra.endCompanionSession(current.sessionId).catch(() => undefined);
+          buffers.current.set(key, { ...freshBuffer(), epoch: value.dialogueEpoch, projectId: value.sources.find((source) => source.kind === "project")?.id ?? null });
+          render((n) => n + 1);
+        } else if (current) {
+          current.epoch = value.dialogueEpoch;
+          current.projectId = value.sources.find((source) => source.kind === "project")?.id ?? null;
+        }
+        setContext(value); setLoadedKey(key); setContextError(null);
+      } catch (reason) {
+        if (!valid()) return;
+        setContext(null);
+        setContextError(errorMessage(reason));
+        // Removed work or revoked sharing must not leave its dialogue visible under another scope.
+        const current = buffers.current.get(key);
+        if (current) {
+          void window.nivra.endCompanionSession(current.sessionId).catch(() => undefined);
+          buffers.current.set(key, freshBuffer());
+          render((n) => n + 1);
+        }
       }
-      setContext(value); setLoadedKey(key); setContextError(null);
-    }, (reason: unknown) => {
-      if (!active) return;
-      setContext(null);
-      setContextError(errorMessage(reason));
-      // Removed work or revoked sharing must not leave its dialogue visible under another scope.
-      const current = buffers.current.get(key);
-      if (current) {
-        void window.nivra.endCompanionSession(current.sessionId).catch(() => undefined);
-        buffers.current.set(key, freshBuffer());
-        render((n) => n + 1);
-      }
-    });
+    };
     void read();
     const timer = window.setInterval(() => void read(), 5_000);
     return () => { active = false; clearInterval(timer); };
@@ -159,20 +190,9 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
         try {
           const result = await window.nivra.getCompanionTurn(value.sessionId, value.requestId!);
           if (!active || result.status === "running") return;
-          const latest = buffers.current.get(bufferKey);
-          if (!latest || latest.sessionId !== value.sessionId || !latest.answering) return;
-          patch(bufferKey, value.sessionId, {
-            answering: false,
-            lines: result.reply ? appendDialogue(latest.lines, { role: "assistant", text: result.reply }) : latest.lines,
-            actions: result.actions ?? [],
-            retained: result.retained ?? [],
-            proposals: result.proposals ?? [],
-            askedFrom: result.fingerprint ?? result.actions?.find((action) => action.fingerprint)?.fingerprint ?? latest.askedFrom,
-            epoch: result.dialogueEpoch ?? latest.epoch,
-            error: result.status === "answered" ? null : result.message ?? `The companion turn ${result.status}. Ask again when you're ready.`,
-          });
+          receive(bufferKey, value.sessionId, value.requestId!, result);
         } catch (reason) {
-          if (active) patch(bufferKey, value.sessionId, { error: `${errorMessage(reason)} Nivra is checking the same request; it won't resend it.` });
+          if (active && buffers.current.get(bufferKey)?.requestId === value.requestId) patch(bufferKey, value.sessionId, { error: `${errorMessage(reason)} Nivra is checking the same request; it won't resend it.` });
         }
       }));
     };
@@ -201,13 +221,15 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
   };
   const end = async () => {
     const current = buffers.current.get(key)!;
+    const cleared = freshBuffer();
+    // Ending is a local privacy action even when the owning engine can't acknowledge cancellation.
+    buffers.current.set(key, cleared);
+    setProposal(null);
+    setRefresh((n) => n + 1);
+    render((n) => n + 1);
     try {
       await window.nivra.endCompanionSession(current.sessionId);
-      if (buffers.current.get(key)?.sessionId === current.sessionId) {
-        buffers.current.set(key, freshBuffer());
-        render((n) => n + 1);
-      }
-    } catch (reason) { patch(key, current.sessionId, { error: errorMessage(reason) }); }
+    } catch (reason) { patch(key, cleared.sessionId, { error: errorMessage(reason) }); }
   };
   const go = (action: CompanionAction) => {
     setOpen(false);

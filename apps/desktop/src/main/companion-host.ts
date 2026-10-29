@@ -274,13 +274,19 @@ export class CompanionHost {
           const text = validateKnowledgeQuote(turn.message, { start: capture.start, end: capture.end, text: capture.quote }, known);
           const clear = /(?:^use\b|\b(?:must|shall|will|we(?:'ve| have)? decided|do not|don't|never|always|remember|i prefer|keep my)\b)/i.test(text) && !/\b(?:maybe|perhaps|might|could|unless|if|guess|think|suggest|consider|should we|not sure|instead|replace|override|ignore|rather than)\b/i.test(text);
           const current = this.#current(turn.hint);
-          const isPreference = /\b(?:i prefer|my preference|keep my|for all my projects|in every project)\b/i.test(text);
-          const personal = isPreference && /\b(?:for all my projects|in every project|always for me|my default)\b/i.test(text);
+          const isPreference = /\b(?:i (?:always )?prefer|my preference|keep my|for all my projects|in every project)\b/i.test(text);
+          const taskSpecific = /\b(?:this(?: one| particular)?|current|single|one) task\b/i.test(text);
+          const missionSpecific = /\b(?:this(?: one| particular)?|current|single|one) mission\b/i.test(text);
+          const narrow = taskSpecific || missionSpecific;
+          const personal = isPreference && !narrow && /\b(?:for all my projects|in every project|for every project|across all my projects)\b/i.test(text);
+          const projectPreference = isPreference && !narrow && (current.resolved.scope?.kind === "project" || /\b(?:(?:for|in|across|throughout) (?:this|the|my current) project|project[ -]wide)\b/i.test(text));
           const brief = current.resolved.brief?.content as Record<string, unknown> | undefined;
           const briefText = [brief?.["goal"], brief?.["scope"], brief?.["exclusions"], brief?.["context"], ...(Array.isArray(brief?.["assumptions"]) ? brief["assumptions"] : [])].filter((value): value is string => typeof value === "string");
           const authoritative = [...current.knowledge.records.map((record) => record.statement ?? ""), ...current.preferences.records.map((record) => record.statement), ...briefText, ...(current.resolved.mission?.version.content.constraints ?? [])];
-          if (!clear || capture.statement.trim() !== text || (!current.resolved.scope && !personal) || companionCaptureConflicts(text, authoritative)) { proposals.push(text); continue; }
-          if (isPreference) {
+          if (!clear || capture.statement.trim() !== text || (!current.resolved.scope && !personal) || (taskSpecific && !current.resolved.task) || (missionSpecific && !current.resolved.mission) || companionCaptureConflicts(text, authoritative)) { proposals.push(text); continue; }
+          // The preference store supports project/personal defaults only. A task or mission's choice remains
+          // knowledge at that native scope unless the person's exact wording explicitly broadens it.
+          if (personal || projectPreference) {
             if (!personal && !current.resolved.project) { proposals.push(text); continue; }
             this.#options.addPreference({ statement: text, scope: personal ? "personal" : "project", projectId: personal ? null : current.resolved.projectId, intent: "default" });
             proposals.push(`Saved as a confirmed ${personal ? "personal" : "project"} preference. View, edit or forget it in Preferences.`);

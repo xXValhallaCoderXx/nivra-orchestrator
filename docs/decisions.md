@@ -3838,3 +3838,17 @@ knowledge and v12 adds content-free save idempotency records. Existing records m
 allowance alone is enforced by NIV-66; generation, decomposition, coding-worker preference adoption, wider spending
 integration and live paid evaluation remain separate. Conservative conflict checks do not prove arbitrary prose
 conflict-free. Verification distinguishes source, mocked-provider, built, packaged and Windows evidence.
+
+## D55. Keep a companion preference at its stated native scope (2026-10-29)
+
+**Decision.** Supersedes D54's blanket routing of engineering preferences into the preference store. A task or mission's
+preference is retained as knowledge on that task or mission. The project/personal preference store receives a broader
+default only when the selected scope or the person's explicit wording establishes that breadth. A task-specific
+statement never becomes a project or personal default; "my default" and "always" alone do not broaden a task's scope.
+
+**Why.** A preference for one piece of work does not authorise changing defaults for other work. The existing preference
+store has project and personal scopes, so routing every engineering preference there would widen a task's instruction.
+
+**Consequences.** No new preference scope or schema is introduced. The native knowledge consumer supplies a task's own
+preference to its readiness coach, while other tasks do not inherit it. Explicit broader defaults still use the existing
+preference store. Conservative wording checks leave unresolved scope as a proposal and grant no permission to act.

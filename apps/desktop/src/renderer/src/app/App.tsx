@@ -309,7 +309,7 @@ function Shell() {
                 if (!returnProjectPresent(destination, list.map((item) => item.id))) throw new Error("The original project was removed.");
                 if (destination.hint.taskId) {
                   const task = await window.nivra.getTask(destination.hint.taskId);
-                  if (destination.projectId && task.summary.projectId !== destination.projectId) throw new Error("This task's repository changed while setup was open.");
+                  if (destination.projectId !== undefined && task.summary.projectId !== destination.projectId) throw new Error("This task's repository changed while setup was open.");
                 }
                 if (destination.hint.missionId) await window.nivra.getMission(destination.hint.missionId);
                 setChosen(destination.scope); navigate(destination.route); setReturnError(null);
@@ -511,9 +511,13 @@ function Shell() {
       {adding.dialog}
       <Companion hint={companionContextHint} narrow={narrow} handle={companion} onVisibilityChange={setCompanionOpen} projectIds={list.map((item) => item.id)} refreshKey={credentialsSaved + projectsVersion} onAdd={() => void adding.add()} onExplain={(id) => { setChosen({ kind: "project", projectId: id }); navigate({ kind: "explain" }); }} onNavigate={(action) => {
         if (action.kind === "settings" || action.kind === "environment") {
-          setSetupReturn({ scope, route: shown, hint: companionContextHint, projectId: action.entityId ?? (companionContextHint.taskId || companionContextHint.missionId ? null : scope.kind === "project" ? scope.projectId : null) }); setReturnError(null);
+          setSetupReturn(setupReturn && detour ? setupReturn : { scope, route: shown, hint: companionContextHint, projectId: action.entityId ?? null }); setReturnError(null);
           if (action.kind === "environment" && action.entityId) openEnvironment(action.entityId);
-          else navigate({ kind: "settings", section: "connections" });
+          else {
+            // Settings acts on the companion's resolved work, while Return restores the earlier sidebar selection.
+            setChosen(action.entityId ? { kind: "project", projectId: action.entityId } : { kind: "general" });
+            navigate({ kind: "settings", section: "connections" });
+          }
         } else if (action.kind === "explain" && action.entityId) { setChosen({ kind: "project", projectId: action.entityId }); navigate({ kind: "explain" }); }
         else if (action.entityId && action.kind === "open-task") navigate({ kind: "task", id: action.entityId, tab: "brief" });
         else if (action.entityId && action.kind === "open-mission") navigate({ kind: "mission", id: action.entityId });

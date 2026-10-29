@@ -848,3 +848,18 @@ When the host's computer month is later than its established budget month, Setti
 requests offers explicit month confirmation. Check the displayed month before confirming. Save and Refresh never
 renew an exhausted allowance. The existing guard/recovery checks remain authoritative, and older outstanding requests
 stay in their original month.
+
+`companion-lifecycle.spec.ts` uses named IPC stand-ins to order context refreshes and replies without a provider. It
+checks that own retained outcomes preserve the reply, external forgetting clears it, old polls cannot complete a newer
+turn, and End clears text before cancellation is acknowledged. Its native navigation cases open a task's project
+Settings from another sidebar selection and General, inspect the actual project controls, and return to the prior scope.
+`companion-engine.test.ts` also checks that one task's preference is absent from another task's model context.
+
+For the affected built journeys, use the package script:
+
+```bash
+pnpm --filter @nivra/desktop run test:e2e companion.spec.ts companion-lifecycle.spec.ts environment-scope.spec.ts
+```
+
+The package script supplies the absolute Node executable needed by source engines; a direct `pnpm exec playwright`
+invocation does not supply it in this checkout.
