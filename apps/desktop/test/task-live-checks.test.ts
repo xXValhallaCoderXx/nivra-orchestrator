@@ -245,7 +245,7 @@ describe("the packages a live run's recipe installs (NIV-55)", () => {
   dirs.push(repository, files);
   const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
   for (const [path, text] of Object.entries({
-    "package.json": json({ name: "live-mono", private: true, packageManager: "pnpm@11.5.3" }),
+    "package.json": json({ name: "live-mono", private: true, packageManager: "pnpm@11.28.9" }),
     ".nvmrc": "24.21.0\n",
     "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
     "pnpm-workspace.yaml": "packages:\n  - packages/*\n",

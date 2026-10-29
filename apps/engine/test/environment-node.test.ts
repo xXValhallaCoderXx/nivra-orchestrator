@@ -45,6 +45,16 @@ const INDEX: ReleaseIndex = {
   advisories: [],
 };
 
+/** INDEX, with the releases chosen packages are checked on: pnpm 11.28.9, npm 11.21.1 (Node 24.21.0 bundles 11.19.0). */
+const CHECKED_INDEX: ReleaseIndex = {
+  ...INDEX,
+  managers: {
+    npm: [{ version: "11.21.1", node: "^20.17.0 || >=22.9.0", deprecated: false }, ...INDEX.managers["npm"]!],
+    pnpm: [{ version: "11.28.9", node: ">=22.13", deprecated: false }, ...INDEX.managers["pnpm"]!],
+  },
+};
+const checked = { releases: CHECKED_INDEX };
+
 async function resolveIn(files: Record<string, Content>, extra: Omit<NodeResolveInput, "snapshot"> = {}): Promise<Resolution> {
   const result = resolveNodeEnvironment({ snapshot: await snap(repoWith(files)), releases: INDEX, ...extra });
   // Every answer is one the domain's schema takes, whatever its kind.
@@ -328,31 +338,31 @@ describe("install options, build policies and what task operations get (NIV-55)"
   });
 
   it("installs the pnpm packages a filter selects, and checks only their Node requirements", async () => {
-    const files = pnpmProject({}, {
+    const files = pnpmProject({ packageManager: "pnpm@11.28.9" }, {
       "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
       "packages/data/package.json": json({ name: "@w/data", engines: { node: ">=22" }, dependencies: { "@w/core": "workspace:*" } }),
       "packages/core/package.json": json({ name: "@w/core", engines: { node: ">=20" } }),
       "packages/legacy/package.json": json({ name: "@w/legacy", engines: { node: "<20" } }),
     });
-    assert.equal((await resolveIn(files)).status, "needs-choice", "the whole workspace can't agree");
-    const scoped = ready(await resolveIn(files, { choices: { scope: { kind: "selected", selectors: ["@w/data..."] } } }));
+    assert.equal((await resolveIn(files, checked)).status, "needs-choice", "the whole workspace can't agree");
+    const scoped = ready(await resolveIn(files, { ...checked, choices: { scope: { kind: "selected", selectors: ["@w/data..."] } } }));
     assert.deepEqual(scoped.recipe.install.args, ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@w/data..."]);
-    refused(await resolveIn(npmProject(), { choices: { scope: { kind: "selected", selectors: ["app"] } } }), "scope", /npm workspaces/);
+    refused(await resolveIn(npmProject(), { choices: { scope: { kind: "selected", selectors: ["app"] } } }), "scope", /pnpm selectors are pnpm's own syntax, and this project installs with npm\. Choose the whole project/);
   });
 });
 
 describe("pnpm selections that must match packages", () => {
   it("asks pnpm to fail an empty selection while leaving the whole project's install unchanged", async () => {
-    const files = pnpmProject({}, {
+    const files = pnpmProject({ packageManager: "pnpm@11.28.9" }, {
       "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
       "packages/data/package.json": json({ name: "@w/data" }),
     });
-    const whole = ready(await resolveIn(files));
+    const whole = ready(await resolveIn(files, checked));
     assert.deepEqual(whole.recipe.install.args, ["install", "--frozen-lockfile"]);
     // pnpm decides which packages match inside the boundary, including exclusions and selectors Nivra cannot expand.
     for (const selectors of [["@w/missing"], ["!*"], ["@w/data", "!@w/other"]]) {
       const scope = { kind: "selected" as const, selectors };
-      const selected = ready(await resolveIn(files, { choices: { scope } }));
+      const selected = ready(await resolveIn(files, { ...checked, choices: { scope } }));
       assert.deepEqual(selected.recipe.scope, scope);
       assert.deepEqual(selected.recipe.install.args, ["install", "--frozen-lockfile", "--fail-if-no-match", ...selectors.flatMap((selector) => ["--filter", selector])]);
       const older = { ...selected.recipe, install: { ...selected.recipe.install, args: selected.recipe.install.args.filter((arg) => arg !== "--fail-if-no-match") } };
@@ -480,13 +490,13 @@ describe("the independent review's findings, each kept fixed (NIV-55)", () => {
 
   it("reads pnpm's filter syntax: exclusions alone, and a package's dependencies only", async () => {
     // data's range keeps Node below 24, so a scope that leaves data out would resolve to 24.21.0 instead.
-    const files = pnpmProject({}, {
+    const files = pnpmProject({ packageManager: "pnpm@11.28.9" }, {
       "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
       "packages/data/package.json": json({ name: "@w/data", engines: { node: ">=22 <24" }, dependencies: { "@w/core": "workspace:*" } }),
       "packages/core/package.json": json({ name: "@w/core", engines: { node: ">=20" } }),
       "packages/legacy/package.json": json({ name: "@w/legacy", engines: { node: "<20" } }),
     });
-    const node = async (selectors: string[]) => tool(ready(await resolveIn(files, { choices: { scope: { kind: "selected", selectors } } })), "node");
+    const node = async (selectors: string[]) => tool(ready(await resolveIn(files, { ...checked, choices: { scope: { kind: "selected", selectors } } })), "node");
     assert.deepEqual(await node(["!@w/legacy"]), { kind: "exact", version: "22.23.4" }, "every package but legacy");
     assert.deepEqual(await node(["@w/data^..."]), { kind: "exact", version: "22.23.4" }, "data's dependencies, counted with data");
     assert.deepEqual(await node(["...@w/core"]), { kind: "exact", version: "22.23.4" }, "core's dependents are data, not legacy");
@@ -578,5 +588,274 @@ describe("Nate's review of PR 31, each finding kept fixed (NIV-55)", () => {
     const versioned = await policy("10.4.1", { pnpm: { onlyBuiltDependencies: ["esbuild@0.25.1", "sharp"] } });
     assert.deepEqual([versioned.runs, versioned.allowed], ["allowed", ["sharp"]], "before 10.19 a version in an entry names no package");
     assert.match(versioned.notes.join(" "), /esbuild@0\.25\.1 allows no build/);
+  });
+});
+
+describe("workspace packages chosen by folder, installed from the links each lockfile records (NIV-55, D52)", () => {
+  /**
+   * A pnpm workspace whose links are recorded as pnpm 9 and later write them: web links data and, through an alias, ui;
+   * data links core by a relative workspace reference; the root links lint; web's twin is the registry's, not the
+   * workspace package of the same name; and legacy's Node range can't be met with the rest.
+   */
+  const MONO_LOCK = [
+    "lockfileVersion: '9.0'",
+    "",
+    "importers:",
+    "",
+    "  .:",
+    "    devDependencies:",
+    "      '@w/lint':",
+    "        specifier: workspace:*",
+    "        version: link:packages/lint",
+    "      typescript:",
+    "        specifier: ^5.6.0",
+    "        version: 5.6.3",
+    "",
+    "  apps/web:",
+    "    dependencies:",
+    "      '@w/data':",
+    "        specifier: workspace:*",
+    "        version: link:../../packages/data",
+    "      '@w/twin':",
+    "        specifier: ^1.0.0",
+    "        version: 1.0.0",
+    "      ui-kit:",
+    "        specifier: workspace:@w/ui@*",
+    "        version: link:../../packages/ui",
+    "",
+    "  packages/core: {}",
+    "",
+    "  packages/data:",
+    "    dependencies:",
+    "      '@w/core':",
+    "        specifier: workspace:../core",
+    "        version: link:../core",
+    "",
+    "  packages/legacy: {}",
+    "",
+    "  packages/lint: {}",
+    "",
+    "  packages/twin: {}",
+    "",
+    "  packages/ui: {}",
+    "",
+    "packages:",
+    "",
+    "  '@w/twin@1.0.0':",
+    "    resolution:",
+    "      integrity: sha512-x",
+    "",
+    "  typescript@5.6.3:",
+    "    resolution:",
+    "      integrity: sha512-y",
+    "",
+    "snapshots:",
+    "",
+    "  '@w/twin@1.0.0': {}",
+    "",
+    "  typescript@5.6.3:",
+    "    dependencies:",
+    "      terminal-link: 2.1.1",
+    "",
+  ].join("\n");
+  const mono = (manifest: Record<string, unknown> = {}, extra: Record<string, Content> = {}) => ({
+    "package.json": json({ name: "mono", private: true, packageManager: "pnpm@11.28.9", devDependencies: { "@w/lint": "workspace:*", typescript: "^5.6.0" }, ...manifest }),
+    "pnpm-lock.yaml": MONO_LOCK,
+    "pnpm-workspace.yaml": "packages:\n  - packages/*\n  - apps/*\n",
+    "apps/web/package.json": json({ name: "@w/web", dependencies: { "@w/data": "workspace:*", "@w/twin": "^1.0.0", "ui-kit": "workspace:@w/ui@*" } }),
+    "packages/core/package.json": json({ name: "@w/core" }),
+    "packages/data/package.json": json({ name: "@w/data", dependencies: { "@w/core": "workspace:../core" } }),
+    "packages/legacy/package.json": json({ name: "@w/legacy", engines: { node: "<20" } }),
+    "packages/lint/package.json": json({ name: "@w/lint" }),
+    "packages/twin/package.json": json({ name: "@w/twin" }),
+    "packages/ui/package.json": json({ name: "@w/ui" }),
+    ...extra,
+  });
+  /**
+   * The same shape for npm, as package-lock.json records it: workspace links at the root's node_modules, web's twin the
+   * registry's 2.0.0 nested under web, ui-kit an alias of a registry package, tool reaching core only through a
+   * registry package, and ui declaring an optional peer.
+   */
+  const npmTree = (extra: Record<string, unknown> = {}) => ({
+    "": { name: "site", version: "1.0.0", workspaces: ["packages/*", "apps/*"], devDependencies: { "@w/lint": "*", typescript: "^5.6.0" } },
+    "apps/tool": { name: "@w/tool", version: "1.0.0", dependencies: { "plugin-x": "^1.0.0" } },
+    "apps/web": { name: "@w/web", version: "1.0.0", dependencies: { "@w/data": "*", "@w/twin": "^2.0.0", "ui-kit": "npm:left-pad@^1.3.0" } },
+    "apps/web/node_modules/@w/twin": { version: "2.0.0", resolved: "https://registry.npmjs.org/@w/twin/-/twin-2.0.0.tgz", integrity: "sha512-a" },
+    "packages/core": { name: "@w/core", version: "1.0.0" },
+    "packages/data": { name: "@w/data", version: "1.0.0", dependencies: { "@w/core": "*", "left-pad": "^1.3.0" } },
+    "packages/lint": { name: "@w/lint", version: "1.0.0" },
+    "packages/twin": { name: "@w/twin", version: "1.0.0" },
+    "packages/ui": { name: "@w/ui", version: "1.0.0", peerDependencies: { react: "^18" }, peerDependenciesMeta: { react: { optional: true } } },
+    "node_modules/@w/core": { resolved: "packages/core", link: true },
+    "node_modules/@w/data": { resolved: "packages/data", link: true },
+    "node_modules/@w/lint": { resolved: "packages/lint", link: true },
+    "node_modules/@w/tool": { resolved: "apps/tool", link: true },
+    "node_modules/@w/twin": { resolved: "packages/twin", link: true },
+    "node_modules/@w/ui": { resolved: "packages/ui", link: true },
+    "node_modules/@w/web": { resolved: "apps/web", link: true },
+    "node_modules/left-pad": { version: "1.3.0", resolved: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz", integrity: "sha512-b" },
+    "node_modules/plugin-x": { version: "1.0.0", resolved: "https://registry.npmjs.org/plugin-x/-/plugin-x-1.0.0.tgz", integrity: "sha512-c", dependencies: { "@w/core": "*" } },
+    "node_modules/typescript": { version: "5.6.3", resolved: "https://registry.npmjs.org/typescript/-/typescript-5.6.3.tgz", integrity: "sha512-d", dev: true },
+    "node_modules/ui-kit": { name: "left-pad", version: "1.3.0", resolved: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz", integrity: "sha512-b" },
+    ...extra,
+  });
+  const site = (tree = npmTree(), manifest: Record<string, unknown> = {}) => {
+    const files: Record<string, Content> = {
+      "package.json": json({ name: "site", version: "1.0.0", private: true, workspaces: ["packages/*", "apps/*"], devDependencies: { "@w/lint": "*", typescript: "^5.6.0" }, ...manifest }),
+      "package-lock.json": json({ name: "site", version: "1.0.0", lockfileVersion: 3, requires: true, packages: tree }),
+    };
+    for (const [key, entry] of Object.entries(tree)) {
+      if (key === "" || key.includes("node_modules/")) continue;
+      const { name, version, dependencies, peerDependencies, peerDependenciesMeta } = entry as Record<string, unknown>;
+      files[`${key}/package.json`] = json({ name, version, ...(dependencies ? { dependencies } : {}), ...(peerDependencies ? { peerDependencies, peerDependenciesMeta } : {}) });
+    }
+    return files;
+  };
+  const scopeOf = (list: string[], root = true) => ({ kind: "packages" as const, packages: list, root });
+  const packages = (list: string[], root = true) => ({ choices: { scope: scopeOf(list, root) } });
+  const facts = (result: Resolution) => {
+    assert.ok(result.status !== "refused" || result.workspace, "the answer carries the workspace's facts");
+    return (result.status === "refused" ? result.workspace : result.workspace)!;
+  };
+  const mode = (result: Resolution, name: "whole" | "packages" | "selectors") => facts(result).modes.find((item) => item.mode === name)!;
+  const installed = (result: Extract<Resolution, { status: "ready" }>) => result.recipe.selection?.packages.map((item) => `${item.chosen ? "+" : ""}${item.folder}`);
+
+  it("lists a pnpm workspace's packages and the ways to choose, the root's switch locked on", async () => {
+    const whole = ready(await resolveIn(mono({}, { "packages/legacy/package.json": json({ name: "@w/legacy" }) }), checked));
+    const listed = facts(whole);
+    assert.deepEqual(listed.packages.map((item) => [item.folder, item.name, item.unavailable]), [
+      ["apps/web", "@w/web", null],
+      ["packages/core", "@w/core", null],
+      ["packages/data", "@w/data", null],
+      ["packages/legacy", "@w/legacy", null],
+      ["packages/lint", "@w/lint", null],
+      ["packages/twin", "@w/twin", null],
+      ["packages/ui", "@w/ui", null],
+    ]);
+    assert.deepEqual([listed.more, listed.root], [0, { dependencies: 2, examples: ["@w/lint", "typescript"], optional: false, reason: "pnpm installs the workspace root's own dependencies whenever it installs chosen packages." }]);
+    assert.deepEqual(listed.modes.map((item) => [item.mode, item.available]), [["whole", true], ["packages", true], ["selectors", true]]);
+    assert.equal(whole.recipe.selection, undefined, "the whole project has no selection");
+  });
+
+  it("installs a chosen pnpm package with every project the lockfile links it and the root to, by exact name, never a same-name registry package", async () => {
+    const shown = ready(await resolveIn(mono(), { ...checked, ...packages(["apps/web"]) }));
+    assert.deepEqual(installed(shown), ["+apps/web", "packages/core", "packages/data", "packages/lint", "packages/ui"], "the alias, the relative reference and the root's link count; twin is the registry's");
+    assert.deepEqual(shown.recipe.install.args, ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@w/web", "--filter", "@w/core", "--filter", "@w/data", "--filter", "@w/lint", "--filter", "@w/ui"]);
+    assert.deepEqual([shown.recipe.scope, shown.recipe.selection?.root], [{ kind: "packages", packages: ["apps/web"], root: true }, true]);
+    assert.match(row(shown, "workspace").note ?? "", /^Installing @w\/web \(apps\/web\)\. Also @w\/core \(packages\/core\), .*@w\/ui \(packages\/ui\), which are linked from them or from the workspace root\. With the workspace root's own dependencies\.$/);
+    assert.equal(tool(shown, "node")?.kind, "exact", "legacy's range doesn't count: it isn't installed");
+    refused(await resolveIn(mono(), checked), "unavailable-runtime", /<20/);
+    refused(await resolveIn(mono(), { ...checked, ...packages(["apps/web"], false) }), "scope", /pnpm installs the workspace root's own dependencies whenever it installs chosen packages/);
+  });
+
+  it("installs a chosen npm workspace with what it reaches through links and registry packages, the root as its switch says", async () => {
+    const withRoot = ready(await resolveIn(site(), packages(["apps/web"])));
+    assert.deepEqual(installed(withRoot), ["+apps/web", "packages/core", "packages/data", "packages/lint"], "the root's link to lint counts with the root; twin and ui-kit are registry packages");
+    assert.deepEqual(withRoot.recipe.install.args, ["ci", "--no-audit", "--no-fund", "--workspace=./apps/web", "--workspace=./packages/core", "--workspace=./packages/data", "--workspace=./packages/lint", "--include-workspace-root"]);
+    const without = ready(await resolveIn(site(), packages(["apps/web"], false)));
+    assert.deepEqual([installed(without), without.recipe.install.args.at(-1), without.recipe.selection?.root], [["+apps/web", "packages/core", "packages/data"], "--include-workspace-root=false", false]);
+    const tool = ready(await resolveIn(site(), packages(["apps/tool"], false)));
+    assert.deepEqual(installed(tool), ["+apps/tool", "packages/core"], "core is reached through plugin-x, a registry package");
+    assert.deepEqual(tool.warnings.map((item) => item.code), ["npm-optional-peers"], "ui's optional peer may come anyway (npm/cli 9847)");
+    const options = ready(await resolveIn(site(), { choices: { scope: scopeOf(["apps/web"]), options: { "legacy-peer-deps": true } } }));
+    assert.deepEqual(options.recipe.install.args.slice(0, 4), ["ci", "--no-audit", "--no-fund", "--legacy-peer-deps"], "install options stay before the workspaces");
+    assert.deepEqual(facts(withRoot).root, { dependencies: 2, examples: ["@w/lint", "typescript"], optional: true, reason: null });
+    assert.deepEqual([mode(withRoot, "selectors").available, mode(withRoot, "selectors").reason], [false, "pnpm selectors are pnpm's own syntax, and this project installs with npm."]);
+  });
+
+  it("refuses an npm dependency the lockfile doesn't record, npm's omit and include, and a package with a workspace directly inside it", async () => {
+    const tree = npmTree();
+    (tree["apps/web"] as { dependencies: Record<string, string> }).dependencies["not-locked"] = "^1.0.0";
+    refused(await resolveIn(site(tree), packages(["apps/web"])), "scope", /package-lock\.json doesn't record where "not-locked", which "apps\/web" needs, comes from/);
+    for (const option of ["omit", "include"]) {
+      const answer = await resolveIn(site(), { choices: { scope: scopeOf(["apps/web"]), options: { [option]: ["dev"] } } });
+      refused(answer, "scope", new RegExp(`npm's ${option} option doesn't combine reliably`));
+    }
+    // npm reads ./apps/web as that folder and the workspaces one level below it, never deeper.
+    const nested = site(npmTree({ "apps/web/extra": { name: "@w/extra", version: "1.0.0" }, "node_modules/@w/extra": { resolved: "apps/web/extra", link: true }, "apps/web/x/deeper": { name: "@w/deeper", version: "1.0.0" }, "node_modules/@w/deeper": { resolved: "apps/web/x/deeper", link: true } }), { workspaces: ["packages/*", "apps/*", "apps/web/extra", "apps/web/x/deeper"] });
+    const offered = ready(await resolveIn(nested));
+    assert.match(facts(offered).packages.find((item) => item.folder === "apps/web")!.unavailable ?? "", /npm would also install "apps\/web\/extra"/);
+    assert.equal(facts(offered).packages.find((item) => item.folder === "apps/web/extra")!.unavailable, null);
+    refused(await resolveIn(nested, packages(["apps/web"])), "scope", /"apps\/web" can't be chosen/);
+  });
+
+  it("explains a removed, unknown or unlisted package by name, and keeps the facts for correcting it", async () => {
+    const gone = await resolveIn(mono(), { ...checked, ...packages(["apps/old"]) });
+    refused(gone, "scope", /"apps\/old" isn't one of this workspace's packages at this commit: it may have been moved or removed/);
+    assert.equal(facts(gone).packages.length, 7);
+    const calm = { "packages/legacy/package.json": json({ name: "@w/legacy" }) };
+    const unlisted = mono({}, { ...calm, "packages/new/package.json": json({ name: "@w/new" }) });
+    const offered = ready(await resolveIn(unlisted, checked));
+    assert.match(facts(offered).packages.find((item) => item.folder === "packages/new")!.unavailable ?? "", /pnpm-lock\.yaml doesn't list it among the workspace's projects/);
+    refused(await resolveIn(unlisted, { ...checked, ...packages(["packages/new"]) }), "scope", /"packages\/new" can't be chosen/);
+    const nameless = ready(await resolveIn(mono({}, { ...calm, "packages/ui/package.json": json({ private: true }) }), checked));
+    assert.match(facts(nameless).packages.find((item) => item.folder === "packages/ui")!.unavailable ?? "", /no name/);
+    refused(await resolveIn(mono({}, { "packages/ui/package.json": json({ private: true }) }), { ...checked, ...packages(["apps/web"]) }), "scope", /need "packages\/ui", which can't be installed on its own/);
+    const twins = ready(await resolveIn(mono({}, { ...calm, "packages/twin/package.json": json({ name: "@w/core" }) }), checked));
+    assert.match(facts(twins).packages.find((item) => item.folder === "packages/core")!.unavailable ?? "", /same name/);
+  });
+
+  it("follows links round a cycle, and refuses more than 20 packages in all", async () => {
+    const lock = (links: Record<string, string[]>) =>
+      ["lockfileVersion: '9.0'", "", "importers:", "", "  .: {}", "", ...Object.entries(links).flatMap(([folder, targets]) => [`  ${folder}:`, ...(targets.length ? ["    dependencies:", ...targets.flatMap((target) => [`      '@c/${target.split("/")[1]}':`, "        specifier: workspace:*", `        version: link:../${target.split("/")[1]}`])] : []), ""]), ""].join("\n");
+    const ring = { "p/a": ["p/b"], "p/b": ["p/a"] };
+    const files = (links: Record<string, string[]>) => ({
+      "package.json": json({ name: "ring", private: true, packageManager: "pnpm@11.28.9" }),
+      "pnpm-workspace.yaml": "packages:\n  - p/*\n",
+      "pnpm-lock.yaml": lock(links),
+      ...Object.fromEntries(Object.keys(links).map((folder) => [`${folder}/package.json`, json({ name: `@c/${folder.split("/")[1]}` })])),
+    });
+    assert.deepEqual(installed(ready(await resolveIn(files(ring), { ...checked, ...packages(["p/a"]) }))), ["+p/a", "p/b"]);
+    const many = Object.fromEntries(Array.from({ length: 21 }, (_, index) => [`p/m${String(index).padStart(2, "0")}`, index === 0 ? Array.from({ length: 20 }, (__, other) => `p/m${String(other + 1).padStart(2, "0")}`) : []]));
+    refused(await resolveIn(files(many), { ...checked, ...packages(["p/m00"]) }), "scope", /install 21 workspace packages, counting the ones they need, more than the 20/);
+  });
+
+  it("offers chosen packages and selectors only on checked releases and settings, and says why not", async () => {
+    // pnpm 11.5.3 is outside the checked list: the whole project stays ready, and a choice is refused with the reason.
+    const older = await resolveIn(mono({ packageManager: "pnpm@11.5.3" }, { "packages/legacy/package.json": json({ name: "@w/legacy" }) }));
+    assert.match(mode(ready(older), "packages").reason ?? "", /Nivra hasn't checked how pnpm 11\.5\.3 installs chosen workspace packages/);
+    assert.equal(mode(ready(older), "selectors").available, false);
+    refused(await resolveIn(mono({ packageManager: "pnpm@11.5.3" }), packages(["apps/web"])), "scope", /pnpm 11\.5\.3/);
+    refused(await resolveIn(mono({ packageManager: "pnpm@11.5.3" }), { choices: { scope: { kind: "selected", selectors: ["@w/web..."] } } }), "scope", /pnpm 11\.5\.3/);
+    for (const [yaml, why] of [
+      ["sharedWorkspaceLockfile: false\n", /a lockfile for each package/],
+      ["excludeLinksFromLockfile: true\n", /excludeLinksFromLockfile/],
+      ["filter:\n  - '@w/web'\n", /sets filter/],
+      ["linkWorkspacePackages: deep\n", /linkWorkspacePackages deep/],
+    ] as const) refused(await resolveIn(mono({}, { "pnpm-workspace.yaml": `packages:\n  - packages/*\n  - apps/*\n${yaml}` }), { ...checked, ...packages(["apps/web"]) }), "scope", why);
+    const deep = MONO_LOCK.replace("      terminal-link: 2.1.1", "      '@w/core': link:packages/core");
+    refused(await resolveIn(mono({}, { "pnpm-lock.yaml": deep }), { ...checked, ...packages(["apps/web"]) }), "scope", /linkWorkspacePackages deep/);
+    assert.equal(mode(ready(await resolveIn(mono({}, { "packages/legacy/package.json": json({ name: "@w/legacy" }) }), checked)), "packages").available, true, "terminal-link's version isn't a link");
+    // A hoisted node linker is refused on pnpm 10, not on 11.28.6 and later.
+    const ten = { ...CHECKED_INDEX, managers: { ...CHECKED_INDEX.managers, pnpm: [{ version: "10.34.9", node: ">=18.12", deprecated: false }, ...CHECKED_INDEX.managers["pnpm"]!] } };
+    const hoisted = (version: string) => mono({ packageManager: `pnpm@${version}` }, { "pnpm-workspace.yaml": "packages:\n  - packages/*\n  - apps/*\nnodeLinker: hoisted\n" });
+    refused(await resolveIn(hoisted("10.34.9"), { releases: ten, ...packages(["apps/web"]) }), "scope", /hoisted node linker/);
+    assert.equal(ready(await resolveIn(hoisted("11.28.9"), { ...checked, ...packages(["apps/web"]) })).recipe.selection?.packages.length, 5);
+    // npm as Node bundles it: judged by the index's npm for that Node.
+    const oldNode = { ...INDEX, node: [...INDEX.node, { version: "18.20.0", npm: "10.5.0", lts: "Hydrogen" }] };
+    const pinnedOld = { ...site(), ".nvmrc": "18.20.0\n" };
+    refused(await resolveIn(pinnedOld, { releases: oldNode, ...packages(["apps/web"]) }), "scope", /Node 18\.20\.0 comes with npm 10\.5\.0\. Nivra hasn't checked how npm 10\.5\.0 installs chosen workspace packages/);
+  });
+
+  it("warns about a lockfile from pnpm 11.28.0 to 11.28.5 on every scope, from packageManager or the lockfile's own env document", async () => {
+    const env = ["---", "lockfileVersion: '9.0'", "", "importers:", "", "  .:", "    configDependencies: {}", "    packageManagerDependencies:", "      pnpm:", "        specifier: 11.28.3", "        version: 11.28.3", "", "---", MONO_LOCK].join("\n");
+    const fromEnv = ready(await resolveIn(mono({}, { "packages/legacy/package.json": json({ name: "@w/legacy" }), "pnpm-lock.yaml": env }), checked));
+    assert.match(fromEnv.warnings.find((item) => item.code === "lockfile-regression")?.message ?? "", /^This project uses pnpm 11\.28\.3, which can write a lockfile that leaves out a dependency/);
+    const flow = env.replace("      pnpm:\n        specifier: 11.28.3\n        version: 11.28.3", "      pnpm: {specifier: 11.28.4, version: 11.28.4}");
+    assert.match(ready(await resolveIn(mono({}, { "packages/legacy/package.json": json({ name: "@w/legacy" }), "pnpm-lock.yaml": flow }), checked)).warnings.map((item) => item.message).join(" "), /pnpm 11\.28\.4/);
+    const pinIndex = { ...CHECKED_INDEX, managers: { ...CHECKED_INDEX.managers, pnpm: [{ version: "11.28.5", node: ">=22.13", deprecated: false }, ...CHECKED_INDEX.managers["pnpm"]!] } };
+    const pinned = ready(await resolveIn(mono({ packageManager: "pnpm@11.28.5" }, { "packages/legacy/package.json": json({ name: "@w/legacy" }) }), { releases: pinIndex }));
+    assert.deepEqual([pinned.warnings.some((item) => item.code === "lockfile-regression"), mode(pinned, "packages").available], [true, false], "the whole project is warned; chosen packages aren't offered");
+    const clean = ready(await resolveIn(mono({}, { "packages/legacy/package.json": json({ name: "@w/legacy" }) }), checked));
+    assert.equal(clean.warnings.some((item) => item.code === "lockfile-regression"), false);
+  });
+
+  it("answers a single package with only the whole project, and a choice waiting on Node with the facts known so far", async () => {
+    const single = ready(await resolveIn(pnpmProject({ packageManager: "pnpm@11.28.9" }), checked));
+    assert.deepEqual([facts(single).packages.length, mode(single, "packages").reason, mode(single, "selectors").reason], [0, "This project is one package, so installing it is installing the whole project.", "This project isn't a pnpm workspace, so there are no packages to choose."]);
+    refused(await resolveIn(pnpmProject({ packageManager: "pnpm@11.28.9" }), { ...checked, ...packages(["src"]) }), "scope", /one package/);
+    const waiting = await resolveIn(mono({}, { ".nvmrc": "24.21.0\n", ".node-version": "22.23.4\n", "packages/legacy/package.json": json({ name: "@w/legacy" }) }), checked);
+    assert.equal(waiting.status, "needs-choice");
+    assert.equal(facts(waiting).packages.length, 7, "the picker can be used while Node is chosen");
   });
 });

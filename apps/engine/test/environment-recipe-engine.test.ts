@@ -54,6 +54,8 @@ const NPM = {
 interface Image {
   node: string;
   npm: string;
+  /** The pnpm the preparation activates, as it prints it: 11.5.3, the project's pin, unless said. */
+  pnpm?: string;
   corepack?: string | null;
   libc?: string;
   install?: "ok" | "fails" | "bootstrap-fails";
@@ -90,7 +92,7 @@ async function setup(image: Image) {
       }
       mkdirSync(join(folder, "workspace", "node_modules", "dep"), { recursive: true });
       writeFileSync(join(folder, "workspace", "node_modules", "dep", "index.js"), "module.exports = 1;\n");
-      const versions = `${pnpm ? "via corepack\n" : ""}node v${image.node}\nnpm ${image.npm}\n${pnpm ? "pnpm 11.5.3\n" : ""}arch x86_64\n`;
+      const versions = `${pnpm ? "via corepack\n" : ""}node v${image.node}\nnpm ${image.npm}\n${pnpm ? `pnpm ${image.pnpm ?? "11.5.3"}\n` : ""}arch x86_64\n`;
       if (image.install === "fails") return done({ exitCode: 1, stdout: `${versions}${image.installLog ?? "npm error code ERESOLVE\n"}` });
       const builds = pnpm ? `builds-begin\nAutomatically ignored builds during installation:\n${image.builds ?? "  None"}\nbuilds-end\n` : "";
       return done({ stdout: `${versions}added 12 packages in 3s\ninstalled\n${builds}` });
@@ -100,7 +102,7 @@ async function setup(image: Image) {
       const settings = image.readiness?.settings ?? "setting verify-deps-before-run false\nsetting pm-on-fail ignore";
       // As the step lists the workspace: the setup files the preparation was sent, and what the install left besides.
       const listed = [...(received.inputs ?? []), ...(image.readiness?.extraFiles ?? [])].sort().map((path) => `file ./${path}`).join("\n");
-      return done({ stdout: `node v${image.node}\nnpm ${image.npm}\n${pnpm ? "pnpm 11.5.3\n" : ""}${tools}\n${pnpm ? settings : ""}\n${listed}\nlisted\n` });
+      return done({ stdout: `node v${image.node}\nnpm ${image.npm}\n${pnpm ? `pnpm ${image.pnpm ?? "11.5.3"}\n` : ""}${tools}\n${pnpm ? settings : ""}\n${listed}\nlisted\n` });
     }
     return undefined;
   };
@@ -231,8 +233,9 @@ describe("a project-driven recipe's preparation through a real engine (NIV-55)",
   });
 
   it("keeps no environment when pnpm reports an empty selection, and asks the person to correct it", async () => {
-    const { stub, engine } = await setup({ node: "24.21.0", npm: "11.19.0", install: "fails", installLog: 'No projects matched the filters in "/workspace"\n' });
-    const repo = repoWith(PNPM);
+    // Selectors are offered only on a pnpm release whose filtered installs were checked (D52): 11.28.9 here.
+    const { stub, engine } = await setup({ node: "24.21.0", npm: "11.19.0", pnpm: "11.28.9", install: "fails", installLog: 'No projects matched the filters in "/workspace"\n' });
+    const repo = repoWith({ ...PNPM, "package.json": json({ name: "mono", private: true, packageManager: "pnpm@11.28.9" }) });
     const choices: EnvironmentChoices = { scope: { kind: "selected", selectors: ["@mono/missing"] } };
     const shown = ready(await resolve(engine, repo, choices));
     assert.deepEqual(shown.recipe.install.args, ["install", "--frozen-lockfile", "--fail-if-no-match", "--filter", "@mono/missing"]);
@@ -243,7 +246,7 @@ describe("a project-driven recipe's preparation through a real engine (NIV-55)",
     assert.match(result.stopped?.detail ?? "", /None of the workspace packages matched.*Correct the package names or folders under What to install/);
     const operations = spawns(stub);
     assert.equal(operations.length, 2, "a failed selection must not run readiness");
-    assert.deepEqual(operations[1]!.args.slice(5), ["pnpm", "11.5.3", "corepack-else-npm-global", "none", ...shown.recipe.install.args]);
+    assert.deepEqual(operations[1]!.args.slice(5), ["pnpm", "11.28.9", "corepack-else-npm-global", "none", ...shown.recipe.install.args]);
   });
 
   it("refuses a run whose recipe isn't the one previewed, on the same commit, before anything is sent", async () => {
