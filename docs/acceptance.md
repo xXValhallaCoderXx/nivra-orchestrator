@@ -3584,3 +3584,53 @@ The source/test paths are disjoint. A merge-tree rehearsal found conflicts only 
 `acceptance.md`, `decisions.md` and `development.md`. Whichever PR lands second must retain both sets of additions.
 NIV-46 keeps D58 and NIV-71 uses D59. This PR stays based on main `f0de67b` and carries no NIV-46 implementation;
 neither PR was merged for the rehearsal, and the disposable checkout was removed afterwards.
+
+### PR #49 review follow-up (30 October 2026)
+
+The three P2 findings against `8650034` are corrected. The final implementation is
+`261777da68eb63f2e5b8f2b8fc24366da24017a0`, including main `8fb205541f70ba922146367a395aa45401a60014`
+and its merged NIV-46 changes. Each current-main document remains a byte-for-byte prefix of the merged document;
+D58 remains database privacy and D59 remains coding-run context. Protocol 22 is still the next version after main's
+21. No dependency or authorisation boundary changed.
+
+- A failed preview keeps its choices editor available: correct a blank choice or remove a duplicate, refresh, and
+  retain the other choices. Loading/error content has a distinct test identifier from a completed preview, so journey
+  helpers wait for the consent prompts before trying Start.
+- Each setup of the Preferences-return effect starts its replacement preview. StrictMode cleanup invalidates the
+  earlier request without suppressing its replacement; generation checks reject late results.
+- Both context-refusal branches save a finished `refused` report before throwing, with closed `context-mismatch`
+  and `context-credentials` codes and fixed recovery messages. Tests change saved key values after the check step
+  and after model listing, covering preferences and choices, and separately inject mismatched context at those
+  steps. Each leaves a finished refusal, no proposal, no model inference/execution, and no private value in the
+  result/report. Real-stdio and RPC readback also verify both finished refusals at the initial check.
+
+Final checks, using synthetic credentials and stand-ins:
+
+| Check | Result |
+| --- | --- |
+| `env TMPDIR=/var/tmp taskset --cpu-list 0-1 pnpm verify` | 1,921 passed: 141 domain, 724 desktop, 1,056 engine; zero failures/skips |
+| Final workspace typechecks | Passed; repeated after the renderer's loading/ready selector correction |
+| Built and development UI | 22 passed: 18 built task/preference/application/companion journeys and 4 Preferences-return cases served by Vite with React's development runtime and StrictMode |
+| Fresh Linux packaged app | 28 passed across app security/bridge, planning, budget recovery, companion lifecycle and all 4 preference cases |
+| Fresh runtimes and Windows/WSL harness | Staging smoke checks passed; 37/37 harness checks passed, including the unchanged release home and disposable-home cleanup |
+| Fresh native Windows UI | 15 passed after `pnpm dev:win --no-launch --skip-stage`; zero failures/skips |
+| Native Windows build identity | Source, installed and native PowerShell hashes matched before/after for app.asar, the Windows engine and Linux runtime; app.asar SHA-256 `340d1c83c04a53f0d0cf76d4682a70f46ebd2a0030184c460bdd34915ccdcea8`, 3,580,674 bytes; Windows runtime content hash `cdf5d126f8c33756` |
+| Real engine through `rpc.ts` | Both context refusals read back as finished `refused` reports, no echoed synthetic saved value, no inference/execution |
+
+Receipts are ignored under `.artifacts/niv71-review/`: `verify.log`, `typecheck-final.log`,
+`built-development-final.log`, `packaged-final.log`, `stage.log`, `targets-windows.log`, `windows-ui-final.log`,
+`windows-before.json`/`windows-after.json` and `rpc-refusals.json`. The 318-file production/helper manifest is
+`source-manifest.json`, fingerprint `6d2967280b35ebbac126339a4f6b96547ae7d051623798dfdfeaa3547034732b`.
+The complete diff/untracked files were inspected, with no generated output or credential-shaped production addition.
+The original main checkout remains clean at `f0de67b`.
+
+Earlier attempts are retained separately: an old stop-code count assertion was updated along with explicit parsing
+checks for both new codes; direct Playwright invocation lacked the package script's absolute Node path; and the new
+invalid-choice test initially reused the prior test's stale brief, correctly triggering return refusal. The supported
+script and a freshly opened task isolate validation. The broader journey exposed the loading/ready selector collision
+above; it was corrected before the final UI/package runs and repeated workspace typechecks. An initial RPC fixture
+included a field outside TaskBrief and was correctly refused before startup; the corrected fixture gave the reports
+above. No assertion/deadline was weakened and no test was removed or skipped to obtain the final passes.
+
+No paid calls ran. This evidence establishes these edge cases and their integration without adding a live-model
+preference-compliance claim. The PR remains for re-review; these results do not authorise merging it.

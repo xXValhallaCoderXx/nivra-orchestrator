@@ -990,3 +990,19 @@ matching private input stops another send without echoing the value. Existing re
 Run built task/preference journeys against loopback stand-ins, then packaged and Windows UI checks with fresh runtimes.
 The keyless packaged preference journey admits no provider work; it checks empty state, Preferences return, stale
 preview, failed starts, cancellation and task switching. Record those separately from actual worker-request evidence.
+
+PR #49's return regressions also run against React's development runtime: a production bundle alone does not replay
+StrictMode effects. The `development` Playwright project starts a loopback Vite server for `task-preferences.spec.ts`;
+the app retains its sandbox, typed preload and trusted-sender checks. Use the package script so the unpackaged engine
+receives the absolute Node path, as in the other built-app checks:
+
+```bash
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e --project=development task-preferences.spec.ts
+pnpm --filter @nivra/engine exec node --test test/task-run.test.ts test/task-engine.test.ts
+```
+
+The first command checks both built and development projects. Cases include correcting blank/duplicate choices
+after returning from Preferences. Workflow tests cover keys newly matching accepted preferences/choices between
+steps and context-digest mismatches: both produce finished refusal reports before inference or execution, including
+when a previous step already saved an in-progress report. The closed stop codes keep recovery messages independent
+of private input and prevent these refusals from appearing as engine interruptions.
