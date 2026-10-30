@@ -221,6 +221,7 @@ function PreviewBody({ preview }: { preview: MissionReviewPreview }) {
       <Text size="sm" data-testid="mission-preview-cost">
         Two reviewers on their own, then the chair: up to {preview.requests} model calls, with {preview.model ? preview.model : "the Nemotron model your key's listing gives"}. Nothing is retried.
       </Text>
+      <Text size="sm" data-testid="mission-preview-allowance">{preview.allowance.description}</Text>
       <Stack gap={2} data-testid="mission-preview-not-sent">
         <Text size="sm" fw={600}>
           Not sent

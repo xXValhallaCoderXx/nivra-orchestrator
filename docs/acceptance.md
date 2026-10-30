@@ -3959,3 +3959,20 @@ checks **1 passed, 12 stand-in-only skips**, and fresh Windows/native/WSL UI **1
 changes no runtime code. All 12 failed-run evidence hashes still match; no new paid run was made. The historical
 frozen recipes do not identify the rebased PR candidate. Host-ledger admission and a newly frozen useful live coach
 journey remain necessary before closing NIV-53; NIV-52 remains assessment-only.
+
+## Budgeted mission reviews and recovery fixes (NIV-52, D65) — 30 October 2026
+
+Mission councils now use one guarded host grant for both reviewers and the chair, with explicit optional monthly
+coverage. Outstanding grants reconnect their recorded engines for metadata settlement before availability is shown,
+including after deletion/relaunch; failed reconnection and invalid or interrupted evidence keep their conservative
+charge and explain it. Repeated settlement releases no capacity twice. Collector shutdown runs independently and
+records reconciliation and shutdown failures separately.
+
+PR #59's follow-up rechecks cancellation and deletion after budget reconciliation, refreshes the final engine summary
+after the collector's settling wait, and restricts model selection to the grant before choosing a fallback. Five
+offline regressions cover these findings, including deletion and case-insensitive grant matching. Merge and live
+acceptance remain on hold for review of the newly tested revision.
+
+[NIV-52's verification record](niv-52-verification.md) identifies the reproduction regressions and the final revision's
+private check receipts. Offline enforcement, built/packaged UI, Windows transport and eventual paid model usefulness
+are distinct evidence. No paid review is claimed here, and the frozen usefulness rubric is unchanged.

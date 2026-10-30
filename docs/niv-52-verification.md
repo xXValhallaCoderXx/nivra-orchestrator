@@ -114,3 +114,57 @@ reasoning is not added twice to completion usage. Apply the frozen rubric and re
 attempt needs its own authorisation; it never follows automatically from a poor score. A direct-engine live run is
 separate from the app journey above and would not establish a paid packaged-app demonstration or future release
 contents. Publication of this completion pass does not substitute for that remaining acceptance or authorise a merge.
+
+## Budgeted review integration and review fixes — 30 October 2026
+
+The follow-up on `feature/niv-52-budget`, based on `af77cf5`, incorporates the in-progress budgeted-review consumer and
+fixes both reproduced lifecycle findings before paid acceptance. The independent implementation worktree is retained.
+The review reproductions and their original receipts remain in ignored `.artifacts/niv52-review/`.
+
+- Outstanding Companion, Planning, Coding and mission-review grants reconnect their recorded target before available
+  request capacity is calculated. Reconnection reads only journal metadata, even after mission deletion and relaunch.
+  A different home, failed connection, missing record or invalid seal retains the full charge and a visible reason.
+- Only the existing ledger's validation of a complete seal releases unused requests. A repeated or concurrent pass
+  neither inserts duplicate operation rows nor changes the settled revision again. Interrupted usage stays charged
+  at its bound as unknown; it is not shown as a zero-cost cancelled review.
+- The live collector attempts shutdown in an independent finally. Reconciliation and shutdown failures each retain a
+  separate sanitised failure entry, without exposing raw exception text, credentials or private context.
+- `mission-review-budget.test.ts` promotes the two reproductions to regressions, adds failed reconnection and invalid
+  complete-seal cases, checks recovery and repeated/concurrent settlement, and injects reconciliation-only and combined
+  cleanup failures. Existing lost-reply and crash cases assert the full held total and truthful unknown classification.
+
+Focused development checks and every initial failure are retained separately. The final checks run on one clean,
+committed revision; `.artifacts/niv52-review/final-checks/receipt.json` identifies that revision, commands, exit statuses,
+logs and protected-profile observations. Read those receipts and the final handoff for actual outcomes; historical
+counts above do not establish this revision's verification. Required gates are full `pnpm verify`, affected built UI,
+fresh runtime staging, packaged checks, a fresh Windows development build and Windows checks, plus real-engine RPC.
+
+No live credential is read or paid request made in this fix pass. The tested commit is returned for human review before
+live acceptance. The frozen usefulness rubric above remains unchanged, and both NIV-52 and wider NIV-66 acceptance
+remain open until their separate evidence is supplied.
+
+### PR integration with current main
+
+PR preparation integrates `75b38e0` (NIV-53 / PR #57) and retains its coach acceptance history and D64. The mission
+decision is D65. The mission implementation and recovery regressions remain those tested at `588e731`; the combined
+revision is verified afresh before publication because main also changes the shared model client. Its commands,
+outcomes and exact head are recorded in `.artifacts/niv52-review/pr-checks/receipt.json`, separately from the original
+final-check receipts. No paid acceptance or merge to main is performed by PR preparation.
+
+### PR #59 review corrections after `45c376b`
+
+- After budget reconciliation finishes, the host checks that the review's link still exists and is submitting,
+  and checks cancellation again before marking its grant dispatching or sending `runs.start`. Cancel and mission
+  deletion during a held reconciliation send no run; the guard-verified undispatched grant can release its capacity.
+- The live collector refreshes the engine summary after its settling wait, before recording confirmed cancellation
+  or unresolved termination. An earlier running summary no longer overrides a completed cancellation.
+- Review model selection intersects the provider listing with the grant before choosing a preferred model or a
+  fallback. Grant matching is case-insensitive, and a listing with no permitted model fails without inference.
+
+Five new offline regression cases reproduced these defects before the fixes. The affected host, ledger, mission,
+saved-plan review and collector suites pass **105 tests**, with no skips. Development failures and corrected reruns
+are retained in `.artifacts/niv52-review/review-followup-*.log`.
+
+The required final checks use one clean committed revision, recorded with each command, log digest and outcome in
+`.artifacts/niv52-review/review-followup-checks/receipt.json`. The PR update reports that revision's actual results.
+Merge and live acceptance remain on hold; this correction pass reads no live credential and makes no paid call.

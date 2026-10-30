@@ -95,15 +95,16 @@ function oneKind(policy: { preset: string; currency: unknown; monthlyMicros: unk
 /** What the person chooses. Choosing one never enables paid work by itself: consents and keys still govern. */
 // Old records retain their exact shape and hash. Expanded coverage is a new policy version, never a transform.
 export const ModelRequestLimit = z.union([
-  z.strictObject({ feature: z.literal("companion"), monthlyRequests: count }),
-  z.strictObject({ pool: z.literal("companion-and-planning"), monthlyRequests: count }),
-  z.strictObject({ pool: z.literal("companion-planning-and-coding"), monthlyRequests: count }),
+  z.strictObject({ feature: z.literal("companion"), monthlyRequests: count, includeMissionReviews: z.boolean().optional() }),
+  z.strictObject({ pool: z.literal("companion-and-planning"), monthlyRequests: count, includeMissionReviews: z.boolean().optional() }),
+  z.strictObject({ pool: z.literal("companion-planning-and-coding"), monthlyRequests: count, includeMissionReviews: z.boolean().optional() }),
 ]);
 export type ModelRequestLimit = z.infer<typeof ModelRequestLimit>;
 const RequestLimits = z.array(ModelRequestLimit).max(1);
 
 export const codingRequestPool = (limits: readonly ModelRequestLimit[] | undefined): boolean => limits?.some((limit) => "pool" in limit && limit.pool === "companion-planning-and-coding") ?? false;
-export const requestPoolCovers = (feature: string, limits?: readonly ModelRequestLimit[]): boolean => feature === "companion" || feature === "planning" || (feature === "task" && codingRequestPool(limits));
+export const missionReviewRequestPool = (limits: readonly ModelRequestLimit[] | undefined): boolean => limits?.[0]?.includeMissionReviews === true;
+export const requestPoolCovers = (feature: string, limits?: readonly ModelRequestLimit[]): boolean => feature === "companion" || feature === "planning" || (feature === "task" && codingRequestPool(limits)) || (feature === "mission-review" && missionReviewRequestPool(limits));
 export function modelRequestPoolLimit(limits: readonly ModelRequestLimit[] | undefined): number | null {
   return limits?.[0]?.monthlyRequests ?? null;
 }
@@ -114,6 +115,8 @@ export function hasSharedRequestPool(limits: readonly ModelRequestLimit[] | unde
 const policyDraftShape = {
   /** Explicit expansion of a saved request-count recovery restriction, bound to its immutable revision. */
   requestRecoveryRevision: z.number().int().positive().optional(),
+  /** Mission-review recovery expansion is acknowledged independently of coding. */
+  missionReviewRecoveryRevision: z.number().int().positive().optional(),
   modelRequestLimits: RequestLimits.optional(),
   preset: BudgetPreset,
   /** Null, with monthlyMicros, for a counts-only budget. */
@@ -281,6 +284,9 @@ export type GrantRequest = z.infer<typeof GrantRequest>;
 
 /** What an engine receives with a call: its finite share, never the pool. It travels in memory, never in a workflow. */
 export const BudgetGrant = z.strictObject({
+  /** New mission grants bind their consumer; historical grants keep their exact serialised shape. */
+  feature: SpendFeature.optional(),
+  workflow: z.string().min(1).max(40).optional(),
   /** Explicit allow-list; older journals fall back to their rates. */
   models: z.array(z.string().min(1).max(200)).max(5).optional(),
   modelListings: count.optional(),

@@ -77,6 +77,29 @@ test("coding coverage expands only on Save and names previously recorded coding 
   await expect.poll(() => page.evaluate(async () => (await window.nivra.getCompanionUsage()).coverage)).toBe("companion-and-planning");
 });
 
+test("mission-review coverage expands only on Save, preserves coding's independent choice and survives reopening", async () => {
+  await goTo(page, "settings-budget");
+  await page.getByTestId("companion-limit-enabled").check();
+  await page.getByTestId("companion-limit").fill("100");
+  await page.getByTestId("coding-coverage").check();
+  await page.getByTestId("companion-limit-save").click();
+  await expect.poll(() => page.evaluate(async () => (await window.nivra.getCompanionUsage()).coverage)).toBe("companion-planning-and-coding");
+  await page.getByTestId("mission-review-coverage").check();
+  await expect(page.getByTestId("mission-review-coverage-preview")).toContainText("Each review reserves three requests together");
+  expect((await page.evaluate(() => window.nivra.getBudgetPolicy()))?.modelRequestLimits?.[0]?.includeMissionReviews).toBeUndefined();
+  await page.getByTestId("companion-limit-save").click();
+  await expect.poll(() => page.evaluate(async () => (await window.nivra.getCompanionUsage()).includeMissionReviews)).toBe(true);
+  await page.reload(); await goTo(page, "settings-budget");
+  await expect(page.getByTestId("mission-review-coverage")).toBeChecked();
+  await expect(page.getByTestId("coding-coverage")).toBeChecked();
+  await page.getByTestId("coding-coverage").uncheck();
+  await page.getByTestId("companion-limit-save").click();
+  await expect.poll(() => page.evaluate(async () => [(await window.nivra.getCompanionUsage()).includeMissionReviews, (await window.nivra.getCompanionUsage()).coverage])).toEqual([true, "companion-and-planning"]);
+  await page.getByTestId("mission-review-coverage").uncheck();
+  await page.getByTestId("companion-limit-save").click();
+  await expect.poll(() => page.evaluate(async () => (await window.nivra.getCompanionUsage()).includeMissionReviews)).toBe(false);
+});
+
 test("when main can't give the limits, the section says so and shows no figure", async () => {
   // A stand-in for a failing call, in this app only, then the page loaded again so the section asks afresh.
   await app.evaluate(({ ipcMain }) => {
@@ -98,9 +121,9 @@ test("when main can't give the limits, the section says so and shows no figure",
 test("sets one Companion and planning monthly request allowance and shows separate feature usage", async () => {
   await goTo(page, "settings-budget");
   const view = page.getByTestId("companion-usage");
-  await expect(view).toContainText("Coding is included only when you explicitly save expanded coverage");
+  await expect(view).toContainText("Coding and mission reviews are included independently when you explicitly save their coverage");
   await expect(view.getByTestId("coding-coverage")).not.toBeChecked();
-  await expect(view.getByRole("heading", { name: "Companion and planning", exact: true })).toBeVisible();
+  await expect(view.getByRole("heading", { name: "Shared AI request allowance", exact: true })).toBeVisible();
   await view.getByTestId("companion-limit-enabled").check();
   await view.getByTestId("companion-limit").fill("12");
   await expect(view.getByLabel("Monthly AI request limit", { exact: true })).toHaveValue("12");
