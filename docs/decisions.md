@@ -4056,3 +4056,21 @@ worker uses its existing unchanged outcome and summary to request clarification 
 approved brief. No new outcome, continuation, budget pool, reservation algorithm or sandbox policy is introduced.
 Attaching/extracting/previewing/selecting is unpaid. No image secret detection or live provider image-understanding
 claim is made. OCR, PDF rendering, indexing, cloud sync and background summaries remain deferred.
+
+## D61 — Recoverable reference selection/cleanup and accepted Planning context (NIV-70 review)
+
+**Decision.** Clarify D60's selection and lifecycle rules: reductions of included task context remain possible even
+while the remaining context is invalid. Inclusion and dispatch retain their complete validation. Delete private task
+files before cascading task metadata; a cleanup failure keeps the task and its cleanup records for explicit retry.
+Removed attachments retain a cleanup retry until success, and their pending copies count towards storage limits.
+Planning fixes the task reference binding at dispatch, keeps accepted results under that binding, and marks later
+reference changes as stale advice. Existing consent, explicit cancellation and other authority checks continue.
+
+**Why.** Review reproduced an oversized-discussion selection deadlock, untracked private files after task deletion,
+a hidden retry after failed removal, and a running Planning request discarded when a new comment changed its source
+binding. These are recovery and accepted-context transitions rather than new permissions or model capabilities.
+
+**Consequences.** Existing task metadata and a durable retry notice survive failed deletion; no independent cleanup
+database or background deletion worker is required. An optional attachment cleanup flag remains compatible with
+historical metadata. Protocol 23, database schema 15, dependency pins and model/budget policies are unchanged. Accepted
+Planning reference bytes remain frozen, while stale results require a new review before saving or reuse.

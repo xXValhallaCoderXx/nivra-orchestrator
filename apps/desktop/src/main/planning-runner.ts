@@ -119,6 +119,7 @@ export class PlanningRunner {
     const startedAt = performance.now();
     try {
       current();
+      input.dispatched();
       let run;
       try { run = await connection.call("runs.start", { clientRequestId: operationId, workflowId: "planning", input: { planningId: view.id, operationId, revision: view.revision, bindingDigest: view.binding }, context, budget: grant }); }
       catch { current(); run = await connection.call("runs.find", { clientRequestId: operationId }); }

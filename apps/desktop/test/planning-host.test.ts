@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import type { PlanningBrief, PlanningProposal, PlanningRequest, PlanningResult } from "@nivra/domain";
 import { PlanningHost, type PlanningHostOptions } from "../src/main/planning-host.ts";
@@ -12,6 +12,7 @@ import { addMissionTask, insertMission, missionTaskIds } from "../src/main/missi
 import { decide, deleteTask, getTask, insertAttempt, insertTask, listTasks, recordOutcome, settleAttempt, updateTask, versionsOf } from "../src/main/workspace.ts";
 import { openWorkspace, type WorkspaceDb } from "../src/main/workspace-db.ts";
 import { BRIEFS } from "./fixtures/briefs.ts";
+import { TaskReferences } from "../src/main/task-references.ts";
 
 const AT = "2026-10-29T14:00:00.000Z";
 const roots: string[] = [];
@@ -53,6 +54,54 @@ async function completed(service: PlanningHost, id: string, operationId: string)
 }
 
 describe("reviewed native planning", () => {
+  it("retains accepted frozen reference context and the resulting advice when discussion or files change", async () => {
+    for (const change of ["none", "comment", "remove", "selection", "damage"] as const) {
+      const db = workspace(), p = project(), sourceId = task(db, p.id), root = dirname(db.path);
+      const references = new TaskReferences(db, join(root, "assets")); references.addComment(sourceId, "Original discussion", []);
+      const path = join(root, "note.md"); writeFileSync(path, "Original file"); const asset = await references.importFile(sourceId, path, []);
+      references.select(sourceId, { excludedCommentIds: [], attachmentIds: [asset.id] }); const frozen = references.freeze(sourceId, []);
+      let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; }); let stops = 0, acknowledgements = 0;
+      const service = host(db, { projects: () => [p], references: (id) => references.freeze(id, []), generate: async ({ dispatched, started, assertCurrent }) => {
+        dispatched(); started({ runId: randomUUID(), maxRequests: 3 }); await gate; assertCurrent(); return { ...result(), sourceManifest: frozen.manifest };
+      }, cancelGeneration: async () => { stops++; }, acknowledge: async () => { acknowledgements++; } });
+      const plan = await service.create({ ...request(), projectId: p.id, source: { kind: "task", id: sourceId, version: 1 } });
+      const operation = await service.generate(plan.id, plan.revision, { inspectRepository: true, operationId: randomUUID() });
+      assert.equal(service.operation(plan.id, operation.id).status, "running");
+      if (change === "comment") references.addComment(sourceId, "Added while the accepted request is running", []);
+      if (change === "remove") references.remove(sourceId, asset.id);
+      if (change === "selection") references.select(sourceId, { excludedCommentIds: [], attachmentIds: [] });
+      if (change === "damage") writeFileSync(join(references.root, p.id, sourceId, asset.id, "prepared.txt"), "Damaged after acceptance");
+      release(); assert.equal((await completed(service, plan.id, operation.id)).status, "succeeded", change);
+      const retained = service.get(plan.id); assert.equal(retained.proposal?.summary, result().proposal.summary);
+      assert.deepEqual(retained.sourceManifest, frozen.manifest); assert.equal(stops, 0); assert.equal(acknowledgements, 1);
+      assert.equal(frozen.attachments[0]!.text, "Original file");
+      if (change === "none") assert.equal(retained.stale, null);
+      else {
+        assert.notEqual(retained.stale, null, change);
+        await assert.rejects(service.save({ id: plan.id, revision: retained.revision, key: randomUUID(), itemIds: ["first"] }), /changed|damaged/);
+      }
+    }
+  });
+  it("still refuses changed reference context before dispatch and cancels accepted work on revoked sharing or explicit cancellation", async () => {
+    for (const cause of ["before-dispatch", "sharing", "cancel"] as const) {
+      const db = workspace(); let p = project(), epoch = 0; const sourceId = task(db, p.id), references = new TaskReferences(db, join(dirname(db.path), "assets"));
+      references.addComment(sourceId, "Original discussion", []);
+      let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; }); let sends = 0;
+      const service = host(db, { projects: () => [p], sharingEpoch: () => epoch, references: (id) => references.freeze(id, []), generate: async ({ dispatched, started, assertCurrent }) => {
+        if (cause === "before-dispatch") await gate;
+        dispatched(); sends++; started({ runId: randomUUID(), maxRequests: 1 });
+        if (cause !== "before-dispatch") await gate;
+        assertCurrent(); return result();
+      }, cancelGeneration: async () => undefined });
+      const plan = await service.create({ ...request(), projectId: p.id, source: { kind: "task", id: sourceId, version: 1 } });
+      const operation = await service.generate(plan.id, plan.revision, { inspectRepository: false, operationId: randomUUID() });
+      references.addComment(sourceId, "New supporting context", []);
+      if (cause === "sharing") { p = { ...p, sharing: { ...p.sharing, modelContext: false } }; epoch++; await service.invalidateProject(p.id); }
+      if (cause === "cancel") await service.cancel(plan.id, operation.id);
+      release(); assert.equal((await completed(service, plan.id, operation.id)).status, cause === "before-dispatch" ? "failed" : "cancelled");
+      assert.equal(sends, cause === "before-dispatch" ? 0 : 1); assert.equal(service.get(plan.id).proposal, null);
+    }
+  });
   it("binds both selected mission and project knowledge and rejects pending results after either note is edited or forgotten", async () => {
     for (const scope of ["mission", "project"] as const) for (const change of ["edit", "forget"] as const) {
       const db = workspace(); const p = project(); const missionId = randomUUID();

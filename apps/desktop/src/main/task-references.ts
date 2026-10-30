@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { AttachmentMetadata, FrozenReferenceContext, PDF_LIMITATION, PROJECT_ATTACHMENTS_MOVED, REFERENCE_LIMITS, ReferenceManifest, ReferenceSelection, TaskComment, commentPayload, manifestPayload, type AttachmentPreview, type ReferenceReceipt, type TaskActivity, type TaskDiscussion } from "@nivra/domain";
 import { imageInfo, validatePreparedImage } from "./attachment-image.ts";
@@ -81,7 +81,7 @@ export class TaskReferences {
   }
   #all(taskId: string): AttachmentMetadata[] { return this.workspace.db.prepare("SELECT metadata_json FROM task_attachments WHERE task_id=? ORDER BY rowid").all(taskId).map((row) => AttachmentMetadata.parse(JSON.parse(String(row["metadata_json"])))); }
   #capacity(taskId: string, bytes: number, another = true): void {
-    const all = this.#all(taskId).filter((item) => item.state !== "removed");
+    const all = this.#all(taskId).filter((item) => item.state !== "removed" || item.cleanupPending !== false);
     if (all.length + (another ? 1 : 0) > REFERENCE_LIMITS.stored || all.reduce((n, item) => n + item.bytes + item.preparedBytes, bytes) > REFERENCE_LIMITS.storedBytes) throw new Error("A task holds at most 10 attachments and 25 MiB including prepared images. Remove an attachment or choose a smaller file.");
   }
   comments(taskId: string): TaskComment[] {
@@ -109,10 +109,13 @@ export class TaskReferences {
   select(taskId: string, input: ReferenceSelection): void {
     const selection = ReferenceSelection.parse(input);
     const comments = new Set(this.comments(taskId).map((item) => item.id));
-    if (new Set(selection.attachmentIds).size !== selection.attachmentIds.length || selection.excludedCommentIds.some((id) => !comments.has(id))) throw new Error("The selected references changed. Open the task again.");
-    for (const id of selection.attachmentIds) { const item = this.#metadata(id, taskId); if (item.state !== "ready") throw new Error("Prepare or replace this attachment before including it."); this.#check(item, false); this.#check(item, true); }
-    // Apply all inclusion limits now, so selection itself never promises content that cannot be sent.
-    this.#build(taskId, selection);
+    if (new Set(selection.attachmentIds).size !== selection.attachmentIds.length || new Set(selection.excludedCommentIds).size !== selection.excludedCommentIds.length || selection.excludedCommentIds.some((id) => !comments.has(id))) throw new Error("The selected references changed. Open the task again.");
+    for (const id of selection.attachmentIds) this.#metadata(id, taskId);
+    const previous = this.selection(taskId);
+    const reducing = previous.excludedCommentIds.every((id) => selection.excludedCommentIds.includes(id)) && selection.attachmentIds.every((id) => previous.attachmentIds.includes(id)) && (selection.excludedCommentIds.length > previous.excludedCommentIds.length || selection.attachmentIds.length < previous.attachmentIds.length);
+    // Removing context must remain possible while other included sources are oversized or damaged.
+    // New inclusions and every preview/request still validate the complete selected context.
+    if (!reducing) this.#build(taskId, selection);
     this.workspace.db.prepare("INSERT INTO task_reference_selection (task_id,selection_json,notice) VALUES (?, ?, NULL) ON CONFLICT(task_id) DO UPDATE SET selection_json=excluded.selection_json,notice=NULL").run(taskId, JSON.stringify(selection));
   }
   async importFile(taskId: string, path: string, known: KnownSecrets, commentId: string | null = null): Promise<AttachmentMetadata> {
@@ -177,7 +180,7 @@ export class TaskReferences {
   }
   remove(taskId: string, id: string): void {
     const item = this.#metadata(id, taskId);
-    const removed: AttachmentMetadata = { ...item, state: "removed", detail: "Attachment removed. Historical requests keep their frozen references." };
+    const removed: AttachmentMetadata = { ...item, state: "removed", cleanupPending: true, detail: "Attachment removed. Historical requests keep their frozen references." };
     const tombstone = join(this.#folder(taskId, item.projectId, id), "removed.json");
     try { privateWrite(tombstone, JSON.stringify(removed)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     this.workspace.tx(() => {
@@ -197,7 +200,26 @@ export class TaskReferences {
         }
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") failed = true; }
     }
-    if (failed) { this.#save({ ...removed, detail: "Removed from future context, but a private file couldn't be deleted. Restore write access to Nivra's data folder and remove it again." }); throw new Error("The attachment is excluded, but some private copies couldn't be deleted. Restore write access to Nivra's data folder and remove it again."); }
+    if (failed) { this.#save({ ...removed, detail: "Removed from future context, but a private file couldn't be deleted. Close anything using it, restore write access, then press Retry file cleanup." }); throw new Error("The attachment is excluded, but some private copies couldn't be deleted. Close anything using them, restore write access, then press Retry file cleanup."); }
+    this.#save({ ...removed, cleanupPending: false });
+  }
+  /** Keep the task and its cleanup records until every private copy and receipt has gone. */
+  deleteTaskAssets(taskId: string): void {
+    const task = this.#task(taskId);
+    if (this.#busy.has(taskId)) throw new Error("An attachment is still being imported. Wait for it to finish, then delete the task again.");
+    const notice = "Task deletion couldn't finish its private-file cleanup. The task and cleanup records were kept. Close anything using those files, restore write access to Nivra's data folder, then delete the task again.";
+    this.workspace.db.prepare("INSERT INTO task_reference_selection (task_id,selection_json,notice) VALUES (?,?,?) ON CONFLICT(task_id) DO UPDATE SET notice=excluded.notice").run(taskId, JSON.stringify(this.selection(taskId)), notice);
+    try {
+      this.#folder(taskId, task.projectId);
+      for (const item of this.#all(taskId)) this.remove(taskId, item.id);
+      for (const owner of readdirSync(this.root, { withFileTypes: true })) {
+        if (owner.name !== "unassigned" && !/^[a-f0-9-]{36}$/i.test(owner.name)) continue;
+        const folder = join(this.root, owner.name, taskId);
+        try { lstatSync(folder); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+        // Validate parents before recursive removal, including interrupted imports/moves without metadata.
+        rmSync(this.#folder(taskId, owner.name === "unassigned" ? null : owner.name), { recursive: true });
+      }
+    } catch { throw new Error(notice); }
   }
   /** Copies stay available after interruption; ownership changes only after every destination is verified. */
   move(taskId: string, projectId: string | null): void {

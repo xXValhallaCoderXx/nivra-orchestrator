@@ -1226,6 +1226,22 @@ describe("Host: conversations follow each turn to its end, and never resend one 
 });
 
 describe("Host: native tasks, made directly or from a plan, with versioned briefs (D26, NIV-32)", () => {
+  it("deletes unselected private task files before their metadata, and retains a failed deletion for an explicit retry", async () => {
+    const { host, root } = makeHost();
+    const fields = { goal: "One native task", acceptanceCriteria: ["A result"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] };
+    const task = await host.createTask({ title: "Private cleanup", fields, projectId: null, planId: null });
+    const path = join(root, "private.md"); writeFileSync(path, "Never sent to a provider");
+    const discussion = await host.importTaskAttachment(task.summary.id, path), asset = discussion.attachments[0]!;
+    assert.equal(discussion.selection.attachmentIds.length, 0);
+    const folder = join(root, "task-assets", "unassigned", task.summary.id), prepared = join(folder, asset.id, "prepared.txt");
+    rmSync(prepared); mkdirSync(prepared); writeFileSync(join(prepared, "obstruction"), "Blocked");
+    assert.throws(() => host.deleteTask(task.summary.id), /cleanup records were kept/);
+    assert.equal(host.task(task.summary.id).summary.id, task.summary.id);
+    assert.equal(host.getTaskDiscussion(task.summary.id).attachments[0]!.cleanupPending, true);
+    rmSync(prepared, { recursive: true }); host.deleteTask(task.summary.id);
+    assert.equal(existsSync(folder), false); assert.throws(() => host.task(task.summary.id), /no longer/);
+    assert.equal(existsSync(path), true, "the user-selected original outside application data is retained");
+  });
   const KEY = "test-key-0123456789";
   const empty = { goal: "", acceptanceCriteria: [] as string[], scope: "", exclusions: "", context: "", assumptions: [] as string[], checks: [] as string[], acceptanceCases: [] as Array<{ name: string; command: string; expectedOutput: string; expectedExitCode: number }> };
   async function stubWith(chat: (request: StubRequest, index: number) => Reply) {

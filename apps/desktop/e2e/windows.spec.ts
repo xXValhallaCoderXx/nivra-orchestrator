@@ -246,6 +246,13 @@ test("task references use the Windows picker, Chromium image worker and packaged
   expect(context.attachments.find((file) => file.kind === "image")!.image!.base64.length).toBeGreaterThan(20);
   expect(context.attachments.find((file) => file.kind === "pdf")!.text).toContain("Windows packaged PDF text");
   expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");
+  const userData = await app.evaluate(({ app }) => app.getPath("userData"));
+  const discussion = await page.evaluate((id) => window.nivra.getTaskDiscussion(id), taskId);
+  const privateFolder = wslpath("-u", `${userData}\\task-assets\\${discussion.attachments[0]!.projectId}\\${taskId}`);
+  expect(existsSync(privateFolder)).toBe(true);
+  await page.evaluate((id) => window.nivra.deleteTask(id), taskId);
+  expect(existsSync(privateFolder)).toBe(false);
+  expect(existsSync(wslpath("-u", imageWin))).toBe(true);
 });
 
 test("quitting leaves no engine on Windows or in the distribution", async () => {

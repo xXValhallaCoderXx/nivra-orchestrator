@@ -217,6 +217,74 @@ export interface StopOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** A hello fixture captured while its engine still owns it; start time guards against pid reuse after that engine dies. */
+export interface HeldChild {
+  pid: number;
+  uid: number;
+  started: string;
+}
+
+function processState(pid: number, proc: string): { state: string; parent: number; group: number; started: string } | null {
+  let text: string;
+  try {
+    text = readFileSync(join(proc, String(pid), "stat"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Refused(`Couldn't read process ${pid}'s identity. Check it by hand; nothing was killed.`);
+  }
+  const fields = text.slice(text.lastIndexOf(")") + 2).trim().split(/\s+/);
+  if (!fields[0] || !/^\d+$/.test(fields[1] ?? "") || !/^\d+$/.test(fields[2] ?? "") || !/^\d+$/.test(fields[19] ?? "")) {
+    throw new Refused(`Couldn't identify process ${pid}. Check it by hand; nothing was killed.`);
+  }
+  return { state: fields[0], parent: Number(fields[1]), group: Number(fields[2]), started: fields[19]! };
+}
+
+/** Capture only the known engine's own hello child, in the process group Local made for it, before killing the engine. */
+export function captureHeldChild(pid: number, enginePid: number, uid: number, proc = "/proc"): HeldChild {
+  const state = processState(pid, proc);
+  if (!state || state.state === "Z" || state.parent !== enginePid || state.group !== pid || ownerOf(pid, proc) !== uid || !commandLine(pid, proc)?.includes("--nivra-hold")) {
+    throw new Refused(`Process ${pid} isn't this engine's held hello child. Nothing was killed; run the rehearsal again.`);
+  }
+  return { pid, uid, started: state.started };
+}
+
+/**
+ * The rehearsal deliberately SIGKILLs an engine. That cannot run its cleanup, so the harness must stop the hello
+ * fixture it orphaned before timing a later quit. This is fixture cleanup, never an application's shutdown path.
+ */
+export async function stopHeldChild(child: HeldChild, options: StopOptions = {}): Promise<void> {
+  const proc = options.proc ?? "/proc";
+  const live = () => {
+    const state = processState(child.pid, proc);
+    if (!state) return false;
+    if (state.started !== child.started || state.group !== child.pid || ownerOf(child.pid, proc) !== child.uid) {
+      // The process can disappear between reading stat and checking its directory's owner.
+      if (!processState(child.pid, proc)) return false;
+      throw new Refused(`Process ${child.pid} isn't the captured hello child any more. Nothing was killed; check it by hand.`);
+    }
+    if (state.state === "Z") return false;
+    if (!commandLine(child.pid, proc)?.includes("--nivra-hold")) {
+      // It may have exited between the stat and the command-line read.
+      const now = processState(child.pid, proc);
+      if (!now || (now.started === child.started && now.state === "Z")) return false;
+      throw new Refused(`Process ${child.pid} isn't a held hello child any more. Nothing was killed; check it by hand.`);
+    }
+    return true;
+  };
+  if (!live()) return;
+  try {
+    (options.kill ?? ((pid, signal) => process.kill(pid, signal)))(-child.pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+  const sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = performance.now() + (options.timeoutMs ?? 5_000);
+  while (live()) {
+    if (performance.now() >= deadline) throw new Refused(`The rehearsal's held child ${child.pid} didn't stop. Check it by hand before running another session.`);
+    await sleep(50);
+  }
+}
+
 /**
  * Waits for each of this session's engines to exit. One still running after the wait is killed only while its command
  * line still names its instance; anything else is refused rather than killed.

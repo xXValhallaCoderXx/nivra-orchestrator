@@ -1353,7 +1353,7 @@ export function TaskDetail({
       <Modal opened={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete this task?" data-testid="task-delete-dialog">
         <Stack gap="sm">
           <Text size="sm">
-            The task and every version of its brief are deleted. The plans and conversations it came from stay. Its engines keep their records of its runs and coachings, and
+            The task, every version of its brief, comments and private attachment copies are deleted. The plans and conversations it came from stay. Its engines keep their records of its runs and coachings, and
             what was sent to Token Factory stays there.
           </Text>
           <Group justify="flex-end" gap="sm">

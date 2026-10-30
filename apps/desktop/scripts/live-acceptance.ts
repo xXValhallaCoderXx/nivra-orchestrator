@@ -45,7 +45,7 @@ import {
   type RunEntry,
   type Scenario,
 } from "./acceptance-record.ts";
-import { copyRunStore, enginesUsing, finishSession, isEngine, loadRecord, moveHome, noteAcceptanceHome, readRuns, Refused, saveRecord, type RecoveryRecord } from "./acceptance-state.ts";
+import { captureHeldChild, copyRunStore, enginesUsing, finishSession, isEngine, loadRecord, moveHome, noteAcceptanceHome, readRuns, Refused, saveRecord, stopHeldChild, type RecoveryRecord } from "./acceptance-state.ts";
 import { expectedSnapshot, sleep, Ui, waitFor } from "./live-ui.ts";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -379,7 +379,7 @@ function keepLogs(profile: string, phase: string): void {
 async function quit(profile: string, phase: string): Promise<number> {
   if (!app) return 0;
   const at = performance.now();
-  // How long a quit takes is evidence, not a limit: with a held run it has taken up to a minute.
+  // Keep the final state even for a slow quit; the held-run check below enforces D4's 5 s + 2 s graces.
   await Promise.race([app.close().catch(() => undefined), sleep(120_000)]);
   if (alive(appProcess)) throw new Error("the app didn't quit within 120 s");
   const took = Math.round(performance.now() - at);
@@ -561,16 +561,24 @@ async function rehearsal(): Promise<void> {
   const killed = await hello(a, "A", 60);
   const victim = (await ui!.online(target));
   if (!isEngine(victim.pid, victim.instanceId, uid)) throw new Refused(`pid ${victim.pid} isn't engine ${victim.instanceId}; nothing was killed.`);
+  const childPid = (await ui!.events(killed)).events.find((event) => event.type === "command.started" && event.stepId === "hold")?.data?.["pid"];
+  if (typeof childPid !== "number") throw new Refused("The held hello child wasn't recorded, so the engine wasn't killed. Run the rehearsal again.");
+  const child = captureHeldChild(childPid, victim.pid, uid);
   keepLogs(profiles.main, "before-kill");
-  process.kill(victim.pid, "SIGKILL");
-  await ui!.toDiagnostics();
-  await ui!.page.getByTestId("engine-failed").waitFor({ timeout: 30_000 });
-  await ui!.page.getByTestId("engine-restart").click();
-  const revived = await engineOnline("after a kill");
-  await waitFor(async () => (await ui!.status(killed)) !== "running", 30_000, "the killed run to be reconciled");
-  const k = await ui!.events(killed);
-  const starts = k.events.filter((e) => e.type === "run.started").length;
-  expect("engine.kill-held", "A", k.status === "failed" && k.events.at(-1)?.type === "run.interrupted" && starts === 1 && revived.instanceId !== victim.instanceId, `held run ${k.status}, last event ${k.events.at(-1)?.type}: "${k.events.at(-1)?.message ?? ""}"; started ${starts} time(s)`);
+  try {
+    process.kill(victim.pid, "SIGKILL");
+    await ui!.toDiagnostics();
+    await ui!.page.getByTestId("engine-failed").waitFor({ timeout: 30_000 });
+    await ui!.page.getByTestId("engine-restart").click();
+    const revived = await engineOnline("after a kill");
+    await waitFor(async () => (await ui!.status(killed)) !== "running", 30_000, "the killed run to be reconciled");
+    const k = await ui!.events(killed);
+    const starts = k.events.filter((e) => e.type === "run.started").length;
+    expect("engine.kill-held", "A", k.status === "failed" && k.events.at(-1)?.type === "run.interrupted" && starts === 1 && revived.instanceId !== victim.instanceId, `held run ${k.status}, last event ${k.events.at(-1)?.type}: "${k.events.at(-1)?.message ?? ""}"; started ${starts} time(s)`);
+  } finally {
+    await stopHeldChild(child);
+    log(`stopped the hello fixture left by the deliberately killed engine (pid ${child.pid})`);
+  }
 
   const closed = await hello(a, "A", 60);
   const quitMs = await quit(profiles.main, "app-close");
@@ -578,7 +586,7 @@ async function rehearsal(): Promise<void> {
   copyRunStore(engineHomeNow(), copy);
   const rows = readRuns(copy);
   const row = rows.find((r) => r.id === closed);
-  expect("app.closed-run", "A", row !== undefined && row.status !== "running", `the held run ended ${row?.status ?? "missing"}: "${row?.lastEvent?.message ?? ""}"; the app took ${quitMs} ms to quit`);
+  expect("app.closed-run", "A", row?.status === "cancelled" && row.lastEvent?.message === "Cancelled: the app asked it to stop" && quitMs <= 7_000, `the held run ended ${row?.status ?? "missing"}: "${row?.lastEvent?.message ?? ""}"; the app took ${quitMs} ms to quit (limit 7000 ms)`);
   expect("app.no-running", "none", rows.every((r) => r.status !== "running" && r.status !== "queued"), `${rows.length} runs in the store, none left running`);
 
   await launch(profiles.main, profiles.engine);

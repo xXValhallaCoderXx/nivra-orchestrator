@@ -3709,6 +3709,67 @@ Desktop UI, packaged and Windows checks were not repeated for this script/test/d
 runtime sources are identical to current main. No paid provider/cloud calls ran and no checks were weakened or
 skipped to obtain a passing result. PR #50 remains unmerged for the person to review this combined revision.
 
+## NIV-25: held hello shutdown, 30 October 2026
+
+**Finding.** The minute-long observation was a rehearsal artefact. The rehearsal first deliberately killed an
+engine during a 60 s hello hold. SIGKILL bypassed that engine's cleanup, leaving its fixture child alive. A later
+`app.close()` waited for that orphan even though the active run, its engine and the app had already stopped.
+On the retained installed `ead56e8` deb, the app process exited in 84 ms but `app.close()` took 59,463 ms. On a new
+installed deb built from clean main `a9dbc309efc842cbf31cf29bf669f12a1589da72`, those measurements were 471 ms and
+58,318 ms. A fresh held-run quit on that same build took 100 ms. These diagnostic measurements distinguish process
+exit from the automation wait; they do not turn the orphan from the deliberately killed engine into a successful
+cleanup.
+
+**Change.** Only the rehearsal and its tests change. Before killing its engine, it captures the hello child's pid,
+start time, owner, parent and process group. It then cleans up that fixture in `finally`, checking its identity before
+signalling the group and refusing a changed identity. The later `app.closed-run` check now requires the expected
+cancellation message and a quit within D4's 5 s + 2 s graces. Application shutdown, execution backends, IPC, protocol,
+dependencies and packaging sources are unchanged; no general cleanup guarantee after SIGKILL is added.
+
+**Installed Linux deb evidence**, with fresh profiles and engine homes, no key and no model calls:
+
+| Case | Quit times |
+|---|---|
+| Fresh app, 60 s hello holding, three repetitions | 176, 145, 153 ms |
+| Cancel, graceful restart, engine kill with fixture cleanup, then quit during another hold, three repetitions | 126, 205, 164 ms |
+| Full `accept:live --platform linux --session rehearsal`, three sessions | 171, 190, 162 ms |
+
+Every focused repetition persisted `cancelled` with "Cancelled: the app asked it to stop", left no queued/running
+rows or live app, engine or tracked hold child, and retained one start after relaunch. All eight applicable criteria
+passed in each full rehearsal; each recovery record is `restored` and its profiles were deleted. The installed app
+matched the package and runtime hashes. The original 0.1.0 installation was restored afterwards, with its original
+`app.asar` hash and a clean `dpkg --verify` result. The release engine home was never selected.
+
+The test package's SHA-256 is `1b49bb56de1187c4fe89510185ed2533c7bdc3bdd0eb52e80695b6f65189ae9c`;
+its `app.asar` is `7d0ee4870c9b84e93c7858d31c7b234b39d94a56e724f05511bee29f3feb44fe`, and its Linux
+runtime is `65f9561b43bb5ebf` (protocol 22). The app was built from clean main before the uncommitted harness change;
+the harness's separate source fingerprints and commands are in `.artifacts/niv25/receipt.json`.
+
+**Verification:** `taskset -c 0-3 pnpm verify` passed all typechecks and **1,944 tests** (141 domain, 729 desktop,
+1,074 engine), with no failures, cancellations or skips. An initial unrestricted run hit existing timeout failures
+under heavy concurrency and was stopped; the complete bounded-affinity rerun passed without changing checks or
+deadlines. The focused acceptance tests passed 12/12, including a real engine kill, orphan cleanup, cancellation and
+no replay. The packaged `app.spec.ts` passed 6/6, and a keyless hello through `apps/engine/scripts/rpc.ts` succeeded.
+Windows checks were not repeated for this Linux rehearsal fix: no application runtime, target, supervisor, staging,
+main-process or preload source changed.
+
+Ignored diagnostic traces, the six focused repetitions, package metadata, verification logs and the installation
+restoration receipt are in `.artifacts/niv25/`. The full rehearsal records are under
+`~/nivra-acceptance/niv25-20261030/`, in sessions `20261030T075657Z`, `20261030T075837Z` and `20261030T080033Z`.
+
+**PR #51 review correction, after `416275b`.** A child can disappear between the state read and the owner read,
+including during post-SIGKILL polling. Before refusing an identity mismatch, cleanup now reads the state again:
+absence completes cleanup, while a process still present remains refused. Three deterministic regressions cover
+disappearance before signalling, disappearance while polling after one signal, and a replacement at the same pid
+after the owner read fails. Both disappearance cases failed before the correction; the replacement remains refused
+without being signalled.
+
+The focused acceptance tests passed **15/15**. `taskset -c 0-3 pnpm verify` passed all typechecks and **1,947 tests**
+(141 domain, 732 desktop, 1,074 engine), with no failures, cancellations or skips. Receipts are in
+`.artifacts/niv25-review/`. Packaged and Windows checks were not repeated for this script/test correction; application
+runtime sources are unchanged, and the preceding packaged checks and rehearsal timings remain evidence from the
+reviewed implementation rather than new runs.
+
 ## NIV-70: task discussion, activity and multimodal context (30 October 2026)
 
 Implemented from main `60c1216`, reusing NIV-69 Planning and NIV-71's frozen coding context; combined verification
@@ -3722,3 +3783,19 @@ Companion/Planning monthly request allowance. No sandbox accounting or budget po
 the final candidate identity. Model requests in verification use explicit local stand-ins. Live provider image
 understanding is unassessed and requires separate approval. No paid calls, merges or Linear updates ran. Publishing
 the PR and its reviewer comment was explicitly requested separately.
+
+### PR 52 review corrections and current main — 30 October 2026
+
+The four review findings at `77e96a3` now have regression coverage: incremental exclusion from oversized discussion,
+private-file cleanup before task metadata deletion, a persistent removed-attachment cleanup retry, and retained
+accepted Planning results with stale advice after reference changes. Current main `5b9b635` is integrated, preserving
+NIV-25's implementation/tests and both acceptance additions.
+
+All typechecks and **1,979 tests passed** (144 domain, 754 desktop, 1,081 engine). The affected built and packaged
+Electron suites each passed **15/15**; freshly staged Windows engine checks passed **39/39**, and the freshly copied
+Windows app passed **16/16**, including native private-task-file deletion. All of these corrected-candidate runs
+finished with zero failures or skips. The keyless real-engine RPC check passed as well.
+
+[The review-fix receipt](niv-70-verification.md#pr-52-review-fixes-and-current-main-integration--30-october-2026) records
+the frozen source manifest, failure/retry evidence, commands and limits. No paid calls or live visual probe ran; PR 52
+remains unmerged for re-review.

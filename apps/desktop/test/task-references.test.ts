@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -9,7 +9,7 @@ import { extractPdf, PDF_REFUSED } from "../src/main/attachment-pdf.ts";
 import { validatePreparedImage } from "../src/main/attachment-image.ts";
 import { referenceSha, TaskReferences } from "../src/main/task-references.ts";
 import { briefFrom } from "../src/main/tasks.ts";
-import { decide, insertAttempt, insertTask, recordApply, recordOutcome, settleAttempt, updateTask, withdrawDecision } from "../src/main/workspace.ts";
+import { decide, deleteTask, getTask, insertAttempt, insertTask, recordApply, recordOutcome, settleAttempt, updateTask, withdrawDecision } from "../src/main/workspace.ts";
 import { openWorkspace, type WorkspaceDb } from "../src/main/workspace-db.ts";
 
 const roots: string[] = [], workspaces: WorkspaceDb[] = [];
@@ -26,6 +26,57 @@ function setup() {
 }
 import { png, pdf } from "./fixtures/reference-files.ts";
 describe("task discussion and private reference storage", () => {
+  it("allows exclusions to reduce an oversized discussion incrementally while previews and new inclusions remain bounded", () => {
+    const { refs, id } = setup();
+    const comments = Array.from({ length: 5 }, (_, index) => refs.addComment(id, `${index}`.repeat(8000), []));
+    assert.throws(() => refs.freeze(id, []), /24,000/);
+    refs.select(id, { excludedCommentIds: [comments[0]!.id], attachmentIds: [] });
+    assert.equal(refs.selection(id).excludedCommentIds.length, 1);
+    assert.throws(() => refs.freeze(id, []), /24,000/);
+    refs.select(id, { excludedCommentIds: comments.slice(0, 2).map((comment) => comment.id), attachmentIds: [] });
+    assert.equal(refs.freeze(id, []).comments.reduce((total, comment) => total + comment.text.length, 0), 24_000);
+    assert.throws(() => refs.select(id, { excludedCommentIds: [comments[0]!.id], attachmentIds: [] }), /24,000/);
+    assert.equal(refs.selection(id).excludedCommentIds.length, 2);
+  });
+  it("keeps an excluded attachment's cleanup retry after an I/O failure and finishes it after the obstruction is removed", async () => {
+    const { refs, id, file, workspace } = setup(), asset = await refs.importFile(id, file("retry.md", "Accepted content"), []);
+    refs.select(id, { excludedCommentIds: [], attachmentIds: [asset.id] }); const accepted = refs.freeze(id, []);
+    const prepared = join(refs.root, "unassigned", id, asset.id, "prepared.txt");
+    rmSync(prepared); mkdirSync(prepared); writeFileSync(join(prepared, "obstruction"), "A locked-file stand-in");
+    assert.throws(() => refs.remove(id, asset.id), /Retry file cleanup/);
+    const restarted = new TaskReferences(workspace, refs.root), pending = restarted.discussion(id);
+    assert.equal(pending.attachments[0]!.state, "removed"); assert.equal(pending.attachments[0]!.cleanupPending, true);
+    assert.equal(pending.selection.attachmentIds.length, 0); assert.equal(accepted.attachments[0]!.text, "Accepted content");
+    for (let n = 0; n < 9; n++) await restarted.importFile(id, file(`active${n}.md`, "Still stored"), []);
+    await assert.rejects(restarted.importFile(id, file("overflow.md", "Pending private copies still count"), []), /10 attachments/);
+    rmSync(prepared, { recursive: true }); restarted.remove(id, asset.id);
+    assert.equal(restarted.discussion(id).attachments[0]!.cleanupPending, false);
+    assert.equal(existsSync(join(refs.root, "unassigned", id, asset.id, "original")), false);
+    assert.equal((await restarted.importFile(id, file("replacement.md", "Space released after cleanup"), [])).state, "ready");
+  });
+  it("removes every task-owned copy and receipt, including interrupted moves and imports, before metadata can cascade", async () => {
+    const { refs, id, file, workspace } = setup();
+    const asset = await refs.importFile(id, file("unselected.md", "Never sent"), []);
+    const destination = randomUUID();
+    assert.throws(() => workspace.tx(() => { refs.move(id, destination); throw new Error("interrupted"); }), /interrupted/);
+    const orphan = join(refs.root, "unassigned", id, randomUUID()); mkdirSync(orphan); writeFileSync(join(orphan, "original"), "Partial import");
+    const otherTask = randomUUID(), outside = join(refs.root, "unassigned", otherTask); mkdirSync(outside); writeFileSync(join(outside, "keep"), "Other task");
+    assert.equal(refs.selection(id).attachmentIds.length, 0);
+    refs.deleteTaskAssets(id); assert.equal(deleteTask(workspace, id), true);
+    assert.equal(existsSync(join(refs.root, "unassigned", id)), false); assert.equal(existsSync(join(refs.root, destination, id)), false);
+    assert.equal(existsSync(join(outside, "keep")), true); assert.equal(getTask(workspace, id), null);
+    assert.equal(workspace.db.prepare("SELECT COUNT(*) AS n FROM task_attachments WHERE id=?").get(asset.id)!["n"], 0);
+  });
+  it("retains the task and durable cleanup records across restart when task deletion cannot remove a private file", async () => {
+    const { refs, id, file, workspace } = setup(), asset = await refs.importFile(id, file("retained.md", "Never selected"), []);
+    const prepared = join(refs.root, "unassigned", id, asset.id, "prepared.txt"); rmSync(prepared); mkdirSync(prepared); writeFileSync(join(prepared, "obstruction"), "Blocked");
+    assert.throws(() => refs.deleteTaskAssets(id), /task and cleanup records were kept/);
+    const path = workspace.path; workspace.close(); const opened = openWorkspace(path); assert.equal(opened.state, "ready"); if (opened.state !== "ready") throw new Error("workspace"); workspaces.push(opened.db);
+    const restarted = new TaskReferences(opened.db, refs.root); assert.notEqual(getTask(opened.db, id), null);
+    assert.equal(restarted.discussion(id).attachments[0]!.cleanupPending, true); assert.match(restarted.discussion(id).notice!, /delete the task again/);
+    rmSync(prepared, { recursive: true }); restarted.deleteTaskAssets(id); assert.equal(deleteTask(opened.db, id), true);
+    assert.equal(existsSync(join(refs.root, "unassigned", id)), false);
+  });
   it("keeps comments immutable, independently ordered and locally authored without changing the execution revision", () => {
     const { refs, id, workspace } = setup();
     const one = refs.addComment(id, "First", []), two = refs.addComment(id, "Second", []);

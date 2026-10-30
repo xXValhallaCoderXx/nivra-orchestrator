@@ -15,6 +15,8 @@ export interface PlanningGeneration {
   operationId: string;
   inspectRepository: boolean;
   assertCurrent(): void;
+  /** Last source check at dispatch; later reference changes make advice stale without replacing its context. */
+  dispatched(): void;
   started(info: { runId: string; maxRequests: number }): void;
   signal: AbortSignal;
 }
@@ -59,7 +61,7 @@ export class PlanningHost {
     if (!project) throw new Error("This planning draft's project was removed. Its saved content remains available; start a new repository-free draft or choose an existing project.");
     return project;
   }
-  #references(request: PlanningRequest, proposal: PlanningProposal | null, planningId?: string, knownSavedItemIds?: readonly string[]): unknown {
+  #references(request: PlanningRequest, proposal: PlanningProposal | null, planningId?: string, knownSavedItemIds?: readonly string[], frozenReferences?: { value: unknown }): unknown {
     const workspace = this.#options.workspace();
     const project = request.projectId ? this.#project(request.projectId) : null;
     const mission = request.missionId ? latestMissionVersion(workspace, request.missionId) : null;
@@ -111,19 +113,19 @@ export class PlanningHost {
     });
     const knowledge = planningContextFor(workspace, this.#options.projects(), request).knowledge.records.map((record) => [record.id, record.revision]);
     const preferences = this.#options.preferences?.(request.projectId).records.map((record) => [record.id, record.revision]) ?? [];
-    const references = request.source.kind === "task" ? this.#options.references?.(request.source.id) : undefined;
-    return ["nivra.planning-binding.v2", project ? [project.id, project.targetId] : null, source, mission ? [mission.id, mission.version, mission.sha256] : null, tasks, knowledge, preferences, saved, references ? { digest: references.digest, manifest: references.manifest } : null];
+    const references = !frozenReferences && request.source.kind === "task" ? this.#options.references?.(request.source.id) : undefined;
+    return ["nivra.planning-binding.v2", project ? [project.id, project.targetId] : null, source, mission ? [mission.id, mission.version, mission.sha256] : null, tasks, knowledge, preferences, saved, frozenReferences ? frozenReferences.value : references ? { digest: references.digest, manifest: references.manifest } : null];
   }
-  #binding(request: PlanningRequest, proposal: PlanningProposal | null, planningId?: string, knownSavedItemIds?: readonly string[]): { references: unknown; binding: string } {
-    const references = this.#references(request, proposal, planningId, knownSavedItemIds);
+  #binding(request: PlanningRequest, proposal: PlanningProposal | null, planningId?: string, knownSavedItemIds?: readonly string[], frozenReferences?: { value: unknown }): { references: unknown; binding: string } {
+    const references = this.#references(request, proposal, planningId, knownSavedItemIds, frozenReferences);
     return { references, binding: planningDigest(references) };
   }
-  #current(record: PlanningRecord): void {
+  #current(record: PlanningRecord, frozenReferences?: { value: unknown }): void {
     // A save adds its own result mappings. They become advice inputs only in the next reviewed/generated version.
     const references = record.references as unknown[];
     const saved = Array.isArray(references[7]) ? references[7] as unknown[][] : [];
     const knownSavedItemIds = saved.map((item) => String(item[0]));
-    if (record.binding !== this.#binding(record.request, record.proposal, record.id, knownSavedItemIds).binding) throw new Error(staleMessage);
+    if (record.binding !== this.#binding(record.request, record.proposal, record.id, knownSavedItemIds, frozenReferences).binding) throw new Error(staleMessage);
   }
   #view(record: PlanningRecord): PlanningView {
     const { references, ...view } = record;
@@ -217,7 +219,10 @@ export class PlanningHost {
     const project = record.request.projectId ? this.#project(record.request.projectId) : null;
     if (input.inspectRepository && !project) throw new Error("Choose a project before inspecting repository impact. Repository-free planning remains available.");
     const epoch = project ? this.#options.sharingEpoch(project.id) : null;
-    const generationBinding = this.#binding(record.request, record.proposal, record.id).binding;
+    const generation = this.#binding(record.request, record.proposal, record.id);
+    const generationBinding = generation.binding;
+    const frozenReferences = { value: (generation.references as unknown[])[8] ?? null };
+    let dispatched = false;
     const repositoryBound = project !== null;
     if (repositoryBound && !project?.sharing.modelContext) throw new Error(sharingMessage);
     const controller = new AbortController();
@@ -225,13 +230,15 @@ export class PlanningHost {
       if (controller.signal.aborted) throw new Error("This planning pass was cancelled. Request a new pass explicitly if needed.");
       const current = this.#record(id);
       if (current.revision !== revision || current.binding !== record.binding) throw new Error(staleMessage);
-      this.#current(current);
-      if (this.#binding(current.request, current.proposal, current.id).binding !== generationBinding) throw new Error(staleMessage);
+      const accepted = dispatched ? frozenReferences : undefined;
+      this.#current(current, accepted);
+      if (this.#binding(current.request, current.proposal, current.id, undefined, accepted).binding !== generationBinding) throw new Error(staleMessage);
       if (repositoryBound && project) {
         const latest = this.#options.projects().find((candidate) => candidate.id === project.id);
         if (!latest?.sharing.modelContext || this.#options.sharingEpoch(project.id) !== epoch) throw new Error(sharingMessage);
       }
     };
+    const acceptContext = () => { assertCurrent(); dispatched = true; };
     const known = await this.#options.secrets();
     refuseCredentials("The planning brief", JSON.stringify(record.request), known, "send");
     assertCurrent();
@@ -244,21 +251,21 @@ export class PlanningHost {
     if (workspace.db.prepare("SELECT 1 FROM planning_operations WHERE planning_id=? AND status IN ('submitting','running')").get(id)) throw new Error("A planning pass is already running for this draft. Wait for it or cancel it first.");
     insertPlanningOperation(workspace, { id: input.operationId, planningId: id, revision, fingerprint, maxRequests: input.inspectRepository ? 8 : 1 }, now());
     this.#active.set(input.operationId, { planningId: id, projectId: project?.id ?? null, controller });
-    void this.#finish(record, input.operationId, input.inspectRepository, generationBinding, assertCurrent, controller);
+    void this.#finish(record, input.operationId, input.inspectRepository, generationBinding, frozenReferences, assertCurrent, acceptContext, controller);
     return this.operation(id, input.operationId);
   }
-  async #finish(record: PlanningRecord, operationId: string, inspectRepository: boolean, generationBinding: string, assertCurrent: () => void, controller: AbortController): Promise<void> {
+  async #finish(record: PlanningRecord, operationId: string, inspectRepository: boolean, generationBinding: string, frozenReferences: { value: unknown }, assertCurrent: () => void, dispatched: () => void, controller: AbortController): Promise<void> {
     const workspace = this.#options.workspace();
     let keepForStop = false;
     try {
-      const result = PlanningResult.parse(await this.#options.generate!({ view: { ...this.#view(record), binding: generationBinding }, operationId, inspectRepository, assertCurrent, signal: controller.signal, started: (info) => { assertCurrent(); updatePlanningOperation(workspace, operationId, "running", null, info); } }));
+      const result = PlanningResult.parse(await this.#options.generate!({ view: { ...this.#view(record), binding: generationBinding }, operationId, inspectRepository, assertCurrent, dispatched, signal: controller.signal, started: (info) => { dispatched(); assertCurrent(); updatePlanningOperation(workspace, operationId, "running", null, info); } }));
       const known = await this.#options.secrets();
       refuseCredentials("The planning result", JSON.stringify(result), known);
       assertCurrent();
       this.#checkProposalEvidence(result.proposal, result.evidence);
       workspace.tx(() => {
         assertCurrent();
-        const bound = this.#binding(record.request, result.proposal, record.id);
+        const bound = this.#binding(record.request, result.proposal, record.id, undefined, frozenReferences);
         revisePlanning(workspace, record.id, record.revision, { request: record.request, proposal: result.proposal, evidence: inspectRepository ? result.evidence : null, ...bound }, now());
         updatePlanningOperation(workspace, operationId, "succeeded", result.exploration || null);
       });

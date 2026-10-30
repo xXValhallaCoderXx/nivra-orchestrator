@@ -1,5 +1,8 @@
 # NIV-70: task discussion, activity and multimodal context
 
+The original candidate below is `77e96a3`. The PR 52 review-fix receipt at the end records the corrected candidate
+and current-main integration; its verification supersedes the earlier review-readiness receipt.
+
 Implemented from main `60c121667db3ee22912ee3717db1d871d48ee83b`. The final combined candidate is in the isolated
 `nivra-orchestrator-niv70` worktree, on `feature/niv-70-pr`, based on current main
 `a9dbc30`. NIV-48's script and tests match that main byte for byte; both tickets' documentation is retained.
@@ -120,3 +123,54 @@ fast-forwarded to current main. Older branch-only commits and the separate recov
 
 Live provider image understanding remains **unassessed**. It requires a harmless, separately approved live visual
 check. Cloud sync, OCR, PDF rendering, indexing and background summaries remain deferred.
+
+## PR 52 review fixes and current-main integration — 30 October 2026
+
+The four independently reproduced review issues at `77e96a3` are fixed together with behavioural regression tests:
+
+- Selection changes that only remove included sources can be saved while the remaining discussion is still too
+  large or another selected file is damaged. Five 8,000-character comments can be reduced one exclusion at a time:
+  the first exclusion persists at 32,000 characters; the second restores a valid 24,000-character context. New
+  inclusions, previews and requests still enforce the complete context limits and credential checks.
+- Task deletion cleans every task-owned private folder before the database deletes the task and cascades its
+  metadata. This includes original/prepared copies, receipts and interrupted import/move copies, even for files
+  never selected or sent. A cleanup failure retains the task, metadata and a durable retry notice, including across
+  restart. Retrying task deletion finishes cleanup; other tasks and the user-selected originals outside application
+  data are retained.
+- Failed attachment removal persists `cleanupPending` and keeps **Retry file cleanup** visible after exclusion.
+  A successful retry clears the flag. Historical removed records with unknown cleanup state also offer a retry.
+  Pending private copies continue counting towards the existing storage limits until cleanup succeeds.
+- Planning checks the complete current reference binding immediately before dispatch, then retains that accepted
+  component through acknowledgement recovery, authorisation and result persistence. Later discussion, selection,
+  removal or file-damage changes leave the result and original manifest intact, and mark the advice stale for future
+  review/save. A source change before dispatch is still refused. Explicit cancellation, sharing revocation and the
+  existing checks on other authoritative bindings remain in force.
+
+Merged current main `5b9b6352b16f82287b001a898d2921150a003dfb` into the PR branch. The sole conflict was the append-only
+acceptance document: current main's complete text is followed by the complete NIV-70 additions, preserving both
+tickets. NIV-25's acceptance scripts and tests match current main byte for byte. No protocol, dependency, database
+migration, budget policy or engine inference change is introduced by these review fixes.
+
+The frozen non-document manifest contains 562 source/configuration/test files; SHA-256
+`471222a4fa0f12eaf94fedda3eb0549ff7661acbacde0e8af717e355de491fb2`.
+
+| Check on the corrected combined candidate | Result |
+| --- | --- |
+| `taskset -c 8-11 pnpm verify` | All typechecks and **1,979 tests passed**: 144 domain, 754 desktop, 1,081 engine; zero failures, cancellations or skips |
+| Focused reference/Planning host/Planning transport tests | **45/45 passed**, including accepted snapshots, stale advice, lost acknowledgements, pre-dispatch refusal and consent/cancellation |
+| Native host deletion regression | **1/1 passed**; an unselected file's failed cleanup retains the task and an explicit retry deletes its private copies |
+| Affected built Electron checks: task discussion, Planning, Companion | **15/15 passed**, no skips |
+| Same affected checks in fresh Linux `package:dir` output | **15/15 passed**, no skips; includes actual Chromium image and bundled PDF workers |
+| Fresh `stage:runtime all` | Linux x64 smoke passed, `e8d44378d308555b`; Windows x64 cross-staged, `bb435c7b18f3f686` |
+| `verify:windows --skip-stage` after fresh staging | **39/39 passed**, release WSL home unchanged and nonce test home removed |
+| `test:windows` after fresh `dev:win --skip-stage --no-launch` | **16/16 passed**, including removal of the task's private directory by the native Windows app |
+| Real engine through `rpc.ts` | Keyless `doctor` passed in a disposable home, provider variables removed from the child, graceful shutdown |
+
+The cleanup-failure regressions obstruct an unlink with a nonempty directory, verify persisted exclusion/retry state,
+then remove the obstruction and retry. The native Windows check separately verifies real private-file cleanup. No
+assertion or timeout was weakened, no test was removed and no skip was added. The existing passing suites did not
+cover these four bugs; these new cases exercise their previously missing recovery/lifecycle transitions.
+
+Ignored receipts are retained in `.artifacts/niv70-review/`, including command logs, the source manifest and packaged
+hashes. Other worktrees and their local commits remain untouched. No paid call, live visual probe, Linear update or
+merge of PR 52 was performed; live provider image understanding remains unassessed.

@@ -1186,6 +1186,7 @@ export class Host {
     if (openCoachings(workspace, { taskId }).length) throw new Error("The coach is still answering about this task. Cancel it, and wait for it to end, then delete the task.");
     // An apply its engine reported and the person hasn't settled still has an engine record and kept copies.
     if (attemptsOf(workspace, taskId).some((attempt) => this.#applyUnresolved(attemptRecord(workspace, attempt.id)))) throw new Error(SETTLE_BEFORE_DELETE);
+    this.#taskReferences().deleteTaskAssets(taskId);
     if (!deleteTask(workspace, taskId)) throw new Error("That task is no longer in the list.");
   }
 
