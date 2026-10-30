@@ -201,6 +201,18 @@ test("cancels a run while its worker waits on the model: it ends cancelled, and 
   modelGate = null;
   release();
   expect({ spawns: spawns(), uploads: uploads(), chats: model.chats().length }).toEqual(sent);
+  const stopped = await page.evaluate(async ([task, attempt]) => window.nivra.getTaskAttempt(task!, attempt!), [taskId, (await card.getAttribute("data-attempt-id"))!]);
+  expect([stopped.report?.checks.length, stopped.report?.beforeChecks?.length]).toEqual([0, 1]);
+  await expect(card.getByTestId("task-attempt-report")).toHaveAttribute("data-verified", "false");
+  const before = card.getByTestId("task-attempt-before-check");
+  await expect(before).toHaveCount(1);
+  await expect(before).toHaveAttribute("data-verdict", "failed");
+  await expect(before).toContainText("/bin/sh check.sh");
+  await expect(before).toContainText("Exited 1");
+  await expect(before).toContainText("comparison unavailable");
+  await expect(before.getByTestId("task-attempt-before-output")).toContainText("got:");
+  await expect(card.getByTestId("task-attempt-check")).toHaveCount(0);
+  await expect(card.getByTestId("task-attempt-approve")).toHaveCount(0);
   expect(readFileSync(greetPath(), "utf8")).toBe(ORIGINAL);
 });
 

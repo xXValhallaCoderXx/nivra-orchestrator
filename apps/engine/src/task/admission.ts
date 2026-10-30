@@ -19,15 +19,18 @@ const BoundReport = z.object({
   baseline: z.string(),
   prefix: z.string(),
   environment: z.record(z.string(), z.unknown()).nullable(),
-  environmentRef: z.record(z.string(), z.unknown()).nullable(),
-  setup: TaskSetupCheck.nullable(),
+  // Version 3 predates recipe environments and setup checks; those fields were added without changing its version.
+  environmentRef: z.record(z.string(), z.unknown()).nullable().optional(),
+  setup: TaskSetupCheck.nullable().optional(),
   frozen: z.array(z.strictObject({ path: z.string().max(1_024), unchanged: z.boolean().nullable() })).max(TASK_BRIEF_LIMITS.frozen),
   checks: z.array(BoundCheck).max(TASK_BRIEF_LIMITS.finalChecks),
   verified: z.boolean(),
   manifest: TaskVerificationManifest.optional(),
   beforeChecks: z.array(TaskCheck).max(TASK_BRIEF_LIMITS.finalChecks - 1).optional(),
-});
+}).refine((report) => report.version !== 4 || (report.environmentRef !== undefined && report.setup !== undefined), "Current reports retain explicit environment and setup evidence.");
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+// Historical judgeCheck used clip(command, 80), before the worker masked the report. This is an exact name, not a prefix.
+const legacyCheckName = (command: string): string => command.length > 80 ? `${command.slice(0, 77)}...` : command;
 
 export const ADMISSION_UNAVAILABLE = "This run's trustworthy verification evidence isn't available, so this change can't be approved. Start a new authorised task run.";
 
@@ -59,21 +62,29 @@ export async function taskAdmission(input: { proposal: Proposal | null; params: 
     legacy = report.version === 3;
     const { task } = params;
     if (report.task.taskId !== task.attempt.taskId || report.task.attemptId !== task.attempt.attemptId || report.task.runId !== params.runId || report.task.briefVersion !== task.brief.version || report.task.briefSha256 !== task.brief.sha256 || report.baseline !== proposal.binding.baseline || report.prefix !== proposal.binding.destination.prefix) return refuse("This proposal's report belongs to another run, brief or snapshot, so it can't be approved. Start a new authorised task run.");
-    const setupRequired = report.environment !== null || report.environmentRef !== null;
-    if (report.environment !== null && report.environmentRef !== null) return refuse(ADMISSION_UNAVAILABLE);
+    const environmentRef = report.environmentRef ?? null;
+    const setup = report.setup ?? null;
+    const setupRequired = report.environment !== null || environmentRef !== null;
+    if (report.environment !== null && environmentRef !== null) return refuse(ADMISSION_UNAVAILABLE);
     if (params.brief && await taskBriefDigest(params.brief) !== task.brief.sha256) return refuse("The original brief doesn't match this proposal's binding, so its checks can't be established. Start a new authorised task run.");
     let manifest = report.manifest;
     if (legacy) {
       if (!params.brief) return refuse("This older run needs its original brief to establish every required check. Start a new authorised task run if that brief is no longer available.");
       manifest = await taskVerificationManifest(params.brief, setupRequired);
-      if (report.checks.some((check) => check.kind === "check" ? check.name !== params.brief!.checks[check.number - 1] : check.name !== params.brief!.acceptanceCases[check.number - 1]?.name || (check.verdict === "passed" && check.exitCode !== params.brief!.acceptanceCases[check.number - 1]?.expectedExitCode))) return refuse("This older run's final results don't match its original cases and commands, so it can't be approved. Start a new authorised task run.");
+      if (report.checks.some((check) => {
+        if (check.kind === "check") {
+          const command = params.brief!.checks[check.number - 1];
+          return command === undefined || check.name !== legacyCheckName(command);
+        }
+        return check.name !== params.brief!.acceptanceCases[check.number - 1]?.name || (check.verdict === "passed" && check.exitCode !== params.brief!.acceptanceCases[check.number - 1]?.expectedExitCode);
+      })) return refuse("This older run's final results don't match its original cases and commands, so it can't be approved. Start a new authorised task run.");
     } else {
       if (!manifest || report.beforeChecks === undefined || manifest.setupRequired !== setupRequired) return refuse(ADMISSION_UNAVAILABLE);
       if (params.brief && canonicalJson(manifest) !== canonicalJson(await taskVerificationManifest(params.brief, setupRequired))) return refuse("The recorded checks don't match the original brief, so this change can't be approved. Start a new authorised task run.");
       const required = manifest.checks.filter((check) => check.kind === "check");
       if (report.beforeChecks.length !== required.length || required.some((expected) => report.beforeChecks!.filter((check) => check.kind === "check" && check.number === expected.number && check.commandSha256 === expected.commandSha256).length !== 1)) return refuse("The required checks' before-change evidence isn't complete or bound to the same commands. Start a new authorised task run.");
     }
-    const assessment = evaluateTaskVerification({ manifest, checks: report.checks, frozen: report.frozen, setup: report.setup, originalVerified: report.verified, legacy });
+    const assessment = evaluateTaskVerification({ manifest, checks: report.checks, frozen: report.frozen, setup, originalVerified: report.verified, legacy });
     return { eligible: assessment.verified, reason: assessment.reason, proposalHash: proposal.hash, reportSha256: proposal.binding.reportSha256, legacy };
   } catch {
     return refuse(ADMISSION_UNAVAILABLE);

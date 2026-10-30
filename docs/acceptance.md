@@ -3441,3 +3441,35 @@ The source/test diff SHA-256 against merged main is
 
 Local integrated receipts and logs are retained under `.cache/niv67/`, including `integrated-verification.json`.
 No live/paid validation was used. SHE-65 production correctness and NIV-35 live acceptance remain separate.
+
+### PR 47 review corrections — 30 October 2026
+
+Follow-up to the review of `cd5a8e040c14043d8ccadd10f9dde76f1e8d5c58`. The source/test diff SHA-256 is
+`ca10bde86472d4520673d623b47aeff07e03939b2d77cb45b892027153c816e6`
+(`git diff --binary cd5a8e0 -- apps packages`). Local receipts/logs are in `.cache/niv67/review-fixes/`.
+
+- Legacy check names match the historical harness exactly: commands longer than 80 UTF-16 code units use the first
+  77 followed by `...`. Full original-brief digest checks and exact row identities remain; arbitrary prefixes and a
+  different brief with the same clipped label are refused. Tests cover 80, 81 and 103 characters.
+- Pre-recipe version-3 reports may omit `environmentRef` and `setup` when there was no prepared environment. Either
+  prepared-environment field still requires affirmative unchanged setup evidence; absent, null or unknown evidence
+  is refused. Version-4 reports still require explicit fields. The real-engine regression seeds a separate authentic
+  legacy run/proposal, reads and admits it after restart, applies it by hash, and preserves the original newer proposal.
+- Before-change observations render independently of final rows, with recorded labels, commands when the original
+  binding is available, reasons and both output streams. Missing/mismatched/ambiguous final evidence stays unavailable;
+  no before-only result implies verification. The recovery journey proves cancellation leaves these records visible
+  with zero final rows and no approval action.
+
+Validation: `pnpm verify` passed all 1,862 tests (140 domain, 720 desktop, 1,002 engine), no skips/failures, including all
+main/renderer/E2E typechecks. The focused engine checks passed 23 tests, and focused UI checks passed 33. All 11 built
+journeys in `task-recovery.spec.ts`, `task-apply.spec.ts` and `task-run.spec.ts` passed through the supported `test:e2e`
+script. The real engine through `rpc.ts` passed against local stand-ins again. `git diff --check` and scope/credential
+review passed; no new credential-shape flags or generated tracked files.
+
+An earlier built attempt in the agent runner failed before task execution because localhost binding was denied
+(`EPERM`: three setup failures, eight dependent cases not run). The same complete affected files passed from the
+current full-access runner. No tests were skipped or weakened to accommodate that failure.
+
+Packaged/Windows suites were not repeated for this follow-up: no packaging, main-process, preload, target or supervisor
+source changed. Their earlier results above remain evidence for their labelled revisions. No paid validation was
+performed, protocol 21 is unchanged, and the PR remains unmerged for re-review.

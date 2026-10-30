@@ -1079,18 +1079,19 @@ const ran = (exitCode: number | null, durationMs: number | null) => [exitCode !=
 export function RunChecks({ report, content }: { report: TaskReport; content: BriefContent | null }) {
   const setup = report.setup ?? null;
   const legacy = legacyVerification(report);
+  const beforeChecks = report.beforeChecks ?? [];
   const changedSetup = setup?.unchanged === false ? setup.changed : [];
-  const any = report.baseline.length + report.checks.length + report.frozen.length + changedSetup.length + (setup?.unchanged === null ? 1 : 0);
+  const any = report.baseline.length + beforeChecks.length + report.checks.length + report.frozen.length + changedSetup.length + (setup?.unchanged === null ? 1 : 0);
   if (!any) return null;
-  const decides = ["the acceptance cases", !legacy && report.checks.some((check) => check.kind === "check") ? "the required repository checks" : null, report.frozen.length ? "the frozen files" : null, setup ? "the setup files" : null].filter(Boolean) as string[];
+  const decides = ["the acceptance cases", !legacy && (report.manifest?.checks.some((check) => check.kind === "check") || report.checks.some((check) => check.kind === "check")) ? "the required repository checks" : null, report.frozen.length ? "the frozen files" : null, setup ? "the setup files" : null].filter(Boolean) as string[];
   const listed = decides.length > 1 ? `${decides.slice(0, -1).join(", ")} and ${decides.at(-1)}` : decides[0]!;
   const deciding = listed.charAt(0).toUpperCase() + listed.slice(1);
   return (
-    <Paper withBorder p="md" radius="md">
+    <Paper withBorder p="md" radius="md" data-testid="task-attempt-checks">
       <Stack gap={0}>
         <Text fw={600}>Acceptance cases and checks</Text>
         <Text size="sm" c="var(--nivra-text-2)" pb="xs">
-          Nivra ran these itself, with networking off. {legacy ? `${deciding} decided this legacy run's recorded result; repository checks were advisory.` : `${deciding} decide verification. Required checks must pass on the proposed result, even if they failed before the worker's changes.`}
+          Checks run with networking off. These are the results Nivra recorded. {legacy ? `${deciding} decided this legacy run's recorded result; repository checks were advisory.` : `${deciding} decide verification. Required checks must pass on the proposed result, even if they failed before the worker's changes.`}
         </Text>
         {report.baseline.map((check) => (
           <CheckRow
@@ -1105,6 +1106,30 @@ export function RunChecks({ report, content }: { report: TaskReport; content: Br
             data-match={matchOf(check)}
           />
         ))}
+        {beforeChecks.length > 0 && (
+          <Stack gap={0} data-testid="task-attempt-before-checks">
+            <Text size="sm" fw={600}>Before the worker's changes</Text>
+            <Text size="xs" c="var(--nivra-text-2)" pb="xs">These records concern the unchanged snapshot before the worker's changes. They don't verify a proposed result.</Text>
+            {beforeChecks.map((check, index) => {
+              const matched = report.checks.some((final) => comparisonOf(final, beforeChecks).before === check);
+              const bound = report.manifest?.checks.some((given) => given.kind === "check" && check.kind === "check" && given.number === check.number && given.commandSha256 === check.commandSha256);
+              const command = bound ? content?.checks[check.number - 1] ?? null : null;
+              return (
+                <CheckRow
+                  key={`before-${index}-${check.number}`}
+                  label={`Before-change check ${check.number}`}
+                  title={command === null ? `Recorded label: ${check.name}` : null}
+                  command={command}
+                  detail={[check.reason, ran(check.exitCode, check.durationMs), command === null ? "Original command unavailable." : null, matched ? null : "No final result can be matched to this observation; comparison unavailable."].filter(Boolean).join(" · ")}
+                  badge={VERDICT_LOOK[check.verdict]}
+                  output={{ stdout: check.stdoutTail, stderr: check.stderrTail, testId: "task-attempt-before-output" }}
+                  data-testid="task-attempt-before-check"
+                  data-verdict={check.verdict}
+                />
+              );
+            })}
+          </Stack>
+        )}
         {report.checks
           .filter((check) => check.kind === "case")
           .map((check) => (
@@ -1140,7 +1165,7 @@ export function RunChecks({ report, content }: { report: TaskReport; content: Br
         {report.checks
           .filter((check) => check.kind === "check")
           .map((check) => (
-            <CaseOrCheck key={`check-${check.number}`} check={check} command={content?.checks[check.number - 1] ?? check.name} legacy={legacy} beforeChecks={report.beforeChecks} />
+            <CaseOrCheck key={`check-${check.number}`} check={check} command={content?.checks[check.number - 1] ?? null} legacy={legacy} beforeChecks={beforeChecks} />
           ))}
       </Stack>
     </Paper>
@@ -1173,7 +1198,7 @@ function CaseOrCheck({ check, command, legacy = false, beforeChecks }: { check: 
           </>
         )
       }
-      title={isCase ? check.name : null}
+      title={isCase ? check.name : command === null ? `Recorded label: ${check.name}` : null}
       command={command}
       detail={detail || null}
       badge={VERDICT_LOOK[check.verdict]}
@@ -1183,14 +1208,8 @@ function CaseOrCheck({ check, command, legacy = false, beforeChecks }: { check: 
     >
       {comparison && (
         <Stack gap={2} data-testid="task-attempt-check-comparison" data-comparison={comparison.label}>
-          <Group gap="xs">
-            <Badge size="xs" variant="light" color={comparison.color}>{comparison.label}</Badge>
-            {comparison.before && <Text size="xs" c="var(--nivra-text-2)" data-testid="task-attempt-before-check" data-verdict={comparison.before.verdict}>Before the worker: {VERDICT_LOOK[comparison.before.verdict].label}{ran(comparison.before.exitCode, comparison.before.durationMs) ? ` · ${ran(comparison.before.exitCode, comparison.before.durationMs)}` : ""}</Text>}
-          </Group>
+          <Badge size="xs" variant="light" color={comparison.color}>{comparison.label}</Badge>
           <Text size="xs" c="var(--nivra-text-2)">{comparison.detail}</Text>
-          {comparison.before?.verdict !== "passed" && (comparison.before?.stdoutTail || comparison.before?.stderrTail) && (
-            <Code block fz="xs" style={{ maxHeight: 200, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }} data-testid="task-attempt-before-output">{[comparison.before.stdoutTail, comparison.before.stderrTail].filter(Boolean).join("\n")}</Code>
-          )}
         </Stack>
       )}
       {(check.changedFiles.length > 0 || check.unclear) && (
