@@ -44,13 +44,14 @@ function checkIntent(scope: PreferenceScope, intent: PreferenceIntent): Preferen
  * The task's choices as the person typed them, trimmed and checked here so a refusal says what to do (D23). The engine
  * checks them again. They go with one run only and are never saved.
  */
-export function cleanChoices(choices: readonly string[]): string[] {
-  if (choices.length > MAX_CHOICES) throw new Error(`An explanation can carry at most ${MAX_CHOICES} choices; this one has ${choices.length}. Remove some, then explain again.`);
+export function cleanChoices(choices: readonly string[], purpose: "explain" | "run" = "explain"): string[] {
+  const again = purpose === "run" ? "preview the run" : "explain";
+  if (choices.length > MAX_CHOICES) throw new Error(`${purpose === "run" ? "A coding run" : "An explanation"} can carry at most ${MAX_CHOICES} choices; this one has ${choices.length}. Remove some, then ${again} again.`);
   const clean = choices.map((choice) => choice.trim());
-  if (clean.some((choice) => !choice)) throw new Error("A choice needs some words. Type what this task should do, or remove the empty choice, then explain again.");
+  if (clean.some((choice) => !choice)) throw new Error(`A choice needs some words. Type what this task should do, or remove the empty choice, then ${again} again.`);
   const long = clean.find((choice) => choice.length > MAX_CHOICE_CHARS);
-  if (long !== undefined) throw new Error(`A choice can be at most ${MAX_CHOICE_CHARS} characters; one has ${long.length}. Shorten it, then explain again.`);
-  if (new Set(clean).size !== clean.length) throw new Error("The same choice is there twice. Remove one, then explain again.");
+  if (long !== undefined) throw new Error(`A choice can be at most ${MAX_CHOICE_CHARS} characters; one has ${long.length}. Shorten it, then ${again} again.`);
+  if (new Set(clean).size !== clean.length) throw new Error(`The same choice is there twice. Remove one, then ${again} again.`);
   return clean;
 }
 

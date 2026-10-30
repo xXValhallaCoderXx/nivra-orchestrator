@@ -1,3 +1,4 @@
+import { choicesDigest, preferencesDigest, StoredTaskInput } from "../src/index.ts";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
@@ -21,14 +22,27 @@ const FINGERPRINT = "f".repeat(64);
 const request = async (overrides: { input?: Record<string, unknown>; context?: unknown; brief?: unknown } = {}) => ({
   clientRequestId: randomUUID(),
   workflowId: "task",
-  input: { repoPath: "/home/someone/repo", project: randomUUID(), target: "wsl:Ubuntu-24.04", preview: FINGERPRINT, taskId: randomUUID(), briefVersion: 3, briefDigest: await taskBriefDigest(BRIEF), ...overrides.input },
-  context: overrides.context ?? { sharing: { modelContext: true, cloudExecution: true }, brief: overrides.brief ?? BRIEF },
+  input: { repoPath: "/home/someone/repo", project: randomUUID(), target: "wsl:Ubuntu-24.04", preview: FINGERPRINT, taskId: randomUUID(), briefVersion: 3, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(BRIEF), ...overrides.input },
+  context: overrides.context ?? { sharing: { modelContext: true, cloudExecution: true }, brief: overrides.brief ?? BRIEF, preferences: { revision: 0, records: [] }, choices: [] },
 });
 
 describe("a task run's request (NIV-7)", () => {
+  it("requires both context digests on new requests and permits absent digests only in historical reads", async () => {
+    const given = await request();
+    for (const key of ["preferencesDigest", "choicesDigest"] as const) {
+      const input: Record<string, unknown> = { ...given.input }; delete input[key];
+      assert.equal(StartRunParams.safeParse({ ...given, input }).success, false);
+      assert.equal(StoredTaskInput.safeParse(input).success, true);
+    }
+    const changed = await choicesDigest(["Use pnpm", "Keep the public API"]);
+    assert.equal(changed === await choicesDigest(["Keep the public API", "Use pnpm"]), false);
+    assert.equal(changed, await choicesDigest([" Use pnpm ", "Keep the public API"]));
+    assert.equal(StartRunParams.safeParse({ ...given, context: { ...given.context, choices: ["duplicate", "duplicate"] } }).success, false);
+  });
+
   it("takes the checkout, its project and target, the preview's fingerprint, the task and its brief by version and digest, with both consents and the brief in its context", async () => {
     const parsed = StartRunParams.parse(await request());
-    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 21]);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 22]);
     assert.equal(StartRunParams.safeParse(await request({ input: { target: "local" } })).success, true);
     assert.deepEqual(
       ["runs.task", "runs.proposal", "task.preview"].map((name) => [Object.hasOwn(Methods, name), name.startsWith("runs.") ? Methods[name as "runs.task"].result.safeParse(null).success : null]),
@@ -155,7 +169,10 @@ describe("what a task run gives back (NIV-7)", () => {
     assert.equal(TaskReport.safeParse({ ...report, stopped: { code: "something-else", step: null, message: "x" } }).success, false);
     assert.equal(TaskReport.safeParse({ ...report, checks: Array.from({ length: 5 }, () => report.checks[0]) }).success, false, "four cases and checks at most");
     assert.equal(TaskReport.safeParse({ ...report, checks: [{ ...report.checks[0], verdict: "skipped" }] }).success, false);
-    assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 10, true]);
+    for (const code of ["context-mismatch", "context-credentials"]) {
+      assert.equal(TaskReport.safeParse({ ...report, outcome: "refused", stopped: { code, step: "prepare", message: "x" }, worker: null, checks: [], verified: false, proposal: null, reportSha256: null }).success, true);
+    }
+    assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 12, true]);
   });
 });
 

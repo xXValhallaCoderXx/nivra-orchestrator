@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PreferenceSnapshot, RunChoices } from "./context.ts";
 import { EnvironmentRef, TaskEnvironment } from "./environment.ts";
 import { ModelFailureKind, RunRoute, RunUsage } from "./models.ts";
 import { SandboxCleanup, SandboxStep, SandboxStopCode, SnapshotPreview, TargetName } from "./sandbox.ts";
@@ -169,6 +170,8 @@ export async function taskBriefDigest(brief: TaskBrief): Promise<string> {
 export const TaskContext = z.strictObject({
   sharing: z.strictObject({ modelContext: z.boolean(), cloudExecution: z.boolean() }),
   brief: TaskBrief,
+  preferences: PreferenceSnapshot,
+  choices: RunChoices,
 });
 export type TaskContext = z.infer<typeof TaskContext>;
 
@@ -186,6 +189,8 @@ export const TaskInput = z.strictObject({
   briefVersion: z.number().int().positive(),
   /** `taskBriefDigest` of the context's brief, checked before anything is sent. */
   briefDigest: Sha256Hex,
+  preferencesDigest: Sha256Hex,
+  choicesDigest: Sha256Hex,
   /**
    * The prepared environment the run starts from: D41's single setup, or a project-driven recipe's (NIV-55). Without
    * one, the run starts from Nivra's own base image.
@@ -203,6 +208,9 @@ export const StoredTaskInput = z.object({
   taskId: z.string().min(1),
   briefVersion: z.number().int().positive(),
   briefDigest: z.string().min(1),
+  /** Absent only in historical records; every new request requires both. */
+  preferencesDigest: z.string().min(1).optional(),
+  choicesDigest: z.string().min(1).optional(),
   environment: z.union([z.object({ image: z.string().min(1), inputsDigest: z.string().min(1), projectFingerprint: z.string().min(1), node: z.string(), pnpm: z.string(), arch: z.string() }), EnvironmentRef]).optional(),
 });
 export type StoredTaskInput = z.infer<typeof StoredTaskInput>;
@@ -368,7 +376,7 @@ export const TaskWorker = z.strictObject({
 export type TaskWorker = z.infer<typeof TaskWorker>;
 
 /** What stopped a run, by kind: a sandbox check's codes (D36), and a task's own. The words are chosen by the code. */
-export const TaskStopCode = z.enum([...SandboxStopCode.options, "toolchain", "time", "model-sharing", "brief", "model", "native-windows", "baseline", "environment", "frozen", "environment-missing"]);
+export const TaskStopCode = z.enum([...SandboxStopCode.options, "toolchain", "time", "model-sharing", "brief", "model", "native-windows", "baseline", "environment", "frozen", "environment-missing", "context-mismatch", "context-credentials"]);
 export type TaskStopCode = z.infer<typeof TaskStopCode>;
 
 /**

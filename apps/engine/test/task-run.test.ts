@@ -1,3 +1,4 @@
+import { choicesDigest, preferencesDigest } from "@nivra/domain";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -131,8 +132,8 @@ describe("a task run's slot (D39)", () => {
     scheduler.attach({ getWorkflow: () => ({ createRun: async ({ runId }) => ({ start: () => new Promise((resolve) => release.set(runId, () => resolve({ status: "success" }))), cancel: async () => undefined, watch: () => () => undefined }) }) });
     scheduler.recover();
     const hello = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: "/repo", holdMs: 0 }, context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } } });
-    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: TASK_BRIEF };
-    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(TASK_BRIEF) }, context: taskContext });
+    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: TASK_BRIEF, preferences: { revision: 0, records: [] }, choices: [] };
+    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(TASK_BRIEF) }, context: taskContext });
     const environmentContext: EnvironmentContext = { sharing: { cloudExecution: true }, spec: { filters: [] } };
     const prepare = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "environment", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "e".repeat(64) }, context: environmentContext });
     const [h1, h2] = [hello(), hello()];
@@ -173,8 +174,8 @@ describe("a task run's slot (D39)", () => {
     const helloContext = { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } };
     const hello = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: "/repo", holdMs: 0 }, context: helloContext });
     const brief = TASK_BRIEF;
-    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief };
-    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(brief) }, context: taskContext });
+    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief, preferences: { revision: 0, records: [] }, choices: [] };
+    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) }, context: taskContext });
     const [h1, h2, h3] = [hello(), hello(), hello()];
     const [t1, t2] = [await task(), await task()];
     const status = (runId: string) => store.status(runId);
@@ -190,8 +191,15 @@ describe("a task run's slot (D39)", () => {
     await waitFor(() => [h1, h2, h3, t1, t2].every((runId) => status(runId) === "succeeded") || null, { what: "every run to end" });
     // The same request id with another task's input is another run's: refused, as a check's and research's are.
     const reused = randomUUID();
-    const input = { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(brief) };
-    scheduler.submit({ clientRequestId: reused, workflowId: "task", input, context: taskContext });
+    const input = { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) };
+    const original = scheduler.submit({ clientRequestId: reused, workflowId: "task", input, context: taskContext });
+    const held = scheduler.contextOf(original, "task")!;
+    taskContext.choices.push("Changed after acceptance");
+    assert.equal(held.choices.length, 0, "the caller cannot mutate the accepted snapshot");
+    assert.equal(Object.isFrozen(held.preferences.records), true);
+    assert.equal(scheduler.submit({ clientRequestId: reused, workflowId: "task", input, context: taskContext }), original);
+    assert.equal(scheduler.contextOf(original, "task"), held, "duplicates keep the original context object");
+    for (const key of ["preferencesDigest", "choicesDigest"] as const) assert.throws(() => scheduler.submit({ clientRequestId: reused, workflowId: "task", input: { ...input, [key]: "a".repeat(64) }, context: taskContext }), /already started another run/);
     assert.throws(() => scheduler.submit({ clientRequestId: reused, workflowId: "task", input: { ...input, briefVersion: 2 }, context: taskContext }), /already started another run, with other input/);
     database.close();
   });
@@ -300,7 +308,7 @@ describe("a task run's workflow, in process (D39)", () => {
   const MODEL = TASK_MODEL;
   type Call = [string, Record<string, unknown>];
 
-  async function workflow(options: { platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string>; keep?: (proposal: Proposal) => void } = {}) {
+  async function workflow(options: { platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string>; keep?: (proposal: Proposal) => void; context?: Partial<Pick<TaskContext, "preferences" | "choices">>; knownValues?: () => string[]; afterCheck?: (context: TaskContext) => void; afterListing?: (context: TaskContext) => void } = {}) {
     const root = repoWith(options.files ?? FILES);
     const guest = new RealGuest();
     guest.busybox = true;
@@ -308,8 +316,8 @@ describe("a task run's workflow, in process (D39)", () => {
     const brief = TASK_BRIEF;
     const runId = randomUUID();
     const requestId = randomUUID();
-    const input = { repoPath: root, project: randomUUID(), target: "local", preview: (await snap(root)).fingerprint, taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(brief) };
-    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief };
+    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief, preferences: { revision: 0, records: [] }, choices: [], ...options.context };
+    const input = { repoPath: root, project: randomUUID(), target: "local", preview: (await snap(root)).fingerprint, taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest(context.preferences.records), choicesDigest: await choicesDigest(context.choices), briefDigest: await taskBriefDigest(brief) };
     const calls = options.calls ?? [["edit_file", TASK_FIX], ["submit", { summary: "Defaulted the name to world." }]];
     let requests = 0;
     const model = new MastraLanguageModelV2Mock({
@@ -318,14 +326,17 @@ describe("a task run's workflow, in process (D39)", () => {
         return { content: [{ type: "tool-call", toolCallId: `call-${requests++}`, toolName: tool, input: JSON.stringify(args) }], finishReason: "tool-calls", usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, warnings: [] };
       }) as never,
     });
-    const listing = (async () => new Response(JSON.stringify({ object: "list", data: [{ id: MODEL }] }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+    const listing = (async () => {
+      options.afterListing?.(context);
+      return new Response(JSON.stringify({ object: "list", data: [{ id: MODEL }] }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
     const reports: TaskReport[] = [];
     const proposals: Proposal[] = [];
     // What was saved, in order: each report by its outcome, and the proposal.
     const saves: string[] = [];
     let opened = 0;
     const deps: TaskDeps = {
-      recorder: { output: () => undefined, event: () => undefined },
+      recorder: { output: (_runId, step) => { if (step === "check") options.afterCheck?.(context); }, event: () => undefined },
       context: () => context,
       task: () => input,
       requestId: () => requestId,
@@ -339,7 +350,7 @@ describe("a task run's workflow, in process (D39)", () => {
       findGit: () => GIT,
       platform: options.platform ?? "linux",
       exclude: [],
-      knownValues: () => [KEY],
+      knownValues: options.knownValues ?? (() => [KEY]),
       vaultValues: () => options.vaultValues ?? [KEY, PROJECT],
       shutdown: new AbortController().signal,
       endpoint: { url: "http://127.0.0.1:9/v1", kind: "loopback-test" },
@@ -392,6 +403,35 @@ describe("a task run's workflow, in process (D39)", () => {
     const done = await workflow({ platform: "win32" });
     assert.deepEqual([done.result.status, done.result.error?.message, done.opened, done.requests(), done.reports.map((report) => [report.outcome, report.stopped?.code, report.stopped?.step])], ["failed", TASK_STOP_MESSAGES["native-windows"], 0, 0, [["refused", "native-windows", "check"]]]);
   });
+
+  for (const step of ["prepare", "start"] as const) {
+    it(`saves a finished context-credential refusal at ${step} when a newly saved key matches accepted preferences or choices`, async () => {
+      for (const field of ["preference", "choice"] as const) {
+        const value = `accepted-private-context-${randomUUID()}`;
+        let saved = false;
+        const changed = () => { saved = true; };
+        const done = await workflow({
+          context: { preferences: { revision: 1, records: field === "preference" ? [{ id: randomUUID(), statement: value, scope: "personal", intent: "default", revision: 1 }] : [] }, choices: field === "choice" ? [value] : [] },
+          knownValues: () => saved ? [KEY, value] : [KEY],
+          ...(step === "prepare" ? { afterCheck: changed } : { afterListing: changed }),
+        });
+        const final = done.reports.at(-1)!;
+        assert.deepEqual([done.result.status, done.saves, final.outcome, final.stopped?.code, final.stopped?.step, final.finishedAt !== null], ["failed", ["report in-progress", "report refused"], "refused", "context-credentials", step, true]);
+        assert.equal(final.stopped?.message, TASK_STOP_MESSAGES["context-credentials"]);
+        assert.deepEqual([done.opened, done.requests(), done.guest.service.uploads.length, done.guest.service.spawns, done.proposals.length], [0, 0, 0, 0, 0]);
+        assert.equal(JSON.stringify({ result: done.result, reports: done.reports }).includes(value), false);
+      }
+    });
+
+    it(`saves a finished context-mismatch refusal at ${step} rather than leaving the in-progress report`, async () => {
+      const changed = (context: TaskContext) => { context.choices = ["A mismatched choice"]; };
+      const done = await workflow(step === "prepare" ? { afterCheck: changed } : { afterListing: changed });
+      const final = done.reports.at(-1)!;
+      assert.deepEqual([done.result.status, done.saves, final.outcome, final.stopped?.code, final.stopped?.step, final.finishedAt !== null], ["failed", ["report in-progress", "report refused"], "refused", "context-mismatch", step, true]);
+      assert.equal(final.stopped?.message, TASK_STOP_MESSAGES["context-mismatch"]);
+      assert.deepEqual([done.opened, done.requests(), done.guest.service.uploads.length, done.guest.service.spawns, done.proposals.length], [0, 0, 0, 0, 0]);
+    });
+  }
 
   it("keeps no proposal that holds a value the vault keeps, even one the change's own rules missed", async () => {
     // A value only the vault knows, in the fix's new text: nothing before the store catches it, and the store refuses it.

@@ -117,7 +117,7 @@ describe("a brief's baseline selections and frozen files (D41)", () => {
   });
 
   it("binds a run to its environment, and reads a report kept from before D41 as one with none", () => {
-    const input = { repoPath: "/r", project: randomUUID(), target: "local", preview: FINGERPRINT, taskId: randomUUID(), briefVersion: 1, briefDigest: FINGERPRINT };
+    const input = { repoPath: "/r", project: randomUUID(), target: "local", preview: FINGERPRINT, taskId: randomUUID(), briefVersion: 1, briefDigest: FINGERPRINT, preferencesDigest: FINGERPRINT, choicesDigest: FINGERPRINT };
     const environment = { image: "a5019762", inputsDigest: "c".repeat(64), projectFingerprint: "d".repeat(64), node: "v22.23.4", pnpm: "11.5.3", arch: "x86_64" };
     assert.equal(TaskInput.safeParse({ ...input, environment }).success, true);
     assert.equal(TaskInput.safeParse({ ...input, environment: { ...environment, tag: "node:22" } }).success, false, "a tag is never part of the binding");

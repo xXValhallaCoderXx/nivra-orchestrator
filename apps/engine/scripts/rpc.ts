@@ -35,7 +35,7 @@
 // version 1 and the local target are filled in; after --follow, its report and proposal are printed. Against stand-ins
 // for Nebius and Token Factory, pass --sandboxes-url and --token-factory-url:
 //   pnpm rpc task.preview '{"repoPath":"/path/to/repo","brief":{"goal":"…","acceptanceCriteria":[],"scope":"","exclusions":"","context":"","checks":[],"acceptanceCases":[{"name":"…","command":"…","expectedOutput":"…\n","expectedExitCode":0}]}}'
-//   pnpm rpc runs.start '{"workflowId":"task","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"modelContext":true,"cloudExecution":true},"brief":{…}}}' --follow --sandboxes-url http://127.0.0.1:<port> --token-factory-url http://127.0.0.1:<port>/v1
+//   pnpm rpc runs.start '{"workflowId":"task","input":{"repoPath":"/path/to/repo"},"context":{"sharing":{"modelContext":true,"cloudExecution":true},"preferences":{"revision":0,"records":[]},"choices":[],"brief":{…}}}' --follow --sandboxes-url http://127.0.0.1:<port> --token-factory-url http://127.0.0.1:<port>/v1
 // An environment's preparation (D41) needs upload consent and the spec; without a context it has neither consent nor
 // filters. Its preview's fingerprint is taken here from `environment.preview` when it is left out, and a project id and
 // the local target are filled in; after --follow, its report is printed. A task run bound to it carries the prepared
@@ -72,6 +72,8 @@ import {
   missionPacketDigest,
   packetDigest,
   preferencesDigest,
+  choicesDigest,
+  TaskContext,
   PROTOCOL_VERSION,
   researchPacketDigest,
   RpcCallError,
@@ -120,12 +122,20 @@ if (method === "runs.start" && params["workflowId"] === "research") {
 }
 // A task run without the rest of its context: no consent to share or upload (D39). Its brief's digest is worked out from
 // the brief it carries, and a project, a task, a brief version and the local target are filled in, when left out.
+// Preference/choice context must be explicit; digests are constructed from that context, never from an omitted snapshot.
 const task = method === "runs.start" && params["workflowId"] === "task";
 if (task) {
-  const given = (params["context"] ?? {}) as { sharing?: unknown; brief?: TaskBrief };
-  const context = { sharing: { modelContext: false, cloudExecution: false }, ...given };
+  const given = (params["context"] ?? {}) as Record<string, unknown>;
+  const checked = TaskContext.safeParse({ sharing: { modelContext: false, cloudExecution: false }, ...given });
+  if (!checked.success) {
+    console.error("A coding run needs its brief, an explicit preference snapshot and a choices array, even when empty. Supply that context, then request the run again.");
+    process.exit(2);
+  }
+  const context = checked.data;
   const input: Record<string, unknown> = { project: randomUUID(), target: "local", taskId: randomUUID(), briefVersion: 1, ...(params["input"] as Record<string, unknown>) };
   if (context.brief && input["briefDigest"] === undefined) input["briefDigest"] = await taskBriefDigest(context.brief);
+  input["preferencesDigest"] ??= await preferencesDigest(context.preferences.records);
+  input["choicesDigest"] ??= await choicesDigest(context.choices);
   params = { ...params, input, context };
 }
 // A coaching without the rest of its context: no preferences, and no consent to share a project's material (NIV-53).

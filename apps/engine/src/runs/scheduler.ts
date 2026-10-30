@@ -136,7 +136,7 @@ function sameResearch(stored: unknown, input: unknown): boolean {
 
 /** Whether a stored task run's input names the same checkout, project, target, preview, task and brief as a new one (D39). */
 function sameTask(stored: unknown, input: unknown): boolean {
-  const keys = ["repoPath", "project", "target", "preview", "taskId", "briefVersion", "briefDigest"] as const;
+  const keys = ["repoPath", "project", "target", "preview", "taskId", "briefVersion", "briefDigest", "preferencesDigest", "choicesDigest"] as const;
   const a = (stored ?? {}) as Record<string, unknown>;
   const b = (input ?? {}) as Record<string, unknown>;
   return keys.every((key) => a[key] === b[key]);
@@ -266,7 +266,8 @@ export class RunScheduler {
       }
     }
     if (created) {
-      this.#contexts.set(id, { workflowId: request.workflowId, context: request.context });
+      const context = request.workflowId === "task" ? freezeContext(structuredClone(request.context)) : request.context;
+      this.#contexts.set(id, { workflowId: request.workflowId, context });
       this.#requests.set(id, request.clientRequestId);
       if (request.budget) this.#grants.set(id, request.budget.id);
     }
@@ -410,4 +411,13 @@ export class RunScheduler {
       this.#diagnose({ code: "record-failed", stage: "run.events", run: runId, error: errorFacts(error) });
     }
   }
+}
+
+/** Only the accepted task snapshot is retained, including its nested brief and record arrays. */
+function freezeContext<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freezeContext(child);
+    Object.freeze(value);
+  }
+  return value;
 }

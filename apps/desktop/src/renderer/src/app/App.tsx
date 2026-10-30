@@ -80,6 +80,7 @@ function Shell() {
   // Selection is local to this window; leaving and reopening a saved plan keeps the review choices.
   const planningSelections = useRef(new Map<string, string[]>());
   const [companionOpen, setCompanionOpen] = useState(false);
+  const [runPreferencesReturn, setRunPreferencesReturn] = useState<{ taskId: string; scope: Scope; draft: import("../features/task-run").RunChoicesDraft } | null>(null);
   const [setupReturn, setSetupReturn] = useState<SetupReturn | null>(null);
   const [returnError, setReturnError] = useState<string | null>(null);
   const [environmentProjects, setEnvironmentProjects] = useState<string[]>([]);
@@ -174,6 +175,7 @@ function Shell() {
     // From the sidebar over the page, the focus goes to the page it opened, never to nothing.
     if (narrow && navOpen) requestAnimationFrame(() => main.current?.focus());
     setNavOpen(false);
+    if (runPreferencesReturn && (next.kind === "new-task" || (next.kind === "task" && next.id !== runPreferencesReturn.taskId))) setRunPreferencesReturn(null);
     if (next.kind !== "new-task") setComposerOrigin(null);
     if (next.kind === "planning" && next.id === null && !next.entryId) return setRoute({ ...next, entryId: crypto.randomUUID() });
     if (next.kind !== "settings") return setRoute(next);
@@ -307,6 +309,14 @@ function Shell() {
       <AppShell.Main ref={main} id="page" tabIndex={-1} aria-label="Page" inert={companionOpen && narrow ? true : undefined} style={{ outline: "none", height: "100dvh", overflowY: "auto", ...(companionOpen && !narrow ? { paddingRight: 420 } : {}) }} data-testid="main">
         <Box px={{ base: 16, sm: 40 }} pt={28} pb={40} maw={1120}>
           <Stack gap="md">
+            {runPreferencesReturn && shown.kind === "settings" && <Button variant="default" size="xs" data-testid="task-preferences-return" onClick={async () => {
+              const destination = runPreferencesReturn;
+              try {
+                const task = await window.nivra.getTask(destination.taskId);
+                if (task.revision !== destination.draft.revision || task.brief.version !== destination.draft.briefVersion || task.summary.projectId !== destination.draft.projectId || (task.summary.projectId && !list.some((item) => item.id === task.summary.projectId))) throw new Error("The task, brief or repository changed while Preferences was open. Open the task and preview it again.");
+                setChosen(destination.scope); navigate({ kind: "task", id: destination.taskId, tab: "brief" });
+              } catch (reason) { setReturnError(errorMessage(reason)); setRunPreferencesReturn(null); }
+            }}>Return to run preview</Button>}
             {setupReturn && detour && <Group><Button variant="default" size="xs" data-testid="companion-return" onClick={async () => {
               const destination = setupReturn;
               try {
@@ -430,6 +440,13 @@ function Shell() {
                   renderStrip={(items) => <TaskStrip items={items} />}
                   onOpenEnvironment={openEnvironment}
                   onOpenPlanning={(id) => navigate({ kind: "planning", id })}
+                  runChoicesDraft={runPreferencesReturn?.taskId === shown.id ? runPreferencesReturn.draft : undefined}
+                  onClearRunChoices={() => setRunPreferencesReturn(null)}
+                  onRunPreferences={(draft) => {
+                    setRunPreferencesReturn({ taskId: shown.id, scope, draft });
+                    setChosen(draft.projectId ? { kind: "project", projectId: draft.projectId } : { kind: "general" });
+                    navigate({ kind: "settings", section: "preferences" });
+                  }}
                 />
               </Box>
             )}

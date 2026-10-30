@@ -21,7 +21,7 @@ describe("a sandbox check's request (NIV-44)", () => {
     assert.equal(parsed.workflowId, "sandbox");
     assert.equal(StartRunParams.safeParse(request({ input: { target: "wsl:Ubuntu-24.04" } })).success, true);
     assert.equal(WorkflowId.parse("sandbox"), "sandbox");
-    assert.equal(PROTOCOL_VERSION, 21);
+    assert.equal(PROTOCOL_VERSION, 22);
   });
 
   it("never reads model-context consent as upload consent, and takes no command, no key and no other workflow's context", () => {

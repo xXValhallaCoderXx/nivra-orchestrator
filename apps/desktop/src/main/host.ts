@@ -15,6 +15,7 @@ import {
   isTerminal,
   packetDigest,
   preferencesDigest,
+  choicesDigest,
   projectFingerprint,
   RpcCallError,
   SPECIALISTS,
@@ -1616,7 +1617,7 @@ export class Host {
    * now: the commit's snapshot comes from the project's own engine, with no network. Nothing is sent or stored. A run
    * that can't start now is still previewed as far as it can be, and says why.
    */
-  async previewTaskRun(taskId: string): Promise<TaskRunPreview> {
+  async previewTaskRun(taskId: string, choices: readonly string[] = []): Promise<TaskRunPreview> {
     const workspace = this.#workspaceDb();
     const task = getTask(workspace, taskId);
     if (!task) throw new Error("That task is no longer in the list.");
@@ -1624,7 +1625,14 @@ export class Host {
     const content = BriefContentSchema.parse(brief.content);
     const project = task.projectId ? (this.#options.store.data.projects.find((p) => p.id === task.projectId) ?? null) : null;
     const consents = { modelContext: project?.sharing.modelContext ?? false, cloudExecution: project?.sharing.cloudExecution ?? false };
+    const cleaned = cleanChoices(choices, "run");
+    const preferences = snapshotFor(this.#options.store.data, task.projectId);
+    const known = await this.#knownSecrets();
+    for (const record of preferences.records) refuseCredentials("A preference for this run", record.statement, known, "preview");
+    for (const choice of cleaned) refuseCredentials("A choice for this run", choice, known, "preview");
+    const contextDigests = { preferencesDigest: await preferencesDigest(preferences.records), choicesDigest: await choicesDigest(cleaned) };
     const base = {
+      preferences, choices: cleaned, ...contextDigests,
       taskId,
       briefVersion: brief.version,
       project: project ? { label: project.label, targetLabel: this.#labelOf(project.targetId) } : { label: "No repository yet", targetLabel: "" },
@@ -1662,6 +1670,7 @@ export class Host {
     const keys = await this.#options.credentials();
     const blocked = !consents.modelContext ? RUN_SHARING_OFF : !consents.cloudExecution ? RUN_UPLOADS_OFF : !(keys.NEBIUS_API_KEY && keys.NEBIUS_PROJECT_ID) ? RUN_KEYS_MISSING : null;
     const expected = taskRunFingerprint({
+      ...contextDigests,
       taskId,
       briefId: brief.id,
       briefVersion: brief.version,
@@ -1696,11 +1705,11 @@ export class Host {
    * a run started while either was being turned off is cancelled at once. One task runs at a time. The attempt is
    * stored first, then sent in the background on its project's engine, and found by its request id if the answer is lost.
    */
-  async startTaskRun(taskId: string, expected: string, snapshot: string): Promise<TaskAttemptView> {
+  async startTaskRun(taskId: string, expected: string, snapshot: string, choices: readonly string[] = []): Promise<TaskAttemptView> {
     if (this.#taskStarting) throw new Error("A task run is already being started. Wait for it, then try again.");
     this.#taskStarting = true;
     try {
-      return await this.#startTask(taskId, expected, snapshot);
+      return await this.#startTask(taskId, expected, snapshot, choices);
     } finally {
       this.#taskStarting = false;
     }
@@ -2738,7 +2747,7 @@ export class Host {
     return null;
   }
 
-  async #startTask(taskId: string, expected: string, snapshot: string): Promise<TaskAttemptView> {
+  async #startTask(taskId: string, expected: string, snapshot: string, choices: readonly string[]): Promise<TaskAttemptView> {
     const workspace = this.#workspaceDb();
     const task = getTask(workspace, taskId);
     if (!task) throw new Error("That task is no longer in the list.");
@@ -2755,23 +2764,33 @@ export class Host {
     const packet = (taskBriefOf(content) as { brief: TaskBrief }).brief;
     // The brief goes to Token Factory: a key saved since it was written is refused here, and nothing is sent.
     for (const [field, text] of briefTexts(packet)) refuseCredentials(field, text, known, "send");
+    const cleaned = cleanChoices(choices, "run");
+    const preferences = snapshotFor(this.#options.store.data, project.id);
+    for (const record of preferences.records) refuseCredentials("A preference for this run", record.statement, known, "send");
+    for (const choice of cleaned) refuseCredentials("A choice for this run", choice, known, "send");
+    const contextDigests = { preferencesDigest: await preferencesDigest(preferences.records), choicesDigest: await choicesDigest(cleaned) };
     const briefDigest = await taskBriefDigest(packet);
     // The prepared environment the preview was bound to, if any (D41): one prepared again since then changes the fingerprint.
     const prepared = this.#preparedFor(project);
     if (prepared && "refused" in prepared) throw new Error(prepared.refused);
-    const current = taskRunFingerprint({ taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length }, environment: prepared });
+    const current = taskRunFingerprint({ ...contextDigests, taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length }, environment: prepared });
     if (current !== expected) throw new Error("What this run would send has changed since you previewed it. Preview it again, then start.");
     // Checked again after the waits: consent, and the project itself, can change while the keys are read.
     const now = this.#options.store.data.projects.find((p) => p.id === project.id);
     if (!now || this.#removing.has(project.id) || !now.sharing.modelContext || !now.sharing.cloudExecution || this.#epochOf(project.id) !== epochs.sharingEpoch || this.#cloudEpochOf(project.id) !== epochs.cloudEpoch) {
       throw new Error("This project's sharing or uploads changed while the run was starting, so it wasn't started. Preview it again.");
     }
+    // No asynchronous work after this check and before acceptance. Global preference revisions are not identities.
+    const currentTask = getTask(workspace, taskId);
+    if (currentTask?.revision !== task.revision || currentTask.projectId !== project.id || versionsOf(workspace, taskId).at(-1)?.id !== brief.id || JSON.stringify(snapshotFor(this.#options.store.data, project.id).records) !== JSON.stringify(preferences.records)) {
+      throw new Error("The task or its preferences changed while the run was starting. Preview it again, then start.");
+    }
     const id = randomUUID();
     if (!insertAttempt(workspace, { id, taskId, briefId: brief.id, sessionId: this.#sessionId, targetId: project.targetId, createdAt: new Date().toISOString() })) throw new Error(TASK_RUNNING);
     this.#taskRuns.set(id, { projectId: project.id, ...epochs });
     this.#submissions.set(id, { cancel: null });
-    const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest, ...(prepared ? { environment: prepared } : {}) };
-    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: packet };
+    const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest, ...contextDigests, ...(prepared ? { environment: prepared } : {}) };
+    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: packet, preferences, choices: [...cleaned] };
     void this.#submitAttempt(id, project, input, context).catch((error: unknown) => this.#options.log(`A task run couldn't be sent: ${errorText(error)}`));
     return this.#attemptView(getAttempt(workspace, id)!);
   }
