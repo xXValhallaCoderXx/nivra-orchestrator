@@ -3888,3 +3888,15 @@ passed the full packaged suite, **92 passed and 72 existing skips**; the freshly
 All four new promotion UI scenarios ran in both Linux builds, and the Windows promotion scenario ran on the actual
 native and WSL engines. The existing staged runtimes were reused because engine, domain and lockfile content is
 unchanged. No live provider calls ran. Combined-candidate logs and the source manifest are under `.artifacts/niv10/pr-*`.
+
+## Reliable coding on larger tasks (NIV-60, D63) — 30 October 2026
+
+The implementation extends targeted edits, guarded coding grants and the shared host request ledger. New previews
+default to a maximum of 64 working requests plus one reserved hand-in; time/context may stop work sooner. Monthly
+coding coverage is explicitly saved, with separate recovery acknowledgement where required. Boundary counters and
+deadlines remain cumulative, and late capacity replies cannot restart cancelled, submitted or finalising work.
+
+[The NIV-60 verification record](niv-60-verification.md) separates deterministic enforcement, desktop checks and the
+prepared A1/B1/C1 real-task evaluation. Deterministic stand-ins pass 65 requests, 33 required writes and the old input
+allowance, while separate exhausted-pool/failed-guard cases retain final checks. These do not establish model quality
+or a useful larger-task result. NIV-60 remains open pending the independent real-task acceptance evidence.

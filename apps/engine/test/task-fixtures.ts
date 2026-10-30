@@ -38,6 +38,7 @@ type Generated = { content: unknown[]; finishReason: string; usage: Record<strin
 /** An answer cut off at its output cap: the start of some text, and no tool call made (NIV-35). */
 export const CUT_OFF: Call = ["(cut off)", {}];
 const calling = (step: Step, index: number): Generated =>
+  step[0] === "(ended)" ? { content: [{ type: "text", text: "I stopped without submitting." }], finishReason: "stop", usage: { inputTokens: 3000, outputTokens: 10 }, warnings: [] } :
   step[0] === CUT_OFF[0] ? { content: [{ type: "text", text: "Here is the whole file, rewritten:\n#!/bin/sh\n" }], finishReason: "length", usage: { inputTokens: 3_000, outputTokens: 8_000, totalTokens: 11_000 }, warnings: [] } : answering(step, index);
 const answering = (step: Step, index: number): Generated => ({
   content: (typeof step[0] === "string" ? [step as Call] : (step as Call[])).map(([tool, input], at) => ({ type: "tool-call", toolCallId: `call-${index}-${at}`, toolName: tool, input: JSON.stringify(input) })),

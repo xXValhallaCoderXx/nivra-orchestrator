@@ -1,3 +1,4 @@
+import { codingRequestPool, DEFAULT_WORKING_REQUESTS, modelRequestPoolLimit, TaskWork, type BudgetGrant as CodingGrant, type TaskWork as CodingWork } from "@nivra/domain";
 import { TaskReferences } from "./task-references.ts";
 import type { ReferenceSelection, FrozenReferenceContext } from "@nivra/domain";
 import { randomUUID } from "node:crypto";
@@ -129,6 +130,7 @@ import {
   openGrants,
   writeGrant,
   writeAdaptivePlanningGrant,
+  writeAdaptiveCodingGrant,
   sharedRequestLimitDraft,
   markDispatching,
   markAccepted,
@@ -508,6 +510,7 @@ export class Host {
   readonly #taskRuns = new Map<string, { projectId: string; sharingEpoch: number; cloudEpoch: number }>();
   /** A task run being started: one at a time, claimed before its first wait (D39). */
   #taskStarting = false;
+  #codingAdmissions = new Map<string, { work: CodingWork; policyVersion: number | null; root: CodingGrant | null }>();
   /** Task runs being followed to their end. */
   readonly #followingAttempts = new Set<string>();
   /** The engine's own words for a run start it answered with an error, shown if its search then finds no run. */
@@ -1645,7 +1648,9 @@ export class Host {
    * now: the commit's snapshot comes from the project's own engine, with no network. Nothing is sent or stored. A run
    * that can't start now is still previewed as far as it can be, and says why.
    */
-  async previewTaskRun(taskId: string, choices: readonly string[] = []): Promise<TaskRunPreview> {
+  async previewTaskRun(taskId: string, choices: readonly string[] = [], workingRequests?: number | null): Promise<TaskRunPreview> {
+    await this.#reconcileCompanionBudgets("task");
+    const choice = this.#codingChoice(workingRequests);
     const workspace = this.#workspaceDb();
     const task = getTask(workspace, taskId);
     if (!task) throw new Error("That task is no longer in the list.");
@@ -1662,6 +1667,9 @@ export class Host {
     const contextDigests = { preferencesDigest: await preferencesDigest(preferences.records), choicesDigest: await choicesDigest(cleaned), referencesDigest: references.digest };
     const base = {
       preferences, choices: cleaned, references, ...contextDigests,
+      work: choice.work,
+      allowance: choice.description,
+      monthlyCoverage: choice.monthly,
       taskId,
       briefVersion: brief.version,
       project: project ? { label: project.label, targetLabel: this.#labelOf(project.targetId) } : { label: "No repository yet", targetLabel: "" },
@@ -1694,11 +1702,12 @@ export class Host {
     if (prepared && "refused" in prepared) return stopped(prepared.refused);
     const environment = prepared;
     const engine = await this.#started(project.targetId);
-    const shown = await engine.supervisor.call("task.preview", { repoPath: project.nativePath, brief: packet, ...(environment ? { environment } : {}) }, { timeoutMs: SANDBOX_PREVIEW_MS });
+    const shown = await engine.supervisor.call("task.preview", { repoPath: project.nativePath, brief: packet, work: choice.work, ...(environment ? { environment } : {}) }, { timeoutMs: SANDBOX_PREVIEW_MS });
     if (shown.status === "refused") return stopped(shown.message);
     const keys = await this.#options.credentials();
-    const blocked = !consents.modelContext ? RUN_SHARING_OFF : !consents.cloudExecution ? RUN_UPLOADS_OFF : !(keys.NEBIUS_API_KEY && keys.NEBIUS_PROJECT_ID) ? RUN_KEYS_MISSING : null;
+    const blocked = !consents.modelContext ? RUN_SHARING_OFF : !consents.cloudExecution ? RUN_UPLOADS_OFF : !(keys.NEBIUS_API_KEY && keys.NEBIUS_PROJECT_ID) ? RUN_KEYS_MISSING : choice.blocked;
     const expected = taskRunFingerprint({
+      work: choice.work, policyVersion: choice.policyVersion,
       ...contextDigests,
       taskId,
       briefId: brief.id,
@@ -1734,11 +1743,11 @@ export class Host {
    * a run started while either was being turned off is cancelled at once. One task runs at a time. The attempt is
    * stored first, then sent in the background on its project's engine, and found by its request id if the answer is lost.
    */
-  async startTaskRun(taskId: string, expected: string, snapshot: string, choices: readonly string[] = []): Promise<TaskAttemptView> {
+  async startTaskRun(taskId: string, expected: string, snapshot: string, choices: readonly string[] = [], workingRequests?: number | null): Promise<TaskAttemptView> {
     if (this.#taskStarting) throw new Error("A task run is already being started. Wait for it, then try again.");
     this.#taskStarting = true;
     try {
-      return await this.#startTask(taskId, expected, snapshot, choices);
+      return await this.#startTask(taskId, expected, snapshot, choices, workingRequests);
     } finally {
       this.#taskStarting = false;
     }
@@ -2800,7 +2809,10 @@ export class Host {
     return null;
   }
 
-  async #startTask(taskId: string, expected: string, snapshot: string, choices: readonly string[]): Promise<TaskAttemptView> {
+  async #startTask(taskId: string, expected: string, snapshot: string, choices: readonly string[], workingRequests?: number | null): Promise<TaskAttemptView> {
+    await this.#reconcileCompanionBudgets("task");
+    const choice = this.#codingChoice(workingRequests);
+    if (choice.blocked) throw new Error(choice.blocked);
     const workspace = this.#workspaceDb();
     const task = getTask(workspace, taskId);
     if (!task) throw new Error("That task is no longer in the list.");
@@ -2827,7 +2839,7 @@ export class Host {
     // The prepared environment the preview was bound to, if any (D41): one prepared again since then changes the fingerprint.
     const prepared = this.#preparedFor(project);
     if (prepared && "refused" in prepared) throw new Error(prepared.refused);
-    const current = taskRunFingerprint({ ...contextDigests, taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length }, environment: prepared });
+    const current = taskRunFingerprint({ work: choice.work, policyVersion: choice.policyVersion, ...contextDigests, taskId, briefId: brief.id, briefVersion: brief.version, briefDigest, projectId: project.id, targetId: project.targetId, sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length }, environment: prepared });
     if (current !== expected) throw new Error("What this run would send has changed since you previewed it. Preview it again, then start.");
     // Checked again after the waits: consent, and the project itself, can change while the keys are read.
     const now = this.#options.store.data.projects.find((p) => p.id === project.id);
@@ -2840,11 +2852,13 @@ export class Host {
       throw new Error("The task or its preferences changed while the run was starting. Preview it again, then start.");
     }
     if (this.#taskReferences().digest(taskId) !== references.digest) throw new Error("The included task context changed. Preview it again before starting.");
+    if ((currentPolicy(this.#budget().workspace)?.version ?? null) !== choice.policyVersion) throw new Error("The allowance changed while starting. Preview the task again.");
     const id = randomUUID();
     if (!insertAttempt(workspace, { id, taskId, briefId: brief.id, sessionId: this.#sessionId, targetId: project.targetId, createdAt: new Date().toISOString() })) throw new Error(TASK_RUNNING);
+    this.#codingAdmissions.set(id, { work: choice.work, policyVersion: choice.policyVersion, root: null });
     this.#taskRuns.set(id, { projectId: project.id, ...epochs });
     this.#submissions.set(id, { cancel: null });
-    const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest, ...contextDigests, ...(prepared ? { environment: prepared } : {}) };
+    const input: TaskInput = { work: choice.work, repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest, ...contextDigests, ...(prepared ? { environment: prepared } : {}) };
     const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: packet, preferences, choices: [...cleaned], references };
     workspace.db.prepare("INSERT INTO task_context_receipts (request_id,task_id,digest,manifest_json) VALUES (?,?,?,?)").run(id, taskId, references.digest, JSON.stringify(references.manifest));
     void this.#submitAttempt(id, project, input, context).catch((error: unknown) => this.#options.log(`A task run couldn't be sent: ${errorText(error)}`));
@@ -2880,6 +2894,7 @@ export class Host {
       return reason !== null;
     };
     const notSent = (why: string) => {
+      this.#codingAdmissions.delete(attemptId);
       this.#submissions.delete(attemptId);
       settle({ status: "not-sent", errorMessage: why });
     };
@@ -2983,6 +2998,7 @@ export class Host {
                 await this.#finishAttempt(attempt, engine, summary);
                 return;
               }
+              if (!attempt.cancelRequested && !this.#attemptStopReason(attemptId)) await this.#renewCoding(attemptId, engine, summary.id);
               if (attempt.cancelRequested && !cancelSent) {
                 cancelSent = true;
                 // A cancel its engine turned down is tried again on the next look, never left for the run to outlast.
@@ -3007,6 +3023,7 @@ export class Host {
       } catch (error) {
         this.#options.log(`Following a task run stopped: ${errorText(error)}`);
       } finally {
+        this.#codingAdmissions.delete(attemptId);
         this.#followingAttempts.delete(attemptId);
         this.#attemptAnswers.delete(attemptId);
       }
@@ -5314,13 +5331,16 @@ export class Host {
   }
 
   /** Companion and planning: one optional monthly request policy, never a token or dollar ceiling. */
-  async setCompanionLimit(limit: number | null) {
+  async setCompanionLimit(limit: number | null, includeCoding?: boolean, recoveryRevision?: number | null) {
     if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0)) throw new Error("Choose a non-negative whole number of Companion and planning requests, or turn the monthly limit off.");
     const previous = await this.getBudgetPolicy();
+    includeCoding ??= codingRequestPool(previous?.modelRequestLimits);
     if (limit === null && previous === null) return this.getCompanionUsage();
     const base = previous ?? { preset: "counts" as const, currency: null, monthlyMicros: null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, thresholds: [], sublimits: { dailyMicros: null, perQueueMicros: null, perTaskMicros: null, projects: [], profiles: [] }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, researchCreditMicros: null };
     const { version: _version, replaces: _replaces, createdAt: _created, ...draft } = base as typeof base & { version?: number; replaces?: number | null; createdAt?: string };
-    await this.setBudgetPolicy({ ...draft, modelRequestLimits: limit === null ? [] : [{ pool: "companion-and-planning", monthlyRequests: limit }] });
+    const usage = companionRequestUsage(this.#workspaceDb());
+    if (includeCoding && usage.recoveryCoverageRevision !== null && !usage.codingRecoveryAcknowledged && recoveryRevision !== usage.recoveryCoverageRevision) throw new Error("Explicitly acknowledge that the remaining recovery allowance will also cover coding, then save again.");
+    await this.setBudgetPolicy({ ...draft, ...(includeCoding && recoveryRevision ? { requestRecoveryRevision: recoveryRevision } : {}), modelRequestLimits: limit === null ? [] : [{ pool: includeCoding ? "companion-planning-and-coding" : "companion-and-planning", monthlyRequests: limit }] });
     return this.getCompanionUsage();
   }
 
@@ -5331,6 +5351,56 @@ export class Host {
     return { ...usage, historyComplete: !recovery && usage.historyComplete, remaining: recovery ? null : usage.remaining, inputTokens: recovery ? null : usage.inputTokens, outputTokens: recovery ? null : usage.outputTokens, blocked: recovery ? BUDGET_NEEDS_RECOVERY : usage.historyBlocked ?? (usage.remaining === 0 ? "The monthly Companion and planning allowance is exhausted. Raise it, wait for the next confirmed month, or continue manually." : null) };
   }
 
+  #codingChoice(requested?: number | null) {
+    const budget = this.#budget();
+    const policy = currentPolicy(budget.workspace);
+    const usage = companionRequestUsage(budget.workspace);
+    const monthly = codingRequestPool(policy?.modelRequestLimits);
+    const maximum = monthly && requested == null ? Math.min(1_000_000, Math.max(1, modelRequestPoolLimit(policy?.modelRequestLimits) ?? DEFAULT_WORKING_REQUESTS)) : requested ?? DEFAULT_WORKING_REQUESTS;
+    const work = TaskWork.parse({ workingRequests: maximum });
+    const blocked = budget.recovery ? BUDGET_NEEDS_RECOVERY : monthly && usage.recoveryCoverageRevision !== null && !usage.codingRecoveryAcknowledged ? "The recovery allowance does not cover coding. Acknowledge expanded recovery coverage in Budget and usage before starting." : monthly && usage.remaining !== null && usage.remaining < 2 ? "The monthly allowance needs at least one working request and its reserved hand-in. Raise it explicitly or wait for the next confirmed month." : null;
+    return { work, monthly, blocked, policyVersion: policy?.version ?? null, description: `Up to ${work.workingRequests} working requests, plus one reserved hand-in. Time or context limits may stop work sooner. Final verification and cleanup remain reserved. ${monthly ? `Coding shares the monthly Companion, Planning and Coding allowance (${usage.remaining === null ? "remaining usage is unknown" : `${usage.remaining} requests currently available`}).` : "Coding uses this finite task allowance outside the monthly request pool."} Sandbox resources retain separate per-run bounds; the request allowance is not a sandbox or dollar ceiling.` };
+  }
+
+  async #renewCoding(attemptId: string, engine: Engine, runId: string): Promise<void> {
+    const admission = this.#codingAdmissions.get(attemptId);
+    if (!admission?.root) return;
+    const pending = await engine.supervisor.call("task.capacityPending", { runId });
+    if (!pending || this.#attemptStopReason(attemptId) || this.#closing) return;
+    const attempt = getAttempt(this.#workspaceDb(), attemptId);
+    if (!attempt || attempt.cancelRequested || attempt.status !== "running" || pending.rootGrantId !== admission.root.id) return;
+    let grant: CodingGrant | null = null;
+    let reason: string | null = null;
+    try {
+    const { workspace, guard, recovery } = this.#budget();
+    reason = recovery ? BUDGET_NEEDS_RECOVERY : null;
+    if ((currentPolicy(workspace)?.version ?? null) !== admission.policyVersion) reason = "The saved allowance changed. Preview a new attempt under the current policy.";
+    if (!reason) {
+      const root = getGrant(workspace, admission.root.id)!;
+      const written = writeAdaptiveCodingGrant(workspace, { requestId: attemptId, workflow: "task", targetId: root.targetId, attribution: root.attribution, models: [TASK_MODEL], productive: { requests: pending.requests, outputTokens: 8000 }, finalisation: { requests: 0, outputTokens: 0 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, extends: root.id, need: `coding-${pending.need}` }, { now: Date.now(), catalogue: this.#prices, timezone: this.#budgetZone(workspace), verified: guard.last(), workingRequests: admission.work.workingRequests });
+      if ("refused" in written) reason = written.refused.message;
+      else {
+        if (written.authority) this.#guardBudget(guard, workspace, written.authority, Date.now());
+        const record = getGrant(workspace, written.grant.id)!;
+        if (record.state === "written") {
+          const state = engine.supervisor.state;
+          if (state.status !== "online" || state.info.homeId !== attempt.homeId) return;
+          const dispatched = markDispatching(workspace, record.id, state.info.homeId, Date.now(), guard.last());
+          if (!dispatched) throw new Error("The coding extension could not be dispatched.");
+          this.#guardBudget(guard, workspace, dispatched, Date.now());
+        }
+        grant = written.grant;
+      }
+    }
+    } catch {
+      grant = null;
+      reason = "Nivra could not durably admit more work. Review Budget and usage before starting another attempt; unresolved capacity remains held.";
+      this.#options.log("Coding capacity stopped because its ledger or guard could not authorise the extension.");
+    }
+    // The reply may become late while in flight. The engine's phase fence refuses activation and reservations stay held.
+    await engine.supervisor.call("task.capacityReply", { runId, need: pending.need, grant, reason });
+  }
+
   /** Writes and guards a finite grant before any companion RPC can be sent. */
   #codingGrant(requestId: string, project: ProjectRecord, taskId: string, homeId: string): BudgetGrant {
     const { workspace, guard, recovery } = this.#budget();
@@ -5338,11 +5408,13 @@ export class Host {
     const now = Date.now();
     const last = guard.last();
     const verified = last ? { ledgerId: last.ledgerId, revision: last.revision, chain: last.chain } : null;
-    const written = writeGrant(workspace, { requestId, workflow: "task", targetId: project.targetId,
+    const admission = this.#codingAdmissions.get(requestId);
+    if (admission && (currentPolicy(workspace)?.version ?? null) !== admission.policyVersion) throw new Error("The allowance changed. Preview a new attempt.");
+    const written = writeAdaptiveCodingGrant(workspace, { requestId, workflow: "task", targetId: project.targetId,
       attribution: { feature: "task", projectId: project.id, taskId, attemptId: requestId, queueId: null, queueItemId: null, profile: CODING_WORKER_PROFILE },
-      models: [TASK_MODEL], productive: { requests: 23, outputTokens: 8_000 }, finalisation: { requests: 1, outputTokens: 1_500 },
+      models: [TASK_MODEL], productive: { requests: Math.min(16, admission?.work.workingRequests ?? DEFAULT_WORKING_REQUESTS), outputTokens: 8_000 }, finalisation: { requests: 1, outputTokens: 1_500 },
       allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, extends: null, need: null },
-      { now, catalogue: this.#prices, timezone: this.#budgetZone(workspace), verified });
+      { now, catalogue: this.#prices, timezone: this.#budgetZone(workspace), verified, workingRequests: admission?.work.workingRequests ?? DEFAULT_WORKING_REQUESTS });
     if ("refused" in written) throw new Error(written.refused.message);
     if (written.authority) this.#guardBudget(guard, workspace, written.authority, now);
     const record = getGrant(workspace, written.grant.id)!;
@@ -5350,6 +5422,7 @@ export class Host {
     const dispatched = markDispatching(workspace, record.id, homeId, now, guard.last());
     if (!dispatched) throw new Error("The coding grant couldn't be dispatched. Review Usage before starting another attempt.");
     this.#guardBudget(guard, workspace, dispatched, now);
+    if (admission) admission.root = written.grant;
     return written.grant;
   }
 
@@ -5372,10 +5445,10 @@ export class Host {
   }
 
   /** Reconciles saved metadata only. Neither a lost response nor a restart resends inference. */
-  async #reconcileCompanionBudgets(): Promise<void> {
+  async #reconcileCompanionBudgets(feature?: "task"): Promise<void> {
     const { workspace, guard, recovery } = this.#budget();
     if (recovery) return;
-    for (const grant of openGrants(workspace).filter((one) => (requestPoolCovers(one.attribution.feature) || one.attribution.feature === "task"))) {
+    for (const grant of openGrants(workspace).filter((one) => feature ? one.attribution.feature === feature : requestPoolCovers(one.attribution.feature) || one.attribution.feature === "task")) {
       const now = Date.now();
       if (grant.state === "written") {
         const released = releaseGrant(workspace, grant.id, now, guard.last());

@@ -666,7 +666,11 @@ export type RunLimitsView = Pick<
  * (D39). Nothing is sent. `expected` binds a start to this preview: starting is refused when anything here changed.
  */
 export interface TaskRunPreview {
+  work?: { workingRequests: number };
+  allowance?: string;
+  monthlyCoverage?: boolean;
   references?: FrozenReferenceContext;
+  referencesDigest?: string;
   preferences: PreferenceSnapshot;
   choices: string[];
   preferencesDigest: string;
@@ -1062,12 +1066,12 @@ export interface NivraApi {
   renameTask(taskId: string, revision: number, title: string): Promise<TaskView>;
   /** Deletes a task with its brief versions and runs; refused while a run of it goes. */
   deleteTask(taskId: string): Promise<void>;
-  /** A task run's bounds that no brief changes, from the domain's one source; nothing is asked of an engine. */
+  /** Default task bounds from the domain; the preview carries the chosen working allowance. */
   getRunLimits(): Promise<RunLimitsView>;
-  /** What a run of the task would send, and where, with its fingerprint. Nothing is sent or stored. */
-  previewTaskRun(taskId: string, choices?: string[]): Promise<TaskRunPreview>;
+  /** Reconciles completed coding allowances, then previews the task without sending new provider work. */
+  previewTaskRun(taskId: string, choices?: string[], workingRequests?: number | null): Promise<TaskRunPreview>;
   /** Starts the run previewed; refused when anything it would send changed since (`expected`, `snapshot`). */
-  startTaskRun(taskId: string, expected: string, snapshot: string, choices?: string[]): Promise<TaskAttemptView>;
+  startTaskRun(taskId: string, expected: string, snapshot: string, choices?: string[], workingRequests?: number | null): Promise<TaskAttemptView>;
   /** Stops a run being sent or going; its end is recorded as cancelled by the person. What it uploaded stays with Nebius. */
   cancelTaskRun(taskId: string, attemptId: string): Promise<TaskAttemptView>;
   /** One run of a task as it is now, read from its engine when that is online. */
@@ -1133,7 +1137,7 @@ export interface NivraApi {
   editKnowledge(id: string, revision: number, statement: string): Promise<KnowledgeView>;
   forgetKnowledge(id: string, revision: number): Promise<void>;
   getCompanionUsage(): Promise<CompanionUsageView>;
-  setCompanionLimit(limit: number | null): Promise<CompanionUsageView>;
+  setCompanionLimit(limit: number | null, includeCoding?: boolean, recoveryRevision?: number | null): Promise<CompanionUsageView>;
   getBudgetPolicy(): Promise<BudgetPolicy | null>;
   /** Saves a monthly budget as the next policy version, or with null turns it off. What was already spent or reserved stays as it was. */
   setBudgetPolicy(draft: BudgetPolicyDraft | null): Promise<BudgetSummary>;
@@ -1148,8 +1152,12 @@ export interface NivraApi {
 }
 
 
-/** Enforcement covers Companion AI inference only. Tokens are reported separately, never a ceiling. */
+/** The explicitly saved shared request coverage. Reported tokens are never a ceiling. */
 export interface CompanionUsageView {
+  coverage?: "companion-and-planning" | "companion-planning-and-coding";
+  coding?: { used: number; reserved: number; unknown: number };
+  recoveryCoverageRevision?: number | null;
+  codingRecoveryAcknowledged?: boolean;
   features: Record<"companion" | "planning", { used: number; reserved: number; unknown: number; reportedInputTokens: number; reportedOutputTokens: number; unknownTokens: number }>;
   historyComplete: boolean;
   month: string;

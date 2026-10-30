@@ -43,7 +43,7 @@ describe("a task run's request (NIV-7)", () => {
 
   it("takes the checkout, its project and target, the preview's fingerprint, the task and its brief by version and digest, with both consents and the brief in its context", async () => {
     const parsed = StartRunParams.parse(await request());
-    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 23]);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 24]);
     assert.equal(StartRunParams.safeParse(await request({ input: { target: "local" } })).success, true);
     assert.deepEqual(
       ["runs.task", "runs.proposal", "task.preview"].map((name) => [Object.hasOwn(Methods, name), name.startsWith("runs.") ? Methods[name as "runs.task"].result.safeParse(null).success : null]),

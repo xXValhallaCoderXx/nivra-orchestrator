@@ -312,6 +312,8 @@ const ENDED: Record<NonNullable<TaskReport["worker"]>["ended"], string> = {
   "output-cap": "stopped when an answer reached its output cap, before handing in",
   "no-time": "didn't start: too little time was left",
   "not-started": "didn't start",
+  "model-ended": "ended without handing in",
+  "no-progress": "stopped after repeated unsuccessful work",
 };
 
 const plural = (count: number, one: string, many = `${one}s`) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
@@ -344,7 +346,7 @@ function checkFilesText(check: TaskCheck): string {
  * in visible words; the preview of what a run would send and where, from the repository's own engine; and the start
  * bound to it. A consent the run needs is asked for in the preview, and its answer stays there as it was given.
  */
-export interface RunChoicesDraft { revision: number; briefVersion: number; projectId: string | null; choices: string[] }
+export interface RunChoicesDraft { revision: number; briefVersion: number; projectId: string | null; choices: string[]; workingRequests?: number | null }
 
 export function RunLauncher({
   view,
@@ -370,6 +372,7 @@ export function RunLauncher({
   const request = useRef(0);
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<TaskRunPreview | null>(null);
+  const [workingRequests, setWorkingRequests] = useState<number | null | undefined>(matches ? choicesDraft?.workingRequests : undefined);
   const [allowed, setAllowed] = useState<{ sharing: boolean; uploads: boolean }>({ sharing: false, uploads: false });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -424,7 +427,7 @@ export function RunLauncher({
     const current = ++request.current;
     setBusy(true); setError(null);
     try {
-      const next = await window.nivra.previewTaskRun(taskId, choices);
+      const next = await window.nivra.previewTaskRun(taskId, choices, workingRequests);
       if (current === request.current) { setPreview(next); setChanged(false); }
     } catch (reason) { if (current === request.current) setError(errorMessage(reason)); }
     finally { if (current === request.current) setBusy(false); }
@@ -458,7 +461,7 @@ export function RunLauncher({
     setBusy(true);
     setError(null);
     try {
-      const attempt = await window.nivra.startTaskRun(taskId, preview.expected, preview.snapshotFingerprint, choices);
+      const attempt = await window.nivra.startTaskRun(taskId, preview.expected, preview.snapshotFingerprint, choices, workingRequests);
       setPreviewing(false); setChoices([]); setChanged(false); onClearChoicesDraft?.();
       onStarted(attempt.id);
     } catch (reason) {
@@ -496,8 +499,13 @@ export function RunLauncher({
         styles={{ content: { display: "flex", flexDirection: "column", overflow: "hidden" }, body: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, padding: 0 } }}
         data-testid="task-run-preview"
       >
+        <Stack p="md" gap="xs">
+          {preview?.allowance && <Text size="sm" data-testid="task-work-allowance">{preview.allowance}</Text>}
+          {preview?.monthlyCoverage && <Checkbox label="Use the monthly allowance without an additional task request limit" checked={workingRequests == null} disabled={busy} onChange={(event) => { setWorkingRequests(event.currentTarget.checked ? null : 64); setChanged(true); request.current++; }} />}
+          {(!preview?.monthlyCoverage || workingRequests != null) && <NumberInput label="Maximum working requests" description="One hand-in is reserved separately. Time or context may stop work sooner." min={1} max={1_000_000} allowDecimal={false} value={workingRequests ?? preview?.work?.workingRequests ?? 64} disabled={busy} data-testid="task-working-requests" onChange={(value) => { if (typeof value === "number") { setWorkingRequests(value); setChanged(true); request.current++; } }} />}
+        </Stack>
         {preview ? (
-          <RunPreview choices={choices} changed={changed} onChoices={changeChoices} onRefresh={() => void refresh()} onPreferences={onPreferences ? () => { request.current++; onPreferences({ revision: view.revision, briefVersion: view.brief.version, projectId, choices: [...choices] }); } : undefined} preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={cancel} />
+          <RunPreview choices={choices} changed={changed} onChoices={changeChoices} onRefresh={() => void refresh()} onPreferences={onPreferences ? () => { request.current++; onPreferences({ revision: view.revision, briefVersion: view.brief.version, projectId, choices: [...choices], workingRequests }); } : undefined} preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={cancel} />
         ) : (
           <Stack p="md" data-testid="task-run-preview-draft" style={{ overflowY: "auto" }}>
             {error ? <Alert color="red" data-testid="task-run-preview-error">{error}</Alert> : <Text size="sm" c="var(--nivra-text-3)">{busy ? "Working out what a run would send, on the repository’s own engine. Nothing is sent." : "Refresh the preview to review these choices and what the run would send. Nothing is sent."}</Text>}
@@ -1454,6 +1462,7 @@ export function RunWorker({ report }: { report: TaskReport }) {
     <Paper withBorder p="md" radius="md">
       <Stack gap="xs" data-testid="task-attempt-worker">
         <Text fw={600}>The worker</Text>
+        {worker.stopDetail && <Text size="sm" data-testid="task-capacity-stop">{worker.stopDetail}</Text>}
         <Text size="sm">
           The worker ({worker.model}) {ENDED[worker.ended]}, after {plural(worker.usage.calls, "model request")}, {plural(worker.tools.writes, "write")} and {plural(worker.tools.runs, "run")}
           {worker.tools.refused ? `; ${plural(worker.tools.refused, "tool call")} refused` : ""}.{" "}

@@ -86,4 +86,10 @@ export const MIGRATIONS: readonly string[] = [
   // v6 (NIV-66): the journal of paid operations under the host's grants: each grant accepted, each operation written at
   // its send point and closed on every path, and each journal sealed, complete or interrupted (budget/journal.ts).
   BUDGET_JOURNAL_SCHEMA,
+  // v7 (NIV-60): immutable membership of all grants for an attempt, retaining historical root bindings.
+  `CREATE TABLE budget_run_grants (run_id TEXT NOT NULL, grant_id TEXT PRIMARY KEY REFERENCES budget_accepted(grant_id)) STRICT;
+   INSERT INTO budget_run_grants SELECT run_id, grant_id FROM budget_accepted WHERE run_id IS NOT NULL;
+   CREATE INDEX budget_run_grants_run ON budget_run_grants(run_id);
+   CREATE TRIGGER budget_run_grants_kept BEFORE UPDATE ON budget_run_grants BEGIN SELECT RAISE(ABORT, 'grant membership is immutable'); END;
+   CREATE TRIGGER budget_run_grants_not_removed BEFORE DELETE ON budget_run_grants BEGIN SELECT RAISE(ABORT, 'grant membership is kept'); END;`,
 ];

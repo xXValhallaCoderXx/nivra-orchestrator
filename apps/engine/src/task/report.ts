@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PATCH_SHOWN_BYTES, StoredTaskInput, TASK_MODEL, type Mask, type RunRoute, type TaskBrief, type TaskCheck, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskRunLimits, type TaskStopCode } from "@nivra/domain";
+import { PATCH_SHOWN_BYTES, StoredTaskInput, TASK_MODEL, type Mask, type RunRoute, type TaskBrief, type TaskCheck, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskRunLimits, type TaskWork, type TaskStopCode } from "@nivra/domain";
 import { previewOf, safeUnresolved, stepOf } from "../exec/check.ts";
 import type { PrescribedResult } from "../exec/prescribed.ts";
 import type { Proposal } from "../exec/proposal.ts";
@@ -149,6 +149,7 @@ export function taskReport(input: { result: PrescribedResult; core: TaskReportCo
     worker: core
       ? {
           ...core.worker,
+          stopDetail: core.worker.stopDetail ? kept(core.worker.stopDetail, 600, mask) : null,
           summary: core.worker.summary === null ? null : kept(core.worker.summary, 2_000, mask),
           failure: (core.worker.failure as NonNullable<TaskReport["worker"]>["failure"]) ?? null,
           model: kept(core.worker.model, 200, mask),
@@ -234,7 +235,7 @@ export function frozenIn(snapshot: Pick<Snapshot, "files">, paths: readonly stri
  * What a run of this brief on this snapshot would send to Nebius, and the bounds it runs under. Its fingerprint is the
  * snapshot's. With an environment (D41), the caller has checked it against the commit's manifests.
  */
-export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | null = null): TaskPreview {
+export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | null = null, work?: TaskWork): TaskPreview {
   const { status: _ready, ...shown } = previewOf(snapshot) as Extract<ReturnType<typeof previewOf>, { status: "ready" }>;
   const commands = [...brief.acceptanceCases.map((given) => given.command), ...brief.checks];
   const paths = new Set(snapshot.files.map((file) => file.path));
@@ -249,7 +250,7 @@ export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "accept
     .filter((one) => one.files.length > 0 || one.unclear);
   const frozen = frozenIn(snapshot, brief.frozen ?? []);
   if ("missing" in frozen) return { status: "refused", code: "frozen", message: `The brief freezes ${frozen.missing.length > 300 ? `${frozen.missing.slice(0, 299)}\u2026` : frozen.missing}, which this commit doesn't hold as a file. Correct the brief, or commit the file, then preview the run again.` };
-  return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, caseFiles, environment, frozen: frozen.files, limits: runLimitsFor(commands.length, brief.baseline?.length ?? 0, brief.checks.length) };
+  return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, caseFiles, environment, frozen: frozen.files, limits: runLimitsFor(commands.length, brief.baseline?.length ?? 0, brief.checks.length, work) };
 }
 
 /**

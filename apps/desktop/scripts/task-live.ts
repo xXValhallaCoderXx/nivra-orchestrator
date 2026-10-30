@@ -26,16 +26,16 @@
 // and frozen files. A file may instead expect its preparation to stop (`expect.preparation`, a stop's code and step,
 // such as an install that fails), with no brief: the recipe names the stop, the run passes only on exactly that stop,
 // and no task is created. Nothing here names a repository. The keys are pasted into Settings by the person: this
-// script never reads or prints them. Nothing is sent before the approval is claimed, and then only by pressing Prepare
+// script can instead load a private --credentials file through Settings; it never prints their values. Nothing is sent before the approval is claimed, and then only by pressing Prepare
 // and Start, once each.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { EnvironmentChoices, EnvironmentStopCode, TASK_MODEL, TaskBrief, taskBriefDigest, type PreparedEnvironmentV2 } from "@nivra/domain";
+import { EnvironmentChoices, EnvironmentStopCode, TASK_MODEL, TaskBrief, DEFAULT_WORKING_REQUESTS, taskBriefDigest, type PreparedEnvironmentV2 } from "@nivra/domain";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { claimApproval, claimOn, isDigest } from "../../engine/scripts/research-check/claim.ts";
 import { environmentResolutionOf } from "../../engine/src/environment/preview.ts";
@@ -46,9 +46,9 @@ import { compressSnapshot } from "../../engine/src/exec/nebius/session.ts";
 import { findGit } from "../../engine/src/exec/find-executable.ts";
 import { takeSnapshot } from "../../engine/src/exec/snapshot.ts";
 import { runLimitsFor } from "../../engine/src/task/limits.ts";
-import type { BriefFields, ProjectView, SettingsView, TaskRunPreview } from "../src/shared/ipc.ts";
+import type { BriefFields, NivraApi, ProjectView, SettingsView, TaskRunPreview } from "../src/shared/ipc.ts";
 import { addProject, attemptOf, createTask, environmentOf, followRun, keysSaved, prepareOnce, previewEnvironment, previewRun, startOnce, taskOf } from "./task-journey.ts";
-import { buildChanges, buildHashes, closedThen, liveFolders, previewProblems, stopProblems, type BuildHashes, type ExpectedStop } from "./task-live-checks.ts";
+import { buildChanges, buildHashes, closedThen, liveFolders, previewProblems, readLiveCredentials, stopProblems, type BuildHashes, type ExpectedStop } from "./task-live-checks.ts";
 import { RELEASE_HOME_STATE, releaseHomeChange } from "./test-homes.ts";
 
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -65,6 +65,7 @@ const { values } = parseArgs({
     cleanup: { type: "boolean", default: false },
     check: { type: "boolean", default: false },
     approved: { type: "string" },
+    credentials: { type: "string" },
     state: { type: "string" },
     task: { type: "string", default: join(homedir(), "nivra-work", "she65", "task-live.json") },
   },
@@ -144,8 +145,9 @@ function readTask(path: string): LiveTask {
 
 /** The checkout at its baseline, clean, outside this repository. */
 function checkCheckout(task: LiveTask): void {
-  const real = resolve(task.repository);
-  if (!real.startsWith("/") || real.startsWith(repository)) throw new Error("The task's repository must be a checkout of its own, outside Nivra's.");
+  const real = realpathSync.native(task.repository);
+  const inside = relative(realpathSync.native(repository), real);
+  if (!isAbsolute(real) || inside === "" || (!isAbsolute(inside) && inside !== ".." && !inside.startsWith(`..${sep}`))) throw new Error("The task's repository must be a checkout of its own, outside Nivra's.");
   if (git(real, "rev-parse", "HEAD") !== task.baseline) throw new Error(`${real} isn't at the baseline ${task.baseline}. Check it out there, then try again.`);
   if (git(real, "status", "--porcelain", "--untracked-files=all") !== "") throw new Error(`${real} has uncommitted changes. Clean it, then try again.`);
 }
@@ -277,7 +279,7 @@ function expectedStopRecipe(expected: ExpectedStop) {
     limits: null,
     model: null,
     steps: [
-      "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
+      "the script launches the frozen build with a profile and an engine home of its own; the Nebius key and project id are supplied through Settings, interactively or from the selected private credentials file, and the script waits until both are saved",
       "the script adds the repository as a project, and allows its uploads through their own dialog",
       `the script previews the environment, the project's own recipe, and checks its fingerprint is the one above, claims the approval, and presses Prepare once; the run passes only if the preparation stops at ${expected.code} (step ${expected.step}), in Nivra's words for that stop, with ${expected.detail === null ? "no guidance" : "exactly the guidance above"}${expected.code === "install" ? " and the end of the install's log kept" : ""}, and keeps no environment. Any other ending, a success or another failure of the same step included, is a failure`,
       "no task is created or started",
@@ -297,13 +299,14 @@ async function taskRecipe(task: LiveTask, shown: Awaited<ReturnType<typeof bound
   return {
     expect: null,
     task: { title: task.task.title, briefDigest: await taskBriefDigest(brief), cases: brief.acceptanceCases.map((given) => given.name), checks: brief.checks, baseline: (brief.baseline ?? []).map((given) => given.name), frozen: shown.frozen },
-    limits: runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0),
+    work: { workingRequests: DEFAULT_WORKING_REQUESTS },
+    limits: runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0, brief.checks.length, { workingRequests: DEFAULT_WORKING_REQUESTS }),
     model: {
       required: TASK_MODEL,
       rule: "The run uses this model and no other: the engine takes it from Token Factory's listing, or stops the run at its model step, before any request to a model and before the commit is uploaded. The preparation comes first, so it has run by then.",
     },
     steps: [
-      "the script launches the frozen build with a profile and an engine home of its own; Nate pastes the Nebius key and project id into Settings, and the script waits until both are saved",
+      "the script launches the frozen build with a profile and an engine home of its own; the Nebius key and project id are supplied through Settings, interactively or from the selected private credentials file, and the script waits until both are saved",
       "the script adds the repository as a project, and allows its model sharing and its uploads, each through its own dialog",
       "the script previews the environment, the project's own recipe, and checks its fingerprint is the one above, claims the approval, and presses Prepare once; the environment must end prepared with every dependency build run, or nothing more is started under this approval",
       "once it is prepared, the script creates the task with the brief above, marks it ready, and previews the run. It checks the preview is bound to this brief's digest, this commit's snapshot and the environment just prepared (the fingerprint Start sends, which the app checks again), shows the frozen files above with their hashes, and names the model above in the app's own words, then presses Start once",
@@ -312,7 +315,7 @@ async function taskRecipe(task: LiveTask, shown: Awaited<ReturnType<typeof bound
     ],
     requests: [
       `Nebius: the image listing; an import of ${shown.environment.image} if the project has none; one inspect of it with networking off; one upload of the setup files (${shown.environment.sentBytes} bytes); one preparation with networking on; one readiness check with networking off`,
-      `Nebius: one upload of the commit (${shown.snapshot.sentBytes} bytes compressed); at most ${runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0).operations} operations with networking off, and cleanup's cancels`,
+      `Nebius: one upload of the commit (${shown.snapshot.sentBytes} bytes compressed); at most ${runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0, brief.checks.length, { workingRequests: DEFAULT_WORKING_REQUESTS }).operations} operations with networking off, and cleanup's cancels`,
       "Token Factory: one model listing; at most the run's model requests, each with the brief, the files the worker reads, the lines its searches find and the output of what it runs",
     ],
     keeps: { nebius: `${RETENTION} Nebius keeps each operation's arguments in its records, so what the worker writes stays there too.`, tokenFactory: "Token Factory keeps what it receives, under its own terms. What was sent can't be withdrawn." },
@@ -448,7 +451,7 @@ async function runPreviewProblems(page: Page, recipe: Awaited<ReturnType<typeof 
   if (!project) return ["the project isn't in the app"];
   const structured = await call<TaskRunPreview>(page, `window.nivra.previewTaskRun(${JSON.stringify(ids.taskId)})`);
   return previewProblems({
-    approved: { baseline: recipe.repository.baseline, snapshotFingerprint: recipe.repository.fingerprint, briefDigest: recipe.task.briefDigest, frozen: recipe.task.frozen, configuration: recipe.environment.configuration },
+    approved: { work: recipe.work, baseline: recipe.repository.baseline, snapshotFingerprint: recipe.repository.fingerprint, briefDigest: recipe.task.briefDigest, frozen: recipe.task.frozen, configuration: recipe.environment.configuration },
     ids: { taskId: ids.taskId, briefId: view.brief.id, briefVersion: view.brief.version, projectId: project.id, targetId: project.targetId },
     prepared,
     shownExpected,
@@ -524,7 +527,15 @@ async function live(frozen: Frozen, task: LiveTask, approved: string): Promise<n
   const { app, page } = await openApp(frozen, folder);
   let claimed = false;
   try {
-    log("Paste the Nebius key and project id into Settings. This script waits until both are saved, and never reads them.");
+    if (values.credentials) {
+      const credentials = readLiveCredentials(values.credentials, repository);
+      await page.evaluate(async (given) => {
+        const api = (globalThis as unknown as { nivra: NivraApi }).nivra;
+        await api.setNebiusKey(given.key);
+        await api.setNebiusProjectId(given.project);
+      }, credentials);
+      log("Private credentials were supplied through Settings; their values were not recorded.");
+    } else log("Paste the Nebius key and project id into Settings. The script waits until both are saved.");
     await keysSaved(page, 30 * 60_000);
     const projectId = await addProject(app, page, task.repository);
     const shown = await previewEnvironment(page, projectId, task.environment);

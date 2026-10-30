@@ -362,7 +362,7 @@ process.stdin.on("data", (chunk) => {
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
       nebiusProject = request.params.secrets?.NEBIUS_PROJECT_ID ?? null;
-      send({ id: request.id, result: { protocolVersion: 23, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 24, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {
@@ -480,6 +480,10 @@ process.stdin.on("data", (chunk) => {
         id: request.id,
         result: { hash: TASK_HASH, baseline: "a".repeat(40), prefix: "", paths: [{ path: "greet.sh", change: "changed", before: { mode: "100644", sha256: sha }, after: { mode: "100644", sha256: "9".repeat(64) } }], patch: "--- a/greet.sh\n+++ b/greet.sh\n", patchBytes: 30, truncated: false },
       });
+    } else if (request.method === "task.capacityPending") {
+      send({ id: request.id, result: null });
+    } else if (request.method === "task.capacityReply") {
+      send({ id: request.id, result: { accepted: false } });
     } else if (request.method === "task.preview") {
       appendFileSync(join(home, "task-previews.log"), `${JSON.stringify(request.params)}\n`);
       const none = { count: 0, sample: [] };

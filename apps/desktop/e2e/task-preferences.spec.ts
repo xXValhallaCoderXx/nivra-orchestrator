@@ -47,6 +47,8 @@ test("temporary choices survive Preferences and failed starts, require refresh, 
   await page.getByTestId("task-run").click();
   const preview = page.getByTestId("task-run-preview-body");
   await expect(preview.getByTestId("task-run-preferences")).toContainText("No confirmed preferences apply");
+  await page.getByTestId("task-working-requests").fill("16");
+  await preview.getByRole("button", { name: "Refresh preview", exact: true }).click();
   await preview.getByRole("button", { name: "Add run choice", exact: true }).click();
   await preview.getByLabel("Run choice 1", { exact: true }).fill("Preserve the existing public API");
   await expect(preview).toContainText("Choices changed. Refresh");
@@ -57,6 +59,8 @@ test("temporary choices survive Preferences and failed starts, require refresh, 
   await page.getByTestId("preference-confirm").click();
   await expect(page.getByTestId("preference-list")).toContainText("Prefer explicit return types");
   await page.getByTestId("task-preferences-return").click();
+  await expect(page.getByTestId("task-working-requests")).toHaveValue("16");
+  await expect(page.getByTestId("task-work-allowance")).toContainText("Up to 16 working requests");
   await expect(preview.getByLabel("Run choice 1", { exact: true })).toHaveValue("Preserve the existing public API");
   await expect(preview.getByTestId("task-run-preferences")).toContainText("Prefer explicit return types");
   // Synthetic credentials satisfy the preview only. Revoke sharing before Start so no provider work is admitted.
@@ -82,6 +86,7 @@ test("temporary choices survive Preferences and failed starts, require refresh, 
   await goTo(page, "tasks");
   await page.getByRole("button", { name: "Preference preview fixture", exact: true }).click();
   await expect(preview.getByLabel("Run choice 1", { exact: true })).toHaveValue("Preserve the existing public API");
+  await expect(page.getByTestId("task-working-requests")).toHaveValue("16");
   await preview.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByTestId("task-run").click();
   await expect(preview.getByLabel("Run choice 1", { exact: true })).toHaveCount(0);
@@ -105,7 +110,6 @@ test("switching tasks clears the originating preview's temporary choices", async
   await expect(preview.getByLabel("Run choice 1", { exact: true })).toHaveCount(0);
   expect((await page.evaluate((id) => window.nivra.getTask(id), taskId)).attempts.length).toBe(0);
 });
-
 
 test("a revised brief requires another preview while retaining this task's temporary choices", async () => {
   const preview = page.getByTestId("task-run-preview-body");
@@ -157,4 +161,24 @@ test("invalid choices remain editable after returning from Preferences, and can 
   await expect(preview.getByLabel("Run choice 2", { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("task-run-start")).toBeEnabled();
   expect((await page.evaluate((id) => window.nivra.getTask(id), taskId)).attempts.length).toBe(0);
+});
+
+test("a finite request limit survives Preferences while coding shares the monthly allowance", async () => {
+  const preview = page.getByTestId("task-run-preview-body");
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("task-run-preview")).toBeHidden();
+  await page.evaluate(() => window.nivra.setCompanionLimit(100, true));
+  await goTo(page, "tasks");
+  await page.getByRole("button", { name: "Preference preview fixture", exact: true }).click();
+  await page.getByTestId("task-run").click();
+  await page.getByLabel(/^Use the monthly allowance without/).uncheck();
+  await page.getByTestId("task-working-requests").fill("16");
+  await preview.getByRole("button", { name: "Refresh preview", exact: true }).click();
+  await preview.getByRole("button", { name: "Edit preferences", exact: true }).click();
+  await page.getByTestId("task-preferences-return").click();
+  await expect(page.getByTestId("task-working-requests")).toHaveValue("16");
+  await expect(page.getByTestId("task-work-allowance")).toContainText("Up to 16 working requests");
+  await expect(page.getByLabel(/^Use the monthly allowance without/)).not.toBeChecked();
+  await preview.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.evaluate(() => window.nivra.setCompanionLimit(null, false));
 });

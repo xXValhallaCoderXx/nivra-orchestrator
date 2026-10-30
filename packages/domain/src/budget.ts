@@ -97,11 +97,13 @@ function oneKind(policy: { preset: string; currency: unknown; monthlyMicros: unk
 export const ModelRequestLimit = z.union([
   z.strictObject({ feature: z.literal("companion"), monthlyRequests: count }),
   z.strictObject({ pool: z.literal("companion-and-planning"), monthlyRequests: count }),
+  z.strictObject({ pool: z.literal("companion-planning-and-coding"), monthlyRequests: count }),
 ]);
 export type ModelRequestLimit = z.infer<typeof ModelRequestLimit>;
 const RequestLimits = z.array(ModelRequestLimit).max(1);
 
-export const requestPoolCovers = (feature: string): feature is "companion" | "planning" => feature === "companion" || feature === "planning";
+export const codingRequestPool = (limits: readonly ModelRequestLimit[] | undefined): boolean => limits?.some((limit) => "pool" in limit && limit.pool === "companion-planning-and-coding") ?? false;
+export const requestPoolCovers = (feature: string, limits?: readonly ModelRequestLimit[]): boolean => feature === "companion" || feature === "planning" || (feature === "task" && codingRequestPool(limits));
 export function modelRequestPoolLimit(limits: readonly ModelRequestLimit[] | undefined): number | null {
   return limits?.[0]?.monthlyRequests ?? null;
 }
@@ -110,6 +112,8 @@ export function hasSharedRequestPool(limits: readonly ModelRequestLimit[] | unde
 }
 
 const policyDraftShape = {
+  /** Explicit expansion of a saved request-count recovery restriction, bound to its immutable revision. */
+  requestRecoveryRevision: z.number().int().positive().optional(),
   modelRequestLimits: RequestLimits.optional(),
   preset: BudgetPreset,
   /** Null, with monthlyMicros, for a counts-only budget. */

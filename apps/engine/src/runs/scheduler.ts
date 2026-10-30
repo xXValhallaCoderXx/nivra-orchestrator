@@ -136,10 +136,10 @@ function sameResearch(stored: unknown, input: unknown): boolean {
 
 /** Whether a stored task run's input names the same checkout, project, target, preview, task and brief as a new one (D39). */
 function sameTask(stored: unknown, input: unknown): boolean {
-  const keys = ["repoPath", "project", "target", "preview", "taskId", "briefVersion", "briefDigest", "preferencesDigest", "choicesDigest", "referencesDigest"] as const;
+  const keys = ["repoPath", "project", "target", "preview", "taskId", "briefVersion", "briefDigest", "preferencesDigest", "choicesDigest", "referencesDigest", "work"] as const;
   const a = (stored ?? {}) as Record<string, unknown>;
   const b = (input ?? {}) as Record<string, unknown>;
-  return keys.every((key) => a[key] === b[key]);
+  return keys.every((key) => key === "work" ? JSON.stringify(a[key]) === JSON.stringify(b[key]) : a[key] === b[key]);
 }
 
 /**

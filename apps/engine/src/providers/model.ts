@@ -152,7 +152,7 @@ export interface CallOptions {
    * A request may have an output cap and a deadline of its own, in place of the call's (NIV-35), and, under a budget
    * grant, the part of the grant it draws on (the hand-in draws on the finalisation part).
    */
-  prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice; maxOutputTokens?: number; stepMs?: number; budgetPart?: OperationPart } | undefined;
+  prepareStep?: (step: { stepNumber: number }) => { activeTools?: string[]; toolChoice?: ToolChoice; maxOutputTokens?: number; stepMs?: number; budgetPart?: OperationPart } | undefined | Promise<{ activeTools?: string[]; toolChoice?: ToolChoice; maxOutputTokens?: number; stepMs?: number; budgetPart?: OperationPart } | undefined>;
   /** Under a budget grant: the part of it this call's requests draw on, unless a step says otherwise. Productive by default. */
   budgetPart?: OperationPart;
   /** The person's cancel. */
@@ -192,6 +192,7 @@ export interface ModelClient {
 export interface BudgetBinding {
   journal: Pick<BudgetJournal, "open" | "sent" | "close" | "providerTime">;
   grantId: string;
+  selectGrant?: (part: OperationPart) => string;
   /** Allowed candidate IDs for selection. The journal enforces them again at send. */
   models?: readonly string[];
   /** The council seat or role the requests are made for, when they have one. */
@@ -338,8 +339,8 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
           ...(call.toolChoice ? { toolChoice: call.toolChoice } : {}),
           ...(call.prepareStep
             ? {
-                prepareStep: ({ stepNumber, abort }: { stepNumber: number; abort: (reason: string) => never }) => {
-                  const asked = call.prepareStep!({ stepNumber });
+                prepareStep: async ({ stepNumber, abort }: { stepNumber: number; abort: (reason: string) => never }) => {
+                  const asked = await call.prepareStep!({ stepNumber });
                   // The grant's part is the journal's to know, never Mastra's.
                   if (asked?.budgetPart && slot) slot.part = asked.budgetPart;
                   const prepared = asked === undefined ? undefined : withoutPart(asked);
@@ -509,7 +510,7 @@ function openRow(budget: BudgetBinding, slot: AttemptSlot, target: object, optio
   const modelId = (target as { modelId?: unknown }).modelId;
   let opened: ReturnType<BudgetJournal["open"]>;
   try {
-    opened = budget.journal.open(budget.grantId, {
+    opened = budget.journal.open(budget.selectGrant?.(slot.part) ?? budget.grantId, {
       kind: "model-request",
       part: slot.part,
       model: typeof modelId === "string" ? modelId : null,

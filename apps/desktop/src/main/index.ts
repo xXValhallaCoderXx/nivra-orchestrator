@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, requestMsFor, TASK_RUN_BOUNDS, type EnvironmentChoices } from "@nivra/domain";
+import { CoachField, MAX_PREFERENCES, PreferenceIntent, PreferenceScope, requestMsFor, TASK_RUN_BOUNDS, taskWorkLimits, DEFAULT_WORKING_REQUESTS, type EnvironmentChoices } from "@nivra/domain";
 import { BudgetMonthLabel, BudgetPolicyDraft, BudgetRemaining } from "@nivra/domain";
 import { PlanningBrief, PlanningProposal, PlanningRequest } from "@nivra/domain";
 import { z } from "zod";
@@ -338,22 +338,21 @@ function start(): void {
   handle(IPC.setTaskState, z.tuple([Id, Revision, z.enum(TASK_STATES)]), (_event, id, revision, state) => host.setTaskState(id, revision, state));
   handle(IPC.renameTask, z.tuple([Id, Revision, LongText]), (_event, id, revision, title) => host.renameTask(id, revision, title));
   handle(IPC.deleteTask, z.tuple([Id]), (_event, id) => host.deleteTask(id));
-  // The bounds no brief changes (Settings › Budget and usage): the domain's own values and derivations, as the engine
-  // reads them; none is copied or worked out again here, and the engine stays the one that enforces them.
+  // Defaults for Settings › Budget and usage; the accepted preview supplies each run's effective work allowance.
   handle(IPC.getRunLimits, none, (): RunLimitsView => ({
-    modelRequests: TASK_RUN_BOUNDS.modelRequests,
+    modelRequests: taskWorkLimits({ workingRequests: DEFAULT_WORKING_REQUESTS }).requests,
     requestSeconds: requestMsFor(TASK_RUN_BOUNDS.outputTokensPerRequest) / 1000,
     outputTokensPerRequest: TASK_RUN_BOUNDS.outputTokensPerRequest,
-    estimatedInputTokens: TASK_RUN_BOUNDS.estimatedInputTokens,
-    toolCalls: TASK_RUN_BOUNDS.toolCalls,
-    writes: TASK_RUN_BOUNDS.writes,
-    runs: TASK_RUN_BOUNDS.runs,
+    estimatedInputTokens: taskWorkLimits({ workingRequests: DEFAULT_WORKING_REQUESTS }).inputTokens,
+    toolCalls: taskWorkLimits({ workingRequests: DEFAULT_WORKING_REQUESTS }).toolCalls,
+    writes: taskWorkLimits({ workingRequests: DEFAULT_WORKING_REQUESTS }).writes,
+    runs: taskWorkLimits({ workingRequests: DEFAULT_WORKING_REQUESTS }).runs,
     checkSeconds: TASK_RUN_BOUNDS.checkSeconds,
     sessionMinutes: TASK_RUN_BOUNDS.sessionMinutes,
     runMinutes: TASK_RUN_BOUNDS.runMinutes,
   }));
-  handle(IPC.previewTaskRun, z.tuple([Id, z.array(z.string().max(300)).max(5).default([])]), (_event, id, choices) => host.previewTaskRun(id, choices));
-  handle(IPC.startTaskRun, z.tuple([Id, Fingerprint, Fingerprint, z.array(z.string().max(300)).max(5).default([])]), (_event, id, expected, snapshot, choices) => host.startTaskRun(id, expected, snapshot, choices));
+  handle(IPC.previewTaskRun, z.tuple([Id, z.array(z.string().max(300)).max(5).default([]), z.number().int().min(1).max(1_000_000).nullable().optional()]), (_event, id, choices, workingRequests?: number | null) => host.previewTaskRun(id, choices, workingRequests));
+  handle(IPC.startTaskRun, z.tuple([Id, Fingerprint, Fingerprint, z.array(z.string().max(300)).max(5).default([]), z.number().int().min(1).max(1_000_000).nullable().optional()]), (_event, id, expected, snapshot, choices, workingRequests?: number | null) => host.startTaskRun(id, expected, snapshot, choices, workingRequests));
   handle(IPC.cancelTaskRun, z.tuple([Id, Id]), (_event, id, attemptId) => host.cancelTaskRun(id, attemptId));
   handle(IPC.getTaskAttempt, z.tuple([Id, Id]), (_event, id, attemptId) => host.taskAttempt(id, attemptId));
   // A run's change (D40): approved by the hash the person saw, rejected, revised, settled or restored.
@@ -413,7 +412,7 @@ function start(): void {
   handle(IPC.generatePlanning, z.tuple([z.uuid(), z.number().int().positive(), z.strictObject({ inspectRepository: z.boolean(), operationId: z.uuid() })]), (_event, id, revision, input) => host.generatePlanning(id, revision, input));
   handle(IPC.getPlanningOperation, z.tuple([z.uuid(), z.uuid()]), (_event, id, operationId) => host.getPlanningOperation(id, operationId));
   handle(IPC.cancelPlanning, z.tuple([z.uuid(), z.uuid()]), (_event, id, operationId) => host.cancelPlanning(id, operationId));
-  handle(IPC.setCompanionLimit, z.tuple([z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable()]), (_event, limit) => host.setCompanionLimit(limit));
+  handle(IPC.setCompanionLimit, z.tuple([z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(), z.boolean().optional(), z.number().int().positive().nullable().optional()]), (_event, limit, includeCoding?: boolean, revision?: number | null) => host.setCompanionLimit(limit, includeCoding, revision));
   handle(IPC.getBudgetPolicy, none, () => host.getBudgetPolicy());
   handle(IPC.setBudgetPolicy, z.tuple([BudgetPolicyDraft.nullable()]), (_event, draft) => host.setBudgetPolicy(draft));
   handle(IPC.budgetSummary, none, () => host.budgetSummary());

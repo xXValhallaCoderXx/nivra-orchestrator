@@ -1,4 +1,5 @@
 import type { ExecRequest } from "../exec/backend.ts";
+import { createHash } from "node:crypto";
 import { credentialKinds } from "../exec/snapshot.ts";
 
 /**
@@ -9,6 +10,36 @@ import { credentialKinds } from "../exec/snapshot.ts";
 
 /** The most a write may carry: one argument, well under what an operation's arguments may hold. */
 export const MAX_WRITE_BYTES = 32 * 1024;
+export const MAX_REPLACEMENT_BYTES = 16 * 1024;
+export const MAX_EDIT_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_EDIT_COMMAND_BYTES = 32 * 1024;
+
+/** Fixed splice, with byte offsets computed from the verified copy. No model text becomes shell source. */
+export const SPLICE_SCRIPT = [
+  "set -e",
+  'bb="$2"; cd "$1"; path="./$3"; start="$5"; end="$6"',
+  '[ -f "$path" ] && [ ! -L "$path" ]',
+  'parent=$($bb dirname -- "$path")',
+  'part="$parent"; while [ "$part" != . ]; do [ ! -L "$part" ]; part=$($bb dirname -- "$part"); done',
+  'hash=$($bb sha256sum -- "$path"); [ "${hash%% *}" = "$4" ]',
+  'size=$($bb stat -c %s -- "$path"); [ "$start" -ge 0 ] && [ "$end" -ge "$start" ] && [ "$end" -le "$size" ]',
+  'mode=$($bb stat -c %a -- "$path")',
+  'tmp=$($bb mktemp "$parent/.nivra-edit.XXXXXX")',
+  'trap \'$bb rm -f -- "$tmp"\' 0',
+  '{ $bb head -c "$start" -- "$path"; printf \'%s\' "$7" | $bb base64 -d; $bb tail -c "+$((end + 1))" -- "$path"; } > "$tmp"',
+  'hash=$($bb sha256sum -- "$tmp"); [ "${hash%% *}" = "$8" ]',
+  '$bb chmod "$mode" -- "$tmp"',
+  '$bb mv -f -- "$tmp" "$path"',
+].join("\n");
+
+export function spliceRequest(input: { workspace: string; path: string; before: string; start: number; end: number; replacement: string; result: string; applets?: string; timeoutMs: number }): ExecRequest {
+  const bytes = Buffer.from(input.replacement);
+  if (bytes.length > MAX_REPLACEMENT_BYTES) throw new Error("The replacement exceeds the bounded splice payload.");
+  const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+  const argv: [string, ...string[]] = ["/bin/sh", "-c", SPLICE_SCRIPT, "nivra-write", input.workspace, input.applets ?? "/bin/busybox", input.path, hash(input.before), String(input.start), String(input.end), bytes.toString("base64"), hash(input.result)];
+  if (Buffer.byteLength(JSON.stringify(argv)) + 2048 > MAX_EDIT_COMMAND_BYTES) throw new Error("The encoded splice and its command overhead exceed the transport limit.");
+  return { argv, cwd: input.workspace, timeoutMs: input.timeoutMs, maxOutputBytes: 4096, persist: true, label: "write" };
+}
 
 /**
  * A write: the file's whole new content, as one argument. $1 the workspace, $2 what runs the tools (busybox; empty for
@@ -26,12 +57,12 @@ export const WRITE_SCRIPT = [
 ].join("\n");
 
 /** Why `content` can't be sent as a write, in words for the model; null when it can. */
-export function writeContentProblem(content: string, knownValues: readonly string[] = []): string | null {
+export function writeContentProblem(content: string, knownValues: readonly string[] = [], maxBytes = MAX_WRITE_BYTES): string | null {
   const bytes = new TextEncoder().encode(content);
   // A lone surrogate has no UTF-8 form: encoding replaces it, so the text wouldn't come back as it was.
   if (new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes) !== content) return "the content isn't well-formed text (it holds a lone surrogate)";
   if (content.includes("\0")) return "the content holds a NUL character, and a write carries text only";
-  if (bytes.byteLength > MAX_WRITE_BYTES) return `the content is ${bytes.byteLength} bytes, over the ${MAX_WRITE_BYTES} one write may carry`;
+  if (bytes.byteLength > maxBytes) return `the content is ${bytes.byteLength} bytes, over the ${maxBytes} this operation may carry`;
   const kinds = credentialKinds(bytes, knownValues);
   if (kinds.length) return `the content holds what looks like ${kinds.join(" and ")}, so it was never sent`;
   return null;

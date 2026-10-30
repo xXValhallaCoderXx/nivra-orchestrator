@@ -4,7 +4,7 @@ import { dirname, join, relative } from "node:path";
 import { PROBE_SCRIPT } from "../src/exec/check.ts";
 import { PREPARE_SCRIPT } from "../src/exec/nebius/session.ts";
 import { COLLECT_SCRIPT } from "../src/exec/patch.ts";
-import { TOOLCHAIN_SCRIPT, WRITE_SCRIPT } from "../src/task/scripts.ts";
+import { SPLICE_SCRIPT, TOOLCHAIN_SCRIPT, WRITE_SCRIPT } from "../src/task/scripts.ts";
 import { FakeService, succeed, type Behaviour } from "./fake-sandboxes.ts";
 import { scratch } from "./workspace-fixtures.ts";
 
@@ -110,6 +110,7 @@ const PATHS = new Map<string, readonly number[]>([
   [PREPARE_SCRIPT, [3, 4, 6]],
   [COLLECT_SCRIPT, [3, 4, 6]],
   [WRITE_SCRIPT, [3]],
+  [SPLICE_SCRIPT, [3]],
   [PROBE_SCRIPT, [3]],
   [TOOLCHAIN_SCRIPT, []],
 ]);
@@ -119,6 +120,7 @@ const APPLETS = new Map<string, number>([
   [PREPARE_SCRIPT, 5],
   [COLLECT_SCRIPT, 5],
   [WRITE_SCRIPT, 4],
+  [SPLICE_SCRIPT, 4],
   [PROBE_SCRIPT, 4],
 ]);
 

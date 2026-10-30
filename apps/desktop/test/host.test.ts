@@ -30,7 +30,7 @@ import { succeed } from "../../engine/test/fake-sandboxes.ts";
 import { ENV_PREPARE_SCRIPT } from "../../engine/src/exec/nebius/sandbox.ts";
 import { INSPECT_SCRIPT, READINESS_SCRIPT } from "../../engine/src/environment/scripts.ts";
 import { readTar } from "../../engine/src/exec/tar.ts";
-import { changedSince, folderState } from "../../engine/test/workspace-fixtures.ts";
+import { changedSince, folderState, GIT } from "../../engine/test/workspace-fixtures.ts";
 import { TASK_FIX, TASK_FIXTURE } from "../../engine/scripts/task-fixture.ts";
 import { briefFrom, NO_CASE, taskBriefOf, taskRunFingerprint } from "../src/main/tasks.ts";
 import { insertTask } from "../src/main/workspace.ts";
@@ -2709,18 +2709,18 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     return root;
   };
   /** Stand-ins for Nebius, its guest running each command with this machine's tools, and for Token Factory, its model doing `calls`. */
-  async function standIns(calls = WORK, onRequest?: (index: number) => void) {
+  async function standIns(calls = WORK, onRequest?: (index: number) => void, realisticUsage = false) {
     const guest = new RealGuest(CHECK_IMAGE.uuid);
     guest.busybox = true;
     const sandbox = await startSandboxStub({ guest });
-    const model = await startStub({ models: [{ id: TASK_MODEL, context_length: 131_072 }], chat: (_request, index) => { onRequest?.(index); return toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }); } });
+    const model = await startStub({ models: [{ id: TASK_MODEL, context_length: 131_072 }], chat: (request, index) => { onRequest?.(index); return toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}`, ...(realisticUsage ? { tokens: [Math.ceil(request.raw.length / 3), 200] as [number, number] } : {}) }); } });
     local.push(sandbox, model);
     return { sandbox, model, guest };
   }
   /** A host whose one project is a WSL repository holding the fixture, both consents given, the keys saved. */
-  async function taskHost(options: { calls?: Array<[string, Record<string, unknown>]>; consents?: boolean } = {}) {
-    const { sandbox, model, guest } = await standIns(options.calls);
-    const repo = makeRepo(join(reposRoot(), "greet"), FILES);
+  async function taskHost(options: { calls?: Array<[string, Record<string, unknown>]>; consents?: boolean; realisticUsage?: boolean; files?: Record<string, string> } = {}) {
+    const { sandbox, model, guest } = await standIns(options.calls, undefined, options.realisticUsage);
+    const repo = makeRepo(join(reposRoot(), "greet"), options.files ?? FILES);
     const made = makeHost({ tokenFactoryUrl: model.url, sandboxesUrl: sandbox.url, projects: [{ targetId: "wsl:Test", path: repo }] });
     made.keys.current = SECRETS;
     if (options.consents !== false) {
@@ -2729,7 +2729,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     }
     return { ...made, sandbox, model, guest, repo };
   }
-  async function readyTask(host: Host, projectId: string, fields = FIELDS, title = "Greet the world") {
+  async function readyTask(host: Host, projectId: string, fields: typeof FIELDS & { frozen?: string[] } = FIELDS, title = "Greet the world") {
     const task = await host.createTask({ title, fields, projectId, planId: null });
     return host.setTaskState(task.summary.id, task.revision, "ready");
   }
@@ -2739,6 +2739,114 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
       return view.status !== "submitting" && view.status !== "running" ? view : null;
     }, what, 60_000);
   const uploads = (stub: SandboxStub<RealGuest>) => stub.requests.filter((request) => request.path === "/v1/files").length;
+
+  it("NIV-60 uses all four admitted portions with realistic context, crosses both old thresholds and keeps final verification", async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [["edit_file", TASK_FIX]];
+    const files = { ...FILES };
+    const indexes = Array.from({ length: 32 }, (_, index) => index + 1);
+    for (const index of indexes) {
+      files[`part-${index}.sh`] = `part_${index}() { printf '%s\\n' 0; }\n`;
+      calls.push(["edit_file", { path: `part-${index}.sh`, old_text: "0;", new_text: `${index};` }]);
+    }
+    files["check-parts.sh"] = `for n in ${indexes.join(" ")}; do . "./part-$n.sh"; eval "part_$n"; done\n`;
+    while (calls.length < 64) calls.push(["read_file", { path: `part-${calls.length - 32}.sh` }]);
+    calls.push(["submit", { summary: "Fixed the default name and checked the collected result." }]);
+    const { host, ids, model, root, repo } = await taskHost({ calls, files, realisticUsage: true });
+    const task = await readyTask(host, ids[0]!, { ...FIELDS, frozen: ["check.sh", "check-parts.sh"], acceptanceCases: [CASE, { name: "Every part returns its own index", command: "/bin/sh check-parts.sh", expectedExitCode: 0, expectedOutput: indexes.join("\n") + "\n" }], context: "Repository context for the realistic request-volume fixture. ".repeat(300) });
+    const preview = await host.previewTaskRun(task.summary.id);
+    assert.equal(preview.work?.workingRequests, 64);
+    assert.equal(preview.limits?.modelRequests, 65);
+    assert.deepEqual([preview.limits?.toolCalls, preview.limits?.writes, preview.limits?.runs], [256, 64, 32]);
+    assert.match(preview.allowance!, /Time or context limits may stop work sooner/);
+    const attempt = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
+    const done = await ended(host, task.summary.id, attempt.id, "the four admitted portions and final verification");
+    assert.equal(done.status, "answered", done.note ?? "");
+    assert.equal(done.report!.verified, true);
+    assert.equal(done.report!.worker!.handedIn, true);
+    assert.equal(done.report!.worker!.usage.calls, 65);
+    assert.equal(done.report!.worker!.tools.writes, 33);
+    assert.equal(done.report!.worker!.usage.inputTokens! > 480_000, true);
+    assert.equal(model.chats().length, 65);
+    assert.equal(model.chats().every((request) => request.raw.length > 10_000), true);
+    assert.equal(spawnSync(GIT, ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).stdout, "");
+    await host.getCompanionUsage();
+    const usage = await host.budgetSummary(); assert.equal(usage.usage!.requests, 65);
+    await host.shutdown();
+    const opening = openWorkspace(join(root, "workspace.db")); if (opening.state !== "ready") throw new Error("workspace");
+    try {
+      const grants = opening.db.db.prepare("SELECT grant_json,state FROM budget_grants WHERE request_id=?").all(attempt.id);
+      assert.equal(grants.length, 4);
+      assert.equal(grants.every((grant) => grant["state"] === "settled"), true);
+      assert.equal(grants.reduce((sum, row) => sum + JSON.parse(String(row["grant_json"])).finalisation.requests, 0), 1);
+    } finally { opening.db.close(); }
+  });
+
+  it("NIV-60 exhausts an explicit monthly coding pool while retaining the single hand-in and final checks", async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [["edit_file", TASK_FIX]];
+    while (calls.length < 25) calls.push(["read_file", { path: "greet.sh" }]);
+    calls.push(["submit", { summary: "The accepted monthly allowance is used; handing in the verified fix." }]);
+    const { host, ids, model } = await taskHost({ calls });
+    await host.setCompanionLimit(26, true);
+    const task = await readyTask(host, ids[0]!);
+    const preview = await host.previewTaskRun(task.summary.id);
+    const attempt = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
+    const done = await ended(host, task.summary.id, attempt.id);
+    assert.equal(done.report!.verified, true);
+    assert.equal(done.report!.worker!.handInDue, "allowance");
+    assert.match(done.report!.worker!.stopDetail!, /monthly coding allowance/);
+    assert.equal(model.chats().length, 26);
+    const usage = await host.getCompanionUsage();
+    assert.deepEqual([usage.used, usage.reserved, usage.remaining], [26, 0, 0]);
+    assert.equal(usage.features.coding?.used, 26);
+  });
+
+  it("NIV-60 sends no work under an extension whose dispatch guard failed", async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [["edit_file", TASK_FIX]];
+    while (calls.length < 16) calls.push(["read_file", { path: "greet.sh" }]);
+    calls.push(["submit", { summary: "No more work was durably admitted." }]);
+    const { host, ids, model } = await taskHost({ calls }); const task = await readyTask(host, ids[0]!);
+    const preview = await host.previewTaskRun(task.summary.id);
+    const append = BudgetGuard.prototype.append; let writes = 0;
+    BudgetGuard.prototype.append = function(record) { if (++writes === 4) throw new Error("simulated extension guard failure"); return append.call(this, record); };
+    try {
+      const attempt = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
+      const done = await ended(host, task.summary.id, attempt.id);
+      assert.equal(model.chats().length, 17);
+      assert.equal(done.report!.worker!.handInDue, "allowance");
+      assert.match(done.report!.worker!.stopDetail!, /could not durably admit/);
+      assert.equal(done.report!.verified, true);
+      assert.equal(writes, 4);
+      await assert.rejects(host.getCompanionUsage(), /guard/i);
+    } finally { BudgetGuard.prototype.append = append; }
+  });
+
+  it("NIV-60 binds the chosen request maximum and policy version to the preview", async () => {
+    const { host, ids } = await taskHost(); const task = await readyTask(host, ids[0]!);
+    const preview = await host.previewTaskRun(task.summary.id, [], 32);
+    await assert.rejects(host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!, [], 64), /changed since you previewed/);
+    await host.setCompanionLimit(100, true);
+    await assert.rejects(host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!, [], 32), /changed since you previewed/);
+  });
+
+  for (const path of ["preview", "admission"] as const) it(`NIV-60 review: a completed task returns unused requests through ${path}`, async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [["edit_file", TASK_FIX], ["submit", { summary: "Fixed the greeting." }], ["edit_file", TASK_FIX], ["submit", { summary: "Fixed the next task's greeting." }]];
+    const { host, ids, model } = await taskHost({ calls });
+    await host.setCompanionLimit(17, true);
+    const tasks = [await readyTask(host, ids[0]!), await readyTask(host, ids[0]!)];
+    const earlier = await host.previewTaskRun(tasks[1]!.summary.id);
+    for (let index = 0; index < 2; index++) {
+      const task = tasks[index]!;
+      const preview = index === 1 && path === "admission" ? earlier : await host.previewTaskRun(task.summary.id);
+      assert.equal(preview.blocked, null, "normal task-to-task use must not require a Settings refresh");
+      const attempt = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
+      const done = await ended(host, task.summary.id, attempt.id);
+      assert.equal(done.report!.verified, true);
+      assert.equal(done.report!.worker!.usage.calls, 2);
+    }
+    assert.equal(model.chats().length, 4);
+    const usage = await host.getCompanionUsage();
+    assert.deepEqual([usage.used, usage.reserved, usage.remaining], [4, 0, 13]);
+  });
 
   it("NIV-70 freezes discussion and selected image content through coding, reconciles its finite grant, and keeps request-pool usage separate", async () => {
     const { host, ids, model, root } = await taskHost();
@@ -2780,7 +2888,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
       assert.equal(record["state"], "settled");
       const attribution = JSON.parse(String(record["attribution_json"])), grant = JSON.parse(String(record["grant_json"]));
       assert.deepEqual([attribution.feature, attribution.projectId, attribution.taskId, attribution.attemptId, attribution.profile.id], ["task", ids[0], task.summary.id, started.id, "coding-worker"]);
-      assert.deepEqual([grant.productive, grant.finalisation, grant.models], [{ requests: 23, outputTokens: 8000 }, { requests: 1, outputTokens: 1500 }, [TASK_MODEL]]);
+      assert.deepEqual([grant.productive, grant.finalisation, grant.models], [{ requests: 16, outputTokens: 8000 }, { requests: 1, outputTokens: 1500 }, [TASK_MODEL]]);
     } finally { opened.db.close(); }
   });
 
@@ -3018,7 +3126,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const expected = async (snapshot: string) =>
-      taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+      taskRunFingerprint({ work: { workingRequests: 64 }, policyVersion: null, referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const snapshot = "c".repeat(64);
     // Accepted, then answered with an error: the run is found by its request id, and recorded as it ended.
     writeFileSync(join(home, "accept"), "");
@@ -3067,7 +3175,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = async () => taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = async () => taskRunFingerprint({ work: { workingRequests: 64 }, policyVersion: null, referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const going = async () => {
       const started = await host.startTaskRun(task.summary.id, await expected(), snapshot);
       const running = await waitFor(async () => {
@@ -3111,7 +3219,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ work: { workingRequests: 64 }, policyVersion: null, referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     const running = await waitFor(async () => {
       const seen = await host.taskAttempt(task.summary.id, started.id);
@@ -3137,7 +3245,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ work: { workingRequests: 64 }, policyVersion: null, referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     await waitFor(async () => (await host.taskAttempt(task.summary.id, started.id)).runId, "the task's run to be going");
     const { pid } = await online(host, "wsl:Test");
@@ -3219,7 +3327,7 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ work: { workingRequests: 64 }, policyVersion: null, referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     return { taskId: task.summary.id, attemptId: started.id, done: await ended(host, task.summary.id, started.id) };
   }
@@ -3791,7 +3899,7 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     const created = await host.createTask({ title: "Greet the world", fields, projectId: id, planId: null });
     const task = host.setTaskState(created.summary.id, created.revision, "ready");
     const packet = (taskBriefOf(task.brief.content) as { brief: TaskBrief }).brief;
-    const parts = { referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64), requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } };
+    const parts = { work: { workingRequests: 64 }, policyVersion: null, referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64), requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } };
     const asked = () => JSON.parse(lines(home, "task-previews.log").at(-1)!) as { environment?: unknown; brief: TaskBrief };
     // No environment yet: the required-check policy is still bound to the preview.
     const plain = await host.previewTaskRun(task.summary.id);

@@ -1,3 +1,5 @@
+import { CodingCapacity } from "./task/capacity.ts";
+import type { TaskWork } from "@nivra/domain";
 import { checkReferences } from "@nivra/domain";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -428,6 +430,18 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
   const chatContext = (runId: string): ChatContext | null => scheduler.contextOf(runId, "chat");
   const researchContext = (runId: string): ResearchContext | null => scheduler.contextOf(runId, "research");
   const taskContext = (runId: string): TaskContext | null => scheduler.contextOf(runId, "task");
+  const codingCapacities = new Map<string, CodingCapacity>();
+  const codingCapacity = (runId: string): CodingCapacity | null => {
+    const found = codingCapacities.get(runId);
+    if (found) return found;
+    const work = readTaskInput(store.summary(runId)?.input)?.work;
+    const rootId = scheduler.grantOf(runId);
+    const root = rootId ? journal.grant(rootId) : null;
+    if (!work || !root) return null;
+    const capacity = new CodingCapacity(runId, root, work, journal);
+    codingCapacities.set(runId, capacity);
+    return capacity;
+  };
   const coachContext = (runId: string): CoachContext | null => scheduler.contextOf(runId, "coach");
   const recorder = {
     output: (runId: string, stepId: string, message: string, data?: JsonObject) => void store.append(runId, { type: "step.output", stepId, message, data: data ?? null }),
@@ -595,7 +609,7 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
     return null;
   };
   /** What a task run of this checkout would send to Nebius, with no network, and the bounds of a run of this brief. */
-  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | EnvironmentRef | undefined): Promise<TaskPreview> => {
+  const taskPreview = async (repoPath: string, brief: Pick<TaskContext["brief"], "acceptanceCases" | "checks" | "baseline" | "frozen">, environment: (TaskEnvironment & { preparedAt: string }) | EnvironmentRef | undefined, work?: TaskWork): Promise<TaskPreview> => {
     const git = locateGit();
     if (!git) throw new RpcFailure(ErrorCode.InvalidParams, `Git isn't installed on this target, or isn't on its PATH. ${installGitAdvice(process.platform)}`);
     const session = await backend.open({ workspace: repoPath });
@@ -607,10 +621,10 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
       }
       // A recipe's environment (NIV-55) in its own field, D41's left empty.
       if (environment && isEnvironmentRef(environment)) {
-        const shown = taskPreviewOf(snapshot, brief, null);
+        const shown = taskPreviewOf(snapshot, brief, null, work);
         return shown.status === "ready" ? { ...shown, environmentRef: environment } : shown;
       }
-      return taskPreviewOf(snapshot, brief, environment ?? null);
+      return taskPreviewOf(snapshot, brief, environment ?? null, work);
     } catch (error) {
       // It names the file it is about: a preview is shown to the person, and never stored (D36).
       if (error instanceof WorkspaceRefusal) return { status: "refused", code: error.code, message: mask(error.message).slice(0, 2_000) };
@@ -812,7 +826,8 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
         ...(options.tavilyUrl ? { tavilyUrl: options.tavilyUrl } : {}),
       }),
       [TASK_WORKFLOW_ID]: createTaskWorkflow({
-        budget: (runId) => { const grantId = scheduler.grantOf(runId); return grantId ? { journal, grantId, models: journal.models(grantId), seat: "coding-worker" } : null; },
+        capacity: codingCapacity,
+        budget: (runId) => { const grantId = scheduler.grantOf(runId); return grantId ? { journal, grantId, selectGrant: (part) => part === "finalisation" ? grantId : codingCapacity(runId)?.productiveGrant() ?? grantId, models: journal.models(grantId), seat: "coding-worker" } : null; },
         recorder,
         context: taskContext,
         task: (runId) => readTaskInput(store.summary(runId)?.input),
@@ -980,7 +995,8 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
         if ((params.workflowId === "task" || params.workflowId === "planning" || params.workflowId === "companion") && params.context.references && !await checkReferences(params.context.references)) throw new RpcFailure(ErrorCode.InvalidParams, "The included task context doesn't match its frozen source manifest. Preview it again; nothing was started.");
         if (params.workflowId === "task") {
           const grant = params.budget;
-          if (grant.productive.requests !== 23 || grant.productive.outputTokens !== 8_000 || grant.finalisation.requests !== 1 || grant.finalisation.outputTokens !== 1_500 || (grant.modelListings ?? 1) !== 1 || grant.models?.length !== 1 || grant.models[0] !== TASK_MODEL) throw new RpcFailure(ErrorCode.InvalidParams, "This coding grant must cover the task model, one listing, 23 productive requests and one reserved hand-in. Preview a new run.");
+          const productiveFits = params.input.work ? grant.productive.requests >= 1 && grant.productive.requests <= Math.min(16, params.input.work.workingRequests) : grant.productive.requests === 23;
+          if (!productiveFits || grant.productive.outputTokens !== 8_000 || grant.finalisation.requests !== 1 || grant.finalisation.outputTokens !== 1_500 || (grant.modelListings ?? 1) !== 1 || grant.models?.length !== 1 || grant.models[0] !== TASK_MODEL) throw new RpcFailure(ErrorCode.InvalidParams, "This coding grant must cover the task model, one listing, an admitted working portion and one reserved hand-in. Preview a new run.");
         }
         if (params.workflowId === "planning") {
           if (endedPlanningOperations.size >= 1_024 && !store.findByRequest(params.clientRequestId)) throw new RpcFailure(ErrorCode.InvalidParams, "This engine's temporary planning history is full. Restart its engine before asking for another AI plan; manual planning remains available.");
@@ -1016,7 +1032,7 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
       "runs.find": ({ clientRequestId }) => store.findByRequest(clientRequestId),
       "runs.list": ({ limit, cursor }) => store.list({ limit, cursor }),
       "runs.events": ({ runId, after, limit }) => store.events(runId, after, limit) ?? notFound(runId),
-      "runs.cancel": ({ runId }) => scheduler.cancel(runId) ?? notFound(runId),
+      "runs.cancel": ({ runId }) => { codingCapacities.get(runId)?.finish("cancelled"); return scheduler.cancel(runId) ?? notFound(runId); },
       "runs.result": ({ runId }) => {
         if (!store.status(runId)) notFound(runId);
         const stored = store.artifact(runId, "explain");
@@ -1069,7 +1085,9 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
         const proposal = store.proposal(runId);
         return proposal === null ? null : proposalView(proposal, mask);
       },
-      "task.preview": ({ repoPath, brief, environment }) => taskPreview(repoPath, brief, environment),
+      "task.preview": ({ repoPath, brief, environment, work }) => taskPreview(repoPath, brief, environment, work),
+      "task.capacityPending": ({ runId }) => codingCapacities.get(runId)?.pending() ?? null,
+      "task.capacityReply": ({ runId, need, grant, reason }) => ({ accepted: codingCapacities.get(runId)?.reply(need, grant, reason) ?? false }),
       "environment.preview": ({ repoPath, spec }) => environmentPreview(repoPath, spec),
       "environment.resolve": ({ repoPath, choices, previous }) => environmentResolve(repoPath, choices, previous),
       "runs.coach": ({ runId }) => {
