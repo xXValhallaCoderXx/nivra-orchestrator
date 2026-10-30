@@ -71,7 +71,7 @@ export function savePlanningTasks(workspace: WorkspaceDb, input: { id: string; r
       const assumptions = [...record.proposal.uncertainties, ...record.request.brief.uncertainties].slice(0, 20);
       insertTask(workspace, { id: taskId, title: item.title, projectId: record.request.projectId, createdAt: at, updatedAt: at }, { id: briefId, content: briefFrom({ goal: item.goal, acceptanceCriteria: item.acceptanceCriteria, scope: item.scope, exclusions: item.exclusions, context, assumptions, checks: [], acceptanceCases: [], baseline: [], frozen: [] }), derivedFrom: null });
       if (record.request.missionId && addMissionTask(workspace, record.request.missionId, taskId, at) !== "added") throw new Error("The mission couldn't hold this whole breakdown. Review its backlog, then save again; no tasks were created.");
-      const metadata = { questions, missingPrerequisites, impactIds: item.impactIds };
+      const metadata = { questions, missingPrerequisites, impactIds: item.impactIds, sourceReferences: (record.references as unknown[])[8] ?? null };
       db.prepare("INSERT INTO planning_task_sources (planning_id,item_id,revision,task_id,brief_id,metadata_json) VALUES (?,?,?,?,?,?)").run(input.id, item.id, input.revision, taskId, briefId, JSON.stringify(metadata));
       result.push({ itemId: item.id, taskId, briefId, missingPrerequisites });
     }

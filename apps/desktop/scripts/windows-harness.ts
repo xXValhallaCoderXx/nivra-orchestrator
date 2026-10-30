@@ -1,3 +1,4 @@
+import { referenceTransfer } from "./reference-transfer.ts";
 // Runs ON WINDOWS, as a real Windows process (the staged node.exe), started by verify-windows.ts from WSL (D14). It
 // drives the native Windows engine and a WSL engine through the same target and supervisor modules Electron's main
 // process uses, and checks what CI would have: start, hello, cancel, a clean stop, and that an engine dies with its
@@ -227,6 +228,7 @@ async function main(): Promise<void> {
     return `engine ${info.engineVersion}, Node ${info.node}, pid ${info.pid}, home ${info.home}`;
   });
   if (nativeUp) {
+    await check("native: bounded reference context over Windows RPC, no provider calls", () => referenceTransfer(native));
     await check("native: doctor", async () => {
       const report = await native.call("doctor", {});
       return report.checks.map((c) => `${c.id}=${c.status}`).join(", ");
@@ -380,6 +382,7 @@ async function main(): Promise<void> {
       return `engine ${info.engineVersion} on ${info.platform}/${info.arch}, pid ${info.pid} (in ${distro.name}), home ${info.home}`;
     });
     if (up) {
+      await check("wsl: bounded image reference context from native Windows over RPC, no provider calls", () => referenceTransfer(supervisor));
       await check("wsl: doctor", async () => (await supervisor.call("doctor", {})).checks.map((c) => `${c.id}=${c.status}`).join(", "));
       const made = await inDistro(["/bin/sh", "-c", 'set -e; d="$HOME/.nivra-verify/repo $1"; rm -rf "$d"; mkdir -p "$d"; cd "$d"; git init -q -b main; git -c user.name=t -c user.email=t@nivra.invalid commit -q --allow-empty -m init; pwd', "sh", AWKWARD]);
       const repo = made.stdout.trim().split("\n").at(-1) ?? "";

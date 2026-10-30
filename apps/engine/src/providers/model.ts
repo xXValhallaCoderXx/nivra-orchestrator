@@ -3,7 +3,7 @@ import { Agent } from "@mastra/core/agent";
 import { resolveModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
 import { isMastraTimeoutError } from "@mastra/core/loop";
-import type { ModelEndpoint, ModelFailureKind } from "@nivra/domain";
+import { VISUAL_MODEL, type ModelEndpoint, type ModelFailureKind } from "@nivra/domain";
 import type { BudgetJournal, OpenRefusal, OperationPart } from "../budget/journal.ts";
 import { errorFacts, internalMessage, safeClass, type DiagnosticCode, type FailureFacts } from "../diagnostics.ts";
 import { capCompletionTokens, listModels as fetchModels, TOKEN_FACTORY_BASE_URL, TokenFactoryError, type ModelEntry } from "./tokenfactory.ts";
@@ -172,15 +172,17 @@ export interface AgentSpec {
 }
 
 /** The one thing the client does with an agent; Mastra's own generic types don't survive the tools being dynamic. */
+export type ModelPart = { type: "text"; text: string } | { type: "image"; image: string; mimeType: "image/png" };
+export type ModelPrompt = string | ModelPart[];
 export interface ModelAgent {
-  generate(prompt: string, options: never): Promise<unknown>;
+  generate(prompt: string | Array<{ role: "user"; content: ModelPart[] }>, options: never): Promise<unknown>;
 }
 
 export interface ModelClient {
   readonly endpoint: Endpoint;
   listModels(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<ModelList>;
   agent(spec: AgentSpec): ModelAgent;
-  call(agent: ModelAgent, prompt: string, options: CallOptions): Promise<CallResult>;
+  call(agent: ModelAgent, prompt: ModelPrompt, options: CallOptions): Promise<CallResult>;
 }
 
 /**
@@ -211,6 +213,7 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
   const endpoint = options.endpoint ?? TOKEN_FACTORY;
   // Each agent's provider requests, as they start and end, for the call in progress (see `countAttempts`).
   const slots = new WeakMap<object, AttemptSlot>();
+  const modelIds = new WeakMap<object, string>();
   return {
     endpoint,
 
@@ -275,10 +278,12 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       // Internal API (D11): reaches the loop's logger too, which __setLogger alone does not. Covered by stderr canaries.
       agent.__registerPrimitives({ logger: noopLogger });
       slots.set(agent, slot);
+      modelIds.set(agent, spec.modelId);
       return agent as unknown as ModelAgent;
     },
 
     async call(agent, prompt, call) {
+      if (Array.isArray(prompt) && prompt.some((part) => part.type === "image") && modelIds.get(agent)?.toLowerCase() !== VISUAL_MODEL.toLowerCase()) throw failure("model-unavailable", "Selected images require the visual task model; no request was sent.");
       const internal = call.internal ?? new InternalFailure();
       const abortSignal = call.signal ? AbortSignal.any([call.signal, internal.signal]) : internal.signal;
       const steps: StepRecord[] = [];
@@ -327,7 +332,7 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
       };
       let output: { text?: string; finishReason?: string; response?: { modelId?: string } };
       try {
-        output = (await agent.generate(prompt, {
+        output = (await agent.generate(typeof prompt === "string" ? prompt : [{ role: "user", content: prompt }], {
           maxSteps: call.maxSteps,
           ...(call.stopWhen ? { stopWhen: () => call.stopWhen!() } : {}),
           ...(call.toolChoice ? { toolChoice: call.toolChoice } : {}),

@@ -1,3 +1,4 @@
+import type { FrozenReferenceContext } from "@nivra/domain";
 import { mergeRanges, PlanningBrief, PlanningProposal, PlanningRequest, PlanningResult, type PlanningEvidence, type PlanningOperationView, type PlanningSave, type PlanningSavedItem, type PlanningView, type PreferenceSnapshot } from "@nivra/domain";
 import { z } from "zod";
 import { resolveCompanionScope } from "./companion-context.ts";
@@ -18,6 +19,7 @@ export interface PlanningGeneration {
   signal: AbortSignal;
 }
 export interface PlanningHostOptions {
+  references?(taskId: string): FrozenReferenceContext;
   workspace(): WorkspaceDb;
   projects(): readonly ProjectRecord[];
   sharingEpoch(projectId: string): number;
@@ -109,7 +111,8 @@ export class PlanningHost {
     });
     const knowledge = planningContextFor(workspace, this.#options.projects(), request).knowledge.records.map((record) => [record.id, record.revision]);
     const preferences = this.#options.preferences?.(request.projectId).records.map((record) => [record.id, record.revision]) ?? [];
-    return ["nivra.planning-binding.v2", project ? [project.id, project.targetId] : null, source, mission ? [mission.id, mission.version, mission.sha256] : null, tasks, knowledge, preferences, saved];
+    const references = request.source.kind === "task" ? this.#options.references?.(request.source.id) : undefined;
+    return ["nivra.planning-binding.v2", project ? [project.id, project.targetId] : null, source, mission ? [mission.id, mission.version, mission.sha256] : null, tasks, knowledge, preferences, saved, references ? { digest: references.digest, manifest: references.manifest } : null];
   }
   #binding(request: PlanningRequest, proposal: PlanningProposal | null, planningId?: string, knownSavedItemIds?: readonly string[]): { references: unknown; binding: string } {
     const references = this.#references(request, proposal, planningId, knownSavedItemIds);
@@ -123,7 +126,9 @@ export class PlanningHost {
     if (record.binding !== this.#binding(record.request, record.proposal, record.id, knownSavedItemIds).binding) throw new Error(staleMessage);
   }
   #view(record: PlanningRecord): PlanningView {
-    const { references: _references, ...view } = record;
+    const { references, ...view } = record;
+    const source = (references as unknown[])[8] as { manifest?: FrozenReferenceContext["manifest"] } | undefined;
+    if (source?.manifest) view.sourceManifest = source.manifest;
     const latest = this.#options.workspace().db.prepare("SELECT id FROM planning_operations WHERE planning_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(record.id);
     view.operation = latest ? getPlanningOperation(this.#options.workspace(), String(latest["id"])) : null;
     try { this.#current(record); } catch (error) { view.stale = error instanceof Error ? error.message : staleMessage; }

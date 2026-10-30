@@ -1,3 +1,4 @@
+import { checkReferences } from "@nivra/domain";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { LibSQLStore } from "@mastra/libsql";
@@ -25,6 +26,7 @@ import {
   ResearchReport,
   SandboxReport,
   TaskReport,
+  TASK_MODEL,
   type EngineFatal,
   type EngineInfo,
   type ChatContext,
@@ -810,6 +812,7 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
         ...(options.tavilyUrl ? { tavilyUrl: options.tavilyUrl } : {}),
       }),
       [TASK_WORKFLOW_ID]: createTaskWorkflow({
+        budget: (runId) => { const grantId = scheduler.grantOf(runId); return grantId ? { journal, grantId, models: journal.models(grantId), seat: "coding-worker" } : null; },
         recorder,
         context: taskContext,
         task: (runId) => readTaskInput(store.summary(runId)?.input),
@@ -973,7 +976,12 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
         return { ok: true as const };
       },
       "budget.journal": ({ grantId, after, limit }) => ({ ...journal.read(grantId, after, limit), providerDate: journal.providerDate(grantId) }),
-      "runs.start": (params) => {
+      "runs.start": async (params) => {
+        if ((params.workflowId === "task" || params.workflowId === "planning" || params.workflowId === "companion") && params.context.references && !await checkReferences(params.context.references)) throw new RpcFailure(ErrorCode.InvalidParams, "The included task context doesn't match its frozen source manifest. Preview it again; nothing was started.");
+        if (params.workflowId === "task") {
+          const grant = params.budget;
+          if (grant.productive.requests !== 23 || grant.productive.outputTokens !== 8_000 || grant.finalisation.requests !== 1 || grant.finalisation.outputTokens !== 1_500 || (grant.modelListings ?? 1) !== 1 || grant.models?.length !== 1 || grant.models[0] !== TASK_MODEL) throw new RpcFailure(ErrorCode.InvalidParams, "This coding grant must cover the task model, one listing, 23 productive requests and one reserved hand-in. Preview a new run.");
+        }
         if (params.workflowId === "planning") {
           if (endedPlanningOperations.size >= 1_024 && !store.findByRequest(params.clientRequestId)) throw new RpcFailure(ErrorCode.InvalidParams, "This engine's temporary planning history is full. Restart its engine before asking for another AI plan; manual planning remains available.");
           if (endedPlanningOperations.has(params.input.operationId)) throw new RpcFailure(ErrorCode.InvalidParams, "This planning operation ended. Open a new operation to ask again.");

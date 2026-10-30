@@ -4,7 +4,7 @@ import type { RunLimitsView } from "../../../shared/ipc";
 import { runLimitLines } from "../shell/run-limits";
 
 /** Coverage outside the shared monthly inference-request allowance. */
-export const BUDGET_NOT_AVAILABLE = "Coding runs, research, sandbox operations and other agents aren't covered by the Companion and planning request allowance. Their existing per-run limits apply.";
+export const BUDGET_NOT_AVAILABLE = "Coding model requests are recorded in the shared budget ledger with their existing per-run limits. They do not use the Companion and planning monthly request allowance. Research, sandbox operations and other agents retain their existing accounting and limits.";
 
 /**
  * Settings › Budget and usage: the coverage outside the Companion and planning allowance and the existing per-run

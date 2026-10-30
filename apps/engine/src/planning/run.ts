@@ -1,3 +1,5 @@
+import { checkReferences, referenceImageEstimate, referenceText } from "@nivra/domain";
+import { referenceModel, referencePrompt } from "../providers/reference-content.ts";
 import { createTool } from "@mastra/core/tools";
 import { PLANNING_LIMITS, PlanningProposal, PlanningResult, knowledgeDigest, preferencesDigest, type Mask, type PlanningContext, type PlanningEvidence, type PlanningInput, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
@@ -39,8 +41,9 @@ export async function runPlanning(deps: PlanningDeps, runId: string, input: Plan
   if (!binding) throw failure("budget-exhausted", "this planning operation has no accepted grant");
   const key = deps.apiKey();
   if (!key) throw failure("no-key");
+  if (context.references && !await checkReferences(context.references)) throw failure("internal", "the included task context changed");
   const packet = JSON.stringify({ brief: context.brief, records: context.snapshot, preferences: context.preferences.records, knowledge: context.knowledge?.records ?? [] });
-  if (deps.mask(packet) !== packet) throw failure("internal", "the planning packet contains credential-shaped text");
+  if (deps.mask(packet + referenceText(context.references)) !== packet + referenceText(context.references)) throw failure("internal", "the planning packet contains credential-shaped text");
   if (context.knowledge && await knowledgeDigest(context.knowledge.records) !== context.knowledge.digest) throw failure("internal", "the planning knowledge changed");
   deps.received(runId, { preferencesDigest: await preferencesDigest(context.preferences.records), knowledgeDigest: context.knowledge?.digest ?? null });
   const maxRequests = context.repository ? context.maxRequests : 1;
@@ -60,7 +63,7 @@ export async function runPlanning(deps: PlanningDeps, runId: string, input: Plan
   try {
     const client = deps.modelClient?.(key, binding) ?? createModelClient({ apiKey: key, endpoint: deps.endpoint, budget: binding });
     const models = await client.listModels({ signal, timeoutMs: Math.min(30_000, remaining()) });
-    const model = pickNemotron(binding.models ? models.ids.filter((id) => binding.models!.some((allowed) => allowed.toLowerCase() === id.toLowerCase())) : models.ids);
+    const model = referenceModel(models.ids, binding.models, context.references) ?? pickNemotron(binding.models ? models.ids.filter((id) => binding.models!.some((allowed) => allowed.toLowerCase() === id.toLowerCase())) : models.ids);
     if (!model) throw failure("model-unavailable", "no NVIDIA model is listed in this planning grant");
     deps.setMeta(runId, { route: { provider: "nebius", endpoint: deps.endpoint.kind, model } });
     if (context.repository && maxRequests > 1) {
@@ -127,7 +130,7 @@ export async function runPlanning(deps: PlanningDeps, runId: string, input: Plan
     for (let n = 1; n <= maxRequests && !proposal; n++) {
       requestNumber = n;
       let prompt = JSON.stringify({ packet: JSON.parse(packet), repository: context.repository ? { revision: evidence.baseline, inspection: reader ? "bounded tracked-source reads available" : "Repository impact not assessed" } : null, unavailable, observations, request: n, maximumRequests: maxRequests, guidance: "Submit a final proposal when enough is known. Never invent missing evidence." });
-      const estimate = Math.ceil((INSTRUCTIONS.length + definitions + prompt.length) / 3);
+      const estimate = Math.ceil((INSTRUCTIONS.length + definitions + prompt.length + referenceText(context.references).length) / 3) + referenceImageEstimate(context.references);
       finalDue = finalDue || n === maxRequests || !reader || remaining() <= 2 * PLANNING_LIMITS.stepMs || inputUsed + 2 * estimate > PLANNING_LIMITS.inputTokens || toolCalls >= PLANNING_LIMITS.toolCalls || estimate >= contextTokens - 1_000;
       if (estimate > contextTokens || inputUsed + estimate > PLANNING_LIMITS.inputTokens) throw failure("context-too-small", "the planning context cannot fit its reserved final answer");
       if (finalDue) prompt += "\nExploration has ended to protect the final answer. Use submit_plan now, with explicit gaps and provisional impacts where evidence is missing.";
@@ -135,13 +138,15 @@ export async function runPlanning(deps: PlanningDeps, runId: string, input: Plan
       // The host must recheck the original project's existence, consent and sharing epoch for this exact request.
       if (context.repository || context.projectId) await deps.authorize(runId, input.operationId, n, context.repository?.sharingEpoch ?? context.sharingEpoch ?? 0, signal);
       signal.throwIfAborted();
+      const privateText = prompt + referenceText(context.references);
+      if (deps.mask(privateText) !== privateText) throw failure("malformed", "the planning context contains a credential; review the task references before asking again");
       // A tool may fill the context while this request explores. Its reserved answer belongs to the next request.
       const answerThisRequest = finalDue;
       const left = remaining();
       if (left <= 0) throw failure("timeout", "the planning operation reached its overall deadline");
       let generated;
       try {
-        generated = await client.call(agent, prompt, { maxSteps: 1, maxOutputTokens: PLANNING_LIMITS.outputTokens, budgetPart: answerThisRequest ? "finalisation" : "productive", toolChoice: answerThisRequest && policyFor(model).forceAnswer ? { type: "tool", toolName: "submit_plan" } : "auto", prepareStep: () => answerThisRequest ? { activeTools: ["submit_plan"] } : undefined, deadlines: { stepMs: Math.min(left, PLANNING_LIMITS.stepMs), totalMs: left }, signal, internal: new InternalFailure() });
+        generated = await client.call(agent, referencePrompt(prompt, context.references), { maxSteps: 1, maxOutputTokens: PLANNING_LIMITS.outputTokens, budgetPart: answerThisRequest ? "finalisation" : "productive", toolChoice: answerThisRequest && policyFor(model).forceAnswer ? { type: "tool", toolName: "submit_plan" } : "auto", prepareStep: () => answerThisRequest ? { activeTools: ["submit_plan"] } : undefined, deadlines: { stepMs: Math.min(left, PLANNING_LIMITS.stepMs), totalMs: left }, signal, internal: new InternalFailure() });
       } catch (error) {
         if (error instanceof ModelFailure) { steps.push(...error.steps); error.steps = []; error.failedStep = null; }
         throw error;
@@ -163,7 +168,7 @@ export async function runPlanning(deps: PlanningDeps, runId: string, input: Plan
     signal.throwIfAborted();
     if (!proposal) throw failure("malformed", "the planning operation ended without a valid proposal");
     const exploration = !context.repository ? "One AI request; no repository inspection." : maxRequests < PLANNING_LIMITS.requests ? `Exploration was reduced to at most ${maxRequests} AI ${maxRequests === 1 ? "request" : "requests"} by the remaining shared allowance. Final-answer capacity was protected.${reader ? "" : " Repository impact was not assessed."}` : "At most eight AI requests; exploration ends early when time, context or evidence requires the final answer.";
-    if (!deps.save(runId, input.operationId, PlanningResult.parse({ proposal, evidence, exploration }))) throw failure("cancelled");
+    if (!deps.save(runId, input.operationId, PlanningResult.parse({ ...(context.references ? { sourceManifest: context.references.manifest } : {}), proposal, evidence, exploration }))) throw failure("cancelled");
   } finally {
     deps.setMeta(runId, { usage: usageOf(steps) });
     await opened?.session.close();

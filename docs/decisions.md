@@ -4011,3 +4011,48 @@ snapshot and choices; new TaskInput requires both digests, while historical stor
 existing scheduler owns context lifetime and restart still interrupts without replay. No database migration,
 dependency, model, memory store, automatic learning, continuation, preference promotion or new budget authority is
 introduced. NIV-46's database-permission work remains separate.
+
+## D60. Task discussion and reference files freeze with each request; coding model calls use guarded grants (2026-10-30)
+
+**Decision.** Extend D59's frozen coding context, NIV-69 Planning and task Companion with one host-owned reference
+adapter. Comments are immutable, locally authored and ordered independently of execution revisions. Comments are
+included unless excluded; files require explicit selection. Private application-data copies retain source/prepared
+hashes, ownership and optional comment links. Copy and verify before committing metadata; verify move destinations
+before changing ownership and preserve valid recovery copies. Removal excludes later requests; accepted requests
+retain their own bytes. Project changes clear file selection and apply the destination's sharing settings.
+
+Each request's manifest binds ordered comment payloads, attachment identities/source/prepared hashes and hashes of
+the exact canonical run-summary payload supplied, including status, verification and apply facts. Recompute included
+sources before dispatch; excluded sources cannot invalidate a preview. Accepted context is cloned and frozen in
+memory. Persist references and fingerprints, keeping raw context out of engine logs, events and Mastra storage.
+Planning results and created drafts retain provenance, without copying files into repositories or selecting them.
+
+Send selected images as typed image content through the installed Mastra/Nebius transport, only to an available,
+grant-covered `nvidia/Nemotron-3.5-Super-VL`. Refuse an unsupported route without substitution or dropping images.
+Estimate image input on every carrying request, including tool rounds and finalisation; provider totals replace
+estimates without adding them again. Estimates establish neither monetary bounds nor a budget policy. PDFs supply
+bounded extracted text, labelled “PDF text only — images and layout aren’t included”. Static image preparation uses
+a bundled Chromium worker; PDF extraction uses a separate bounded host worker and exactly `unpdf@2.0.1`, bundled as
+a desktop devDependency, without canvas. The limits are recorded in [NIV-70 verification](niv-70-verification.md).
+
+Before coding can send attachments, require a finite D49 host-ledger grant for every new attempt, attributed to the
+project, task, attempt and existing coding-worker profile. Guard its written and dispatching revisions before sending
+`runs.start`. Preserve one listing, 23 productive requests at 8,000 output tokens, and one reserved hand-in at 1,500.
+Both listing and generation use the existing send-point journal; hand-in-only requests use finalisation, including
+early hand-in. Missing bindings refuse model-client construction. Reconcile task grants through the existing seals
+and affirmative-evidence rules, without inference replay. Coding remains outside the Companion/Planning monthly
+request allowance; sandbox operations/accounting, catalogue validation and dollar-budget refusal stay unchanged.
+
+**Why.** A visible task discussion is useful only when the model receives the reviewed content, including images as
+images, and a preview's identity covers the facts actually supplied. A frozen request must survive later removal or
+source changes. Coding's existing per-run limits did not substitute for a guarded shared-ledger grant, so wiring
+that prerequisite is necessary before enabling coding attachment requests.
+
+**Consequences.** Protocol 23 carries bounded prepared bytes through Windows/WSL RPC while retaining historical
+record readability. Workspace migrations 14–15 append discussion, metadata, selections, reference receipts, masked
+existing hand-in summaries and small activity references; older activity gaps are labelled. Attachments and discussion
+are supporting context, and the
+worker uses its existing unchanged outcome and summary to request clarification for material conflicts with the
+approved brief. No new outcome, continuation, budget pool, reservation algorithm or sandbox policy is introduced.
+Attaching/extracting/previewing/selecting is unpaid. No image secret detection or live provider image-understanding
+claim is made. OCR, PDF rendering, indexing, cloud sync and background summaries remain deferred.

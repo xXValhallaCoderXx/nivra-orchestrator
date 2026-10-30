@@ -19,12 +19,13 @@ const BRIEF: Brief = {
   acceptanceCases: [{ name: "Greets by name, and the world by default", command: ". ./greet.sh; greet Ada; greet", expectedOutput: "Hello, Ada\nHello, world\n", expectedExitCode: 0 }],
 };
 const FINGERPRINT = "f".repeat(64);
-const request = async (overrides: { input?: Record<string, unknown>; context?: unknown; brief?: unknown } = {}) => ({
-  clientRequestId: randomUUID(),
+const request = async (overrides: { input?: Record<string, unknown>; context?: unknown; brief?: unknown } = {}) => { const clientRequestId = randomUUID(); return ({
+  clientRequestId,
+  budget: { id: randomUUID(), requestId: clientRequestId, catalogueVersion: "test", models: ["nvidia/Nemotron-3.5-Super-VL"], rates: [], productiveMicros: null, finalisationMicros: null, productive: { requests: 23, outputTokens: 8000 }, finalisation: { requests: 1, outputTokens: 1500 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 } },
   workflowId: "task",
   input: { repoPath: "/home/someone/repo", project: randomUUID(), target: "wsl:Ubuntu-24.04", preview: FINGERPRINT, taskId: randomUUID(), briefVersion: 3, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(BRIEF), ...overrides.input },
   context: overrides.context ?? { sharing: { modelContext: true, cloudExecution: true }, brief: overrides.brief ?? BRIEF, preferences: { revision: 0, records: [] }, choices: [] },
-});
+}); };
 
 describe("a task run's request (NIV-7)", () => {
   it("requires both context digests on new requests and permits absent digests only in historical reads", async () => {
@@ -42,7 +43,7 @@ describe("a task run's request (NIV-7)", () => {
 
   it("takes the checkout, its project and target, the preview's fingerprint, the task and its brief by version and digest, with both consents and the brief in its context", async () => {
     const parsed = StartRunParams.parse(await request());
-    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 22]);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 23]);
     assert.equal(StartRunParams.safeParse(await request({ input: { target: "local" } })).success, true);
     assert.deepEqual(
       ["runs.task", "runs.proposal", "task.preview"].map((name) => [Object.hasOwn(Methods, name), name.startsWith("runs.") ? Methods[name as "runs.task"].result.safeParse(null).success : null]),

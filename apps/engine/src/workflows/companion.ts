@@ -1,3 +1,5 @@
+import { checkReferences, referenceImageEstimate, referenceText } from "@nivra/domain";
+import { referenceModel, referencePrompt } from "../providers/reference-content.ts";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { COMPANION_LIMITS, CompanionResult, knowledgeDigest, preferencesDigest, type CompanionContext, type Mask, type RunRoute, type RunUsage } from "@nivra/domain";
 import { z } from "zod";
@@ -36,8 +38,9 @@ export function createCompanionWorkflow(deps: CompanionDeps) {
       if (!key) throw failure("no-key");
       const binding = deps.budget(runId);
       if (!binding) throw failure("budget-exhausted", "this temporary turn has no accepted budget grant");
+      if (context.references && !await checkReferences(context.references)) throw failure("internal", "the included task context changed");
       const text = JSON.stringify({ snapshot: context.snapshot, preferences: context.preferences.records, knowledge: context.knowledge?.records ?? [], history: context.history, message: context.message });
-      if (deps.mask(text) !== text) throw failure("internal", "the temporary context contains credential-shaped text");
+      if (deps.mask(text + referenceText(context.references)) !== text + referenceText(context.references)) throw failure("internal", "the temporary context contains credential-shaped text");
       if (context.knowledge && await knowledgeDigest(context.knowledge.records) !== context.knowledge.digest) throw failure("internal", "the temporary knowledge snapshot changed");
       deps.received(runId, {
         preferences: context.preferences.records.map(({ id, revision }) => ({ id, revision })),
@@ -49,15 +52,17 @@ export function createCompanionWorkflow(deps: CompanionDeps) {
       const client = deps.modelClient?.(key, binding) ?? createModelClient({ apiKey: key, endpoint: deps.endpoint, budget: binding });
       const models = await client.listModels({ timeoutMs: 30_000, ...(abortSignal ? { signal: abortSignal } : {}) });
       const allowed = binding.models ? models.ids.filter((id) => binding.models!.some((candidate) => candidate.toLowerCase() === id.toLowerCase())) : models.ids;
-      const model = pickNemotron(allowed);
+      const model = referenceModel(models.ids, binding.models, context.references) ?? pickNemotron(allowed);
       if (!model) throw failure("model-unavailable", "no NVIDIA model is listed for this key");
-      if (Math.ceil((INSTRUCTIONS.length + text.length) / 3) > requestBudget(models.contextLengths.get(model) ?? null)) throw failure("context-too-small", "the temporary context is too large for this model");
+      if (Math.ceil((INSTRUCTIONS.length + text.length + referenceText(context.references).length) / 3) + referenceImageEstimate(context.references) > requestBudget(models.contextLengths.get(model) ?? null)) throw failure("context-too-small", "the temporary context is too large for this model");
       deps.setMeta(runId, { route: { provider: "nebius", endpoint: deps.endpoint.kind, model } });
       const agent = client.agent({ id: "nivra-companion", name: "Nivra companion", modelId: model, instructions: INSTRUCTIONS, tools: {} });
       const remainingMs = Math.max(1, Math.floor(COMPANION_LIMITS.totalMs - (performance.now() - startedAt)));
+      const privateText = text + referenceText(context.references);
+      if (deps.mask(privateText) !== privateText) throw failure("internal", "the temporary context contains a credential; review the task references before asking again");
       let generated;
       try {
-        generated = await client.call(agent, text, { maxSteps: 1, toolChoice: "none", maxOutputTokens: COMPANION_LIMITS.outputTokens, deadlines: { stepMs: Math.min(COMPANION_LIMITS.stepMs, remainingMs), totalMs: remainingMs }, internal: new InternalFailure(), ...(abortSignal ? { signal: abortSignal } : {}) });
+        generated = await client.call(agent, referencePrompt(text, context.references), { maxSteps: 1, toolChoice: "none", maxOutputTokens: COMPANION_LIMITS.outputTokens, deadlines: { stepMs: Math.min(COMPANION_LIMITS.stepMs, remainingMs), totalMs: remainingMs }, internal: new InternalFailure(), ...(abortSignal ? { signal: abortSignal } : {}) });
       } catch (error) {
         if (error instanceof ModelFailure) {
           const steps = error.steps;

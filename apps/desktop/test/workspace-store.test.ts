@@ -115,7 +115,7 @@ describe("the workspace database (D26)", () => {
     const before = sha(path);
     const opening = opened(path);
     assert.equal(opening.state, "unavailable");
-    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v13\), so this version won't read or change it\./);
+    assert.match(opening.state === "unavailable" ? opening.reason : "", /^Your history was saved by a newer version of Nivra \(schema v99; this version knows v15\), so this version won't read or change it\./);
     assert.deepEqual([sha(path), readdirSync(dir).sort()], [before, ["workspace.db"]]);
   });
 
@@ -435,7 +435,7 @@ describe("reviews of plan versions (D31)", () => {
     const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages"];
     const dump = (db: DatabaseSync) => ({
       rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
-      schema: db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN ('conversations', 'tasks', 'artifacts', 'run_links', 'messages') AND name <> 'run_links_fixed' ORDER BY name").all(),
+      schema: db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN ('conversations', 'tasks', 'artifacts', 'run_links', 'messages') AND name NOT IN ('run_links_fixed','task_state_activity') ORDER BY name").all(),
     });
     const before = dump(raw);
     assert.deepEqual(before.rows.map((rows) => rows.length), [1, 1, 2, 3, 3]);
@@ -470,7 +470,7 @@ describe("reviews of plan versions (D31)", () => {
     const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages", "reviews"];
     const dump = (db: DatabaseSync) => ({
       rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
-      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
+      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('task_state_activity','task_decision_activity','task_apply_activity') AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
     });
     const before = dump(raw);
     assert.deepEqual(before.rows.map((rows) => rows.length), [1, 0, 1, 1, 0, 1]);
@@ -584,7 +584,7 @@ describe("coachings of tasks (NIV-53)", () => {
     const TABLES = ["tasks", "artifacts", "run_links", "missions", "mission_versions", "mission_tasks"];
     const dump = (db: DatabaseSync) => ({
       rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
-      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
+      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('task_state_activity','task_decision_activity','task_apply_activity') AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
     });
     const before = dump(raw);
     assert.deepEqual(before.rows.map((rows) => rows.length), [1, 1, 1, 0, 0, 0]);
@@ -658,8 +658,8 @@ describe("the shared budget's ledger (NIV-66)", () => {
     const db = migrated.db.db;
     const kept = new Set(before.schema.map((row) => String(row["name"])));
     assert.deepEqual(schema(db).filter((row) => kept.has(String(row["name"]))), before.schema);
-    const added = [...new Set(schema(db).filter((row) => !kept.has(String(row["name"]))).map((row) => String(row["tbl_name"])))];
-    assert.deepEqual(added.filter((table) => !table.startsWith("budget_") && table !== "price_catalogues"), ["companion_saves", "knowledge", "knowledge_actions", "knowledge_state", "planning_operations", "planning_requests", "planning_saves", "planning_task_sources", "planning_versions"]);
+    const added = [...new Set(schema(db).filter((row) => !kept.has(String(row["name"])) && row["type"] === "table").map((row) => String(row["tbl_name"])))];
+    assert.deepEqual(added.filter((table) => !table.startsWith("budget_") && table !== "price_catalogues"), ["companion_saves", "knowledge", "knowledge_actions", "knowledge_state", "planning_operations", "planning_requests", "planning_saves", "planning_task_sources", "planning_versions", "task_activity", "task_attachments", "task_comments", "task_context_receipts", "task_reference_selection", "task_run_summaries"]);
     assert.ok(added.length >= 8, added.join(", "));
     assert.deepEqual(rows(db), before.rows);
     assert.deepEqual(added.map((table) => Number(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()?.["n"])), added.map((table) => table === "knowledge_state" ? 1 : 0));
@@ -684,7 +684,7 @@ describe("a loss kept in the workspace (NIV-66)", () => {
     const db = migrated.db.db;
     const kept = new Set(before.map((row) => String(row["name"])));
     assert.deepEqual(schema(db).filter((row) => kept.has(String(row["name"]))), before);
-    assert.deepEqual([...new Set(schema(db).filter((row) => !kept.has(String(row["name"]))).map((row) => String(row["tbl_name"])))], ["budget_pending_recovery", "companion_saves", "knowledge", "knowledge_actions", "knowledge_state", "planning_operations", "planning_requests", "planning_saves", "planning_task_sources", "planning_versions"]);
+    assert.deepEqual([...new Set(schema(db).filter((row) => !kept.has(String(row["name"]))).map((row) => String(row["tbl_name"])))], ["budget_pending_recovery", "companion_saves", "knowledge", "knowledge_actions", "knowledge_state", "planning_operations", "planning_requests", "planning_saves", "planning_task_sources", "planning_versions", "task_activity", "task_attachments", "task_comments", "task_context_receipts", "task_reference_selection", "task_run_summaries", "attempt_records", "tasks"]);
     assert.equal(Number(db.prepare("SELECT count(*) AS n FROM budget_pending_recovery").get()?.["n"]), 0);
   });
 });
@@ -718,7 +718,7 @@ describe("a project's environment (D41)", () => {
     const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages", "reviews", "research", "attempt_records"];
     const dump = (db: DatabaseSync) => ({
       rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
-      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
+      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('task_state_activity','task_decision_activity','task_apply_activity') AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
     });
     const before = dump(raw);
     assert.deepEqual(before.rows.map((rows) => rows.length), [1, 1, 1, 2, 1, 0, 0, 1]);
@@ -754,7 +754,7 @@ describe("a project's environment (D41)", () => {
     const TABLES = ["conversations", "tasks", "artifacts", "run_links", "messages", "reviews", "research", "attempt_records", "environments", "preparations"];
     const dump = (db: DatabaseSync) => ({
       rows: TABLES.map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()),
-      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
+      schema: db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('task_state_activity','task_decision_activity','task_apply_activity') AND tbl_name IN (${TABLES.map((table) => `'${table}'`).join(", ")}) ORDER BY name`).all(),
     });
     const before = dump(raw);
     assert.deepEqual(before.rows.map((rows) => rows.length), [1, 1, 1, 1, 1, 0, 0, 0, 1, 1]);

@@ -1,3 +1,4 @@
+import { checkReferences, referenceText } from "@nivra/domain";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { choicesDigest, preferencesDigest, isEnvironmentRef, projectFingerprint, TASK_MODEL, TaskOutcome, taskBriefDigest, type EnvironmentRef, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskEnvironment, type TaskReport, type TaskStopCode } from "@nivra/domain";
 import { z } from "zod";
@@ -5,7 +6,7 @@ import { installGitAdvice } from "../advice.ts";
 import { Refusal } from "../diagnostics.ts";
 import type { ExecutionBackend } from "../exec/backend.ts";
 import type { Proposal } from "../exec/proposal.ts";
-import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
+import { createModelClient, failure, ModelFailure, type BudgetBinding, type Endpoint, type ModelClient } from "../providers/model.ts";
 import { policyFor } from "../providers/policy.ts";
 import { RepoError } from "../repo/paths.ts";
 import { runLimitsFor, TASK_LIMITS } from "../task/limits.ts";
@@ -54,6 +55,7 @@ export interface TaskDeps {
   setMeta: (runId: string, meta: { usage?: RunUsage; route?: RunRoute }) => void;
   saveReport: (runId: string, report: TaskReport) => void;
   saveProposal: (runId: string, proposal: Proposal) => void;
+  budget?: (runId: string) => BudgetBinding | null;
   now?: () => Date;
   /** Tests only, in process: a client over a mock model. */
   modelClient?: (apiKey: string, endpoint: Endpoint) => ModelClient;
@@ -68,7 +70,11 @@ const stop = (code: TaskStopCode, step: string | null) => new Refusal(`task-${co
 
 export function createTaskWorkflow(deps: TaskDeps) {
   const now = deps.now ?? (() => new Date());
-  const clientFor = (key: string) => (deps.modelClient ? deps.modelClient(key, deps.endpoint) : createModelClient({ apiKey: key, endpoint: deps.endpoint }));
+  const clientFor = (runId: string, key: string) => {
+    const budget = deps.budget?.(runId) ?? null;
+    if (deps.budget && !budget) throw failure("budget-exhausted", "this coding attempt has no accepted budget grant; preview a new attempt");
+    return deps.modelClient ? deps.modelClient(key, deps.endpoint) : createModelClient({ apiKey: key, endpoint: deps.endpoint, ...(budget ? { budget } : {}) });
+  };
   /** Each run's start, on the monotonic clock: its one deadline counts from here, its checks included (D39). */
   const startedAt = new Map<string, number>();
   const routes = new Map<string, RunRoute>();
@@ -115,7 +121,8 @@ export function createTaskWorkflow(deps: TaskDeps) {
     if (!task.preferencesDigest || !task.choicesDigest || await preferencesDigest(context.preferences.records) !== task.preferencesDigest || await choicesDigest(context.choices) !== task.choicesDigest) {
       throw refuse("context-mismatch");
     }
-    const privateTexts = [...context.preferences.records.map((record) => record.statement), ...context.choices];
+    if ((task.referencesDigest ?? null) !== (context.references?.digest ?? null) || (context.references && (!await checkReferences(context.references) || context.references.manifest.taskId !== task.taskId))) throw refuse("context-mismatch");
+    const privateTexts = [referenceText(context.references),...context.preferences.records.map((record) => record.statement), ...context.choices];
     if (privateTexts.some((text) => deps.mask(text) !== text || deps.knownValues().some((value) => value.length > 0 && text.includes(value)))) {
       throw refuse("context-credentials");
     }
@@ -178,7 +185,7 @@ export function createTaskWorkflow(deps: TaskDeps) {
           }
           let models;
           try {
-            models = await clientFor(given.credentials.key).listModels({ signal: abortSignal, timeoutMs: 30_000 });
+            models = await clientFor(runId, given.credentials.key).listModels({ signal: abortSignal, timeoutMs: 30_000 });
           } catch (error) {
             if (!abortSignal.aborted) {
               early(runId, task, "failed", "model", "prepare", true);
@@ -250,7 +257,8 @@ export function createTaskWorkflow(deps: TaskDeps) {
               environment,
               local,
               git,
-              client: clientFor(credentials.key),
+              client: clientFor(runId, credentials.key),
+              ...(context.references ? { references: context.references } : {}),
               model: inputData.model,
               policy: policyFor(inputData.model),
               contextLength: inputData.contextLength,

@@ -193,6 +193,7 @@ export function taskBriefOf(content: BriefContent): { brief: TaskBrief } | { blo
  */
 export function taskRunFingerprint(parts: {
   preferencesDigest?: string;
+  referencesDigest?: string;
   choicesDigest?: string;
   taskId: string;
   briefId: string;
@@ -217,7 +218,7 @@ export function taskRunFingerprint(parts: {
     3 + TASK_RUN_BOUNDS.writes + TASK_RUN_BOUNDS.runs + checks.finalChecks + checks.baselineChecks + checks.comparisonChecks,
     TASK_RUN_BOUNDS] : canonical;
   const context = parts.preferencesDigest && parts.choicesDigest ? ["nivra.task-run-preview.v5", approved, parts.preferencesDigest, parts.choicesDigest] : approved;
-  return createHash("sha256").update(JSON.stringify(context)).digest("hex");
+  return createHash("sha256").update(JSON.stringify(parts.referencesDigest ? ["nivra.task-run-preview.v6", context, parts.referencesDigest] : context)).digest("hex");
 }
 
 /** What a run sends to each service, in plain words (D39). */

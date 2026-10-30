@@ -1,3 +1,4 @@
+import { codingGrant } from "./coding-grant.ts";
 import { choicesDigest, preferencesDigest, type PreferenceSnapshot } from "@nivra/domain";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
@@ -87,8 +88,9 @@ const ready = (shown: TaskPreview) => {
 async function start(engine: EngineProcess, repo: string, fingerprint: string, options: { preferences?: PreferenceSnapshot; choices?: string[]; contextDigests?: { preferencesDigest: string; choicesDigest: string }; brief?: TaskBrief; sharing?: { modelContext: boolean; cloudExecution: boolean }; requestId?: string; briefDigest?: string; environment?: TaskEnvironment } = {}): Promise<RunSummary> {
   const brief = options.brief ?? BRIEF;
   const preferences = options.preferences ?? { revision: 0, records: [] }; const choices = options.choices ?? [];
+  const requestId = options.requestId ?? randomUUID();
   return engine.client.call("runs.start", {
-    clientRequestId: options.requestId ?? randomUUID(),
+    clientRequestId: requestId, budget: codingGrant(requestId),
     workflowId: "task",
     input: { repoPath: repo, project: PROJECT, target: "local", preview: fingerprint, taskId: TASK_ID, briefVersion: 2, preferencesDigest: options.contextDigests?.preferencesDigest ?? await preferencesDigest(preferences.records), choicesDigest: options.contextDigests?.choicesDigest ?? await choicesDigest(choices), briefDigest: options.briefDigest ?? (await taskBriefDigest(brief)), ...(options.environment ? { environment: options.environment } : {}) },
     context: { sharing: options.sharing ?? { modelContext: true, cloudExecution: true }, brief, preferences, choices },
@@ -509,6 +511,10 @@ describe("a task run through a real engine (NIV-7)", () => {
     const stopped = await report(engine, first.id);
     assert.deepEqual([stopped.outcome, stopped.proposal, stopped.cleanup?.stopped, stopped.cleanup?.unresolved], ["cancelled", null, 1, []]);
     assert.equal(await engine.client.call("runs.proposal", { runId: first.id }), null);
+    const journal = await engine.client.call("budget.journal", { grantId: codingGrant(requestId).id, after: 0, limit: 200 });
+    assert.equal(journal.seal?.kind, "complete");
+    assert.equal(journal.rows.filter((row) => row.kind === "model-listing").length, 1);
+    assert.equal(journal.rows.filter((row) => row.kind === "model-request").length, 0);
   });
 
   it("starts no recovery pass over the journal of a task under way when the key is saved, and refuses one asked for", async () => {
@@ -531,11 +537,12 @@ describe("a task run through a real engine (NIV-7)", () => {
   it("keeps a proposal across a restart, reads a run its engine died during as interrupted, and replays nothing", async () => {
     const { sandbox, model, guest, engine, home, repo } = await setup();
     const fingerprint = ready(await preview(engine, repo)).snapshot.fingerprint;
-    const proposed = await start(engine, repo, fingerprint);
+    const proposedRequest = randomUUID(), dyingRequest = randomUUID();
+    const proposed = await start(engine, repo, fingerprint, { requestId: proposedRequest });
     assert.equal((await ended(engine, proposed.id)).status, "succeeded");
     const hash = (await report(engine, proposed.id)).proposal?.hash;
     guest.override = ({ label }) => (label === "nivra-toolchain" ? { waits: true } : undefined);
-    const dying = await start(engine, repo, fingerprint);
+    const dying = await start(engine, repo, fingerprint, { requestId: dyingRequest });
     await waitFor(() => operationRead(sandbox, "nivra-toolchain", 2), { timeoutMs: 30_000, what: "the engine's first read of the second toolchain probe's operation" });
     engine.kill();
     await engine.exited;
@@ -544,6 +551,11 @@ describe("a task run through a real engine (NIV-7)", () => {
     await later.initialize(CREDENTIALS);
     assert.deepEqual([(await later.client.call("runs.proposal", { runId: proposed.id }))?.hash, (await report(later, proposed.id)).outcome], [hash, "proposed"]);
     assert.deepEqual([(await later.client.call("runs.get", { runId: dying.id })).status, (await report(later, dying.id)).outcome], ["failed", "interrupted"]);
+    const completed = await later.client.call("budget.journal", { grantId: codingGrant(proposedRequest).id, after: 0, limit: 200 });
+    const interrupted = await later.client.call("budget.journal", { grantId: codingGrant(dyingRequest).id, after: 0, limit: 200 });
+    assert.equal(completed.seal?.kind, "complete"); assert.equal(interrupted.seal?.kind, "interrupted");
+    assert.equal(completed.rows.filter((row) => row.kind === "model-request").length, model.chats().length);
+    assert.equal(interrupted.rows.filter((row) => row.kind === "model-request").length, 0);
     const done = await waitFor(async () => {
       const status: SandboxStatus = await later.client.call("sandbox.status", {});
       return status.pass.state === "done" ? status : null;

@@ -159,7 +159,7 @@ test("writes a brief's baseline checks and frozen files, previews a run from the
   await expect(preview.getByTestId("task-run-preview-environment")).toContainText("Starts from the prepared environment: node 22.23.4, npm 11.19.0, pnpm 11.5.3, prepared ");
   await expect(preview.getByTestId("task-run-preview-baseline")).toContainText("1 baseline check runs once on the commit as it is, with networking off.");
   await expect(preview.getByTestId("task-run-preview-frozen-file")).toContainText("check.sh, ");
-  await expect(preview.getByTestId("task-run-preview-limits")).toContainText("1 baseline check before the worker");
+  await expect(preview.getByTestId("task-run-preview-limits")).toContainText("1 explicit baseline check before the worker");
   await page.getByTestId("task-run-start").click();
 
   // The card: started from the environment, the baseline check matched, the frozen file unchanged, and so verified.
@@ -168,7 +168,8 @@ test("writes a brief's baseline checks and frozen files, previews a run from the
   await expect(card.getByTestId("task-attempt-environment")).toContainText("Started from the prepared environment: node 22.23.4, npm 11.19.0, pnpm 11.5.3, x86_64, image image-");
   await expect(card.getByTestId("task-attempt-baseline-check")).toHaveAttribute("data-match", "matched");
   await expect(card.getByTestId("task-attempt-frozen-file")).toHaveAttribute("data-state", "unchanged");
-  await expect(card.getByTestId("task-attempt-verdict")).toContainText("Every acceptance case passed, and every frozen file is unchanged: the change is verified.");
+  // This gated report predates version 4: current engine admission verifies it, with an explicit comparison gap.
+  await expect(card.getByTestId("task-attempt-verdict")).toHaveText("This legacy run was recorded as verified under the earlier rule, where repository checks were advisory. Its engine has checked the original proposal evidence against the current rule: every required final case and repository check passed, with the integrity checks satisfied. The change is verified and can be approved. Before-change comparisons weren't recorded, so regression comparisons are unavailable.");
   await expect(page.getByTestId("task-engine-failed")).toHaveCount(0);
   const run = JSON.parse(lines("tasks.log")[0]!.split(" ").slice(1).join(" ")) as { input: { environment?: { format: string; tools: Array<{ name: string; version: string }>; builds: { missing: string[] } | null } }; brief: { baseline?: unknown[]; frozen?: string[] } };
   expect([run.input.environment?.format, run.input.environment?.tools[0]?.version, run.input.environment?.builds?.missing, run.brief.baseline?.length, run.brief.frozen]).toEqual(["nivra.environment-ref.v1", "22.23.4", ["esbuild"], 1, ["check.sh"]]);

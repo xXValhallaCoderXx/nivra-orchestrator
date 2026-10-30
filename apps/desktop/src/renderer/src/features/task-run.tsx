@@ -1,3 +1,4 @@
+import { ReferenceContextView, ReferenceReceiptView } from "./task-discussion";
 import { Alert, Badge, Button, Checkbox, Code, Collapse, Group, List, Modal, NumberInput, Paper, SegmentedControl, SimpleGrid, Stack, Text, TextInput, Textarea, UnstyledButton, VisuallyHidden } from "@mantine/core";
 import type { BaselineSelection, TaskBaselineCheck, TaskCheck, TaskProposal, TaskReport } from "@nivra/domain";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
@@ -379,6 +380,18 @@ export function RunLauncher({
   const why = useId();
   const projectId = view.summary.projectId;
   const blocked = view.runBlocked;
+  useEffect(() => {
+    if (!previewing || !preview?.references) return;
+    let active = true;
+    const check = async () => {
+      try {
+        const current = await window.nivra.previewTaskReferences(taskId);
+        if (active && current.digest !== preview.references!.digest) { setChanged(true); setError("The included discussion, files or run summaries changed. Refresh this preview before starting."); }
+      } catch (reason) { if (active) { setChanged(true); setError(errorMessage(reason)); } }
+    };
+    const timer = setInterval(() => void check(), 1500);
+    return () => { active = false; clearInterval(timer); };
+  }, [taskId, previewing, preview?.references?.digest]);
 
   // Only a press made while this is shown opens the preview: one counted before it was shown again doesn't.
   const seenAsk = useRef(asked);
@@ -544,6 +557,7 @@ function RunPreview({
         {preview.project.targetLabel ? ` · ${preview.project.targetLabel}` : ""}. A worker changes a copy of the commit in a Nebius sandbox, with networking off. It can read and
         write files there and run the cases and checks below, and nothing else. Nothing comes back to your checkout unless you approve the change afterwards.
       </Text>
+      <ReferenceContextView value={preview.references} />
       <Paper withBorder p="sm" data-testid="task-run-preferences"><Stack gap="xs">
         <Group justify="space-between"><Text fw={600}>Preferences for this run</Text><Button variant="subtle" size="xs" disabled={busy || !onPreferences} onClick={onPreferences}>Edit preferences</Button></Group>
         {preview.preferences.records.length === 0 && <Text size="sm">No confirmed preferences apply to this run.</Text>}
@@ -1466,6 +1480,7 @@ export function RunReview({ value, number, task, content, decision = null }: { v
   return (
     <Stack gap="md" data-testid={report ? "task-attempt-report" : undefined} data-outcome={report?.outcome} data-verified={report ? currentlyVerified(value) : undefined} data-recorded-verified={report?.verified}>
       <RunResult value={value} number={number} task={task} />
+      <ReferenceReceiptView value={value.referenceContext} />
       {decision}
       {report && <RunChecks report={report} content={content} />}
       {value.proposal && <RunChanges proposal={value.proposal} />}

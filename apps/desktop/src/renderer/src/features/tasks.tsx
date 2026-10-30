@@ -1,3 +1,4 @@
+import { TaskDiscussionPanel } from "./task-discussion";
 import { Alert, Anchor, Badge, Button, Code, Collapse, Grid, Group, List, Menu, Modal, Paper, Select, SimpleGrid, Stack, Table, Tabs, Text, Textarea, TextInput, Title, UnstyledButton } from "@mantine/core";
 import type { CoachQuestionField } from "@nivra/domain";
 import { useEffect, useId, useState, type ChangeEvent, type ReactNode } from "react";
@@ -1243,6 +1244,7 @@ export function TaskDetail({
               </Paper>
             )}
             {leading && phase !== "completed" && !(summary.state === "draft" || shown === null) && <ReadinessCard readiness={readiness} busy={busy || coachSaving} onAction={onReadiness} />}
+            <TaskDiscussionPanel key={`${taskId}:${summary.projectId}`} taskId={taskId} projectId={summary.projectId} onAttempt={(id) => { setChosen(id); setTab("runs"); }} />
             </Stack>
           </Stack>
         </Grid.Col>

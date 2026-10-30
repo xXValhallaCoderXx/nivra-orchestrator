@@ -3708,3 +3708,17 @@ untracked files were inspected; no generated output, dependencies or credential 
 Desktop UI, packaged and Windows checks were not repeated for this script/test/documentation integration: their
 runtime sources are identical to current main. No paid provider/cloud calls ran and no checks were weakened or
 skipped to obtain a passing result. PR #50 remains unmerged for the person to review this combined revision.
+
+## NIV-70: task discussion, activity and multimodal context (30 October 2026)
+
+Implemented from main `60c1216`, reusing NIV-69 Planning and NIV-71's frozen coding context; combined verification
+includes current main `a9dbc30`. The change adds
+native task discussion/reference storage, projected activity, exact frozen source manifests across task Companion,
+Planning and coding, typed image transport and bounded text-only PDF extraction. Coding first receives guarded
+host-ledger grants with its existing 23 productive requests and reserved hand-in; it remains outside the
+Companion/Planning monthly request allowance. No sandbox accounting or budget policy was redesigned.
+
+[The NIV-70 receipt](niv-70-verification.md) records limits, negative/recovery cases, packaged/Windows evidence and
+the final candidate identity. Model requests in verification use explicit local stand-ins. Live provider image
+understanding is unassessed and requires separate approval. No paid calls, merges or Linear updates ran. Publishing
+the PR and its reviewer comment was explicitly requested separately.

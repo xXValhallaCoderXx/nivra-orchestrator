@@ -1,3 +1,5 @@
+import { TaskReferences } from "./task-references.ts";
+import type { ReferenceSelection, FrozenReferenceContext } from "@nivra/domain";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -12,6 +14,8 @@ import {
   REF_FORMAT,
   SETUP_FORMAT,
   TASK_BRIEF_LIMITS,
+  TASK_MODEL,
+  CODING_WORKER_PROFILE,
   isTerminal,
   packetDigest,
   preferencesDigest,
@@ -1106,6 +1110,22 @@ export class Host {
     return this.task(taskId);
   }
 
+  #references: TaskReferences | null = null;
+  #taskReferences(): TaskReferences { return this.#references ??= new TaskReferences(this.#workspaceDb(), join(dirname(this.#options.workspacePath), "task-assets")); }
+  getTaskBrief(taskId: string, briefId: string): TaskView["brief"] {
+    const brief = versionsOf(this.#workspaceDb(), taskId).find((brief) => brief.id === briefId);
+    if (!brief) throw new Error("That brief version doesn't belong to this task. Open its activity again.");
+    return { id: brief.id, version: brief.version, sha256: brief.sha256, content: BriefContentSchema.parse(brief.content), createdAt: brief.createdAt };
+  }
+  getTaskDiscussion(taskId: string) { return this.#taskReferences().discussion(taskId); }
+  async addTaskComment(taskId: string, text: string) { this.#taskReferences().addComment(taskId, text, await this.#knownSecrets()); return this.getTaskDiscussion(taskId); }
+  selectTaskReferences(taskId: string, selection: ReferenceSelection) { this.#taskReferences().select(taskId, selection); return this.getTaskDiscussion(taskId); }
+  async importTaskAttachment(taskId: string, nativePath: string, commentId: string | null = null) { await this.#taskReferences().importFile(taskId, nativePath, await this.#knownSecrets(), commentId); return this.getTaskDiscussion(taskId); }
+  getTaskAttachmentPreview(taskId: string, id: string) { return this.#taskReferences().preview(taskId, id); }
+  async prepareTaskImage(taskId: string, id: string, base64: string, source: string) { this.#taskReferences().prepareImage(taskId, id, base64, source, await this.#knownSecrets()); return this.getTaskDiscussion(taskId); }
+  removeTaskAttachment(taskId: string, id: string) { this.#taskReferences().remove(taskId, id); return this.getTaskDiscussion(taskId); }
+  async previewTaskReferences(taskId: string) { return this.#taskReferences().freeze(taskId, await this.#knownSecrets()); }
+
   /**
    * Sets the repository a task will run on, or none. What its brief took from another project's conversation is
    * cleared in a new version and marked to be written again (D26), so a project's material never moves with a task.
@@ -1124,8 +1144,12 @@ export class Host {
       return from !== undefined && from !== null && from !== projectId;
     });
     const cleared = briefForRepository(before, projectId) ?? (foreignPlanning ? { ...before, context: "", assumptions: [], revalidate: ["context", "assumptions"] as BriefContent["revalidate"] } : null);
-    if (cleared) this.#commitBrief(task, latest, cleared, { projectId, state: task.state === "ready" && !briefIsReady(cleared) ? "draft" : task.state });
-    else if (!updateTask(workspace, taskId, revision, { projectId }, new Date().toISOString())) throw new Error("This task changed since you opened it. Open it again, then try again.");
+    workspace.tx(() => {
+      if (task.projectId !== projectId) this.#taskReferences().move(taskId, projectId);
+      if (cleared) this.#commitBrief(task, latest, cleared, { projectId, state: task.state === "ready" && !briefIsReady(cleared) ? "draft" : task.state });
+      else if (!updateTask(workspace, taskId, revision, { projectId }, new Date().toISOString())) throw new Error("This task changed since you opened it. Open it again, then try again.");
+    });
+    this.#taskReferences().settleMoves(taskId);
     return this.task(taskId);
   }
 
@@ -1630,9 +1654,10 @@ export class Host {
     const known = await this.#knownSecrets();
     for (const record of preferences.records) refuseCredentials("A preference for this run", record.statement, known, "preview");
     for (const choice of cleaned) refuseCredentials("A choice for this run", choice, known, "preview");
-    const contextDigests = { preferencesDigest: await preferencesDigest(preferences.records), choicesDigest: await choicesDigest(cleaned) };
+    const references = this.#taskReferences().freeze(taskId, known);
+    const contextDigests = { preferencesDigest: await preferencesDigest(preferences.records), choicesDigest: await choicesDigest(cleaned), referencesDigest: references.digest };
     const base = {
-      preferences, choices: cleaned, ...contextDigests,
+      preferences, choices: cleaned, references, ...contextDigests,
       taskId,
       briefVersion: brief.version,
       project: project ? { label: project.label, targetLabel: this.#labelOf(project.targetId) } : { label: "No repository yet", targetLabel: "" },
@@ -2768,7 +2793,8 @@ export class Host {
     const preferences = snapshotFor(this.#options.store.data, project.id);
     for (const record of preferences.records) refuseCredentials("A preference for this run", record.statement, known, "send");
     for (const choice of cleaned) refuseCredentials("A choice for this run", choice, known, "send");
-    const contextDigests = { preferencesDigest: await preferencesDigest(preferences.records), choicesDigest: await choicesDigest(cleaned) };
+    const references = this.#taskReferences().freeze(taskId, known);
+    const contextDigests = { preferencesDigest: await preferencesDigest(preferences.records), choicesDigest: await choicesDigest(cleaned), referencesDigest: references.digest };
     const briefDigest = await taskBriefDigest(packet);
     // The prepared environment the preview was bound to, if any (D41): one prepared again since then changes the fingerprint.
     const prepared = this.#preparedFor(project);
@@ -2785,12 +2811,14 @@ export class Host {
     if (currentTask?.revision !== task.revision || currentTask.projectId !== project.id || versionsOf(workspace, taskId).at(-1)?.id !== brief.id || JSON.stringify(snapshotFor(this.#options.store.data, project.id).records) !== JSON.stringify(preferences.records)) {
       throw new Error("The task or its preferences changed while the run was starting. Preview it again, then start.");
     }
+    if (this.#taskReferences().digest(taskId) !== references.digest) throw new Error("The included task context changed. Preview it again before starting.");
     const id = randomUUID();
     if (!insertAttempt(workspace, { id, taskId, briefId: brief.id, sessionId: this.#sessionId, targetId: project.targetId, createdAt: new Date().toISOString() })) throw new Error(TASK_RUNNING);
     this.#taskRuns.set(id, { projectId: project.id, ...epochs });
     this.#submissions.set(id, { cancel: null });
     const input: TaskInput = { repoPath: project.nativePath, project: project.id, target: project.targetId, preview: snapshot, taskId, briefVersion: brief.version, briefDigest, ...contextDigests, ...(prepared ? { environment: prepared } : {}) };
-    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: packet, preferences, choices: [...cleaned] };
+    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: packet, preferences, choices: [...cleaned], references };
+    workspace.db.prepare("INSERT INTO task_context_receipts (request_id,task_id,digest,manifest_json) VALUES (?,?,?,?)").run(id, taskId, references.digest, JSON.stringify(references.manifest));
     void this.#submitAttempt(id, project, input, context).catch((error: unknown) => this.#options.log(`A task run couldn't be sent: ${errorText(error)}`));
     return this.#attemptView(getAttempt(workspace, id)!);
   }
@@ -2852,8 +2880,15 @@ export class Host {
     }
     let run: RunSummary;
     try {
-      run = await engine.supervisor.call("runs.start", { clientRequestId: attemptId, workflowId: "task", input, context });
+      if (context.references && this.#taskReferences().digest(input.taskId, attemptId) !== context.references.digest) throw new Error("The included task context changed before dispatch. Preview a new attempt.");
+      const budget = this.#codingGrant(attemptId, project, input.taskId, state.info.homeId);
+      run = await engine.supervisor.call("runs.start", { clientRequestId: attemptId, workflowId: "task", input, context, budget });
     } catch (error) {
+      // A grant refused before dispatch sends nothing. A guarded dispatch keeps its reservation until a seal.
+      if (!openGrants(workspace).some((grant) => grant.requestId === attemptId && grant.state !== "written")) {
+        notSent(errorText(error));
+        return;
+      }
       // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
       if (error instanceof EngineOfflineError || error instanceof TypeError) {
         notSent(`The engine on ${label} didn't take the run (${errorText(error)}), so ${RUN_NOTHING}.`);
@@ -2963,7 +2998,7 @@ export class Host {
       // Its outcome is kept now, so its history shows without its engine; one that can't be read now is read when shown.
       try {
         const report = await engine.supervisor.call("runs.task", { runId: summary.id });
-        if (report && report.request.clientRequestId === attempt.id && report.request.runId === summary.id) this.#keepOutcome(attempt.id, report);
+        if (report && report.request.clientRequestId === attempt.id && report.request.runId === summary.id) this.#keepOutcome(attempt.id, report, await this.#knownSecrets());
       } catch {
         // Read when the run is shown.
       }
@@ -3016,6 +3051,7 @@ export class Host {
     const workspace = this.#workspaceDb();
     const record = attemptRecord(workspace, attempt.id);
     const base: TaskAttemptView = {
+      referenceContext: this.#taskReferences().receipt(attempt.taskId, attempt.id),
       id: attempt.id,
       taskId: attempt.taskId,
       briefVersion: getArtifact(workspace, attempt.briefId)?.version ?? 0,
@@ -3049,7 +3085,7 @@ export class Host {
       const report: TaskReport | null = await engine.supervisor.call("runs.task", { runId: attempt.runId });
       // A report about another request or run is shown nowhere.
       if (report && (report.request.clientRequestId !== attempt.id || report.request.runId !== attempt.runId)) return { ...base, unresolved: "Its engine's report is about another run, so none of it is shown." };
-      if (report && attempt.status === "answered") this.#keepOutcome(attempt.id, report);
+      if (report && attempt.status === "answered") this.#keepOutcome(attempt.id, report, known);
       const proposal = report?.proposal ? await engine.supervisor.call("runs.proposal", { runId: attempt.runId }) : null;
       let admission: TaskAdmission | null = null;
       if (report?.proposal && proposal && report.proposal.hash === proposal.hash) {
@@ -3158,14 +3194,22 @@ export class Host {
       throw new Error(`Nivra can't read this run's report from its engine now (${errorText(error)}), so nothing was sent. Try again.`);
     }
     if (!report || report.request.clientRequestId !== attempt.id || report.request.runId !== attempt.runId) throw new Error("This run's report can't be read from its engine, so nothing was sent. Run the task again.");
-    this.#keepOutcome(attempt.id, report);
+    this.#keepOutcome(attempt.id, report, await this.#knownSecrets());
     return report;
   }
 
   /** How an attempt's run ended, kept once (D40): its history then shows without its engine. */
-  #keepOutcome(attemptId: string, report: TaskReport): void {
+  #keepOutcome(attemptId: string, report: TaskReport, known: KnownSecrets): void {
     if (report.outcome === "in-progress" || this.#workspace.state !== "ready") return;
     recordOutcome(this.#workspace.db, attemptId, { outcome: report.outcome, verified: report.verified, proposalHash: report.proposal?.hash ?? null, baseline: report.snapshot?.baseline ?? null }, new Date().toISOString());
+    const attempt = getAttempt(this.#workspace.db, attemptId);
+    if (!attempt) return;
+    this.#taskReferences().retainSummary(attemptId, report.worker?.summary ?? null, known);
+    const at = report.finishedAt ?? new Date().toISOString();
+    for (const check of report.checks) this.#taskReferences().record(attempt.taskId, "check", `Final ${check.kind} ${check.number}: ${check.verdict}`, attemptId, at);
+    for (const check of report.beforeChecks ?? []) this.#taskReferences().record(attempt.taskId, "check", `Before-change check ${check.number}: ${check.verdict}`, attemptId, at);
+    for (const check of report.baseline) this.#taskReferences().record(attempt.taskId, "check", `Baseline ${check.number}: ${check.matched === null ? "unknown" : check.matched ? "matched" : "did not match"}`, attemptId, at);
+    if (report.proposal) this.#taskReferences().record(attempt.taskId, "proposal", `Proposal ${report.proposal.hash.slice(0, 12)} · ${report.verified ? "verified" : "not verified"}`, attemptId, at);
   }
 
   /**
@@ -5019,6 +5063,7 @@ export class Host {
     if (this.#planning) return this.#planning;
     const projects = () => this.#options.store.data.projects.filter((project) => !this.#removing.has(project.id));
     const runner = this.#planningRunner ??= new PlanningRunner({
+      references: (taskId) => this.#taskReferences().freeze(taskId, []),
       workspace: () => this.#workspaceDb(), projects,
       sharingEpoch: (id) => this.#epochOf(id),
       preferences: (id) => snapshotFor(this.#options.store.data, id),
@@ -5028,6 +5073,7 @@ export class Host {
       reconcile: () => this.getCompanionUsage(),
     });
     return this.#planning = new PlanningHost({
+      references: (taskId) => this.#taskReferences().freeze(taskId, []),
       workspace: () => this.#workspaceDb(), projects,
       sharingEpoch: (id) => this.#epochOf(id), secrets: () => this.#knownSecrets(),
       preferences: (id) => snapshotFor(this.#options.store.data, id),
@@ -5078,6 +5124,7 @@ export class Host {
 
   #companionHost(): CompanionHost {
     return this.#companion ??= new CompanionHost({
+      references: (taskId) => this.#taskReferences().freeze(taskId, []),
       workspace: () => this.#workspaceDb(),
       projects: () => this.#options.store.data.projects,
       preferences: (projectId) => snapshotFor(this.#options.store.data, projectId),
@@ -5105,7 +5152,7 @@ export class Host {
 
   getCompanionContext(hint: CompanionHint): Promise<CompanionContextView> { return this.#companionHost().context(hint); }
   inspectProject(projectId: string): Promise<ProjectInspectionView> { return this.#companionHost().inspect(projectId); }
-  sendCompanionTurn(input: { sessionId: string; clientRequestId: string; hint: CompanionHint; message: string }): Promise<{ runId: string; requestId: string }> { return this.#companionHost().send(input); }
+  sendCompanionTurn(input: { sessionId: string; clientRequestId: string; hint: CompanionHint; expected?: string; message: string }): Promise<{ runId: string; requestId: string }> { return this.#companionHost().send(input); }
   getCompanionTurn(sessionId: string, requestId: string): Promise<CompanionTurnView> { return this.#companionHost().turn(sessionId, requestId); }
   cancelCompanionTurn(sessionId: string, requestId: string): Promise<void> { return this.#companionHost().cancel(sessionId, requestId); }
   endCompanionSession(sessionId: string): Promise<void> { return this.#companionHost().end(sessionId); }
@@ -5257,6 +5304,27 @@ export class Host {
   }
 
   /** Writes and guards a finite grant before any companion RPC can be sent. */
+  #codingGrant(requestId: string, project: ProjectRecord, taskId: string, homeId: string): BudgetGrant {
+    const { workspace, guard, recovery } = this.#budget();
+    if (recovery) throw new Error(BUDGET_NEEDS_RECOVERY);
+    const now = Date.now();
+    const last = guard.last();
+    const verified = last ? { ledgerId: last.ledgerId, revision: last.revision, chain: last.chain } : null;
+    const written = writeGrant(workspace, { requestId, workflow: "task", targetId: project.targetId,
+      attribution: { feature: "task", projectId: project.id, taskId, attemptId: requestId, queueId: null, queueItemId: null, profile: CODING_WORKER_PROFILE },
+      models: [TASK_MODEL], productive: { requests: 23, outputTokens: 8_000 }, finalisation: { requests: 1, outputTokens: 1_500 },
+      allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, extends: null, need: null },
+      { now, catalogue: this.#prices, timezone: this.#budgetZone(workspace), verified });
+    if ("refused" in written) throw new Error(written.refused.message);
+    if (written.authority) this.#guardBudget(guard, workspace, written.authority, now);
+    const record = getGrant(workspace, written.grant.id)!;
+    if (record.state !== "written") throw new Error("This coding attempt was already dispatched. Open its existing attempt; it will not be sent again.");
+    const dispatched = markDispatching(workspace, record.id, homeId, now, guard.last());
+    if (!dispatched) throw new Error("The coding grant couldn't be dispatched. Review Usage before starting another attempt.");
+    this.#guardBudget(guard, workspace, dispatched, now);
+    return written.grant;
+  }
+
   #companionGrant(requestId: string, targetId: string, homeId: string, projectId: string | null, taskId: string | null) {
     this.#ensurePlanningPool();
     const { workspace, guard, recovery } = this.#budget();
@@ -5279,7 +5347,7 @@ export class Host {
   async #reconcileCompanionBudgets(): Promise<void> {
     const { workspace, guard, recovery } = this.#budget();
     if (recovery) return;
-    for (const grant of openGrants(workspace).filter((one) => requestPoolCovers(one.attribution.feature))) {
+    for (const grant of openGrants(workspace).filter((one) => (requestPoolCovers(one.attribution.feature) || one.attribution.feature === "task"))) {
       const now = Date.now();
       if (grant.state === "written") {
         const released = releaseGrant(workspace, grant.id, now, guard.last());
@@ -5297,7 +5365,7 @@ export class Host {
           page = await engine.supervisor.call("budget.journal", { grantId: grant.id, after, limit: 200 });
           if (!page.accepted) break;
           rows.push(...page.rows);
-          if (rows.length > 1000) throw new Error("A companion journal exceeds its bound.");
+          if (rows.length > 1000) throw new Error("A model journal exceeds its bound.");
           after = page.next ?? 0;
         } while (page.next !== null);
         if (!page.accepted) continue;

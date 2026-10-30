@@ -1,3 +1,5 @@
+import { VISUAL_MODEL } from "@nivra/domain";
+import { referenceFixture } from "./reference-fixture.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -20,6 +22,16 @@ import { cleanUp, scratch } from "./workspace-fixtures.ts";
 after(cleanUp);
 
 describe("a task's worker (NIV-7, D39)", () => {
+  it("NIV-70 journals early image hand-in as finalisation and repeats image input without adding estimates to reported totals", async () => {
+    const references = await referenceFixture(); const time = clock();
+    const run = await attempt({ journal: true, time, extra: { references, model: VISUAL_MODEL }, handInWhenAsked: true, beforeRequest: () => void time.sleep(60_000), calls: Array.from({ length: 23 }, (): Call => ["search_files", { text: "greet", in: "names" }]) });
+    assert.equal(run.core!.worker.handInDue, "time"); assert.equal(run.requests() < 24, true);
+    assert.equal(run.budgetParts.at(-1), "finalisation"); assert.equal(run.budgetParts.slice(0, -1).every((part) => part === "productive"), true);
+    assert.equal(run.core!.worker.usage.inputTokens, run.requests() * 3000);
+    for (const prompt of run.prompts()) { assert.equal(prompt.includes(references.comments[0]!.text), true); assert.equal(prompt.includes('"type":"file"'), true); assert.equal(prompt.includes('"mediaType":"image/png"'), true); }
+    assert.equal(run.outputCaps().at(-1), 1500);
+  });
+
   it("stops before another model request when a frozen preference becomes a saved credential", async () => {
     const privateText = "private-value-that-becomes-a-key"; let saved = false;
     const run = await attempt({

@@ -1,3 +1,4 @@
+import type { TaskDiscussion, AttachmentPreview, ReferenceSelection, FrozenReferenceContext, ReferenceReceipt } from "@nivra/domain";
 import type {
   TaskAdmission,
   ApplyPath,
@@ -127,6 +128,15 @@ export const IPC = {
   createTask: "tasks:create",
   reviseBrief: "tasks:revise-brief",
   refreshBriefFromPlan: "tasks:refresh-brief",
+  getTaskBrief: "tasks:brief-version",
+  getTaskDiscussion: "tasks:discussion",
+  addTaskComment: "tasks:add-comment",
+  pickTaskAttachment: "tasks:pick-attachment",
+  getTaskAttachmentPreview: "tasks:attachment-preview",
+  prepareTaskImage: "tasks:prepare-image",
+  removeTaskAttachment: "tasks:remove-attachment",
+  selectTaskReferences: "tasks:select-references",
+  previewTaskReferences: "tasks:reference-context",
   setTaskProject: "tasks:project",
   setTaskState: "tasks:state",
   renameTask: "tasks:rename",
@@ -613,7 +623,7 @@ export interface TaskSummary {
 }
 
 export interface TaskView {
-  planningSources?: Array<{ planningId: string; revision: number; itemId: string; questions: string[]; missingPrerequisites: string[] }>;
+  planningSources?: Array<{ planningId: string; revision: number; itemId: string; questions: string[]; missingPrerequisites: string[]; sourceReferences?: { digest: string; manifest: FrozenReferenceContext["manifest"] } | null }>;
   summary: TaskSummary;
   revision: number;
   brief: { id: string; version: number; sha256: string; content: BriefContent; createdAt: string };
@@ -655,6 +665,7 @@ export type RunLimitsView = Pick<
  * (D39). Nothing is sent. `expected` binds a start to this preview: starting is refused when anything here changed.
  */
 export interface TaskRunPreview {
+  references?: FrozenReferenceContext;
   preferences: PreferenceSnapshot;
   choices: string[];
   preferencesDigest: string;
@@ -732,6 +743,7 @@ export interface TaskApplyView {
 }
 
 export interface TaskAttemptView {
+  referenceContext?: ReferenceReceipt | null;
   id: string;
   taskId: string;
   briefVersion: number;
@@ -1032,6 +1044,15 @@ export interface NivraApi {
   /** Takes a newer version of the plan a brief came from into its next version. */
   refreshBriefFromPlan(taskId: string, revision: number, planId: string): Promise<TaskView>;
   /** Sets the repository a task will run on, or none; what came from another project's conversation is cleared. */
+  getTaskBrief(taskId: string, briefId: string): Promise<TaskView["brief"]>;
+  getTaskDiscussion(taskId: string): Promise<TaskDiscussion>;
+  addTaskComment(taskId: string, text: string): Promise<TaskDiscussion>;
+  pickTaskAttachment(taskId: string, commentId?: string | null): Promise<TaskDiscussion | null>;
+  getTaskAttachmentPreview(taskId: string, id: string): Promise<AttachmentPreview>;
+  prepareTaskImage(taskId: string, id: string, base64: string, source: string): Promise<TaskDiscussion>;
+  removeTaskAttachment(taskId: string, id: string): Promise<TaskDiscussion>;
+  selectTaskReferences(taskId: string, selection: ReferenceSelection): Promise<TaskDiscussion>;
+  previewTaskReferences(taskId: string): Promise<FrozenReferenceContext>;
   setTaskProject(taskId: string, revision: number, projectId: string | null): Promise<TaskView>;
   /** Moves a task to the state asked for, when its brief allows it. */
   setTaskState(taskId: string, revision: number, state: TaskState): Promise<TaskView>;
@@ -1098,7 +1119,7 @@ export interface NivraApi {
   saveCompanionDraft(input: {sessionId: string; requestId: string; actionId: string; fingerprint: string; draft: CompanionDraft}): Promise<{mission?: MissionView; task?: TaskView}>;
   getCompanionContext(hint: CompanionHint): Promise<CompanionContextView>;
   inspectProject(projectId: string): Promise<ProjectInspectionView>;
-  sendCompanionTurn(input: {sessionId: string; clientRequestId: string; hint: CompanionHint; message: string}): Promise<{runId: string; requestId: string}>;
+  sendCompanionTurn(input: {sessionId: string; clientRequestId: string; hint: CompanionHint; expected?: string; message: string}): Promise<{runId: string; requestId: string}>;
   getCompanionTurn(sessionId: string, requestId: string): Promise<CompanionTurnView>;
   cancelCompanionTurn(sessionId: string, requestId: string): Promise<void>;
   endCompanionSession(sessionId: string): Promise<void>;
@@ -1148,6 +1169,7 @@ export type CompanionScope = {kind: "general"} | {kind: "project"; projectId: st
 export interface CompanionSettingsView { hidden: boolean; invitationDismissed: boolean }
 export interface KnowledgeView { id: string; revision: number; statement: string | null; status: "active" | "stale" | "superseded" | "forgotten"; kind: string; origin: string; sourceLabel: string }
 export interface CompanionContextView {
+  references?: FrozenReferenceContext;
   scope: CompanionScope; fingerprint: string; dialogueEpoch: string; label: string;
   sources: Array<{kind: string; id: string; label: string; revision: string | number}>;
   blockers: Array<{id: string; title: string; detail: string; action: "settings" | "environment" | "recheck" | null}>;

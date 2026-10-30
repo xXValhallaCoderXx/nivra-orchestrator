@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { goTo, openSwitcher } from "./places.ts";
 import { RELEASE_HOME_STATE, releaseHomeChange, REMOVE_TEST_HOME, STALE_TEST_HOMES, testWslHome } from "../scripts/test-homes.ts";
+import { png, pdf } from "../test/fixtures/reference-files.ts";
 
 /**
  * The packaged Windows app, run on Windows from WSL through interop (D14: no CI), as copied by `pnpm dev:win`. One
@@ -219,6 +220,32 @@ test("research starts with no Tavily key and its queries off, and the permission
   expect((await page.evaluate(() => window.nivra.setWebResearch(true))).webResearch).toBe(true);
   expect((await page.evaluate(() => window.nivra.setWebResearch(false))).webResearch).toBe(false);
   expect((await page.evaluate(() => window.nivra.getSettings())).webResearch).toBe(false);
+});
+
+test("task references use the Windows picker, Chromium image worker and packaged PDF worker without provider calls", async () => {
+  await choose("Windows · Local");
+  const taskId = await page.evaluate(async () => {
+    const project = (await window.nivra.listProjects()).find((project) => project.targetId === "local")!;
+    const task = await window.nivra.createTask({ title: "Windows reference acceptance", projectId: project.id, planId: null, fields: { goal: "Review supporting references", acceptanceCriteria: ["Prepared context is visible"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] } });
+    await window.nivra.addTaskComment(task.summary.id, "Windows task context ü 中文");
+    return task.summary.id;
+  });
+  const imageWin = `${devWin}\\e2e\\reference.png`, pdfWin = `${devWin}\\e2e\\reference.pdf`;
+  writeFileSync(wslpath("-u", imageWin), png()); writeFileSync(wslpath("-u", pdfWin), pdf("Windows packaged PDF text"));
+  await goTo(page, "tasks"); await page.getByRole("button", { name: "Windows reference acceptance", exact: true }).click();
+  const panel = page.getByTestId("task-discussion");
+  await app.evaluate(async ({ dialog }, path) => { dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog; }, imageWin);
+  await panel.getByRole("button", { name: "Attach reference file", exact: true }).click();
+  await expect(page.getByRole("dialog").locator("img")).toBeVisible(); await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
+  await panel.getByLabel("Include reference.png", { exact: true }).check();
+  await app.evaluate(async ({ dialog }, path) => { dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [path] })) as typeof dialog.showOpenDialog; }, pdfWin);
+  await panel.getByRole("button", { name: "Attach reference file", exact: true }).click();
+  await panel.getByLabel("Include reference.pdf", { exact: true }).check();
+  const context = await page.evaluate((id) => window.nivra.previewTaskReferences(id), taskId);
+  expect(context.comments[0]!.text).toBe("Windows task context ü 中文"); expect(context.attachments.length).toBe(2);
+  expect(context.attachments.find((file) => file.kind === "image")!.image!.base64.length).toBeGreaterThan(20);
+  expect(context.attachments.find((file) => file.kind === "pdf")!.text).toContain("Windows packaged PDF text");
+  expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");
 });
 
 test("quitting leaves no engine on Windows or in the distribution", async () => {

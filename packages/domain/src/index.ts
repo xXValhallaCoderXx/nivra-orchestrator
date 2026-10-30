@@ -25,3 +25,5 @@ export * from "./knowledge.ts";
 
 export * from "./companion.ts";
 export * from "./planning.ts";
+
+export * from "./references.ts";
