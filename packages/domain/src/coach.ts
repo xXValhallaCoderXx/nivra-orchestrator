@@ -35,8 +35,9 @@ export const COACH_RUN_LIMITS = {
   totalMs: 180_000,
   requestMs: 150_000,
   listMs: 30_000,
-  outputTokensPerRequest: 4_000,
-  estimatedInputTokens: 60_000,
+  outputTokensPerRequest: 8_000,
+  // Keep the coach's input plus its completion inside the application's existing 64,000-token ceiling.
+  estimatedInputTokens: 56_000,
 } as const;
 
 /**

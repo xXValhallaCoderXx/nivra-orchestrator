@@ -46,8 +46,9 @@ export const ANSWER_TOKENS = 4_000;
  * The token budget for everything sent in one request, with room left for the answer. There is no floor: a model whose
  * context can't hold the instructions and the map with room to read is refused before any chat request (D23), never
  * sent more than it allows.
+ * A workflow with its own completion allowance passes that bound explicitly; other callers keep ANSWER_TOKENS.
  */
-export function requestBudget(contextLength: number | null): number {
+export function requestBudget(contextLength: number | null, answerTokens = ANSWER_TOKENS): number {
   const limit = contextLength === null ? APP_TOKEN_CAP : Math.min(contextLength, APP_TOKEN_CAP);
-  return limit - ANSWER_TOKENS;
+  return limit - answerTokens;
 }

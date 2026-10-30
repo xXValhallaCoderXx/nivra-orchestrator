@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
-import { COACH_PROFILE, COACH_TOOL, coachPacketDigest, combinedMask, CoachReport, preferencesDigest, type CoachContext, type CoachPacket, type PreferenceSnapshot } from "@nivra/domain";
-import { runCoach, type CoachRunOptions } from "../src/coach/run.ts";
+import { COACH_PROFILE, COACH_RUN_LIMITS, COACH_TOOL, coachPacketDigest, combinedMask, CoachReport, preferencesDigest, type CoachContext, type CoachPacket, type PreferenceSnapshot } from "@nivra/domain";
+import { estimateCoachRequest, runCoach, type CoachRunOptions } from "../src/coach/run.ts";
+import { coachMessage } from "../src/coach/prompt.ts";
 import { asEnded, readCoachTask, type CoachTask } from "../src/coach/task.ts";
 import { createModelClient, ModelFailure } from "../src/providers/model.ts";
-import { DEFAULT_POLICY, policyFor } from "../src/providers/policy.ts";
+import { ANSWER_TOKENS, APP_TOKEN_CAP, DEFAULT_POLICY, policyFor, requestBudget } from "../src/providers/policy.ts";
+import { FETCH_HEADERS_MS } from "../src/providers/transport.ts";
 import { createCoachWorkflow, type CoachDeps } from "../src/workflows/coach.ts";
 
 /** The task readiness coach's run, in process on Mastra's mock model (NIV-53): one request at most, never repeated. */
@@ -115,9 +117,28 @@ describe("a coaching, in process (NIV-53)", () => {
     ]);
     assert.deepEqual([report.questions[0]?.id, report.changes[0]?.field, report.sampling.toolChoice, report.profile, report.briefVersion], ["Q1", "acceptanceCriteria", "forced", { id: "task-readiness-coach", version: 2 }, 3]);
     const call = model.doGenerateCalls[0] as { toolChoice?: unknown; maxOutputTokens?: number; prompt?: unknown };
-    assert.deepEqual([call.toolChoice, call.maxOutputTokens], [{ type: "tool", toolName: COACH_TOOL }, 4_000]);
+    assert.deepEqual([call.toolChoice, call.maxOutputTokens], [{ type: "tool", toolName: COACH_TOOL }, 8_000]);
     assert.match(JSON.stringify(call.prompt), /Nivra coach role: task-readiness-coach/);
     assert.ok(report.usage.inputTokens === 1_200 && report.budget.used.reportedInputTokens === 1_200);
+  });
+
+  it("reserves the coach's full completion at the exact context boundary, while other workflows keep their default", async () => {
+    const estimated = estimateCoachRequest(coachMessage(PACKET, NO_PREFERENCES, mask));
+    const boundary = estimated + COACH_RUN_LIMITS.outputTokensPerRequest;
+    const short = await inProcess(async () => handIn(GOOD), { contextLength: boundary - 1 });
+    const refused = await failing(short.options, short.saved);
+    assert.equal(refused.error.kind, "context-too-small");
+    assert.match(refused.error.message, /8,000 are held back/);
+    assert.equal(short.model.doGenerateCalls.length, 0);
+    const exact = await inProcess(async () => handIn(GOOD), { contextLength: boundary });
+    assert.equal((await runCoach(exact.options)).outcome, "complete");
+    assert.equal(exact.model.doGenerateCalls.length, 1);
+    assert.equal(requestBudget(null, COACH_RUN_LIMITS.outputTokensPerRequest), 56_000);
+    assert.equal(COACH_RUN_LIMITS.estimatedInputTokens + COACH_RUN_LIMITS.outputTokensPerRequest, APP_TOKEN_CAP);
+    assert.equal(ANSWER_TOKENS, 4_000);
+    assert.equal(requestBudget(null), 60_000);
+    assert.equal(COACH_RUN_LIMITS.listMs + COACH_RUN_LIMITS.requestMs, COACH_RUN_LIMITS.totalMs);
+    assert.ok(FETCH_HEADERS_MS > COACH_RUN_LIMITS.totalMs);
   });
 
   it("is complete with a summary that proposes nothing, under the coach's uncertainty", async () => {
