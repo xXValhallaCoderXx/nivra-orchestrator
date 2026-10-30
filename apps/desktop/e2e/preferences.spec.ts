@@ -1,11 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
 import { goTo, openSwitcher } from "./places.ts";
+import { HostStore } from "../src/main/host-store.ts";
+import { keepSuggestion } from "../src/main/preferences.ts";
 
 /**
  * Preferences through the real UI (D21, NIV-5): a preference confirmed in the window is kept by the host, survives a
@@ -283,6 +285,139 @@ test("two projects with the same name in a file stay apart, neither goes anywher
   await expect(page.getByTestId("preference-transfer")).toHaveText("Imported 2 preferences; 1 already here; 1 left out.");
   await expect(page.getByTestId("preference-list")).toContainText("Use Jest for alpha's tests");
   await expect(page.getByTestId("preference-list")).not.toContainText("Use Vitest for alpha's tests");
+});
+
+test("promotion starts blank, reviews the source, and cancelling, leaving or reloading discard its temporary wording (NIV-10)", async () => {
+  await choose("alpha");
+  await goTo(page, "settings-preferences");
+  const before = await page.evaluate(() => window.nivra.listPreferences());
+  expect(await page.getByTestId("preference-list").evaluate((list) => list.scrollWidth - list.clientWidth)).toBeLessThanOrEqual(1);
+  const source = page.getByTestId("preference-row").filter({ hasText: ALPHA_OWN });
+  const open = async () => {
+    await source.getByTestId("preference-promote").click();
+    await expect(page.getByTestId("preference-promotion-input")).toHaveValue("");
+    await expect(page.getByTestId("preference-promotion-input")).toBeFocused();
+    await expect(page.getByTestId("preference-promotion-confirm")).toBeDisabled();
+    await expect(page.getByTestId("preference-promotion-source")).toHaveText(ALPHA_OWN);
+    await expect(page.getByTestId("preference-promotion-review")).toContainText("Decision to change existing conventions");
+    await expect(page.getByTestId("preference-promotion-review")).toContainText("No repository evidence recorded");
+    await page.getByTestId("preference-promotion-input").fill("An unconfirmed promotion draft");
+  };
+  await open();
+  await page.getByTestId("preference-promotion-cancel").click();
+  await open();
+  await page.keyboard.press("Escape");
+  await open();
+  // Settings remains mounted when hidden. Exercise a route change while the review still owns the focus.
+  await page.getByTestId("nav-home").evaluate((button) => (button as HTMLElement).click());
+  await expect(page.getByTestId("page-home")).toBeVisible();
+  await expect(page.getByTestId("preference-promotion-review")).not.toBeVisible();
+  await goTo(page, "settings-preferences");
+  await open();
+  await page.reload();
+  await goTo(page, "settings-preferences");
+  await source.getByTestId("preference-promote").click();
+  await expect(page.getByTestId("preference-promotion-input")).toHaveValue("");
+  await page.getByTestId("preference-promotion-cancel").click();
+  expect(await page.evaluate(() => window.nivra.listPreferences())).toEqual(before);
+  expect(readFileSync(join(root, "user data", "nivra.json"), "utf8").includes("An unconfirmed promotion draft")).toBe(false);
+});
+
+test("promotion refuses a source edited since review, without adding personal wording (NIV-10)", async () => {
+  await choose("alpha");
+  await confirmPreference("Temporary project preference for stale review", "alpha only");
+  const source = (await page.evaluate(() => window.nivra.listPreferences())).records.find((r) => r.statement === "Temporary project preference for stale review")!;
+  await page.locator(`[data-preference-id="${source.id}"]`).getByTestId("preference-promote").click();
+  await page.getByTestId("preference-promotion-input").fill("Temporary portable wording");
+  await page.evaluate((id) => window.nivra.editPreference(id, "Revised temporary project preference", "default"), source.id);
+  await page.getByTestId("preference-promotion-confirm").click();
+  await expect(page.getByTestId("preference-promotion-error")).toContainText("source preference changed");
+  await expect(page.getByTestId("preference-promotion-confirm")).toBeDisabled();
+  expect((await page.evaluate(() => window.nivra.listPreferences())).records.some((r) => r.statement === "Temporary portable wording")).toBe(false);
+  await page.getByTestId("preference-promotion-cancel").click();
+  await page.locator(`[data-preference-id="${source.id}"]`).getByTestId("preference-delete").click();
+});
+
+test("promotion checks saved keys and refuses an unreadable secret store without saving (NIV-10)", async () => {
+  const saved = "promotion-saved-key-0123456789";
+  await page.evaluate((value) => window.nivra.setNebiusKey(value), saved);
+  const before = await page.evaluate(() => window.nivra.listPreferences());
+  try {
+    await page.getByTestId("preference-row").filter({ hasText: ALPHA_OWN }).getByTestId("preference-promote").click();
+    await page.getByTestId("preference-promotion-input").fill(`Use this ${saved}`);
+    await page.getByTestId("preference-promotion-confirm").click();
+    await expect(page.getByTestId("preference-promotion-error")).toContainText("nothing was saved");
+    await expect(page.getByTestId("preference-promotion-error")).not.toContainText(saved);
+  } finally {
+    await page.evaluate(() => window.nivra.setNebiusKey(null));
+  }
+  const secretFile = join(root, "user data", "secrets.json");
+  const prior = existsSync(secretFile) ? readFileSync(secretFile) : null;
+  try {
+    writeFileSync(secretFile, "not readable JSON");
+    await page.getByTestId("preference-promotion-input").fill("Prefer small API clients");
+    await page.getByTestId("preference-promotion-confirm").click();
+    await expect(page.getByTestId("preference-promotion-error")).toContainText("couldn't read your saved keys");
+    expect(await page.evaluate(() => window.nivra.listPreferences())).toEqual(before);
+  } finally {
+    if (prior) writeFileSync(secretFile, prior);
+    else rmSync(secretFile, { force: true });
+  }
+  await page.getByTestId("preference-promotion-cancel").click();
+});
+
+test("a kept suggestion promotes after restart, preserves historical evidence, and only new wording reaches another project (NIV-10)", async ({}, testInfo) => {
+  const projectId = (await page.evaluate(() => window.nivra.listProjects())).find((p) => p.label === "alpha")!.id;
+  await app.close();
+  const store = new HostStore(join(root, "user data", "nivra.json"));
+  // A retained suggestion from an earlier session: no new model request or repository read is involved.
+  store.update((data) => keepSuggestion(data, { projectId, statement: "Alpha's private module prefers named exports", evidence: {
+    runId: randomUUID(), suggestion: 0, headAtStart: "a".repeat(40), ranAt: "2026-10-18T12:00:00.000Z", citations: [{ path: "private/alpha-module.ts", startLine: 4, endLine: 8 }],
+  } }, new Date()).data);
+  await launch(testInfo);
+  await choose("alpha");
+  await goTo(page, "settings-preferences");
+  const source = (await page.evaluate(() => window.nivra.listPreferences())).records.find((r) => r.statement === "Alpha's private module prefers named exports")!;
+  const sourceRow = page.locator(`[data-preference-id="${source.id}"]`);
+  await sourceRow.getByTestId("preference-promote").click();
+  await expect(page.getByTestId("preference-promotion-evidence")).toContainText("Historical evidence");
+  await expect(page.getByTestId("preference-promotion-evidence")).toContainText("private/alpha-module.ts:4–8");
+  await expect(page.getByTestId("preference-promotion-input")).toHaveValue("");
+  await page.getByTestId("preference-promotion-input").fill("Prefer named exports in new modules ü%#");
+  await page.screenshot({ path: testInfo.outputPath("promotion-review.png"), animations: "disabled" });
+  await page.getByTestId("preference-promotion-confirm").click();
+  await expect(page.getByTestId("preference-promotion-note")).toContainText("Personal default confirmed");
+  const after = await page.evaluate(() => window.nivra.listPreferences());
+  const personal = after.records.find((r) => r.statement === "Prefer named exports in new modules ü%#")!;
+  expect(after.records.find((r) => r.id === source.id)).toEqual(source);
+  expect([personal.scope, personal.intent, personal.origin, personal.projectId, personal.evidence]).toEqual(["personal", "default", "entered", null, null]);
+  await expect(page.locator(`[data-preference-id="${personal.id}"]`).getByTestId("preference-promote")).toHaveCount(0);
+
+  await sourceRow.getByTestId("preference-promote").click();
+  await page.getByTestId("preference-promotion-input").fill(personal.statement);
+  await page.getByTestId("preference-promotion-confirm").click();
+  await expect(page.getByTestId("preference-promotion-note")).toContainText("already confirmed");
+  expect((await page.evaluate(() => window.nivra.listPreferences())).revision).toBe(after.revision);
+  await choose("beta");
+  const expected = await expectedFor("beta");
+  const received = await runHello();
+  expect([received.digest, received.records.map((r) => r.id).includes(source.id), received.records.map((r) => r.id).includes(personal.id)]).toEqual([expected.digest, false, true]);
+  await app.close();
+  await launch(testInfo);
+  await choose("beta");
+  expect((await runHello()).digest).toBe(expected.digest);
+  await goTo(page, "settings-preferences");
+  const personalRow = page.locator(`[data-preference-id="${personal.id}"]`);
+  await personalRow.getByTestId("preference-edit").click();
+  await personalRow.getByTestId("preference-edit-input").fill("Prefer explicit exports in new modules");
+  await personalRow.getByTestId("preference-save").click();
+  await expect(personalRow.getByTestId("preference-revision")).toContainText("revision 2");
+  expect((await runHello()).digest).toBe((await expectedFor("beta")).digest);
+  await goTo(page, "settings-preferences");
+  await personalRow.getByTestId("preference-delete").click();
+  await expect(personalRow).toHaveCount(0);
+  expect((await runHello()).records.some((r) => r.id === personal.id)).toBe(false);
+  expect((await page.evaluate(() => window.nivra.listPreferences())).records.find((r) => r.id === source.id)).toEqual(source);
 });
 
 test("only the app's own store keeps preference text: nothing in the engine's databases or the logs", async () => {

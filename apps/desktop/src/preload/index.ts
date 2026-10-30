@@ -43,6 +43,7 @@ const api = {
   editPreference: (id, statement, intent) => ipcRenderer.invoke(IPC.editPreference, id, statement, intent),
   deletePreference: (id) => ipcRenderer.invoke(IPC.deletePreference, id),
   supersedePreference: (id, statement, intent) => ipcRenderer.invoke(IPC.supersedePreference, id, statement, intent),
+  promotePreference: (sourceId, expectedRevision, statement) => ipcRenderer.invoke(IPC.promotePreference, sourceId, expectedRevision, statement),
   keepSuggestion: (projectId, runId, index, statement) => ipcRenderer.invoke(IPC.keepSuggestion, projectId, runId, index, statement),
   exportPreferences: (scopes) => ipcRenderer.invoke(IPC.exportPreferences, scopes),
   previewImport: () => ipcRenderer.invoke(IPC.previewImport),

@@ -105,6 +105,7 @@ const EXPECTED_API = [
   "previewSandboxCheck",
   "previewTaskReferences",
   "previewTaskRun",
+  "promotePreference",
   "refreshBriefFromPlan",
   "rejectTaskChange",
   "removeMissionTask",

@@ -1,6 +1,6 @@
-import { Badge, Button, Checkbox, Group, SegmentedControl, Select, Stack, Text, TextInput } from "@mantine/core";
+import { Badge, Button, Checkbox, Group, Modal, SegmentedControl, Select, Stack, Text, Textarea, TextInput } from "@mantine/core";
 import type { PreferenceIntent, PreferenceScope } from "@nivra/domain";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ImportEntryView, ImportSourceView, PreferencesView, PreferenceView, ProjectView } from "../../../shared/ipc";
 import { errorMessage, Section } from "../shared/ui";
 
@@ -19,7 +19,7 @@ const ORIGIN: Record<PreferenceView["origin"], string> = { entered: "", suggeste
  * Editing fixes a preference's wording; replacing it is a new decision, and the old one stays as history that no run
  * gets.
  */
-export function Preferences({ project, projects, view, onChanged }: { project: ProjectView | null; projects: ProjectView[]; view: PreferencesView | null; onChanged(): void }) {
+export function Preferences({ active, project, projects, view, onChanged }: { active: boolean; project: ProjectView | null; projects: ProjectView[]; view: PreferencesView | null; onChanged(): void }) {
   const [statement, setStatement] = useState("");
   const [exportScopes, setExportScopes] = useState<{ personal: boolean; projectIds: string[] } | null>(null);
   // What an import would bring, and the person's choices: the file's personal preferences in or out, and where each of
@@ -35,6 +35,16 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
   const [scope, setScope] = useState<PreferenceScope>("personal");
   const [intent, setIntent] = useState<PreferenceIntent>("default");
   const [editing, setEditing] = useState<{ id: string; text: string; intent: PreferenceIntent; mode: "edit" | "replace" } | null>(null);
+  // A review and its independently written wording stay in this screen's memory, never in saved drafts.
+  const [promoting, setPromoting] = useState<{ source: PreferenceView; text: string } | null>(null);
+  const [promotionNote, setPromotionNote] = useState<string | null>(null);
+  // Settings sections stay mounted while hidden. Leaving this one still discards the promotion review and draft.
+  useEffect(() => {
+    if (!active) {
+      setPromoting(null);
+      setPromotionNote(null);
+    }
+  }, [active]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const records = view?.records ?? [];
@@ -43,6 +53,7 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
   const sentTo = (record: PreferenceView) => project !== null && record.status === "confirmed" && (record.scope === "personal" || record.projectId === project.id);
   const sent = records.filter(sentTo).length;
   const scopeLabel = (record: PreferenceView) => (record.scope === "personal" ? "Every project" : `${record.projectLabel ?? "A removed project"} only`);
+  const promotionStale = promoting !== null && (!projects.some((p) => p.id === promoting.source.projectId) || !records.some((r) => r.id === promoting.source.id && r.revision === promoting.source.revision && r.status === "confirmed" && r.scope === "project"));
 
   // Set at once, unlike `busy`, so a quick second click can't repeat a change that already went through.
   const acting = useRef(false);
@@ -80,6 +91,25 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
         ? await act(() => window.nivra.editPreference(editing.id, editing.text, editing.intent))
         : await act(() => window.nivra.supersedePreference(editing.id, editing.text, editing.intent));
     if (saved) setEditing(null);
+  }
+
+  function closePromotion() {
+    if (acting.current) return;
+    setPromoting(null);
+    setError(null);
+  }
+
+  async function promote() {
+    if (!promoting || promotionStale) return;
+    const { source, text } = promoting;
+    let note = "";
+    if (await act(async () => {
+      const result = await window.nivra.promotePreference(source.id, source.revision, text);
+      note = result.created ? "Personal default confirmed for every project. The project original is preserved." : "That personal default is already confirmed for every project. Nothing new was saved.";
+    })) {
+      setPromoting(null);
+      setPromotionNote(note);
+    }
   }
 
   // Export and import (D23): the scopes are the person's to choose, and so is the project each imported one goes to.
@@ -185,7 +215,7 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
       {current.length > 0 && (
         <Stack gap="xs" data-testid="preference-list">
           {current.map((record) => (
-            <Group key={record.id} gap="sm" wrap="nowrap" align="center" data-testid="preference-row" data-preference-id={record.id}>
+            <Group key={record.id} gap="sm" wrap="wrap" align="center" data-testid="preference-row" data-preference-id={record.id}>
               {editing?.id === record.id ? (
                 <Stack gap={4} style={{ flex: 1 }}>
                   <TextInput
@@ -210,7 +240,7 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
                   )}
                 </Stack>
               ) : (
-                <Text size="sm" style={{ flex: 1, opacity: project && !sentTo(record) ? 0.55 : 1 }} data-testid="preference-statement">
+                <Text size="sm" style={{ flex: "1 1 240px", minWidth: 0, overflowWrap: "anywhere", opacity: project && !sentTo(record) ? 0.55 : 1 }} data-testid="preference-statement">
                   {record.statement}
                 </Text>
               )}
@@ -227,7 +257,7 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
                   Not confirmed
                 </Badge>
               )}
-              <Text size="xs" c="var(--nivra-text-3)" style={{ flex: "none", whiteSpace: "nowrap" }} data-testid="preference-revision">
+              <Text size="xs" c="var(--nivra-text-3)" style={{ overflowWrap: "anywhere" }} data-testid="preference-revision">
                 revision {record.revision}
                 {ORIGIN[record.origin]}
                 {project && !sentTo(record) ? ` · not sent to ${project.label}` : ""}
@@ -242,7 +272,7 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
                   </Button>
                 </Group>
               ) : (
-                <Group gap={4} wrap="nowrap" style={{ flex: "none" }}>
+                <Group gap={4} wrap="wrap" justify="flex-end" style={{ flex: "none", maxWidth: 260 }}>
                   <Button
                     size="xs"
                     variant="subtle"
@@ -263,6 +293,17 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
                   >
                     Replace
                   </Button>
+                  {record.scope === "project" && record.status === "confirmed" && projects.some((p) => p.id === record.projectId) && (
+                    <Button
+                      size="xs"
+                      variant="subtle"
+                      onClick={() => { setPromoting({ source: record, text: "" }); setPromotionNote(null); setError(null); }}
+                      disabled={busy}
+                      data-testid="preference-promote"
+                    >
+                      Use in every project
+                    </Button>
+                  )}
                   <Button size="xs" variant="subtle" color="red" onClick={() => void act(() => window.nivra.deletePreference(record.id))} disabled={busy} data-testid="preference-delete">
                     Delete
                   </Button>
@@ -272,6 +313,52 @@ export function Preferences({ project, projects, view, onChanged }: { project: P
           ))}
         </Stack>
       )}
+      <Modal opened={active && promoting !== null} onClose={closePromotion} title="Use in every project" size="lg" closeOnEscape={!busy} closeOnClickOutside={!busy} withCloseButton={!busy}>
+        {promoting && (
+          <Stack gap="sm" data-testid="preference-promotion-review">
+            <Text size="sm">Review this project preference, then write the personal default you want to use beyond it.</Text>
+            <Stack gap={4}>
+              <Text size="sm" fw={600} data-testid="preference-promotion-source">{promoting.source.statement}</Text>
+              <Text size="xs" c="var(--nivra-text-3)">
+                {promoting.source.projectLabel} only · {promoting.source.intent === "override" ? "Decision to change existing conventions" : "Project default"} · revision {promoting.source.revision}
+                {ORIGIN[promoting.source.origin] || " · entered by you"}
+              </Text>
+              {promoting.source.evidence ? (
+                <Stack gap={2} data-testid="preference-promotion-evidence">
+                  <Text size="xs" c="var(--nivra-text-3)">
+                    Historical evidence from run {promoting.source.evidence.runId}, {new Date(promoting.source.evidence.ranAt).toLocaleString()}.
+                    {promoting.source.evidence.headAtStart ? ` HEAD: ${promoting.source.evidence.headAtStart}.` : " HEAD was not recorded."} These sources have not been rechecked.
+                  </Text>
+                  {promoting.source.evidence.citations.map((citation, index) => (
+                    <Text key={index} size="xs" style={{ overflowWrap: "anywhere" }}>{citation.path}:{citation.startLine}–{citation.endLine}</Text>
+                  ))}
+                </Stack>
+              ) : <Text size="xs" c="var(--nivra-text-3)">No repository evidence recorded for this preference.</Text>}
+            </Stack>
+            <Textarea
+              label="Personal default"
+              description="Write wording suitable for other projects, without source-project paths, private details or code."
+              value={promoting.text}
+              onChange={(event) => setPromoting({ ...promoting, text: event.currentTarget.value })}
+              maxLength={500}
+              autosize minRows={2} maxRows={6}
+              disabled={busy}
+              data-autofocus
+              data-testid="preference-promotion-input"
+            />
+            <Text size="xs" c="var(--nivra-text-3)">
+              Confirming makes this your default for every project on this computer. Repository conventions take precedence. The project original and its evidence stay as they are; only your new wording becomes personal.
+            </Text>
+            {promotionStale && <Text size="sm" c="var(--nivra-error)" role="alert">The source preference changed or is no longer available. Close this dialog and reopen Use in every project to review it again.</Text>}
+            {error && <Text size="sm" c="var(--nivra-error)" role="alert" data-testid="preference-promotion-error">{error}</Text>}
+            <Group justify="flex-end">
+              <Button variant="default" onClick={closePromotion} disabled={busy} data-testid="preference-promotion-cancel">Cancel</Button>
+              <Button onClick={() => void promote()} loading={busy} disabled={promotionStale || !promoting.text.trim() || promoting.text.trim().length > 500} data-testid="preference-promotion-confirm">Confirm for every project</Button>
+            </Group>
+          </Stack>
+        )}
+      </Modal>
+      {promotionNote && <Text size="sm" role="status" data-testid="preference-promotion-note">{promotionNote}</Text>}
       <Group gap="sm" align="flex-end">
         <TextInput
           label="New preference"

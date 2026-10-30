@@ -15,6 +15,7 @@ import {
   keepSuggestion,
   parseImport,
   previewImport,
+  promotePreference,
   removeProjectPreferences,
   snapshotFor,
   supersedePreference,
@@ -155,6 +156,58 @@ describe("preferences (D21)", () => {
     assert.deepEqual([rekept.created, rekept.record.status, rekept.data.preferences.length], [true, "confirmed", 3]);
     assert.throws(() => keepSuggestion(empty(), { projectId: "33333333-3333-4333-8333-333333333333", statement: "Run tests with Jest", evidence }, later), /no longer in the list/);
     assert.deepEqual(snapshotFor(kept.data, B).records, [], "another project never gets it");
+  });
+
+  it("promotes entered, imported and suggestion-derived project preferences as independent personal defaults (NIV-10)", () => {
+    const sourceText = "Private alpha uses /repos/a/internal-tests";
+    const entered = addPreference(empty(), { statement: sourceText, scope: "project", projectId: A, intent: "override" }, now);
+    const suggested = keepSuggestion(empty(), { projectId: A, statement: sourceText, evidence: { runId: "55555555-5555-4555-8555-555555555555", suggestion: 0, headAtStart: "private-head", ranAt: now.toISOString(), citations: [{ path: "private-source.ts", startLine: 2, endLine: 4 }] } }, now);
+    const file = parseImport(buildExport(entered.data, { personal: false, projectIds: [A] }, [], now).text);
+    const imported = applyImport(empty(), file, { personal: false, projects: [{ source: "p1", project: A }] }, now);
+    for (const data of [entered.data, suggested.data, imported.data]) {
+      const source = structuredClone(data.preferences[0]!);
+      const promoted = promotePreference(data, source.id, source.revision, "  Prefer tests beside the code ü%#  ", later);
+      assert.equal(promoted.created, true);
+      assert.equal(promoted.data.preferences.length, 2);
+      assert.deepEqual(promoted.data.preferences.find((record) => record.id === source.id), source);
+      const personal = promoted.record;
+      assert.notEqual(personal.id, source.id);
+      assert.deepEqual([personal.statement, personal.scope, personal.projectId, personal.intent, personal.origin, personal.status, personal.evidence, personal.supersedes, personal.revision, personal.confirmedAt],
+        ["Prefer tests beside the code ü%#", "personal", null, "default", "entered", "confirmed", null, null, 1, later.toISOString()]);
+      assert.equal(promoted.data.preferencesRevision, data.preferencesRevision + 1);
+      assert.deepEqual(snapshotFor(promoted.data, B).records, [{ id: personal.id, statement: personal.statement, scope: "personal", intent: "default", revision: 1 }]);
+      assert.equal(snapshotFor(promoted.data, A).records.length, 2);
+      assert.equal(JSON.stringify(personal).includes("private"), false, "no source content, HEAD or citations copied");
+    }
+  });
+
+  it("refuses a stale, replaced, deleted, unconfirmed or personal source, and a removed project (NIV-10)", () => {
+    const { data, ids } = withPreferences(["Alpha uses Jest", A], ["Keep functions small", null]);
+    const id = ids[0]!;
+    const edited = editPreference(data, id, { statement: "Alpha uses Vitest" }, later).data;
+    const replaced = supersedePreference(data, id, { statement: "Alpha uses Vitest", intent: "default" }, later).data;
+    const removed = { ...data, projects: data.projects.filter((project) => project.id !== A) };
+    const suggested = { ...data, preferences: data.preferences.map((record) => record.id === id ? { ...record, status: "suggested" as const, confirmedAt: null } : record) };
+    for (const candidate of [edited, replaced, deletePreference(data, id), removed, suggested]) {
+      const before = JSON.stringify(candidate);
+      assert.throws(() => promotePreference(candidate, id, 1, "Prefer Vitest", later), /Reopen Use in every project/);
+      assert.equal(JSON.stringify(candidate), before, "a refusal leaves the records unchanged");
+    }
+    assert.throws(() => promotePreference(data, ids[1]!, 1, "Prefer Vitest", later), /Reopen Use in every project/);
+    assert.equal(promotePreference(edited, id, 2, "Prefer Vitest", later).created, true, "a fresh source review is accepted");
+  });
+
+  it("deduplicates trimmed exact personal wording, even at capacity, without changing the source or revision (NIV-10)", () => {
+    let { data, ids } = withPreferences(["Alpha uses Jest", A], ["Prefer Vitest", null]);
+    for (let i = data.preferences.length; i < MAX_PREFERENCES; i++) data = addPreference(data, { statement: `Other preference ${i}`, scope: "personal", projectId: null }, now).data;
+    const existing = promotePreference(data, ids[0]!, 1, " Prefer Vitest ", later);
+    assert.deepEqual([existing.created, existing.record.id, existing.data.preferencesRevision], [false, ids[1], data.preferencesRevision]);
+    assert.equal(existing.data, data);
+    assert.throws(() => promotePreference(data, ids[0]!, 1, "Prefer vitest", later), /at most 50 preferences/);
+    assert.throws(() => promotePreference(data, ids[0]!, 1, "   ", later), /needs some words/);
+    assert.throws(() => promotePreference(data, ids[0]!, 1, "x".repeat(501), later), /at most 500 characters/);
+    const deleted = deletePreference(data, ids[1]!);
+    assert.equal(promotePreference(deleted, ids[0]!, 1, "Prefer Vitest", later).created, true, "a later explicit confirmation can recreate a deleted default");
   });
 
   it("checks a task's choices before they are sent, saying what to fix (D23)", () => {
