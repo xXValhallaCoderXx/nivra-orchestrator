@@ -17,7 +17,7 @@ const MAX_EDIT_COMMAND_BYTES = 32 * 1024;
 /** Fixed splice, with byte offsets computed from the verified copy. No model text becomes shell source. */
 export const SPLICE_SCRIPT = [
   "set -e",
-  'bb="$2"; cd "$1"; path="$3"; start="$5"; end="$6"',
+  'bb="$2"; cd "$1"; path="./$3"; start="$5"; end="$6"',
   '[ -f "$path" ] && [ ! -L "$path" ]',
   'parent=$($bb dirname -- "$path")',
   'part="$parent"; while [ "$part" != . ]; do [ ! -L "$part" ]; part=$($bb dirname -- "$part"); done',

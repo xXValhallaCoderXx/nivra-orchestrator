@@ -2721,6 +2721,26 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     await assert.rejects(host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!, [], 32), /changed since you previewed/);
   });
 
+  for (const path of ["preview", "admission"] as const) it(`NIV-60 review: a completed task returns unused requests through ${path}`, async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [["edit_file", TASK_FIX], ["submit", { summary: "Fixed the greeting." }], ["edit_file", TASK_FIX], ["submit", { summary: "Fixed the next task's greeting." }]];
+    const { host, ids, model } = await taskHost({ calls });
+    await host.setCompanionLimit(17, true);
+    const tasks = [await readyTask(host, ids[0]!), await readyTask(host, ids[0]!)];
+    const earlier = await host.previewTaskRun(tasks[1]!.summary.id);
+    for (let index = 0; index < 2; index++) {
+      const task = tasks[index]!;
+      const preview = index === 1 && path === "admission" ? earlier : await host.previewTaskRun(task.summary.id);
+      assert.equal(preview.blocked, null, "normal task-to-task use must not require a Settings refresh");
+      const attempt = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
+      const done = await ended(host, task.summary.id, attempt.id);
+      assert.equal(done.report!.verified, true);
+      assert.equal(done.report!.worker!.usage.calls, 2);
+    }
+    assert.equal(model.chats().length, 4);
+    const usage = await host.getCompanionUsage();
+    assert.deepEqual([usage.used, usage.reserved, usage.remaining], [4, 0, 13]);
+  });
+
   it("NIV-70 freezes discussion and selected image content through coding, reconciles its finite grant, and keeps request-pool usage separate", async () => {
     const { host, ids, model, root } = await taskHost();
     const task = await readyTask(host, ids[0]!);

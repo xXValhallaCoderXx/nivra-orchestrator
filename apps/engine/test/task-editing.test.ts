@@ -8,6 +8,15 @@ import { cleanUp } from "./workspace-fixtures.ts";
 
 after(cleanUp);
 describe("NIV-60 precise editing and termination", () => {
+  it("review: splices a file in a folder beginning with a dash", async () => {
+    const brief = { ...BRIEF, checks: [], acceptanceCases: BRIEF.acceptanceCases.map((given) => ({ ...given, command: given.command.replaceAll("./greet.sh", "./-src/file.txt") })) };
+    const run = await attempt({ brief, files: { "-src/file.txt": FIXTURE["greet.sh"]! }, calls: [["edit_file", { ...FIX, path: "-src/file.txt" }]] });
+    assert.equal(run.core!.worker.written.length, 1);
+    assert.equal(run.core!.worker.written[0], "-src/file.txt");
+    assert.equal(run.core!.verified, true);
+    assert.equal(labels(run.guest).filter((label) => label === "nivra-write").length, 1);
+  });
+
   it("splices a larger executable file preserving CRLF, Unicode and trailing newlines", async () => {
     const text = `# café 👩🏽‍💻\r\n${"# unchanged padding\r\n".repeat(2300)}${FIXTURE["greet.sh"]}\n\n`;
     const run = await attempt({ files: { ...FIXTURE, "greet.sh": { executable: text } }, calls: [["edit_file", FIX]] });

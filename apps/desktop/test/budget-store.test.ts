@@ -1406,6 +1406,23 @@ describe("NIV-60 coding coverage and portions", () => {
   const policy = (monthlyRequests: number, coding = true): BudgetPolicyDraft => ({ preset: "counts", currency: null, monthlyMicros: null, timezone: "UTC", thresholds: [], sublimits: NO_SUBLIMITS, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, researchCreditMicros: null, modelRequestLimits: [{ pool: coding ? "companion-planning-and-coding" : "companion-and-planning", monthlyRequests }] });
   const coding = (over: Partial<GrantRequest> = {}) => request({ productive: { requests: 16, outputTokens: 8000 }, ...over });
 
+  for (const change of ["disable coding", "turn the monthly budget off"] as const) it(`review: recovered coding charges remain held after ${change}`, () => {
+    const db = workspace(); setPolicy(db, policy(100, false), OCT, ESTABLISHED);
+    startNewHistory(db, { recovery: lost(db), remaining: { micros: 0, mode: "counts", allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, modelRequestLimits: [{ pool: "companion-and-planning", monthlyRequests: 5 }] }, now: OCT, timezone: "UTC" });
+    setPolicy(db, { ...policy(100), requestRecoveryRevision: companionRequestUsage(db).recoveryCoverageRevision! }, OCT, ESTABLISHED);
+    const held = writeAdaptiveCodingGrant(db, coding({ productive: { requests: 4, outputTokens: 8000 } }), context(db));
+    if (!("grant" in held)) throw new Error(held.refused.message);
+    markDispatching(db, held.grant.id, HOME, OCT, ledgerState(db));
+    setPolicy(db, change === "disable coding" ? policy(100, false) : null, OCT, ESTABLISHED);
+    const attribution: GrantRequest["attribution"] = { ...request().attribution, feature: "companion", profile: null };
+    const extra = writeGrant(db, request({ workflow: "companion", attribution, productive: { requests: 5, outputTokens: 8000 }, finalisation: { requests: 0, outputTokens: 0 } }), context(db));
+    assert.equal("refused" in extra, true, "the same five recovered requests must not be admitted again");
+    assert.equal(companionRequestUsage(db).remaining, 0);
+    assert.equal(companionRequestUsage(db).coding.reserved, 5);
+    const planning = writeAdaptivePlanningGrant(db, request({ workflow: "planning", attribution: { ...attribution, feature: "planning" }, productive: { requests: 4, outputTokens: 8000 } }), context(db));
+    assert.equal("refused" in planning, true);
+  });
+
   it("preserves old coverage and counts existing coding reservations when expanded explicitly", () => {
     const db = workspace(); setPolicy(db, policy(20, false), OCT, ESTABLISHED);
     const first = writeAdaptiveCodingGrant(db, coding(), context(db));

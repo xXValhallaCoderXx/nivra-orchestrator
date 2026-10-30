@@ -1646,6 +1646,7 @@ export class Host {
    * that can't start now is still previewed as far as it can be, and says why.
    */
   async previewTaskRun(taskId: string, choices: readonly string[] = [], workingRequests?: number | null): Promise<TaskRunPreview> {
+    await this.#reconcileCompanionBudgets("task");
     const choice = this.#codingChoice(workingRequests);
     const workspace = this.#workspaceDb();
     const task = getTask(workspace, taskId);
@@ -2782,6 +2783,7 @@ export class Host {
   }
 
   async #startTask(taskId: string, expected: string, snapshot: string, choices: readonly string[], workingRequests?: number | null): Promise<TaskAttemptView> {
+    await this.#reconcileCompanionBudgets("task");
     const choice = this.#codingChoice(workingRequests);
     if (choice.blocked) throw new Error(choice.blocked);
     const workspace = this.#workspaceDb();
@@ -5416,10 +5418,10 @@ export class Host {
   }
 
   /** Reconciles saved metadata only. Neither a lost response nor a restart resends inference. */
-  async #reconcileCompanionBudgets(): Promise<void> {
+  async #reconcileCompanionBudgets(feature?: "task"): Promise<void> {
     const { workspace, guard, recovery } = this.#budget();
     if (recovery) return;
-    for (const grant of openGrants(workspace).filter((one) => (requestPoolCovers(one.attribution.feature) || one.attribution.feature === "task"))) {
+    for (const grant of openGrants(workspace).filter((one) => feature ? one.attribution.feature === feature : requestPoolCovers(one.attribution.feature) || one.attribution.feature === "task")) {
       const now = Date.now();
       if (grant.state === "written") {
         const released = releaseGrant(workspace, grant.id, now, guard.last());

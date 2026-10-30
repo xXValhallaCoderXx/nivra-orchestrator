@@ -1065,7 +1065,7 @@ export interface NivraApi {
   deleteTask(taskId: string): Promise<void>;
   /** Default task bounds from the domain; the preview carries the chosen working allowance. */
   getRunLimits(): Promise<RunLimitsView>;
-  /** What a run of the task would send, and where, with its fingerprint. Nothing is sent or stored. */
+  /** Reconciles completed coding allowances, then previews the task without sending new provider work. */
   previewTaskRun(taskId: string, choices?: string[], workingRequests?: number | null): Promise<TaskRunPreview>;
   /** Starts the run previewed; refused when anything it would send changed since (`expected`, `snapshot`). */
   startTaskRun(taskId: string, expected: string, snapshot: string, choices?: string[], workingRequests?: number | null): Promise<TaskAttemptView>;

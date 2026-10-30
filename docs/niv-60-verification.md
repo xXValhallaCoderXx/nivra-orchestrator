@@ -24,7 +24,8 @@ and the user's late-reply/larger-task additions remain the acceptance requiremen
 
 The monthly request pool does not establish sandbox cost coverage, a token ceiling, a dollar ceiling or an account
 invoice limit. Sandbox operations/seconds retain their existing accounting and finite per-run bounds. No user-repository
-proposal has been applied; no live provider call has run for this implementation yet.
+proposal has been applied. A1's live validation passed on `63ae1d8`; no live worker has started. The review corrections
+and the remaining approval boundary are recorded below. PR #54 remains on hold for merging.
 
 ## Offline evidence
 
@@ -91,15 +92,18 @@ validation trees, no `nivra-validation` material in the worker snapshots and the
 Each current task recipe and validation plan passes unpaid preflight. The original package-only scope is refused
 because pnpm 11.5.3 is outside Nivra's checked filtered-install range; the new recipes choose whole-project preparation
 without changing source pins, frozen files or judges. The existing strict report-judge self-tests passed 8/8. This
-does not prove environment readiness, baseline/reference/control results, worker check duration or successful tasks.
+did not prove environment readiness, baseline/reference/control results, worker check duration or successful tasks.
+The subsequent A1 validation is recorded below; B1 and C1 have not run live.
 
 Live runners require a clean committed Nivra revision; the app runner additionally requires a release candidate frozen
-from that revision and a concrete claimed recipe approval. The user has now authorised review commits, pushing the
-branch and opening a PR into main. Necessary bounded live validation already has the user's authorisation; no
-additional blanket live-test permission is needed. The PR keeps this remaining acceptance work visible.
+from that revision and a concrete claimed recipe approval. The user authorised the six exact recipes in
+`~/nivra-acceptance/niv60/approval/approval.md` for `63ae1d86bf9a98937feeb3ce18252f4d84ce9e77`. Only A1 validation
+ran. The other five recipes are unused and held: that approval does not authorise the changed source or build.
+Review commits, pushing the branch and the PR into main are authorised; merging and applying or accepting a proposal
+remain separate decisions. The PR keeps the remaining acceptance work visible.
 
-Still required: execute each frozen baseline/reference/known-wrong control in the boundary; confirm the baseline's
-named failures and green unrelated checks; measure duration/output against the worker's 60-second check limit; freeze
+Still required for B1 and C1: execute each frozen baseline/reference/known-wrong control in the boundary; confirm the
+baseline's named failures and green unrelated checks; measure duration/output against the worker's 60-second check limit; freeze
 the final build/environment/recipe identities; run one worker attempt per task; and inspect every successful proposal
 against its frozen brief. Record requests, tools, writes, checks, time, interventions, known/unknown usage and failures.
 Do not install or execute these repositories locally, expose validation solutions to workers, retry paid failures
@@ -129,5 +133,65 @@ The following checks ran on that integrated implementation, superseding earlier 
 | Real stdio engine through `pnpm rpc task.preview`, working maximum 64 | Passed, no model call, disposable home removed | `pr-rpc.log` |
 
 These runs used Node 24.21.0, pnpm 10.4.1 and the shared heavy-check lock. The final receipt commit changes only this
-document; no implementation changed after the integrated checks. Generated output remains ignored. Live-provider
-and useful larger-task acceptance evidence is still pending and is explicitly called out in the PR and reviewer note.
+document; no implementation changed after those integrated checks. Generated output remains ignored. These historical
+checks did not cover the four transitions reported at `63ae1d8`; the corrections and new regressions follow.
+
+## A1 validation on the approved revision — 30 October 2026
+
+The single approved A1 validation recipe
+`451a74cff208ac7aa473fa7a47025ae1effb576b5d1ecd6d85d9ec282e0a9784` completed successfully on `63ae1d8` before
+the review hold could interrupt it. No process was signalled and no worker started. All 36 validation checks passed,
+and all 24 baseline/reference/control selections matched. The baseline had the intended eight failing acceptance
+cases; the reference passed, the known-wrong controls failed as intended and unrelated checks stayed green.
+The longest required baseline/reference check took 12,541 ms, within the worker's 60-second limit. This establishes
+the fixture's validation on that revision, not a useful worker result on either revision.
+
+Receipts remain outside the checkout in `~/nivra-acceptance/env-probe-2026-10-30T125547578Z/` and
+`~/nivra-acceptance/niv60/runs/A1-validation-summary.json`. The latter retains reported preparation and all 27
+task-session operation usage records. Preparation reported 33.42 seconds, CPU 27.010764, memory 911408 and image size
+761419533, with the raw resource fields preserved. Memory units and the resource `cost` field's currency/conversion
+were not established; monetary cost is `null`, not $0. No model inference requests were made. Collection matched the
+pinned commit, cleanup left no unresolved operations and the release home was unchanged.
+
+The remaining paid runs are held for a revised source/build and concrete recipe approval. No proposal has been
+applied or accepted. Successful real-task proposals, a genuine C1 multi-file attempt and useful work beyond a formerly
+limiting allowance remain open requirements; no calls or writes will be added merely to cross a threshold.
+
+## Four review corrections — 30 October 2026
+
+1. Recovery accounting now charges every grant admitted since the loss against the fixed recovered remainder,
+   independently of later coverage changes. New grants still require the applicable coverage acknowledgement.
+   Tests reserve and dispatch all five recovered requests for coding, then disable coding or turn the monthly budget
+   off; neither Companion nor adaptive Planning can reserve the same five again. Unknown usage retains its bound.
+2. Task preview and admission reconcile existing coding journals before calculating availability. Only the existing
+   guard-verified unsent evidence or a complete engine seal releases unused capacity. Separate real-host tests finish
+   two two-request tasks under a monthly allowance of 17, through a fresh preview and through an already-open preview,
+   without visiting Settings. The ledger ends with four used, none reserved and 13 remaining.
+3. The fixed splice prefixes its relative path with `./`, protecting `mktemp` and subsequent commands from a leading
+   dash. A real execution-script regression edits and verifies `-src/file.txt` with exactly one write.
+4. The Preferences handoff saves and restores `workingRequests` with the existing temporary choices. Electron tests
+   retain a selected maximum of 16 both outside monthly coding coverage and under a shared monthly allowance, across
+   unmounting and returning to the preview. The monthly toggle also retains its finite-limit selection.
+
+Before the production fixes, the filtered regression run reproduced four failures: the two recovery-policy changes,
+the blocked next task and the leading-dash splice. Afterward all six matching tests passed, including independent
+preview and admission paths. Full budget/editing/worker tests passed 140/140, the existing host task group passed
+18/18, and Preferences passed 10/10 across built and development StrictMode apps. The final full run includes the
+new host admission case. No regression tests were skipped or weakened to fix these findings.
+
+Final checks use `.artifacts/niv60/review-fixes/`, Node 24.21.0 and pnpm 10.4.1; heavy checks use the shared lock:
+
+| Command/check | Result | Receipt |
+| --- | --- | --- |
+| `pnpm verify` | All typechecks and 2,020 tests passed: 144 domain, 776 desktop, 1,100 engine; no failures, cancellations or skips | `verify.log` |
+| `pnpm stage:runtime all` | Passed; Linux smoke checked and Windows cross-staged with hashes `05cdbff81603d6ca` and `f0e69278e0f13afd` | `stage.log` |
+| Built app: app, budget usage, task run, task preferences and task discussion | 22/22 passed, no skips | `built.log` |
+| Fresh Linux package, same affected cases | 21 passed, one existing skip requiring unpackaged-only endpoint switches; that task run passed in the built app | `package-build.log`, `packaged.log` |
+| Fresh Windows development package and full native UI | 17/17 passed, no skips | `windows-build.log`, `windows-ui.log` |
+| `pnpm verify:windows --skip-stage`, with the freshly staged runtimes | 39/39 passed, protocol 24; release home unchanged and test home removed | `windows-rpc.log` |
+| Real stdio engine through `pnpm rpc task.preview`, working maximum 64 | Passed with no model call; disposable home removed | `rpc.log` |
+
+No implementation changed after this verification sequence started; the subsequent edits record these results.
+The full correction diff and untracked files were inspected; no dependencies, generated output or credentials are
+included. These checks support re-review of the four fixes. PR #54 remains held for merging, and real-task acceptance
+remains open under the source-specific approval boundary above.

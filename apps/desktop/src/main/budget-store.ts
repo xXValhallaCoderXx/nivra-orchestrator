@@ -618,7 +618,7 @@ function lossIn(db: DatabaseSync, periodIndex: number): Loss | null {
 const coveredBy = (loss: Loss | null) => (grant: GrantRecord) =>
   loss !== null && grant.writtenRevision <= loss.revision && grant.periodIndex >= loss.periodIndex && grant.periodIndex <= loss.throughIndex;
 
-/** The grants written since a loss, in every ledger month it holds through: what the person said was left counts them all. */
+/** The grants admitted since a loss. Later coverage changes cannot erase charges against that fixed remainder. */
 function grantsSince(db: DatabaseSync, loss: Loss): GrantRecord[] {
   return db
     .prepare("SELECT * FROM budget_grants WHERE written_revision > ? AND period_idx >= ? AND period_idx <= ? ORDER BY created_at, rowid")
@@ -693,7 +693,7 @@ export function writeAdaptivePlanningGrant(
     const cap = modelRequestPoolLimit(policy?.modelRequestLimits);
     if (cap !== null) available = Math.min(available, Math.max(0, cap - requestsHeld(db, grants)));
     const loss = lossIn(db, periodIndex);
-    if (loss?.remaining?.mode === "counts") available = Math.min(available, Math.max(0, (modelRequestPoolLimit(loss.remaining.modelRequestLimits) ?? 0) - requestsHeld(db, grantsSince(db, loss).filter((grant) => requestPoolCovers(grant.attribution.feature, currentPolicyIn(db)?.modelRequestLimits)))));
+    if (loss?.remaining?.mode === "counts") available = Math.min(available, Math.max(0, (modelRequestPoolLimit(loss.remaining.modelRequestLimits) ?? 0) - requestsHeld(db, grantsSince(db, loss))));
     if (available < 1) return { refused: { code: "counted" as const, message: "The monthly Companion and planning allowance is exhausted. Raise the limit, wait for the next confirmed month, or continue manually." } };
     return writeGrantWithDigest(workspace, { ...asked, productive: { ...asked.productive, requests: available - 1 }, finalisation: { ...asked.finalisation, requests: 1 } }, context, digest);
   });
@@ -728,7 +728,7 @@ export function writeAdaptiveCodingGrant(workspace: WorkspaceDb, request: GrantR
     if (loss?.remaining?.mode === "counts") {
       const coverage = policy?.requestRecoveryRevision === loss.revision && codingRequestPool(policy.modelRequestLimits) ? policy.modelRequestLimits : loss.remaining.modelRequestLimits;
       if (!requestPoolCovers("task", coverage)) return { refused: { code: "counted" as const, message: "The saved recovery allowance does not cover coding. Explicitly acknowledge expanded recovery coverage in Budget and usage, or wait for the next confirmed month." } };
-      available = Math.min(available, Math.max(0, (modelRequestPoolLimit(loss.remaining.modelRequestLimits) ?? 0) - requestsHeld(db, grantsSince(db, loss).filter((grant) => requestPoolCovers(grant.attribution.feature, coverage)))));
+      available = Math.min(available, Math.max(0, (modelRequestPoolLimit(loss.remaining.modelRequestLimits) ?? 0) - requestsHeld(db, grantsSince(db, loss))));
     }
     const productive = Math.min(asked.productive.requests, available - asked.finalisation.requests);
     if (productive < 1) return { refused: { code: "counted" as const, message: "The monthly coding allowance has no more working capacity available. Raise it explicitly or wait for the next confirmed month. The reserved hand-in remains available." } };
@@ -874,7 +874,7 @@ function admission(
     if (remaining.mode === "counts") {
       const cap = modelRequestPoolLimit(remaining.modelRequestLimits) ?? 0;
       const coverage = policy?.requestRecoveryRevision === loss.revision && codingRequestPool(policy.modelRequestLimits) ? policy.modelRequestLimits : remaining.modelRequestLimits;
-      const after = grantsSince(db, loss).filter((grant) => requestPoolCovers(grant.attribution.feature, coverage));
+      const after = grantsSince(db, loss);
       if (request.models.length > 0 && (!requestPoolCovers(request.attribution.feature, coverage) || requestsHeld(db, after) + request.productive.requests + request.finalisation.requests > cap)) return { code: "counted", message: "This exceeds the Companion and planning requests you said remained after recovery. Change the recovery allowance or wait for the next confirmed month." };
     } else {
     if (need === null) {
@@ -1293,7 +1293,7 @@ export function companionRequestUsage(workspace: WorkspaceDb) {
   if (loss) {
     if (loss.remaining?.mode === "counts") {
       const allowed = modelRequestPoolLimit(loss.remaining.modelRequestLimits) ?? 0;
-      const recovered = Math.max(0, allowed - requestsHeld(db, grants));
+      const recovered = Math.max(0, allowed - requestsHeld(db, grantsSince(db, loss)));
       remaining = remaining === null ? recovered : Math.min(remaining, recovered);
     } else {
       historyBlocked = loss.remaining === null ? "Budget history was lost and new spending waits for the next confirmed month. Manual planning remains available." : "The recovery allowance is in money and Companion and planning requests cannot be priced within it. Restore the history or choose an explicit request-count recovery allowance.";

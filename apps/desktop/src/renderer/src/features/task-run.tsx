@@ -346,7 +346,7 @@ function checkFilesText(check: TaskCheck): string {
  * in visible words; the preview of what a run would send and where, from the repository's own engine; and the start
  * bound to it. A consent the run needs is asked for in the preview, and its answer stays there as it was given.
  */
-export interface RunChoicesDraft { revision: number; briefVersion: number; projectId: string | null; choices: string[] }
+export interface RunChoicesDraft { revision: number; briefVersion: number; projectId: string | null; choices: string[]; workingRequests?: number | null }
 
 export function RunLauncher({
   view,
@@ -372,7 +372,7 @@ export function RunLauncher({
   const request = useRef(0);
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<TaskRunPreview | null>(null);
-  const [workingRequests, setWorkingRequests] = useState<number | null | undefined>(undefined);
+  const [workingRequests, setWorkingRequests] = useState<number | null | undefined>(matches ? choicesDraft?.workingRequests : undefined);
   const [allowed, setAllowed] = useState<{ sharing: boolean; uploads: boolean }>({ sharing: false, uploads: false });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -505,7 +505,7 @@ export function RunLauncher({
           {(!preview?.monthlyCoverage || workingRequests != null) && <NumberInput label="Maximum working requests" description="One hand-in is reserved separately. Time or context may stop work sooner." min={1} max={1_000_000} allowDecimal={false} value={workingRequests ?? preview?.work?.workingRequests ?? 64} disabled={busy} data-testid="task-working-requests" onChange={(value) => { if (typeof value === "number") { setWorkingRequests(value); setChanged(true); request.current++; } }} />}
         </Stack>
         {preview ? (
-          <RunPreview choices={choices} changed={changed} onChoices={changeChoices} onRefresh={() => void refresh()} onPreferences={onPreferences ? () => { request.current++; onPreferences({ revision: view.revision, briefVersion: view.brief.version, projectId, choices: [...choices] }); } : undefined} preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={cancel} />
+          <RunPreview choices={choices} changed={changed} onChoices={changeChoices} onRefresh={() => void refresh()} onPreferences={onPreferences ? () => { request.current++; onPreferences({ revision: view.revision, briefVersion: view.brief.version, projectId, choices: [...choices], workingRequests }); } : undefined} preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={cancel} />
         ) : (
           <Stack p="md" data-testid="task-run-preview-draft" style={{ overflowY: "auto" }}>
             {error ? <Alert color="red" data-testid="task-run-preview-error">{error}</Alert> : <Text size="sm" c="var(--nivra-text-3)">{busy ? "Working out what a run would send, on the repository’s own engine. Nothing is sent." : "Refresh the preview to review these choices and what the run would send. Nothing is sent."}</Text>}
