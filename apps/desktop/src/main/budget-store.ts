@@ -9,6 +9,7 @@ import {
   JournalSeal,
   hasSharedRequestPool,
   codingRequestPool,
+  missionReviewRequestPool,
   modelRequestPoolLimit,
   monthOf,
   priceUsage,
@@ -805,6 +806,7 @@ function writeGrantWithDigest(
     if (!period) insertPeriod(db, monthOf(context.now, timezone), timezone, "first", null, authority.revision, at);
     const id = randomUUID();
     const grant: BudgetGrant = {
+      ...(asked.attribution.feature === "mission-review" ? { feature: asked.attribution.feature, workflow: asked.workflow, modelListings: 1 } : {}),
       id,
       requestId: asked.requestId,
       catalogueVersion: context.catalogue.version,
@@ -873,7 +875,8 @@ function admission(
     }
     if (remaining.mode === "counts") {
       const cap = modelRequestPoolLimit(remaining.modelRequestLimits) ?? 0;
-      const coverage = policy?.requestRecoveryRevision === loss.revision && codingRequestPool(policy.modelRequestLimits) ? policy.modelRequestLimits : remaining.modelRequestLimits;
+      const expanded = request.attribution.feature === "mission-review" ? policy?.missionReviewRecoveryRevision === loss.revision && missionReviewRequestPool(policy.modelRequestLimits) : request.attribution.feature === "task" && policy?.requestRecoveryRevision === loss.revision && codingRequestPool(policy.modelRequestLimits);
+      const coverage = expanded ? policy!.modelRequestLimits : remaining.modelRequestLimits;
       const after = grantsSince(db, loss);
       if (request.models.length > 0 && (!requestPoolCovers(request.attribution.feature, coverage) || requestsHeld(db, after) + request.productive.requests + request.finalisation.requests > cap)) return { code: "counted", message: "This exceeds the Companion and planning requests you said remained after recovery. Change the recovery allowance or wait for the next confirmed month." };
     } else {
@@ -1275,7 +1278,7 @@ export function sharedRequestLimitDraft(previous: BudgetPolicy | null): BudgetPo
   const limit = previous?.modelRequestLimits?.[0];
   if (!previous || !limit || "pool" in limit) return null;
   const { version: _version, replaces: _replaces, createdAt: _createdAt, ...draft } = previous;
-  return { ...draft, modelRequestLimits: [{ pool: "companion-and-planning", monthlyRequests: limit.monthlyRequests }] };
+  return { ...draft, modelRequestLimits: [{ pool: "companion-and-planning", monthlyRequests: limit.monthlyRequests, ...(limit.includeMissionReviews === undefined ? {} : { includeMissionReviews: limit.includeMissionReviews }) }] };
 }
 
 /** Combined inference coverage only. Feature rows partition these totals; they never add a second reservation. */
@@ -1300,5 +1303,24 @@ export function companionRequestUsage(workspace: WorkspaceDb) {
       remaining = null;
     }
   }
-  return { month: period?.label ?? "Not started", limit, ...totals, remaining, historyComplete: !loss, historyBlocked, inputTokens: totals.unknownTokens || loss ? null : totals.reportedInputTokens, outputTokens: totals.unknownTokens || loss ? null : totals.reportedOutputTokens, coverage: codingRequestPool(currentPolicyIn(db)?.modelRequestLimits) ? "companion-planning-and-coding" as const : "companion-and-planning" as const, coding: requestTotals(db, recorded.filter((grant) => grant.attribution.feature === "task")), recoveryCoverageRevision: loss?.remaining?.mode === "counts" && !codingRequestPool(loss.remaining.modelRequestLimits) ? loss.revision : null, codingRecoveryAcknowledged: Boolean(loss && currentPolicyIn(db)?.requestRecoveryRevision === loss.revision), features: { companion: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "companion")), planning: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "planning")), ...(codingRequestPool(currentPolicyIn(db)?.modelRequestLimits) ? { coding: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "task")) } : {}) } };
+  const policy = currentPolicyIn(db);
+  return {
+    month: period?.label ?? "Not started", limit, ...totals, remaining, historyComplete: !loss, historyBlocked,
+    inputTokens: totals.unknownTokens || loss ? null : totals.reportedInputTokens,
+    outputTokens: totals.unknownTokens || loss ? null : totals.reportedOutputTokens,
+    coverage: codingRequestPool(policy?.modelRequestLimits) ? "companion-planning-and-coding" as const : "companion-and-planning" as const,
+    coding: requestTotals(db, recorded.filter((grant) => grant.attribution.feature === "task")),
+    includeMissionReviews: missionReviewRequestPool(policy?.modelRequestLimits),
+    missionReviews: requestTotals(db, recorded.filter((grant) => grant.attribution.feature === "mission-review")),
+    recoveryCoverageRevision: loss?.remaining?.mode === "counts" && !codingRequestPool(loss.remaining.modelRequestLimits) ? loss.revision : null,
+    codingRecoveryAcknowledged: Boolean(loss && policy?.requestRecoveryRevision === loss.revision),
+    missionReviewRecoveryRevision: loss?.remaining?.mode === "counts" && !missionReviewRequestPool(loss.remaining.modelRequestLimits) ? loss.revision : null,
+    missionReviewRecoveryAcknowledged: Boolean(loss && policy?.missionReviewRecoveryRevision === loss.revision),
+    features: {
+      companion: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "companion")),
+      planning: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "planning")),
+      ...(codingRequestPool(policy?.modelRequestLimits) ? { coding: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "task")) } : {}),
+      ...(missionReviewRequestPool(policy?.modelRequestLimits) ? { missionReviews: requestTotals(db, grants.filter((grant) => grant.attribution.feature === "mission-review")) } : {}),
+    },
+  };
 }

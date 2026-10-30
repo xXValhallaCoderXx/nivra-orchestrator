@@ -157,6 +157,8 @@ export interface ReviewRunOptions {
   task: ReviewTask;
   context: ReviewContext;
   client: ModelClient;
+  /** Each concurrent role gets its own immutable journal attribution. */
+  clientForRole?: (role: ReviewRole | "chair") => ModelClient;
   model: string;
   contextLength: number | null;
   route: RunRoute;
@@ -299,13 +301,15 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewReport
       },
     });
     const internal = new InternalFailure();
-    const agent = client.agent({ id: `nivra-review-${spec.role}`, name: `Nivra ${mode.label[spec.role].toLowerCase()}`, modelId: options.model, instructions: spec.instructions, tools: { [spec.tool]: tool } });
+    const stageClient = options.clientForRole?.(spec.role) ?? client;
+    const agent = stageClient.agent({ id: `nivra-review-${spec.role}`, name: `Nivra ${mode.label[spec.role].toLowerCase()}`, modelId: options.model, instructions: spec.instructions, tools: { [spec.tool]: tool } });
     const own: StepRecord[] = [];
     try {
-      await client.call(agent, spec.message, {
+      await stageClient.call(agent, spec.message, {
         maxSteps: 1,
         deadlines: { stepMs: admitted.ms, totalMs: admitted.ms },
         maxOutputTokens: limits.outputTokensPerRequest,
+        budgetPart: spec.role === "chair" ? "finalisation" : "productive",
         toolChoice: options.policy.forceAnswer ? { type: "tool", toolName: spec.tool } : "auto",
         internal,
         ...(options.signal ? { signal: options.signal } : {}),

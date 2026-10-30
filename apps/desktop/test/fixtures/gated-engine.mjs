@@ -362,7 +362,7 @@ process.stdin.on("data", (chunk) => {
     appendFileSync(join(home, "calls.log"), `${request.method}\n`);
     if (request.method === "initialize") {
       nebiusProject = request.params.secrets?.NEBIUS_PROJECT_ID ?? null;
-      send({ id: request.id, result: { protocolVersion: 24, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
+      send({ id: request.id, result: { protocolVersion: 25, engineVersion: "gated", instanceId, pid: process.pid, home, homeId, runtimeHash: null, node: process.versions.node, platform: process.platform, arch: process.arch } });
     } else if (request.method === "ping") {
       send({ id: request.id, result: { instanceId } });
     } else if (request.method === "runs.start") {

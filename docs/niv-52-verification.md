@@ -114,3 +114,31 @@ reasoning is not added twice to completion usage. Apply the frozen rubric and re
 attempt needs its own authorisation; it never follows automatically from a poor score. A direct-engine live run is
 separate from the app journey above and would not establish a paid packaged-app demonstration or future release
 contents. Publication of this completion pass does not substitute for that remaining acceptance or authorise a merge.
+
+## Budgeted review integration and review fixes — 30 October 2026
+
+The follow-up on `feature/niv-52-budget`, based on `af77cf5`, incorporates the in-progress budgeted-review consumer and
+fixes both reproduced lifecycle findings before paid acceptance. The independent implementation worktree is retained.
+The review reproductions and their original receipts remain in ignored `.artifacts/niv52-review/`.
+
+- Outstanding Companion, Planning, Coding and mission-review grants reconnect their recorded target before available
+  request capacity is calculated. Reconnection reads only journal metadata, even after mission deletion and relaunch.
+  A different home, failed connection, missing record or invalid seal retains the full charge and a visible reason.
+- Only the existing ledger's validation of a complete seal releases unused requests. A repeated or concurrent pass
+  neither inserts duplicate operation rows nor changes the settled revision again. Interrupted usage stays charged
+  at its bound as unknown; it is not shown as a zero-cost cancelled review.
+- The live collector attempts shutdown in an independent finally. Reconciliation and shutdown failures each retain a
+  separate sanitised failure entry, without exposing raw exception text, credentials or private context.
+- `mission-review-budget.test.ts` promotes the two reproductions to regressions, adds failed reconnection and invalid
+  complete-seal cases, checks recovery and repeated/concurrent settlement, and injects reconciliation-only and combined
+  cleanup failures. Existing lost-reply and crash cases assert the full held total and truthful unknown classification.
+
+Focused development checks and every initial failure are retained separately. The final checks run on one clean,
+committed revision; `.artifacts/niv52-review/final-checks/receipt.json` identifies that revision, commands, exit statuses,
+logs and protected-profile observations. Read those receipts and the final handoff for actual outcomes; historical
+counts above do not establish this revision's verification. Required gates are full `pnpm verify`, affected built UI,
+fresh runtime staging, packaged checks, a fresh Windows development build and Windows checks, plus real-engine RPC.
+
+No live credential is read or paid request made in this fix pass. The tested commit is returned for human review before
+live acceptance. The frozen usefulness rubric above remains unchanged, and both NIV-52 and wider NIV-66 acceptance
+remain open until their separate evidence is supplied.

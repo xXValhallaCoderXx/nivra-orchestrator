@@ -1,4 +1,4 @@
-import { codingRequestPool, DEFAULT_WORKING_REQUESTS, modelRequestPoolLimit, TaskWork, type BudgetGrant as CodingGrant, type TaskWork as CodingWork } from "@nivra/domain";
+import { codingRequestPool, missionReviewRequestPool, DEFAULT_WORKING_REQUESTS, modelRequestPoolLimit, TaskWork, type BudgetGrant as CodingGrant, type TaskWork as CodingWork } from "@nivra/domain";
 import { TaskReferences } from "./task-references.ts";
 import type { ReferenceSelection, FrozenReferenceContext } from "@nivra/domain";
 import { randomUUID } from "node:crypto";
@@ -1649,7 +1649,7 @@ export class Host {
    * that can't start now is still previewed as far as it can be, and says why.
    */
   async previewTaskRun(taskId: string, choices: readonly string[] = [], workingRequests?: number | null): Promise<TaskRunPreview> {
-    await this.#reconcileCompanionBudgets("task");
+    await this.#reconcileCompanionBudgets();
     const choice = this.#codingChoice(workingRequests);
     const workspace = this.#workspaceDb();
     const task = getTask(workspace, taskId);
@@ -2101,11 +2101,11 @@ export class Host {
   }
 
   /**
-   * What a review of the mission's selected tasks would send (NIV-52), and the fingerprint that binds it. Reads only:
-   * nothing is stored or sent, and no engine starts.
+   * What a review of the mission's selected tasks would send (NIV-52), and the fingerprint that binds it. Outstanding
+   * grants reconnect their engines for journal reads and settlement only; no model request or new grant is sent.
    */
-  async prepareMissionReview(missionId: string, taskIds: readonly string[]): Promise<MissionReviewPreview> {
-    return (await this.#missionReviewRequest(missionId, taskIds)).preview;
+  async prepareMissionReview(missionId: string, taskIds: readonly string[], options?: { requiredModel: string }): Promise<MissionReviewPreview> {
+    return (await this.#missionReviewRequest(missionId, taskIds, options?.requiredModel)).preview;
   }
 
   /**
@@ -2114,15 +2114,20 @@ export class Host {
    * review plan saved (an identical one reused) and the review stored; then it is sent in the background on this
    * computer's engine, as a plan's review is (D31). A review writes no mission, task, brief or preference.
    */
-  async startMissionReview(missionId: string, taskIds: readonly string[], expected: string): Promise<MissionView> {
+  async startMissionReview(missionId: string, taskIds: readonly string[], expected: string, options?: { requiredModel: string }): Promise<MissionView> {
     const workspace = this.#workspaceDb();
-    const request = await this.#missionReviewRequest(missionId, taskIds);
+    const request = await this.#missionReviewRequest(missionId, taskIds, options?.requiredModel);
     if (request.preview.blocked) throw new Error(request.preview.blocked);
     if (request.preview.expected !== expected) throw new Error("What this review would send has changed since you opened it. Check the new preview, then start again.");
     const { mission, conversation, composition, digests, preferences } = request;
     const id = randomUUID();
     const content = missionPlanContent(composition, conversation.id);
-    const plan = workspace.tx(() => {
+    const budget = this.#budget();
+    let verified;
+    try { verified = budget.guard.last(); }
+    catch { this.#budgetState = { kind: "unavailable", message: BUDGET_GUARD_FAILED }; throw new Error(BUDGET_GUARD_FAILED); }
+    const now = Date.now();
+    const admitted = workspace.tx(() => {
       const changes = validateBinding(workspace, composition.binding);
       if (changes.length) throw new Error(`What this review would send has changed since you opened it: ${changes.map(changeText).join(" ")} Check the new preview, then start again.`);
       // Linked to a repository meanwhile: this increment reviews only tasks with none (D42).
@@ -2137,11 +2142,16 @@ export class Host {
       const review = { id, conversationId: conversation.id, planId: saved.id, planLineage: saved.lineageId, planVersion: saved.version, planSha256: saved.sha256, panel: "council" as const, packetDigest: digests.packet, preferencesDigest: digests.preferences, scope: { kind: "general" as const }, createdAt: new Date().toISOString() };
       const given = preferences.records.map(({ id: preferenceId, revision }) => ({ id: preferenceId, revision }));
       if (!insertReview(workspace, review, { sessionId: this.#sessionId, targetId: conversation.targetId, preferences: given })) throw new Error(MISSION_BUSY);
-      return saved;
+      const written = writeGrant(workspace, { requestId: id, workflow: "review", targetId: conversation.targetId, attribution: { feature: "mission-review", projectId: null, taskId: null, attemptId: null, queueId: null, queueItemId: null, profile: null }, models: composition.packet.model ? [composition.packet.model] : this.#prices.models.map((rate) => rate.model), productive: { requests: 2, outputTokens: 4000 }, finalisation: { requests: 1, outputTokens: 4000 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, extends: null, need: null }, { now, catalogue: this.#prices, timezone: this.#budgetZone(workspace), verified });
+      if ("refused" in written) throw new Error(written.refused.message);
+      return { plan: saved, written };
     });
+    try { if (admitted.written.authority) this.#guardBudget(budget.guard, workspace, admitted.written.authority, now); }
+    catch (error) { this.#settle(id, { status: "not-sent", errorMessage: "The budget guard could not be written, so this review was not sent. Review Budget and usage before trying again." }); throw error; }
+    const plan = admitted.plan;
     this.#submissions.set(id, { cancel: null });
     const input = { panel: "council" as const, planId: plan.id, planVersion: plan.version, packetDigest: digests.packet, preferencesDigest: digests.preferences };
-    void this.#submit(id, conversation, { workflowId: "review", input, context: { preferences, sharing: { modelContext: false }, packet: composition.packet } }, 0).catch((error: unknown) => this.#options.log(`A mission review couldn't be sent: ${errorText(error)}`));
+    void this.#submit(id, conversation, { workflowId: "review", input, context: { preferences, sharing: { modelContext: false }, packet: composition.packet } }, 0, undefined, { grant: admitted.written.grant, policyVersion: request.preview.allowance.policyVersion }).catch((error: unknown) => this.#options.log(`A mission review couldn't be sent: ${errorText(error)}`));
     return this.mission(missionId);
   }
 
@@ -2810,7 +2820,7 @@ export class Host {
   }
 
   async #startTask(taskId: string, expected: string, snapshot: string, choices: readonly string[], workingRequests?: number | null): Promise<TaskAttemptView> {
-    await this.#reconcileCompanionBudgets("task");
+    await this.#reconcileCompanionBudgets();
     const choice = this.#codingChoice(workingRequests);
     if (choice.blocked) throw new Error(choice.blocked);
     const workspace = this.#workspaceDb();
@@ -4078,15 +4088,24 @@ export class Host {
    * the composition, the whole packet checked for credentials, the preference snapshot (personal preferences only, as a
    * general plan's, D21 and D26), their fingerprints, and the preview that shows them.
    */
-  async #missionReviewRequest(missionId: string, taskIds: readonly string[]) {
+  async #missionReviewRequest(missionId: string, taskIds: readonly string[], requiredModel?: string) {
+    await this.#reconcileCompanionBudgets();
     const workspace = this.#workspaceDb();
     const mission = getMission(workspace, missionId);
     const conversation = mission ? getConversation(workspace, mission.conversationId) : null;
     if (!mission || !conversation) throw new Error("That mission is no longer here.");
-    const composition = composeMissionReview(workspace, mission, taskIds, null);
+    const composition = composeMissionReview(workspace, mission, taskIds, requiredModel ?? null);
     const preferences = snapshotFor(this.#options.store.data, null);
     refusePacketCredentials(composition.packet, preferences, await this.#knownSecrets());
     const digests = await missionDigests(composition, preferences);
+    const { recovery } = this.#budget();
+    const policy = currentPolicy(workspace);
+    const usage = companionRequestUsage(workspace);
+    const monthly = missionReviewRequestPool(policy?.modelRequestLimits);
+    const notes = [...new Set(this.#budgetReconciliationNotes.values())];
+    const unavailable = recovery ? BUDGET_NEEDS_RECOVERY : usage.historyBlocked ?? (usage.missionReviewRecoveryRevision !== null && !usage.missionReviewRecoveryAcknowledged ? "The remaining recovery allowance does not cover mission reviews. Explicitly acknowledge review coverage in Budget and usage, or wait for the next confirmed month." : monthly && usage.remaining !== null && usage.remaining < MISSION_REVIEW_REQUESTS ? "The shared monthly allowance needs three available requests for two reviewers and the reserved chair. Raise it explicitly or wait for the next confirmed month, then preview again." : null);
+    const blocked = unavailable ? [unavailable, ...notes].join(" ") : null;
+    const allowance = { policyVersion: policy?.version ?? null, monthly, remaining: monthly ? usage.remaining : null, description: [`Three inference requests are reserved together: two reviewers and one chair, plus one bounded model listing. Each answer is capped at 4,000 completion tokens including reasoning, with 150 seconds per request and 330 seconds for the review. ${monthly ? `Mission reviews share the monthly AI request allowance (${usage.remaining === null ? "remaining usage is unknown" : `${usage.remaining} currently available`}).` : "Mission reviews use these finite per-run limits outside the monthly request allowance."} This is not a token or dollar spending ceiling.`, ...notes].join(" ") };
     const preview: MissionReviewPreview = {
       missionId: mission.id,
       missionVersion: composition.binding.mission!.version,
@@ -4099,8 +4118,9 @@ export class Host {
       model: composition.packet.model,
       requests: MISSION_REVIEW_REQUESTS,
       notSent: MISSION_REVIEW_NOT_SENT,
-      blocked: openTurns(workspace, { conversationId: conversation.id }).length ? MISSION_BUSY : null,
-      expected: missionPreviewFingerprint(digests),
+      allowance,
+      blocked: openTurns(workspace, { conversationId: conversation.id }).length ? MISSION_BUSY : blocked,
+      expected: missionPreviewFingerprint(digests, JSON.stringify([allowance.policyVersion, requiredModel ?? null, MISSION_REVIEW_REQUESTS, 4000, 150000, 330000])),
     };
     return { mission, conversation, composition, digests, preferences, preview };
   }
@@ -4325,7 +4345,7 @@ export class Host {
    * after it (no answer, a closed connection, an error answer: the engine may have started the run first) leaves it to
    * be found by its request id.
    */
-  async #submit(turnId: string, conversation: ConversationRecord, request: LinkRequest, epoch: number, researchEpoch = this.#webResearchEpoch): Promise<void> {
+  async #submit(turnId: string, conversation: ConversationRecord, request: LinkRequest, epoch: number, researchEpoch = this.#webResearchEpoch, missionAdmission?: { grant: BudgetGrant; policyVersion: number | null }): Promise<void> {
     const workspace = this.#workspaceDb();
     const label = this.#labelOf(conversation.targetId);
     const { what, nothing } = sendWords(request.workflowId);
@@ -4367,9 +4387,24 @@ export class Host {
       this.#submissions.delete(turnId);
       return;
     }
+    let budget: BudgetGrant | undefined;
+    if (request.workflowId === "review" && "kind" in request.context.packet && request.context.packet.kind === "mission") {
+      try {
+        await this.#reconcileCompanionBudgets();
+        const current = this.#budget();
+        if (current.recovery || !missionAdmission || (currentPolicy(workspace)?.version ?? null) !== missionAdmission.policyVersion) throw new Error("The saved allowance changed after this review was previewed. Preview the review again under the current policy.");
+        const dispatched = markDispatching(workspace, missionAdmission.grant.id, state.info.homeId, Date.now(), current.guard.last());
+        if (!dispatched) throw new Error("This mission review's grant was already dispatched. Open the existing review; it will not be sent again.");
+        this.#guardBudget(current.guard, workspace, dispatched, Date.now());
+        budget = missionAdmission.grant;
+      } catch (error) {
+        notSent(errorText(error));
+        return;
+      }
+    }
     let run: RunSummary;
     try {
-      run = await engine.supervisor.call("runs.start", { clientRequestId: turnId, ...request });
+      run = await engine.supervisor.call("runs.start", { clientRequestId: turnId, ...request, ...(budget ? { budget } : {}) });
     } catch (error) {
       // Nothing was written: the engine wasn't online, or the parameters were refused before sending.
       if (error instanceof EngineOfflineError || error instanceof TypeError) {
@@ -4560,6 +4595,7 @@ export class Host {
     if (!review) return;
     const known = await this.#knownSecrets();
     const report = await engine.supervisor.call("runs.review", { runId: summary.id });
+    await this.#reconcileCompanionBudgets();
     if (report && !reportMatches(report, review, summary.id)) {
       this.#settle(link.id, { status: "unknown", errorMessage: "its engine's report is about something other than what this review sent, so none of it was kept" });
       return;
@@ -5216,6 +5252,8 @@ export class Host {
   #budgetGuard: BudgetGuard | null = null;
   /** The wall clock and the monotonic clock when the budget was first checked, for noting a clock that jumps. */
   #budgetClock: { wall: number; mono: number } | null = null;
+  #budgetReconciliation: Promise<void> | null = null;
+  readonly #budgetReconciliationNotes = new Map<string, string>();
 
   /**
    * The workspace's ledger, checked against its guard once per session. A ledger that is missing, another, behind the
@@ -5327,20 +5365,23 @@ export class Host {
   /** The current month as the ledger counts it, with every reason its totals can't be read as complete. */
   async budgetSummary(): Promise<BudgetSummary> {
     const { workspace, recovery } = this.#budget();
+    await this.#reconcileCompanionBudgets();
     return budgetSummary(workspace, { now: Date.now(), catalogue: this.#prices, recovery, timezone: this.#budgetZone(workspace) });
   }
 
   /** Companion and planning: one optional monthly request policy, never a token or dollar ceiling. */
-  async setCompanionLimit(limit: number | null, includeCoding?: boolean, recoveryRevision?: number | null) {
+  async setCompanionLimit(limit: number | null, includeCoding?: boolean, recoveryRevision?: number | null, includeMissionReviews?: boolean, missionReviewRecoveryRevision?: number | null) {
     if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0)) throw new Error("Choose a non-negative whole number of Companion and planning requests, or turn the monthly limit off.");
     const previous = await this.getBudgetPolicy();
     includeCoding ??= codingRequestPool(previous?.modelRequestLimits);
+    includeMissionReviews ??= missionReviewRequestPool(previous?.modelRequestLimits);
     if (limit === null && previous === null) return this.getCompanionUsage();
     const base = previous ?? { preset: "counts" as const, currency: null, monthlyMicros: null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, thresholds: [], sublimits: { dailyMicros: null, perQueueMicros: null, perTaskMicros: null, projects: [], profiles: [] }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, researchCreditMicros: null };
     const { version: _version, replaces: _replaces, createdAt: _created, ...draft } = base as typeof base & { version?: number; replaces?: number | null; createdAt?: string };
     const usage = companionRequestUsage(this.#workspaceDb());
     if (includeCoding && usage.recoveryCoverageRevision !== null && !usage.codingRecoveryAcknowledged && recoveryRevision !== usage.recoveryCoverageRevision) throw new Error("Explicitly acknowledge that the remaining recovery allowance will also cover coding, then save again.");
-    await this.setBudgetPolicy({ ...draft, ...(includeCoding && recoveryRevision ? { requestRecoveryRevision: recoveryRevision } : {}), modelRequestLimits: limit === null ? [] : [{ pool: includeCoding ? "companion-planning-and-coding" : "companion-and-planning", monthlyRequests: limit }] });
+    if (includeMissionReviews && usage.missionReviewRecoveryRevision !== null && !usage.missionReviewRecoveryAcknowledged && missionReviewRecoveryRevision !== usage.missionReviewRecoveryRevision) throw new Error("Explicitly acknowledge that the remaining recovery allowance will also cover mission reviews, then save again.");
+    await this.setBudgetPolicy({ ...draft, ...(includeCoding && recoveryRevision ? { requestRecoveryRevision: recoveryRevision } : {}), ...(includeMissionReviews && missionReviewRecoveryRevision ? { missionReviewRecoveryRevision } : {}), modelRequestLimits: limit === null ? [] : [{ pool: includeCoding ? "companion-planning-and-coding" : "companion-and-planning", monthlyRequests: limit, ...(includeMissionReviews ? { includeMissionReviews: true } : {}) }] });
     return this.getCompanionUsage();
   }
 
@@ -5348,7 +5389,7 @@ export class Host {
     const { workspace, recovery } = this.#budget();
     await this.#reconcileCompanionBudgets();
     const usage = companionRequestUsage(workspace);
-    return { ...usage, historyComplete: !recovery && usage.historyComplete, remaining: recovery ? null : usage.remaining, inputTokens: recovery ? null : usage.inputTokens, outputTokens: recovery ? null : usage.outputTokens, blocked: recovery ? BUDGET_NEEDS_RECOVERY : usage.historyBlocked ?? (usage.remaining === 0 ? "The monthly Companion and planning allowance is exhausted. Raise it, wait for the next confirmed month, or continue manually." : null) };
+    return { ...usage, reconciliationNotes: [...new Set(this.#budgetReconciliationNotes.values())], historyComplete: !recovery && usage.historyComplete, remaining: recovery ? null : usage.remaining, inputTokens: recovery ? null : usage.inputTokens, outputTokens: recovery ? null : usage.outputTokens, blocked: recovery ? BUDGET_NEEDS_RECOVERY : usage.historyBlocked ?? (usage.remaining === 0 ? "The monthly Companion and planning allowance is exhausted. Raise it, wait for the next confirmed month, or continue manually." : null) };
   }
 
   #codingChoice(requested?: number | null) {
@@ -5444,20 +5485,56 @@ export class Host {
     return written.grant;
   }
 
-  /** Reconciles saved metadata only. Neither a lost response nor a restart resends inference. */
-  async #reconcileCompanionBudgets(feature?: "task"): Promise<void> {
+  /** Reconnects grant owners for metadata only. Neither a lost response nor a restart resends inference. */
+  async #reconcileCompanionBudgets(): Promise<void> {
+    const previous = this.#budgetReconciliation;
+    const pending = (async () => {
+      // Each caller observes its own failure; a failed pass must not poison the next explicit refresh.
+      if (previous) await previous.catch(() => undefined);
+      await this.#reconcileBudgetGrants();
+    })();
+    this.#budgetReconciliation = pending;
+    try { await pending; }
+    finally { if (this.#budgetReconciliation === pending) this.#budgetReconciliation = null; }
+  }
+
+  async #reconcileBudgetGrants(): Promise<void> {
     const { workspace, guard, recovery } = this.#budget();
     if (recovery) return;
-    for (const grant of openGrants(workspace).filter((one) => feature ? one.attribution.feature === feature : requestPoolCovers(one.attribution.feature) || one.attribution.feature === "task")) {
+    const outstanding = openGrants(workspace);
+    const open = new Set(outstanding.map((grant) => grant.id));
+    for (const id of this.#budgetReconciliationNotes.keys()) if (!open.has(id)) this.#budgetReconciliationNotes.delete(id);
+    const connections = new Map<string, Promise<Engine>>();
+    for (const grant of outstanding.filter((one) => requestPoolCovers(one.attribution.feature) || one.attribution.feature === "task" || one.attribution.feature === "mission-review")) {
       const now = Date.now();
       if (grant.state === "written") {
+        if (this.#submissions.has(grant.requestId)) continue;
         const released = releaseGrant(workspace, grant.id, now, guard.last());
         if (released) this.#guardBudget(guard, workspace, released, now);
         continue;
       }
-      const engine = this.#engines.get(grant.targetId);
-      const state = engine?.supervisor.state;
-      if (!engine || state?.status !== "online" || state.info.homeId !== grant.homeId) continue;
+      const label = this.#labelOf(grant.targetId);
+      let engine: Engine;
+      try {
+        let connection = connections.get(grant.targetId);
+        if (!connection) {
+          connection = (async () => {
+            const owner = await this.#ensure(grant.targetId);
+            await owner.supervisor.start();
+            return owner;
+          })();
+          connections.set(grant.targetId, connection);
+        }
+        engine = await connection;
+      } catch {
+        this.#budgetReconciliationNotes.set(grant.id, `The engine on ${label} couldn't be reconnected, so its allowance remains reserved. Restore that target, then refresh Budget and usage.`);
+        continue;
+      }
+      const state = engine.supervisor.state;
+      if (state.status !== "online" || state.info.homeId !== grant.homeId) {
+        this.#budgetReconciliationNotes.set(grant.id, `The engine on ${label} has different or unavailable records from the one that received this grant. Its allowance remains reserved. Restore the original engine home, then refresh Budget and usage.`);
+        continue;
+      }
       try {
         const rows: import("@nivra/domain").BudgetOperation[] = [];
         let after = 0;
@@ -5469,13 +5546,20 @@ export class Host {
           if (rows.length > 1000) throw new Error("A model journal exceeds its bound.");
           after = page.next ?? 0;
         } while (page.next !== null);
-        if (!page.accepted) continue;
+        if (!page.accepted) {
+          this.#budgetReconciliationNotes.set(grant.id, `The engine on ${label} has no accepted record of this grant. Its allowance remains reserved. Restore the original engine records, then refresh Budget and usage.`);
+          continue;
+        }
         const accepted = markAccepted(workspace, grant.id, now);
         if (accepted) this.#guardBudget(guard, workspace, accepted, now);
         if (page.seal) {
           const settled = recordJournal(workspace, grant.id, rows, page.seal, now);
           if ("refused" in settled) throw new Error(settled.refused);
           if (settled.authority) this.#guardBudget(guard, workspace, settled.authority, now);
+          if (page.seal.kind === "complete") this.#budgetReconciliationNotes.delete(grant.id);
+          else this.#budgetReconciliationNotes.set(grant.id, `The usage journal on ${label} was interrupted, so its unused allowance remains reserved. Restore the original complete records if available, or review Budget and usage.`);
+        } else {
+          this.#budgetReconciliationNotes.set(grant.id, `The usage journal on ${label} has no complete seal yet, so its unused allowance remains reserved. Wait for the run to finish, then refresh Budget and usage.`);
         }
         if (page.providerDate) {
           const observed = observeProviderTime(workspace, Date.parse(page.providerDate), now, this.#budgetZone(workspace));
@@ -5484,6 +5568,7 @@ export class Host {
       } catch {
         const uncertain = markUncertain(workspace, grant.id, now);
         if (uncertain) this.#guardBudget(guard, workspace, uncertain, now);
+        this.#budgetReconciliationNotes.set(grant.id, `Nivra couldn't validate the usage journal on ${label}, so its unused allowance remains reserved. Restore that engine's records, then refresh Budget and usage.`);
       }
     }
   }

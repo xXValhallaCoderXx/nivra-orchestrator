@@ -4151,3 +4151,28 @@ No dependency, provider, queue, checkpoint, compaction, restart continuation or 
 added. This supersedes D39/D60's fixed coding allowances and coding request-pool exclusion for explicitly expanded
 policies. [NIV-60's evidence record](niv-60-verification.md) keeps deterministic enforcement separate from useful
 real-task results; the ticket stays open until the representative and larger-task acceptance evidence exists.
+
+## D64. Mission reviews use complete council grants and reconnect their recorded owners for settlement (2026-10-30, NIV-52)
+
+**Decision.** A mission review starts once under one guarded host-ledger grant: two productive inference requests and
+one protected chair request, each capped at 4,000 completion tokens including reasoning, plus one bounded listing.
+The existing request and review deadlines and no-retry behaviour remain. Each concurrent role has immutable journal
+attribution. Monthly review coverage is optional and explicitly saved, independent of coding; old policy bytes and
+recovery restrictions retain their meaning, and reviews need their own recovery acknowledgement.
+
+Before showing available request capacity, the host reconnects engines named by outstanding grants and reads their
+journals, including after relaunch when the review was deleted. It never substitutes another home or replays a run.
+Validated complete seals release unused capacity through the existing ledger; interrupted or invalid evidence and
+failed reconnection retain the conservative charge, with an explanation. Reconciliation is serialised and repeated
+settlement is idempotent. The source live collector attempts shutdown in an independent finally and retains separate,
+sanitised reconciliation and shutdown failures.
+
+**Why.** A bounded review needs its chair reserved before either reviewer starts. Deleted review records and a cold
+host are not evidence that no model requests were sent, but they must not prevent reading a complete seal that proves
+what was unused. A reconciliation failure must not leave the engine running by bypassing shutdown.
+
+**Consequences.** Protocol 25 requires mission-specific grants while preserving saved-plan review behaviour. No
+dependency or database migration is added. The live script uses production Host admission, a fresh private ledger
+and guard, an explicit three-request UTC policy, and the exact approved model. Unknown usage and money remain
+unknown. This supersedes D44's unbound mission-review dispatch; D49 remains the budget authority. Technical and
+usefulness acceptance remain separate and no paid run is authorised by the implementation or its offline checks.

@@ -375,17 +375,32 @@ async function start(engine: EngineProcess, options: { packet?: MissionReviewPac
     preferencesDigest: await preferencesDigest(preferences.records),
   };
   const clientRequestId = randomUUID();
-  const run = await engine.client.call("runs.start", { clientRequestId, workflowId: "review", input, context: { preferences, sharing: { modelContext: false }, packet } });
-  return { run, input, clientRequestId };
+  const budget = { feature: "mission-review" as const, workflow: "review", id: randomUUID(), requestId: clientRequestId, models: [packet.model ?? MODEL], modelListings: 1, catalogueVersion: "test-unpriced", rates: [], productiveMicros: null, finalisationMicros: null, productive: { requests: 2, outputTokens: 4000 }, finalisation: { requests: 1, outputTokens: 4000 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 } };
+  const run = await engine.client.call("runs.start", { clientRequestId, budget, workflowId: "review", input, context: { preferences, sharing: { modelContext: false }, packet } });
+  return { run, input, clientRequestId, budget };
 }
 const finished = (engine: EngineProcess, runId: string) => engine.waitForRun(runId, (page) => isTerminal(page.status), 30_000);
 const failedEvent = (page: RunEventsPage) => page.events.find((event) => event.type === "run.failed");
 const reportOf = async (engine: EngineProcess, runId: string) => (await engine.client.call("runs.review", { runId })) as ReviewReport | null;
 
 describe("a mission review over stdio (NIV-52)", () => {
+  it("refuses missing, misidentified, wrong-model and insufficient grants before any provider traffic", async () => {
+    const { engine, stub } = await setup(scripted(COUNCIL));
+    const clientRequestId = randomUUID();
+    const packet = { ...PACKET, model: MODEL };
+    const input = { panel: "council" as const, planId: randomUUID(), planVersion: 1, packetDigest: await missionPacketDigest(packet), preferencesDigest: await preferencesDigest(PREFERENCES.records) };
+    const good = { id: randomUUID(), requestId: clientRequestId, feature: "mission-review" as const, workflow: "review", models: [MODEL], modelListings: 1, catalogueVersion: "test-unpriced", rates: [], productiveMicros: null, finalisationMicros: null, productive: { requests: 2, outputTokens: 4000 }, finalisation: { requests: 1, outputTokens: 4000 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 } };
+    const variants = [undefined, { ...good, feature: "coach" as const }, { ...good, workflow: "coach" }, { ...good, requestId: randomUUID() }, { ...good, models: ["nvidia/a-different-model"] }, { ...good, productive: { requests: 1, outputTokens: 4000 } }, { ...good, finalisation: { requests: 0, outputTokens: 4000 } }, { ...good, finalisation: { requests: 1, outputTokens: 3999 } }, { ...good, modelListings: 0 }];
+    for (const budget of variants) {
+      await assert.rejects(engine.client.call("runs.start", { clientRequestId, ...(budget ? { budget } : {}), workflowId: "review", input, context: { preferences: PREFERENCES, sharing: { modelContext: false }, packet } }), /host grant/);
+    }
+    assert.equal(stub.requests.length, 0);
+    assert.equal((await engine.client.call("runs.list", {})).runs.length, 0);
+  });
+
   it("sends both reviewers the mission and its tasks, then the chair, and keeps a report bound to what was sent", async () => {
     const { stub, engine } = await setup(scripted(COUNCIL));
-    const { run, input, clientRequestId } = await start(engine);
+    const { run, input, clientRequestId, budget } = await start(engine);
     const page = await finished(engine, run.id);
     assert.equal(page.status, "succeeded", page.events.map((event) => event.message).join(" | "));
     const report = await reportOf(engine, run.id);
@@ -412,6 +427,10 @@ describe("a mission review over stdio (NIV-52)", () => {
     );
     assert.deepEqual([report.synthesis?.priorities, report.route?.model, report.packet.textChars], [["arch-1", "risk-1"], MODEL, renderMissionPacket(PACKET).length]);
     assert.equal(chats.length, 3);
+    const journal = await engine.client.call("budget.journal", { grantId: budget.id });
+    assert.equal(journal.rows.length, 4);
+    assert.equal(journal.seal?.kind, "complete");
+    assert.deepEqual(journal.rows.map((row) => [row.kind, row.seat]).sort(), [["model-listing", "mission-review-listing"], ["model-request", "architecture"], ["model-request", "chair"], ["model-request", "risks"]]);
   });
 
   it("refuses before any request a model it wasn't allowed, and uses exactly the one it was", async () => {

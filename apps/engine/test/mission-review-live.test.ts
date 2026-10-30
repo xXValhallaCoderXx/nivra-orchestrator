@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +64,20 @@ const unnamed = (reply: Reply): Reply => {
 };
 
 describe("the mission review's live check (NIV-52)", () => {
+  it("rejects linked evidence directories and their ancestors without changing historical files", async () => {
+    const dir = folder();
+    const historical = join(dir, "historical"); mkdirSync(historical);
+    const marker = join(historical, "result.json"); writeFileSync(marker, "Keep this evidence.\n");
+    const linked = join(dir, "linked"); symlinkSync(historical, linked, "junction");
+    for (const out of [linked, join(linked, "new-evidence")]) {
+      const result = await run(["--token-factory-url", "http://127.0.0.1:9", "--out", out, "--home", join(dir, "home")], dir);
+      assert.equal(result.code, 2);
+      assert.match(result.stderr, /directory or output path is linked/);
+    }
+    assert.equal(readFileSync(marker, "utf8"), "Keep this evidence.\n");
+    assert.equal(existsSync(join(historical, "new-evidence")), false);
+  });
+
   it("prints the recipe for approval, with its bounds, its one model and a digest, and sends nothing", async () => {
     const { code, stdout } = await run(["--plan"]);
     assert.match(stdout, /One approval is one run\. This one covers run 1 of this recipe at this revision\. The first launch that presents it claims it in ~\/nivra-acceptance\/claims\/mission-review\/ before the checkout is checked, the key is read or anything is sent/);
@@ -72,7 +86,7 @@ describe("the mission review's live check (NIV-52)", () => {
     assert.match(stdout, /at most 3 requests \(two reviewers, then the chair\), 4,000 completion tokens each \(reasoning included\), 150 s each and 330 s in all/);
     assert.match(stdout, /Product architect v1, instructions [0-9a-f]{12}\./);
     assert.match(stdout, /The forms they hand in \(the tools' definitions\): [0-9a-f]{12}\./);
-    assert.match(stdout, /Live acceptance is deferred until mission reviews receive host-ledger grants/);
+    assert.match(stdout, /The production host reserves all three inference slots in its isolated shared monthly allowance/);
     assert.match(stdout, /Approval digest: [0-9a-f]{64}\n/);
     const again = await run(["--plan"]);
     assert.equal(digestIn(again.stdout), digestIn(stdout), "the same recipe gives the same digest");
@@ -149,6 +163,12 @@ describe("the mission review's live check (NIV-52)", () => {
     assert.deepEqual(result.findings.map((reviewer) => reviewer.refs), [[["T1", "backlog"]], [["T3"]]]);
     assert.equal(stub.chats().length, 3);
     assert.equal(stub.requests.filter((request) => request.path.endsWith("/models")).length, 1, "listing isn't an inference request");
+    const receipt = JSON.parse(readFileSync(join(dir, "out", "host", "receipt.json"), "utf8")) as { grants: Array<{ state: string; attribution_json: string }>; operations: Array<{ kind: string; seat: string }>; roles: Array<{ seat: string; part: string }> };
+    assert.equal(receipt.grants.length, 1);
+    assert.equal(receipt.grants[0]?.state, "settled");
+    assert.equal(JSON.parse(receipt.grants[0]!.attribution_json).feature, "mission-review");
+    assert.equal(receipt.operations.length, 4);
+    assert.deepEqual(receipt.roles.map((row) => [row.seat, row.part]).sort(), [["architecture", "productive"], ["chair", "finalisation"], ["mission-review-listing", "productive"], ["risks", "productive"]]);
     for (const request of stub.chats()) {
       assert.equal(request.body?.model, LIVE_MODEL);
       assert.equal(request.body?.["max_completion_tokens"], 4_000);

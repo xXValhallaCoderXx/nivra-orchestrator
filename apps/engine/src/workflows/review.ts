@@ -16,7 +16,7 @@ import {
   type RunUsage,
 } from "@nivra/domain";
 import { z } from "zod";
-import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
+import { createModelClient, failure, ModelFailure, type BudgetBinding, type Endpoint, type ModelClient } from "../providers/model.ts";
 import { policyFor } from "../providers/policy.ts";
 import type { RunLimits } from "../providers/run-budget.ts";
 import { isNvidiaModel, pickNemotron } from "../providers/tokenfactory.ts";
@@ -42,6 +42,8 @@ export interface ReviewDeps {
   task: (runId: string) => ReviewTask | null;
   /** The request id the host sent the run with. */
   requestId: (runId: string) => string | null;
+  /** Required for mission reviews; held in scheduler memory and the operation journal only. */
+  budget?: (runId: string) => BudgetBinding | null;
   apiKey: () => string | null;
   endpoint: Endpoint;
   mask: Mask;
@@ -76,7 +78,11 @@ const Prepared = z.strictObject({ model: z.string(), contextLength: z.number().n
 const Reviewed = z.strictObject({ outcome: ReviewOutcome, findings: z.number().int().nonnegative() });
 
 export function createReviewWorkflow(deps: ReviewDeps) {
-  const clientFor = (key: string) => (deps.modelClient ? deps.modelClient(key, deps.endpoint) : createModelClient({ apiKey: key, endpoint: deps.endpoint }));
+  const clientFor = (key: string, runId: string, seat: string) => {
+    const binding = deps.budget?.(runId);
+    if (isMission(given(runId).packet) && !binding) throw failure("budget-exhausted", "this mission review has no admitted host allowance; preview and start it again");
+    return deps.modelClient ? deps.modelClient(key, deps.endpoint) : createModelClient({ apiKey: key, endpoint: deps.endpoint, ...(binding ? { budget: { ...binding, seat } } : {}) });
+  };
 
   const given = (runId: string): ReviewContext => {
     const context = deps.context(runId);
@@ -166,7 +172,7 @@ export function createReviewWorkflow(deps: ReviewDeps) {
     outputSchema: Prepared,
     execute: async ({ runId, abortSignal }) => guard("review.prepare", deps.mask, async () => {
       const { context: sent, key } = allowed(runId);
-      const client = clientFor(key);
+      const client = clientFor(key, runId, "mission-review-listing");
       const models = await client.listModels({ signal: abortSignal, timeoutMs: 30_000 });
       const model = reviewModel(sent.packet, models.ids);
       deps.setMeta(runId, { route: { provider: "nebius", endpoint: deps.endpoint.kind, model } });
@@ -189,7 +195,8 @@ export function createReviewWorkflow(deps: ReviewDeps) {
         clientRequestId: deps.requestId(runId) ?? runId,
         task,
         context: sent,
-        client: clientFor(key),
+        client: clientFor(key, runId, "review"),
+        clientForRole: (role) => clientFor(key, runId, role),
         model: inputData.model,
         contextLength: inputData.contextLength,
         route: { provider: "nebius", endpoint: deps.endpoint.kind, model: inputData.model },

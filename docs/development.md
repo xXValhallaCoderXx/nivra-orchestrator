@@ -99,10 +99,9 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 ```
 
 `verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`.
-- **A mission review** (NIV-52). `rpc.ts` drives one against a real engine: give `runs.start` a `review` with a mission
-  packet in its context (`"packet": {"kind": "mission", ...}`, as `apps/engine/test/fixtures/mission-review/live.json`
-  holds one), and it fills in the packet's and the preferences' digests when the input leaves them out. A packet that
-  names a model is refused before any inference request unless the listing gives exactly that model.
+- **A mission review** (NIV-52, D64) requires the production host's finite grant for two reviewers and one reserved
+  chair, with one listing accounted separately. Use the host-backed script below; never manufacture a grant for
+  `rpc.ts`. A packet naming a model is refused before inference unless the listing gives exactly that model.
 - **The mission review's live check** is an explicit script, never part of `verify`, and runs only with Nate's approval
   of its digest:
 
@@ -120,13 +119,21 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
   next run's digest.
   The current evidence model is exactly `nvidia/Nemotron-3.5-Super-VL`, with `max_completion_tokens` 4,000 (reasoning
   included), at most three inference requests, 150 seconds each and 330 seconds for the review. Listings are separate
-  from inference. **Paid acceptance is deferred until mission reviews receive host-ledger grants (NIV-66)**: the
-  existing per-review bounds are not a host grant. `--plan` names that operating prerequisite; it does not integrate
-  the ledger or waive AGENTS.md. A later live run also needs clean source and approval of its new exact digest.
+  from inference. The source harness now uses production Host admission and an isolated counts-only policy in UTC,
+  with three monthly requests and explicit review coverage. Paid acceptance still awaits review of the tested commit,
+  clean source and approval of its exact recipe digest; passing stand-ins does not establish useful model advice.
   Collection failures now retain a receipt and partial reports when available. A lost start reply is found by its
   request id, never resent; a cancellation request is not confirmed until a terminal state is observed. Collection
   errors, unresolved termination and the closer's return are recorded separately, with unknown usage left unknown.
   See [NIV-52's completion evidence and frozen usefulness rubric](niv-52-verification.md).
+- **Outstanding grant recovery** reconnects recorded targets before calculating request availability, even when a
+  mission or its review has been deleted. These are journal reads, never replayed model requests. A missing target,
+  different home, missing journal, interrupted seal or invalid complete seal retains the full conservative charge;
+  Budget and usage and blocked mission previews explain why. Restore the original records and refresh. Only a
+  validated complete seal releases unused capacity, and repeated/concurrent reconciliation is idempotent.
+  The live collector always attempts shutdown independently of reconciliation and records both failures separately.
+  Focused regressions: `pnpm --filter @nivra/desktop exec node --test test/mission-review-budget.test.ts
+  test/budget-mission-review.test.ts test/host-budget.test.ts` (one command).
 - **The window's tests** (`e2e/missions.spec.ts`) drive missions with the token factory stub: the council's roles are
   told apart by the instructions' first line, as for plan reviews. A packaged app runs only the parts that need no
   model.

@@ -3913,3 +3913,15 @@ deadlines remain cumulative, and late capacity replies cannot restart cancelled,
 prepared A1/B1/C1 real-task evaluation. Deterministic stand-ins pass 65 requests, 33 required writes and the old input
 allowance, while separate exhausted-pool/failed-guard cases retain final checks. These do not establish model quality
 or a useful larger-task result. NIV-60 remains open pending the independent real-task acceptance evidence.
+
+## Budgeted mission reviews and recovery fixes (NIV-52, D64) — 30 October 2026
+
+Mission councils now use one guarded host grant for both reviewers and the chair, with explicit optional monthly
+coverage. Outstanding grants reconnect their recorded engines for metadata settlement before availability is shown,
+including after deletion/relaunch; failed reconnection and invalid or interrupted evidence keep their conservative
+charge and explain it. Repeated settlement releases no capacity twice. Collector shutdown runs independently and
+records reconciliation and shutdown failures separately.
+
+[NIV-52's verification record](niv-52-verification.md) identifies the reproduction regressions and the final revision's
+private check receipts. Offline enforcement, built/packaged UI, Windows transport and eventual paid model usefulness
+are distinct evidence. No paid review is claimed here, and the frozen usefulness rubric is unchanged.

@@ -412,7 +412,7 @@ function start(): void {
   handle(IPC.generatePlanning, z.tuple([z.uuid(), z.number().int().positive(), z.strictObject({ inspectRepository: z.boolean(), operationId: z.uuid() })]), (_event, id, revision, input) => host.generatePlanning(id, revision, input));
   handle(IPC.getPlanningOperation, z.tuple([z.uuid(), z.uuid()]), (_event, id, operationId) => host.getPlanningOperation(id, operationId));
   handle(IPC.cancelPlanning, z.tuple([z.uuid(), z.uuid()]), (_event, id, operationId) => host.cancelPlanning(id, operationId));
-  handle(IPC.setCompanionLimit, z.tuple([z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(), z.boolean().optional(), z.number().int().positive().nullable().optional()]), (_event, limit, includeCoding?: boolean, revision?: number | null) => host.setCompanionLimit(limit, includeCoding, revision));
+  handle(IPC.setCompanionLimit, z.tuple([z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(), z.boolean().optional(), z.number().int().positive().nullable().optional(), z.boolean().optional(), z.number().int().positive().nullable().optional()]), (_event, limit, includeCoding?: boolean, revision?: number | null, includeMissionReviews?: boolean, missionRevision?: number | null) => host.setCompanionLimit(limit, includeCoding, revision, includeMissionReviews, missionRevision));
   handle(IPC.getBudgetPolicy, none, () => host.getBudgetPolicy());
   handle(IPC.setBudgetPolicy, z.tuple([BudgetPolicyDraft.nullable()]), (_event, draft) => host.setBudgetPolicy(draft));
   handle(IPC.budgetSummary, none, () => host.budgetSummary());
