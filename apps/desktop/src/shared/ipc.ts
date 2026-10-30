@@ -17,6 +17,7 @@ import type {
   ExplainResult,
   HistoryRecord,
   MissionContent,
+  PreferenceSnapshot,
   PreferenceIntent,
   PreferenceScope,
   PreparedEnvironmentV2,
@@ -654,6 +655,10 @@ export type RunLimitsView = Pick<
  * (D39). Nothing is sent. `expected` binds a start to this preview: starting is refused when anything here changed.
  */
 export interface TaskRunPreview {
+  preferences: PreferenceSnapshot;
+  choices: string[];
+  preferencesDigest: string;
+  choicesDigest: string;
   taskId: string;
   briefVersion: number;
   /** The repository the task runs on, and its engine. */
@@ -1036,9 +1041,9 @@ export interface NivraApi {
   /** A task run's bounds that no brief changes, from the domain's one source; nothing is asked of an engine. */
   getRunLimits(): Promise<RunLimitsView>;
   /** What a run of the task would send, and where, with its fingerprint. Nothing is sent or stored. */
-  previewTaskRun(taskId: string): Promise<TaskRunPreview>;
+  previewTaskRun(taskId: string, choices?: string[]): Promise<TaskRunPreview>;
   /** Starts the run previewed; refused when anything it would send changed since (`expected`, `snapshot`). */
-  startTaskRun(taskId: string, expected: string, snapshot: string): Promise<TaskAttemptView>;
+  startTaskRun(taskId: string, expected: string, snapshot: string, choices?: string[]): Promise<TaskAttemptView>;
   /** Stops a run being sent or going; its end is recorded as cancelled by the person. What it uploaded stays with Nebius. */
   cancelTaskRun(taskId: string, attemptId: string): Promise<TaskAttemptView>;
   /** One run of a task as it is now, read from its engine when that is online. */

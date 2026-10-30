@@ -1,3 +1,4 @@
+import { choicesDigest, preferencesDigest } from "@nivra/domain";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -93,8 +94,8 @@ async function start(engine: EngineProcess, repo: string, fingerprint: string, e
   return engine.client.call("runs.start", {
     clientRequestId: randomUUID(),
     workflowId: "task",
-    input: { repoPath: repo, project: PROJECT, target: "local", preview: fingerprint, taskId: TASK_ID, briefVersion: 2, briefDigest: await taskBriefDigest(BRIEF), environment },
-    context: { sharing: { modelContext: true, cloudExecution: true }, brief: BRIEF },
+    input: { repoPath: repo, project: PROJECT, target: "local", preview: fingerprint, taskId: TASK_ID, briefVersion: 2, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(BRIEF), environment },
+    context: { sharing: { modelContext: true, cloudExecution: true }, brief: BRIEF, preferences: { revision: 0, records: [] }, choices: [] },
   });
 }
 const ended = (engine: EngineProcess, runId: string) => engine.waitForRun(runId, (page) => isTerminal(page.status), 60_000);

@@ -111,6 +111,8 @@ export async function attempt(options: Attempt = {}) {
       folder: root,
       preview,
       brief,
+      preferences: { revision: 0, records: [] },
+      choices: [],
       backend,
       local,
       git: GIT,

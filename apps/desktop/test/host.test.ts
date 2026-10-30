@@ -1,3 +1,4 @@
+import { choicesDigest, preferencesDigest } from "@nivra/domain";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -2583,11 +2584,11 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     return root;
   };
   /** Stand-ins for Nebius, its guest running each command with this machine's tools, and for Token Factory, its model doing `calls`. */
-  async function standIns(calls = WORK) {
+  async function standIns(calls = WORK, onRequest?: (index: number) => void) {
     const guest = new RealGuest(CHECK_IMAGE.uuid);
     guest.busybox = true;
     const sandbox = await startSandboxStub({ guest });
-    const model = await startStub({ models: [{ id: TASK_MODEL, context_length: 131_072 }], chat: (_request, index) => toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }) });
+    const model = await startStub({ models: [{ id: TASK_MODEL, context_length: 131_072 }], chat: (_request, index) => { onRequest?.(index); return toolCall(calls[Math.min(index, calls.length - 1)]![0], calls[Math.min(index, calls.length - 1)]![1], { id: `call_${index}` }); } });
     local.push(sandbox, model);
     return { sandbox, model, guest };
   }
@@ -2613,6 +2614,109 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
       return view.status !== "submitting" && view.status !== "running" ? view : null;
     }, what, 60_000);
   const uploads = (stub: SandboxStub<RealGuest>) => stub.requests.filter((request) => request.path === "/v1/files").length;
+
+  it("NIV-71 sends frozen scoped preferences and choices to every worker request, and keeps input canaries out of run storage", async () => {
+    let host!: Host; let personalId = "";
+    const canary = `coding-preference-${randomUUID()}`; const choice = `coding-choice-${randomUUID()}`;
+    const { sandbox, model } = await standIns(WORK, (index) => { if (index === 0) host.editPreference(personalId, { statement: "Changed after acceptance" }); });
+    const repo = makeRepo(join(reposRoot(), "scoped"), FILES);
+    const made = makeHost({ tokenFactoryUrl: model.url, sandboxesUrl: sandbox.url, projects: [{ targetId: "wsl:Test", path: repo }, { targetId: "local", path: repo }] });
+    host = made.host; made.keys.current = SECRETS;
+    await host.setSharing(made.ids[0]!, true); await host.setCloudExecution(made.ids[0]!, true);
+    personalId = host.addPreference({ statement: canary, scope: "personal", projectId: null }).id;
+    const old = host.addPreference({ statement: "Superseded convention marker", scope: "project", projectId: made.ids[0]!, intent: "override" });
+    const own = host.supersedePreference(old.id, { statement: "Keep the exported API stable", intent: "override" });
+    host.addPreference({ statement: "Foreign project convention marker", scope: "project", projectId: made.ids[1]! });
+    const task = await readyTask(host, made.ids[0]!);
+    const before = host.task(task.summary.id).brief.sha256;
+    const preview = await host.previewTaskRun(task.summary.id, [` ${choice} `]);
+    assert.deepEqual(preview.preferences.records.map((record) => record.id), [personalId, own.id]);
+    assert.deepEqual(preview.choices, [choice]);
+    const started = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!, [choice]);
+    const done = await ended(host, task.summary.id, started.id);
+    assert.equal(done.report?.outcome, "proposed");
+    assert.equal(model.chats().length, 4);
+    assert.equal(model.chats().every((chat) => chat.raw.includes(canary) && chat.raw.includes(choice) && chat.raw.includes("override") && !chat.raw.includes("Changed after acceptance") && !chat.raw.includes("Foreign project convention marker") && !chat.raw.includes("Superseded convention marker")), true);
+    assert.equal(host.task(task.summary.id).brief.sha256, before);
+    assert.equal(JSON.stringify(await host.runEvents(done.runId!, 0)).includes(canary), false);
+    await host.rejectTaskChange(task.summary.id, done.id);
+    host.deletePreference(own.id);
+    const next = await host.previewTaskRun(task.summary.id);
+    const again = await host.startTaskRun(task.summary.id, next.expected, next.snapshotFingerprint!);
+    await ended(host, task.summary.id, again.id);
+    const later = model.chats().slice(4);
+    assert.equal(later.length > 0, true);
+    assert.equal(later.every((chat) => chat.raw.includes("Changed after acceptance") && !chat.raw.includes(canary) && !chat.raw.includes(choice) && !chat.raw.includes("Keep the exported API stable")), true);
+    await host.shutdown();
+    for (const marker of [canary, choice]) {
+      assert.equal(filesHolding(join(made.root, "wsl home"), marker).length, 0, "no input text in engine/Mastra persistence");
+      assert.equal(filesHolding(made.root, marker).some((file) => file.endsWith("workspace.db") || file.includes("logs/")), false);
+    }
+  });
+
+  it("NIV-71 rejects relevant preference or choice changes, but permits unrelated-project changes", async () => {
+    const { host, ids, model, root } = await taskHost();
+    const own = host.addPreference({ statement: "Keep one API stable", scope: "project", projectId: ids[0]! });
+    const task = await readyTask(host, ids[0]!);
+    const choices = ["Keep the test names"];
+    const shown = await host.previewTaskRun(task.summary.id, choices);
+    await assert.rejects(host.startTaskRun(task.summary.id, shown.expected, shown.snapshotFingerprint!, ["Change the test names"]), /changed since you previewed/);
+    host.editPreference(own.id, { statement: "Keep two APIs stable" });
+    await assert.rejects(host.startTaskRun(task.summary.id, shown.expected, shown.snapshotFingerprint!, choices), /changed since you previewed/);
+    const current = await host.previewTaskRun(task.summary.id, choices);
+    host.deletePreference(own.id);
+    await assert.rejects(host.startTaskRun(task.summary.id, current.expected, current.snapshotFingerprint!, choices), /changed since you previewed/);
+    const latest = await host.previewTaskRun(task.summary.id, choices);
+    assert.equal(latest.preferences.records.length, 0);
+    assert.equal(model.chats().length, 0);
+    assert.equal(host.task(task.summary.id).attempts.length, 0);
+    // Changing an unrelated project's preference raises the store revision without changing this run's binding.
+    const otherRepo = makeRepo(join(reposRoot(), "other"), FILES);
+    const second = makeHost({ tokenFactoryUrl: model.url, projects: [{ targetId: "wsl:Test", path: otherRepo }, { targetId: "local", path: otherRepo }] });
+    second.keys.current = SECRETS;
+    await second.host.setSharing(second.ids[0]!, true); await second.host.setCloudExecution(second.ids[0]!, true);
+    const otherTask = await readyTask(second.host, second.ids[0]!);
+    const unrelated = second.host.addPreference({ statement: "Other project only", scope: "project", projectId: second.ids[1]! });
+    const first = await second.host.previewTaskRun(otherTask.summary.id);
+    second.host.editPreference(unrelated.id, { statement: "Other project still only" });
+    const after = await second.host.previewTaskRun(otherTask.summary.id);
+    assert.equal(after.preferences.revision > first.preferences.revision, true);
+    assert.equal(after.expected, first.expected);
+    assert.equal(after.preferences.records.length, 0);
+  });
+
+  it("NIV-71 rechecks relevant preferences after asynchronous start prerequisites", async () => {
+    let release!: () => void; let held = false; let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const { model } = await standIns(); const repo = makeRepo(join(reposRoot(), "held"), FILES);
+    const { host, ids } = makeHost({ tokenFactoryUrl: model.url, projects: [{ targetId: "wsl:Test", path: repo }], credentials: async () => { if (held) { entered(); await gate; } return SECRETS; } });
+    await host.setSharing(ids[0]!, true); await host.setCloudExecution(ids[0]!, true);
+    const pref = host.addPreference({ statement: "Before credentials wait", scope: "personal", projectId: null });
+    const task = await readyTask(host, ids[0]!); const shown = await host.previewTaskRun(task.summary.id);
+    held = true;
+    const start = host.startTaskRun(task.summary.id, shown.expected, shown.snapshotFingerprint!);
+    await waiting; host.editPreference(pref.id, { statement: "After credentials wait" }); release();
+    await assert.rejects(start, /changed since you previewed/);
+    assert.equal(host.task(task.summary.id).attempts.length, 0); assert.equal(model.chats().length, 0);
+  });
+
+  it("NIV-71 screens recognised and saved credentials in preferences and choices without echoing them", async () => {
+    const { host, ids, keys, model } = await taskHost();
+    const task = await readyTask(host, ids[0]!);
+    const clean = await host.previewTaskRun(task.summary.id);
+    const secret = "ghp_" + "q".repeat(36);
+    for (const value of [secret, KEY]) {
+      const safeError = (error: unknown) => error instanceof Error && !error.message.includes(value) && /credential|key|token/.test(error.message);
+      await assert.rejects(host.previewTaskRun(task.summary.id, [value]), safeError);
+      await assert.rejects(host.startTaskRun(task.summary.id, clean.expected, clean.snapshotFingerprint!, [value]), safeError);
+    }
+    const pref = host.addPreference({ statement: "An ordinary saved note", scope: "personal", projectId: null });
+    const preview = await host.previewTaskRun(task.summary.id);
+    keys.current = { ...SECRETS, TAVILY_API_KEY: "An ordinary saved note" };
+    await assert.rejects(host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!), (error: unknown) => error instanceof Error && !error.message.includes(pref.statement) && /saved Tavily key/.test(error.message));
+    assert.equal(model.chats().length, 0);
+  });
 
   it("runs a ready task's brief on its project's engine, previewed and bound, and reads back its report and change, the checkout untouched", async () => {
     const { host, ids, sandbox, model, repo } = await taskHost();
@@ -2732,7 +2836,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const expected = async (snapshot: string) =>
-      taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+      taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const snapshot = "c".repeat(64);
     // Accepted, then answered with an error: the run is found by its request id, and recorded as it ended.
     writeFileSync(join(home, "accept"), "");
@@ -2781,7 +2885,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const going = async () => {
       const started = await host.startTaskRun(task.summary.id, expected, snapshot);
       const running = await waitFor(async () => {
@@ -2825,7 +2929,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     const running = await waitFor(async () => {
       const seen = await host.taskAttempt(task.summary.id, started.id);
@@ -2851,7 +2955,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     await waitFor(async () => (await host.taskAttempt(task.summary.id, started.id)).runId, "the task's run to be going");
     const { pid } = await online(host, "wsl:Test");
@@ -2933,7 +3037,7 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     return { taskId: task.summary.id, attemptId: started.id, done: await ended(host, task.summary.id, started.id) };
   }
@@ -3505,7 +3609,7 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     const created = await host.createTask({ title: "Greet the world", fields, projectId: id, planId: null });
     const task = host.setTaskState(created.summary.id, created.revision, "ready");
     const packet = (taskBriefOf(task.brief.content) as { brief: TaskBrief }).brief;
-    const parts = { taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64), requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } };
+    const parts = { preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64), requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } };
     const asked = () => JSON.parse(lines(home, "task-previews.log").at(-1)!) as { environment?: unknown; brief: TaskBrief };
     // No environment yet: the required-check policy is still bound to the preview.
     const plain = await host.previewTaskRun(task.summary.id);

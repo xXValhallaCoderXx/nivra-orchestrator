@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -19,6 +20,32 @@ import { cleanUp, scratch } from "./workspace-fixtures.ts";
 after(cleanUp);
 
 describe("a task's worker (NIV-7, D39)", () => {
+  it("stops before another model request when a frozen preference becomes a saved credential", async () => {
+    const privateText = "private-value-that-becomes-a-key"; let saved = false;
+    const run = await attempt({
+      extra: { preferences: { revision: 1, records: [{ id: randomUUID(), statement: privateText, scope: "personal", intent: "default", revision: 1 }] }, choices: [], mask: (text) => saved ? text.replaceAll(privateText, "[redacted]") : text },
+      beforeRequest: () => { saved = true; },
+    });
+    assert.equal(run.requests(), 1);
+    assert.equal(run.result.outcome, "failed");
+    assert.equal(JSON.stringify(run.core).includes(privateText), false);
+    assert.match(run.result.stopped?.message ?? "", /credential/);
+  });
+
+  it("carries labelled preference intent and run choices through every model request including hand-in", async () => {
+    const preferences = { revision: 4, records: [
+      { id: randomUUID(), statement: "Personal default canary", scope: "personal" as const, intent: "default" as const, revision: 1 },
+      { id: randomUUID(), statement: "Project decision canary", scope: "project" as const, intent: "override" as const, revision: 2 },
+    ] };
+    const run = await attempt({ extra: { preferences, choices: ["Run-only choice canary"] } });
+    assert.equal(run.requests(), 4);
+    for (const prompt of run.prompts()) {
+      for (const marker of ["Personal default canary", "Project decision canary", "Run-only choice canary", "Precedence, highest first", "scope", "intent", "cannot waive task acceptance", "required checks"]) assert.equal(prompt.includes(marker), true, marker);
+    }
+    assert.equal(run.core!.verified, true);
+    assert.equal(run.offered().at(-1)!.includes("submit"), true);
+  });
+
   it("reads, fixes and checks the fixture in the sandbox, and proposes a verified change bound to the attempt, the checkout untouched", async () => {
     const run = await attempt();
     assert.deepEqual([run.result.outcome, run.result.stopped], ["proposed", null]);

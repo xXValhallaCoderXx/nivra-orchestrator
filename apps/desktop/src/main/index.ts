@@ -334,8 +334,8 @@ function start(): void {
     sessionMinutes: TASK_RUN_BOUNDS.sessionMinutes,
     runMinutes: TASK_RUN_BOUNDS.runMinutes,
   }));
-  handle(IPC.previewTaskRun, z.tuple([Id]), (_event, id) => host.previewTaskRun(id));
-  handle(IPC.startTaskRun, z.tuple([Id, Fingerprint, Fingerprint]), (_event, id, expected, snapshot) => host.startTaskRun(id, expected, snapshot));
+  handle(IPC.previewTaskRun, z.tuple([Id, z.array(z.string().max(300)).max(5).default([])]), (_event, id, choices) => host.previewTaskRun(id, choices));
+  handle(IPC.startTaskRun, z.tuple([Id, Fingerprint, Fingerprint, z.array(z.string().max(300)).max(5).default([])]), (_event, id, expected, snapshot, choices) => host.startTaskRun(id, expected, snapshot, choices));
   handle(IPC.cancelTaskRun, z.tuple([Id, Id]), (_event, id, attemptId) => host.cancelTaskRun(id, attemptId));
   handle(IPC.getTaskAttempt, z.tuple([Id, Id]), (_event, id, attemptId) => host.taskAttempt(id, attemptId));
   // A run's change (D40): approved by the hash the person saw, rejected, revised, settled or restored.

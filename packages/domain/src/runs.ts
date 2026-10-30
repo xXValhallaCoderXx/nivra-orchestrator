@@ -1,3 +1,4 @@
+import { MAX_CHOICES, MAX_CHOICE_CHARS } from "./context.ts";
 import { z } from "zod";
 import { RunRoute, RunUsage } from "./models.ts";
 
@@ -76,8 +77,7 @@ export const HelloInput = z.strictObject({
 export type HelloInput = z.infer<typeof HelloInput>;
 
 /** The most choices one explanation can carry, and the longest each can be (NIV-11, D23). */
-export const MAX_CHOICES = 5;
-export const MAX_CHOICE_CHARS = 300;
+export { MAX_CHOICES, MAX_CHOICE_CHARS } from "./context.ts";
 
 /**
  * Explain a repository with evidence (NIV-6, NIV-9). The question is stored with the run, masked, but never handed to

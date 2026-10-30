@@ -1,3 +1,4 @@
+import { choicesDigest, preferencesDigest } from "@nivra/domain";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -131,8 +132,8 @@ describe("a task run's slot (D39)", () => {
     scheduler.attach({ getWorkflow: () => ({ createRun: async ({ runId }) => ({ start: () => new Promise((resolve) => release.set(runId, () => resolve({ status: "success" }))), cancel: async () => undefined, watch: () => () => undefined }) }) });
     scheduler.recover();
     const hello = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: "/repo", holdMs: 0 }, context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } } });
-    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: TASK_BRIEF };
-    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(TASK_BRIEF) }, context: taskContext });
+    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: TASK_BRIEF, preferences: { revision: 0, records: [] }, choices: [] };
+    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(TASK_BRIEF) }, context: taskContext });
     const environmentContext: EnvironmentContext = { sharing: { cloudExecution: true }, spec: { filters: [] } };
     const prepare = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "environment", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "e".repeat(64) }, context: environmentContext });
     const [h1, h2] = [hello(), hello()];
@@ -173,8 +174,8 @@ describe("a task run's slot (D39)", () => {
     const helloContext = { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } };
     const hello = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: "/repo", holdMs: 0 }, context: helloContext });
     const brief = TASK_BRIEF;
-    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief };
-    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(brief) }, context: taskContext });
+    const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief, preferences: { revision: 0, records: [] }, choices: [] };
+    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) }, context: taskContext });
     const [h1, h2, h3] = [hello(), hello(), hello()];
     const [t1, t2] = [await task(), await task()];
     const status = (runId: string) => store.status(runId);
@@ -190,8 +191,15 @@ describe("a task run's slot (D39)", () => {
     await waitFor(() => [h1, h2, h3, t1, t2].every((runId) => status(runId) === "succeeded") || null, { what: "every run to end" });
     // The same request id with another task's input is another run's: refused, as a check's and research's are.
     const reused = randomUUID();
-    const input = { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(brief) };
-    scheduler.submit({ clientRequestId: reused, workflowId: "task", input, context: taskContext });
+    const input = { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) };
+    const original = scheduler.submit({ clientRequestId: reused, workflowId: "task", input, context: taskContext });
+    const held = scheduler.contextOf(original, "task")!;
+    taskContext.choices.push("Changed after acceptance");
+    assert.equal(held.choices.length, 0, "the caller cannot mutate the accepted snapshot");
+    assert.equal(Object.isFrozen(held.preferences.records), true);
+    assert.equal(scheduler.submit({ clientRequestId: reused, workflowId: "task", input, context: taskContext }), original);
+    assert.equal(scheduler.contextOf(original, "task"), held, "duplicates keep the original context object");
+    for (const key of ["preferencesDigest", "choicesDigest"] as const) assert.throws(() => scheduler.submit({ clientRequestId: reused, workflowId: "task", input: { ...input, [key]: "a".repeat(64) }, context: taskContext }), /already started another run/);
     assert.throws(() => scheduler.submit({ clientRequestId: reused, workflowId: "task", input: { ...input, briefVersion: 2 }, context: taskContext }), /already started another run, with other input/);
     database.close();
   });
@@ -308,8 +316,8 @@ describe("a task run's workflow, in process (D39)", () => {
     const brief = TASK_BRIEF;
     const runId = randomUUID();
     const requestId = randomUUID();
-    const input = { repoPath: root, project: randomUUID(), target: "local", preview: (await snap(root)).fingerprint, taskId: randomUUID(), briefVersion: 1, briefDigest: await taskBriefDigest(brief) };
-    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief };
+    const input = { repoPath: root, project: randomUUID(), target: "local", preview: (await snap(root)).fingerprint, taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) };
+    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief, preferences: { revision: 0, records: [] }, choices: [] };
     const calls = options.calls ?? [["edit_file", TASK_FIX], ["submit", { summary: "Defaulted the name to world." }]];
     let requests = 0;
     const model = new MastraLanguageModelV2Mock({

@@ -86,12 +86,14 @@ export function previewProblems(input: {
   /** The recipe's environment just prepared, as the app's view holds it; null for a run with none. */
   prepared: PreparedEnvironmentV2 | null;
   shownExpected: string;
-  structured: Pick<TaskRunPreview, "expected" | "snapshotFingerprint" | "snapshot" | "frozen" | "environment" | "sends">;
+  structured: Pick<TaskRunPreview, "expected" | "snapshotFingerprint" | "snapshot" | "frozen" | "environment" | "sends"> & Partial<Pick<TaskRunPreview, "preferencesDigest" | "choicesDigest" | "cases" | "checks" | "baseline">>;
 }): string[] {
   const { approved, ids, prepared, structured } = input;
   // What the host binds a run from it to (fingerprint v3): its own ref for this target, worked out here again.
   const environment = prepared ? environmentRefOf(prepared, null, ids.targetId) : null;
-  const expected = taskRunFingerprint({ ...ids, briefDigest: approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: approved.snapshotFingerprint, environment });
+  const context = structured.preferencesDigest && structured.choicesDigest ? { preferencesDigest: structured.preferencesDigest, choicesDigest: structured.choicesDigest } : {};
+  const requiredChecks = structured.cases && structured.checks && structured.baseline ? { finalChecks: structured.cases.length + structured.checks.length, baselineChecks: structured.baseline.length, comparisonChecks: structured.checks.length } : undefined;
+  const expected = taskRunFingerprint({ ...ids, ...context, requiredChecks, briefDigest: approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: approved.snapshotFingerprint, environment });
   const problems: string[] = [];
   if (input.shownExpected !== expected) problems.push("the window's preview isn't bound to the approved brief, commit and environment");
   if (structured.expected !== expected) problems.push("the app's preview isn't bound to the approved brief, commit and environment");
