@@ -3799,3 +3799,43 @@ finished with zero failures or skips. The keyless real-engine RPC check passed a
 [The review-fix receipt](niv-70-verification.md#pr-52-review-fixes-and-current-main-integration--30-october-2026) records
 the frozen source manifest, failure/retry evidence, commands and limits. No paid calls or live visual probe ran; PR 52
 remains unmerged for re-review.
+
+## NIV-28: bounded window startup visibility, 30 October 2026
+
+The main window now shows on `ready-to-show` or after a five-second fallback. The startup controller is attached
+before maximisation and renderer loading. Showing the window, beginning to close it or destroying it cancels the
+timer and removes the startup listeners; late readiness cannot reopen it. The delayed path also checks whether the
+window has already been shown or destroyed. Bounds, zoom, theme, renderer security and engine lifecycle rules are
+unchanged.
+
+This work is isolated on `feature/niv-28`. It began on main `5b9b635`; when PR 52 merged during verification, the
+patch was carried onto main `f1eaf4770dd8e5b3cd44340ed4131496455526e2` and the combined candidate was verified again.
+The helper and its deterministic tests retained their original hashes. No dependency, domain, preload, IPC or engine
+change is part of this diff.
+
+| Evidence on the combined candidate | Result |
+|---|---|
+| Deterministic startup-controller tests | 7/7 passed: normal readiness, missing readiness at five seconds, another show path, close, closed, destruction and already visible/destroyed windows; late readiness and delayed showing remain cancelled |
+| `taskset -c 0-3 pnpm verify` | All typechecks and 1,986 tests passed: 144 domain, 761 desktop, 1,081 engine; no failures, cancellations or skips |
+| Built Linux `test:e2e e2e/app.spec.ts`, under Xvfb | 7/7 passed, including native `BrowserWindow.isVisible()` |
+| Full Linux `test:packaged`, under Xvfb | 88 passed, 72 existing packaged-project skips, no failures; no skip was added for this change |
+| Freshly staged `verify:windows --skip-stage` | 39/39 passed on Windows, including native and WSL engines and the unchanged release-home check |
+| `dev:win --skip-stage --no-launch`, then full `test:windows` | 17/17 passed, including native-window visibility, relaunches and cleanup |
+
+Both runtimes were freshly staged before reusing them with `--skip-stage`. The Linux packaged app and the Windows
+copy retained their expected hashes throughout their checks. The Linux `app.asar` SHA-256 is
+`93d51acf65e91f00cb4eae18b4de18fe5f854450b173f380d4066abb61232c58`; the Windows development-channel
+`app.asar` is `8dfc70082bb2080216fb3102aaf894963605c24ffc1150c260c072d9de6bf586`. Their runtime hashes
+are `e8d44378d308555b` (Linux/WSL) and `bb435c7b18f3f686` (Windows), protocol 23.
+
+An initial built smoke invocation through direct `pnpm exec playwright` lacked the package script's Node-path
+configuration and failed engine startup. The documented `test:e2e` launcher passed 7/7 under Xvfb without changing
+tests, deadlines or runtime configuration. The initial-main receipts are kept separately from the combined runs.
+Commands, source fingerprints, results and build identities are under `.artifacts/niv28/`; the combined receipt is
+`receipt.json`. No live model/provider calls ran, and no generated output is included in the change.
+
+**Original GNOME acceptance remains pending.** No active GNOME Wayland guest was available, and the archived VM's
+SSH endpoint was unreachable. The ordinary Xvfb/WSLg and Windows checks do not establish the locked-screen case.
+That check must launch the packaged app while the GNOME session is locked, wait beyond five seconds, unlock and
+verify that the window appears and is interactive without restarting or manually showing it. NIV-28 remains open;
+the PR is opened for code review with this limitation stated.

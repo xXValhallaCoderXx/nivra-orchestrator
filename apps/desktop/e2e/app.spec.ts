@@ -181,6 +181,13 @@ test.afterAll(async () => {
   rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 });
 
+test("the native window becomes visible after startup", async () => {
+  await expect.poll(() => app.evaluate(({ BrowserWindow }) => {
+    const windows = BrowserWindow.getAllWindows();
+    return windows.length === 1 && windows[0]!.isVisible();
+  }), { timeout: 10_000 }).toBe(true);
+});
+
 test("the window is sandboxed and sees only the typed bridge", async () => {
   await expect(page).toHaveTitle("Nivra");
   const surface = await page.evaluate(() => ({

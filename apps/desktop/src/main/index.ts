@@ -20,6 +20,7 @@ import { testEngineArgs } from "./test-switches.ts";
 import type { EnginePlatform } from "./targets/types.ts";
 import type { WslRuntime } from "./targets/wsl.ts";
 import { defaultZoom, restoreBounds, stepZoom } from "./window-state.ts";
+import { showWindowWhenReady } from "./window-visibility.ts";
 
 /**
  * Electron's main process: a thin shell over `Host` (D12). It owns the window, the security guards (from Hird,
@@ -487,10 +488,10 @@ function start(): void {
         zoomFactor: zoom,
       },
     });
+    showWindowWhenReady(window);
     if (store.data.window?.maximized) window.maximize();
     attachZoomControls(window, zoom, displayDefault, (next) => store.update((data) => ({ ...data, zoom: next })));
     window.on("close", () => store.update((data) => ({ ...data, window: { bounds: window.getNormalBounds(), maximized: window.isMaximized() } })));
-    window.once("ready-to-show", () => window.show());
     const load = devServerUrl ? window.loadURL(devServerUrl) : window.loadFile(indexHtml);
     load.catch((error: unknown) => console.error("Failed to load the renderer", error));
   };
