@@ -3756,3 +3756,16 @@ main-process or preload source changed.
 Ignored diagnostic traces, the six focused repetitions, package metadata, verification logs and the installation
 restoration receipt are in `.artifacts/niv25/`. The full rehearsal records are under
 `~/nivra-acceptance/niv25-20261030/`, in sessions `20261030T075657Z`, `20261030T075837Z` and `20261030T080033Z`.
+
+**PR #51 review correction, after `416275b`.** A child can disappear between the state read and the owner read,
+including during post-SIGKILL polling. Before refusing an identity mismatch, cleanup now reads the state again:
+absence completes cleanup, while a process still present remains refused. Three deterministic regressions cover
+disappearance before signalling, disappearance while polling after one signal, and a replacement at the same pid
+after the owner read fails. Both disappearance cases failed before the correction; the replacement remains refused
+without being signalled.
+
+The focused acceptance tests passed **15/15**. `taskset -c 0-3 pnpm verify` passed all typechecks and **1,947 tests**
+(141 domain, 732 desktop, 1,074 engine), with no failures, cancellations or skips. Receipts are in
+`.artifacts/niv25-review/`. Packaged and Windows checks were not repeated for this script/test correction; application
+runtime sources are unchanged, and the preceding packaged checks and rehearsal timings remain evidence from the
+reviewed implementation rather than new runs.

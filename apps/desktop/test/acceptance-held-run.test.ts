@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import mutableFs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, describe, it } from "node:test";
+import { after, describe, it, mock } from "node:test";
 import { captureHeldChild, copyRunStore, readRuns, Refused, stopHeldChild, type HeldChild } from "../scripts/acceptance-state.ts";
 import { isAlive, makeRepo, startEngine, waitFor, type EngineProcess } from "../../engine/test/helpers.ts";
 
@@ -76,6 +78,36 @@ describe("held hello rehearsal cleanup (NIV-25)", () => {
     await stopHeldChild(child, { proc, kill: () => assert.fail("must not kill a missing process") });
     fixture({}, proc);
     await assert.rejects(stopHeldChild(child, { proc, timeoutMs: 0, kill: () => undefined }), /didn't stop/);
+  });
+
+  for (const scenario of [
+    { title: "accepts disappearance between state and owner reads before signalling", ownerRead: 1, replaced: false },
+    { title: "accepts disappearance between state and owner reads during post-kill polling", ownerRead: 2, replaced: false },
+    { title: "refuses a replacement that exists after a missing owner read", ownerRead: 1, replaced: true },
+  ]) it(scenario.title, async () => {
+    const { pid, proc } = fixture();
+    const child = captureHeldChild(pid, 4241, uid, proc);
+    const directory = join(proc, String(pid));
+    const killed: Array<[number, NodeJS.Signals]> = [];
+    let ownerReads = 0;
+    const stat = mutableFs.statSync;
+    const race = mock.method(mutableFs, "statSync", (...args: Parameters<typeof stat>) => {
+      if (args[0] === directory && ++ownerReads === scenario.ownerRead) {
+        rmSync(directory, { recursive: true });
+        if (scenario.replaced) fixture({ started: "654321" }, proc);
+        throw Object.assign(new Error("the process disappeared during the owner read"), { code: "ENOENT" });
+      }
+      return stat(...args);
+    });
+    syncBuiltinESMExports();
+    try {
+      const stop = stopHeldChild(child, { proc, timeoutMs: 0, kill: (group, signal) => { killed.push([group, signal]); } });
+      if (scenario.replaced) await assert.rejects(stop, Refused);
+      else await stop;
+      assert.equal(ownerReads, scenario.ownerRead, "the race happened at the selected owner read");
+      assert.equal(existsSync(directory), scenario.replaced);
+      assert.deepEqual(killed, scenario.ownerRead === 1 ? [] : [[-pid, "SIGKILL"]]);
+    } finally { race.mock.restore(); syncBuiltinESMExports(); }
   });
 
   it("cleans the killed rehearsal's real child, then another held run shuts down cancelled without replay", async () => {

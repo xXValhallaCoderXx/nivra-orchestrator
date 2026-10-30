@@ -258,6 +258,8 @@ export async function stopHeldChild(child: HeldChild, options: StopOptions = {})
     const state = processState(child.pid, proc);
     if (!state) return false;
     if (state.started !== child.started || state.group !== child.pid || ownerOf(child.pid, proc) !== child.uid) {
+      // The process can disappear between reading stat and checking its directory's owner.
+      if (!processState(child.pid, proc)) return false;
       throw new Refused(`Process ${child.pid} isn't the captured hello child any more. Nothing was killed; check it by hand.`);
     }
     if (state.state === "Z") return false;
