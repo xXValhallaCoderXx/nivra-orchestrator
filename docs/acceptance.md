@@ -3878,3 +3878,13 @@ Logs, a source manifest and the inspected dialog screenshot are kept locally und
 used no live provider calls. No persistence migration, engine protocol, target/supervisor/staging source, dependency,
 worker or budget policy changed. Personal wording is manually reviewed; these checks do not claim semantic removal
 of private details that a person independently chooses to type into that wording.
+
+### PR integration with main — 30 October 2026
+
+Main `7f7e26f` (NIV-28) is integrated at `16277e9`. Both acceptance histories are retained; the promotion change is
+unchanged. Fresh checks on the combined code passed all typechecks and **1,993 tests** (144 domain, 768 desktop,
+1,081 engine), with zero failures or skips. The affected built UI suites passed **20/20**; a fresh Linux package
+passed the full packaged suite, **92 passed and 72 existing skips**; the freshly copied Windows app passed **18/18**.
+All four new promotion UI scenarios ran in both Linux builds, and the Windows promotion scenario ran on the actual
+native and WSL engines. The existing staged runtimes were reused because engine, domain and lockfile content is
+unchanged. No live provider calls ran. Combined-candidate logs and the source manifest are under `.artifacts/niv10/pr-*`.
