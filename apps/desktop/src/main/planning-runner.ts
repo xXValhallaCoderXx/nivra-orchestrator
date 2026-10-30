@@ -1,3 +1,4 @@
+import { referenceText, type FrozenReferenceContext } from "@nivra/domain";
 import { isTerminal, PLANNING_LIMITS, PlanningContext, type BudgetGrant, type PlanningEvidence, type PlanningResult, type PreferenceSnapshot } from "@nivra/domain";
 import { resolveCompanionScope } from "./companion-context.ts";
 import type { ProjectRecord } from "./host-store.ts";
@@ -11,6 +12,7 @@ import type { WorkspaceDb } from "./workspace-db.ts";
 
 type Connection = Pick<EngineSupervisor, "call" | "state">;
 interface Options {
+  references?(taskId: string): FrozenReferenceContext;
   workspace(): WorkspaceDb;
   projects(): readonly ProjectRecord[];
   sharingEpoch(id: string): number;
@@ -100,9 +102,11 @@ export class PlanningRunner {
     let snapshot = JSON.stringify(native);
     if (snapshot.length > 32_000) snapshot = JSON.stringify({ ...native, tasks: tasks.slice(0, 5), previousProposal: null, gaps: ["Only the first five native task summaries and the bounded saved-item mappings fit this planning context; the earlier proposal is omitted."] });
     refuseCredentials("The planning context", snapshot, known, "send");
-    const template = PlanningContext.parse({ brief: view.request.brief, snapshot, projectId: project?.id ?? null, sharingEpoch: epoch ?? 0, preferences: this.#options.preferences(project?.id ?? null), knowledge, repository: input.inspectRepository && project ? { repoPath: project.nativePath, projectId: project.id, sharingEpoch: epoch } : null, maxRequests: input.inspectRepository ? PLANNING_LIMITS.requests : 1 });
-    refuseCredentials("The planning context", JSON.stringify(template), known, "send");
+    const references = view.request.source.kind === "task" ? this.#options.references?.(view.request.source.id) : undefined;
+    const template = PlanningContext.parse({ ...(references ? { references } : {}), brief: view.request.brief, snapshot, projectId: project?.id ?? null, sharingEpoch: epoch ?? 0, preferences: this.#options.preferences(project?.id ?? null), knowledge, repository: input.inspectRepository && project ? { repoPath: project.nativePath, projectId: project.id, sharingEpoch: epoch } : null, maxRequests: input.inspectRepository ? PLANNING_LIMITS.requests : 1 });
+    refuseCredentials("The planning context", JSON.stringify({ ...template, references: undefined }) + referenceText(template.references), known, "send");
     current();
+    if (references) workspace.db.prepare("INSERT OR IGNORE INTO task_context_receipts (request_id,task_id,digest,manifest_json) VALUES (?,?,?,?)").run(operationId, references.manifest.taskId, references.digest, JSON.stringify(references.manifest));
     let grant: BudgetGrant;
     try { grant = this.#options.grant(operationId, project?.targetId ?? "local", homeId, project?.id ?? null, view.request.source.kind === "task" ? view.request.source.id : null, input.inspectRepository ? PLANNING_LIMITS.requests : 1); }
     catch (error) { throw new PlanningFailure(error instanceof Error ? error.message : "The shared request allowance couldn't be checked. Review it in Settings; manual planning remains available."); }
@@ -115,6 +119,7 @@ export class PlanningRunner {
     const startedAt = performance.now();
     try {
       current();
+      input.dispatched();
       let run;
       try { run = await connection.call("runs.start", { clientRequestId: operationId, workflowId: "planning", input: { planningId: view.id, operationId, revision: view.revision, bindingDigest: view.binding }, context, budget: grant }); }
       catch { current(); run = await connection.call("runs.find", { clientRequestId: operationId }); }

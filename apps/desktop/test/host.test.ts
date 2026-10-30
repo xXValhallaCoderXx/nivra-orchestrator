@@ -1,3 +1,5 @@
+import { png as referencePng } from "./fixtures/reference-files.ts";
+import { BudgetGuard } from "../src/main/budget-guard.ts";
 import { choicesDigest, preferencesDigest } from "@nivra/domain";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -1224,6 +1226,22 @@ describe("Host: conversations follow each turn to its end, and never resend one 
 });
 
 describe("Host: native tasks, made directly or from a plan, with versioned briefs (D26, NIV-32)", () => {
+  it("deletes unselected private task files before their metadata, and retains a failed deletion for an explicit retry", async () => {
+    const { host, root } = makeHost();
+    const fields = { goal: "One native task", acceptanceCriteria: ["A result"], scope: "", exclusions: "", context: "", assumptions: [], checks: [], acceptanceCases: [] };
+    const task = await host.createTask({ title: "Private cleanup", fields, projectId: null, planId: null });
+    const path = join(root, "private.md"); writeFileSync(path, "Never sent to a provider");
+    const discussion = await host.importTaskAttachment(task.summary.id, path), asset = discussion.attachments[0]!;
+    assert.equal(discussion.selection.attachmentIds.length, 0);
+    const folder = join(root, "task-assets", "unassigned", task.summary.id), prepared = join(folder, asset.id, "prepared.txt");
+    rmSync(prepared); mkdirSync(prepared); writeFileSync(join(prepared, "obstruction"), "Blocked");
+    assert.throws(() => host.deleteTask(task.summary.id), /cleanup records were kept/);
+    assert.equal(host.task(task.summary.id).summary.id, task.summary.id);
+    assert.equal(host.getTaskDiscussion(task.summary.id).attachments[0]!.cleanupPending, true);
+    rmSync(prepared, { recursive: true }); host.deleteTask(task.summary.id);
+    assert.equal(existsSync(folder), false); assert.throws(() => host.task(task.summary.id), /no longer/);
+    assert.equal(existsSync(path), true, "the user-selected original outside application data is retained");
+  });
   const KEY = "test-key-0123456789";
   const empty = { goal: "", acceptanceCriteria: [] as string[], scope: "", exclusions: "", context: "", assumptions: [] as string[], checks: [] as string[], acceptanceCases: [] as Array<{ name: string; command: string; expectedOutput: string; expectedExitCode: number }> };
   async function stubWith(chat: (request: StubRequest, index: number) => Reply) {
@@ -2615,6 +2633,63 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     }, what, 60_000);
   const uploads = (stub: SandboxStub<RealGuest>) => stub.requests.filter((request) => request.path === "/v1/files").length;
 
+  it("NIV-70 freezes discussion and selected image content through coding, reconciles its finite grant, and keeps request-pool usage separate", async () => {
+    const { host, ids, model, root } = await taskHost();
+    const task = await readyTask(host, ids[0]!);
+    const comment = "Frozen task discussion canary";
+    await host.addTaskComment(task.summary.id, comment);
+    const path = join(root, "reference.png"), png = referencePng(); writeFileSync(path, png);
+    const imported = await host.importTaskAttachment(task.summary.id, path);
+    const attachment = imported.attachments[0]!;
+    await host.prepareTaskImage(task.summary.id, attachment.id, png.toString("base64"), attachment.sha256);
+    host.selectTaskReferences(task.summary.id, { excludedCommentIds: [], attachmentIds: [attachment.id] });
+    const preview = await host.previewTaskRun(task.summary.id);
+    await host.addTaskComment(task.summary.id, "A newly included source");
+    await assert.rejects(host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!), /changed since you previewed/);
+    const shown = await host.previewTaskRun(task.summary.id);
+    const started = await host.startTaskRun(task.summary.id, shown.expected, shown.snapshotFingerprint!);
+    await waitFor(() => model.chats().length > 0, "the frozen coding context to reach the provider stand-in");
+    host.removeTaskAttachment(task.summary.id, attachment.id);
+    const done = await ended(host, task.summary.id, started.id);
+    assert.equal(done.status, "answered", done.note ?? "");
+    assert.equal(done.referenceContext?.attachments[0]?.removed, true);
+    assert.equal(done.referenceContext?.comments[0]?.text, comment);
+    assert.equal(model.chats().length, 4);
+    for (const request of model.chats()) {
+      assert.equal(request.raw.includes(comment), true);
+      const messages = request.body!.messages as Array<{ content: string | Array<{ type: string; image_url?: { url: string } }> }>;
+      const images = messages.flatMap((message) => Array.isArray(message.content) ? message.content : []).filter((part) => part.type === "image_url");
+      assert.equal(images.length, 1); assert.equal(images[0]!.image_url!.url, `data:image/png;base64,${png.toString("base64")}`);
+    }
+    const allowance = await host.getCompanionUsage();
+    assert.equal(allowance.reserved + allowance.used, 0);
+    const summary = await host.budgetSummary(); assert.equal(summary.usage!.requests, 4);
+    const nextContext = await host.previewTaskReferences(task.summary.id);
+    assert.equal(JSON.parse(nextContext.summaries[0]!.payload).workerSummary, done.report!.worker!.summary);
+    await host.shutdown();
+    const opened = openWorkspace(join(root, "workspace.db")); assert.equal(opened.state, "ready"); if (opened.state !== "ready") throw new Error("workspace");
+    try {
+      const record = opened.db.db.prepare("SELECT state,attribution_json,grant_json FROM budget_grants WHERE request_id=?").get(started.id)!;
+      assert.equal(record["state"], "settled");
+      const attribution = JSON.parse(String(record["attribution_json"])), grant = JSON.parse(String(record["grant_json"]));
+      assert.deepEqual([attribution.feature, attribution.projectId, attribution.taskId, attribution.attemptId, attribution.profile.id], ["task", ids[0], task.summary.id, started.id, "coding-worker"]);
+      assert.deepEqual([grant.productive, grant.finalisation, grant.models], [{ requests: 23, outputTokens: 8000 }, { requests: 1, outputTokens: 1500 }, [TASK_MODEL]]);
+    } finally { opened.db.close(); }
+  });
+
+  it("NIV-70 refuses dispatch when its budget guard can't persist the dispatching revision", async () => {
+    const { host, ids, model, sandbox } = await taskHost(); const task = await readyTask(host, ids[0]!);
+    const preview = await host.previewTaskRun(task.summary.id);
+    const append = BudgetGuard.prototype.append; let writes = 0;
+    BudgetGuard.prototype.append = function(record) { if (++writes === 2) throw new Error("simulated full disk"); return append.call(this, record); };
+    try {
+      const attempt = await host.startTaskRun(task.summary.id, preview.expected, preview.snapshotFingerprint!);
+      const done = await ended(host, task.summary.id, attempt.id);
+      assert.equal(done.status, "not-sent"); assert.equal(model.requests.length, 0); assert.equal(sandbox.requests.length, 0);
+      assert.equal(writes, 2);
+    } finally { BudgetGuard.prototype.append = append; }
+  });
+
   it("NIV-71 sends frozen scoped preferences and choices to every worker request, and keeps input canaries out of run storage", async () => {
     let host!: Host; let personalId = "";
     const canary = `coding-preference-${randomUUID()}`; const choice = `coding-choice-${randomUUID()}`;
@@ -2836,7 +2911,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const expected = async (snapshot: string) =>
-      taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+      taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const snapshot = "c".repeat(64);
     // Accepted, then answered with an error: the run is found by its request id, and recorded as it ended.
     writeFileSync(join(home, "accept"), "");
@@ -2885,9 +2960,9 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = async () => taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const going = async () => {
-      const started = await host.startTaskRun(task.summary.id, expected, snapshot);
+      const started = await host.startTaskRun(task.summary.id, await expected(), snapshot);
       const running = await waitFor(async () => {
         const seen = await host.taskAttempt(task.summary.id, started.id);
         return seen.status === "running" && seen.runId ? seen : null;
@@ -2929,7 +3004,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     const running = await waitFor(async () => {
       const seen = await host.taskAttempt(task.summary.id, started.id);
@@ -2955,7 +3030,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     await waitFor(async () => (await host.taskAttempt(task.summary.id, started.id)).runId, "the task's run to be going");
     const { pid } = await online(host, "wsl:Test");
@@ -3037,7 +3112,7 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
+    const expected = taskRunFingerprint({ referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     return { taskId: task.summary.id, attemptId: started.id, done: await ended(host, task.summary.id, started.id) };
   }
@@ -3609,7 +3684,7 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     const created = await host.createTask({ title: "Greet the world", fields, projectId: id, planId: null });
     const task = host.setTaskState(created.summary.id, created.revision, "ready");
     const packet = (taskBriefOf(task.brief.content) as { brief: TaskBrief }).brief;
-    const parts = { preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64), requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } };
+    const parts = { referencesDigest: (await host.previewTaskReferences(task.summary.id)).digest, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64), requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } };
     const asked = () => JSON.parse(lines(home, "task-previews.log").at(-1)!) as { environment?: unknown; brief: TaskBrief };
     // No environment yet: the required-check policy is still bound to the preview.
     const plain = await host.previewTaskRun(task.summary.id);

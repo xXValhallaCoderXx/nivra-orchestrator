@@ -1,3 +1,4 @@
+import { REFERENCE_LIMITS } from "./references.ts";
 import { z } from "zod";
 import { BudgetGrant, BudgetOperation, JournalSeal } from "./budget.ts";
 import { ApplyParams, ApplyResolution, ApplyView, TaskAdmission, TaskAdmissionParams } from "./apply.ts";
@@ -101,14 +102,14 @@ export const StartRunParams = z.discriminatedUnion("workflowId", [
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: ResearchContext, workflowId: z.literal("research"), input: ResearchInput }),
   // A task run carries its frozen brief and both consents, model sharing and uploads, held in memory like the snapshot
   // (D39): neither consent stands in for the other.
-  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: TaskContext, workflowId: z.literal("task"), input: TaskInput }),
+  z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: BudgetGrant, context: TaskContext, workflowId: z.literal("task"), input: TaskInput }),
   // An environment's preparation carries its upload consent and what the person chose: D41's spec, or a project-driven
   // recipe's choices and the versions its last preparation settled on (NIV-55). No model is involved.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: z.union([EnvironmentContext, EnvironmentContextV2]), workflowId: z.literal("environment"), input: EnvironmentInput }),
   // A coaching of one task carries its frozen packet, the preferences and the project's model sharing (NIV-53), held in
   // memory like the snapshot: the run stores ids and fingerprints only.
   z.strictObject({ clientRequestId: RunRequest.clientRequestId, budget: RunRequest.budget, context: CoachContext, workflowId: z.literal("coach"), input: CoachInput }),
-]);
+]).refine((request) => new TextEncoder().encode(JSON.stringify(request)).byteLength <= REFERENCE_LIMITS.requestBytes, "This complete request exceeds 6 MiB. Include fewer or smaller attachments, then preview again.");
 export type StartRunParams = z.input<typeof StartRunParams>;
 
 /** Whether the model did what a tool choice asked; `skipped` when there was no time or no working call to try it. */

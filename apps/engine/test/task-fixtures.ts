@@ -1,3 +1,6 @@
+import { BudgetJournal } from "../src/budget/journal.ts";
+import { Database } from "../src/db/database.ts";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
 import { isEnvironmentRef } from "@nivra/domain";
@@ -44,6 +47,7 @@ const answering = (step: Step, index: number): Generated => ({
 });
 
 export interface Attempt {
+  journal?: boolean;
   calls?: Step[];
   /** Wraps the fake service's transport, to watch or change requests. */
   wrap?: (transport: Transport, guest: RealGuest) => Transport;
@@ -87,6 +91,7 @@ export async function attempt(options: Attempt = {}) {
   const outputCaps: Array<number | undefined> = [];
   const deadlines: CallOptions["deadlines"][] = [];
   const model = new MastraLanguageModelV2Mock({
+    modelId: options.extra?.model ?? MODEL,
     doGenerate: (async (call: { prompt: unknown; tools?: Array<{ name: string }>; maxOutputTokens?: number }) => {
       const index = requests++;
       const sent = JSON.stringify(call.prompt);
@@ -104,7 +109,11 @@ export async function attempt(options: Attempt = {}) {
   const opened = await localSession(root);
   const local = options.wrapLocal ? options.wrapLocal(opened) : opened;
   const preview = await previewOf(root);
-  const client = createModelClient({ apiKey: "test-key-0123456789", model: () => model });
+  const database = options.journal ? new Database(join(scratch("worker-budget"), "nivra.db")) : null;
+  const journal = database ? new BudgetJournal(database, randomUUID()) : null;
+  const grantId = randomUUID();
+  if (journal) journal.accept({ id: grantId, requestId: randomUUID(), catalogueVersion: "test", models: [options.extra?.model ?? MODEL], rates: [], productiveMicros: null, finalisationMicros: null, productive: { requests: 23, outputTokens: 8000 }, finalisation: { requests: 1, outputTokens: 1500 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 } }, { runId: null, providerDate: null });
+  const client = createModelClient({ ...(journal ? { budget: { journal, grantId, seat: "coding-worker" } } : {}), apiKey: "test-key-0123456789", model: () => model });
   try {
     const outcome = await runWorker({
       binding: { project: randomUUID(), target: "local", taskId: randomUUID(), attemptId: randomUUID(), runId: randomUUID(), briefVersion: 1, briefSha256: "b".repeat(64), homeId: randomUUID() },
@@ -128,8 +137,9 @@ export async function attempt(options: Attempt = {}) {
       ...(options.signal ? { signal: options.signal } : {}),
       ...options.extra,
     });
-    return { ...outcome, guest, model, root, changed: changedSince(before, root), requests: () => requests, prompts: () => prompts, offered: () => offered, outputCaps: () => outputCaps, deadlines: () => deadlines };
+    return { ...outcome, budgetParts: database?.open().prepare("SELECT part FROM budget_journal ORDER BY seq").all().map((row) => String(row["part"])) ?? [], guest, model, root, changed: changedSince(before, root), requests: () => requests, prompts: () => prompts, offered: () => offered, outputCaps: () => outputCaps, deadlines: () => deadlines };
   } finally {
+    database?.close();
     await opened.close();
   }
 }

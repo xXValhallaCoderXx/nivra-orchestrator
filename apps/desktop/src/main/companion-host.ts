@@ -1,3 +1,4 @@
+import { referenceText, type FrozenReferenceContext } from "@nivra/domain";
 import { randomUUID } from "node:crypto";
 import { COMPANION_LIMITS, CompanionContext, CompanionResult, type BudgetGrant, type KnowledgeRecord, type KnowledgeScope, type PreferenceSnapshot, type RunSummary } from "@nivra/domain";
 import type { BriefFields, CompanionAction, CompanionContextView, CompanionHint, CompanionScope, CompanionSettingsView, CompanionTurnView, KnowledgeView, MissionView, ProjectInspectionView, TaskView } from "../shared/ipc.ts";
@@ -16,6 +17,7 @@ type Connection = Pick<EngineSupervisor, "call" | "state">;
 type Draft = { title: string; outcome?: string; goal?: string; scope?: string; acceptance?: string[] };
 export interface CompanionDraftSave { sessionId: string; requestId: string; actionId: string; fingerprint: string; draft: Draft }
 export interface CompanionHostOptions {
+  references?(taskId: string): FrozenReferenceContext;
   workspace(): WorkspaceDb;
   projects(): readonly ProjectRecord[];
   preferences(projectId: string | null): PreferenceSnapshot;
@@ -37,7 +39,7 @@ export interface CompanionHostOptions {
   engineState?(targetId: string): { status: string; reason?: string };
 }
 interface Session { id: string; hint: CompanionHint; scopeKey: string; epoch: string; history: Array<{ role: "user" | "assistant"; text: string }>; turns: Map<string, Turn>; ended: boolean; pending: { id: string; digest: string; promise: Promise<{ runId: string; requestId: string }> } | null }
-interface Turn { id: string; requestDigest: string; sessionId: string; hint: CompanionHint; message: string; epoch: string; fingerprint: string; targetId: string; homeId: string | null; runId: string | null; view: CompanionTurnView; result: CompanionResult | null; cancelled: boolean; processing: Promise<void> | null; actions: Map<string, { action: CompanionResult["actions"][number]; fingerprint: string }> }
+interface Turn { id: string; requestDigest: string; sessionId: string; hint: CompanionHint; expected?: string; message: string; epoch: string; fingerprint: string; targetId: string; homeId: string | null; runId: string | null; view: CompanionTurnView; result: CompanionResult | null; cancelled: boolean; processing: Promise<void> | null; actions: Map<string, { action: CompanionResult["actions"][number]; fingerprint: string }> }
 
 export function companionKnowledgeView(record: KnowledgeRecord): KnowledgeView {
   const source = record.source;
@@ -77,8 +79,9 @@ export class CompanionHost {
     const knowledge = knowledgeSnapshotFor(workspace, projects, resolved, { forModel: true, repositoryRevisions: this.#repositoryRevisions });
     const preferences = this.#options.preferences(resolved.project?.id ?? null);
     const epoch = companionSaveFingerprint([companionScopeOf(resolved.scope), resolved.projectId, this.#options.preferenceRevision(), knowledge.epoch, resolved.projectId ? this.#options.sharingEpoch(resolved.projectId) : 0]);
+    const references = resolved.task ? this.#options.references?.(resolved.task.id) : undefined;
     const inspection = resolved.project ? this.#inspections.get(resolved.project.id) : null;
-    return { resolved, knowledge, preferences, epoch, fingerprint: companionSaveFingerprint([resolved.binding, epoch, knowledge.digest, inspection ?? null]) };
+    return { resolved, knowledge, preferences, epoch, references, fingerprint: companionSaveFingerprint([resolved.binding, epoch, knowledge.digest, inspection ?? null, references?.digest ?? null]) };
   }
 
   async context(hint: CompanionHint): Promise<CompanionContextView> {
@@ -118,7 +121,7 @@ export class CompanionHost {
     if (resolved.environment && resolved.project) sources.push({ kind: "environment", id: resolved.project.id, label: resolved.environment.prepared ? "Last prepared environment" : "Saved environment choices", revision: resolved.environment.updatedAt });
     const scopes = [resolved.scope, ...(resolved.task && resolved.project ? [{ kind: "project" as const, id: resolved.project.id }] : [])].filter((scope): scope is KnowledgeScope => scope !== null);
     const knowledge = scopes.flatMap((scope) => listKnowledge(this.#options.workspace(), scope)).filter((record) => record.projectId === null || record.projectId === resolved.projectId).map(companionKnowledgeView);
-    return { scope: companionScopeOf(resolved.scope), fingerprint: current.fingerprint, dialogueEpoch: current.epoch, label: resolved.task?.title ?? resolved.mission?.version.content.name ?? resolved.project?.label ?? "General planning", sources, blockers, knowledge, canAsk: askBlocked === null, askBlocked, sharingRequired: resolved.project !== null && !resolved.project.sharing.modelContext, projectId: resolved.projectId };
+    return { ...(current.references ? { references: current.references } : {}), scope: companionScopeOf(resolved.scope), fingerprint: current.fingerprint, dialogueEpoch: current.epoch, label: resolved.task?.title ?? resolved.mission?.version.content.name ?? resolved.project?.label ?? "General planning", sources, blockers, knowledge, canAsk: askBlocked === null, askBlocked, sharingRequired: resolved.project !== null && !resolved.project.sharing.modelContext, projectId: resolved.projectId };
   }
 
   async inspect(projectId: string): Promise<ProjectInspectionView> {
@@ -178,7 +181,7 @@ export class CompanionHost {
       limits: "Relevant saved fields only; long fields may be shortened. No repository files or unsent forms are included." });
   }
 
-  async send(input: { sessionId: string; clientRequestId: string; hint: CompanionHint; message: string }): Promise<{ runId: string; requestId: string }> {
+  async send(input: { sessionId: string; clientRequestId: string; hint: CompanionHint; expected?: string; message: string }): Promise<{ runId: string; requestId: string }> {
     const session = this.#session(input.sessionId, input.hint);
     const requestDigest = companionSaveFingerprint([session.scopeKey, input.message.trim()]);
     if (session.pending) {
@@ -197,8 +200,9 @@ export class CompanionHost {
     return promise;
   }
 
-  async #send(session: Session, input: { sessionId: string; clientRequestId: string; hint: CompanionHint; message: string }, requestDigest: string): Promise<{ runId: string; requestId: string }> {
+  async #send(session: Session, input: { sessionId: string; clientRequestId: string; hint: CompanionHint; expected?: string; message: string }, requestDigest: string): Promise<{ runId: string; requestId: string }> {
     const preview = await this.context(input.hint);
+    if (input.expected && input.expected !== preview.fingerprint) throw new Error("The included context changed since you reviewed it. Review the current context before asking again.");
     if (!preview.canAsk) throw new Error(preview.askBlocked ?? noContentFailure);
     const current = this.#current(input.hint);
     const known = await this.#options.secrets();
@@ -206,12 +210,13 @@ export class CompanionHost {
     if (!message || message.length > COMPANION_LIMITS.messageChars) throw new Error("Type a message of at most 8,000 characters, then send it.");
     refuseCredentials("Your companion message", message, known, "send");
     const snapshot = this.#snapshot(current.resolved);
-    const context = CompanionContext.parse({ preferences: current.preferences, sharing: { modelContext: current.resolved.project?.sharing.modelContext ?? false }, message, history: session.history, snapshot, knowledge: current.knowledge });
-    refuseCredentials("The companion context", JSON.stringify(context), known, "send");
+    const context = CompanionContext.parse({ preferences: current.preferences, sharing: { modelContext: current.resolved.project?.sharing.modelContext ?? false }, message, history: session.history, snapshot, knowledge: current.knowledge, ...(current.references ? { references: current.references } : {}) });
+    refuseCredentials("The companion context", JSON.stringify({ ...context, references: undefined }) + referenceText(context.references), known, "send");
     const connection = await this.#options.connect(current.resolved.targetId);
     const state = connection.state;
     if (state.status !== "online") throw new Error("The project's engine isn't available. Recheck its target, then ask again.");
     if (this.#current(input.hint).fingerprint !== current.fingerprint || session.epoch !== current.epoch || session.ended) throw new Error("The current work changed before sending. Refresh the companion, then ask again.");
+    if (context.references) this.#options.workspace().db.prepare("INSERT OR IGNORE INTO task_context_receipts (request_id,task_id,digest,manifest_json) VALUES (?,?,?,?)").run(input.clientRequestId, context.references.manifest.taskId, context.references.digest, JSON.stringify(context.references.manifest));
     const budget = this.#options.grant(input.clientRequestId, current.resolved.targetId, state.info.homeId, current.resolved.projectId, current.resolved.task?.id ?? null);
     const turn: Turn = { id: input.clientRequestId, requestDigest, sessionId: input.sessionId, hint: input.hint, message, epoch: current.epoch, fingerprint: current.fingerprint, targetId: current.resolved.targetId, homeId: state.info.homeId, runId: null, view: { status: "running" }, result: null, cancelled: false, processing: null, actions: new Map() };
     session.turns.set(turn.id, turn);

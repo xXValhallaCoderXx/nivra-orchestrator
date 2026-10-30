@@ -1,3 +1,4 @@
+import { TaskReferencePreview } from "./task-discussion";
 import { Alert, Anchor, Badge, Button, Checkbox, Group, Paper, Select, Stack, Text, Textarea, TextInput, Title } from "@mantine/core";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import type { PlanningBrief, PlanningItem, PlanningProposal, PlanningRequest, PlanningView, PlanningOperationView } from "@nivra/domain";
@@ -86,6 +87,7 @@ export function PlanningPage({ id, projectId, sourceTaskId, missionId, initialBr
   async function act(action: () => Promise<void>) { setBusy(true); setError(null); try { await action(); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } }
   return <Stack gap="md" data-testid="planning-page">
     <Title order={1}>Break into tasks</Title>
+    <TaskReferencePreview taskId={view?.request.source.kind === "task" ? view.request.source.id : sourceTaskId} />
     <Text size="sm">Review the outcome, what it affects and the selected draft tasks. Saving keeps drafts; execution has its own readiness and approval steps.</Text>
     {error && <Alert color="red" data-testid="planning-error">{error}</Alert>}
     {view?.stale && <Alert color="yellow">{view.stale} Refresh the source and review a new version before saving tasks.<Button variant="default" size="xs" onClick={() => void act(async () => { apply(await window.nivra.revisePlanning(view.id, view.revision, { brief, proposal, refresh: true }), selection, true); })}>Refresh source for review</Button></Alert>}

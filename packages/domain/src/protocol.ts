@@ -4,8 +4,8 @@ import { z } from "zod";
  * The host–engine protocol (D2): JSON-RPC 2.0, one message per line, over the engine's stdin and stdout.
  * Bump `PROTOCOL_VERSION` whenever a change would break the other side; `initialize` refuses a mismatch.
  */
-// NIV-71 binds frozen coding preferences and run choices.
-export const PROTOCOL_VERSION = 22;
+// NIV-70 adds frozen discussion, attachment bytes and required coding grants.
+export const PROTOCOL_VERSION = 23;
 
 /**
  * The longest line either side accepts, in characters of decoded text. A longer line is a protocol error: it is never

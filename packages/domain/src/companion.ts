@@ -1,3 +1,4 @@
+import { FrozenReferenceContext } from "./references.ts";
 import { z } from "zod";
 import { PreferenceSnapshot } from "./context.ts";
 import { KnowledgeSnapshot } from "./knowledge.ts";
@@ -7,6 +8,7 @@ export const COMPANION_LIMITS = { messageChars: 8_000, historyMessages: 12, hist
 export const CompanionInput = z.strictObject({ sessionId: z.uuid(), bindingDigest: z.string().regex(/^[a-f0-9]{64}$/) });
 export type CompanionInput = z.infer<typeof CompanionInput>;
 export const CompanionContext = z.strictObject({
+  references: FrozenReferenceContext.optional(),
   preferences: PreferenceSnapshot,
   sharing: z.strictObject({ modelContext: z.boolean() }),
   message: z.string().trim().min(1).max(COMPANION_LIMITS.messageChars),

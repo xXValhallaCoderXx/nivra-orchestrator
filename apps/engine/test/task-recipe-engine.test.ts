@@ -1,3 +1,4 @@
+import { codingGrant } from "./coding-grant.ts";
 import { choicesDigest, preferencesDigest } from "@nivra/domain";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -91,8 +92,9 @@ const refused = (shown: TaskPreview) => {
   return shown as Extract<TaskPreview, { status: "refused" }>;
 };
 async function start(engine: EngineProcess, repo: string, fingerprint: string, environment: EnvironmentRef): Promise<RunSummary> {
+  const requestId = randomUUID();
   return engine.client.call("runs.start", {
-    clientRequestId: randomUUID(),
+    clientRequestId: requestId, budget: codingGrant(requestId),
     workflowId: "task",
     input: { repoPath: repo, project: PROJECT, target: "local", preview: fingerprint, taskId: TASK_ID, briefVersion: 2, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(BRIEF), environment },
     context: { sharing: { modelContext: true, cloudExecution: true }, brief: BRIEF, preferences: { revision: 0, records: [] }, choices: [] },

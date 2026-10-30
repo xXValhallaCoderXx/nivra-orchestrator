@@ -1,3 +1,4 @@
+import { REFERENCE_LIMITS, ReferenceSelection } from "@nivra/domain";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, powerMonitor, safeStorage, screen, session, type IpcMainInvokeEvent } from "electron";
 import { readFileSync } from "node:fs";
 import { homedir, release } from "node:os";
@@ -316,6 +317,20 @@ function start(): void {
   handle(IPC.createTask, z.tuple([z.strictObject({ title: LongText, fields: Fields, projectId: Id.nullable(), planId: Id.nullable() })]), (_event, input) => host.createTask(input));
   handle(IPC.reviseBrief, z.tuple([Id, Revision, Fields]), (_event, id, revision, fields) => host.reviseBrief(id, revision, fields));
   handle(IPC.refreshBriefFromPlan, z.tuple([Id, Revision, Id]), (_event, id, revision, planId) => host.refreshBriefFromPlan(id, revision, planId));
+  handle(IPC.getTaskBrief, z.tuple([Id, Id]), (_event, taskId, id) => host.getTaskBrief(taskId, id));
+  handle(IPC.getTaskDiscussion, z.tuple([Id]), (_event, id) => host.getTaskDiscussion(id));
+  handle(IPC.addTaskComment, z.tuple([Id, z.string().min(1).max(REFERENCE_LIMITS.commentChars)]), (_event, id, text) => host.addTaskComment(id, text));
+  handle(IPC.selectTaskReferences, z.tuple([Id, ReferenceSelection]), (_event, id, selection) => host.selectTaskReferences(id, selection));
+  handle(IPC.previewTaskReferences, z.tuple([Id]), (_event, id) => host.previewTaskReferences(id));
+  handle(IPC.getTaskAttachmentPreview, z.tuple([Id, Id]), (_event, taskId, id) => host.getTaskAttachmentPreview(taskId, id));
+  handle(IPC.prepareTaskImage, z.tuple([Id, Id, z.string().max(Math.ceil(REFERENCE_LIMITS.imageBytes / 3) * 4), z.string().regex(/^[a-f0-9]{64}$/)]), (_event, taskId, id, base64, source) => host.prepareTaskImage(taskId, id, base64, source));
+  handle(IPC.removeTaskAttachment, z.tuple([Id, Id]), (_event, taskId, id) => host.removeTaskAttachment(taskId, id));
+  handle(IPC.pickTaskAttachment, z.tuple([Id, Id.nullable()]), async (event, taskId, commentId) => {
+    host.getTaskDiscussion(taskId);
+    const picked = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender)!, { title: "Attach reference file", properties: ["openFile"], filters: [{ name: "Reference files", extensions: ["png", "jpg", "jpeg", "webp", "pdf", "txt", "md", "ts", "tsx", "js", "json", "py", "rs", "go", "css", "html", "yml", "yaml", "sql", "sh"] }, { name: "All files", extensions: ["*"] }] });
+    if (picked.canceled || !picked.filePaths[0]) return null;
+    return host.importTaskAttachment(taskId, picked.filePaths[0], commentId);
+  });
   handle(IPC.setTaskProject, z.tuple([Id, Revision, Id.nullable()]), (_event, id, revision, projectId) => host.setTaskProject(id, revision, projectId));
   handle(IPC.setTaskState, z.tuple([Id, Revision, z.enum(TASK_STATES)]), (_event, id, revision, state) => host.setTaskState(id, revision, state));
   handle(IPC.renameTask, z.tuple([Id, Revision, LongText]), (_event, id, revision, title) => host.renameTask(id, revision, title));
@@ -376,7 +391,7 @@ function start(): void {
   handle(IPC.inspectProject, project, (_event,id) => host.inspectProject(id));
   handle(IPC.getCompanionSettings, none, () => host.getCompanionSettings());
   handle(IPC.setCompanionSettings, z.tuple([CompanionSettings]), (_event,input) => host.setCompanionSettings(input));
-  handle(IPC.sendCompanionTurn, z.tuple([z.strictObject({sessionId:Id,clientRequestId:Id,hint:CompanionHint,message:z.string().trim().min(1).max(MESSAGE_CHARS)})]), (_event,input) => host.sendCompanionTurn(input));
+  handle(IPC.sendCompanionTurn, z.tuple([z.strictObject({sessionId:Id,clientRequestId:Id,hint:CompanionHint,expected:z.string().regex(/^[a-f0-9]{64}$/).optional(),message:z.string().trim().min(1).max(MESSAGE_CHARS)})]), (_event,input) => host.sendCompanionTurn(input));
   handle(IPC.getCompanionTurn,z.tuple([Id,Id]),(_event,sessionId,id)=>host.getCompanionTurn(sessionId,id));
   handle(IPC.cancelCompanionTurn,z.tuple([Id,Id]),(_event,sessionId,id)=>host.cancelCompanionTurn(sessionId,id));
   handle(IPC.endCompanionSession,z.tuple([Id]),(_event,id)=>host.endCompanionSession(id));

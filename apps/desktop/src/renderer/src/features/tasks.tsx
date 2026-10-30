@@ -1,3 +1,4 @@
+import { TaskDiscussionPanel } from "./task-discussion";
 import { Alert, Anchor, Badge, Button, Code, Collapse, Grid, Group, List, Menu, Modal, Paper, Select, SimpleGrid, Stack, Table, Tabs, Text, Textarea, TextInput, Title, UnstyledButton } from "@mantine/core";
 import type { CoachQuestionField } from "@nivra/domain";
 import { useEffect, useId, useState, type ChangeEvent, type ReactNode } from "react";
@@ -1243,6 +1244,7 @@ export function TaskDetail({
               </Paper>
             )}
             {leading && phase !== "completed" && !(summary.state === "draft" || shown === null) && <ReadinessCard readiness={readiness} busy={busy || coachSaving} onAction={onReadiness} />}
+            <TaskDiscussionPanel key={`${taskId}:${summary.projectId}`} taskId={taskId} projectId={summary.projectId} onAttempt={(id) => { setChosen(id); setTab("runs"); }} />
             </Stack>
           </Stack>
         </Grid.Col>
@@ -1351,7 +1353,7 @@ export function TaskDetail({
       <Modal opened={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete this task?" data-testid="task-delete-dialog">
         <Stack gap="sm">
           <Text size="sm">
-            The task and every version of its brief are deleted. The plans and conversations it came from stay. Its engines keep their records of its runs and coachings, and
+            The task, every version of its brief, comments and private attachment copies are deleted. The plans and conversations it came from stay. Its engines keep their records of its runs and coachings, and
             what was sent to Token Factory stays there.
           </Text>
           <Group justify="flex-end" gap="sm">

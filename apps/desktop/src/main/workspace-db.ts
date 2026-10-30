@@ -717,6 +717,32 @@ export const WORKSPACE_MIGRATIONS: readonly string[] = [
     created_at TEXT NOT NULL
   ) STRICT;
   `,
+  `
+  CREATE TABLE task_comments (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, seq INTEGER NOT NULL, content_json TEXT NOT NULL, UNIQUE(task_id,seq)) STRICT;
+  CREATE TRIGGER task_comments_immutable BEFORE UPDATE ON task_comments BEGIN SELECT RAISE(ABORT, 'comments are immutable'); END;
+  CREATE TABLE task_attachments (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, metadata_json TEXT NOT NULL) STRICT;
+  CREATE TABLE task_reference_selection (task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE, selection_json TEXT NOT NULL, notice TEXT) STRICT;
+  CREATE TABLE task_activity (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, at TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, record_id TEXT NOT NULL) STRICT;
+  CREATE TABLE task_context_receipts (request_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, digest TEXT NOT NULL, manifest_json TEXT NOT NULL) STRICT;
+  CREATE TRIGGER task_state_activity AFTER UPDATE OF state,project_id ON tasks WHEN OLD.state<>NEW.state OR OLD.project_id IS NOT NEW.project_id BEGIN
+    INSERT INTO task_activity VALUES (lower(hex(randomblob(16))),NEW.id,NEW.updated_at,'state',CASE WHEN OLD.project_id IS NOT NEW.project_id THEN 'Project changed; attachment selection cleared' ELSE 'Task marked ' || NEW.state END,NEW.id);
+  END;
+  CREATE TRIGGER task_decision_activity AFTER UPDATE ON attempt_records WHEN OLD.decision IS NOT NEW.decision AND NEW.decision IS NOT NULL BEGIN
+    INSERT INTO task_activity SELECT lower(hex(randomblob(16))),task_id,COALESCE(NEW.decided_at,created_at),'decision','Proposal ' || NEW.decision,NEW.attempt_id FROM run_links WHERE id=NEW.attempt_id;
+  END;
+  CREATE TRIGGER task_apply_activity AFTER UPDATE ON attempt_records WHEN OLD.apply_json IS NOT NEW.apply_json AND NEW.apply_json IS NOT NULL AND (json_extract(OLD.apply_json,'$.status') IS NOT json_extract(NEW.apply_json,'$.status') OR json_extract(OLD.apply_json,'$.resolution') IS NOT json_extract(NEW.apply_json,'$.resolution')) BEGIN
+    INSERT INTO task_activity SELECT lower(hex(randomblob(16))),task_id,COALESCE(NEW.apply_read_at,created_at),'apply','Apply ' || COALESCE(json_extract(NEW.apply_json,'$.status'),'unknown') || ' · ' || COALESCE(json_extract(NEW.apply_json,'$.resolution'),'unsettled'),NEW.attempt_id FROM run_links WHERE id=NEW.attempt_id;
+  END;
+
+  `,
+  `
+  -- A small, masked projection of the engine's existing hand-in, rather than its checks' output or event log.
+  CREATE TABLE task_run_summaries (attempt_id TEXT PRIMARY KEY REFERENCES run_links(id) ON DELETE CASCADE, summary TEXT) STRICT;
+  DROP TRIGGER task_decision_activity;
+  CREATE TRIGGER task_decision_activity AFTER UPDATE ON attempt_records WHEN OLD.decision IS NOT NEW.decision BEGIN
+    INSERT INTO task_activity SELECT lower(hex(randomblob(16))),task_id,COALESCE(NEW.decided_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),'decision',CASE WHEN NEW.decision IS NULL THEN 'Proposal approval withdrawn' ELSE 'Proposal ' || NEW.decision END,NEW.attempt_id FROM run_links WHERE id=NEW.attempt_id;
+  END;
+  `,
 ];
 
 export type WorkspaceOpening =

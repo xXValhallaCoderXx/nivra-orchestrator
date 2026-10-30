@@ -1,3 +1,4 @@
+import { FrozenReferenceContext } from "./references.ts";
 import { z } from "zod";
 import { PreferenceSnapshot, RunChoices } from "./context.ts";
 import { EnvironmentRef, TaskEnvironment } from "./environment.ts";
@@ -168,6 +169,7 @@ export async function taskBriefDigest(brief: TaskBrief): Promise<string> {
 
 /** What a task run gets besides its input (D21): held in the engine's memory for the run, never stored. */
 export const TaskContext = z.strictObject({
+  references: FrozenReferenceContext.optional(),
   sharing: z.strictObject({ modelContext: z.boolean(), cloudExecution: z.boolean() }),
   brief: TaskBrief,
   preferences: PreferenceSnapshot,
@@ -191,6 +193,7 @@ export const TaskInput = z.strictObject({
   briefDigest: Sha256Hex,
   preferencesDigest: Sha256Hex,
   choicesDigest: Sha256Hex,
+  referencesDigest: Sha256Hex.optional(),
   /**
    * The prepared environment the run starts from: D41's single setup, or a project-driven recipe's (NIV-55). Without
    * one, the run starts from Nivra's own base image.
@@ -211,6 +214,7 @@ export const StoredTaskInput = z.object({
   /** Absent only in historical records; every new request requires both. */
   preferencesDigest: z.string().min(1).optional(),
   choicesDigest: z.string().min(1).optional(),
+  referencesDigest: z.string().min(1).optional(),
   environment: z.union([z.object({ image: z.string().min(1), inputsDigest: z.string().min(1), projectFingerprint: z.string().min(1), node: z.string(), pnpm: z.string(), arch: z.string() }), EnvironmentRef]).optional(),
 });
 export type StoredTaskInput = z.infer<typeof StoredTaskInput>;

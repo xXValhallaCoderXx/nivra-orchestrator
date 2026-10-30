@@ -16,7 +16,7 @@ import { goTo } from "./places.ts";
  * them, the section says so and shows no figure. A fresh profile, no project needed.
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
-const WORDS = "Coding runs, research, sandbox operations and other agents aren't covered by the Companion and planning request allowance. Their existing per-run limits apply.";
+const WORDS = "Coding model requests are recorded in the shared budget ledger with their existing per-run limits. They do not use the Companion and planning monthly request allowance. Research, sandbox operations and other agents retain their existing accounting and limits.";
 
 let root: string;
 let app: ElectronApplication;

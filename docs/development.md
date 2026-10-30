@@ -1043,3 +1043,31 @@ Run the focused suite before the final full suite. The missed-turn regression ad
 both run windows; it must fail if give-up is moved back ahead of cancellation. The original stuck-run watchdog,
 numeric timing bound, journal assertions and no-resend checks remain in place; only its exact note changes to avoid
 claiming an unobserved full interval after cancellation. No paid evaluation or real credentials are needed.
+
+### Task discussion and reference context (NIV-70)
+
+Protocol 23 and workspace migrations 14–15 add task comments, private reference files, exact source manifests and required
+coding grants. See [the behaviour, limits and verification receipt](niv-70-verification.md) and D60. The PDF worker is
+a separate bundled main entry; image preparation is a bundled renderer worker. Do not replace either with an
+unbounded main-thread extraction/decoding path. Attaching/selecting/previewing makes no provider request.
+
+Focused checks, all using local fixtures or provider stand-ins:
+
+```bash
+pnpm --filter @nivra/desktop exec node --test test/task-references.test.ts
+pnpm --filter @nivra/engine exec node --test test/multimodal.test.ts test/task-run.test.ts test/task-worker.test.ts test/budget-model.test.ts
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e task-discussion.spec.ts task-preferences.spec.ts
+pnpm --filter @nivra/desktop package:dir
+xvfb-run -a pnpm --filter @nivra/desktop test:packaged task-discussion.spec.ts task-preferences.spec.ts
+```
+
+Use the `test:e2e` package script for an unpackaged app: it supplies the absolute Node path. On a heavily loaded WSL
+machine, `taskset -c 0-3 pnpm verify` runs the same complete typecheck/test command with fewer concurrent test
+processes; it changes no assertions or deadlines. Run Windows lifecycle checks after other heavyweight checks finish.
+`verify:windows` includes an unpaid large reference-payload/hash check on both native Windows and Windows-to-WSL RPC.
+After fresh staging and `dev:win --no-launch`, `test:windows` also checks native picker/image preparation and packaged
+PDF extraction. All Windows checks keep their own test homes and compare the release's `~/.nivra` before/after.
+
+New coding `runs.start` requests require a real host-ledger grant: a CLI caller must not invent a grant or bypass the
+host budget authority. Historical run reads need no replacement grant. Provider image understanding requires a
+harmless, separately approved live check; transport/fixture checks alone establish no such claim.

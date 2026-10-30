@@ -1,3 +1,4 @@
+import { ReferenceContextView } from "./task-discussion";
 import { Alert, Badge, Box, Button, Group, Paper, Stack, Text, Textarea, TextInput, Title } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import type { PlanningBrief } from "@nivra/domain";
@@ -214,7 +215,7 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
     // This synchronous change also guards a second click before React renders.
     patch(key, current.sessionId, { composer: "", answering: true, requestId: null, error: null, actions: [], retained: [], proposals: [], askedFrom: context.fingerprint, lines: appendDialogue(current.lines, { role: "user", text: message }) });
     try {
-      const started = await window.nivra.sendCompanionTurn({ sessionId: current.sessionId, clientRequestId: requestId, hint, message });
+      const started = await window.nivra.sendCompanionTurn({ sessionId: current.sessionId, clientRequestId: requestId, hint, expected: context.fingerprint, message });
       patch(key, current.sessionId, { requestId: started.requestId });
     } catch (reason) {
       // The host records dispatch before sending. A later retry is an explicit new turn, never an automatic replay.
@@ -265,6 +266,7 @@ export function Companion({ hint, narrow, handle, onNavigate, onAdd, onExplain, 
             </Group>
             {contextError && <Alert color="red" data-testid="companion-context-error">{contextError}</Alert>}
             {context && <Stack gap={4} data-testid="companion-context"><Text size="sm" fw={600}>Using: {context.label}</Text><Text size="xs" c="var(--nivra-text-2)">{context.sources.map((source) => `${source.label} · ${source.revision}`).join("; ") || "General guidance, with no repository"}</Text><Group gap="xs">{context.sources.filter((source) => source.kind === "task" || source.kind === "mission").map((source) => <Button key={`${source.kind}:${source.id}`} variant="subtle" size="xs" onClick={() => go({ id: `source:${source.id}`, kind: source.kind === "task" ? "open-task" : "open-mission", entityId: source.id, label: source.label })}>Open {source.label}</Button>)}</Group></Stack>}
+            <ReferenceContextView value={context?.references} />
             <Box display={mode === "idea" ? undefined : "none"}><IdeaGuide key={buffer.sessionId} onNavigate={go} onPlan={openPlanner} /></Box>
             {mode === "setup" && <SetupGuide projectId={projectId ?? null} refreshKey={refresh + refreshKey} onNavigate={go} onAdd={onAdd} onExplain={(id) => { setOpen(false); onExplain(id); }} />}
             {context && <Stack gap="xs">{context.blockers.map((blocker) => <Alert key={blocker.id} color="yellow"><Text size="sm" fw={600}>{blocker.title}</Text><Text size="sm">{blocker.detail}</Text>{blocker.action && <Button mt="xs" size="xs" variant="default" onClick={() => blocker.action === "recheck" ? setRefresh((n) => n + 1) : go({ id: blocker.id, kind: blocker.action === "environment" ? "environment" : "settings", ...(projectId ? { entityId: projectId } : {}), label: blocker.action === "settings" ? "Open Settings" : "Open environment" })}>{blocker.action === "recheck" ? "Recheck" : blocker.action === "settings" ? "Open Settings" : "Open environment"}</Button>}</Alert>)}</Stack>}

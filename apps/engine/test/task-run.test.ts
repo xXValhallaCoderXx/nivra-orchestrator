@@ -1,3 +1,5 @@
+import { codingGrant } from "./coding-grant.ts";
+import { BudgetJournal } from "../src/budget/journal.ts";
 import { choicesDigest, preferencesDigest } from "@nivra/domain";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -127,13 +129,13 @@ describe("a task run's slot (D39)", () => {
       ["task", { id: "task", title: () => "Task" }],
       ["environment", { id: "environment", title: () => "Environment" }],
     ]);
-    const scheduler = new RunScheduler({ store, workflows, instanceId: randomUUID(), log: { info: () => undefined, warn: () => undefined, error: () => undefined }, diagnose: () => undefined });
+    const scheduler = new RunScheduler({ journal: new BudgetJournal(database, randomUUID()), store, workflows, instanceId: randomUUID(), log: { info: () => undefined, warn: () => undefined, error: () => undefined }, diagnose: () => undefined });
     const release = new Map<string, () => void>();
     scheduler.attach({ getWorkflow: () => ({ createRun: async ({ runId }) => ({ start: () => new Promise((resolve) => release.set(runId, () => resolve({ status: "success" }))), cancel: async () => undefined, watch: () => () => undefined }) }) });
     scheduler.recover();
     const hello = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: "/repo", holdMs: 0 }, context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false } } });
     const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief: TASK_BRIEF, preferences: { revision: 0, records: [] }, choices: [] };
-    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(TASK_BRIEF) }, context: taskContext });
+    const task = async () => { const requestId = randomUUID(); return scheduler.submit({ budget: codingGrant(requestId), clientRequestId: requestId, workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(TASK_BRIEF) }, context: taskContext }); };
     const environmentContext: EnvironmentContext = { sharing: { cloudExecution: true }, spec: { filters: [] } };
     const prepare = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "environment", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "e".repeat(64) }, context: environmentContext });
     const [h1, h2] = [hello(), hello()];
@@ -161,7 +163,7 @@ describe("a task run's slot (D39)", () => {
       ["hello", { id: "hello", title: () => "Hello" }],
       ["task", { id: "task", title: () => "Task" }],
     ]);
-    const scheduler = new RunScheduler({ store, workflows, instanceId: randomUUID(), log: { info: () => undefined, warn: () => undefined, error: () => undefined }, diagnose: () => undefined });
+    const scheduler = new RunScheduler({ journal: new BudgetJournal(database, randomUUID()), store, workflows, instanceId: randomUUID(), log: { info: () => undefined, warn: () => undefined, error: () => undefined }, diagnose: () => undefined });
     // Each run holds until it is let go.
     const release = new Map<string, () => void>();
     const handleFor = (runId: string): RunHandle => ({
@@ -175,7 +177,7 @@ describe("a task run's slot (D39)", () => {
     const hello = () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "hello", input: { repoPath: "/repo", holdMs: 0 }, context: helloContext });
     const brief = TASK_BRIEF;
     const taskContext: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief, preferences: { revision: 0, records: [] }, choices: [] };
-    const task = async () => scheduler.submit({ clientRequestId: randomUUID(), workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) }, context: taskContext });
+    const task = async () => { const requestId = randomUUID(); return scheduler.submit({ budget: codingGrant(requestId), clientRequestId: requestId, workflowId: "task", input: { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) }, context: taskContext }); };
     const [h1, h2, h3] = [hello(), hello(), hello()];
     const [t1, t2] = [await task(), await task()];
     const status = (runId: string) => store.status(runId);
@@ -192,15 +194,15 @@ describe("a task run's slot (D39)", () => {
     // The same request id with another task's input is another run's: refused, as a check's and research's are.
     const reused = randomUUID();
     const input = { repoPath: "/repo", project: randomUUID(), target: "local", preview: "f".repeat(64), taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) };
-    const original = scheduler.submit({ clientRequestId: reused, workflowId: "task", input, context: taskContext });
+    const original = scheduler.submit({ clientRequestId: reused, budget: codingGrant(reused), workflowId: "task", input, context: taskContext });
     const held = scheduler.contextOf(original, "task")!;
     taskContext.choices.push("Changed after acceptance");
     assert.equal(held.choices.length, 0, "the caller cannot mutate the accepted snapshot");
     assert.equal(Object.isFrozen(held.preferences.records), true);
-    assert.equal(scheduler.submit({ clientRequestId: reused, workflowId: "task", input, context: taskContext }), original);
+    assert.equal(scheduler.submit({ clientRequestId: reused, budget: codingGrant(reused), workflowId: "task", input, context: taskContext }), original);
     assert.equal(scheduler.contextOf(original, "task"), held, "duplicates keep the original context object");
-    for (const key of ["preferencesDigest", "choicesDigest"] as const) assert.throws(() => scheduler.submit({ clientRequestId: reused, workflowId: "task", input: { ...input, [key]: "a".repeat(64) }, context: taskContext }), /already started another run/);
-    assert.throws(() => scheduler.submit({ clientRequestId: reused, workflowId: "task", input: { ...input, briefVersion: 2 }, context: taskContext }), /already started another run, with other input/);
+    for (const key of ["preferencesDigest", "choicesDigest"] as const) assert.throws(() => scheduler.submit({ clientRequestId: reused, budget: codingGrant(reused), workflowId: "task", input: { ...input, [key]: "a".repeat(64) }, context: taskContext }), /already started another run/);
+    assert.throws(() => scheduler.submit({ clientRequestId: reused, budget: codingGrant(reused), workflowId: "task", input: { ...input, briefVersion: 2 }, context: taskContext }), /already started another run, with other input/);
     database.close();
   });
 });
@@ -308,7 +310,7 @@ describe("a task run's workflow, in process (D39)", () => {
   const MODEL = TASK_MODEL;
   type Call = [string, Record<string, unknown>];
 
-  async function workflow(options: { platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string>; keep?: (proposal: Proposal) => void; context?: Partial<Pick<TaskContext, "preferences" | "choices">>; knownValues?: () => string[]; afterCheck?: (context: TaskContext) => void; afterListing?: (context: TaskContext) => void } = {}) {
+  async function workflow(options: { missingGrant?: boolean; platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string>; keep?: (proposal: Proposal) => void; context?: Partial<Pick<TaskContext, "preferences" | "choices">>; knownValues?: () => string[]; afterCheck?: (context: TaskContext) => void; afterListing?: (context: TaskContext) => void } = {}) {
     const root = repoWith(options.files ?? FILES);
     const guest = new RealGuest();
     guest.busybox = true;
@@ -336,6 +338,7 @@ describe("a task run's workflow, in process (D39)", () => {
     const saves: string[] = [];
     let opened = 0;
     const deps: TaskDeps = {
+      ...(options.missingGrant ? { budget: () => null } : {}),
       recorder: { output: (_runId, step) => { if (step === "check") options.afterCheck?.(context); }, event: () => undefined },
       context: () => context,
       task: () => input,
@@ -371,6 +374,12 @@ describe("a task run's workflow, in process (D39)", () => {
     const result = (await run.start({ inputData: {} })) as { status: string; error?: { message?: string } };
     return { result, reports, proposals, saves, opened, requests: () => requests, guest, operations: operationsForBrief(brief) };
   }
+
+  it("NIV-70 refuses a lost coding grant before listing, inference or sandbox operations", async () => {
+    const done = await workflow({ missingGrant: true });
+    assert.equal(done.result.status, "failed");
+    assert.equal(done.requests(), 0); assert.equal(done.opened, 0); assert.equal(done.proposals.length, 0);
+  });
 
   it("proposes a verified change, keeping the proposal and a report the protocol takes", async () => {
     const done = await workflow();

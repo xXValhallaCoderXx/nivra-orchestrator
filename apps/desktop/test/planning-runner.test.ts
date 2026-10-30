@@ -24,7 +24,7 @@ function fixture() {
   if (opening.state !== "ready") throw new Error("The fixture couldn't open.");
   opened.push(opening.db);
   const project: ProjectRecord = { id: randomUUID(), targetId: "local", nativePath: "/synthetic", label: "Synthetic", addedAt: "2026-10-29T10:00:00.000Z", sharing: { modelContext: true, cloudExecution: false } };
-  const projects = [project]; let epoch = 0; let cap = 1; let grants = 0;
+  const projects = [project]; let epoch = 0; let cap = 1; let grants = 0; let dispatches = 0;
   const operationId = randomUUID(); const runId = randomUUID(); const homeId = randomUUID();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const hooks: Record<string, ((params: Record<string, unknown>) => unknown | Promise<unknown>) | undefined> = {};
@@ -42,11 +42,23 @@ function fixture() {
   const view: PlanningView = { id: randomUUID(), revision: 1, request: { brief: { title: "A change", outcome: "One visible result", intendedUsers: "Engineers", scope: "One flow", exclusions: "", constraints: [], decisions: [], uncertainties: [], questions: [] }, source: { kind: "manual" }, projectId: project.id, missionId: null }, proposal: null, evidence: null, binding: "a".repeat(64), stale: null, saved: [], createdAt: project.addedAt, updatedAt: project.addedAt };
   const starts: Array<{ runId: string; maxRequests: number }> = [];
   const controller = new AbortController();
-  const input: PlanningGeneration = { view, operationId, inspectRepository: true, signal: controller.signal, assertCurrent: () => { if (controller.signal.aborted || !projects.includes(project) || !project.sharing.modelContext || epoch !== 0) throw new PlanningFailure("The project's sharing epoch changed."); }, started: (info) => starts.push(info) };
-  return { options, connection, state, project, projects, view, input, hooks, calls, starts, grants: () => grants, epoch: (value: number) => { epoch = value; }, cap: (value: number) => { cap = value; }, controller };
+  const input: PlanningGeneration = { view, operationId, inspectRepository: true, signal: controller.signal, dispatched: () => { input.assertCurrent(); dispatches++; }, assertCurrent: () => { if (controller.signal.aborted || !projects.includes(project) || !project.sharing.modelContext || epoch !== 0) throw new PlanningFailure("The project's sharing epoch changed."); }, started: (info) => starts.push(info) };
+  return { options, connection, state, project, projects, view, input, hooks, calls, starts, dispatches: () => dispatches, grants: () => grants, epoch: (value: number) => { epoch = value; }, cap: (value: number) => { cap = value; }, controller };
 }
 
 describe("planning engine transport consent and lifecycle", () => {
+  it("fixes accepted reference authority at dispatch even when the acknowledgement is lost", async () => {
+    const f = fixture(); let changed = false;
+    const authority = f.input.assertCurrent;
+    f.input.assertCurrent = () => { authority(); if (changed && f.dispatches() === 0) throw new Error("References changed before dispatch"); };
+    f.hooks["runs.start"] = () => { assert.equal(f.dispatches(), 1); changed = true; throw new Error("Lost acknowledgement"); };
+    const runner = new PlanningRunner(f.options), retained = await runner.generate(f.input);
+    assert.equal(retained.proposal.summary, result().proposal.summary);
+    assert.equal(f.calls.filter((call) => call.method === "runs.start").length, 1);
+    assert.equal(f.calls.filter((call) => call.method === "runs.find").length, 1);
+    assert.equal(f.starts.length, 1); assert.equal(f.dispatches(), 1);
+    await runner.acknowledge(f.input.operationId);
+  });
   it("sends the selected mission and project knowledge together, including mission planning from a task in another mission", async () => {
     for (const taskSource of [false, true]) {
       const f = fixture(); const db = f.options.workspace(); const missionId = randomUUID(); const oldMissionId = randomUUID(); const at = f.project.addedAt;

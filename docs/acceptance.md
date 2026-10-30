@@ -3769,3 +3769,33 @@ The focused acceptance tests passed **15/15**. `taskset -c 0-3 pnpm verify` pass
 `.artifacts/niv25-review/`. Packaged and Windows checks were not repeated for this script/test correction; application
 runtime sources are unchanged, and the preceding packaged checks and rehearsal timings remain evidence from the
 reviewed implementation rather than new runs.
+
+## NIV-70: task discussion, activity and multimodal context (30 October 2026)
+
+Implemented from main `60c1216`, reusing NIV-69 Planning and NIV-71's frozen coding context; combined verification
+includes current main `a9dbc30`. The change adds
+native task discussion/reference storage, projected activity, exact frozen source manifests across task Companion,
+Planning and coding, typed image transport and bounded text-only PDF extraction. Coding first receives guarded
+host-ledger grants with its existing 23 productive requests and reserved hand-in; it remains outside the
+Companion/Planning monthly request allowance. No sandbox accounting or budget policy was redesigned.
+
+[The NIV-70 receipt](niv-70-verification.md) records limits, negative/recovery cases, packaged/Windows evidence and
+the final candidate identity. Model requests in verification use explicit local stand-ins. Live provider image
+understanding is unassessed and requires separate approval. No paid calls, merges or Linear updates ran. Publishing
+the PR and its reviewer comment was explicitly requested separately.
+
+### PR 52 review corrections and current main — 30 October 2026
+
+The four review findings at `77e96a3` now have regression coverage: incremental exclusion from oversized discussion,
+private-file cleanup before task metadata deletion, a persistent removed-attachment cleanup retry, and retained
+accepted Planning results with stale advice after reference changes. Current main `5b9b635` is integrated, preserving
+NIV-25's implementation/tests and both acceptance additions.
+
+All typechecks and **1,979 tests passed** (144 domain, 754 desktop, 1,081 engine). The affected built and packaged
+Electron suites each passed **15/15**; freshly staged Windows engine checks passed **39/39**, and the freshly copied
+Windows app passed **16/16**, including native private-task-file deletion. All of these corrected-candidate runs
+finished with zero failures or skips. The keyless real-engine RPC check passed as well.
+
+[The review-fix receipt](niv-70-verification.md#pr-52-review-fixes-and-current-main-integration--30-october-2026) records
+the frozen source manifest, failure/retry evidence, commands and limits. No paid calls or live visual probe ran; PR 52
+remains unmerged for re-review.
