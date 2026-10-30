@@ -3622,7 +3622,7 @@ Receipts are ignored under `.artifacts/niv71-review/`: `verify.log`, `typecheck-
 `windows-before.json`/`windows-after.json` and `rpc-refusals.json`. The 318-file production/helper manifest is
 `source-manifest.json`, fingerprint `6d2967280b35ebbac126339a4f6b96547ae7d051623798dfdfeaa3547034732b`.
 The complete diff/untracked files were inspected, with no generated output or credential-shaped production addition.
-The original main checkout remains clean at `f0de67b`.
+The original checkout is clean at `8fb2055`. Implementation changes stayed in the separate NIV-71 worktree.
 
 Earlier attempts are retained separately: an old stop-code count assertion was updated along with explicit parsing
 checks for both new codes; direct Playwright invocation lacked the package script's absolute Node path; and the new
