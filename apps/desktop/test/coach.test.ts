@@ -195,7 +195,7 @@ describe("a coaching's preview and what it is bound to (NIV-53)", () => {
     assert.deepEqual(input, { taskId: task.taskId, briefId: task.brief.id, briefVersion: 3, bindingDigest: binding, packetDigest, preferencesDigest: prefs, profile: { id: COACH_PROFILE.id, version: COACH_PROFILE.version } });
     assert.deepEqual(context, { preferences: PREFERENCES, sharing: { modelContext: false }, packet });
     assert.equal(preview.expected, coachPreviewFingerprint({ bindingDigest: binding, packetDigest, preferencesDigest: prefs, sharing: null, projectId: null, targetId: "local", profileId: COACH_PROFILE.id, profileVersion: COACH_PROFILE.version, model: null }));
-    assert.deepEqual(preview.limits, { requests: 1, totalSeconds: 180, requestSeconds: 150, outputTokens: 4_000, estimatedInputTokens: preview.limits.estimatedInputTokens, budgetTokens: COACH_RUN_LIMITS.estimatedInputTokens });
+    assert.deepEqual(preview.limits, { requests: 1, totalSeconds: 180, requestSeconds: 150, outputTokens: 8_000, estimatedInputTokens: preview.limits.estimatedInputTokens, budgetTokens: 56_000 });
     assert.ok(preview.limits.estimatedInputTokens > 0 && preview.limits.estimatedInputTokens < COACH_RUN_LIMITS.estimatedInputTokens);
     assert.deepEqual([preview.sends, preview.notSent, preview.keeps, preview.blocked], [[...COACH_SENDS], [...COACH_NOT_SENT], TOKEN_FACTORY_KEEPS, null]);
     assert.deepEqual(preview.preferences, [{ statement: "Prefer small changes", scope: "personal", intent: "default" }]);
@@ -237,12 +237,12 @@ describe("a coaching's preview and what it is bound to (NIV-53)", () => {
     const findings = Array.from({ length: 3 }, () => ({ title: "t".repeat(160), detail: "d".repeat(1_000), recommendation: "r".repeat(500), reviewedBriefVersion: 1 }));
     const mission = { name: "m".repeat(120), version: MISSION_REF.version, parts: Array.from({ length: 8 }, (_, index) => ({ label: `Part ${index}`, text: "x".repeat(4_000) })) };
     const max = await coachRequest(large, state(large, { preferences: many, mission, findings, binding: coachBindingFor(large, MISSION_REF, findings.map(() => ({ reviewId: randomUUID(), findingId: "risk-1" })), PROFILE) }));
-    // Even then the estimate is within the run's budget, so the size block is a backstop: shown here with a smaller one.
-    assert.ok(max.preview.limits.estimatedInputTokens <= COACH_RUN_LIMITS.estimatedInputTokens, String(max.preview.limits.estimatedInputTokens));
-    assert.equal(max.preview.blocked, null);
+    // The larger completion reservation now puts this maximal packet over the coach's input allowance.
+    assert.ok(max.preview.limits.estimatedInputTokens > COACH_RUN_LIMITS.estimatedInputTokens, String(max.preview.limits.estimatedInputTokens));
+    assert.match(max.preview.blocked ?? "", /takes 56,000.*Shorten the mission/);
     assert.equal(
       sizeBlocked(max.packet, many, 70_000, COACH_RUN_LIMITS.estimatedInputTokens),
-      "What the coach would read is too long for one request: an estimated 70,000 tokens, and it takes 60,000. Shorten the mission, the longest part, then ask the coach again.",
+      "What the coach would read is too long for one request: an estimated 70,000 tokens, and it takes 56,000. Shorten the mission, the longest part, then ask the coach again.",
     );
     assert.match(sizeBlocked(max.packet, many, 70_000, 60_000) ?? "", /Shorten the mission/);
     assert.match(sizeBlocked({ ...max.packet, mission: null, findings: [] }, many, 70_000, 60_000) ?? "", /Shorten your preferences, the longest part/);

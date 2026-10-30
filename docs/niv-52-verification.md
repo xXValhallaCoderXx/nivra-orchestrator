@@ -142,3 +142,11 @@ fresh runtime staging, packaged checks, a fresh Windows development build and Wi
 No live credential is read or paid request made in this fix pass. The tested commit is returned for human review before
 live acceptance. The frozen usefulness rubric above remains unchanged, and both NIV-52 and wider NIV-66 acceptance
 remain open until their separate evidence is supplied.
+
+### PR integration with current main
+
+PR preparation integrates `75b38e0` (NIV-53 / PR #57) and retains its coach acceptance history and D64. The mission
+decision is D65. The mission implementation and recovery regressions remain those tested at `588e731`; the combined
+revision is verified afresh before publication because main also changes the shared model client. Its commands,
+outcomes and exact head are recorded in `.artifacts/niv52-review/pr-checks/receipt.json`, separately from the original
+final-check receipts. No paid acceptance or merge to main is performed by PR preparation.
