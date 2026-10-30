@@ -3933,7 +3933,7 @@ Proposal binding version 2 already binds the report bytes and remains unchanged.
 new task system or execution-boundary change is introduced. The deterministic fixtures prove Nivra's verdict handling,
 not that SHE-65 is fixed; NIV-35's real-task acceptance remains separate.
 
-## D58. Frozen confirmed preferences and temporary choices reach the coding worker (2026-10-30)
+## D59. Frozen confirmed preferences and temporary choices reach the coding worker (2026-10-30)
 
 **Decision.** NIV-71 extends D21/D23's existing canonical personal/project preferences to coding runs. The host selects
 confirmed personal records and the task's own project's confirmed records, excluding superseded records. The preview

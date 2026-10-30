@@ -3528,3 +3528,16 @@ obtain a passing result.
 No dependency, database schema, model, approval boundary or budget authority changed. NIV-46's database-permission
 work remains separate. These checks establish input construction, lifetime, privacy and integration mechanics; they
 do not establish live-model preference compliance or an ability to prevent model-authored paraphrases under D22.
+
+Coordination with NIV-46 PR #48 was checked at `165a776fdd914308c15f8e2ad996c4663e7d0878`. Its six source/test
+files were overlaid unchanged onto NIV-71 `dd9ce48` in a disposable detached worktree. The combined source passed
+141 engine tests covering database privacy, stdio, sandbox lifecycle, task execution, proposal application and the
+worker, plus all four NIV-71 host regressions and the engine typecheck, with zero failures/skips. Receipts are
+`combined-source.json`, `combined-engine.log`, `combined-host.log` and `combined-typecheck.log` under the ignored
+evidence directory above. This rehearsal covers focused source integration; the full source/UI/platform counts
+above refer to the independent NIV-71 implementation.
+
+The source/test paths are disjoint. A merge-tree rehearsal found conflicts only in the three append-only docs:
+`acceptance.md`, `decisions.md` and `development.md`. Whichever PR lands second must retain both sets of additions.
+NIV-46 keeps D58 and NIV-71 uses D59. This PR stays based on main `f0de67b` and carries no NIV-46 implementation;
+neither PR was merged for the rehearsal, and the disposable checkout was removed afterwards.
