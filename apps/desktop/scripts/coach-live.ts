@@ -21,7 +21,7 @@ import { PREFERRED_NEMOTRON, TOKEN_FACTORY_BASE_URL } from "../../engine/src/pro
 import type { CoachPreview, CoachingView } from "../src/shared/coach.ts";
 import type { EngineView, TaskView } from "../src/shared/ipc.ts";
 import { COACH_DEMO, COACH_FOLLOW_MS, checkCoachAnswer, coachingsOf, coachPreview, createCoachTask, endedCoach, openCoachTask, saveCoachSelection, taskOf } from "./coach-journey.ts";
-import { coachDigest, coachFiles, coachHash, coachState } from "./coach-live-checks.ts";
+import { coachDigest, coachFiles, coachHash, coachOutput, coachState, writeCoachOutput } from "./coach-live-checks.ts";
 import { RELEASE_HOME_STATE } from "./test-homes.ts";
 
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -37,8 +37,8 @@ assert.ok(values.state, "Give --state a new ~/nivra-acceptance/niv53/completion-
 const state = coachState(values.state, homedir());
 const claims = join(homedir(), "nivra-acceptance", "claims", "coach-desktop");
 const keyFile = values.credentials ?? join(homedir(), ".config", "nivra", "token-factory.env");
-const file = (name: string) => join(state, name);
-const write = (name: string, value: unknown) => writeFileSync(file(name), `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+const file = (name: string) => coachOutput(state, name);
+const write = (name: string, value: unknown) => writeCoachOutput(state, name, `${JSON.stringify(value, null, 2)}\n`);
 const read = <T>(name: string): T => JSON.parse(readFileSync(file(name), "utf8")) as T;
 const run = (exe: string, args: string[], cwd = repository, input?: string): string => {
   const result = spawnSync(exe, args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, ...(input === undefined ? {} : { input }) });
@@ -120,7 +120,7 @@ async function freeze(): Promise<void> {
   const beforeSource = source();
   console.log("Building the native Windows app; output goes to build.log.");
   const built = spawnSync("pnpm", ["dev:win", "--no-launch"], { cwd: repository, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  writeFileSync(file("build.log"), `${built.stdout}\n${built.stderr}`, { mode: 0o600 });
+  writeCoachOutput(state, "build.log", `${built.stdout}\n${built.stderr}`);
   assert.equal(built.status, 0, "the Windows build failed; see build.log");
   assert.equal(source().sha256, beforeSource.sha256, "source changed while the build was made");
   const localAppData = run("/mnt/c/Windows/System32/cmd.exe", ["/d", "/c", "echo %LOCALAPPDATA%"], "/mnt/c");
@@ -138,7 +138,7 @@ async function freeze(): Promise<void> {
     frozen.before = await createCoachTask(page);
     frozen.preview = await coachPreview(page, frozen.before.summary.id);
     assert.equal((await coachingsOf(page, frozen.before.summary.id)).length, 0);
-    await page.getByTestId("coach-dialog").screenshot({ path: file("preview.png") });
+    writeCoachOutput(state, "preview.png", await page.getByTestId("coach-dialog").screenshot());
     await page.getByTestId("coach-dialog-cancel").click();
     assert.equal((await page.evaluate("window.nivra.listEngines()") as unknown[]).length, 0);
   } finally { await app.close(); }
@@ -196,7 +196,7 @@ async function session(kind: "rehearse" | "live" | "save" | "cleanup"): Promise<
       assert.equal(coachDigest(current.report), coachDigest(coaching.report), "the report changed since it was reviewed");
       const saved = await saveCoachSelection(page, frozen.before, current, fields);
       write("saved.json", saved);
-      await page.getByTestId("task-coach-main").screenshot({ path: file("saved.png") });
+      writeCoachOutput(state, "saved.png", await page.getByTestId("task-coach-main").screenshot());
       await app.close();
       app = await launch(frozen);
       page = await app.firstWindow();
@@ -209,7 +209,7 @@ async function session(kind: "rehearse" | "live" | "save" | "cleanup"): Promise<
       assert.equal(records.length, 1);
       assert.deepEqual(records[0]!.applied?.fields, fields);
       assert.equal(records[0]!.report?.stage.requests, 1);
-      await page.getByTestId("task-coach-main").screenshot({ path: file("reopened.png") });
+      writeCoachOutput(state, "reopened.png", await page.getByTestId("task-coach-main").screenshot());
       write("result.json", { outcome: "journey-passed", recipe: digest, reviewed: values.reviewed, fields, briefVersion: reopened.brief.version, model: current.report.stage.servedModel, usage: current.report.usage, note: "Structural journey passed. Assess actual usefulness separately in quality.md; this is not proof of engineering correctness." });
       console.log("Selected changes persisted across restart. No coaching was started by save or reopening.");
     } else {
@@ -228,7 +228,7 @@ async function session(kind: "rehearse" | "live" | "save" | "cleanup"): Promise<
         const coaching = await endedCoach(page, before.summary.id);
         write("answer.json", coaching);
         write("live-binding.json", { recipe: digest, answerSha256: coachDigest(coaching) });
-        await page.getByTestId("task-coach-main").screenshot({ path: file("answer.png") });
+        writeCoachOutput(state, "answer.png", await page.getByTestId("task-coach-main").screenshot());
         assert.equal((await taskOf(page, before.summary.id)).brief.version, before.brief.version);
         const engines = await page.evaluate("window.nivra.listEngines()") as EngineView[];
         const local = engines.find((engine) => engine.targetId === "local");

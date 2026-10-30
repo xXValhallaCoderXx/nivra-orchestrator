@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const coachHash = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
 export const coachDigest = (value: unknown): string => coachHash(JSON.stringify(value));
@@ -22,6 +22,36 @@ export function coachState(path: string, home: string): string {
   const state = resolve(path);
   const root = join(home, "nivra-acceptance", "niv53");
   const rel = relative(root, state);
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || !rel.split(sep)[0]!.startsWith("completion-")) throw new Error(`Use a new completion-* folder inside ${root}; historical evidence is kept as it is.`);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || !rel.split(sep)[0]!.startsWith("completion-")) throw new Error(`Use a new completion-* folder inside ${root}; historical evidence is kept as it is.`);
+  ordinaryPath(state);
   return state;
+}
+
+const evidenceError = () => new Error("Coach evidence needs ordinary, unlinked folders and files. Use a new completion-* folder; historical evidence is kept as it is.");
+
+/** Check existing ancestors too, including dangling links, before reading or writing evidence. */
+function ordinaryPath(path: string, output = false): void {
+  const parent = dirname(path);
+  if (parent !== path) ordinaryPath(parent);
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (stat && (stat.isSymbolicLink() || (output ? !stat.isFile() || stat.nlink !== 1 : !stat.isDirectory()))) throw evidenceError();
+}
+
+export function coachOutput(state: string, name: string): string {
+  const path = resolve(state, name);
+  const rel = relative(state, path);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw evidenceError();
+  ordinaryPath(path, true);
+  return path;
+}
+
+/** Never truncate an existing output until its opened descriptor proves it is an unlinked ordinary file. */
+export function writeCoachOutput(state: string, name: string, value: string | Uint8Array): void {
+  const descriptor = openSync(coachOutput(state, name), constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.nlink !== 1) throw evidenceError();
+    ftruncateSync(descriptor, 0);
+    writeFileSync(descriptor, value);
+  } finally { closeSync(descriptor); }
 }

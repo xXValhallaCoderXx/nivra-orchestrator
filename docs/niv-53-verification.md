@@ -157,3 +157,27 @@ The documentation-only record follows the tested code. Earlier frozen recipes re
 source/build hashes they name; they do not identify this rebased PR candidate. Before any future paid acceptance,
 verify host-ledger grant wiring and freeze a new concrete recipe from the actual candidate. No further paid run was
 made while preparing this PR. NIV-53 remains open for that admission and useful live-coaching evidence.
+
+## PR review: evidence folder protection
+
+Review of `f193cc0` reproduced a linked `completion-*` folder passing the lexical state check. The correction
+checks every existing directory component before accepting the state, and checks each output again when accessed.
+Linked and dangling paths, multiply linked output files, non-file outputs and paths outside the state are refused.
+Receipts, build logs and screenshots use the same guarded writer: it opens without following a linked output and
+checks the descriptor before truncating. The model-client changes and application runtime are unchanged.
+
+Fresh evidence is in this worktree's `.artifacts/niv53-evidence-protection-verify.log` and
+`.artifacts/niv53-evidence-protection-cli.json`:
+
+| Check | Result |
+| --- | --- |
+| Regression before the fix | Failed with the expected missing rejection for a linked completion folder. |
+| Focused acceptance-helper tests | All 6 passed, including linked ancestors, nested and replaced state folders, linked/dangling/hard-linked output files, ordinary text/binary writes and unchanged disposable historical receipts. |
+| Actual `coach-live --plan` invocation | Rejected a linked completion state before Windows launch or credential access; its disposable historical receipt was unchanged and the temporary paths were removed. |
+| `pnpm verify` | All typechecks and 2,036 tests passed: domain 144, engine 1,103, desktop 789; none failed or skipped. |
+| Diff inspection | Only the two standalone acceptance scripts, their regression test and this record changed after `f193cc0`; no generated files or credentials are included. |
+
+No paid call ran. Built, packaged, Windows UI and RPC checks were not repeated for this correction: no application,
+main/preload, engine, target, supervisor, staging or packaging source changed. Their earlier receipts above remain
+historical evidence for the candidates they identify. PR #57 remains on hold for review; this correction does not
+close NIV-53 or supply the coach's separate grant integration, live acceptance or visible subtasks.
