@@ -1,17 +1,80 @@
-/* The shell's own styles (NIV-56): the sidebar's links, as drawn in the canvas (KIT "Shared CSS"), with the theme's
-   tokens so dark follows. Loaded by main.tsx as a file: the CSP allows 'self' styles. */
+/* Shared presentation uses the theme's tokens in both schemes. Loaded as a file: the CSP allows 'self' styles. */
+
+.nivra-focus:focus-visible,
+.nivra-switcher:has(input:focus-visible) {
+  outline: 2px solid var(--nivra-focus);
+  outline-offset: 3px;
+}
+.mantine-Input-input[data-variant="default"]:not([data-error]):not([data-success]) {
+  --input-bg: var(--nivra-surface);
+  --input-bd: var(--nivra-control-border);
+  --input-bd-focus: var(--nivra-focus);
+}
+.mantine-Input-input[data-variant="default"]:focus-within:not([data-error]):not([data-success]) {
+  --input-bd: var(--nivra-focus);
+}
+.mantine-Tabs-tab[data-active] {
+  border-color: var(--nivra-focus);
+  color: var(--nivra-link);
+}
+.mantine-Combobox-option[data-combobox-selected],
+.mantine-Combobox-option[aria-selected="true"] {
+  background: var(--nivra-nav-active);
+  color: var(--mantine-color-text);
+}
+
+.nivra-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 44px;
+  padding: 0 6px;
+}
+.nivra-brand-mark {
+  flex: none;
+  color: var(--nivra-action);
+}
+
+/* A companion can leave less room than the window's breakpoint implies. Columns follow the actual page width. */
+.nivra-page {
+  container-type: inline-size;
+  container-name: nivra-page;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+@container nivra-page (max-width: 660px) {
+  .mantine-SimpleGrid-root {
+    --sg-cols: 1 !important;
+  }
+  .mantine-Grid-col {
+    --col-flex-basis: 100% !important;
+    --col-max-width: 100% !important;
+  }
+  .mantine-Group-root {
+    flex-wrap: wrap;
+  }
+  .mantine-Button-root {
+    max-width: 100%;
+    height: auto;
+    min-height: var(--button-height);
+  }
+  .mantine-Button-label {
+    white-space: normal;
+  }
+}
 
 .nivra-nav {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 34px;
+  min-height: 36px;
   padding: 0 10px;
   border-radius: 8px;
   font-size: 13px;
   color: var(--mantine-color-text);
   width: 100%;
   box-sizing: border-box;
+  border: 1px solid transparent;
   text-align: left;
 }
 .nivra-nav:hover:not(:disabled) {
@@ -19,7 +82,8 @@
 }
 .nivra-nav[aria-current="page"] {
   background: var(--nivra-nav-active);
-  font-weight: 500;
+  border-color: var(--nivra-focus);
+  font-weight: 600;
 }
 .nivra-nav:disabled {
   cursor: default;
@@ -61,6 +125,7 @@
 }
 .nivra-subnav[aria-current="page"] {
   background: var(--nivra-nav-active);
+  box-shadow: inset 2px 0 var(--nivra-focus);
 }
 .nivra-subnav-action {
   font-weight: 500;
@@ -78,12 +143,6 @@
 .nivra-subnav-detail {
   font-size: 12px;
   color: var(--nivra-text-3);
-}
-
-/* The switcher's field takes the focus; the box around it shows the ring (PN5). */
-.nivra-switcher:has(input:focus-visible) {
-  outline: 2px solid var(--mantine-color-text);
-  outline-offset: 2px;
 }
 
 /* Read by assistive technology, not shown. */
@@ -112,7 +171,7 @@
 }
 .nivra-skip:focus {
   transform: none;
-  outline: 2px solid var(--mantine-color-text);
+  outline: 2px solid var(--nivra-focus);
   outline-offset: 2px;
 }
 
@@ -136,7 +195,7 @@
   position: sticky;
   bottom: 0;
   padding: 12px 0 4px;
-  background: var(--mantine-color-body);
+  background: var(--nivra-surface);
   z-index: 1;
 }
 
@@ -158,7 +217,7 @@
   overflow-x: hidden;
   overflow-wrap: anywhere;
   z-index: 150;
-  background: var(--mantine-color-body);
+  background: var(--nivra-surface);
   border-radius: 0;
   outline: none;
 }

@@ -1,5 +1,6 @@
 import { TaskDiscussionPanel } from "./task-discussion";
-import { Alert, Anchor, Badge, Button, Code, Collapse, Grid, Group, List, Menu, Modal, Paper, Select, SimpleGrid, Stack, Table, Tabs, Text, Textarea, TextInput, Title, UnstyledButton } from "@mantine/core";
+import { BriefRead } from "./brief-read";
+import { Alert, Anchor, Badge, Button, Code, Collapse, Grid, Group, Menu, Modal, Paper, Select, SimpleGrid, Stack, Table, Tabs, Text, Textarea, TextInput, Title, UnstyledButton } from "@mantine/core";
 import type { CoachQuestionField } from "@nivra/domain";
 import { useEffect, useId, useState, type ChangeEvent, type ReactNode } from "react";
 import type { CoachingView } from "../../../shared/coach";
@@ -16,7 +17,7 @@ import { useNarrow } from "./narrow";
 import { ApplyCard, applyMarks, AttemptsList, CompletedCards, DecisionCard, RunSummary, SettleCard } from "./task-apply";
 import { CoachAside, CoachMain, isOpenCoaching } from "./task-coach";
 import { CheckGroup, CheckLine, ReadinessCard } from "./task-readiness";
-import { BaselineInput, BaselineRead, baselineDraftOf, baselineOf, caseDraftOf, caseOf, CasesInput, CasesRead, RunGoing, RunLauncher, RunReview, useRun, type BaselineDraft, type CaseDraft } from "./task-run";
+import { BaselineInput, baselineDraftOf, baselineOf, caseDraftOf, caseOf, CasesInput, RunGoing, RunLauncher, RunReview, useRun, type BaselineDraft, type CaseDraft } from "./task-run";
 
 /**
  * Native tasks (D26, NIV-32): a brief written directly or made from a plan, the same form either way. Every change to a
@@ -223,93 +224,6 @@ function BriefInputs({ draft, onChange, reveal = null }: { draft: Draft; onChang
           )}
         </Stack>
       </Paper>
-    </Stack>
-  );
-}
-
-function Field({ label, children, testId }: { label: string; children: ReactNode; testId: string }) {
-  return (
-    <Stack gap={2} data-testid={testId}>
-      <Text size="xs" fw={600} c="var(--nivra-text-3)">
-        {label}
-      </Text>
-      {children}
-    </Stack>
-  );
-}
-
-const textOr = (text: string) =>
-  text ? (
-    <Text size="sm" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-      {text}
-    </Text>
-  ) : (
-    <Text size="sm" c="var(--nivra-text-3)">
-      None yet
-    </Text>
-  );
-
-const listOr = (items: string[]) =>
-  items.length ? (
-    <List size="sm">
-      {items.map((item, index) => (
-        <List.Item key={index}>{item}</List.Item>
-      ))}
-    </List>
-  ) : (
-    <Text size="sm" c="var(--nivra-text-3)">
-      None yet
-    </Text>
-  );
-
-function BriefRead({ content }: { content: BriefContent }) {
-  return (
-    <Stack gap="sm" data-testid="task-brief">
-      <Field label="Goal" testId="task-brief-goal">
-        {textOr(content.goal)}
-      </Field>
-      <Field label="Acceptance criteria" testId="task-brief-criteria">
-        {listOr(content.acceptanceCriteria)}
-      </Field>
-      <Field label="Scope" testId="task-brief-scope">
-        {textOr(content.scope)}
-      </Field>
-      <Field label="Not part of it" testId="task-brief-exclusions">
-        {textOr(content.exclusions)}
-      </Field>
-      <Field label="Context" testId="task-brief-context">
-        {textOr(content.context)}
-      </Field>
-      <Field label="Assumptions" testId="task-brief-assumptions">
-        {listOr(content.assumptions)}
-      </Field>
-      <Field label="Checks" testId="task-brief-checks">
-        {listOr(content.checks)}
-      </Field>
-      <Field label="Acceptance cases" testId="task-brief-cases">
-        <CasesRead cases={content.acceptanceCases} />
-      </Field>
-      <Field label="Baseline checks, before the worker" testId="task-brief-baseline">
-        <BaselineRead checks={content.baseline} />
-      </Field>
-      <Field label="Frozen files, which the worker can't change" testId="task-brief-frozen">
-        {content.frozen.length ? (
-          <List size="sm">
-            {content.frozen.map((path) => (
-              <List.Item key={path}>
-                <Code>{path}</Code>
-              </List.Item>
-            ))}
-          </List>
-        ) : (
-          <Text size="sm" c="var(--nivra-text-3)">
-            None
-          </Text>
-        )}
-      </Field>
-      <Text size="xs" c="var(--nivra-text-3)">
-        A run of this task goes alone, in a sandbox with networking off, and nothing it changes reaches your checkout unless you approve it.
-      </Text>
     </Stack>
   );
 }

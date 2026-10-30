@@ -5,7 +5,6 @@ import { BudgetAndUsage } from "../features/budget-usage";
 import { CompanionUsage } from "../features/companion-usage";
 import { Doctor } from "../features/doctor";
 import { EngineNotices } from "../features/engine";
-import { HelloRun, type RunRef } from "../features/hello";
 import { Preferences } from "../features/preferences";
 import { SandboxCheck } from "../features/sandbox";
 import { FeatureNeeds, NebiusConnection, ResearchSwitch, SettingsCard, SharingTable, TavilyConnection } from "../features/settings";
@@ -52,8 +51,6 @@ export function SettingsPage({
   preferences,
   onPreferencesChanged,
   onProjectsChanged,
-  helloRun,
-  onHelloRun,
   credentialsSaved,
   onCredentialsSaved,
   appInfo,
@@ -75,8 +72,6 @@ export function SettingsPage({
   preferences: PreferencesView | null;
   onPreferencesChanged(): void;
   onProjectsChanged(): void;
-  helloRun: RunRef | null;
-  onHelloRun(projectId: string, ref: RunRef): void;
   credentialsSaved: number;
   onCredentialsSaved(): void;
   appInfo: AppInfo | null;
@@ -153,7 +148,7 @@ export function SettingsPage({
             title={project ? `${project.targetLabel} engine` : "Engines"}
             description={
               project
-                ? `The engine ${project.label} runs on. Diagnose setup, the hello run and the sandbox check below run on it.`
+                ? `Setup and sandbox checks for ${project.label} run on this engine.`
                 : "Diagnostics run on a project's engine: choose a project with the switcher."
             }
             testId="diagnostics-engine"
@@ -169,7 +164,6 @@ export function SettingsPage({
             )}
           </SettingsCard>
           <Doctor key={`doctor:${project?.targetId ?? "none"}`} projectId={project?.id ?? null} online={online} targetLabel={project?.targetLabel ?? null} />
-          <HelloRun key={`hello:${project?.id ?? "none"}`} project={project} online={online} run={helloRun} onRun={onHelloRun} />
           <SandboxCheck key={`sandbox:${project?.id ?? "none"}`} project={project} online={online} credentialsSaved={credentialsSaved} onProjectChanged={onProjectsChanged} />
           {wsl && <WslGuidance wsl={wsl} onChecked={onWslChecked} />}
           <SettingsCard title="This app" testId="diagnostics-app">
@@ -270,7 +264,7 @@ function SectionLinks({ section, onSection, narrow }: { section: SettingsSection
             style={{
               height: 36,
               padding: "0 12px",
-              borderBottom: `2px solid ${active ? "var(--mantine-color-text)" : "transparent"}`,
+              borderBottom: `2px solid ${active ? "var(--nivra-focus)" : "transparent"}`,
               marginBottom: -1,
               fontSize: 13,
               fontWeight: active ? 600 : 400,

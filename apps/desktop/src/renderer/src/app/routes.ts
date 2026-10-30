@@ -93,7 +93,7 @@ export interface DraftStore {
  * literal colours. Each is a CSS variable set by the theme's cssVariablesResolver.
  */
 export const THEME_TOKENS = {
-  /** The border of an outlined control (default buttons, inputs, the switcher): 3.45:1 on white. */
+  /** The border of an outlined control (default buttons, inputs, the switcher), distinct from a card's border. */
   controlBorder: "--nivra-control-border",
   /** Rows of a diff: an added line and a removed one. The +/- sign carries the meaning too. */
   diffAdded: "--nivra-diff-added",

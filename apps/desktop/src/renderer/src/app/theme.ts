@@ -1,21 +1,33 @@
-import { Badge, Button, createTheme, Paper, Table, virtualColor, type CSSVariablesResolver, type MantineColorsTuple } from "@mantine/core";
+import { Anchor, Badge, Button, createTheme, defaultVariantColorsResolver, Modal, Paper, Table, type CSSVariablesResolver, type MantineColorsTuple } from "@mantine/core";
 
 /**
- * Nivra's design tokens, from Hird's design system v1 (provenance.md): mono, light and dark. Ink carries structure;
- * colour is kept for outcomes and boundaries, so those always stand out. Labels are sentence case.
+ * Charcoal surfaces and a green action accent, in light and dark. Outcome colours are separate from selection and
+ * actions: choosing something never says it passed a check. Fonts stay bundled, and labels stay sentence case.
  */
 
 const gray: MantineColorsTuple = ["#FAFAFA", "#F5F5F5", "#EDEDED", "#E5E5E5", "#D4D4D4", "#A3A3A3", "#737373", "#525252", "#262626", "#0A0A0A"];
-const dark: MantineColorsTuple = ["#FAFAFA", "#A3A3A3", "#8A8A8A", "#5C5C5C", "#262626", "#1A1A1A", "#111111", "#0A0A0A", "#050505", "#000000"];
-const inkLight: MantineColorsTuple = ["#FAFAFA", "#F5F5F5", "#E5E5E5", "#D4D4D4", "#A3A3A3", "#737373", "#0A0A0A", "#262626", "#262626", "#262626"];
-const inkDark: MantineColorsTuple = ["#FAFAFA", "#F5F5F5", "#E5E5E5", "#D4D4D4", "#A3A3A3", "#8A8A8A", "#737373", "#525252", "#FAFAFA", "#E5E5E5"];
+const dark: MantineColorsTuple = ["#F2F5F3", "#B6C1BA", "#96A69B", "#78867C", "#3A443D", "#28312B", "#1A201C", "#111513", "#0C100D", "#080C09"];
+const brand: MantineColorsTuple = ["#F3FAEB", "#E9F4DE", "#DBEEC6", "#C7E6A5", "#B0DD82", "#A0D66A", "#8FCB50", "#80BC42", "#54882F", "#37691D"];
+const badgeTones = new Set(["gray", "blue", "yellow", "green", "red", "indigo", "orange"]);
 
 export const theme = createTheme({
-  colors: { gray, dark, inkLight, inkDark, ink: virtualColor({ name: "ink", light: "inkLight", dark: "inkDark" }) },
-  primaryColor: "ink",
-  primaryShade: { light: 6, dark: 8 },
+  colors: { gray, dark, brand },
+  primaryColor: "brand",
+  primaryShade: 6,
   autoContrast: true,
-  black: "#0A0A0A",
+  black: "#142011",
+  focusClassName: "nivra-focus",
+  variantColorResolver: (input) => {
+    const resolved = defaultVariantColorsResolver(input);
+    if (input.variant === "default") return { ...resolved, border: "1px solid var(--nivra-control-border)" };
+    if ((input.color ?? input.theme.primaryColor) === "brand" && input.variant === "filled") {
+      return { background: "var(--nivra-action)", hover: "var(--nivra-action-hover)", color: "var(--nivra-on-action)", border: "1px solid var(--nivra-action-edge)" };
+    }
+    if (input.variant === "light" && input.color && badgeTones.has(input.color)) {
+      return { background: `var(--nivra-badge-${input.color}-bg)`, hover: `var(--nivra-badge-${input.color}-bg)`, color: `var(--nivra-badge-${input.color}-fg)`, border: "1px solid transparent" };
+    }
+    return resolved;
+  },
   defaultRadius: "md",
   radius: { xs: "4px", sm: "6px", md: "8px", lg: "12px", xl: "16px" },
   fontFamily: "'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif",
@@ -28,31 +40,53 @@ export const theme = createTheme({
     sizes: { h1: { fontSize: "24px", lineHeight: "1.34" }, h2: { fontSize: "20px", lineHeight: "1.4" }, h3: { fontSize: "15px", lineHeight: "1.47" } },
   },
   components: {
-    Badge: Badge.extend({ styles: { root: { textTransform: "none", fontWeight: 500, letterSpacing: 0 } } }),
-    Button: Button.extend({ styles: { root: { fontWeight: 500 } } }),
-    Paper: Paper.extend({ defaultProps: { radius: "lg" } }),
+    Anchor: Anchor.extend({ defaultProps: { c: "var(--nivra-link)" } }),
+    Badge: Badge.extend({ defaultProps: { color: "gray", variant: "light" }, styles: { root: { textTransform: "none", fontWeight: 500, letterSpacing: 0 } } }),
+    Button: Button.extend({ defaultProps: { variant: "filled" }, styles: { root: { fontWeight: 500 } } }),
+    Paper: Paper.extend({ defaultProps: { radius: "lg" }, styles: { root: { backgroundColor: "var(--nivra-surface)" } } }),
+    Modal: Modal.extend({ styles: { content: { background: "var(--nivra-surface)" }, header: { background: "var(--nivra-surface)" }, title: { fontWeight: 600 } } }),
     Table: Table.extend({ defaultProps: { verticalSpacing: "xs", horizontalSpacing: "md" } }),
   },
 });
 
 export const cssVariablesResolver: CSSVariablesResolver = () => ({
-  variables: {},
+  variables: {
+    "--nivra-action": "#8FCB50",
+    "--nivra-action-hover": "#80BC42",
+    "--nivra-on-action": "#142011",
+    "--nivra-control-border": "#78867C",
+    "--mantine-color-brand-light": "var(--nivra-nav-active)",
+    "--mantine-color-brand-light-hover": "var(--nivra-hover)",
+    "--mantine-color-brand-light-color": "var(--nivra-link)",
+    "--mantine-color-brand-outline": "var(--nivra-link)",
+    "--mantine-color-brand-outline-hover": "var(--nivra-nav-active)",
+    "--mantine-color-anchor": "var(--nivra-link)",
+  },
   light: {
-    "--mantine-color-body": "#FFFFFF",
-    "--mantine-color-text": "#0A0A0A",
-    "--mantine-color-default-border": "#E5E5E5",
-    "--mantine-color-default-hover": "#F5F5F5",
-    "--nivra-subtle": "#FAFAFA",
-    "--nivra-hover": "#F5F5F5",
-    "--nivra-nav-active": "#EDEDED",
-    "--nivra-border": "#E5E5E5",
-    "--nivra-text-2": "#525252",
-    "--nivra-text-3": "#737373",
+    "--mantine-color-body": "#F6F7F6",
+    "--mantine-color-text": "#171C19",
+    "--mantine-color-default": "#FFFFFF",
+    "--mantine-color-default-color": "#171C19",
+    "--mantine-color-default-border": "#DDE2DE",
+    "--mantine-color-default-hover": "#EDF1ED",
+    "--mantine-color-dimmed": "#5F6E64",
+    "--mantine-color-disabled": "#E9EDE9",
+    "--mantine-color-disabled-color": "#59665D",
+    "--mantine-color-disabled-border": "#78867C",
+    "--nivra-surface": "#FFFFFF",
+    "--nivra-subtle": "#EEF1EE",
+    "--nivra-hover": "#EDF1ED",
+    "--nivra-nav-active": "#E9F4DE",
+    "--nivra-border": "#DDE2DE",
+    "--nivra-text-2": "#4D5951",
+    "--nivra-text-3": "#5F6E64",
+    "--nivra-link": "#37691D",
+    "--nivra-focus": "#37691D",
+    "--nivra-action-edge": "#37691D",
     "--nivra-success": "#16A34A",
     "--nivra-warning": "#B45309",
     "--nivra-error": "#B91C1C",
     "--nivra-error-icon": "#DC2626",
-    "--nivra-control-border": "#8A8A8A",
     "--nivra-diff-added": "#ECFDF3",
     "--nivra-diff-removed": "#FEF2F2",
     "--nivra-badge-gray-bg": "#F5F5F5",
@@ -71,22 +105,30 @@ export const cssVariablesResolver: CSSVariablesResolver = () => ({
     "--nivra-badge-orange-fg": "#9A3412",
   },
   dark: {
-    "--mantine-color-body": "#0A0A0A",
-    "--mantine-color-text": "#FAFAFA",
-    "--mantine-color-default": "#111111",
-    "--mantine-color-default-border": "#262626",
-    "--mantine-color-default-hover": "#1A1A1A",
-    "--nivra-subtle": "#111111",
-    "--nivra-hover": "#1A1A1A",
-    "--nivra-nav-active": "#262626",
-    "--nivra-border": "#262626",
-    "--nivra-text-2": "#A3A3A3",
-    "--nivra-text-3": "#8A8A8A",
+    "--mantine-color-body": "#111513",
+    "--mantine-color-text": "#F2F5F3",
+    "--mantine-color-default": "#1A201C",
+    "--mantine-color-default-color": "#F2F5F3",
+    "--mantine-color-default-border": "#3A443D",
+    "--mantine-color-default-hover": "#28312B",
+    "--mantine-color-dimmed": "#96A69B",
+    "--mantine-color-disabled": "#28312B",
+    "--mantine-color-disabled-color": "#96A69B",
+    "--mantine-color-disabled-border": "#78867C",
+    "--nivra-surface": "#1A201C",
+    "--nivra-subtle": "#171D19",
+    "--nivra-hover": "#28312B",
+    "--nivra-nav-active": "#233321",
+    "--nivra-border": "#3A443D",
+    "--nivra-text-2": "#B6C1BA",
+    "--nivra-text-3": "#96A69B",
+    "--nivra-link": "#A5DD70",
+    "--nivra-focus": "#A5DD70",
+    "--nivra-action-edge": "#8FCB50",
     "--nivra-success": "#22C55E",
     "--nivra-warning": "#FBBF24",
     "--nivra-error": "#F87171",
     "--nivra-error-icon": "#EF4444",
-    "--nivra-control-border": "#8A8A8A",
     "--nivra-diff-added": "#0B2B17",
     "--nivra-diff-removed": "#3A1212",
     "--nivra-badge-gray-bg": "#262626",

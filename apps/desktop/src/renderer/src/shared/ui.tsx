@@ -1,4 +1,4 @@
-import { Paper, Stack, Text, Title } from "@mantine/core";
+import { Box, Group, Paper, Stack, Text, Title } from "@mantine/core";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 /** Electron prefixes errors from the main process; people only need the message itself (from Hird). */
@@ -12,15 +12,17 @@ export function Section({ title, description, actions, children }: { title: stri
   return (
     <Paper withBorder p="lg">
       <Stack gap="md">
-        <Stack gap={2} style={{ position: "relative" }}>
-          <Title order={3}>{title}</Title>
-          {description && (
-            <Text size="sm" c="var(--nivra-text-2)">
-              {description}
-            </Text>
-          )}
-          {actions && <div style={{ position: "absolute", right: 0, top: 0 }}>{actions}</div>}
-        </Stack>
+        <Group justify="space-between" align="flex-start" gap="sm">
+          <Stack gap={2} style={{ flex: "1 1 220px", minWidth: 0 }}>
+            <Title order={3}>{title}</Title>
+            {description && (
+              <Text size="sm" c="var(--nivra-text-2)">
+                {description}
+              </Text>
+            )}
+          </Stack>
+          {actions && <Box style={{ flex: "0 1 auto", maxWidth: "100%" }}>{actions}</Box>}
+        </Group>
         {children}
       </Stack>
     </Paper>

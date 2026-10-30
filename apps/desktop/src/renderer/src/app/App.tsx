@@ -7,7 +7,8 @@ import { Companion, type CompanionHandle } from "../features/companion";
 import { companionHint, returnProjectPresent, type SetupReturn } from "../features/companion-state";
 import { Environment } from "../features/environment";
 import { Explain } from "../features/explain";
-import { TERMINAL, type RunRef } from "../features/hello";
+import { TERMINAL, type RunRef } from "../shared/runs";
+import { BrandMark } from "../shell/Brand";
 import { MissionDetail, MissionsPage } from "../features/missions";
 import { PlanningHome } from "../features/navigation";
 import { AddedWarning, useAddProject, type AddOutcome } from "../features/projects";
@@ -84,8 +85,7 @@ function Shell() {
   const [setupReturn, setSetupReturn] = useState<SetupReturn | null>(null);
   const [returnError, setReturnError] = useState<string | null>(null);
   const [environmentProjects, setEnvironmentProjects] = useState<string[]>([]);
-  // Hello and Explain runs this window started, by project: their pages find them again after any navigation.
-  const [helloRuns, setHelloRuns] = useState<Record<string, RunRef>>({});
+  // Explain runs this window started, by project: their pages find them again after any navigation.
   const [explainRuns, setExplainRuns] = useState<Record<string, RunRef>>({});
   const [addWarning, setAddWarning] = useState<{ projectId: string; text: string } | null>(null);
   // Settings opens on the section last shown there.
@@ -167,7 +167,7 @@ function Shell() {
   useEffect(() => {
     main.current?.scrollTo({ top: 0 });
   }, [placeKey]);
-  const busyIds = [...Object.entries(helloRuns), ...Object.entries(explainRuns)]
+  const busyIds = Object.entries(explainRuns)
     .filter(([, ref]) => ref.status !== null && !TERMINAL.includes(ref.status))
     .map(([id]) => id);
 
@@ -273,10 +273,7 @@ function Shell() {
               <path d="M4 7h16M4 12h16M4 17h16" />
             </svg>
           </ActionIcon>
-          <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" style={{ flex: "none" }}>
-            <rect x="2" y="2" width="20" height="20" rx="6" fill="currentColor" />
-            <path d="M8 16V8l8 8V8" stroke="var(--mantine-color-body)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <BrandMark />
           <Box style={{ flex: "1 1 auto", minWidth: 0 }}>{switcherElement}</Box>
         </AppShell.Header>
       )}
@@ -307,7 +304,7 @@ function Shell() {
       />
       {/* The page scrolls inside the main area, never the window: the sidebar and the top bar stay where they are. */}
       <AppShell.Main ref={main} id="page" tabIndex={-1} aria-label="Page" inert={companionOpen && narrow ? true : undefined} style={{ outline: "none", height: "100dvh", overflowY: "auto", ...(companionOpen && !narrow ? { paddingRight: 420 } : {}) }} data-testid="main">
-        <Box px={{ base: 16, sm: 40 }} pt={28} pb={40} maw={1120}>
+        <Box className="nivra-page" px={{ base: 16, sm: 40 }} pt={28} pb={40} maw={1120}>
           <Stack gap="md">
             {runPreferencesReturn && shown.kind === "settings" && <Button variant="default" size="xs" data-testid="task-preferences-return" onClick={async () => {
               const destination = runPreferencesReturn;
@@ -525,8 +522,6 @@ function Shell() {
                 preferences={preferences.value}
                 onPreferencesChanged={() => setPreferencesVersion((n) => n + 1)}
                 onProjectsChanged={() => setProjectsVersion((n) => n + 1)}
-                helloRun={project ? (helloRuns[project.id] ?? null) : null}
-                onHelloRun={(id, ref) => setHelloRuns((current) => (current[id]?.runId === ref.runId && current[id]?.status === ref.status ? current : { ...current, [id]: ref }))}
                 credentialsSaved={credentialsSaved}
                 onCredentialsSaved={() => setCredentialsSaved((count) => count + 1)}
                 onOpenCompanion={() => companion.current?.open()}

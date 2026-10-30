@@ -4176,3 +4176,23 @@ D49 still requires a host-ledger grant before every paid request. The coach rout
 so the live helper refuses another paid start before a claim or credential read; an approval digest is insufficient.
 The new recipe and rehearsal remain unpaid pending separately verified coach grant wiring. Mission-review grant
 wiring is assessed separately under NIV-52; this change does not implement it or complete NIV-66.
+
+## D65. Shared renderer branding and diagnostics on demand (NIV-72, 2026-10-30)
+
+**Decision.** Use charcoal surfaces and a controlled green action/selection accent in both appearance schemes,
+retaining Nivra's name, IBM Plex fonts, navigation and state. Keep outcome colours distinct. Refresh the existing
+in-app N mark and shared controls without changing the packaged icon pipeline. Internal Hello controls disappear
+from both development and release UI; their engine workflow and typed bridge remain for automated lifecycle and
+preference checks. Home shows readiness and useful failures; technical runtime facts remain in Advanced diagnostics.
+Historical briefs use the current brief's read-only presentation instead of raw JSON.
+
+**Why.** The ordinary product journey should describe the engineer's work, with coherent controls and readable
+states. Bootstrap test controls and runtime implementation details distract from that work. Removing their visible
+controls must preserve the underlying lifecycle checks and the product's honest execution evidence.
+
+**Consequences.** This supersedes the shell's monochrome presentation and visible Hello panel, without changing
+D51's routes, drafts or keyboard behaviour. No IPC, domain schema, persistence, provider, budget or execution-boundary
+change is introduced. Tests and lifecycle observers use the existing bridge for Hello and retain their assertions;
+they no longer claim a product timeline exists for it. Real tests, failures, unknown usage, consent and test-endpoint
+labels remain visible. The [verification record](niv-72-verification.md) distinguishes window evidence from live and
+release acceptance.

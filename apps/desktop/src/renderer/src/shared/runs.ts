@@ -4,6 +4,12 @@ import { errorMessage } from "./ui";
 
 export const TERMINAL: readonly RunStatus[] = ["succeeded", "failed", "cancelled"];
 
+/** The last run started for a project, as far as the page knows. */
+export interface RunRef {
+  runId: string;
+  status: RunStatus | null;
+}
+
 /**
  * Follows one run's timeline by cursor (Hird D8), only while its own engine is online: main routes every call about a
  * run to the engine that runs it, and the page pauses while that engine is offline instead of asking another (D17).

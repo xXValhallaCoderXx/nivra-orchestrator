@@ -11,7 +11,7 @@ const LOOK = {
   failed: { dot: "var(--nivra-error-icon)", label: "Engine failed" },
 } as const;
 
-/** An engine's state at a glance: a dot and a word, with the details on hover. */
+/** Readiness at a glance; runtime versions and storage belong in Advanced diagnostics. */
 export function EngineDot({ engine, stoppedLabel, testId, unknown }: { engine: EngineView | null; stoppedLabel?: string; testId: string; unknown?: string | null }) {
   const state = engine?.state;
   // A read of the engines that failed says so, rather than waiting for ever.
@@ -19,15 +19,15 @@ export function EngineDot({ engine, stoppedLabel, testId, unknown }: { engine: E
   const detail = !state
     ? (unknown ?? "Checking the engine…")
     : state.status === "online"
-      ? `Engine ${state.info.engineVersion} on ${state.info.platform}/${state.info.arch}, Node ${state.info.node} · data in ${state.info.home}`
+      ? "The engine for this project is ready."
       : state.status === "starting"
         ? state.detail
         : state.status === "failed"
           ? state.reason
           : "The engine isn't running.";
   return (
-    <Tooltip label={detail} multiline maw={460} withArrow>
-      <Group gap={6} wrap="nowrap">
+    <Tooltip label={detail} multiline maw={460} withArrow events={{ hover: true, focus: true, touch: false }}>
+      <Group gap={6} wrap="nowrap" tabIndex={0} className="nivra-focus">
         <Box w={8} h={8} bg={look.dot} style={{ borderRadius: "50%", flex: "none" }} />
         <Text size="xs" c="var(--nivra-text-2)" style={{ whiteSpace: "nowrap" }} data-testid={testId}>
           {state?.status === "stopped" && stoppedLabel ? stoppedLabel : look.label}

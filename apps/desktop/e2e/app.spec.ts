@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { goTo, openSwitcher } from "./places.ts";
+import { cancelRun, runStatus, startHello } from "./runs.ts";
 
 /**
  * The built app, driven like a person would (B4, D17): the sandboxed window, the typed bridge, no engine until a
@@ -218,15 +219,13 @@ test("a repository picked in the native dialog runs on its folder's engine, runs
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online");
 
   await goTo(page, "settings-diagnostics");
-  await page.getByTestId("hello-start").click();
-  await expect(page.getByTestId("hello-status")).toHaveText("succeeded");
-  await expect(page.getByTestId("hello-timeline")).toContainText("on main");
+  await expect(page.getByTestId("hello-start")).toHaveCount(0);
+  const runId = await startHello(page);
+  await expect.poll(() => runStatus(page, runId)).toBe("succeeded");
+  expect((await page.evaluate((id) => window.nivra.runEvents(id, 0), runId)).events.some((event) => event.message.includes("on main"))).toBe(true);
 
-  await page.getByText("60 s", { exact: true }).click();
-  await page.getByTestId("hello-start").click();
-  await expect(page.getByTestId("hello-timeline")).toContainText("Holding a child process");
-  await page.getByTestId("hello-cancel").click();
-  await expect(page.getByTestId("hello-status")).toHaveText("cancelled");
+  const held = await startHello(page, 60_000);
+  await cancelRun(page, held);
 });
 
 test("a key holding a character no key has is refused when it is saved, saying why, and nothing is saved", async () => {
