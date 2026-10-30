@@ -925,6 +925,41 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e --project=built task-run.spec.
 Packaged apps ignore the stand-in endpoint switches, so those task journeys remain built-app evidence; the packaged
 suite and Windows project cover their own stated scenarios.
 
+## Engine database privacy (NIV-46, D58)
+
+Linux/WSL engine homes support owner-controlled directories, including existing 0755 homes, below trusted ancestors.
+Group/other-writable directories and symlinked home paths are refused; root-owned sticky temporary ancestors are
+allowed for disposable fixtures. Newly created home directories request 0700. The engine requires a local filesystem
+that honours POSIX modes and, on Linux, directory-descriptor access through `/proc/self/fd`. This is file privacy,
+not encryption or isolation from the same user/root. Native Windows retains its existing ACL behaviour.
+
+Startup validates both recognised SQLite families, privately prepares `nivra.db`, acquires its exclusive lock, repairs
+its existing sidecars, and privately prepares Mastra's family before constructing its storage driver. Repair uses
+validated descriptors and checks that 0600 took effect; it preserves bytes, inodes and recovery data. A missing main
+file with surviving recovery files is refused rather than replaced with an empty database. Unsafe paths and repair
+failures report `home-unusable`; fix the ownership/path or restore the affected entries from a trusted backup, then
+start again. A refused startup does not broaden permissions or remove recovery files.
+
+Only the two database families are repaired. Existing runtime executables and user files remain untouched. No global
+umask is changed, no sidecars are manufactured and no database schema migration is introduced. Normal release startup
+repairs its own selected home; never point a development engine or migration check at the real release home.
+
+Focused offline checks, followed by the full suite and the Windows/WSL harness:
+
+```bash
+pnpm --filter @nivra/engine exec node --test test/database-privacy.test.ts test/engine.test.ts
+pnpm --filter @nivra/engine exec node --test test/sandbox-engine.test.ts
+pnpm verify
+pnpm verify:windows
+```
+
+The driver gate checks modes before Mastra schema initialisation, during writes, and through sidecar recreation under
+umask 022 and 000. The normal regression checks do not replace the explicit creation-time acceptance trace: after a
+driver change, observe each creating syscall before subsequent userspace code can chmod the result. Use a disposable
+home, never a real installation. FIFO tests retain their strict deadlines and verify non-blocking handling if a regular
+file becomes a FIFO between inspection and opening. Run focused and full suites separately to avoid competing startup
+loads. No paid/provider calls are required.
+
 ### Confirmed preferences in coding runs (NIV-71)
 
 The task preview/start bridge accepts optional temporary choices. The host resolves confirmed personal preferences

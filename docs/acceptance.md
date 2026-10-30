@@ -3474,6 +3474,49 @@ Packaged/Windows suites were not repeated for this follow-up: no packaging, main
 source changed. Their earlier results above remain evidence for their labelled revisions. No paid validation was
 performed, protocol 21 is unchanged, and the PR remains unmerged for re-review.
 
+## Private engine database files and safe legacy repair (NIV-46, D58) — 30 October 2026
+
+Source verified locally at `a65c3379fe1249529b828765c54ffd992c4ec18b`, published unchanged as
+`8d5a91555e9cfa40016419f58099d39bd21fa63d`. Both commits have Git tree `36d95ec45b85923a77bef729abc66b60f8d4429e`, based on main
+`f0de67b9259111b7a9299bcc687037f99c51cb4d`. Publication through the connected GitHub app changes commit metadata,
+not file content. Subsequent changes in this PR are documentation only. Implementation is
+isolated in the `feature/niv-46` worktree; no runtime-version, schema or dependency changes are included, and no host,
+preload or renderer source changed.
+
+| Scenario | Evidence and observed result |
+| --- | --- |
+| Creation-time privacy, an early gate | A disposable Linux/x86-64 ptrace harness stopped every traced Node/libuv thread at syscall boundaries. All 44 successful database/sidecar creation opens observed under umask 022 and 000 were 0600 immediately on syscall return, before the tracee could execute a userspace chmod. Both database families, WAL, SHM, rollback journals and recreation were observed. |
+| Ongoing driver and workflow lifecycle | The driver gate runs before Mastra schema initialisation, checks active writes and recreates WAL/SHM/rollback journals twice for each driver/mask. Real-engine fixtures inspect all data files after a no-provider hello, clean restart and forced-stop recovery. Prior completed history survives. |
+| Legacy 0755 homes, 0644 files | Real driver processes leave WAL or hot rollback journals by SIGKILL. Descriptor repair preserves every fixture file's inode and content hash before driver opening; actual startup then repairs the legacy modes and recovers the committed record, excluding the uncommitted change. Main database inodes and the home's 0755 mode remain unchanged. |
+| Unsafe files and paths | Symlink, hard-link, directory and FIFO cases cover all eight recognised names. Startup returns `home-unusable` within its five-second guard; outside sentinel bytes, modes and change times remain unchanged. Separate descriptor-race tests reject a regular file swapped for a FIFO or symlink before chmod. An already-present FIFO is never opened; the swapped-FIFO open must have `O_NONBLOCK`. |
+| Unsafe homes and recovery prerequisites | Shared-writable homes, symlinked homes/ancestors and unexpected ownership refuse. Orphan WAL data remains intact without manufacturing a new main database. A filesystem that ignores chmod refuses rather than reporting private files. |
+| Failure and exclusive ownership | Injected EPERM during repair releases the Nivra lock, permitting a later engine to start. Failure after LibSQL initialisation closes its client and the lock. A second process returns `locked` without changing the live owner's data hashes, modes or change times, including deliberately broadened Mastra files; the owner still answers. |
+| Remaining home files | The hello fixture preserves pre-existing notes and executable runtime modes. The existing sandbox-engine fixture inventories every generated data file recursively, including its settled journal, against local stand-ins. Secret/preference canaries and protocol purity remain covered. |
+| Self-check and platforms | Self-check works without inspecting even an unsafe named home. Both staged runtimes build; Linux staged self-check/start/stop and the native Windows/WSL harness pass. Native Windows retains its ACL behaviour; POSIX modes do not establish Windows privacy. |
+
+Final validation on the implementation revision:
+
+- `pnpm verify`: all typechecks and **1,909 tests passed** (140 domain, 720 desktop, 1,049 engine), zero failures/skips.
+- `node --test test/database-privacy.test.ts test/engine.test.ts` from `apps/engine`: **62 passed**, including all
+  47 new privacy regressions, zero failures/skips. The sandbox inventory also passes in the full suite.
+- `pnpm verify:windows`: **37/37 passed**, including native Windows and WSL startup, shutdown, cancellation and restart.
+  Its release-home guard found all eight entries unchanged and removed its disposable WSL home.
+- The real engine through `apps/engine/scripts/rpc.ts`: no-provider hello succeeded, every generated database file
+  present after exit was 0600, and a second invocation retained the succeeded run. The disposable home was removed.
+- The explicit creation-time trace passed on the same source revision. Local ignored receipts are under
+  `.artifacts/niv46/` in the implementation worktree; the ptrace harness is evidence tooling, not a new test dependency.
+
+An extra focused run launched alongside the full suite exceeded three five-second process-startup guards (symlink,
+FIFO and hard-link cases) and failed. The full suite passed, and the unchanged complete focused command then passed
+when run alone. No deadline was extended and no test was skipped, removed or weakened. Keep focused and full runs
+separate when reproducing their results.
+
+No real release/development home was opened for migration, and no paid provider/cloud calls were made. Existing
+installations are repaired only when their owning engine next starts normally. Packaged Electron/UI suites were not
+repeated: no packaging, main-process, preload, target or supervisor source changed. Permissions do not provide
+isolation from the same OS user/root, and unsafe homes are refused rather than recursively repaired. Protocol 21 and
+all stored-content restrictions remain in force; NIV-62 remains separate. This evidence does not authorise merging.
+
 ## NIV-71: confirmed preferences in coding runs (30 October 2026)
 
 Implemented on `feature/niv-71` in the separate `nivra-orchestrator-niv71` worktree, based on refreshed main `f0de67b`.

@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import type { LibSQLStore } from "@mastra/libsql";
+import { DatabaseFiles } from "./db/private-files.ts";
 import {
   ChatInput,
   CompanionInput,
@@ -276,10 +278,32 @@ function applyHold(file: string): ApplyHook {
  * as such instead of crashing the import.
  */
 export async function createEngine(options: EngineOptions): Promise<Engine> {
+  const database = new Database(join(options.home, "nivra.db"), { exclusive: true });
+  const files = new DatabaseFiles(options.home);
+  const opened: { storage: LibSQLStore | null } = { storage: null };
+  try {
+    files.validateFamily("nivra.db");
+    files.validateFamily("mastra.db");
+    database.open();
+    // LibSQLStore creates its client and starts WAL setup in its constructor: secure every existing file first.
+    // Only the exclusive owner may repair Mastra storage. A refused second engine never opens it for writing.
+    files.prepareFamily("mastra.db");
+    return await createOpenEngine(options, database, (storage) => { opened.storage = storage; });
+  } catch (error) {
+    try {
+      await opened.storage?.close();
+    } finally {
+      database.close();
+    }
+    throw error;
+  } finally {
+    files.close();
+  }
+}
+
+async function createOpenEngine(options: EngineOptions, database: Database, keepStorage: (storage: LibSQLStore) => void): Promise<Engine> {
   const { home, instanceId, output, log } = options;
   const env = options.env ?? process.env;
-  const database = new Database(join(home, "nivra.db"), { exclusive: true });
-  database.open();
 
   let mastraModules: [
     typeof import("@mastra/core/mastra"),
@@ -634,6 +658,9 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     }
   };
 
+  const storage = new LibSQLStore({ id: "nivra-engine", url: libsqlFileUrl(join(home, "mastra.db")) });
+  keepStorage(storage);
+  await storage.init();
   const mastra = new Mastra({
     workflows: {
       [PLANNING_WORKFLOW_ID]: createPlanningWorkflow({
@@ -804,7 +831,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         saveProposal: (runId, proposal) => store.saveProposal(runId, proposal),
       }),
     },
-    storage: new LibSQLStore({ id: "nivra-engine", url: libsqlFileUrl(join(home, "mastra.db")) }),
+    storage,
     logger: false,
   });
 
@@ -1083,7 +1110,11 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
         await scheduler.stop(reason, 3_000);
         await server.idle();
       } finally {
-        database.close();
+        try {
+          await storage.close();
+        } finally {
+          database.close();
+        }
         resolveClosed();
       }
     })();

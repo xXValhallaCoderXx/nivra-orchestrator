@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { isTerminal, type RunSummary, type SandboxPreview, type SandboxReport, type SandboxStatus } from "@nivra/domain";
@@ -119,6 +119,18 @@ describe("a sandbox check through a real engine (NIV-44)", () => {
     // Nothing of the key in the run's record, and the session's journal moved aside, with nothing open.
     assert.ok(!JSON.stringify(page.events).includes(KEY));
     assert.deepEqual([readdirSync(join(home, "sandbox")).filter((name) => name.endsWith(".jsonl")).length, readdirSync(join(home, "sandbox", "settled")).length], [0, 1]);
+    // NIV-46: inventory every data file this fixture creates, including the settled sandbox journal, while open.
+    const inventory = (folder: string) => {
+      for (const entry of readdirSync(folder, { withFileTypes: true })) {
+        const path = join(folder, entry.name);
+        if (entry.isDirectory()) inventory(path);
+        else {
+          assert.equal(entry.isFile(), true, entry.name);
+          if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o7777, 0o600, entry.name);
+        }
+      }
+    };
+    inventory(home);
   });
 
   it("refuses without upload consent, or without the key and project id, sending nothing; model-context consent never stands in", async () => {
