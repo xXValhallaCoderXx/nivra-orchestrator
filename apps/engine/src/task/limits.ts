@@ -73,10 +73,10 @@ export function reserveMs(finalChecks: number): number {
 }
 
 /**
- * The operations a run may start: prepare, the toolchain probe, the brief's baseline selections (D41), the worker's
- * writes and runs, collect and the final checks.
+ * The operations a run may start: prepare, the toolchain probe, the brief's baseline selections (D41), observed
+ * before-change repository checks, the worker's writes and runs, collect and the final checks.
  */
-export const operationsFor = (finalChecks: number, baselineChecks = 0): number => 1 + 1 + baselineChecks + TASK_LIMITS.tools.writes + TASK_LIMITS.tools.runs + 1 + finalChecks;
+export const operationsFor = (finalChecks: number, baselineChecks = 0, comparisonChecks = 0): number => 1 + 1 + baselineChecks + comparisonChecks + TASK_LIMITS.tools.writes + TASK_LIMITS.tools.runs + 1 + finalChecks;
 
 /** What a tool needs left in the work window before it sends an operation: the operation, and its read when it has one. */
 export const writeNeedsMs = (): number => operationMs(TASK_LIMITS.write.timeoutMs) + TASK_LIMITS.write.downloadMs;
@@ -85,8 +85,8 @@ export const runNeedsMs = (): number => operationMs(TASK_LIMITS.checks.timeoutMs
 /** The time the session leaves for what comes after it: close, the patch, and the report and proposal. */
 export const AFTER_SESSION_MS = TASK_LIMITS.closeMs + TASK_LIMITS.patchMs + TASK_LIMITS.reportMs;
 
-/** A run's bounds for a brief with `finalChecks` cases and checks and `baselineChecks` selections, as its preview shows them (D39, D41). */
-export function runLimitsFor(finalChecks: number, baselineChecks = 0): TaskRunLimits {
+/** A run's bounds, including observed comparison checks before the worker, as its preview shows them. */
+export function runLimitsFor(finalChecks: number, baselineChecks = 0, comparisonChecks = 0): TaskRunLimits {
   return {
     modelRequests: TASK_LIMITS.model.requests,
     requestSeconds: TASK_LIMITS.model.stepMs / 1000,
@@ -97,7 +97,8 @@ export function runLimitsFor(finalChecks: number, baselineChecks = 0): TaskRunLi
     writeBytes: TASK_LIMITS.write.maxBytes,
     runs: TASK_LIMITS.tools.runs,
     baselineChecks,
-    operations: operationsFor(finalChecks, baselineChecks),
+    comparisonChecks,
+    operations: operationsFor(finalChecks, baselineChecks, comparisonChecks),
     checkSeconds: TASK_LIMITS.checks.timeoutMs / 1000,
     sessionMinutes: TASK_LIMITS.sessionMs / 60_000,
     runMinutes: TASK_LIMITS.runMs / 60_000,

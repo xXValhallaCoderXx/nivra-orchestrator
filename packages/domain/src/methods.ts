@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { BudgetGrant, BudgetOperation, JournalSeal } from "./budget.ts";
-import { ApplyParams, ApplyResolution, ApplyView } from "./apply.ts";
+import { ApplyParams, ApplyResolution, ApplyView, TaskAdmission, TaskAdmissionParams } from "./apply.ts";
 import { ChatContext, ChatInput, ChatResult } from "./chat.ts";
 import { CompanionContext, CompanionInput, CompanionResult, RepositoryInspection } from "./companion.ts";
 import { CoachContext, CoachInput, CoachReport } from "./coach.ts";
@@ -250,6 +250,8 @@ export const Methods = {
    * or ready with what preparing it would send. It replaces environment.preview once the host uses it.
    */
   "environment.resolve": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), choices: EnvironmentChoices, previous: PreviousSettlement.nullable() }), result: EnvironmentPreviewV2 },
+  /** Checks the intact bound report and original brief without claiming an apply or writing the checkout. */
+  "task.admission": { params: TaskAdmissionParams, result: TaskAdmission },
   /**
    * Applies a task's proposal (D40): the approval itself, bound to the hash and the attempt, checked again, then
    * written. Idempotent by its request id: a repeat gets the apply it started. A refusal is a result, not an error.

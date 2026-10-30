@@ -6,15 +6,16 @@ import { TASK_LIMITS } from "./limits.ts";
 import { firstWord } from "./scripts.ts";
 
 /**
- * The acceptance harness (NIV-7, D39). A task's verdict comes only from its acceptance cases, frozen with the brief:
+ * The acceptance harness (NIV-7, D39). A task needs every acceptance case and required repository check to pass.
+ * Acceptance cases are frozen with the brief:
  * each is a command and the exact output and exit code it must give. The command runs as one disposable operation,
  * from the image collect left, and the engine compares what came back on this computer, outside every process that
  * ran the workspace's code. The worker can't edit a case, and the code a case runs can only give output to be judged:
  * replacing a test script, or an `exit 0` before the assertions, changes nothing here.
  *
- * Repository checks (the brief's own commands, such as `sh check.sh`) run the same way, and exit 0 reads as passed,
- * but they run the workspace's own scripts, which the worker may have changed, so they never decide the verdict: each
- * is reported with the files its command names that the change touches.
+ * Repository checks (the brief's own commands, such as `sh check.sh`) run the same way, and exit 0 reads as passed.
+ * Each is required, though a script the worker changed can still print a pass: the report names the files its
+ * command names that the change touches. Passing checks prove only what those commands checked.
  */
 
 export interface AcceptanceCase {
@@ -31,6 +32,8 @@ export interface CheckResult {
   /** 1-based, as the brief lists them. */
   number: number;
   name: string;
+  /** Exact command bytes, bound to the run's verification manifest. */
+  commandSha256?: string;
   verdict: Verdict;
   /** Why, in Nivra's words, for anything but a pass. */
   reason: string | null;
@@ -180,7 +183,7 @@ export function judgeCase(number: number, given: AcceptanceCase, ran: ExecResult
   return { ...result, verdict: "failed", reason: reasons.join(", and "), difference: outputMatches ? null : firstDifference(given.expectedOutput, ran.stdout) };
 }
 
-/** A repository check: exit 0 reads as passed. It decides nothing; its changed files are named beside it. */
+/** A required repository check: exit 0 reads as passed; its changed files are named beside it. */
 export function judgeCheck(number: number, command: string, ran: ExecResult, named: NamedFiles, timeoutMs: number = TASK_LIMITS.checks.timeoutMs): CheckResult {
   const result: CheckResult = { ...base("check", number, clip(command, 80)), exitCode: ran.exitCode, stdoutTail: tailOf(ran.stdout), stderrTail: tailOf(ran.stderr), changedFiles: named.files, unclear: named.unclear, durationMs: ran.durationMs };
   const ended = ending(ran, timeoutMs);
@@ -296,9 +299,3 @@ export function commandFiles(command: string, files: ReadonlySet<string>, depth 
 export function programsOf(commands: readonly string[]): string[] {
   return [...new Set(commands.map(firstWord).filter((word): word is string => word !== null))];
 }
-
-/** Whether every acceptance case passed: the only thing that makes a proposal verified. */
-export const verified = (results: readonly CheckResult[]): boolean => {
-  const cases = results.filter((result) => result.kind === "case");
-  return cases.length > 0 && cases.every((result) => result.verdict === "passed");
-};

@@ -222,14 +222,16 @@ try {
     input["preview"] = shown.snapshot.fingerprint;
   }
   // An approval of a run's proposal, filled in as the host would: from the run, its report, its proposal and this engine.
-  if (method === "task.apply") {
+  if (method === "task.apply" || method === "task.admission") {
     const runId = String(params["runId"] ?? "");
     const summary = await client.call("runs.get", { runId });
     const [report, proposal] = [await client.call("runs.task", { runId }), await client.call("runs.proposal", { runId })];
     if (!report || !proposal) throw new Error("That run has no task report and proposal on this engine, so there is nothing to apply.");
     const input = summary.input as { repoPath: string; project: string; target: string };
     const task = { attempt: { taskId: report.task.taskId, attemptId: report.task.attemptId, runId }, engine: { homeId: info.homeId }, brief: { version: report.task.briefVersion, sha256: report.task.briefDigest } };
-    params = { requestId: randomUUID(), approvedHash: proposal.hash, repoPath: input.repoPath, project: input.project, target: input.target, task, ...params };
+    params = method === "task.apply"
+      ? { requestId: randomUUID(), approvedHash: proposal.hash, repoPath: input.repoPath, project: input.project, target: input.target, task, ...params }
+      : { approvedHash: proposal.hash, task, ...params };
   }
   const result = await client.call(method as MethodName, params as never);
   console.log(JSON.stringify(result, null, 2));

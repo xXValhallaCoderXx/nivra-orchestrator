@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { TaskAdmission } from "@nivra/domain";
 import type { TaskView } from "../src/shared/ipc.ts";
 import { readinessOf, type ReadinessInput } from "../src/shared/task-readiness.ts";
 import { environmentStepOf, latestHolds, stripItemsOf, type StripInput } from "../src/shared/task-strip.ts";
@@ -14,19 +15,21 @@ const PREPARED = await preparedOf("image-1");
 
 describe("the verdict's sentence (D39, D41, NIV-55)", () => {
   const frozen = [{ path: "test/a.test.ts", unchanged: true }] as never;
-  it("keeps today's sentences for a verified change, a frozen file, and the cases", () => {
-    assert.match(verdictText({ verified: true, frozen, setup: { unchanged: true, changed: [] } }), /^Every acceptance case passed, and every frozen file is unchanged: the change is verified\./);
-    assert.match(verdictText({ verified: false, frozen: [{ path: "a", unchanged: false }] as never, setup: null }), /^A frozen file isn't shown to be unchanged/);
-    assert.match(verdictText({ verified: false, frozen, setup: { unchanged: true, changed: [] } }), /^Not every acceptance case was shown to pass/);
+  const current = { version: 4 as const, manifest: { policy: "required-checks-v1" as const, checks: [], frozen: [], setupRequired: false } };
+  const admission: TaskAdmission = { eligible: true, reason: null, proposalHash: "a".repeat(64), reportSha256: "b".repeat(64), legacy: false };
+  it("states verified only after engine admission, and keeps frozen and case failures clear", () => {
+    assert.match(verdictText({ ...current, verified: true, frozen, setup: { unchanged: true, changed: [] } }, admission), /^Every acceptance case passed, and every frozen file is unchanged: the change is verified\./);
+    assert.match(verdictText({ ...current, verified: true, frozen, setup: null }), /hasn't confirmed this proposal's verification from its engine/);
+    assert.match(verdictText({ ...current, verified: false, frozen: [{ path: "a", unchanged: false }] as never, setup: null }), /a frozen file isn't shown to be unchanged/);
+    assert.match(verdictText({ ...current, verified: false, frozen, setup: { unchanged: true, changed: [] } }), /^Not every acceptance case was shown to pass/);
   });
 
   it("says a run that changed a setup file isn't verified for that reason, naming the files, not the cases'", () => {
-    const said = verdictText({ verified: false, frozen, setup: { unchanged: false, changed: ["package.json", "pnpm-lock.yaml", "packages/a/package.json", "packages/b/package.json"] } });
-    assert.match(said, /^The run changed a setup file the environment was prepared from \(package\.json, pnpm-lock\.yaml, packages\/a\/package\.json and 1 more\), so its checks don't count/);
-    assert.match(said, /Request a revision that leaves the setup files as they are\./);
-    assert.match(verdictText({ verified: false, frozen, setup: { unchanged: null, changed: [] } }), /^Nivra couldn't tell whether the setup files/);
+    const said = verdictText({ ...current, verified: false, frozen, setup: { unchanged: false, changed: ["package.json", "pnpm-lock.yaml", "packages/a/package.json", "packages/b/package.json"] } });
+    assert.match(said, /can't be approved: it changes a setup file the environment was prepared from \(package\.json, pnpm-lock\.yaml, packages\/a\/package\.json and 1 more\)/);
+    assert.match(verdictText({ ...current, verified: false, frozen, setup: { unchanged: null, changed: [] } }), /Nivra couldn't tell whether the setup files/);
     // A run with no environment has no setup check: the cases' reason stands.
-    assert.match(verdictText({ verified: false, frozen: [], setup: undefined }), /^Not every acceptance case/);
+    assert.match(verdictText({ ...current, verified: false, frozen: [], setup: undefined }), /^Not every acceptance case/);
   });
 });
 

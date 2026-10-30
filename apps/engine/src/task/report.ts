@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PATCH_SHOWN_BYTES, StoredTaskInput, TASK_MODEL, type Mask, type RunRoute, type TaskBrief, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskRunLimits, type TaskStopCode } from "@nivra/domain";
+import { PATCH_SHOWN_BYTES, StoredTaskInput, TASK_MODEL, type Mask, type RunRoute, type TaskBrief, type TaskCheck, type TaskEnvironment, type TaskPreview, type TaskProposal, type TaskReport, type TaskRunLimits, type TaskStopCode } from "@nivra/domain";
 import { previewOf, safeUnresolved, stepOf } from "../exec/check.ts";
 import type { PrescribedResult } from "../exec/prescribed.ts";
 import type { Proposal } from "../exec/proposal.ts";
@@ -82,6 +82,7 @@ const AFTER_UPLOAD_ANY = "The run stopped after your commit was uploaded, so not
 
 /** A stop's words, by its code and where it happened: only a stop before the upload says nothing was sent. */
 export function taskStopWords(code: TaskStopCode, step: string | null): string {
+  if (code === "time" && step === "before check") return "There wasn't time left for every before-change repository check, so the worker didn't start and nothing was proposed. Run the task again. Your commit was uploaded; what Nebius keeps is listed with the run.";
   const words = TASK_STOP_MESSAGES[code];
   if (step === null || BEFORE_UPLOAD.has(step) || !words.includes("nothing was sent")) return words;
   return AFTER_UPLOAD[code] ?? AFTER_UPLOAD_ANY;
@@ -100,7 +101,7 @@ export const REPORT_BYTES = 200_000;
  * other than tabs and line breaks, and lone surrogates, made U+FFFD, so none costs six bytes as JSON; then cut to
  * `max` characters, keeping the start, or the end for a tail.
  */
-function kept(text: string, max: number, mask: Mask, end: "start" | "end" = "start"): string {
+export function kept(text: string, max: number, mask: Mask, end: "start" | "end" = "start"): string {
   const clean = mask(text)
     .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "\uFFFD");
@@ -115,13 +116,23 @@ export type TaskBound = TaskReport["task"];
 
 /**
  * A run's report from what the worker and the prescribed path gave. The stop's words are chosen by its code and where
- * it happened. A change is verified only when there is one and every acceptance case passed in the final checks.
+ * it happened. Verification needs a change, complete passing final cases and required checks, and integrity evidence.
  * Every text is masked, then cut to the protocol's bounds, and the whole is fitted under `REPORT_BYTES`.
  */
 export function taskReport(input: { result: PrescribedResult; core: TaskReportCore | null; task: TaskBound; request: TaskReport["request"]; route: RunRoute | null; limits?: TaskRunLimits | null; now: Date; mask: Mask }): TaskReport {
   const { result, core, mask } = input;
   const { cleanup } = result;
+  const shownCheck = (check: TaskCheck): TaskCheck => ({
+    ...check,
+    name: kept(check.name, 1_000, mask),
+    reason: check.reason === null ? null : kept(check.reason, 600, mask),
+    stdoutTail: kept(check.stdoutTail, 4_000, mask, "end"),
+    stderrTail: kept(check.stderrTail, 4_000, mask, "end"),
+    difference: check.difference && { line: check.difference.line, expected: kept(check.difference.expected, 200, mask), got: kept(check.difference.got, 200, mask) },
+    changedFiles: check.changedFiles.slice(0, 20).map((path) => kept(path, 1_024, mask)),
+  });
   const report: TaskReport = {
+    ...(core ? { version: 4, manifest: core.manifest, beforeChecks: core.beforeChecks.map(shownCheck) } : {}),
     outcome: result.outcome,
     stopped: result.stopped ? { code: result.stopped.code, step: result.stopped.step === null ? null : kept(result.stopped.step, 64, mask), message: taskStopWords(result.stopped.code, result.stopped.step) } : null,
     task: input.task,
@@ -142,15 +153,7 @@ export function taskReport(input: { result: PrescribedResult; core: TaskReportCo
           written: core.worker.written.slice(0, 32).map((path) => kept(path, 1_024, mask)),
         }
       : null,
-    checks: (core?.checks ?? []).map((check) => ({
-      ...check,
-      name: kept(check.name, 1_000, mask),
-      reason: check.reason === null ? null : kept(check.reason, 600, mask),
-      stdoutTail: kept(check.stdoutTail, 4_000, mask, "end"),
-      stderrTail: kept(check.stderrTail, 4_000, mask, "end"),
-      difference: check.difference && { line: check.difference.line, expected: kept(check.difference.expected, 200, mask), got: kept(check.difference.got, 200, mask) },
-      changedFiles: check.changedFiles.slice(0, 20).map((path) => kept(path, 1_024, mask)),
-    })),
+    checks: (core?.checks ?? []).map(shownCheck),
     verified: result.outcome === "proposed" && core?.verified === true,
     steps: result.steps.slice(0, 24).map((step) => {
       const shown = stepOf(step);
@@ -175,6 +178,7 @@ export function fitted(report: TaskReport): TaskReport {
     const cut = (text: string, max: number) => (text.length > max ? whole(text.slice(-max)) : text);
     current = {
       ...current,
+      ...(current.beforeChecks ? { beforeChecks: current.beforeChecks.map((check) => ({ ...check, stdoutTail: cut(check.stdoutTail, room), stderrTail: cut(check.stderrTail, room) })) } : {}),
       checks: current.checks.map((check) => ({ ...check, stdoutTail: cut(check.stdoutTail, room), stderrTail: cut(check.stderrTail, room) })),
       baseline: current.baseline.map((check) => ({ ...check, stdoutTail: cut(check.stdoutTail, room), stderrTail: cut(check.stderrTail, room) })),
       steps: current.steps.map((step) => ({ ...step, stdoutTail: cut(step.stdoutTail, room / 4), stderrTail: cut(step.stderrTail, room / 4) })),
@@ -243,7 +247,7 @@ export function taskPreviewOf(snapshot: Snapshot, brief: Pick<TaskBrief, "accept
     .filter((one) => one.files.length > 0 || one.unclear);
   const frozen = frozenIn(snapshot, brief.frozen ?? []);
   if ("missing" in frozen) return { status: "refused", code: "frozen", message: `The brief freezes ${frozen.missing.length > 300 ? `${frozen.missing.slice(0, 299)}\u2026` : frozen.missing}, which this commit doesn't hold as a file. Correct the brief, or commit the file, then preview the run again.` };
-  return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, caseFiles, environment, frozen: frozen.files, limits: runLimitsFor(commands.length, brief.baseline?.length ?? 0) };
+  return { status: "ready", snapshot: shown, programs: programsOf(commands), unprobed: commands.filter((command) => firstWord(command) === null).length, caseFiles, environment, frozen: frozen.files, limits: runLimitsFor(commands.length, brief.baseline?.length ?? 0, brief.checks.length) };
 }
 
 /**

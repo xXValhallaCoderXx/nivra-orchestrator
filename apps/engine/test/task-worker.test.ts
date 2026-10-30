@@ -27,9 +27,11 @@ describe("a task's worker (NIV-7, D39)", () => {
     // The case sources greet.sh, which the fix changes: named beside it, as a case judges only what it prints.
     assert.deepEqual(run.core!.checks.map((check) => check.changedFiles), [["greet.sh"], []]);
     assert.deepEqual([run.core!.verified, run.core!.worker.handedIn, run.core!.worker.ended, run.core!.worker.written], [true, true, "submitted", ["greet.sh"]]);
-    // Each operation, in order: the workspace, the toolchain, the write, the worker's run, collect, the final checks.
-    assert.deepEqual(labels(run.guest), ["nivra-prepare", "nivra-toolchain", "nivra-write", "command", "nivra-collect", "command", "command"]);
-    assert.deepEqual(run.guest.ran.map((ran) => ran.disposable), [false, true, false, true, false, true, true]);
+    // Each operation: the workspace, toolchain, before check, write, worker's run, collect, final checks.
+    assert.deepEqual(labels(run.guest), ["nivra-prepare", "nivra-toolchain", "command", "nivra-write", "command", "nivra-collect", "command", "command"]);
+    assert.deepEqual(run.guest.ran.map((ran) => ran.disposable), [false, true, true, false, true, false, true, true]);
+    assert.deepEqual(run.core!.beforeChecks.map((check) => [check.number, check.verdict]), [[1, "failed"]]);
+    assert.equal(run.core!.beforeChecks[0]!.commandSha256, run.core!.checks[1]!.commandSha256);
     const proposal = run.result.proposal!;
     assert.match(new TextDecoder().decode(proposal.patch), /^\+  printf 'Hello, %s\\n' "\$\{1:-world\}"$/m);
     assert.deepEqual(proposal.binding.paths.map((path) => [path.path, path.change]), [["greet.sh", "changed"]]);
@@ -103,7 +105,8 @@ describe("a task's worker (NIV-7, D39)", () => {
     const sent = JSON.stringify((run.model as unknown as { doGenerateCalls: unknown[] }).doGenerateCalls);
     assert.equal(damaged, true);
     assert.deepEqual([progress.filter((line) => line.includes(journalDir)), sent.includes(journalDir), JSON.stringify(run.core).includes(journalDir)], [[], false, false]);
-    assert.ok(progress.some((line) => line === "edit_file refused: the write wasn't sent: the sandbox session refused it"), progress.join(" | "));
+    assert.equal(run.requests(), 0, "a refused before-change check still started the worker");
+    assert.equal(run.core!.beforeChecks[0]!.reason, "it wasn't sent: the sandbox session refused it");
     assert.equal(run.result.proposal, null);
   });
 

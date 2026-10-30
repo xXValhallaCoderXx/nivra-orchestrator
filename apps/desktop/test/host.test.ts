@@ -2732,7 +2732,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const expected = async (snapshot: string) =>
-      taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+      taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const snapshot = "c".repeat(64);
     // Accepted, then answered with an error: the run is found by its request id, and recorded as it ended.
     writeFileSync(join(home, "accept"), "");
@@ -2781,7 +2781,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const going = async () => {
       const started = await host.startTaskRun(task.summary.id, expected, snapshot);
       const running = await waitFor(async () => {
@@ -2825,7 +2825,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     const running = await waitFor(async () => {
       const seen = await host.taskAttempt(task.summary.id, started.id);
@@ -2851,7 +2851,7 @@ describe("Host: task runs, on a project's engine, bound to the preview the perso
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId: ids[0]!, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     await waitFor(async () => (await host.taskAttempt(task.summary.id, started.id)).runId, "the task's run to be going");
     const { pid } = await online(host, "wsl:Test");
@@ -2933,10 +2933,26 @@ describe("Host: deciding on a task's change and applying it on its run's engine 
     const view = host.task(task.summary.id);
     const packet = (taskBriefOf(view.brief.content) as { brief: TaskBrief }).brief;
     const snapshot = "c".repeat(64);
-    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot });
+    const expected = taskRunFingerprint({ taskId: task.summary.id, briefId: view.brief.id, briefVersion: view.brief.version, briefDigest: await taskBriefDigest(packet), projectId, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot, requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } });
     const started = await host.startTaskRun(task.summary.id, expected, snapshot);
     return { taskId: task.summary.id, attemptId: started.id, done: await ended(host, task.summary.id, started.id) };
   }
+
+  it("uses engine admission for approval even when the fitted report and cached outcome say verified", async () => {
+    const { host, ids, home, calls } = await gatedHost();
+    const { taskId, attemptId, done } = await gatedRun(host, ids[0]!);
+    assert.equal(done.report?.verified, true, JSON.stringify([done.status, done.note, done.unresolved]));
+    assert.ok(done.actions.includes("approve"));
+    writeFileSync(join(home, "deny-admission"), "");
+    const denied = await host.taskAttempt(taskId, attemptId);
+    assert.equal(denied.report?.verified, true, "the historical fitted verdict stays readable");
+    assert.equal(denied.admission?.eligible, false);
+    assert.equal(denied.actions.includes("approve"), false);
+    assert.deepEqual(denied.actions, ["reject", "revise"]);
+    await assert.rejects(host.approveTaskChange(taskId, attemptId, done.proposal!.hash), /Required repository check 1/);
+    assert.equal(calls().filter((call) => call === "task.apply").length, 0);
+    assert.equal((await host.taskAttempt(taskId, attemptId)).decision, null);
+  });
 
   it("applies a verified change approved by its hash on its run's engine: written unstaged, accepted, the task completed and the original kept", async () => {
     const { host, ids, repo } = await applyHost();
@@ -3479,7 +3495,7 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     assert.equal(calls(home, "runs.start"), 1);
   });
 
-  it("binds a task run to the prepared environment: its preview carries it to the engine, its start sends it, and its fingerprint is v1 without one and v3 with a recipe's", async () => {
+  it("binds a task run to the prepared environment: its preview carries it to the engine, its start sends it, and its fingerprint binds required checks with or without a recipe", async () => {
     const { host, ids, home } = await gatedHost(["accept", "release", "task-report"]);
     const id = ids[0]!;
     await host.setSharing(id, true);
@@ -3489,9 +3505,9 @@ describe("Host: a project's environment, prepared in Nebius from its own recipe 
     const created = await host.createTask({ title: "Greet the world", fields, projectId: id, planId: null });
     const task = host.setTaskState(created.summary.id, created.revision, "ready");
     const packet = (taskBriefOf(task.brief.content) as { brief: TaskBrief }).brief;
-    const parts = { taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64) };
+    const parts = { taskId: task.summary.id, briefId: task.brief.id, briefVersion: task.brief.version, briefDigest: await taskBriefDigest(packet), projectId: id, targetId: "wsl:Test", sharing: { modelContext: true, cloudExecution: true }, snapshot: "c".repeat(64), requiredChecks: { finalChecks: packet.acceptanceCases.length + packet.checks.length, baselineChecks: packet.baseline?.length ?? 0, comparisonChecks: packet.checks.length } };
     const asked = () => JSON.parse(lines(home, "task-previews.log").at(-1)!) as { environment?: unknown; brief: TaskBrief };
-    // No environment yet: the run would start from Nivra's own image, bound as before.
+    // No environment yet: the required-check policy is still bound to the preview.
     const plain = await host.previewTaskRun(task.summary.id);
     assert.deepEqual([plain.blocked, plain.environment, plain.expected, "environment" in asked()], [null, null, taskRunFingerprint(parts), false]);
     assert.deepEqual(

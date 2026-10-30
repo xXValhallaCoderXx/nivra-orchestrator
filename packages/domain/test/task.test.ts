@@ -28,7 +28,7 @@ const request = async (overrides: { input?: Record<string, unknown>; context?: u
 describe("a task run's request (NIV-7)", () => {
   it("takes the checkout, its project and target, the preview's fingerprint, the task and its brief by version and digest, with both consents and the brief in its context", async () => {
     const parsed = StartRunParams.parse(await request());
-    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 20]);
+    assert.deepEqual([parsed.workflowId, WorkflowId.parse("task"), PROTOCOL_VERSION], ["task", "task", 21]);
     assert.equal(StartRunParams.safeParse(await request({ input: { target: "local" } })).success, true);
     assert.deepEqual(
       ["runs.task", "runs.proposal", "task.preview"].map((name) => [Object.hasOwn(Methods, name), name.startsWith("runs.") ? Methods[name as "runs.task"].result.safeParse(null).success : null]),
@@ -146,6 +146,10 @@ describe("what a task run gives back (NIV-7)", () => {
       finishedAt: new Date().toISOString(),
     };
     assert.equal(TaskReport.safeParse(report).success, true);
+    assert.equal(TaskReport.safeParse({ ...report, version: 4 }).success, false, "new reports require an explicit manifest and observations");
+    const manifest = { policy: "required-checks-v1", checks: [{ kind: "case", number: 1, commandSha256: "a".repeat(64) }], frozen: [], setupRequired: false };
+    assert.equal(TaskReport.safeParse({ ...report, version: 4, manifest, beforeChecks: [] }).success, true);
+    assert.equal(TaskReport.safeParse({ ...report, version: 4, manifest }).success, false);
     assert.equal(TaskReport.parse(report).checks[0]?.unclear, false, "a check kept from before `unclear` reads as one Nivra could read");
     assert.equal(TaskReport.safeParse({ ...report, outcome: "refused", stopped: { code: "model-sharing", step: "check", message: "x" }, worker: null, checks: [], verified: false, proposal: null, reportSha256: null }).success, true);
     assert.equal(TaskReport.safeParse({ ...report, stopped: { code: "something-else", step: null, message: "x" } }).success, false);

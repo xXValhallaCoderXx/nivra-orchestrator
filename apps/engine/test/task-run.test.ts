@@ -282,6 +282,7 @@ describe("what a task run's report says (D39)", () => {
       toolchain: Array.from({ length: 4 }, (_, at) => ({ program: `${at}${wide(200)}`, finding: "present" as const })),
       // Emoji cut between their halves: at the summary's end, and at the start of a tail.
       worker: { ...run.core!.worker, summary: `x${"\u{1F600}".repeat(3_000)}${noisy(100)}`, model: wide(300), written: paths },
+      beforeChecks: Array.from({ length: 3 }, (_, at) => ({ ...run.core!.beforeChecks[0]!, number: at + 1, name: wide(1_200), reason: noisy(800), stdoutTail: noisy(10_000), stderrTail: noisy(10_000) })),
       checks: Array.from({ length: 4 }, (_, at) => ({ ...run.core!.checks[0]!, number: at + 1, name: wide(1_200), reason: noisy(800), stdoutTail: at ? noisy(10_000) : `${"\u{1F600}".repeat(5_000)}x`, stderrTail: noisy(10_000), difference: { line: 1, expected: wide(300), got: noisy(300) }, changedFiles: paths })),
     };
     const result = { ...run.result, steps: Array.from({ length: 30 }, () => ({ ...run.result.steps[0]!, label: wide(100), stdoutTail: noisy(10_000), stderrTail: noisy(10_000) })), cleanup: { ...run.result.cleanup!, unresolved: Array.from({ length: 80 }, (_, at) => `operation ${at}: ${wide(500)}`) } };
@@ -289,6 +290,7 @@ describe("what a task run's report says (D39)", () => {
     const json = JSON.stringify(report);
     assert.ok(Buffer.byteLength(json) <= REPORT_BYTES, `${Buffer.byteLength(json)} bytes`);
     assert.deepEqual([json.includes(SECRET), /\\u00[01]|\\ud[89a-f]/i.test(json), report.checks.map((check) => check.changedFiles.length)], [false, false, [8, 8, 8, 8]]);
+    assert.deepEqual([report.beforeChecks?.length, report.checks.length, report.steps.length, report.manifest], [3, 4, 24, core.manifest]);
     TaskReport.parse(report);
   });
 });

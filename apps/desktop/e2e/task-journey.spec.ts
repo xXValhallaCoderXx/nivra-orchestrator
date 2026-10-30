@@ -191,7 +191,7 @@ test("prepares a project's environment, runs a task made from a saved plan from 
   await expect(card.getByTestId("task-attempt-baseline-check")).toHaveCount(2);
   for (const row of await card.getByTestId("task-attempt-baseline-check").all()) await expect(row).toHaveAttribute("data-match", "matched");
   await expect(card.getByTestId("task-attempt-frozen-file")).toHaveAttribute("data-state", "unchanged");
-  await expect(card.getByTestId("task-attempt-verdict")).toContainText("Every acceptance case passed, and every frozen file is unchanged: the change is verified.");
+  await expect(card.getByTestId("task-attempt-verdict")).toContainText("Every acceptance case and required repository check passed, and every frozen file is unchanged: the change is verified.");
   // Every operation of the run with networking off, its session from the prepared image.
   const spawned = sandbox.requests.filter((request) => request.path === "/v1/instances").slice(spawnsBefore).map((request) => JSON.parse(request.body) as { networking: { enabled: boolean }; image: string });
   expect([spawned.every((spawn) => !spawn.networking.enabled), spawned[0]?.image]).toEqual([true, prepared.prepared?.verified.images.prepared]);
