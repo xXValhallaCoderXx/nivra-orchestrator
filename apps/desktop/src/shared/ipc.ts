@@ -864,6 +864,7 @@ export interface MissionView {
 
 /** What a review of a mission's selected tasks would send (NIV-52), worked out from the records as they are now. Nothing is sent. */
 export interface MissionReviewPreview {
+  allowance: { policyVersion: number | null; monthly: boolean; remaining: number | null; description: string };
   missionId: string;
   missionVersion: number;
   tasks: ReviewedTaskView[];
@@ -1137,7 +1138,7 @@ export interface NivraApi {
   editKnowledge(id: string, revision: number, statement: string): Promise<KnowledgeView>;
   forgetKnowledge(id: string, revision: number): Promise<void>;
   getCompanionUsage(): Promise<CompanionUsageView>;
-  setCompanionLimit(limit: number | null, includeCoding?: boolean, recoveryRevision?: number | null): Promise<CompanionUsageView>;
+  setCompanionLimit(limit: number | null, includeCoding?: boolean, recoveryRevision?: number | null, includeMissionReviews?: boolean, missionReviewRecoveryRevision?: number | null): Promise<CompanionUsageView>;
   getBudgetPolicy(): Promise<BudgetPolicy | null>;
   /** Saves a monthly budget as the next policy version, or with null turns it off. What was already spent or reserved stays as it was. */
   setBudgetPolicy(draft: BudgetPolicyDraft | null): Promise<BudgetSummary>;
@@ -1154,6 +1155,11 @@ export interface NivraApi {
 
 /** The explicitly saved shared request coverage. Reported tokens are never a ceiling. */
 export interface CompanionUsageView {
+  reconciliationNotes?: string[];
+  includeMissionReviews?: boolean;
+  missionReviews?: { used: number; reserved: number; unknown: number };
+  missionReviewRecoveryRevision?: number | null;
+  missionReviewRecoveryAcknowledged?: boolean;
   coverage?: "companion-and-planning" | "companion-planning-and-coding";
   coding?: { used: number; reserved: number; unknown: number };
   recoveryCoverageRevision?: number | null;

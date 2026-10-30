@@ -148,8 +148,8 @@ export async function missionDigests(composition: MissionReviewComposition, pref
  * and title, the profiles), the packet and the preferences. Starting works it out again from the records as they are
  * then and refuses when it differs, so a review sends exactly what the person saw.
  */
-export function missionPreviewFingerprint(digests: { binding: string; packet: string; preferences: string }): string {
-  return createHash("sha256").update(JSON.stringify(["nivra.mission-review-preview.v1", digests.binding, digests.packet, digests.preferences, "council"])).digest("hex");
+export function missionPreviewFingerprint(digests: { binding: string; packet: string; preferences: string }, allowance?: string): string {
+  return createHash("sha256").update(JSON.stringify(["nivra.mission-review-preview.v2", digests.binding, digests.packet, digests.preferences, "council", allowance ?? null])).digest("hex");
 }
 
 /** Why a repository-linked task can't be selected for a review in this increment (NIV-52, D42). */

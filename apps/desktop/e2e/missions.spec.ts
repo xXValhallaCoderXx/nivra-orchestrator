@@ -164,6 +164,8 @@ test("a review's preview shows exactly what it sends, who reads it and what it d
   await expect(page.getByTestId("mission-preview-specialists")).toContainText("Risk and testability reviewer (v1)");
   await expect(page.getByTestId("mission-preview-specialists")).toContainText("Council chair (v1)");
   await expect(page.getByTestId("mission-preview-cost")).toHaveText("Two reviewers on their own, then the chair: up to 3 model calls, with the Nemotron model your key's listing gives. Nothing is retried.");
+  await expect(page.getByTestId("mission-preview-allowance")).toContainText("Three inference requests are reserved together");
+  await expect(page.getByTestId("mission-preview-allowance")).toContainText("outside the monthly request allowance");
   await expect(page.getByTestId("mission-preview-not-sent")).toContainText("Any repository, file or conversation.");
   await page.getByTestId("mission-review-start").click();
   const card = page.getByTestId("mission-review").first();

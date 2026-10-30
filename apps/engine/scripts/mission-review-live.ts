@@ -16,26 +16,26 @@
 // reaches the engine only through `initialize`, and is never printed or written. The engine's home is a fresh folder
 // under ~/.nivra-dev-niv52, never ~/.nivra or ~/.nivra-dev. Evidence goes to ~/nivra-acceptance/mission-review-<UTC>-<rev>/
 // (0700) unless --out says otherwise.
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { MISSION_COUNCIL, MissionReviewPacket, missionPacketDigest, preferencesDigest, renderMissionPacket, SPECIALISTS } from "@nivra/domain";
+import { MISSION_COUNCIL, MissionReviewPacket, missionPacketDigest, renderMissionPacket, SPECIALISTS } from "@nivra/domain";
 import { ANSWER_TOKENS } from "../src/providers/policy.ts";
 import { MISSION_INSTRUCTIONS } from "../src/review/mission-prompt.ts";
 import { missionToolDefinitions, REVIEW_LIMITS, REVIEW_REQUEST_MS } from "../src/review/run.ts";
-import { startEngine } from "./council-eval/batch.ts";
+import { collectHostMissionReview, MISSION_LIVE_POLICY } from "../../desktop/scripts/mission-review-host.ts";
 import { canonical, readCredentials, REPOSITORY } from "./council-eval/files.ts";
 import { claimApproval, claimOn, claimText, isDigest, nextRun } from "./research-check/claim.ts";
-import { collectMissionReview } from "./mission-review-collect.ts";
+import { missionEvidencePath } from "./mission-review-paths.ts";
 
 /** The one model the live run may use: the engine refuses any other before the first inference request. */
 export const LIVE_MODEL = "nvidia/Nemotron-3.5-Super-VL";
 export const FIXTURE = join(REPOSITORY, "apps/engine/test/fixtures/mission-review/live.json");
 /** How long the run may take, as the engine bounds it, and the margin to see its end. */
-const FOLLOW_MS = REVIEW_LIMITS.council.totalMs + 30_000;
+const FOLLOW_MS = 120_000 + REVIEW_LIMITS.council.totalMs + 30_000;
 /** Where this check's approvals are claimed: one folder for every run, apart from any run's evidence and engine home. */
 const CLAIMS = join(homedir(), "nivra-acceptance", "claims", "mission-review");
 
@@ -70,9 +70,20 @@ if (packet.model !== LIVE_MODEL) refuse(`The fixture names ${packet.model ?? "no
 const commit = git(["rev-parse", "HEAD"]).stdout.trim() || null;
 const dirty = git(["status", "--porcelain"]).stdout.trim().length > 0;
 const packetDigest = await missionPacketDigest(packet);
+const sourceFiles = git(["ls-files", "-co", "--exclude-standard", "-z"]).stdout.split("\0").filter(Boolean).sort();
+const sourceSha256 = sha256(canonical(sourceFiles.map((name) => {
+  const path = join(REPOSITORY, name);
+  if (!lstatSync(path).isFile()) refuse("A source file is linked or not an ordinary file. Nothing was sent.");
+  return [name, sha256(readFileSync(path))];
+})));
 /** The recipe for one run of this check at this revision: the first, the second, ... Each run is approved on its own. */
 const recipeFor = (run: number) => ({
-  check: "nivra.mission-review-live.v2",
+  check: "nivra.mission-review-live.v3",
+  sourceSha256,
+  hostPolicy: MISSION_LIVE_POLICY,
+  hostPolicySha256: sha256(canonical(MISSION_LIVE_POLICY)),
+  observerMs: FOLLOW_MS,
+  path: "production Host preview, atomic grant admission, guarded dispatch and reconciliation",
   run,
   revision: commit,
   fixture: { path: relative(REPOSITORY, fixturePath), sha256: sha256(raw), packetDigest, chars: renderMissionPacket(packet).length, tasks: packet.tasks.length },
@@ -89,7 +100,7 @@ const recipeFor = (run: number) => ({
   },
   endpoint: "Nebius Token Factory, the engine's default endpoint",
   preferences: "none",
-  evidence: "~/nivra-acceptance/mission-review-UTC-REV7 (0700): the engine's masked report, stage request counts, usage, served models and collection/termination observations",
+  evidence: "~/nivra-acceptance/mission-review-UTC-REV7 (0700): the host-projected masked report, stage request counts, usage, served models and collection/termination observations; private host ledger, guard and journal receipts in host/",
   claims: "~/nivra-acceptance/claims/mission-review/, one file per approval, kept",
 });
 const digestFor = (run: number) => sha256(canonical(recipeFor(run)));
@@ -109,7 +120,7 @@ if (values.plan) {
   console.log(
     `- Bounds: at most ${recipe.limits.requests} requests (two reviewers, then the chair), ${recipe.limits.outputTokensPerRequest.toLocaleString("en")} completion tokens each (reasoning included), ${recipe.limits.requestMs / 1000} s each and ${recipe.limits.runMs / 1000} s in all; an estimated input budget of ${recipe.limits.estimatedInputTokens.toLocaleString("en")} tokens, which is no ceiling. Nothing is retried.`,
   );
-  console.log("- Live acceptance is deferred until mission reviews receive host-ledger grants (NIV-66). This recipe doesn't waive that prerequisite.");
+  console.log("- The production host reserves all three inference slots in its isolated shared monthly allowance, journals one model listing separately and reconciles the engine seal. Existing profiles are untouched.");
   console.log(`- Where: ${recipe.endpoint}, from a fresh engine home under ~/.nivra-dev-niv52.`);
   console.log(`- Evidence: ${recipe.evidence}.`);
   console.log(
@@ -133,6 +144,8 @@ if (live) {
 const stamp = new Date().toISOString().replace(/[:.]/g, "").replace(/-/g, "");
 const out = resolve(values.out ?? join(homedir(), "nivra-acceptance", `mission-review-${stamp}-${(commit ?? "unknown").slice(0, 7)}`));
 const home = resolve(values.home ?? join(homedir(), ".nivra-dev-niv52", `live-${stamp}`));
+try { missionEvidencePath(out); missionEvidencePath(home); missionEvidencePath(CLAIMS); }
+catch (error) { refuse(error instanceof Error ? error.message : "Choose fresh ordinary evidence paths. Nothing was sent."); }
 /** Whether `path` is `folder` or inside it, by `relative()`, never by its text. */
 const within = (path: string, folder: string) => {
   const rest = relative(folder, path);
@@ -164,18 +177,11 @@ const apiKey = live ? (() => {
 mkdirSync(out, { recursive: true, mode: 0o700 });
 write(join(out, "recipe.json"), { ...recipe, digest, mode: live ? "live" : "stub" });
 
-const clientRequestId = randomUUID();
-const preferences = { revision: 0, records: [] };
-const collected = await collectMissionReview({
-  start: () => startEngine(home, { tokenFactoryUrl: live ? null : values["token-factory-url"]!, apiKey, logPath: join(out, "engine.log") }),
-  followMs: FOLLOW_MS,
-  request: {
-    clientRequestId,
-    workflowId: "review",
-    input: { panel: "council", planId: randomUUID(), planVersion: 1, packetDigest, preferencesDigest: await preferencesDigest(preferences.records) },
-    context: { preferences, sharing: { modelContext: false }, packet },
-  },
+const collected = await collectHostMissionReview({
+  packet, home, root: join(out, "host"), apiKey, tokenFactoryUrl: live ? null : values["token-factory-url"]!,
+  followMs: FOLLOW_MS, logPath: join(out, "engine.log"),
 });
+const clientRequestId = collected.clientRequestId;
 const { summary, report } = collected;
 
 const served = (report?.stages ?? []).filter((stage) => stage.requests > 0).map((stage) => ({ role: stage.role, servedModel: stage.servedModel }));

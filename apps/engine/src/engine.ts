@@ -749,6 +749,7 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
       }),
       [REVIEW_WORKFLOW_ID]: createReviewWorkflow({
         context: reviewContext,
+        budget: (runId) => { const grantId = scheduler.grantOf(runId); return grantId ? { journal, grantId, models: journal.models(grantId), seat: null } : null; },
         task: (runId) => readReviewTask(store.summary(runId)?.input),
         requestId: (runId) => store.requestIdOf(runId),
         apiKey: () => vault.get("NEBIUS_API_KEY"),
@@ -992,6 +993,11 @@ async function createOpenEngine(options: EngineOptions, database: Database, keep
       },
       "budget.journal": ({ grantId, after, limit }) => ({ ...journal.read(grantId, after, limit), providerDate: journal.providerDate(grantId) }),
       "runs.start": async (params) => {
+        if (params.workflowId === "review" && "kind" in params.context.packet && params.context.packet.kind === "mission") {
+          const grant = params.budget;
+          const required = params.context.packet.model;
+          if (!grant || grant.feature !== "mission-review" || grant.workflow !== "review" || grant.requestId !== params.clientRequestId || grant.productive.requests !== 2 || grant.productive.outputTokens !== 4_000 || grant.finalisation.requests !== 1 || grant.finalisation.outputTokens !== 4_000 || (grant.modelListings ?? 1) !== 1 || !grant.models?.length || (required !== null && (grant.models.length !== 1 || grant.models[0] !== required))) throw new RpcFailure(ErrorCode.InvalidParams, "This mission review needs a host grant for one listing, two reviewers and a reserved chair, with the previewed model and 4,000 completion tokens each. Preview and start it again; nothing was sent.");
+        }
         if ((params.workflowId === "task" || params.workflowId === "planning" || params.workflowId === "companion") && params.context.references && !await checkReferences(params.context.references)) throw new RpcFailure(ErrorCode.InvalidParams, "The included task context doesn't match its frozen source manifest. Preview it again; nothing was started.");
         if (params.workflowId === "task") {
           const grant = params.budget;

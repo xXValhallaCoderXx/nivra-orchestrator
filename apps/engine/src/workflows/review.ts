@@ -16,7 +16,7 @@ import {
   type RunUsage,
 } from "@nivra/domain";
 import { z } from "zod";
-import { createModelClient, failure, ModelFailure, type Endpoint, type ModelClient } from "../providers/model.ts";
+import { createModelClient, failure, ModelFailure, type BudgetBinding, type Endpoint, type ModelClient } from "../providers/model.ts";
 import { policyFor } from "../providers/policy.ts";
 import type { RunLimits } from "../providers/run-budget.ts";
 import { isNvidiaModel, pickNemotron } from "../providers/tokenfactory.ts";
@@ -42,6 +42,8 @@ export interface ReviewDeps {
   task: (runId: string) => ReviewTask | null;
   /** The request id the host sent the run with. */
   requestId: (runId: string) => string | null;
+  /** Required for mission reviews; held in scheduler memory and the operation journal only. */
+  budget?: (runId: string) => BudgetBinding | null;
   apiKey: () => string | null;
   endpoint: Endpoint;
   mask: Mask;
@@ -59,16 +61,18 @@ const isMission = (packet: ReviewContext["packet"]): packet is MissionReviewPack
 
 /**
  * The model a review may use: the one the listing gives (D22), or, when a mission packet names one, exactly that model,
- * found in the listing (NIV-52). Any other is refused here, before any inference request: a listing isn't one.
+ * found in the listing (NIV-52). Candidates must also be permitted by the run's grant when present. Any other is
+ * refused here, before any inference request: a listing isn't one.
  */
-export function reviewModel(packet: ReviewContext["packet"], listed: readonly string[]): string {
+export function reviewModel(packet: ReviewContext["packet"], listed: readonly string[], granted?: readonly string[]): string {
+  const candidates = granted ? listed.filter((id) => granted.some((candidate) => candidate.toLowerCase() === id.toLowerCase())) : listed;
   if (isMission(packet) && packet.model !== null) {
     const named = packet.model;
-    const match = isNvidiaModel(named) ? listed.find((id) => id === named) : undefined;
+    const match = isNvidiaModel(named) ? candidates.find((id) => id === named) : undefined;
     if (!match) throw failure("model-unavailable", `this review may use only ${named}, and this key's listing ${listed.length ? "doesn't include it" : "is empty"}, so nothing was sent`);
     return match;
   }
-  const model = pickNemotron(listed);
+  const model = pickNemotron(candidates);
   if (!model) throw failure("model-unavailable", "no NVIDIA model is listed for this key");
   return model;
 }
@@ -76,7 +80,11 @@ const Prepared = z.strictObject({ model: z.string(), contextLength: z.number().n
 const Reviewed = z.strictObject({ outcome: ReviewOutcome, findings: z.number().int().nonnegative() });
 
 export function createReviewWorkflow(deps: ReviewDeps) {
-  const clientFor = (key: string) => (deps.modelClient ? deps.modelClient(key, deps.endpoint) : createModelClient({ apiKey: key, endpoint: deps.endpoint }));
+  const clientFor = (key: string, runId: string, seat: string) => {
+    const binding = deps.budget?.(runId);
+    if (isMission(given(runId).packet) && !binding) throw failure("budget-exhausted", "this mission review has no admitted host allowance; preview and start it again");
+    return deps.modelClient ? deps.modelClient(key, deps.endpoint) : createModelClient({ apiKey: key, endpoint: deps.endpoint, ...(binding ? { budget: { ...binding, seat } } : {}) });
+  };
 
   const given = (runId: string): ReviewContext => {
     const context = deps.context(runId);
@@ -166,9 +174,9 @@ export function createReviewWorkflow(deps: ReviewDeps) {
     outputSchema: Prepared,
     execute: async ({ runId, abortSignal }) => guard("review.prepare", deps.mask, async () => {
       const { context: sent, key } = allowed(runId);
-      const client = clientFor(key);
+      const client = clientFor(key, runId, "mission-review-listing");
       const models = await client.listModels({ signal: abortSignal, timeoutMs: 30_000 });
-      const model = reviewModel(sent.packet, models.ids);
+      const model = reviewModel(sent.packet, models.ids, deps.budget?.(runId)?.models);
       deps.setMeta(runId, { route: { provider: "nebius", endpoint: deps.endpoint.kind, model } });
       const contextLength = models.contextLengths.get(model) ?? null;
       deps.recorder.output(runId, "prepare", `Model ${model}`, { model, contextLength });
@@ -189,7 +197,8 @@ export function createReviewWorkflow(deps: ReviewDeps) {
         clientRequestId: deps.requestId(runId) ?? runId,
         task,
         context: sent,
-        client: clientFor(key),
+        client: clientFor(key, runId, "review"),
+        clientForRole: (role) => clientFor(key, runId, role),
         model: inputData.model,
         contextLength: inputData.contextLength,
         route: { provider: "nebius", endpoint: deps.endpoint.kind, model: inputData.model },
