@@ -102,6 +102,7 @@ async function askTheCoach() {
   await page.getByTestId("task-tab-coach").click();
   await page.getByTestId("coach-ask").click();
   await expect(page.getByTestId("coach-preview")).toBeVisible();
+  await expect(page.getByTestId("coach-preview-limits")).toContainText("8,000 output tokens");
   await page.getByTestId("coach-start").click();
   await expect(page.getByTestId("coach-dialog")).toBeHidden();
 }
@@ -171,6 +172,7 @@ test("a vague task: its gaps, the exact preview, one request, and only the ticke
   await page.getByTestId("coach-ask").click();
   await expect(page.getByTestId("coach-preview-text")).toContainText("C1. It works");
   await expect(page.getByTestId("coach-preview-limits")).toContainText("an estimate, not a cap");
+  await expect(page.getByTestId("coach-preview-limits")).toContainText("8,000 output tokens");
   expect([listings(), coachRequests()]).toEqual(sent);
   await page.getByTestId("coach-start").click();
   await expect(latestCoaching()).toHaveAttribute("data-status", "answered", { timeout: 30_000 });

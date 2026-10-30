@@ -3913,3 +3913,49 @@ deadlines remain cumulative, and late capacity replies cannot restart cancelled,
 prepared A1/B1/C1 real-task evaluation. Deterministic stand-ins pass 65 requests, 33 required writes and the old input
 allowance, while separate exhausted-pool/failed-guard cases retain final checks. These do not establish model quality
 or a useful larger-task result. NIV-60 remains open pending the independent real-task acceptance evidence.
+
+## NIV-53 completion acceptance runner — 30 October 2026
+
+The [NIV-53 verification record](niv-53-verification.md) describes the isolated Windows desktop runner, shared
+offline UI journey, selected-save/restart checks and final output-limit regression. It is based on latest fetched
+main `06dc05a`, with local uncommitted acceptance tooling; its source and frozen build hashes are recorded.
+
+`pnpm verify` passed 1,997 tests with no skips; the focused coach UI suites passed 12/12, the final two acceptance
+cases 2/2, real-engine RPC's four cases passed, and the freshly built Windows suite passed 18/18. The Windows
+preview rehearsal read no key and pressed no Start. No production API, prompt, dependency or allowance changed.
+
+**The one live coaching failed.** Coach v2 on `nvidia/Nemotron-3.5-Super-VL` reported 2,410 input and 4,000 output
+tokens and `finishReason: length`, with no usable structured answer. The original v1 brief and Draft state stayed
+unchanged, with no coding attempt. Reopening retained the failed coaching and started no engine; the key was
+removed and the exact-key scan passed. No paid retry was made and no live selective save was reached.
+
+**NIV-53 remains open:** useful live coaching and the resulting reviewed brief improvement are still unproved.
+Offline selective-saving evidence does not replace that acceptance. Visible subtasks remain a separate follow-up.
+
+### Coach response-budget correction (D64)
+
+The separately requested next allowance is 8,000 completion tokens. Context admission reserves that full amount,
+with at most 56,000 estimated input tokens under the existing 64,000-token ceiling. The preview and recipe agree;
+other workflows retain their limits, and the coach retains its concise validated form, 150/180-second deadlines,
+cancellation and one request without retries. Reasoning usage is retained as an optional reported subset of output,
+never added to the total; missing remains null, including when the SDK supplies an unreported zero.
+
+Fresh checks passed 2,000 unit tests, 13 built coach UI cases, four real-engine RPC cases and 18 Windows cases.
+The targeted packaged coach suite passed its no-key case and skipped 12 cases requiring unpackaged-only stand-ins;
+the final packaged preview explicitly asserted the 8,000-token wording. The original 12 evidence files remain
+byte-identical. [The verification record](niv-53-verification.md) gives the receipts and updated recipe location.
+
+No second paid attempt ran. Current-main inspection at `033b600` confirmed that the coach also lacks host-ledger
+grant admission. The initial paid check should have been deferred under D49. The helper now refuses paid mode until
+that separate integration is verified. NIV-53 remains open; budget sizing and passing offline tests do not establish
+live coaching quality or satisfy grant admission.
+
+### PR candidate on current main
+
+The NIV-53 code candidate `b87dd6a` is rebased onto `033b600`, including NIV-60/PR #54. Both acceptance histories and
+decisions are retained. Fresh combined checks passed all typechecks and **2,034 tests** (144 domain, 1,103 engine,
+787 desktop), with no failures or skips; built coach UI **13/13**, four real-engine RPC cases, fresh packaged coach
+checks **1 passed, 12 stand-in-only skips**, and fresh Windows/native/WSL UI **18/18**. The final documentation record
+changes no runtime code. All 12 failed-run evidence hashes still match; no new paid run was made. The historical
+frozen recipes do not identify the rebased PR candidate. Host-ledger admission and a newly frozen useful live coach
+journey remain necessary before closing NIV-53; NIV-52 remains assessment-only.

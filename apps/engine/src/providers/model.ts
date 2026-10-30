@@ -86,6 +86,8 @@ export interface StepRecord {
   elapsedMs: number;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Optional diagnostic, requested by the coach: already included in outputTokens, never added to it. */
+  reasoningTokens?: number | null;
   finishReason: string | null;
   servedModel: string | null;
   /** The tools the model called in this step, by name. */
@@ -145,6 +147,8 @@ export interface CallOptions {
   /** Per model call, and for the whole call including its tools. */
   deadlines: { stepMs: number; totalMs: number };
   maxOutputTokens: number;
+  /** Retain reported reasoning counts in this call's step metadata. No text or additional model request. */
+  includeReasoningTokens?: boolean;
   toolChoice?: ToolChoice;
   stopWhen?: () => boolean;
   /**
@@ -317,7 +321,7 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
           failure.failedStep = errorStep;
         } else if (unreported?.result !== undefined) {
           // It was answered, and its tools were cut off: a request that happened, reported with what it said.
-          const record = stepRecord(steps.length, unreported.result, Math.round((unreported.endedAt ?? now) - unreported.startedAt));
+          const record = stepRecord(steps.length, unreported.result, Math.round((unreported.endedAt ?? now) - unreported.startedAt), call.includeReasoningTokens, (unreported.result as { usage?: unknown } | undefined)?.usage);
           steps.push(record);
           try {
             call.onStep?.(record);
@@ -359,7 +363,7 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
           onStepFinish: (step: unknown) => {
             try {
               const now = performance.now();
-              const record = stepRecord(steps.length, step, Math.round(now - mark));
+              const record = stepRecord(steps.length, step, Math.round(now - mark), call.includeReasoningTokens, (attempts.at(-1)?.result as { usage?: unknown } | undefined)?.usage);
               mark = now;
               if (record.finishReason === "error" || record.finishReason === "aborted") {
                 errorStep = record;
@@ -401,9 +405,9 @@ export function createModelClient(options: ModelClientOptions): ModelClient {
   };
 }
 
-function stepRecord(stepNumber: number, raw: unknown, elapsedMs: number): StepRecord {
+function stepRecord(stepNumber: number, raw: unknown, elapsedMs: number, includeReasoningTokens = false, reportedUsage?: unknown): StepRecord {
   const step = (raw ?? {}) as {
-    usage?: { inputTokens?: unknown; outputTokens?: unknown };
+    usage?: { inputTokens?: unknown; outputTokens?: unknown; reasoningTokens?: unknown };
     finishReason?: unknown;
     response?: { modelId?: unknown; headers?: unknown };
     toolCalls?: unknown;
@@ -411,6 +415,16 @@ function stepRecord(stepNumber: number, raw: unknown, elapsedMs: number): StepRe
     content?: unknown;
   };
   const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : null);
+  const input = step.usage?.inputTokens;
+  const output = step.usage?.outputTokens;
+  const outputDetails = typeof output === "object" && output !== null ? output as { total?: unknown; reasoning?: unknown } : null;
+  const inputTokens = count(includeReasoningTokens && typeof input === "object" && input !== null ? (input as { total?: unknown }).total : input);
+  const outputTokens = count(includeReasoningTokens && outputDetails ? outputDetails.total : output);
+  // The provider adapter fills missing reasoning counts with zero. Its raw usage preserves whether one was actually
+  // reported. Only the coach opts into retaining this numeric diagnostic; no response/reasoning text is kept.
+  const reported = (reportedUsage ?? {}) as { outputTokens?: unknown; reasoningTokens?: unknown; raw?: { completion_tokens_details?: { reasoning_tokens?: unknown } } | null };
+  const reportedOutput = reported.outputTokens;
+  const reasoning = count("raw" in reported ? reported.raw?.completion_tokens_details?.reasoning_tokens : typeof reportedOutput === "object" && reportedOutput !== null ? (reportedOutput as { reasoning?: unknown }).reasoning : reported.reasoningTokens);
   // Mastra's steps carry tool calls either flat or as chunks, depending on the callback.
   // A provider's own result (a request reported here rather than by Mastra) lists its tool calls in `content`.
   type Call = { type?: unknown; toolName?: unknown; payload?: { toolName?: unknown } };
@@ -426,8 +440,9 @@ function stepRecord(stepNumber: number, raw: unknown, elapsedMs: number): StepRe
   return {
     stepNumber,
     elapsedMs,
-    inputTokens: count(step.usage?.inputTokens),
-    outputTokens: count(step.usage?.outputTokens),
+    inputTokens,
+    outputTokens,
+    ...(includeReasoningTokens ? { reasoningTokens: reasoning !== null && outputTokens !== null && reasoning <= outputTokens ? reasoning : null } : {}),
     finishReason: typeof step.finishReason === "string" ? step.finishReason : null,
     servedModel: typeof step.response?.modelId === "string" && step.response.modelId ? step.response.modelId : null,
     toolNames,

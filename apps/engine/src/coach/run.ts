@@ -15,7 +15,7 @@ import { CHARS_PER_TOKEN } from "../explain/budget.ts";
 import { usageOf } from "../explain/reading.ts";
 import { toolDefinitionChars } from "../explain/tools.ts";
 import { failure, InternalFailure, ModelFailure, type ModelClient, type StepRecord } from "../providers/model.ts";
-import { ANSWER_TOKENS, requestBudget, type ModelPolicy } from "../providers/policy.ts";
+import { requestBudget, type ModelPolicy } from "../providers/policy.ts";
 import { RunBudget } from "../providers/run-budget.ts";
 import { CoachAnswer, COACH_TOOL_DESCRIPTION, normaliseCoaching, type NormalisedCoaching } from "./answers.ts";
 import { COACH_INSTRUCTIONS, COACH_INSTRUCTIONS_SHA256, coachMessage } from "./prompt.ts";
@@ -79,7 +79,7 @@ export const COACH_WORDS = {
     `The coach can't use ${model}: Nivra hasn't checked that it hands in an answer through a form, which the coach needs, so nothing was sent. Check Token Factory in Settings to see which models the key can use.`,
   notNamed: (allowed: string, offered: string) => `This coaching may use ${allowed} only, and the key's listing offers ${offered}, so nothing was sent. Check Token Factory in Settings to see which models the key can use.`,
   tooSmall: (needed: number, available: number) =>
-    `The model's context is too small for this coaching: about ${n(needed)} tokens are needed, and ${n(Math.max(0, available))} are available once ${n(ANSWER_TOKENS)} are held back for the answer, so nothing was sent. Shorten the brief, starting with its longest part, then ask the coach again.`,
+    `The model's context is too small for this coaching: about ${n(needed)} tokens are needed, and ${n(Math.max(0, available))} are available once ${n(COACH_RUN_LIMITS.outputTokensPerRequest)} are held back for the answer, so nothing was sent. Shorten the brief, starting with its longest part, then ask the coach again.`,
   overBudget: (needed: number, available: number) => `The coach's request needs about ${n(needed)} tokens, more than the ${n(available)} its estimated budget allows, so nothing was sent. Shorten the brief, starting with its longest part, then ask the coach again.`,
   noTime: "The coaching ran out of time before its request could be sent, so nothing was sent. Ask the coach again.",
   late: (seconds: number) => `The coach didn't answer within the ${seconds} s this coaching had left. ${UNCHANGED} Ask the coach again.`,
@@ -206,7 +206,7 @@ export async function runCoach(options: CoachRunOptions): Promise<CoachReport> {
     throw refuse("model-not-allowed", new ModelFailure("model-unavailable", COACH_WORDS.notNamed(task.model, options.model)));
   }
   // A request larger than the model's window is never sent (D23).
-  const window = requestBudget(options.contextLength);
+  const window = requestBudget(options.contextLength, limits.outputTokensPerRequest);
   if (estimated > window) {
     throw refuse("budget", new ModelFailure("context-too-small", COACH_WORDS.tooSmall(estimated, window)));
   }
@@ -254,6 +254,7 @@ export async function runCoach(options: CoachRunOptions): Promise<CoachReport> {
       maxSteps: 1,
       deadlines: { stepMs: ms, totalMs: ms },
       maxOutputTokens: limits.outputTokensPerRequest,
+      includeReasoningTokens: true,
       toolChoice: { type: "tool", toolName: COACH_TOOL },
       internal: new InternalFailure(),
       signal: options.signal ? AbortSignal.any([options.signal, timeUp.signal]) : timeUp.signal,
@@ -274,6 +275,8 @@ export async function runCoach(options: CoachRunOptions): Promise<CoachReport> {
       elapsedMs: step.elapsedMs,
       inputTokens: step.inputTokens,
       outputTokens: step.outputTokens,
+      // A reported subset of output, never added to the billed total. Missing remains unknown.
+      reasoningTokens: step.reasoningTokens ?? null,
       finishReason: step.finishReason,
       tools: step.toolNames,
     });

@@ -1115,3 +1115,51 @@ with mode 0600 and only the required Nebius values; values never enter recipes o
 remains available. Remove keys and check isolated homes after the run; never apply the proposals automatically.
 Record every actual attempt and independently inspect successful proposals. If all useful tasks finish below old
 limits, their success does not close the larger-task evidence gap. See [the acceptance record](niv-60-verification.md).
+
+### Task coach desktop acceptance (NIV-53)
+
+The explicit helper runs from WSL, using a new state folder for each frozen candidate. It copies the Windows build
+to a unique folder, uses an isolated native profile/engine, and checks release/shared homes. No key is read by
+freeze, plan or rehearsal. Close other Windows Nivra/Electron instances before its test slot.
+
+```bash
+node apps/desktop/scripts/coach-live.ts --state ~/nivra-acceptance/niv53/completion-example --freeze
+node apps/desktop/scripts/coach-live.ts --state ~/nivra-acceptance/niv53/completion-example --plan
+node apps/desktop/scripts/coach-live.ts --state ~/nivra-acceptance/niv53/completion-example --rehearse
+node apps/desktop/scripts/coach-live.ts --state ~/nivra-acceptance/niv53/completion-example --live --approved <recipe-digest>
+node apps/desktop/scripts/coach-live.ts --state ~/nivra-acceptance/niv53/completion-example --save --reviewed <answer-sha256> --fields acceptanceCriteria
+node apps/desktop/scripts/coach-live.ts --state ~/nivra-acceptance/niv53/completion-example --cleanup
+```
+
+Live mode reads the owned, private `~/.config/nivra/token-factory.env` (`NEBIUS_API_KEY`), or the file explicitly
+named by `--credentials`. It passes the key through the existing named Settings call, removes it when finished,
+then scans native files on Windows. The exclusive claim is kept even after failure or interruption; never remove
+it to repeat a paid attempt. A stale slot lock names its PID: verify that process has ended before removing only
+that lock. This does not release a paid claim.
+
+Live mode retains `answer.json` and stops before saving. Inspect the actual output before supplying its printed
+SHA-256 and the selected fields. Save requires some, but not all, usable proposals; it checks the resulting brief
+and its persistence across reopening. Neither an unusable answer nor the runner's structural checks establish
+useful coaching. The model named by the retained report must match the recipe for acceptance; the helper does
+not change the application's model-selection policy. Cleanup remains available after source changes.
+
+```bash
+node --test apps/desktop/test/coach-live-checks.test.ts
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e coach-acceptance.spec.ts task-coach.spec.ts
+```
+
+The [NIV-53 verification record](niv-53-verification.md) records the failed live output-limit attempt separately
+from the passing stand-in journeys. Do not close the issue or silently increase its limits from that evidence.
+
+The separately requested coach response-budget follow-up now allows 8,000 completion tokens and reserves that
+actual allowance against context, leaving at most 56,000 estimated input tokens under the existing 64,000-token
+ceiling. Other workflows keep their existing defaults. Its 150-second request/180-second overall deadlines and
+strict concise form are unchanged. Coach `model.call` metadata includes reported reasoning tokens, or null when
+unreported; completion totals already include reasoning. The helper records these numeric measurements after close.
+Its observer allows 270 seconds for cold engine initialisation, the complete run and a final polling margin; that
+outer wait changes neither the 150-second model deadline nor the 180-second workflow deadline.
+
+Paid mode is currently refused before another claim or credential read: the coach start route has not been wired
+to a host-ledger grant as AGENTS.md D49 requires. An approval digest does not replace that grant. Freeze, plan and
+unpaid rehearsal remain available; the live/save commands above describe the later path once actual grant admission
+is implemented and verified. The prior failed evidence and claim stay unchanged.

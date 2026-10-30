@@ -208,6 +208,49 @@ describe("a coaching over stdio (NIV-53)", () => {
     assert.equal(JSON.stringify(report).includes("here are my thoughts"), false, "the model's own words aren't kept as a diagnostic");
   });
 
+  it("records reported reasoning as part of an 8,000-token truncated completion, retaining unknown usage and sending nothing again", async () => {
+    for (const reasoning of [1_200, 0, undefined, 8_001]) {
+      const { stub, engine } = await setup(() => ({ body: {
+        id: "coach-output-limit", model: "nvidia/Nemotron-3.5-Super-VL",
+        choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "length" }],
+        usage: { prompt_tokens: 2_410, completion_tokens: 8_000, total_tokens: 10_410, ...(reasoning === undefined ? {} : { completion_tokens_details: { reasoning_tokens: reasoning } }) },
+      } }), { models: [{ id: "nvidia/Nemotron-3.5-Super-VL", context_length: 131_072 }] });
+      const { run } = await startCoaching(engine);
+      const page = await finished(engine, run.id);
+      const report = await reportOf(engine, run.id);
+      assert.equal(page.status, "failed");
+      assert.equal(report?.stage.finishReason, "length");
+      assert.equal(report?.stage.outputTokens, 8_000);
+      assert.equal(report?.usage.outputTokens, 8_000, "reasoning must not be added to completion usage");
+      assert.equal(report?.changes.length, 0);
+      const call = page.events.find((event) => event.type === "model.call");
+      assert.equal(call?.data?.["reasoningTokens"], reasoning !== undefined && reasoning <= 8_000 ? reasoning : null);
+      assert.equal(stub.chats()[0]?.body?.["max_completion_tokens"], 8_000);
+      assert.equal(stub.chats().length, 1);
+      assert.equal(listings(stub), 1);
+    }
+  });
+
+  it("accepts a concise validated form after more than 4,000 completion tokens, counting reasoning once", async () => {
+    const { stub, engine } = await setup(() => {
+      const reply = toolCall(COACH_TOOL, ANSWER, { tokens: [2_410, 6_100] });
+      const body = reply.body as { usage: Record<string, unknown> };
+      body.usage["completion_tokens_details"] = { reasoning_tokens: 5_900 };
+      return reply;
+    });
+    const { run } = await startCoaching(engine);
+    const page = await finished(engine, run.id);
+    const report = await reportOf(engine, run.id);
+    assert.equal(page.status, "succeeded");
+    assert.equal(report?.outcome, "complete");
+    assert.equal(report?.usage.outputTokens, 6_100);
+    assert.equal(report?.budget.used.reportedOutputTokens, 6_100);
+    assert.equal(page.events.find((event) => event.type === "model.call")?.data?.["reasoningTokens"], 5_900);
+    assert.equal(report?.changes.length, 2);
+    assert.equal(stub.chats()[0]?.body?.["max_completion_tokens"], 8_000);
+    assert.equal(stub.chats().length, 1);
+  });
+
   it("refuses before any inference: no key, a project's packet without its consent, a model it can't force, and a model other than the one named", async () => {
     const noKey = await setup(() => toolCall(COACH_TOOL, ANSWER), { key: false });
     const a = await startCoaching(noKey.engine);
