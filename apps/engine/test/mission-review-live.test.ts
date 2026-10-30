@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
-import { startStub, toolCall, type Reply, type Stub, type StubRequest } from "./stub-token-factory.ts";
+import { type MissionReviewPacket, type ParamsOf, type ReviewReport, type RpcClient, type RunSummary } from "@nivra/domain";
+import { collectMissionReview } from "../scripts/mission-review-collect.ts";
+import { httpError, startStub, toolCall, type Reply, type Stub, type StubRequest } from "./stub-token-factory.ts";
 
 /**
  * The mission review's live check (NIV-52), offline: its recipe and digest, a run against a loopback stub that ends
@@ -16,6 +18,7 @@ import { startStub, toolCall, type Reply, type Stub, type StubRequest } from "./
  */
 
 const SCRIPT = fileURLToPath(new URL("../scripts/mission-review-live.ts", import.meta.url));
+const FIXTURE = fileURLToPath(new URL("./fixtures/mission-review/live.json", import.meta.url));
 const dirs: string[] = [];
 const stubs: Stub[] = [];
 after(async () => {
@@ -51,7 +54,7 @@ const COUNCIL: Record<Role, Reply> = {
   risks: toolCall("submit_review", { summary: "One criterion can't be tested.", findings: [{ title: "'It works well' can't be checked", detail: "T3's second criterion.", recommendation: "Say what is checked.", severity: "medium", refs: ["T3"] }], assumptions: [], gaps: [] }),
   chair: toolCall("submit_synthesis", { summary: "Store runs first; make T3 testable.", priorities: ["arch-1", "risk-1"], agreements: [], dissent: [], gaps: [] }),
 };
-const LIVE_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+const LIVE_MODEL = "nvidia/Nemotron-3.5-Super-VL";
 /** A reply as a provider serving `model` sends it back. */
 const servedBy = (reply: Reply, model: string): Reply => ({ ...reply, body: { ...(reply.body as Record<string, unknown>), model } });
 /** A reply that names no model at all. */
@@ -65,10 +68,11 @@ describe("the mission review's live check (NIV-52)", () => {
     const { code, stdout } = await run(["--plan"]);
     assert.match(stdout, /One approval is one run\. This one covers run 1 of this recipe at this revision\. The first launch that presents it claims it in ~\/nivra-acceptance\/claims\/mission-review\/ before the checkout is checked, the key is read or anything is sent/);
     assert.equal(code, 0);
-    assert.match(stdout, /Model: nvidia\/nemotron-3-super-120b-a12b only\. The engine refuses any other before the first inference request/);
-    assert.match(stdout, /at most 3 requests \(two reviewers, then the chair\), 4,000 output tokens each, 150 s each and 330 s in all/);
+    assert.match(stdout, /Model: nvidia\/Nemotron-3\.5-Super-VL only\. The engine refuses any other before the first inference request/);
+    assert.match(stdout, /at most 3 requests \(two reviewers, then the chair\), 4,000 completion tokens each \(reasoning included\), 150 s each and 330 s in all/);
     assert.match(stdout, /Product architect v1, instructions [0-9a-f]{12}\./);
     assert.match(stdout, /The forms they hand in \(the tools' definitions\): [0-9a-f]{12}\./);
+    assert.match(stdout, /Live acceptance is deferred until mission reviews receive host-ledger grants/);
     assert.match(stdout, /Approval digest: [0-9a-f]{64}\n/);
     const again = await run(["--plan"]);
     assert.equal(digestIn(again.stdout), digestIn(stdout), "the same recipe gives the same digest");
@@ -135,7 +139,7 @@ describe("the mission review's live check (NIV-52)", () => {
   });
 
   it("runs the council against a stub, keeps the evidence, and holds the approved model", async () => {
-    const stub = await startStub({ chat: (request) => servedBy(COUNCIL[roleOf(request) ?? "chair"], LIVE_MODEL) });
+    const stub = await startStub({ models: [{ id: "nvidia/Nemotron-3_5-Lightning" }, { id: LIVE_MODEL }], chat: (request) => servedBy(COUNCIL[roleOf(request) ?? "chair"], LIVE_MODEL) });
     stubs.push(stub);
     const dir = folder();
     const { code, stdout } = await run(["--token-factory-url", stub.url, "--out", join(dir, "out"), "--home", join(dir, "home")], dir);
@@ -144,26 +148,78 @@ describe("the mission review's live check (NIV-52)", () => {
     assert.deepEqual([result.status, result.outcome, result.modelHeld, result.served.length], ["succeeded", "complete", true, 3]);
     assert.deepEqual(result.findings.map((reviewer) => reviewer.refs), [[["T1", "backlog"]], [["T3"]]]);
     assert.equal(stub.chats().length, 3);
+    assert.equal(stub.requests.filter((request) => request.path.endsWith("/models")).length, 1, "listing isn't an inference request");
+    for (const request of stub.chats()) {
+      assert.equal(request.body?.model, LIVE_MODEL);
+      assert.equal(request.body?.["max_completion_tokens"], 4_000);
+      assert.equal(Object.hasOwn(request.body ?? {}, "max_tokens"), false);
+      assert.deepEqual(request.body?.tool_choice, { type: "function", function: { name: roleOf(request) === "chair" ? "submit_synthesis" : "submit_review" } });
+    }
+    for (const file of ["recipe.json", "report.json", "result.json", "engine.log"]) {
+      assert.equal(readFileSync(join(dir, "out", file), "utf8").includes("stub-key-0123456789"), false, `${file} contains no key`);
+    }
+  });
+
+  it("keeps a failure receipt when the engine cannot initialise, without claiming a run started", async () => {
+    const dir = folder();
+    const home = join(dir, "not-a-directory");
+    writeFileSync(home, "Keep this file.\n");
+    const { code, stdout, stderr } = await run(["--token-factory-url", "http://127.0.0.1:9", "--out", join(dir, "out"), "--home", home], dir);
+    assert.equal(code, 1);
+    const result = JSON.parse(readFileSync(join(dir, "out", "result.json"), "utf8"));
+    assert.deepEqual([result.runId, result.status, result.startRequested, result.usage], [null, null, false, null]);
+    assert.match(result.problems[0], /Couldn't initialise the engine/);
+    assert.equal(result.engineClose, "not-available");
+    assert.equal(`${stdout}${stderr}`.includes("stub-key-0123456789"), false);
+    assert.equal(readFileSync(home, "utf8"), "Keep this file.\n");
+  });
+
+  it("keeps an incomplete run after a provider failure, without retrying either reviewer or the chair", async () => {
+    const stub = await startStub({ models: [{ id: LIVE_MODEL }], chat: (request) => roleOf(request) === "architecture" ? httpError(503) : servedBy(COUNCIL[roleOf(request) ?? "chair"], LIVE_MODEL) });
+    stubs.push(stub);
+    const dir = folder();
+    const { code } = await run(["--token-factory-url", stub.url, "--out", join(dir, "out"), "--home", join(dir, "home")], dir);
+    assert.equal(code, 1);
+    const result = JSON.parse(readFileSync(join(dir, "out", "result.json"), "utf8"));
+    assert.deepEqual([result.status, result.outcome, result.engineClose], ["failed", "incomplete", "returned"]);
+    assert.ok(stub.chats().length <= 3);
+    assert.equal(stub.chats().filter((request) => roleOf(request) === "architecture").length, 1);
+    for (const role of ["architecture", "risks", "chair"]) assert.ok(stub.chats().filter((request) => roleOf(request) === role).length <= 1, `${role} was never retried`);
+    assert.equal(existsSync(join(dir, "out", "report.json")), true);
+  });
+
+  it("refuses an unpinned or historical-model fixture before reading any key or making evidence", async () => {
+    const dir = folder();
+    const fixture = JSON.parse(readFileSync(FIXTURE, "utf8"));
+    for (const model of [null, "nvidia/nemotron-3-super-120b-a12b"]) {
+      const path = join(dir, "fixture.json");
+      writeFileSync(path, JSON.stringify({ ...fixture, model }));
+      const { code, stderr } = await run(["--fixture", path, "--credentials", join(dir, "missing.env"), "--out", join(dir, "out")], dir);
+      assert.equal(code, 2);
+      assert.match(stderr, /the live check takes only nvidia\/Nemotron-3\.5-Super-VL\. Nothing was sent\./);
+      assert.equal(existsSync(claimsIn(dir)), false);
+      assert.equal(existsSync(join(dir, "out")), false);
+    }
   });
 
   it("fails its evidence when a request was served by another model, though the run completed", async () => {
-    const stub = await startStub({ chat: (request) => servedBy(COUNCIL[roleOf(request) ?? "chair"], "nvidia/a-substitute") });
+    const stub = await startStub({ models: [{ id: LIVE_MODEL }], chat: (request) => servedBy(COUNCIL[roleOf(request) ?? "chair"], "nvidia/a-substitute") });
     stubs.push(stub);
     const dir = folder();
     const { code, stdout } = await run(["--token-factory-url", stub.url, "--out", join(dir, "out"), "--home", join(dir, "home")], dir);
     assert.equal(code, 1);
-    assert.match(stdout, /A request was served by a model other than nvidia\/nemotron-3-super-120b-a12b: this run isn't the approved check\./);
+    assert.match(stdout, /A request was served by a model other than nvidia\/Nemotron-3\.5-Super-VL: this run isn't the approved check\./);
     const result = JSON.parse(readFileSync(join(dir, "out", "result.json"), "utf8")) as { outcome: string; modelHeld: boolean };
     assert.deepEqual([result.outcome, result.modelHeld], ["complete", false]);
   });
 
   it("doesn't call the model held when the answers didn't name the model that served them", async () => {
-    const stub = await startStub({ chat: (request) => unnamed(COUNCIL[roleOf(request) ?? "chair"]) });
+    const stub = await startStub({ models: [{ id: LIVE_MODEL }], chat: (request) => unnamed(COUNCIL[roleOf(request) ?? "chair"]) });
     stubs.push(stub);
     const dir = folder();
     const { code, stdout } = await run(["--token-factory-url", stub.url, "--out", join(dir, "out"), "--home", join(dir, "home")], dir);
     assert.equal(code, 1);
-    assert.match(stdout, /3 of 3 answers didn't name the model that served them, so this run doesn't show nvidia\/nemotron-3-super-120b-a12b held\./);
+    assert.match(stdout, /3 of 3 answers didn't name the model that served them, so this run doesn't show nvidia\/Nemotron-3\.5-Super-VL held\./);
     const result = JSON.parse(readFileSync(join(dir, "out", "result.json"), "utf8")) as { outcome: string; modelHeld: boolean | null };
     assert.deepEqual([result.outcome, result.modelHeld], ["complete", null]);
   });
@@ -180,14 +236,155 @@ describe("the mission review's live check (NIV-52)", () => {
   });
 
   it("sends no inference request when the listing lacks the approved model", async () => {
-    const stub = await startStub({ models: [{ id: "nvidia/some-other-model" }], chat: (request) => COUNCIL[roleOf(request) ?? "chair"] });
+    const stub = await startStub({ models: [{ id: "nvidia/nemotron-3-super-120b-a12b" }], chat: (request) => COUNCIL[roleOf(request) ?? "chair"] });
     stubs.push(stub);
     const dir = folder();
     const { code } = await run(["--token-factory-url", stub.url, "--out", join(dir, "out"), "--home", join(dir, "home")], dir);
     assert.equal(code, 1);
     const result = JSON.parse(readFileSync(join(dir, "out", "result.json"), "utf8")) as { status: string; error: string | null; served: unknown[] };
     assert.deepEqual([result.status, result.served.length], ["failed", 0]);
-    assert.match(result.error ?? "", /may use only nvidia\/nemotron-3-super-120b-a12b/);
+    assert.match(result.error ?? "", /may use only nvidia\/Nemotron-3\.5-Super-VL/);
     assert.equal(stub.chats().length, 0, "no inference request was made");
+  });
+});
+
+const RUNNING: RunSummary = { id: "6b2f8711-42e2-411d-83fe-bc2d3acebe87", workflowId: "review", title: "Review", status: "running", input: {}, createdAt: "2026-10-30T00:00:00.000Z", startedAt: "2026-10-30T00:00:00.000Z", finishedAt: null, error: null, durationMs: null, usage: null, route: null };
+
+/** Lost replies and deadlines without real waits, inference or a new CLI escape hatch. */
+function collectionHarness() {
+  const h = {
+    now: 0,
+    wakes: [] as number[],
+    calls: [] as Array<{ method: string; timeoutMs: number | undefined }>,
+    closes: 0,
+    onCall: (_method: string) => undefined as unknown,
+    onClose: () => undefined as void,
+  };
+  const request: Extract<ParamsOf<"runs.start">, { workflowId: "review" }> = {
+    clientRequestId: "74caeaa2-71ef-4e9c-895a-b5aabf82456b", workflowId: "review",
+    input: { panel: "council", planId: RUNNING.id, planVersion: 1, packetDigest: "a".repeat(64), preferencesDigest: "b".repeat(64) },
+    context: { preferences: { revision: 0, records: [] }, sharing: { modelContext: false }, packet: JSON.parse(readFileSync(FIXTURE, "utf8")) as MissionReviewPacket },
+  };
+  const partial = { outcome: "incomplete", reviewers: [{ role: "architecture", findings: [{ refs: ["T1", "backlog"] }] }] } as unknown as ReviewReport;
+  const client = { call: (async (method, _params, options) => {
+    h.calls.push({ method, timeoutMs: options?.timeoutMs });
+    const supplied = h.onCall(method);
+    if (supplied !== undefined) return supplied;
+    if (method === "runs.start" || method === "runs.get" || method === "runs.find") return { ...RUNNING };
+    if (method === "runs.cancel") return { status: "running", wasTerminal: false };
+    if (method === "runs.review") return partial;
+    throw new Error(`Unexpected RPC ${method}`);
+  }) as RpcClient["call"] };
+  const collect = () => collectMissionReview({
+    start: async () => ({ client, close: async () => { h.closes++; h.onClose(); } }),
+    request, followMs: 10,
+    clock: { now: () => h.now, pause: async (ms) => { h.now = h.wakes.shift() ?? h.now + ms; } },
+  });
+  return { h, collect };
+}
+
+describe("the mission live check's partial evidence", () => {
+  it("doesn't call an acknowledged cancellation confirmed until a terminal state was observed", async () => {
+    const { h, collect } = collectionHarness();
+    const result = await collect();
+    assert.equal(result.cancellation, "requested");
+    assert.equal(result.summary?.status, "running");
+    assert.match(result.unresolved ?? "", /No terminal run state was observed/);
+    assert.match(result.problems[0] ?? "", /No terminal run state was observed within/);
+    assert.equal(result.report?.outcome, "incomplete");
+    assert.equal(result.report?.reviewers[0]?.findings.length, 1);
+    assert.equal(result.engineClose, "returned");
+    assert.equal(h.closes, 1);
+    assert.deepEqual(h.calls.map((call) => call.method), ["runs.start", "runs.cancel", "runs.get", "runs.review"]);
+    assert.ok(h.calls.slice(1).every((call) => call.timeoutMs === 5_000), "collection calls are bounded");
+  });
+
+  it("keeps the confirmed cancellation and partial report when polling fails", async () => {
+    const { h, collect } = collectionHarness();
+    let cancelled = false;
+    h.wakes = [1];
+    h.onCall = (method) => {
+      if (method === "runs.cancel") cancelled = true;
+      if (method === "runs.get") {
+        if (!cancelled) throw new Error("private-transport-key");
+        return { ...RUNNING, status: "cancelled" };
+      }
+      return undefined;
+    };
+    const result = await collect();
+    assert.equal(result.cancellation, "confirmed");
+    assert.equal(result.summary?.status, "cancelled");
+    assert.equal(result.unresolved, null);
+    assert.equal(result.report?.reviewers[0]?.findings.length, 1);
+    assert.match(result.problems[0] ?? "", /Couldn't read the review's status/);
+    assert.equal(JSON.stringify(result).includes("private-transport-key"), false);
+    assert.equal(h.closes, 1);
+  });
+
+  it("finds an uncertain start once and cancels that run, never replaying the request", async () => {
+    const { h, collect } = collectionHarness();
+    h.onCall = (method) => {
+      if (method === "runs.start") throw new Error("private-start-key");
+      if (method === "runs.get") return { ...RUNNING, status: "cancelled" };
+      return undefined;
+    };
+    const result = await collect();
+    assert.equal(result.startRequested, true);
+    assert.equal(result.summary?.id, RUNNING.id);
+    assert.equal(result.cancellation, "confirmed");
+    assert.equal(result.report?.outcome, "incomplete");
+    assert.deepEqual(h.calls.map((call) => call.method), ["runs.start", "runs.find", "runs.cancel", "runs.get", "runs.review"]);
+    assert.equal(JSON.stringify(result).includes("private-start-key"), false);
+    assert.equal(h.closes, 1);
+  });
+
+  it("leaves an uncertain start unknown when finding it fails, and still shuts down", async () => {
+    const { h, collect } = collectionHarness();
+    h.onCall = (method) => {
+      if (method === "runs.start" || method === "runs.find") throw new Error("private-start-key");
+      return undefined;
+    };
+    const result = await collect();
+    assert.equal(result.summary, null);
+    assert.equal(result.report, null);
+    assert.match(result.unresolved ?? "", /whether it started is unknown/);
+    assert.deepEqual(h.calls.map((call) => call.method), ["runs.start", "runs.find"]);
+    assert.equal(result.engineClose, "returned");
+    assert.equal(h.closes, 1);
+  });
+
+  it("records cancellation, collection and shutdown failures without leaking raw exceptions", async () => {
+    const { h, collect } = collectionHarness();
+    h.onCall = (method) => {
+      if (["runs.cancel", "runs.get", "runs.review"].includes(method)) throw new Error("private-failure-key");
+      return undefined;
+    };
+    h.onClose = () => { throw new Error("private-shutdown-key"); };
+    const result = await collect();
+    assert.equal(result.cancellation, "failed");
+    assert.equal(result.engineClose, "failed");
+    assert.equal(result.summary?.status, "running");
+    assert.equal(result.report, null);
+    assert.match(result.unresolved ?? "", /termination is unresolved/);
+    assert.equal(result.problems.length, 5);
+    assert.equal(JSON.stringify(result).includes("private-"), false);
+    assert.equal(h.closes, 1);
+  });
+
+  it("keeps a completed summary when report collection fails, without requesting cancellation", async () => {
+    const { h, collect } = collectionHarness();
+    h.onCall = (method) => {
+      if (method === "runs.start") return { ...RUNNING, status: "succeeded" };
+      if (method === "runs.review") throw new Error("private-report-key");
+      return undefined;
+    };
+    const result = await collect();
+    assert.equal(result.summary?.status, "succeeded");
+    assert.equal(result.report, null);
+    assert.equal(result.cancellation, "not-requested");
+    assert.equal(result.problems.length, 1);
+    assert.match(result.problems[0]!, /Couldn't collect the review report/);
+    assert.deepEqual(h.calls.map((call) => call.method), ["runs.start", "runs.review"]);
+    assert.equal(h.closes, 1);
   });
 });
