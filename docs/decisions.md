@@ -3932,3 +3932,41 @@ the combined source rather than reusing the earlier unpublished protocol-21 arti
 Proposal binding version 2 already binds the report bytes and remains unchanged. No dependency, provider, paid run,
 new task system or execution-boundary change is introduced. The deterministic fixtures prove Nivra's verdict handling,
 not that SHE-65 is fixed; NIV-35's real-task acceptance remains separate.
+
+## D58. Private engine database files and bounded startup repair (2026-10-30)
+
+**Decision.** NIV-46 extends D7's engine-store ownership rule with private file creation and safe repair on Linux and
+WSL. Both main databases are made 0600 before their drivers open them. The pinned SQLite/libsql drivers create and
+recreate WAL, SHM and rollback journals using the private main file's permissions; this is an acceptance gate, not a
+post-initialisation chmod. There is no process-wide umask change.
+
+- Repair is limited to `nivra.db`, `mastra.db` and their exact `-wal`, `-shm` and `-journal` names. Existing entries must
+  be regular files owned by the current user with exactly one hard link. No-follow, non-blocking descriptor opens and
+  identity checks precede descriptor chmod; the resulting mode is checked. No content is truncated, replaced or
+  deleted by the permission helper, and absent sidecars are not created.
+- A home must be owned by the current user and have no group/other write bits. Existing 0755 homes remain usable;
+  newly made directories request 0700. Every ancestor must belong to the current user or root, without group/other
+  write access; root-owned sticky temporary directories are allowed as ancestors. Symlinked homes or ancestors are
+  refused. Linux repairs use held directory descriptors through `/proc/self/fd`; drivers receive the checked native
+  paths. These checks do not isolate the engine from root or another process running as the same user.
+- Both families are validated before startup writes. The private `nivra.db` bootstrap precedes its existing exclusive
+  SQLite lock; existing Nivra sidecars are repaired only after ownership is acquired. Mastra repair and opening happen
+  only under that lock. A private main file is not chmodded again. Main-file inspection descriptors close before its
+  SQLite connection opens: closing another descriptor to that inode afterwards could release its POSIX locks.
+- A missing main database with surviving recovery files is refused, preserving those files for recovery. Unsafe
+  entries and failed or ineffective permission repair return `home-unusable` with recovery guidance. Library storage
+  initialisation is awaited, and failure closes the storage client and ownership database. Shutdown closes workflow
+  storage before releasing ownership. SQLite may retire recovery files through its normal recovery; repair itself
+  never removes them.
+- Privacy initialisation follows the `--self-check` fast path. Native Windows retains inherited ACLs, with no POSIX
+  mode assertion or ACL migration. Runtime executables and unrelated files are not recursively inspected or chmodded.
+
+**Why.** Mastra's constructor previously created its database and sidecars as 0644 even under a permissive process
+umask, and legacy 0755 homes made those files reachable by other users. Chmod after construction leaves a readable
+window. Changing the whole process's umask would also change the checkout directories made by the apply writer.
+
+**Consequences.** Normal startup repairs the selected legacy home when safe; development and verification never open
+real release/development homes to demonstrate repair. Regression fixtures exercise creation, recreation, crash
+recovery, unsafe entries, concurrent ownership and startup cleanup. A driver update must re-establish creation-time
+sidecar privacy. Protocol 21, schemas, dependencies, execution boundaries and stored-content restrictions are unchanged;
+NIV-62 checkpoint features remain separate.

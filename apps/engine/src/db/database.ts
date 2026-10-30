@@ -1,7 +1,7 @@
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import { MIGRATIONS } from "./migrations.ts";
+import { DatabaseFiles } from "./private-files.ts";
 
 export type Row = Record<string, SQLOutputValue>;
 
@@ -42,22 +42,26 @@ export class Database {
 
   open(): DatabaseSync {
     if (this.#db) return this.#db;
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-    // Create the file private before SQLite opens it: the WAL file copies its mode. (Windows ignores modes.)
-    if (!existsSync(this.path)) closeSync(openSync(this.path, "a", 0o600));
-    chmodSync(this.path, 0o600);
-    const db = new DatabaseSync(this.path, { timeout: this.#exclusive ? 0 : 5_000 });
+    const files = new DatabaseFiles(dirname(this.path));
+    let db: DatabaseSync | null = null;
     try {
+      files.validateFamily(basename(this.path));
+      // Secure the main file before SQLite can create a sidecar. Existing sidecars wait for exclusive ownership.
+      files.prepareMain(basename(this.path));
+      db = new DatabaseSync(this.path, { timeout: this.#exclusive ? 0 : 5_000 });
       if (this.#exclusive) db.exec("PRAGMA locking_mode = EXCLUSIVE;");
       // FULL: a write is durable when it returns, so a budget journal row written before a send survives a stop (NIV-66).
       db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL;");
       // A write takes the exclusive lock now, and EXCLUSIVE mode keeps it.
       if (this.#exclusive) db.exec("BEGIN IMMEDIATE; COMMIT;");
+      files.repairSidecars(basename(this.path));
       migrate(db);
     } catch (error) {
-      db.close();
+      db?.close();
       if (isBusy(error)) throw new EngineLockedError(this.path);
       throw error;
+    } finally {
+      files.close();
     }
     this.#db = db;
     return db;
