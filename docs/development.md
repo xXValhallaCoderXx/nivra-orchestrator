@@ -959,3 +959,40 @@ driver change, observe each creating syscall before subsequent userspace code ca
 home, never a real installation. FIFO tests retain their strict deadlines and verify non-blocking handling if a regular
 file becomes a FIFO between inspection and opening. Run focused and full suites separately to avoid competing startup
 loads. No paid/provider calls are required.
+
+## Council evaluation deadlines (NIV-48)
+
+The cancellation and reconciliation deadlines are fixed when a run begins to be followed. A late polling turn does
+not renew either window. If cancellation is due while hard batch time remains, the runner journals its intent once,
+then rechecks the monotonic remainder before attempting the RPC. The call is bounded by the existing 10-second cap
+and remaining batch time; an on-time call also respects the original reconciliation deadline. A cancellation first
+requested after that window gets no fresh settling wait.
+
+At hard batch exhaustion, no new cancellation or evidence-collection RPC is started. If the journal write consumes
+the last time, its intent remains evidence but no cancellation is dispatched. A sub-millisecond remainder cannot fund
+a positive RPC timeout and is described as insufficient time, not as a fully expired cap. The existing engine shutdown
+remains separately bounded by at most 15 seconds of waits.
+
+Every summary, events-page and report read checks its remaining collection allowance before dispatch. Zero would
+disable the RPC client's timer, and a 1 ms floor would initiate a request outside the allowance; neither is used after
+exhaustion. Earlier observations survive a later missing/failed read. An unresolved evaluation keeps status
+`unknown`, request usage `null`, and a truthful reason distinguishing a missed run window, a late cancellation
+attempt and hard batch exhaustion. An acknowledgement alone is not termination. An unresolved record stops the batch
+and is never sent again on resume; historical journal/evidence formats remain readable.
+
+These bounds apply to newly initiated waits and RPCs. Event-loop stalls and synchronous journal/evidence writes are
+not themselves bounded by timers. Production uses `performance.now()`; the internal clock/wait seam exists only for
+tests and adds no CLI controls or approval inputs.
+
+Offline verification uses disposable homes and loopback provider stand-ins:
+
+```bash
+pnpm --filter @nivra/engine typecheck
+pnpm --filter @nivra/engine exec node --test test/council-eval.test.ts
+pnpm verify
+```
+
+Run the focused suite before the final full suite. The missed-turn regression advances a fake monotonic clock past
+both run windows; it must fail if give-up is moved back ahead of cancellation. The original stuck-run watchdog,
+numeric timing bound, journal assertions and no-resend checks remain in place; only its exact note changes to avoid
+claiming an unobserved full interval after cancellation. No paid evaluation or real credentials are needed.

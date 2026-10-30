@@ -3516,3 +3516,44 @@ installations are repaired only when their owning engine next starts normally. P
 repeated: no packaging, main-process, preload, target or supervisor source changed. Permissions do not provide
 isolation from the same OS user/root, and unsafe homes are refused rather than recursively repaired. Protocol 21 and
 all stored-content restrictions remain in force; NIV-62 remains separate. This evidence does not authorise merging.
+
+## Council evaluation late cancellation and truthful timeout evidence (NIV-48) — 30 October 2026
+
+Source verified locally at `86d91b9e11163a563d5ac575125894daa6d6e823`, published unchanged as
+`a0e9dea714defaea97976d8cee83c43cc6828af1`. Both have Git tree `033043a0ee5e407a515f0002d39801610876e33d`,
+based on main `8fb205541f70ba922146367a395aa45401a60014`. Publication through the connected GitHub app changes commit
+metadata, not files. Later changes in this PR are documentation only.
+
+The implementation is confined to the council evaluation batch script and its tests, in the separate `feature/niv-48`
+worktree. There are no engine-runtime, host/preload, preferences, task worker, budget-ledger, queue, UI, dependency or
+model-migration changes. Protocol 21, frozen fixtures and the approval digest are unchanged.
+
+| Scenario | Evidence |
+| --- | --- |
+| One polling turn misses both run windows | A fake clock advances beyond cancellation and give-up while hard batch time remains. Exactly one intent and one bounded cancellation call occur; no fresh reconciliation wait is opened. The result remains unresolved with unknown request usage, an accurate late-cancellation note and no next arm. |
+| Original ordering restored | Before the fix, the new stdio regression failed with zero cancellation entries instead of one. A separate mutation of the fixed source, putting give-up before cancellation, reproduced the same failure. Source bytes were restored exactly; all 18 new deadline cases then passed. |
+| Earlier cancellation, rejected request or lost acknowledgement | Deterministic RPC traces show no duplicate intent/request and no retry. The note distinguishes acknowledgement from an unacknowledged outcome; neither establishes termination by itself. |
+| Journal consumes available time | Dispatch uses the remainder after the journal callback: 100 ms in the partial-consumption case. If the journal exhausts the batch allowance, intent is retained and no RPC starts. |
+| Hard deadline reached or crossed | At and after the cap, no further cancellation/collection RPC starts. The preceding summary remains available, status stays unknown and request usage stays null. A fractional-millisecond remainder starts no manufactured 1 ms request and does not falsely claim full expiry. |
+| Collection expires between reads or a later read fails | Each read checks the same fixed allowance. Prior summaries and a 500-event page are retained; no subsequent page/report call is started after exhaustion. Incomplete evidence is reported and stops the batch rather than becoming a successful or zero-usage record. |
+| Ordinary completion/cancellation and unresolved resume | Existing real-engine/stdio tests pass against loopback stand-ins. The ordinary cancelled run proceeds to the next arm; the stuck-run test retains its watchdog, numeric bounds, journal order and resume/no-resend assertions. The new late-wake stdio case likewise records one run start across resume. |
+
+Final verification on the implementation revision:
+
+- Engine typecheck passed.
+- Focused `test/council-eval.test.ts`: **36/36 passed**, including all 18 new deadline cases, no failures/skips.
+- After the expected ordering-mutation failure and byte-for-byte restoration, the **18/18 deadline cases passed**.
+- One final `pnpm verify`: all typechecks and **1,927 tests passed** (140 domain, 720 desktop, 1,067 engine), with
+  zero failures, cancellations or skips.
+- The full diff and untracked-file review found only the intended script, tests and documentation. No dependency,
+  frozen-input, protocol or generated-output changes are included.
+
+Ignored receipts are under `.artifacts/niv48/` in the implementation worktree: `regression-before.log`,
+`regression-after.log`, `ordering-mutant.log`, `final-deadline-cases.log`, `focused.log` and `verify.log`.
+The failing before/mutation checks are intentional evidence that the regression detects missing cancellation; they
+are not passing production runs.
+
+Desktop E2E, packaged and Windows checks were not run because this change is script/test-only. No paid evaluation,
+real provider call, credential provisioning or real release-home operation was performed. Existing candidate builds and
+evidence remain untouched. This implements the cancellation cleanup independently of NIV-71 / PR 49; merging remains
+with Nate.
