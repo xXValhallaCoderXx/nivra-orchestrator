@@ -129,6 +129,13 @@ async function choose(targetLabel: string) {
   await expect(target).toHaveText(targetLabel);
 }
 
+test("the native Windows window becomes visible after startup", async () => {
+  await expect.poll(() => app.evaluate(({ BrowserWindow }) => {
+    const windows = BrowserWindow.getAllWindows();
+    return windows.length === 1 && windows[0]!.isVisible();
+  }), { timeout: 10_000 }).toBe(true);
+});
+
 test("a fresh profile offers no target to choose, starts no engine, and has nothing to say about a working WSL", async () => {
   await expect(page.getByTestId("engine-badge")).toHaveText("No folder chosen");
   await expect(page.getByTestId("target-select")).toHaveCount(0);
