@@ -3936,3 +3936,13 @@ No second paid attempt ran. Current-main inspection at `033b600` confirmed that 
 grant admission. The initial paid check should have been deferred under D49. The helper now refuses paid mode until
 that separate integration is verified. NIV-53 remains open; budget sizing and passing offline tests do not establish
 live coaching quality or satisfy grant admission.
+
+### PR candidate on current main
+
+The NIV-53 code candidate `b87dd6a` is rebased onto `033b600`, including NIV-60/PR #54. Both acceptance histories and
+decisions are retained. Fresh combined checks passed all typechecks and **2,034 tests** (144 domain, 1,103 engine,
+787 desktop), with no failures or skips; built coach UI **13/13**, four real-engine RPC cases, fresh packaged coach
+checks **1 passed, 12 stand-in-only skips**, and fresh Windows/native/WSL UI **18/18**. The final documentation record
+changes no runtime code. All 12 failed-run evidence hashes still match; no new paid run was made. The historical
+frozen recipes do not identify the rebased PR candidate. Host-ledger admission and a newly frozen useful live coach
+journey remain necessary before closing NIV-53; NIV-52 remains assessment-only.

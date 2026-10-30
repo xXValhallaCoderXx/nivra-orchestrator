@@ -4,8 +4,10 @@
 answer.** The initial acceptance added tooling only. The coach response-budget follow-up below raises its completion
 allowance and fixes its context reservation; visible subtasks and other workflows' limits remain separate.
 
-The separate `feature/niv-53-completion` worktree starts at latest fetched main `06dc05ad269231ee4da52e510142fb9c2bb72e2e`.
-Changes are local and uncommitted. The original NIV-60 checkout and historical candidates were not edited.
+The separate `feature/niv-53-completion` worktree initially started at main `06dc05ad269231ee4da52e510142fb9c2bb72e2e`.
+The early frozen candidates below include uncommitted acceptance tooling. The branch was subsequently committed and
+rebased onto main `033b600` for PR review; the fresh combined checks are recorded at the end. The original NIV-60
+checkout and historical candidates were not edited.
 
 ## Delivered
 
@@ -132,3 +134,26 @@ request and single-use approval did not replace that required grant. The helper 
 claiming another recipe or reading credentials. Coach grant integration must be verified separately; this change
 does not silently wire all of NIV-66 or expand the shared monthly pool. The NIV-52 mission-review grant assessment
 is separate and has not changed mission-review code here.
+
+## PR candidate after main integration
+
+Code candidate `b87dd6a` is rebased onto main `033b600`, including PR #54/NIV-60. The three documentation append
+conflicts retain both tracks' records; D63 remains NIV-60's and D64 the coach correction. The shared ModelClient
+retains NIV-60's dynamic grant selection alongside the coach's opt-in numeric diagnostic. No target, supervisor,
+staging source, dependency, operating-guide or mission-review implementation changed in this PR.
+
+Fresh combined checks, under `.artifacts/niv53/pr/`:
+
+| Check | Result |
+| --- | --- |
+| `pnpm verify` | 2,034 passed: domain 144, engine 1,103, desktop 787; none skipped. |
+| Built coach UI | 13 passed. |
+| Real engine through `apps/engine/scripts/rpc.ts` | All four cases passed; 8,000-token reports and listing/inference counts unchanged. |
+| Fresh Linux package and targeted coach suite | 1 passed, 12 skipped because packaged builds ignore the stand-in switches. |
+| Fresh staged Windows build and UI | 18 passed, none skipped; release-home guard passed. |
+| Diff and retained evidence | All 17 changed paths inspected; no generated artifacts or credentials committed. All 12 original failed-run evidence hashes match. |
+
+The documentation-only record follows the tested code. Earlier frozen recipes remain historical receipts of the
+source/build hashes they name; they do not identify this rebased PR candidate. Before any future paid acceptance,
+verify host-ledger grant wiring and freeze a new concrete recipe from the actual candidate. No further paid run was
+made while preparing this PR. NIV-53 remains open for that admission and useful live-coaching evidence.
