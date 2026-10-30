@@ -3634,3 +3634,77 @@ above. No assertion/deadline was weakened and no test was removed or skipped to 
 
 No paid calls ran. This evidence establishes these edge cases and their integration without adding a live-model
 preference-compliance claim. The PR remains for re-review; these results do not authorise merging it.
+
+## Council evaluation late cancellation and truthful timeout evidence (NIV-48) — 30 October 2026
+
+Source verified locally at `86d91b9e11163a563d5ac575125894daa6d6e823`, published unchanged as
+`a0e9dea714defaea97976d8cee83c43cc6828af1`. Both have Git tree `033043a0ee5e407a515f0002d39801610876e33d`,
+based on main `8fb205541f70ba922146367a395aa45401a60014`. Publication through the connected GitHub app changes commit
+metadata, not files. Later changes in this PR are documentation only.
+
+The implementation is confined to the council evaluation batch script and its tests, in the separate `feature/niv-48`
+worktree. There are no engine-runtime, host/preload, preferences, task worker, budget-ledger, queue, UI, dependency or
+model-migration changes. Protocol 21, frozen fixtures and the approval digest are unchanged.
+
+| Scenario | Evidence |
+| --- | --- |
+| One polling turn misses both run windows | A fake clock advances beyond cancellation and give-up while hard batch time remains. Exactly one intent and one bounded cancellation call occur; no fresh reconciliation wait is opened. The result remains unresolved with unknown request usage, an accurate late-cancellation note and no next arm. |
+| Original ordering restored | Before the fix, the new stdio regression failed with zero cancellation entries instead of one. A separate mutation of the fixed source, putting give-up before cancellation, reproduced the same failure. Source bytes were restored exactly; all 18 new deadline cases then passed. |
+| Earlier cancellation, rejected request or lost acknowledgement | Deterministic RPC traces show no duplicate intent/request and no retry. The note distinguishes acknowledgement from an unacknowledged outcome; neither establishes termination by itself. |
+| Journal consumes available time | Dispatch uses the remainder after the journal callback: 100 ms in the partial-consumption case. If the journal exhausts the batch allowance, intent is retained and no RPC starts. |
+| Hard deadline reached or crossed | At and after the cap, no further cancellation/collection RPC starts. The preceding summary remains available, status stays unknown and request usage stays null. A fractional-millisecond remainder starts no manufactured 1 ms request and does not falsely claim full expiry. |
+| Collection expires between reads or a later read fails | Each read checks the same fixed allowance. Prior summaries and a 500-event page are retained; no subsequent page/report call is started after exhaustion. Incomplete evidence is reported and stops the batch rather than becoming a successful or zero-usage record. |
+| Ordinary completion/cancellation and unresolved resume | Existing real-engine/stdio tests pass against loopback stand-ins. The ordinary cancelled run proceeds to the next arm; the stuck-run test retains its watchdog, numeric bounds, journal order and resume/no-resend assertions. The new late-wake stdio case likewise records one run start across resume. |
+
+Final verification on the implementation revision:
+
+- Engine typecheck passed.
+- Focused `test/council-eval.test.ts`: **36/36 passed**, including all 18 new deadline cases, no failures/skips.
+- After the expected ordering-mutation failure and byte-for-byte restoration, the **18/18 deadline cases passed**.
+- One final `pnpm verify`: all typechecks and **1,927 tests passed** (140 domain, 720 desktop, 1,067 engine), with
+  zero failures, cancellations or skips.
+- The full diff and untracked-file review found only the intended script, tests and documentation. No dependency,
+  frozen-input, protocol or generated-output changes are included.
+
+Ignored receipts are under `.artifacts/niv48/` in the implementation worktree: `regression-before.log`,
+`regression-after.log`, `ordering-mutant.log`, `final-deadline-cases.log`, `focused.log` and `verify.log`.
+The failing before/mutation checks are intentional evidence that the regression detects missing cancellation; they
+are not passing production runs.
+
+Desktop E2E, packaged and Windows checks were not run because this change is script/test-only. No paid evaluation,
+real provider call, credential provisioning or real release-home operation was performed. Existing candidate builds and
+evidence remain untouched. This implements the cancellation cleanup independently of NIV-71 / PR 49; merging remains
+with Nate.
+
+### PR #50 integration with current main (30 October 2026)
+
+Merged main `60c121667db3ee22912ee3717db1d871d48ee83b` into the reviewed NIV-48 head
+`f825f827391e6399987d8d0890599de292b941f1`, producing combined revision
+`00f875f5b0bf70900f1158d99a14491c1688e28f`. Only `acceptance.md` and `development.md` conflicted. Each resolution
+contains current main's complete document followed by the complete NIV-48 additions from the reviewed head, with
+neither ticket's documentation removed or rewritten. This receipt is appended after verification.
+
+The council script and its test remain byte-for-byte identical to `f825f82`. Relative to current main, the only
+non-document changes are still `apps/engine/scripts/council-eval/batch.ts` and `apps/engine/test/council-eval.test.ts`.
+Engine-runtime, desktop, preload, domain, dependency, staging and packaging files match main. The combined revision
+uses protocol 22 from NIV-71; the preceding protocol-21 receipt describes the earlier standalone NIV-48 revision.
+
+Verification of the combined revision on Node 24.21.0 and pnpm 10.4.1:
+
+- Focused `test/council-eval.test.ts`: **36/36 passed**, zero failures/skips, including the late-cancellation,
+  partial-evidence and unresolved/no-resend cases. It ran before the full suite.
+- `env TMPDIR=/var/tmp taskset --cpu-list 0-1 pnpm verify`: all typechecks and **1,939 tests passed**
+  (141 domain, 724 desktop, 1,074 engine), zero failures, cancellations or skips.
+- The real engine through `apps/engine/scripts/rpc.ts`: keyless `doctor` and `hello` passed in a disposable home,
+  using a disposable repository and no sharing consent. Provider credential variables were removed from the child
+  environment, and the disposable home/repository were removed afterwards.
+- All 545 tracked non-document files retained their frozen hashes throughout verification. Manifest fingerprint:
+  `852dd8138179795dc66ec498de0330421d8ddb8aa00ae0bbbd11b8dd3610920c`.
+
+Ignored receipts are under `.artifacts/niv48-integration/`: `focused.log`, `verify.log`, `rpc-smoke.json`,
+`rpc-doctor.log`, `rpc-hello.log`, `source-manifest.json` and `documentation-resolution.json`. The final diff and
+untracked files were inspected; no generated output, dependencies or credential material were added.
+
+Desktop UI, packaged and Windows checks were not repeated for this script/test/documentation integration: their
+runtime sources are identical to current main. No paid provider/cloud calls ran and no checks were weakened or
+skipped to obtain a passing result. PR #50 remains unmerged for the person to review this combined revision.
