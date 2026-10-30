@@ -364,7 +364,7 @@ async function setup(chat: (request: StubRequest) => Reply, models: Array<{ id: 
   return { stub, engine };
 }
 
-async function start(engine: EngineProcess, options: { packet?: MissionReviewPacket; preferences?: PreferenceSnapshot; panel?: "council" | "single"; packetDigest?: string } = {}) {
+async function start(engine: EngineProcess, options: { packet?: MissionReviewPacket; preferences?: PreferenceSnapshot; panel?: "council" | "single"; packetDigest?: string; models?: string[] } = {}) {
   const packet = options.packet ?? PACKET;
   const preferences = options.preferences ?? PREFERENCES;
   const input = {
@@ -375,7 +375,7 @@ async function start(engine: EngineProcess, options: { packet?: MissionReviewPac
     preferencesDigest: await preferencesDigest(preferences.records),
   };
   const clientRequestId = randomUUID();
-  const budget = { feature: "mission-review" as const, workflow: "review", id: randomUUID(), requestId: clientRequestId, models: [packet.model ?? MODEL], modelListings: 1, catalogueVersion: "test-unpriced", rates: [], productiveMicros: null, finalisationMicros: null, productive: { requests: 2, outputTokens: 4000 }, finalisation: { requests: 1, outputTokens: 4000 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 } };
+  const budget = { feature: "mission-review" as const, workflow: "review", id: randomUUID(), requestId: clientRequestId, models: options.models ?? [packet.model ?? MODEL], modelListings: 1, catalogueVersion: "test-unpriced", rates: [], productiveMicros: null, finalisationMicros: null, productive: { requests: 2, outputTokens: 4000 }, finalisation: { requests: 1, outputTokens: 4000 }, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 } };
   const run = await engine.client.call("runs.start", { clientRequestId, budget, workflowId: "review", input, context: { preferences, sharing: { modelContext: false }, packet } });
   return { run, input, clientRequestId, budget };
 }
@@ -453,6 +453,23 @@ describe("a mission review over stdio (NIV-52)", () => {
     const unlisted = await setup(scripted(COUNCIL));
     const notNvidia = await finished(unlisted.engine, (await start(unlisted.engine, { packet: { ...PACKET, model: "Qwen/Qwen3-30B" } })).run.id);
     assert.deepEqual([failedEvent(notNvidia)?.data?.["kind"], unlisted.stub.chats().length], ["model-unavailable", 0], "a named model must be an NVIDIA one");
+  });
+
+  it("selects only granted models when the preferred models are absent, including case-insensitive grant matches", async () => {
+    const outside = "nvidia/unpermitted-fallback", permitted = "nvidia/permitted-fallback";
+    const { engine, stub } = await setup(scripted(COUNCIL), [{ id: outside, context_length: 131_072 }, { id: permitted, context_length: 131_072 }]);
+    const { run } = await start(engine, { models: [MODEL, permitted.toUpperCase()] });
+    assert.equal((await finished(engine, run.id)).status, "succeeded");
+    assert.equal((await reportOf(engine, run.id))?.route?.model, permitted);
+    assert.deepEqual(stub.chats().map((chat) => chat.body?.model), [permitted, permitted, permitted]);
+  });
+
+  it("refuses without inference when none of the listed fallback models is granted", async () => {
+    const { engine, stub } = await setup(scripted(COUNCIL), [{ id: "nvidia/unpermitted-fallback", context_length: 131_072 }]);
+    const { run } = await start(engine);
+    const page = await finished(engine, run.id);
+    assert.deepEqual([page.status, failedEvent(page)?.data?.["kind"], stub.chats().length], ["failed", "model-unavailable", 0]);
+    assert.equal(await reportOf(engine, run.id), null);
   });
 
   it("refuses before any request: other profile versions, a single reviewer, a packet it wasn't asked for, a project preference, text that masking would change", async () => {

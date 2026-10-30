@@ -61,16 +61,18 @@ const isMission = (packet: ReviewContext["packet"]): packet is MissionReviewPack
 
 /**
  * The model a review may use: the one the listing gives (D22), or, when a mission packet names one, exactly that model,
- * found in the listing (NIV-52). Any other is refused here, before any inference request: a listing isn't one.
+ * found in the listing (NIV-52). Candidates must also be permitted by the run's grant when present. Any other is
+ * refused here, before any inference request: a listing isn't one.
  */
-export function reviewModel(packet: ReviewContext["packet"], listed: readonly string[]): string {
+export function reviewModel(packet: ReviewContext["packet"], listed: readonly string[], granted?: readonly string[]): string {
+  const candidates = granted ? listed.filter((id) => granted.some((candidate) => candidate.toLowerCase() === id.toLowerCase())) : listed;
   if (isMission(packet) && packet.model !== null) {
     const named = packet.model;
-    const match = isNvidiaModel(named) ? listed.find((id) => id === named) : undefined;
+    const match = isNvidiaModel(named) ? candidates.find((id) => id === named) : undefined;
     if (!match) throw failure("model-unavailable", `this review may use only ${named}, and this key's listing ${listed.length ? "doesn't include it" : "is empty"}, so nothing was sent`);
     return match;
   }
-  const model = pickNemotron(listed);
+  const model = pickNemotron(candidates);
   if (!model) throw failure("model-unavailable", "no NVIDIA model is listed for this key");
   return model;
 }
@@ -174,7 +176,7 @@ export function createReviewWorkflow(deps: ReviewDeps) {
       const { context: sent, key } = allowed(runId);
       const client = clientFor(key, runId, "mission-review-listing");
       const models = await client.listModels({ signal: abortSignal, timeoutMs: 30_000 });
-      const model = reviewModel(sent.packet, models.ids);
+      const model = reviewModel(sent.packet, models.ids, deps.budget?.(runId)?.models);
       deps.setMeta(runId, { route: { provider: "nebius", endpoint: deps.endpoint.kind, model } });
       const contextLength = models.contextLengths.get(model) ?? null;
       deps.recorder.output(runId, "prepare", `Model ${model}`, { model, contextLength });

@@ -138,6 +138,81 @@ it("retains a grant when its complete seal fails validation and settles it once 
   assert.equal(stub.requests.length, 0);
 });
 
+for (const action of ["cancel", "delete"] as const) it(`does not dispatch after ${action} returns while budget reconciliation is waiting`, async (t) => {
+  const { host, stub } = await setup();
+  await host.setCompanionLimit(6, false, null, true);
+  const original = EngineSupervisor.prototype.call;
+  let armed = false, reads = 0, waiting = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  t.after(release);
+  const starts: string[] = [];
+  const changed = t.mock.method(EngineSupervisor.prototype, "call", async function (this: EngineSupervisor, method: Parameters<typeof original>[0], params: never) {
+    if (method === "runs.start") starts.push((params as { clientRequestId: string }).clientRequestId);
+    const result = await original.call(this, method, params);
+    if (method !== "budget.journal") return result;
+    // Keep the first review's grant open, then hold the next review's dispatch reconciliation, after admission.
+    if (armed && ++reads === 2) { waiting = true; await gate; }
+    return { ...(result as ResultOf<"budget.journal">), seal: null };
+  });
+  const previous = await mission(host);
+  await start(host, previous);
+  assert.equal((await finish(host, previous.id)).status, "answered");
+  const selected = await mission(host);
+  const preview = await host.prepareMissionReview(selected.id, selected.tasks, { requiredModel: MODEL });
+  armed = true;
+  const view = await host.startMissionReview(selected.id, selected.tasks, preview.expected, { requiredModel: MODEL });
+  const reviewId = view.reviews[0]!.id;
+  await waitFor(() => waiting, "The dispatch reconciliation did not reach its gate.");
+  assert.equal(starts.includes(reviewId), false);
+  if (action === "cancel") await host.cancelMissionReview(selected.id, reviewId);
+  else await host.deleteMission(selected.id);
+  release();
+  await host.getCompanionUsage();
+  await host.getCompanionUsage();
+  if (action === "cancel") assert.equal((await finish(host, selected.id)).status, "cancelled");
+  assert.equal(starts.includes(reviewId), false, "no runs.start may be sent after the stop returned");
+  assert.equal(stub.chats().length, 3, "only the earlier completed review called the provider");
+  changed.mock.restore();
+  const usage = await host.getCompanionUsage();
+  assert.deepEqual([usage.used, usage.reserved, usage.remaining], [3, 0, 3], "the undispatched grant releases its unused allowance");
+});
+
+it("refreshes the engine summary after a cancelled review settles in the live collector", async (t) => {
+  const { root, stub, host: unused } = await setup((request) => ({ ...answer(request), delayMs: 3000 }));
+  await unused.shutdown();
+  const originalResult = Host.prototype.runResult;
+  const originalCancel = Host.prototype.cancelMissionReview;
+  const originalMission = Host.prototype.mission;
+  let cancelling = false, cancelReturned = false, settled = false, finalReads = 0;
+  let earlier: Awaited<ReturnType<typeof originalResult>> | null = null;
+  t.mock.method(Host.prototype, "mission", function (this: Host, missionId: string) {
+    const view = originalMission.call(this, missionId);
+    if (cancelReturned && view.reviews[0]?.status === "cancelled") settled = true;
+    return view;
+  });
+  t.mock.method(Host.prototype, "runResult", async function (this: Host, runId: string) {
+    if (!cancelling) {
+      earlier = await originalResult.call(this, runId);
+      assert.equal(earlier.summary.status, "running");
+      throw new Error("Offline polling interruption");
+    }
+    // The engine summary read before the settling wait predates the completed cancellation.
+    if (!settled) return earlier!;
+    finalReads++;
+    return originalResult.call(this, runId);
+  });
+  t.mock.method(Host.prototype, "cancelMissionReview", async function (this: Host, missionId: string, reviewId: string) {
+    cancelling = true;
+    const view = await originalCancel.call(this, missionId, reviewId);
+    cancelReturned = true;
+    return view;
+  });
+  const result = await collectHostMissionReview({ packet, root: join(root, "collector"), home: join(root, "collector-engine"), logPath: join(root, "collector.log"), apiKey: "synthetic-mission-test-key-only", tokenFactoryUrl: stub.url, followMs: 20_000 });
+  assert.ok(finalReads >= 1, "the collector must refresh the engine summary after waiting for the review to settle");
+  assert.deepEqual([result.summary?.status, result.cancellation, result.unresolved, result.engineClose], ["cancelled", "confirmed", null, "returned"]);
+});
+
 for (const shutdownFails of [false, true]) it(`always shuts down after reconciliation fails${shutdownFails ? " and reports both failures" : ""}`, async (t) => {
   const { root, stub, host: unused } = await setup((request) => { const reply = answer(request); return { ...reply, body: { ...(reply.body as object), model: MODEL } }; });
   await unused.shutdown();

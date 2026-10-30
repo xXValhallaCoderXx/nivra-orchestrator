@@ -84,10 +84,6 @@ export async function collectHostMissionReview(options: { packet: MissionReviewP
             try { await host.cancelMissionReview(missionId, review.id); }
             catch { cancellation = "failed"; problems.push("The cancellation request failed; this doesn't establish that the review stopped."); }
           }
-          if (review?.runId) {
-            try { summary = (await host.runResult(review.runId)).summary; }
-            catch { problems.push("Couldn't read the review's final engine status."); }
-          }
           const collectUntil = performance.now() + 5_000;
           while (review && (review.status === "submitting" || review.status === "running") && performance.now() < collectUntil) {
             await new Promise((resolve) => setTimeout(resolve, 50));
@@ -95,6 +91,10 @@ export async function collectHostMissionReview(options: { packet: MissionReviewP
           }
           review = host.mission(missionId).reviews[0] ?? review;
           report = review?.report ?? report;
+          if (review?.runId) {
+            try { summary = (await host.runResult(review.runId)).summary; }
+            catch { problems.push("Couldn't read the review's final engine status."); }
+          }
           if (summary?.status === "cancelled") cancellation = "confirmed";
           if (startRequested && (!summary || summary.status === "running" || summary.status === "queued")) unresolved = "No terminal run state was observed; termination is unresolved. The original host request is never resent.";
         }

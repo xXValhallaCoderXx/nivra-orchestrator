@@ -150,3 +150,21 @@ decision is D65. The mission implementation and recovery regressions remain thos
 revision is verified afresh before publication because main also changes the shared model client. Its commands,
 outcomes and exact head are recorded in `.artifacts/niv52-review/pr-checks/receipt.json`, separately from the original
 final-check receipts. No paid acceptance or merge to main is performed by PR preparation.
+
+### PR #59 review corrections after `45c376b`
+
+- After budget reconciliation finishes, the host checks that the review's link still exists and is submitting,
+  and checks cancellation again before marking its grant dispatching or sending `runs.start`. Cancel and mission
+  deletion during a held reconciliation send no run; the guard-verified undispatched grant can release its capacity.
+- The live collector refreshes the engine summary after its settling wait, before recording confirmed cancellation
+  or unresolved termination. An earlier running summary no longer overrides a completed cancellation.
+- Review model selection intersects the provider listing with the grant before choosing a preferred model or a
+  fallback. Grant matching is case-insensitive, and a listing with no permitted model fails without inference.
+
+Five new offline regression cases reproduced these defects before the fixes. The affected host, ledger, mission,
+saved-plan review and collector suites pass **105 tests**, with no skips. Development failures and corrected reruns
+are retained in `.artifacts/niv52-review/review-followup-*.log`.
+
+The required final checks use one clean committed revision, recorded with each command, log digest and outcome in
+`.artifacts/niv52-review/review-followup-checks/receipt.json`. The PR update reports that revision's actual results.
+Merge and live acceptance remain on hold; this correction pass reads no live credential and makes no paid call.

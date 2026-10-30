@@ -132,6 +132,8 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
   Budget and usage and blocked mission previews explain why. Restore the original records and refresh. Only a
   validated complete seal releases unused capacity, and repeated/concurrent reconciliation is idempotent.
   The live collector always attempts shutdown independently of reconciliation and records both failures separately.
+  Mission dispatch rechecks cancellation and deletion after reconciliation; model selection stays within its grant.
+  The collector refreshes the engine summary after waiting for cancellation to settle.
   Focused regressions: `pnpm --filter @nivra/desktop exec node --test test/mission-review-budget.test.ts
   test/budget-mission-review.test.ts test/host-budget.test.ts` (one command).
 - **The window's tests** (`e2e/missions.spec.ts`) drive missions with the token factory stub: the council's roles are

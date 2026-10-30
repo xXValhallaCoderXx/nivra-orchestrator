@@ -4391,6 +4391,17 @@ export class Host {
     if (request.workflowId === "review" && "kind" in request.context.packet && request.context.packet.kind === "mission") {
       try {
         await this.#reconcileCompanionBudgets();
+        // Reconciliation may wait on another engine. A stop or deletion during that wait must prevent dispatch.
+        const turn = getTurn(workspace, turnId);
+        if (!turn || turn.status !== "submitting") {
+          this.#submissions.delete(turnId);
+          return;
+        }
+        if (stopped() || turn.cancelRequested) {
+          this.#submissions.delete(turnId);
+          this.#settle(turnId, { status: "cancelled", errorMessage: `It was stopped before it was sent, so ${nothing}.` });
+          return;
+        }
         const current = this.#budget();
         if (current.recovery || !missionAdmission || (currentPolicy(workspace)?.version ?? null) !== missionAdmission.policyVersion) throw new Error("The saved allowance changed after this review was previewed. Preview the review again under the current policy.");
         const dispatched = markDispatching(workspace, missionAdmission.grant.id, state.info.homeId, Date.now(), current.guard.last());
