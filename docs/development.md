@@ -924,3 +924,34 @@ xvfb-run -a pnpm --filter @nivra/desktop test:e2e --project=built task-run.spec.
 
 Packaged apps ignore the stand-in endpoint switches, so those task journeys remain built-app evidence; the packaged
 suite and Windows project cover their own stated scenarios.
+
+### Confirmed preferences in coding runs (NIV-71)
+
+The task preview/start bridge accepts optional temporary choices. The host resolves confirmed personal preferences
+and the task's own project preferences, screens them and the choices for credentials, and binds their digests into
+preview v5. Relevant edits, deletion, supersession or changed choices require a fresh preview; an unrelated project's
+edit does not. At acceptance the host rechecks after its asynchronous prerequisites. The accepted context is retained
+in memory through engine startup and deep-copied/frozen by the scheduler; subsequent requests use that same snapshot.
+
+The actual worker prompt carries scope/intent, choices and D23 precedence, inside the existing input budget. Nothing
+in that text grants consent, relaxes final checks or changes execution/spending limits. Both digests and explicit
+context are mandatory for new requests under protocol 22. Historical stored input permits absent digests only for
+reading; it cannot reconstruct or replay private context. `rpc.ts` requires explicit preference and choice context
+(including explicit empty records/choices) and constructs matching digests from it. Omitted context is refused rather
+than silently constructing an empty snapshot.
+
+Choices survive a Preferences detour only in window memory. Return checks task, brief and project identity and refreshes
+the preview. Leaving Settings for the task list does not cancel the originating preview. Explicit preview Cancel,
+switching tasks or an accepted Start clears choices; a refused or failed Start before acceptance keeps them. A brief revision invalidates its preview without discarding that task’s choices; a repository
+reassignment cannot inherit the former project’s choices. They never enter draft persistence, the brief, knowledge or the canonical preference store.
+
+Focused checks include the NIV-71 cases in desktop `host.test.ts`, domain task-contract tests, engine `task-engine`,
+`task-run` and `task-worker` tests, and `task-preferences.spec.ts`. The host test captures production model requests,
+edits preferences while the worker is active, verifies the next attempt's fresh context and scans engine/Mastra/workspace
+persistence for private canaries. Credential tests cover recognised patterns and exact saved-key values without echoing
+those values. The worker also rechecks frozen input before every request, including hand-in, so a newly saved key
+matching private input stops another send without echoing the value. Existing required-check, admission, consent and cancellation regressions remain in force.
+
+Run built task/preference journeys against loopback stand-ins, then packaged and Windows UI checks with fresh runtimes.
+The keyless packaged preference journey admits no provider work; it checks empty state, Preferences return, stale
+preview, failed starts, cancellation and task switching. Record those separately from actual worker-request evidence.

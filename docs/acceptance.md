@@ -3473,3 +3473,58 @@ current full-access runner. No tests were skipped or weakened to accommodate tha
 Packaged/Windows suites were not repeated for this follow-up: no packaging, main-process, preload, target or supervisor
 source changed. Their earlier results above remain evidence for their labelled revisions. No paid validation was
 performed, protocol 21 is unchanged, and the PR remains unmerged for re-review.
+
+## NIV-71: confirmed preferences in coding runs (30 October 2026)
+
+Implemented on `feature/niv-71` in the separate `nivra-orchestrator-niv71` worktree, based on refreshed main `f0de67b`.
+The tested implementation revision is `cb73a1be4182b215ad244cc6b668a78e42d5a730`; the original checkout is not the
+implementation workspace. The production/runtime-helper manifest covers 265 files at
+`.artifacts/niv71/source-manifest.json`, fingerprint
+`a9ab246f7c6e821e4dd05a64346a88a964752a4b02f5e530a82cdd5441241ffb`.
+
+The task preview shows confirmed personal/current-project preferences with scope and intent, plus bounded temporary
+choices. The host binds both digests, screens credentials, rechecks after asynchronous prerequisites and passes the
+accepted snapshot to the actual worker. Its requests retain that frozen context; subsequent attempts receive current
+records. Relevant edits, deletion, supersession or changed choices require another preview; another project's edits
+remain valid. New requests require both digests and explicit context, while historical input stays readable. The CLI
+also refuses omitted preference/choice context rather than silently manufacturing an empty snapshot.
+
+Choices survive Preferences, including a return through the task list, in window memory. Refused/failed starts before
+acceptance retain them; explicit preview cancellation, switching tasks and accepted Start clear them. They never change
+the brief, saved profile or draft persistence. Credential checks cover recognised shapes and exact saved-key values,
+and the worker checks again before each request, including hand-in, for a vault change during the run. Refusals never
+echo those values. Required checks and engine admission remain authoritative even when a preference asks to waive them.
+
+Verification uses synthetic credentials and local/loopback stand-ins, with no paid provider calls:
+
+| Check | Result |
+| --- | --- |
+| `env TMPDIR=/var/tmp taskset --cpu-list 0-1 pnpm verify` | 1,870 passed: 141 domain, 724 desktop, 1,005 engine; zero skipped/failed |
+| Focused domain contracts | 141 passed, including mandatory new-request digests, explicit empty context, canonical choices and historical reads |
+| NIV-71 host regressions | 4 passed; captured actual worker requests, confirmed scope isolation and frozen context across requests, verified the next attempt's current records, checked asynchronous stale starts and credential refusals, and scanned engine/Mastra/workspace persistence for private canaries |
+| Engine/worker/scheduler focus | 64 passed before the final per-request credential guard; the final worker suite then passed 32/32, including the new dynamic-vault guard and actual multi-request/hand-in prompt construction |
+| Final built app under Xvfb | 17 passed across task run/apply/journey, all three preference/choice cases and companion lifecycle; zero skipped/failed |
+| Final Linux packaged app under Xvfb | 27 passed, zero skipped/failed, across app security/bridge, task preferences, planning, shared-budget recovery and companion lifecycle |
+| Fresh final runtimes and Windows/WSL harness | Runtime staging smoke checks passed; final harness passed 37/37, including release-home protections |
+| Native Windows UI | 15 passed, zero skipped/failed, after rebuilding/copying the final development package |
+| Native Windows identity | Source, installed and PowerShell hashes matched before and after for app.asar, the Windows engine bundle and the Linux runtime tarball; app.asar SHA-256 `94186e9b2eed0d6bb3b077e8da42b60c84095c422ebb3bb562b2be5a2c6366a0`, 3,579,949 bytes; Windows runtime content hash `8b1c429a753f9a7b` |
+| Real engine through rpc.ts | Explicit context produced both safe digests and the expected no-sharing refusal without private-text persistence; omitted preferences/choices were refused before engine startup |
+| Final typechecks | Workspace typechecks and the final CLI/engine typecheck passed |
+
+Receipts are ignored under `.artifacts/niv71/`: `verify.log`, `host-new-2.log`, `worker-final.log`, `built-reviewed-final.log`, `packaged-reviewed-final.log`, `stage-final.log`, `targets-windows-final.log`, `windows-ui-final.log`,
+`windows-before.json`/`windows-after.json`, `rpc-final.json` and the named typecheck logs. Earlier candidate receipts
+remain separate.
+
+A final preference test initially assumed that external brief edits automatically refresh the task page; the existing
+page refreshes on actions. Its corrected scenario explicitly exercises the stale Start refusal and Refresh preview,
+retaining the choices and admitting no run. Initial contract-transition attempts exposed fixture mismatches, which were corrected without changing production
+requirements. An overlapping focused-host/full-suite attempt exhausted available WSL memory and hit timing failures;
+the redundant focused run and overloaded verification were stopped, with logs retained in `desktop-focused.log` and
+`verify-overloaded.log`. The final source verification uses lower CPU affinity to reduce worker concurrency, with the
+same assertions, deadlines and complete test set. The first Windows harness attempt also failed to replace its
+disposable runtime cache under memory pressure; fresh-runtime retries passed. No test was skipped or weakened to
+obtain a passing result.
+
+No dependency, database schema, model, approval boundary or budget authority changed. NIV-46's database-permission
+work remains separate. These checks establish input construction, lifetime, privacy and integration mechanics; they
+do not establish live-model preference compliance or an ability to prevent model-authored paraphrases under D22.
