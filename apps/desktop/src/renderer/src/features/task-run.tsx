@@ -486,7 +486,7 @@ export function RunLauncher({
         {preview ? (
           <RunPreview choices={choices} changed={changed} onChoices={changeChoices} onRefresh={() => void refresh()} onPreferences={onPreferences ? () => { request.current++; onPreferences({ revision: view.revision, briefVersion: view.brief.version, projectId, choices: [...choices] }); } : undefined} preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={cancel} />
         ) : (
-          <Stack p="md" data-testid="task-run-preview-body" style={{ overflowY: "auto" }}>
+          <Stack p="md" data-testid="task-run-preview-draft" style={{ overflowY: "auto" }}>
             {error ? <Alert color="red" data-testid="task-run-preview-error">{error}</Alert> : <Text size="sm" c="var(--nivra-text-3)">{busy ? "Working out what a run would send, on the repository’s own engine. Nothing is sent." : "Refresh the preview to review these choices and what the run would send. Nothing is sent."}</Text>}
             <RunChoicesEditor choices={choices} changed={changed} busy={busy} onChoices={changeChoices} onRefresh={() => void refresh()} />
             <Group justify="flex-end"><Button variant="default" onClick={cancel}>Cancel</Button></Group>

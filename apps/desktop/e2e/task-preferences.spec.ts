@@ -130,7 +130,7 @@ test("a revised brief requires another preview while retaining this task's tempo
 });
 
 test("invalid choices remain editable after returning from Preferences, and can be corrected or removed", async () => {
-  const preview = page.getByTestId("task-run-preview-body");
+  const preview = page.getByTestId("task-run-preview");
   await preview.getByRole("button", { name: "Cancel", exact: true }).click();
   // The previous scenario revised the brief; open its current view before testing a validation-only detour.
   await goTo(page, "tasks"); await page.getByRole("button", { name: "Preference preview fixture", exact: true }).click();
