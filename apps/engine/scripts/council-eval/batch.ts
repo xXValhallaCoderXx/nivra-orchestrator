@@ -20,6 +20,13 @@ import type { RunRecord } from "./score.ts";
 const ENTRY = fileURLToPath(new URL("../../src/main.mjs", import.meta.url));
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** Internal timing seam: tests advance the monotonic clock without starving the real event loop. */
+export interface BatchClock {
+  now(): number;
+  pause(ms: number): Promise<void>;
+}
+const CLOCK: BatchClock = { now: () => performance.now(), pause };
+
 /**
  * The most each wait around the runs may take. The batch's 60 minutes count them all from its engine's start: a run is
  * started only if the waits around it and its own windows, each at its limit, could end within them, and no wait goes
@@ -148,6 +155,7 @@ export interface BatchOptions {
   deadlineMs?: number;
   reconcileMs?: number;
   engineEntry?: string;
+  clock?: BatchClock;
   log: (line: string) => void;
 }
 
@@ -165,38 +173,130 @@ export function stopFor(record: RunRecord, frozen: Frozen, mode: "stub" | "live"
 }
 
 /** At most `capMs`, and never past `until` on the monotonic clock: what a call may wait. 0 when `until` has passed. */
-const within = (until: number, capMs: number) => Math.max(0, Math.min(capMs, Math.floor(until - performance.now())));
+const within = (until: number, capMs: number, now: number) => Math.max(0, Math.min(capMs, Math.floor(until - now)));
 
-/** How a run ended, as the evaluation keeps it, read from its own engine before `until`: summary, every event and the report. */
-async function collect(engine: EvalEngine, fixture: FixtureId, arm: Arm, clientRequestId: string, runId: string, until: number): Promise<{ record: RunRecord; events: RunEvent[] }> {
-  const timeoutMs = () => Math.max(1, within(until, WAITS.collectMs));
-  const summary: RunSummary = await engine.client.call("runs.get", { runId }, { timeoutMs: timeoutMs() });
+/** A collection can retain useful evidence even when a later read has no budget or fails. */
+interface Collected {
+  record: RunRecord;
+  events: RunEvent[];
+  incomplete: "deadline" | "read" | null;
+}
+
+class CollectionDeadline extends Error {}
+
+async function collect(client: Pick<RpcClient, "call">, fixture: FixtureId, arm: Arm, clientRequestId: string, runId: string, until: number, clock: BatchClock, lastSummary: RunSummary | null): Promise<Collected> {
+  const timeoutMs = () => {
+    const remaining = within(until, WAITS.collectMs, clock.now());
+    // Zero disables RpcClient's timer. Neither zero nor a manufactured 1 ms is safe after exhaustion.
+    if (remaining <= 0) throw new CollectionDeadline();
+    return remaining;
+  };
+  let summary = lastSummary;
+  let report: ReviewReport | null = null;
   const events: RunEvent[] = [];
-  for (let after = 0; ; ) {
-    const page = await engine.client.call("runs.events", { runId, after, limit: 500 }, { timeoutMs: timeoutMs() });
-    events.push(...page.events);
-    if (page.events.length < 500) break;
-    after = page.next;
+  let incomplete: Collected["incomplete"] = null;
+  try {
+    summary = await client.call("runs.get", { runId }, { timeoutMs: timeoutMs() });
+    for (let after = 0; ; ) {
+      const page = await client.call("runs.events", { runId, after, limit: 500 }, { timeoutMs: timeoutMs() });
+      events.push(...page.events);
+      if (page.events.length < 500) break;
+      after = page.next;
+    }
+    report = await client.call("runs.review", { runId }, { timeoutMs: timeoutMs() });
+  } catch (error) {
+    incomplete = error instanceof CollectionDeadline ? "deadline" : "read";
   }
-  const report: ReviewReport | null = await engine.client.call("runs.review", { runId }, { timeoutMs: timeoutMs() });
-  const failed = events.find((event) => event.type === "run.failed");
-  const kind = failed?.data?.["kind"];
+  const kind = events.find((event) => event.type === "run.failed")?.data?.["kind"];
   return {
     record: {
-      fixture,
-      arm,
-      clientRequestId,
-      runId,
-      status: summary.status,
+      fixture, arm, clientRequestId, runId,
+      status: incomplete ? "unknown" : summary!.status,
       failureKind: typeof kind === "string" ? kind : null,
-      summary,
-      report,
-      requests: report ? report.budget.used.requests : 0,
+      summary, report,
+      requests: incomplete ? null : report ? report.budget.used.requests : 0,
       events: events.length,
       note: null,
     },
     events,
+    incomplete,
   };
+}
+
+/** Internal follow/collection seam shared by the runner and deterministic deadline tests; not a wire contract. */
+export interface FollowOptions {
+  client: Pick<RpcClient, "call">;
+  fixture: FixtureId;
+  arm: Arm;
+  clientRequestId: string;
+  runId: string;
+  deadlineMs: number;
+  reconcileMs: number;
+  batchEnd(): number;
+  cancelIntent(why: "deadline" | "batch"): void;
+  clock?: BatchClock;
+}
+
+export async function finishRun(options: FollowOptions): Promise<{ record: RunRecord; events: RunEvent[] }> {
+  const { client, fixture, arm, clientRequestId, runId, deadlineMs, reconcileMs, batchEnd, cancelIntent } = options;
+  const clock = options.clock ?? CLOCK;
+  const startedAt = clock.now();
+  const lastAt = batchEnd() - WAITS.collectMs;
+  const cancelAt = Math.min(startedAt + deadlineMs, lastAt - reconcileMs);
+  const giveUpAt = Math.min(cancelAt + reconcileMs, lastAt);
+  let intent = false;
+  let attempted = false;
+  let acknowledged = false;
+  let late = false;
+  let summary: RunSummary | null = null;
+  let outcome: "ended" | "window" | "batch";
+  for (;;) {
+    const now = clock.now();
+    if (within(batchEnd(), 10_000, now) <= 0) { outcome = "batch"; break; }
+    // Cancellation comes before give-up, but never before the hard-budget check. Intent is durable before dispatch.
+    if (!intent && now >= cancelAt) {
+      intent = true;
+      cancelIntent(now >= startedAt + deadlineMs ? "deadline" : "batch");
+      const dispatchAt = clock.now();
+      const remaining = within(batchEnd(), 10_000, dispatchAt);
+      if (remaining <= 0) { outcome = "batch"; break; }
+      const settling = within(giveUpAt, 10_000, dispatchAt);
+      late = settling <= 0;
+      attempted = true;
+      await client.call("runs.cancel", { runId }, { timeoutMs: late ? remaining : Math.min(settling, remaining) })
+        .then(() => { acknowledged = true; }, () => undefined);
+      // The original giveUpAt is retained; no reconciliation window begins at the late send or acknowledgement.
+      continue;
+    }
+    if (now >= giveUpAt) { outcome = "window"; break; }
+    const wait = within(Math.min(intent ? giveUpAt : cancelAt, batchEnd()), 10_000, clock.now());
+    const seen = wait > 0 ? await client.call("runs.get", { runId }, { timeoutMs: wait }).catch(() => null) : null;
+    if (seen) {
+      summary = seen;
+      if (isTerminal(seen.status)) { outcome = "ended"; break; }
+    }
+    const delay = within(Math.min(intent ? giveUpAt : cancelAt, batchEnd()), 250, clock.now());
+    await clock.pause(delay);
+  }
+
+  const until = Math.min(clock.now() + (outcome === "ended" ? WAITS.collectMs : UNRESOLVED_READ_MS), batchEnd());
+  const collected = await collect(client, fixture, arm, clientRequestId, runId, until, clock, summary);
+  if (outcome === "ended" && collected.incomplete === null) return collected;
+  const run = `${fixture} ${arm} run`;
+  let reason: string;
+  if (outcome === "batch") {
+    if (clock.now() < batchEnd()) reason = `The batch budget had less than 1 ms left, so no new bounded request could be started for the ${run}.`;
+    else if (attempted) reason = `The batch's 60 minutes ran out before the ${run} could be confirmed ended.`;
+    else if (intent) reason = `Cancellation intent for the ${run} was recorded, but the batch budget expired before the request could be sent.`;
+    else reason = `The runner resumed too late to request cancellation of the ${run} within the batch's 60 minutes.`;
+  } else if (outcome === "ended") reason = `The ${run} was observed to end, but its complete evidence could not be collected.`;
+  else if (late) reason = `The runner requested cancellation of the ${run} with no time left for its original reconciliation wait. No new reconciliation window was opened.`;
+  else reason = `The ${run} was not observed to end within its original reconciliation window.`;
+  const cancellation = attempted ? acknowledged ? " The cancellation request was acknowledged." : " The cancellation request was not acknowledged; its outcome is unknown." : "";
+  const collection = collected.incomplete === "deadline" ? " Evidence collection did not finish within its budget." : collected.incomplete === "read" ? " The engine did not return complete evidence." : "";
+  const terminal = outcome !== "ended" && collected.record.summary && isTerminal(collected.record.summary.status) ? ` A later evidence read observed status ${collected.record.summary.status}.` : "";
+  const note = `${reason}${cancellation}${collection}${terminal} It is kept as unresolved, and the batch stopped. It is never sent again.`;
+  return { record: { ...collected.record, status: "unknown", requests: null, note }, events: collected.events };
 }
 
 /**
@@ -208,11 +308,13 @@ async function collect(engine: EvalEngine, fixture: FixtureId, arm: Arm, clientR
  */
 export async function runBatch(options: BatchOptions): Promise<{ records: RunRecord[]; stopped: string | null }> {
   const { frozen, out } = options;
+  const clock = options.clock ?? CLOCK;
+  const budget = (until: number, capMs: number) => within(until, capMs, clock.now());
   mkdirSync(join(out, "runs"), { recursive: true, mode: 0o700 });
   const journal = new Journal(out);
   const before = journal.read();
   // The batch's clock starts before its engine does: starting it is one of the waits its 60 minutes count.
-  const sessionStart = performance.now();
+  const sessionStart = clock.now();
   const { runner } = frozen.protocol;
   const deadlineOf = (arm: Arm) => options.deadlineMs ?? frozen.protocol.limits[arm].totalMs + runner.cancelMarginMs;
   const reconcileMs = options.reconcileMs ?? runner.reconcileMs;
@@ -221,7 +323,7 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
   const ended = new Set(before.filter((entry) => entry.type === "end").map((entry) => `${entry.fixture}:${entry.arm}`));
   const inflight = before.filter((entry): entry is Extract<JournalEntry, { type: "start" }> => entry.type === "start" && !ended.has(`${entry.fixture}:${entry.arm}`));
   let carried = previous + inflight.reduce((sum, entry) => sum + deadlineOf(entry.arm) + reconcileMs, 0);
-  const elapsed = () => carried + (performance.now() - sessionStart);
+  const elapsed = () => carried + (clock.now() - sessionStart);
   /** The batch's own end, on this session's monotonic clock. */
   const batchEnd = () => sessionStart - carried + runner.batchMs;
   /** Whether a wait of `ms`, at its limit, would still end within the batch's 60 minutes. */
@@ -263,49 +365,13 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
   const engine = await startEngine(join(out, "engine home"), { tokenFactoryUrl: options.tokenFactoryUrl, apiKey: options.apiKey, logPath: join(out, "engine.log"), timeoutMs: WAITS.engineMs, ...(options.engineEntry ? { entry: options.engineEntry } : {}) });
   journal.append({ type: "session", at: new Date().toISOString(), homeId: engine.homeId, pid: engine.pid, mode: options.mode, revision: options.revision, dirty: options.dirty, approvalDigest: frozen.approvalDigest });
 
-  /**
-   * Follows a run to its end within its bounds: cancelled at its deadline (or sooner, to leave the batch room to settle
-   * it and read its record), then given its window to settle. Every call waits only as long as is left. "unresolved"
-   * when it was still going at the end of its window to settle, "ran-out" when the batch's time cut that window short.
-   */
-  const follow = async (fixture: FixtureId, arm: Arm, runId: string): Promise<"ended" | "unresolved" | "ran-out"> => {
-    const startedAt = performance.now();
-    // The last moment to follow it, leaving time to read its record.
-    const lastAt = batchEnd() - WAITS.collectMs;
-    const cancelAt = Math.min(startedAt + deadlineOf(arm), lastAt - reconcileMs);
-    const giveUpAt = Math.min(cancelAt + reconcileMs, lastAt);
-    let cancelled = false;
-    for (;;) {
-      const now = performance.now();
-      if (now >= giveUpAt) return cancelled && cancelAt + reconcileMs <= lastAt ? "unresolved" : "ran-out";
-      if (!cancelled && now >= cancelAt) {
-        cancelled = true;
-        journal.append({ type: "cancel", at: new Date().toISOString(), fixture, arm, runId, why: now >= startedAt + deadlineOf(arm) ? "deadline" : "batch", batchElapsedMs: Math.round(elapsed()) });
-        await engine.client.call("runs.cancel", { runId }, { timeoutMs: Math.max(1, within(giveUpAt, 10_000)) }).catch(() => undefined);
-        continue;
-      }
-      const wait = within(cancelled ? giveUpAt : cancelAt, 10_000);
-      const summary = wait > 0 ? await engine.client.call("runs.get", { runId }, { timeoutMs: wait }).catch(() => null) : null;
-      if (summary && isTerminal(summary.status)) return "ended";
-      await pause(Math.min(250, within(giveUpAt, 250)));
-    }
-  };
-
   const finish = async (fixture: FixtureId, arm: Arm, clientRequestId: string, runId: string | null, status: "not-sent" | "unknown" | null): Promise<RunRecord> => {
     if (!runId) return unseen(fixture, arm, clientRequestId, status ?? "unknown", null);
-    const followed = await follow(fixture, arm, runId);
-    if (followed === "ended") {
-      const collected = await collect(engine, fixture, arm, clientRequestId, runId, Math.min(performance.now() + WAITS.collectMs, batchEnd()));
-      return keep(collected.record, collected.events);
-    }
-    // Still going after its window to settle, or when the batch's time ran out: kept as unresolved, with whatever the
-    // engine says of it now, never resent.
-    const seen = await collect(engine, fixture, arm, clientRequestId, runId, Math.min(performance.now() + UNRESOLVED_READ_MS, batchEnd())).catch(() => null);
-    const note =
-      followed === "unresolved"
-        ? `The ${fixture} ${arm} run was still going ${Math.round(reconcileMs / 1000)} s after it was cancelled, so it is kept as unresolved, and the batch stopped. It is never sent again.`
-        : `The batch's 60 minutes ran out before the ${fixture} ${arm} run ended, so it is kept as unresolved, and the batch stopped. It is never sent again.`;
-    return keep({ ...(seen?.record ?? { fixture, arm, clientRequestId, runId, failureKind: null, summary: null, report: null, events: 0 }), status: "unknown", requests: null, note }, seen?.events ?? []);
+    const finished = await finishRun({
+      client: engine.client, fixture, arm, clientRequestId, runId, deadlineMs: deadlineOf(arm), reconcileMs, batchEnd, clock,
+      cancelIntent: (why) => journal.append({ type: "cancel", at: new Date().toISOString(), fixture, arm, runId, why, batchElapsedMs: Math.round(elapsed()) }),
+    });
+    return keep(finished.record, finished.events);
   };
 
   try {
@@ -316,7 +382,7 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
         stopped ??= stopFor(await finish(entry.fixture, entry.arm, entry.clientRequestId, null, "unknown"), frozen, options.mode);
         continue;
       }
-      const found = await engine.client.call("runs.find", { clientRequestId: entry.clientRequestId }, { timeoutMs: Math.max(1, within(batchEnd(), WAITS.startMs)) });
+      const found = await engine.client.call("runs.find", { clientRequestId: entry.clientRequestId }, { timeoutMs: Math.max(1, budget(batchEnd(), WAITS.startMs)) });
       journal.append({ type: "run", at: new Date().toISOString(), fixture: entry.fixture, arm: entry.arm, clientRequestId: entry.clientRequestId, runId: found?.id ?? null, how: found ? "found" : "not-sent" });
       if (found) stopped ??= stopFor(await finish(entry.fixture, entry.arm, entry.clientRequestId, found.id, null), frozen, options.mode);
     }
@@ -346,7 +412,7 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
       }
       const clientRequestId = randomUUID();
       journal.append({ type: "start", at: new Date().toISOString(), fixture, arm, clientRequestId, homeId: engine.homeId, batchElapsedMs: Math.round(elapsed()) });
-      const startBy = performance.now() + WAITS.startMs;
+      const startBy = clock.now() + WAITS.startMs;
       let runId: string | null = null;
       let how: "started" | "found" | "not-sent" | "unknown" = "started";
       try {
@@ -356,7 +422,7 @@ export async function runBatch(options: BatchOptions): Promise<{ records: RunRec
         // so its store says which. No answer at all (a timeout, a closed connection) leaves it unknown: it may be starting.
         if (error instanceof TypeError) how = "not-sent";
         else if (error instanceof RpcCallError) {
-          const found = await engine.client.call("runs.find", { clientRequestId }, { timeoutMs: Math.max(1, within(startBy, WAITS.startMs)) }).catch(() => undefined);
+          const found = await engine.client.call("runs.find", { clientRequestId }, { timeoutMs: Math.max(1, budget(startBy, WAITS.startMs)) }).catch(() => undefined);
           how = found ? "found" : found === null ? "not-sent" : "unknown";
           runId = found?.id ?? null;
         } else how = "unknown";

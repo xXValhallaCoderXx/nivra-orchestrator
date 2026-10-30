@@ -4,8 +4,8 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, wr
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { preferencesDigest, ReviewPacket, REVIEW_TOOLS, type ReviewReport } from "@nivra/domain";
-import { Journal, UNRESOLVED_READ_MS, type JournalEntry } from "../scripts/council-eval/batch.ts";
+import { preferencesDigest, ReviewPacket, REVIEW_TOOLS, RpcTimeoutError, type RpcClient, type ReviewReport, type RunEvent, type RunSummary } from "@nivra/domain";
+import { finishRun, Journal, runBatch, UNRESOLVED_READ_MS, type FollowOptions, type JournalEntry } from "../scripts/council-eval/batch.ts";
 import { EMPTY_PREFERENCES_DIGEST, FIXTURE_IDS, loadFrozen, planIdOf, readCredentials, REPOSITORY, requestFor, runOrder, type Arm, type FixtureId } from "../scripts/council-eval/files.ts";
 import { defectMatches, matchedDefects } from "../scripts/council-eval/match.ts";
 import { limitMismatches } from "../scripts/council-eval/plan.ts";
@@ -93,6 +93,242 @@ function cli(args: string[], onStdout?: (text: string) => void): { done: Promise
 const journalOf = (out: string): JournalEntry[] => new Journal(out).read();
 const starts = (entries: JournalEntry[]) => entries.filter((entry): entry is Extract<JournalEntry, { type: "start" }> => entry.type === "start").map((entry) => `${entry.fixture}:${entry.arm}`);
 const ORDER = runOrder().map(({ fixture, arm }) => `${fixture}:${arm}`);
+
+const RUNNING: RunSummary = { id: "6b2f8711-42e2-411d-83fe-bc2d3acebe87", workflowId: "review", title: "Review", status: "running", input: {}, createdAt: "2026-10-30T00:00:00.000Z", startedAt: "2026-10-30T00:00:00.000Z", finishedAt: null, error: null, durationMs: null, usage: null, route: null };
+type TimedCall = { method: string; at: number; timeoutMs: number; after?: number };
+
+/** No real waits: every call records its bound, and callbacks can consume time during journal writes or reads. */
+function followHarness() {
+  const h = {
+    now: 0, end: 100_000, wakes: [] as number[], pauses: [] as number[], calls: [] as TimedCall[], intents: [] as Array<{ at: number; why: string }>,
+    onIntent: () => undefined as void,
+    onCall: (_call: TimedCall) => undefined as unknown,
+  };
+  const client = { call: (async (method, params, options) => {
+    const timeoutMs = options?.timeoutMs ?? 0;
+    assert.ok(timeoutMs > 0, "no unbounded/zero-timeout RPC");
+    assert.ok(timeoutMs <= h.end - h.now, `${method} stays within the hard batch deadline`);
+    const call: TimedCall = { method, at: h.now, timeoutMs, after: "after" in params ? Number(params.after) : undefined };
+    h.calls.push(call);
+    const supplied = h.onCall(call);
+    if (supplied !== undefined) return supplied;
+    if (method === "runs.get") return { ...RUNNING };
+    if (method === "runs.cancel") return { status: "running", wasTerminal: false };
+    if (method === "runs.events") return { events: [], next: 0, status: "running" };
+    if (method === "runs.review") return null;
+    throw new Error(`Unexpected RPC ${method}`);
+  }) as RpcClient["call"] };
+  const options: FollowOptions = {
+    client, fixture: "f1", arm: "single", clientRequestId: "74caeaa2-71ef-4e9c-895a-b5aabf82456b", runId: RUNNING.id, deadlineMs: 1000, reconcileMs: 1000,
+    batchEnd: () => h.end,
+    cancelIntent: (why) => { h.intents.push({ at: h.now, why }); h.onIntent(); },
+    clock: { now: () => h.now, pause: async (ms) => {
+      h.pauses.push(ms);
+      assert.ok(h.pauses.length <= 10, "following stays bounded");
+      h.now = h.wakes.shift() ?? h.now + Math.max(1, ms);
+    } },
+  };
+  return { h, run: () => finishRun(options) };
+}
+
+const eventPage = (): RunEvent[] => Array.from({ length: 500 }, (_, i) => ({ runId: RUNNING.id, seq: i + 1, at: RUNNING.createdAt, type: "step.output", stepId: "review", message: "An event", data: null }));
+
+describe("late council cancellation (NIV-48)", () => {
+  it("keeps the cancellation cap and fixed give-up time after a late wake", async () => {
+    const { h, run } = followHarness();
+    h.wakes = [2001];
+    const result = await run();
+    assert.deepEqual(h.intents, [{ at: 2001, why: "deadline" }]);
+    const cancellations = h.calls.filter(c => c.method === "runs.cancel");
+    assert.equal(cancellations.length, 1);
+    assert.equal(cancellations[0].timeoutMs, 10_000);
+    assert.equal(h.pauses.length, 1, "no fresh settling wait");
+    assert.equal(result.record.status, "unknown");
+    assert.equal(result.record.requests, null);
+    assert.equal(result.record.summary?.status, "running", "acknowledgement is not termination");
+    assert.match(result.record.note ?? "", /with no time left for its original reconciliation wait/);
+    assert.equal((result.record.note ?? "").includes("60 minutes ran out"), false);
+    assert.ok(h.calls.filter(c => c.method !== "runs.cancel").every(c => c.timeoutMs <= 5000));
+  });
+
+  it("rechecks the cancellation remainder after journalling consumes part of it", async () => {
+    const { h, run } = followHarness();
+    h.end = 35_000;
+    h.wakes = [34_000];
+    h.onIntent = () => { h.now = 34_900; };
+    await run();
+    const cancellation = h.calls.find(c => c.method === "runs.cancel");
+    assert.equal(cancellation?.at, 34_900);
+    assert.equal(cancellation?.timeoutMs, 100);
+  });
+
+  it("does not cancel twice when an earlier attempt preceded the late wake", async () => {
+    const { h, run } = followHarness();
+    h.wakes = [1000, 2200];
+    const result = await run();
+    assert.equal(h.intents.length, 1);
+    assert.equal(h.calls.filter(c => c.method === "runs.cancel").length, 1);
+    assert.equal(h.pauses.length, 2);
+    assert.match(result.record.note ?? "", /not observed to end within its original reconciliation window/);
+  });
+
+  for (const failure of ["rejection", "timeout"]) it(`does not retry a cancellation ${failure} or claim acknowledgement`, async () => {
+    const { h, run } = followHarness();
+    h.wakes = [2001];
+    h.onCall = call => {
+      if (call.method === "runs.cancel") {
+        if (failure === "timeout") { h.now += call.timeoutMs; throw new RpcTimeoutError("runs.cancel", call.timeoutMs); }
+        throw new Error("refused");
+      }
+    };
+    const result = await run();
+    assert.equal(h.calls.filter(c => c.method === "runs.cancel").length, 1);
+    assert.equal(h.intents.length, 1);
+    assert.match(result.record.note ?? "", /not acknowledged; its outcome is unknown/);
+    assert.equal(result.record.status, "unknown");
+    assert.equal(result.record.requests, null);
+    assert.equal(h.pauses.length, 1);
+  });
+
+  for (const wake of [100_000, 100_001]) it(`starts no RPC when resuming at monotonic time ${wake}, at or beyond the hard cap`, async () => {
+    const { h, run } = followHarness();
+    h.wakes = [wake];
+    const result = await run();
+    assert.deepEqual(h.calls.map(c => c.method), ["runs.get"]);
+    assert.equal(h.intents.length, 0);
+    assert.match(result.record.note ?? "", /resumed too late to request cancellation/);
+    assert.equal(result.record.requests, null);
+    assert.equal(result.record.summary?.status, "running", "the earlier observation survives");
+  });
+
+  it("records intent without sending when the journal consumes the final batch time", async () => {
+    const { h, run } = followHarness();
+    h.wakes = [2001];
+    h.onIntent = () => { h.now = h.end; };
+    const result = await run();
+    assert.equal(h.intents.length, 1);
+    assert.deepEqual(h.calls.map(c => c.method), ["runs.get"]);
+    assert.match(result.record.note ?? "", /intent.*recorded.*expired before the request could be sent/);
+    assert.equal((result.record.note ?? "").includes("was acknowledged"), false);
+  });
+
+  it("does not invent a 1 ms request or claim expiry when only a fraction of a millisecond remains", async () => {
+    const { h, run } = followHarness();
+    h.wakes = [99_999.5];
+    const result = await run();
+    assert.deepEqual(h.calls.map(c => c.method), ["runs.get"]);
+    assert.equal(h.intents.length, 0);
+    assert.match(result.record.note ?? "", /less than 1 ms left/);
+    assert.equal((result.record.note ?? "").includes("60 minutes ran out"), false);
+  });
+
+  it("starts no collection after a cancellation call uses the remaining batch time", async () => {
+    const { h, run } = followHarness();
+    h.end = 35_000;
+    h.wakes = [34_000];
+    h.onCall = call => { if (call.method === "runs.cancel") h.now = h.end; };
+    const result = await run();
+    assert.deepEqual(h.calls.map(c => c.method), ["runs.get", "runs.cancel"]);
+    assert.equal(h.calls[1].timeoutMs, 1000);
+    assert.match(result.record.note ?? "", /60 minutes ran out/);
+    assert.equal(result.record.requests, null);
+  });
+
+  for (const stop of ["summary", "page", "last page"]) it(`preserves evidence when the collection budget runs out after the ${stop} read`, async () => {
+    const { h, run } = followHarness();
+    h.wakes = [2001];
+    h.onCall = call => {
+      if (stop === "summary" && call.method === "runs.get" && h.calls.filter(c => c.method === "runs.get").length === 2) h.now = 7001;
+      if (stop !== "summary" && call.method === "runs.events") {
+        h.now = 7001;
+        return { events: stop === "page" ? eventPage() : [], next: 500, status: "running" };
+      }
+    };
+    const result = await run();
+    assert.equal(result.record.summary?.status, "running");
+    assert.equal(result.record.events, stop === "page" ? 500 : 0);
+    assert.equal(result.events.length, stop === "page" ? 500 : 0);
+    assert.equal(h.calls.filter(c => c.method === "runs.events").length, stop === "summary" ? 0 : 1);
+    assert.equal(h.calls.filter(c => c.method === "runs.review").length, 0);
+    assert.equal(result.record.requests, null);
+    assert.match(result.record.note ?? "", /Evidence collection did not finish within its budget/);
+  });
+
+  it("preserves the first events page when the next read fails", async () => {
+    const { h, run } = followHarness();
+    h.wakes = [2001];
+    h.onCall = call => {
+      if (call.method === "runs.events") {
+        if (call.after === 0) return { events: eventPage(), next: 500, status: "running" };
+        throw new Error("read failed");
+      }
+    };
+    const result = await run();
+    assert.equal(result.events.length, 500);
+    assert.equal(result.record.events, 500);
+    assert.equal(result.record.summary?.status, "running");
+    assert.equal(result.record.requests, null);
+    assert.match(result.record.note ?? "", /engine did not return complete evidence/);
+    assert.equal(h.calls.filter(c => c.method === "runs.review").length, 0);
+  });
+
+  for (const cancelled of [false, true]) it(`retains normal ${cancelled ? "deadline cancellation" : "completion"} behaviour`, async () => {
+    const { h, run } = followHarness();
+    h.wakes = [1000];
+    h.onCall = call => {
+      if (call.method === "runs.get" && (!cancelled || h.calls.some(c => c.method === "runs.cancel"))) return { ...RUNNING, status: cancelled ? "cancelled" : "succeeded" };
+    };
+    const result = await run();
+    assert.equal(result.record.status, cancelled ? "cancelled" : "succeeded");
+    assert.equal(result.record.note, null);
+    assert.equal(h.calls.filter(c => c.method === "runs.cancel").length, cancelled ? 1 : 0);
+    assert.equal(h.calls.filter(c => c.method === "runs.review").length, 1);
+  });
+
+  it("retains an observed terminal summary if its subsequent evidence read has no time left", async () => {
+    const { h, run } = followHarness();
+    h.onCall = call => {
+      if (call.method === "runs.get") { h.now = h.end; return { ...RUNNING, status: "succeeded" }; }
+    };
+    const result = await run();
+    assert.equal(h.calls.length, 1);
+    assert.equal(result.record.summary?.status, "succeeded");
+    assert.equal(result.record.status, "unknown");
+    assert.equal(result.record.requests, null);
+    assert.match(result.record.note ?? "", /was observed to end, but its complete evidence could not be collected/);
+  });
+
+  it("cancels once after missing both run windows, keeps an unresolved result and never starts another arm", { timeout: 30_000 }, async (t) => {
+    const frozen = await loadFrozen();
+    const stub = await stubFor();
+    const out = scratch();
+    let now = 0;
+    let pauses = 0;
+    t.signal.addEventListener("abort", () => {
+      const session = journalOf(out).find(e => e.type === "session");
+      if (session?.type === "session" && isAlive(session.pid)) process.kill(session.pid, "SIGKILL");
+    }, { once: true });
+    const options = { frozen, out, mode: "stub" as const, tokenFactoryUrl: stub.url, apiKey: "stub-key-for-council-eval", revision: null, dirty: false, only: ["f1"] as const, deadlineMs: 1000, reconcileMs: 1000, engineEntry: STUCK, log: () => undefined,
+      clock: { now: () => now, pause: async () => { assert.ok(++pauses <= 1, "no renewed reconciliation window"); now = 2001; } },
+    };
+    const result = await runBatch(options);
+    const journal = journalOf(out);
+    assert.equal(journal.filter(e => e.type === "cancel").length, 1);
+    const calls = readFileSync(join(out, "engine home", "calls.log"), "utf8").split("\n");
+    assert.equal(calls.filter(name => name === "runs.cancel").length, 1);
+    assert.deepEqual(starts(journal), ["f1:single"]);
+    assert.equal(result.records.length, 1);
+    assert.equal(result.records[0].status, "unknown");
+    assert.equal(result.records[0].requests, null);
+    assert.match(result.records[0].note ?? "", /with no time left for its original reconciliation wait/);
+    assert.equal((result.stopped ?? "").includes("60 minutes ran out"), false);
+    assert.equal(stub.chats().length, 0);
+    const resumed = await runBatch(options);
+    assert.equal(resumed.stopped, result.stopped);
+    assert.deepEqual(starts(journalOf(out)), ["f1:single"]);
+    assert.equal(readFileSync(join(out, "engine home", "calls.log"), "utf8").split("\n").filter(name => name === "runs.start").length, 1);
+  });
+});
 
 describe("the council evaluation's frozen inputs (NIV-40)", () => {
   it("reads five synthetic plans, one of them the control, a rubric for them, and a protocol whose limits are the engine's", async () => {
@@ -574,7 +810,7 @@ describe("before any inference request, and a run that won't stop (NIV-40)", () 
     const started = performance.now();
     const { code, stderr } = await run(["--token-factory-url", stub.url, "--out", out, "--engine", STUCK, "--only", "f1", "--deadline-ms", "1000", "--reconcile-ms", String(RECONCILE_MS)]);
     const tookMs = performance.now() - started;
-    const note = "The f1 single run was still going 1 s after it was cancelled, so it is kept as unresolved, and the batch stopped. It is never sent again.";
+    const note = "The f1 single run was not observed to end within its original reconciliation window. The cancellation request was acknowledged. It is kept as unresolved, and the batch stopped. It is never sent again.";
     assert.deepEqual([code, stderr.trim()], [3, note]);
     assert.ok(tookMs < 20_000, `the batch took ${Math.round(tookMs)} ms`);
     const journal = journalOf(out);
