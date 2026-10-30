@@ -99,7 +99,7 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
 ```
 
 `verify:windows` takes `--distro <name>` and `--skip-stage`. It works in `%LOCALAPPDATA%\nivra-dev\verify`.
-- **A mission review** (NIV-52, D64) requires the production host's finite grant for two reviewers and one reserved
+- **A mission review** (NIV-52, D65) requires the production host's finite grant for two reviewers and one reserved
   chair, with one listing accounted separately. Use the host-backed script below; never manufacture a grant for
   `rpc.ts`. A packet naming a model is refused before inference unless the listing gives exactly that model.
 - **The mission review's live check** is an explicit script, never part of `verify`, and runs only with Nate's approval

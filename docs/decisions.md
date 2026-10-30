@@ -4152,7 +4152,32 @@ added. This supersedes D39/D60's fixed coding allowances and coding request-pool
 policies. [NIV-60's evidence record](niv-60-verification.md) keeps deterministic enforcement separate from useful
 real-task results; the ticket stays open until the representative and larger-task acceptance evidence exists.
 
-## D64. Mission reviews use complete council grants and reconnect their recorded owners for settlement (2026-10-30, NIV-52)
+## D64. Reserve the coach's actual completion allowance (NIV-53, 2026-10-30)
+
+**Decision.** Supersedes only D43's coach completion/input allowances: 8,000 completion tokens and at most 56,000
+estimated input tokens under the existing 64,000-token application ceiling. The context helper takes the coach's
+actual completion reservation explicitly; other workflows retain the 4,000-token default. Keep the v2 prompt and
+concise validated form, one request, cancellation, zero retries, a 150-second request deadline within 180 seconds
+overall, and the listing's 30-second bound. Time already spent reduces the request's remaining allowance.
+
+**Why.** The first measured coach response exhausted 4,000 output tokens without a usable structured answer. Raising
+completion alone would leave context admission reserving only 4,000 and allow an oversized combined request. Its
+retained usage does not establish a reasoning split; the provider adapter can also turn missing reasoning into zero.
+
+**Consequences.** The preview, engine admission and next frozen recipe agree on the new coach bounds. Only the coach
+opts into numeric reasoning diagnostics read from original usage metadata; unknown is null and reasoning is already
+included in output, never added twice. The runner records allow-listed measurements after native close. Historical
+4,000-token reports and evidence remain unchanged. No protocol, persistence, dependency, other workflow limit or
+monthly-pool coverage change is introduced. D63 is already allocated on main at `033b600`.
+The acceptance observer permits cold initialisation plus the full engine deadline and a polling margin (270 s),
+without extending either workflow deadline.
+
+D49 still requires a host-ledger grant before every paid request. The coach route remains outside that integration,
+so the live helper refuses another paid start before a claim or credential read; an approval digest is insufficient.
+The new recipe and rehearsal remain unpaid pending separately verified coach grant wiring. Mission-review grant
+wiring is assessed separately under NIV-52; this change does not implement it or complete NIV-66.
+
+## D65. Mission reviews use complete council grants and reconnect their recorded owners for settlement (2026-10-30, NIV-52)
 
 **Decision.** A mission review starts once under one guarded host-ledger grant: two productive inference requests and
 one protected chair request, each capped at 4,000 completion tokens including reasoning, plus one bounded listing.
