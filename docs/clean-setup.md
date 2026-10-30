@@ -1,14 +1,20 @@
 # Clean-setup checks of the judge's path (NIV-16)
 
+**Historical v0.1.1 procedures and results, 19–20 October 2026.** These are not a recipe or validation for the
+unselected execution release. Preserve their original build, platform and credential context. Current draft judge
+instructions are in [judge-walkthrough.md](judge-walkthrough.md); free access remains unresolved. Do not reuse the
+owner's development key. The new locked-GNOME procedure is [niv-28-manual-check.md](niv-28-manual-check.md), and
+Nate has deferred starting the VM until the other agent finishes. No check in this file establishes that case.
+
 The live acceptance (NIV-14) ran on Nate's PC, which has every tool installed. These checks follow a judge instead: the
 files published on the release, the README's steps, and setups that never had Nivra, its runtime or its settings.
 
-- Run them on the release under test: today, the
+- The release under test at the time was the
   [v0.1.1 pre-release](https://github.com/xXValhallaCoderXx/nivra-orchestrator/releases/tag/v0.1.1).
 - Record what happened, including anything the README got wrong or left out. A check that isn't run is recorded as not
   run.
-- **The key** is the judges' key (Nate's existing Token Factory key, D24). Paste it only into Nivra's Settings, never
-  into a terminal, a file or a chat. When a check ends, press **Remove** under Settings, then delete the setup.
+- **Historical credential context:** these checks used Nate's existing Token Factory key (D24), entered in Settings
+  and removed afterwards. They establish owner access only, not an arrangement for giving judges free access now.
 
 ## 1. Windows → WSL, as a fresh Windows user
 
@@ -228,6 +234,7 @@ passed on the first attempt, with no retry:
   appeared: it is created hidden and shown on `ready-to-show`, which never fired. Showing it from the main process
   worked.
   - Starting Nivra from Show Apps worked normally.
-  - Filed as NIV-28 (Backlog): show the window through a bounded fallback as well.
+  - Filed as NIV-28 (Backlog at the time): show the window through a bounded fallback as well. The fallback is now
+    merged; the original locked-GNOME packaged check is still pending, as the notice at the top explains.
 - **A login prompt from `git clone`.** One clone asked for GitHub credentials, likely from a mistyped URL. Both
   repositories are public and clone without a login.
