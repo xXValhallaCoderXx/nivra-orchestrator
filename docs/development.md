@@ -118,6 +118,15 @@ pnpm verify:windows         # from WSL: run the target harness as a Windows proc
   approval is one run: a launch claims it in `~/nivra-acceptance/claims/mission-review/` before the checkout is
   checked, the key is read or anything is sent, the claim is kept whatever happens next, and `--plan` then prints the
   next run's digest.
+  The current evidence model is exactly `nvidia/Nemotron-3.5-Super-VL`, with `max_completion_tokens` 4,000 (reasoning
+  included), at most three inference requests, 150 seconds each and 330 seconds for the review. Listings are separate
+  from inference. **Paid acceptance is deferred until mission reviews receive host-ledger grants (NIV-66)**: the
+  existing per-review bounds are not a host grant. `--plan` names that operating prerequisite; it does not integrate
+  the ledger or waive AGENTS.md. A later live run also needs clean source and approval of its new exact digest.
+  Collection failures now retain a receipt and partial reports when available. A lost start reply is found by its
+  request id, never resent; a cancellation request is not confirmed until a terminal state is observed. Collection
+  errors, unresolved termination and the closer's return are recorded separately, with unknown usage left unknown.
+  See [NIV-52's completion evidence and frozen usefulness rubric](niv-52-verification.md).
 - **The window's tests** (`e2e/missions.spec.ts`) drive missions with the token factory stub: the council's roles are
   told apart by the instructions' first line, as for plan reviews. A packaged app runs only the parts that need no
   model.

@@ -22,16 +22,17 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { isTerminal, MISSION_COUNCIL, MissionReviewPacket, missionPacketDigest, preferencesDigest, renderMissionPacket, SPECIALISTS, type ReviewReport, type RunSummary } from "@nivra/domain";
+import { MISSION_COUNCIL, MissionReviewPacket, missionPacketDigest, preferencesDigest, renderMissionPacket, SPECIALISTS } from "@nivra/domain";
 import { ANSWER_TOKENS } from "../src/providers/policy.ts";
 import { MISSION_INSTRUCTIONS } from "../src/review/mission-prompt.ts";
 import { missionToolDefinitions, REVIEW_LIMITS, REVIEW_REQUEST_MS } from "../src/review/run.ts";
 import { startEngine } from "./council-eval/batch.ts";
 import { canonical, readCredentials, REPOSITORY } from "./council-eval/files.ts";
 import { claimApproval, claimOn, claimText, isDigest, nextRun } from "./research-check/claim.ts";
+import { collectMissionReview } from "./mission-review-collect.ts";
 
 /** The one model the live run may use: the engine refuses any other before the first inference request. */
-export const LIVE_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+export const LIVE_MODEL = "nvidia/Nemotron-3.5-Super-VL";
 export const FIXTURE = join(REPOSITORY, "apps/engine/test/fixtures/mission-review/live.json");
 /** How long the run may take, as the engine bounds it, and the margin to see its end. */
 const FOLLOW_MS = REVIEW_LIMITS.council.totalMs + 30_000;
@@ -88,7 +89,7 @@ const recipeFor = (run: number) => ({
   },
   endpoint: "Nebius Token Factory, the engine's default endpoint",
   preferences: "none",
-  evidence: "~/nivra-acceptance/mission-review-UTC-REV7 (0700): the engine's masked report, the run's events by count, usage and the served model of each request",
+  evidence: "~/nivra-acceptance/mission-review-UTC-REV7 (0700): the engine's masked report, stage request counts, usage, served models and collection/termination observations",
   claims: "~/nivra-acceptance/claims/mission-review/, one file per approval, kept",
 });
 const digestFor = (run: number) => sha256(canonical(recipeFor(run)));
@@ -106,8 +107,9 @@ if (values.plan) {
   console.log(`- The forms they hand in (the tools' definitions): ${recipe.toolsSha256.slice(0, 12)}.`);
   console.log(`- Model: ${LIVE_MODEL} only. The engine refuses any other before the first inference request; a served model that differs fails the evidence.`);
   console.log(
-    `- Bounds: at most ${recipe.limits.requests} requests (two reviewers, then the chair), ${recipe.limits.outputTokensPerRequest.toLocaleString("en")} output tokens each, ${recipe.limits.requestMs / 1000} s each and ${recipe.limits.runMs / 1000} s in all; an estimated input budget of ${recipe.limits.estimatedInputTokens.toLocaleString("en")} tokens, which is no ceiling. Nothing is retried.`,
+    `- Bounds: at most ${recipe.limits.requests} requests (two reviewers, then the chair), ${recipe.limits.outputTokensPerRequest.toLocaleString("en")} completion tokens each (reasoning included), ${recipe.limits.requestMs / 1000} s each and ${recipe.limits.runMs / 1000} s in all; an estimated input budget of ${recipe.limits.estimatedInputTokens.toLocaleString("en")} tokens, which is no ceiling. Nothing is retried.`,
   );
+  console.log("- Live acceptance is deferred until mission reviews receive host-ledger grants (NIV-66). This recipe doesn't waive that prerequisite.");
   console.log(`- Where: ${recipe.endpoint}, from a fresh engine home under ~/.nivra-dev-niv52.`);
   console.log(`- Evidence: ${recipe.evidence}.`);
   console.log(
@@ -162,32 +164,19 @@ const apiKey = live ? (() => {
 mkdirSync(out, { recursive: true, mode: 0o700 });
 write(join(out, "recipe.json"), { ...recipe, digest, mode: live ? "live" : "stub" });
 
-const engine = await startEngine(home, { tokenFactoryUrl: live ? null : values["token-factory-url"]!, apiKey, logPath: join(out, "engine.log") });
 const clientRequestId = randomUUID();
 const preferences = { revision: 0, records: [] };
-let summary: RunSummary | null = null;
-let report: ReviewReport | null = null;
-let unresolved: string | null = null;
-const started = performance.now();
-try {
-  summary = await engine.client.call("runs.start", {
+const collected = await collectMissionReview({
+  start: () => startEngine(home, { tokenFactoryUrl: live ? null : values["token-factory-url"]!, apiKey, logPath: join(out, "engine.log") }),
+  followMs: FOLLOW_MS,
+  request: {
     clientRequestId,
     workflowId: "review",
     input: { panel: "council", planId: randomUUID(), planVersion: 1, packetDigest, preferencesDigest: await preferencesDigest(preferences.records) },
     context: { preferences, sharing: { modelContext: false }, packet },
-  });
-  while (!isTerminal(summary.status) && performance.now() - started < FOLLOW_MS) {
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    summary = await engine.client.call("runs.get", { runId: summary.id });
-  }
-  if (!isTerminal(summary.status)) {
-    unresolved = `The run didn't end within ${FOLLOW_MS / 1000} s, so it was cancelled.`;
-    await engine.client.call("runs.cancel", { runId: summary.id }).catch(() => undefined);
-  }
-  report = await engine.client.call("runs.review", { runId: summary.id }).catch(() => null);
-} finally {
-  await engine.close();
-}
+  },
+});
+const { summary, report } = collected;
 
 const served = (report?.stages ?? []).filter((stage) => stage.requests > 0).map((stage) => ({ role: stage.role, servedModel: stage.servedModel }));
 const wrongModel = served.filter((stage) => stage.servedModel !== null && stage.servedModel !== LIVE_MODEL);
@@ -201,7 +190,12 @@ const result = {
   runId: summary?.id ?? null,
   status: summary?.status ?? null,
   error: summary?.error ?? null,
-  unresolved,
+  clientRequestId,
+  startRequested: collected.startRequested,
+  unresolved: collected.unresolved,
+  cancellation: collected.cancellation,
+  engineClose: collected.engineClose,
+  problems: collected.problems,
   outcome: report?.outcome ?? null,
   findings: (report?.reviewers ?? []).map((reviewer) => ({ role: reviewer.role, findings: reviewer.findings.length, refs: reviewer.findings.map((finding) => finding.refs), adjusted: reviewer.adjusted })),
   synthesis: report?.synthesis ? { priorities: report.synthesis.priorities, agreements: report.synthesis.agreements.length, dissent: report.synthesis.dissent.length, unaddressed: report.synthesis.unaddressed } : null,
@@ -209,14 +203,16 @@ const result = {
   route: report?.route ?? null,
   served,
   modelHeld,
-  elapsedMs: Math.round(performance.now() - started),
+  elapsedMs: collected.elapsedMs,
 };
 if (report) write(join(out, "report.json"), report);
 write(join(out, "result.json"), result);
 console.log(
-  `${result.mode === "live" ? "Live" : "Stub"} mission review ${result.runId ?? "(not started)"}: ${result.status ?? "unknown"}, outcome ${result.outcome ?? "none"}; ${served.length} requests answered by ${[...new Set(served.map((stage) => stage.servedModel ?? "unknown"))].join(", ") || "none"}.`,
+  `${result.mode === "live" ? "Live" : "Stub"} mission review ${result.runId ?? (result.startRequested ? "(run id unknown)" : "(not started)")}: ${result.status ?? "unknown"}, outcome ${result.outcome ?? "none"}; ${served.length} stages recorded a request; served models: ${[...new Set(served.map((stage) => stage.servedModel ?? "unknown"))].join(", ") || "none"}.`,
 );
+for (const problem of result.problems) console.log(problem);
+if (result.unresolved) console.log(result.unresolved);
 if (wrongModel.length) console.log(`A request was served by a model other than ${LIVE_MODEL}: this run isn't the approved check.`);
 else if (unnamed.length) console.log(`${unnamed.length} of ${served.length} answers didn't name the model that served them, so this run doesn't show ${LIVE_MODEL} held.`);
 console.log(`Evidence: ${out}`);
-process.exit(result.status === "succeeded" && result.outcome === "complete" && result.modelHeld === true ? 0 : 1);
+process.exit(result.status === "succeeded" && result.outcome === "complete" && result.modelHeld === true && result.problems.length === 0 && result.unresolved === null ? 0 : 1);

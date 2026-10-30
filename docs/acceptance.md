@@ -2636,6 +2636,19 @@ of up to five selected tasks by the council's specialists, findings that open th
   to be tested are printed apart from this record, since a digest bound to a commit can't be written into it. The
   digest printed at `68a49df` is withdrawn. No paid call was made.
 
+### Mission review completion refresh (NIV-52, 30 October 2026)
+
+Completion work based on main `033b600`, separately from historical candidate 3. The runner, synthetic fixture
+and runner expectations now pin `nvidia/Nemotron-3.5-Super-VL`. Fresh stdio/loopback checks inspect the real request's
+completion cap and tool choice and retain failures and partial evidence; the existing built mission journey passed
+8/8, including opening the right task, saving brief v2 and showing the prior review stale.
+
+**NIV-52 remains open.** The person chose to defer paid execution until mission reviews receive D49's required
+host-ledger grants. No paid call or real credential read occurred. The three seeded gaps and usefulness threshold are
+frozen before live output; no live usefulness assessment has been made. The full verification results, initial
+database-startup timeout failures, subsequent checks, evidence identities and remaining criteria are kept in
+[NIV-52's completion record](niv-52-verification.md). Existing candidate 3 Windows evidence is historical, not a new run.
+
 ### NIV-35's live runs, and the candidates they ran on (D46, D47)
 
 The live packaged journey on SHE-65, on Linux, each run approved by Nate by its recipe's whole digest. Evidence is
