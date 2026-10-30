@@ -1,7 +1,7 @@
 # NIV-60 implementation and evidence
 
 Local implementation on `feature/niv-60`, based on merged main
-`f1eaf4770dd8e5b3cd44340ed4131496455526e2`, 30 October 2026. Implementation is being prepared for a PR into main.
+`f1eaf4770dd8e5b3cd44340ed4131496455526e2`, 30 October 2026. Current-main integration and PR verification are recorded below.
 This record does not mark NIV-60 complete. The agreed
 [implementation handoff](https://linear.app/sentiment-hound/document/niv-60-implementation-handoff-reliable-coding-on-larger-tasks-32156fd9d31d)
 and the user's late-reply/larger-task additions remain the acceptance requirements.
@@ -109,3 +109,25 @@ At least one useful nontrivial proposal must pass its independent frozen checks,
 multi-file attempt. A useful real task must separately demonstrate work beyond a formerly limiting allowance. If
 all successful tasks finish below those limits, record their successes and keep that evidence gap open. Never pad
 calls or writes. Deterministic threshold tests cannot close this gap. NIV-60 stays open until these facts exist.
+
+## PR candidate after current-main integration — 30 October 2026
+
+Implementation commit `74a91cb` is integrated with main `7f7e26f6cd62e24993d7a8a9b34c60075e62076e` in
+`51306bc4195b5001a44b403f853f6a7ffd1dbcb2`. The only merge conflict was the two appended acceptance records; both
+are retained in full. NIV-28's window-visibility helper and tests are byte-for-byte unchanged from current main, and
+its main-process wiring is preserved. The PR diff remains the 49 reviewed NIV-60 source/test/documentation files.
+
+The following checks ran on that integrated implementation, superseding earlier counts for PR review:
+
+| Command/check | Result | Local receipt |
+| --- | --- | --- |
+| `pnpm verify` | All typechecks and 2,015 tests passed: 144 domain, 772 desktop, 1,099 engine; no failures, cancellations or skips | `pr-verify.log` |
+| Built app: app, budget usage, task run, task preferences and task discussion | 21/21 passed, no skips | `pr-ui.log` |
+| Fresh Linux package, same affected cases | 20 passed, one existing skip for a task run requiring unpackaged-only endpoint switches | `pr-ui.log` |
+| Fresh Windows development package, full native UI | 17/17 passed, no skips, including native-window visibility | `pr-ui.log` |
+| `pnpm verify:windows --skip-stage`, using the freshly staged protocol-24 runtimes | 39/39 passed on native Windows and WSL; release-home comparison unchanged and test home removed | `pr-ui.log` |
+| Real stdio engine through `pnpm rpc task.preview`, working maximum 64 | Passed, no model call, disposable home removed | `pr-rpc.log` |
+
+These runs used Node 24.21.0, pnpm 10.4.1 and the shared heavy-check lock. The final receipt commit changes only this
+document; no implementation changed after the integrated checks. Generated output remains ignored. Live-provider
+and useful larger-task acceptance evidence is still pending and is explicitly called out in the PR and reviewer note.
