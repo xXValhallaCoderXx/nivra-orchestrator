@@ -1,4 +1,4 @@
-// Drives a running Nivra through its UI, and reads it through its bridge, for the live acceptance harness (NIV-14).
+// Drives a running Nivra through its UI and typed bridge for the live acceptance harness (NIV-14).
 // The bridge is called with string expressions: scripts are compiled without the DOM's types (as in
 // interrupt-observer.ts). Nothing here reads the key field: Playwright would print its value in a failure message.
 import { createHash } from "node:crypto";
@@ -192,20 +192,18 @@ export class Ui {
     return started;
   }
 
-  /** Starts a hello run held for `seconds` (0, 5 or 60) and returns its id once it is holding, if held. */
+  /** Internal lifecycle checks use the typed bridge; Hello has no product UI. */
   async hello(seconds: 0 | 5 | 60): Promise<string> {
-    const status = this.page.getByTestId("hello-status");
-    const before = (await status.count()) ? await status.getAttribute("data-run-id") : null;
-    await this.toDiagnostics();
-    await this.page.getByText(`${seconds} s`, { exact: true }).click();
-    await this.page.getByTestId("hello-start").click();
-    const runId = await waitFor(async () => {
-      const shown = (await status.count()) ? await status.getAttribute("data-run-id") : null;
-      return shown && shown !== before ? shown : null;
-    }, 60_000, "the hello run to start");
-    if (seconds > 0) await this.page.getByTestId("hello-timeline").getByText("Holding a child process").waitFor({ timeout: 120_000 });
-    return runId;
+    await this.page.getByTestId("project-select").click();
+    const projectId = await this.page.locator('[data-testid="switcher-project"][aria-selected="true"]').getAttribute("data-project-id");
+    await this.page.keyboard.press("Escape");
+    if (!projectId) throw new Error("Choose a project before starting the diagnostic run.");
+    const run = await this.call<RunSummary>(`window.nivra.startHello(${arg(projectId)}, ${seconds * 1000})`);
+    if (seconds > 0) await waitFor(async () => (await this.events(run.id)).events.some((event) => event.message.startsWith("Holding a child process")), 120_000, "the diagnostic child to hold");
+    return run.id;
   }
+
+  cancelRun = (runId: string) => this.call<void>(`window.nivra.cancelRun(${arg(runId)})`);
 
   async confirmPreference(statement: string, scope: string, intent?: "Default for this project" | "Decision to change existing conventions"): Promise<string> {
     await this.toPreferences();

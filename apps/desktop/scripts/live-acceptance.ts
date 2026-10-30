@@ -545,7 +545,7 @@ async function rehearsal(): Promise<void> {
 
   const cancelled = await hello(a, "A", 60);
   await ui!.toDiagnostics();
-  await ui!.page.getByTestId("hello-cancel").click();
+  await ui!.cancelRun(cancelled);
   await ui!.ended(cancelled, 30_000);
   const c = await ui!.events(cancelled);
   expect("cancel.held", "A", c.status === "cancelled" && c.events.at(-1)?.message === "Cancelled", `held run ${c.status}: "${c.events.at(-1)?.message ?? ""}"`);

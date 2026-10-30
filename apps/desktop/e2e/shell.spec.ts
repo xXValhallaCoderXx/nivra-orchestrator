@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
 import { goTo, openSwitcher } from "./places.ts";
+import { cancelRun, runStatus, startHello } from "./runs.ts";
 
 /**
  * The window's shell (NIV-56): drafts kept across navigation and a relaunch, a draft refused for what looks like a
@@ -452,15 +453,12 @@ test("the shortcuts leave zoom's own keys alone: Ctrl with = and 0 still zoom, a
 test("Esc never stops a run: a held hello run keeps running", async () => {
   await expect(page.getByTestId("engine-badge")).toHaveText("Engine online", { timeout: 60_000 });
   await goTo(page, "settings-diagnostics");
-  await page.getByText("60 s", { exact: true }).click();
-  await page.getByTestId("hello-start").click();
-  await expect(page.getByTestId("hello-timeline")).toContainText("Holding a child process");
+  const runId = await startHello(page, 60_000);
   await page.keyboard.press("Escape");
   await page.getByTestId("main").focus();
   await page.keyboard.press("Escape");
-  await expect(page.getByTestId("hello-status")).toHaveText("running");
-  await page.getByTestId("hello-cancel").click();
-  await expect(page.getByTestId("hello-status")).toHaveText("cancelled");
+  expect(await runStatus(page, runId)).toBe("running");
+  await cancelRun(page, runId);
   await goTo(page, "home");
 });
 
@@ -634,7 +632,7 @@ test("storage that refuses every write: a draft says it couldn't be kept and kee
   await page.getByTestId("appearance-dark").click();
   await expect(page.locator("html")).toHaveAttribute("data-mantine-color-scheme", "dark");
   await expect(page.getByTestId("appearance-not-kept")).toHaveText("Nivra couldn't keep this choice on this computer. It applies until Nivra closes.");
-  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe("rgb(10, 10, 10)");
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe("rgb(17, 21, 19)");
 });
 
 test("a read that fails shows as a failure, never as an empty list or a wait that doesn't end", async () => {

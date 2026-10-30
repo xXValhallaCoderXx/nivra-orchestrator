@@ -3,6 +3,7 @@ import { Alert, Anchor, Badge, Button, Checkbox, Group, Modal, Paper, Stack, Tex
 import { useEffect, useRef, useState } from "react";
 import type { AttachmentPreview, FrozenReferenceContext, ReferenceReceipt, ReferenceSelection, TaskDiscussion } from "@nivra/domain";
 import { errorMessage, usePoll } from "../shared/ui";
+import { BriefRead } from "./brief-read";
 
 /** The same actual prepared content shown by each consumer before it asks AI. */
 export function ReferenceContextView({ value }: { value: FrozenReferenceContext | null | undefined }) {
@@ -85,7 +86,7 @@ export function TaskDiscussionPanel({ taskId, projectId, onAttempt }: { taskId: 
     <ReferenceContextView value={included} />
     <Text size="xs">{view?.historyNote}</Text>
     {view?.activity.map((item) => <Group key={item.id} gap="xs"><Text size="xs">{new Date(item.at).toLocaleString()}</Text>{item.kind === "attempt" || item.kind === "decision" || item.kind === "apply" || item.kind === "acceptance" || item.kind === "check" || item.kind === "proposal" ? <Anchor component="button" size="sm" onClick={() => onAttempt(item.recordId)}>{item.label}</Anchor> : item.kind === "brief" ? <Anchor component="button" size="sm" onClick={() => void act(async () => setHistorical(await window.nivra.getTaskBrief(taskId, item.recordId)))}>{item.label}</Anchor> : <Text size="sm">{item.label}</Text>}</Group>)}
-    <Modal opened={historical !== null} onClose={() => setHistorical(null)} title={`Brief version ${historical?.version ?? ""}`} closeButtonProps={{ "aria-label": "Close" }} size="lg"><Text component="pre" size="sm" style={{ whiteSpace: "pre-wrap" }}>{historical ? JSON.stringify(historical.content, null, 2) : ""}</Text></Modal>
+    <Modal opened={historical !== null} onClose={() => setHistorical(null)} title={`Brief version ${historical?.version ?? ""}`} closeButtonProps={{ "aria-label": "Close" }} size="lg">{historical && <BriefRead content={historical.content} historical />}</Modal>
     <Modal opened={preview !== null} onClose={() => setPreview(null)} title={preview?.attachment.name} closeButtonProps={{ "aria-label": "Close" }} size="lg">{preview?.image && <img src={preview.image} alt="Prepared image supplied to AI when selected" style={{ maxWidth: "100%" }} />}{preview?.attachment.kind === "pdf" && <Text size="sm">PDF text only — images and layout aren’t included</Text>}{preview?.text !== null && <Text style={{ whiteSpace: "pre-wrap" }}>{preview?.text}</Text>}</Modal>
   </Stack></Paper>;
 }

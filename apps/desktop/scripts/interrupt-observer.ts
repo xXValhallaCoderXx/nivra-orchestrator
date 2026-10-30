@@ -1,12 +1,12 @@
 // Runs ON WINDOWS with the staged node.exe, started by verify-interrupt.ts from WSL (D14). It drives the packaged
-// Windows app through its UI while a dedicated test distribution is terminated from outside (`wsl --terminate`), and
+// Windows app through its UI and typed bridge while a dedicated test distribution is terminated from outside, and
 // writes what it saw to a trace on Windows. It terminates only the distribution it is given. The app's WSL engine runs
 // in a home of this run's own (--wsl-home, D27).
 import { spawnSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
-import type { RunEventsPage } from "@nivra/domain";
+import type { RunEventsPage, RunSummary } from "@nivra/domain";
 import type { EngineView, ProjectView } from "../src/shared/ipc.ts";
 
 const { values } = parseArgs({
@@ -99,17 +99,17 @@ async function choose(targetId: string): Promise<void> {
   await waitFor(async () => (await page.getByTestId("project-target").textContent()) === project.targetLabel, 10_000, `${project.targetLabel} to be chosen`);
 }
 
-const runIdShown = () => page.getByTestId("hello-status").getAttribute("data-run-id");
-const statusShown = () => page.getByTestId("hello-status").textContent();
-
-/** Starts a run held for 60 s from the UI and returns its id once its child process is holding. */
+/** Starts an internal diagnostic run through the bridge and waits for its child to hold. */
 async function startHeld(): Promise<string> {
   await open("nav-settings", "page-settings");
   await open("settings-tab-diagnostics", "settings-diagnostics");
-  await page.getByText("60 s", { exact: true }).click();
-  await page.getByTestId("hello-start").click();
-  await page.getByTestId("hello-timeline").getByText("Holding a child process").waitFor({ timeout: 60_000 });
-  return (await runIdShown())!;
+  await open("project-select", "project-switcher-list");
+  const projectId = await page.locator('[data-testid="switcher-project"][aria-selected="true"]').getAttribute("data-project-id");
+  await page.keyboard.press("Escape");
+  if (!projectId) throw new Error("Choose a project before starting the diagnostic run.");
+  const run = await page.evaluate(`window.nivra.startHello(${JSON.stringify(projectId)}, 60000)`) as RunSummary;
+  await waitFor(async () => (await events(run.id)).events.some((event) => event.message.startsWith("Holding a child process")), 60_000, "the diagnostic child to hold");
+  return run.id;
 }
 
 async function main(): Promise<number> {
@@ -156,13 +156,11 @@ async function main(): Promise<number> {
   await check("native: the app stays usable, and the native run keeps going on its own engine", async () => {
     // The page answers, and the native project's run is still the same one, holding on the same engine.
     await choose("local");
-    const status = await statusShown();
-    const runId = await runIdShown();
     const timeline = await events(held.nativeRun!);
     const info = await onlineInfo("local");
-    if (status !== "running" || runId !== held.nativeRun || timeline.status !== "running") throw new Error(`native run shows ${status} (${runId}), engine says ${timeline.status}`);
+    if (timeline.status !== "running") throw new Error(`native run ${held.nativeRun} is ${timeline.status}`);
     if (!info || info.instanceId !== held.nativeInstance) throw new Error(`the native engine changed: ${info?.instanceId ?? "offline"}`);
-    return `run ${runId} running on engine ${info.instanceId}`;
+    return `run ${held.nativeRun} running on engine ${info.instanceId}`;
   });
   await check(`${distro}: Restart in the UI brings up a fresh engine`, async () => {
     await choose(wslTarget);
@@ -182,18 +180,14 @@ async function main(): Promise<number> {
     const starts = timeline.events.filter((e) => e.type === "run.started").length;
     const last = timeline.events.at(-1);
     if (timeline.status !== "failed" || last?.type !== "run.interrupted" || starts !== 1) throw new Error(`status ${timeline.status}, last event ${last?.type}, started ${starts} times`);
-    await waitFor(async () => (await statusShown()) === "failed", 15_000, "the UI to show it failed");
-    return `"${last.message}"; started once; the UI shows failed`;
+    await page.getByTestId("settings-diagnostics").waitFor({ state: "visible" });
+    return `"${last.message}"; started once; diagnostics remain usable`;
   });
-  await check(`${distro}: a new run started from the UI works`, async () => {
-    await page.getByText("0 s", { exact: true }).click();
-    await page.getByTestId("hello-start").click();
-    const runId = await waitFor(async () => {
-      const id = await runIdShown();
-      return id && id !== held.wslRun ? id : null;
-    }, 15_000, "the new run");
-    await waitFor(async () => (await statusShown()) === "succeeded", 60_000, "the new run to succeed");
-    return `run ${runId} succeeded`;
+  await check(`${distro}: a new diagnostic run through the bridge works`, async () => {
+    const project = (await projects()).find((project) => project.targetId === wslTarget)!;
+    const run = await page.evaluate(`window.nivra.startHello(${JSON.stringify(project.id)}, 0)`) as RunSummary;
+    await waitFor(async () => (await events(run.id)).status === "succeeded", 60_000, "the new run to succeed");
+    return `run ${run.id} succeeded`;
   });
   await check("native: the held run finishes on the engine that started it", async () => {
     await choose("local");

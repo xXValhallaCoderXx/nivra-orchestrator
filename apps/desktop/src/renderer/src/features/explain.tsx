@@ -3,9 +3,8 @@ import type { ExplainResult, RunSummary } from "@nivra/domain";
 import { useEffect, useState } from "react";
 import type { PreferencesView, ProjectView } from "../../../shared/ipc";
 import { CitationChip, ConflictItem, CONSENT_COVERS, ConsentModal, ContextDetails, linesByFile, preferenceText, runLine, STATUS_COLOR } from "../shared/evidence";
-import { TERMINAL, useRunEvents } from "../shared/runs";
+import { TERMINAL, useRunEvents, type RunRef } from "../shared/runs";
 import { errorMessage, Section } from "../shared/ui";
-import type { RunRef } from "./hello";
 
 /** Timeline entries worth showing for an explanation. */
 const SHOWN = new Set(["run.queued", "run.started", "run.succeeded", "run.failed", "run.cancelled", "run.interrupted", "step.output", "model.call", "tool.called"]);

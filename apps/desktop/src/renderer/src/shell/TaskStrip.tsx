@@ -49,7 +49,7 @@ function dotStyle(state: StripState, current: boolean): CSSProperties {
   };
   if (state === "done") return { ...base, background: "var(--nivra-badge-green-bg)", color: "var(--nivra-badge-green-fg)" };
   if (state === "attention") return { ...base, background: "var(--nivra-badge-yellow-bg)", color: "var(--nivra-badge-yellow-fg)", border: "1px solid var(--nivra-warning)" };
-  if (state === "now" || current) return { ...base, background: "var(--mantine-color-text)", color: "var(--mantine-color-body)" };
+  if (state === "now" || current) return { ...base, background: "var(--nivra-action)", color: "var(--nivra-on-action)", border: "1px solid var(--nivra-action-edge)" };
   return { ...base, background: "var(--mantine-color-body)", color: "var(--nivra-text-2)", border: `1px ${state === "optional" ? "dashed" : "solid"} var(--nivra-control-border)` };
 }
 
@@ -70,7 +70,7 @@ export function TaskStrip({ items, label }: TaskStripProps) {
         <Box component="ol" aria-label={name} style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", gap: 6, alignItems: "center" }}>
           {shown.map((item, index) => (
             <li key={item.step} aria-current={index === current ? "step" : undefined} data-step={item.step} data-state={item.state} style={{ display: "flex" }}>
-              <span aria-hidden="true" style={{ ...dotStyle(item.state, index === current), outline: index === current ? "2px solid var(--mantine-color-text)" : undefined, outlineOffset: 2 }}>
+              <span aria-hidden="true" style={{ ...dotStyle(item.state, index === current), outline: index === current ? "2px solid var(--nivra-focus)" : undefined, outlineOffset: 2 }}>
                 {mark(item, index)}
               </span>
               <VisuallyHidden>

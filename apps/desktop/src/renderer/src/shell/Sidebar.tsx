@@ -4,6 +4,7 @@ import type { ConversationScope, ConversationsView, ConversationSummary, Project
 import type { Navigate, Route, Scope } from "../app/routes";
 import { errorMessage } from "../shared/ui";
 import { SIDEBAR_WIDTH } from "./layout";
+import { Logo } from "./Brand";
 import { placeOfDraft, sectionOf, type Section } from "./places";
 
 /** Inline stroke icons, 16 px (KIT rule 9), decorative: each link says what it is in words. */
@@ -54,20 +55,6 @@ export function Icon({ name }: { name: keyof typeof ICON_PATHS }) {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flex: "none" }}>
       {ICON_PATHS[name]}
     </svg>
-  );
-}
-
-export function Logo() {
-  return (
-    <Box style={{ display: "flex", alignItems: "center", gap: 8, height: 40, padding: "0 6px" }}>
-      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="2" y="2" width="20" height="20" rx="6" fill="currentColor" />
-        <path d="M8 16V8l8 8V8" stroke="var(--mantine-color-body)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-      <Text component="span" fz={17} fw={600} style={{ letterSpacing: "-0.01em" }}>
-        Nivra
-      </Text>
-    </Box>
   );
 }
 

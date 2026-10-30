@@ -6,11 +6,15 @@ import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { png, pdf } from "../test/fixtures/reference-files.ts";
 import { goTo, openSwitcher } from "./places.ts";
+import { seedPlan } from "./seed-workspace.ts";
 
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
 let app: ElectronApplication, page: Page, root: string, taskId: string;
+let sourcePlanId: string;
 test.beforeAll(async ({}, info) => {
   root = mkdtempSync(join(tmpdir(), "nivra discussion acceptance "));
+  mkdirSync(join(root, "user data"));
+  sourcePlanId = seedPlan(join(root, "user data", "workspace.db"), { question: "Review the invoice export", plan: "Keep its original brief and source history." }).planId;
   const executable = info.project.metadata["executable"] as string | undefined;
   const args = [`--user-data-dir=${join(root, "user data")}`, `--nivra-engine-home=${join(root, "engine home")}`];
   app = await electron.launch(executable ? { executablePath: join(desktop, executable), args, chromiumSandbox: true } : { args: [desktop, ...args], chromiumSandbox: true });
@@ -81,4 +85,43 @@ test("failed removal keeps a cleanup retry, and deleting the task removes unsele
   const other = join(root, "unselected.md"); writeFileSync(other, "Never selected or sent"); await picked(other); await panel.getByRole("button", { name: "Attach reference file", exact: true }).click(); await expect(panel.getByLabel("Include unselected.md", { exact: true })).not.toBeChecked();
   await page.getByTestId("task-more").click(); await page.getByTestId("task-delete").click(); await page.getByTestId("task-delete-confirm").click();
   await expect.poll(() => existsSync(folder)).toBe(false); expect(existsSync(path)).toBe(true); expect(existsSync(other)).toBe(true);
+});
+
+test("brief history shows the complete older brief in readable fields, with literal user text", async () => {
+  const title = "Review invoice export";
+  const source = await page.evaluate(async ({ title, planId }) => {
+    const fields = { goal: "Keep <script> as literal invoice text", acceptanceCriteria: ["Amounts keep two decimal places"], scope: "Invoice exports", exclusions: "Payment processing", context: "Monthly reconciliation", assumptions: ["The invoice schema is authoritative"], checks: ["node --test checks.js"], acceptanceCases: [{ name: "Export sample", command: "node export.js", expectedOutput: "1.00\n", expectedExitCode: 0 }], baseline: [{ name: "Current format", command: "node current.js", expectedOutput: "old\n", expectedExitCode: 0 }], frozen: ["schema.sql"] };
+    const task = await window.nivra.createTask({ title, projectId: null, planId, fields });
+    await window.nivra.reviseBrief(task.summary.id, task.revision, { ...fields, goal: "The revised goal" });
+    return task.brief.content.sources[0] ?? null;
+  }, { title, planId: sourcePlanId });
+  expect(source).not.toBeNull();
+  await goTo(page, "tasks");
+  await page.getByRole("button", { name: title, exact: true }).click();
+  await page.getByTestId("task-discussion").getByRole("button", { name: "Brief version 1", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Brief version 1", exact: true });
+  await expect(dialog.getByTestId("task-brief-goal")).toContainText("Keep <script> as literal invoice text");
+  await expect(dialog.getByTestId("task-brief-criteria")).toContainText("Amounts keep two decimal places");
+  await expect(dialog.getByTestId("task-brief-scope")).toContainText("Invoice exports");
+  await expect(dialog.getByTestId("task-brief-exclusions")).toContainText("Payment processing");
+  await expect(dialog.getByTestId("task-brief-context")).toContainText("Monthly reconciliation");
+  await expect(dialog.getByTestId("task-brief-assumptions")).toContainText("The invoice schema is authoritative");
+  await expect(dialog.getByTestId("task-brief-checks")).toContainText("node --test checks.js");
+  await expect(dialog.getByTestId("task-brief-cases")).toContainText("node export.js");
+  await expect(dialog.getByTestId("task-brief-cases")).toContainText("1.00");
+  await expect(dialog.getByTestId("task-brief-baseline")).toContainText("node current.js");
+  await expect(dialog.getByTestId("task-brief-frozen")).toContainText("schema.sql");
+  const details = dialog.getByTestId("historical-brief-details");
+  await details.locator("summary").click();
+  await expect(details).toContainText("Runs at once: 1. Network: off. Approval: required.");
+  await expect(details.getByTestId("historical-brief-source")).toHaveCount(1);
+  await expect(details).toContainText("Plan version 1");
+  await expect(details).toContainText(sourcePlanId);
+  await expect(details).toContainText(source!.planLineage);
+  await expect(details).toContainText(source!.conversationId!);
+  await expect(details).toContainText("General (no repository)");
+  await expect(dialog.locator("script")).toHaveCount(0);
+  await expect(dialog).not.toContainText('"acceptanceCriteria":');
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByTestId("task-brief-goal")).toContainText("The revised goal");
 });

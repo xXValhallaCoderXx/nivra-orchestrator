@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page, type TestInfo } from "@playwright/test";
 import { goTo, openSwitcher } from "./places.ts";
+import { runStatus, startHello } from "./runs.ts";
 import { HostStore } from "../src/main/host-store.ts";
 import { keepSuggestion } from "../src/main/preferences.ts";
 
@@ -85,18 +86,10 @@ async function expectedFor(label: string): Promise<{ digest: string; ids: string
 
 /** Runs hello on the chosen project and returns what its engine recorded about the context it received. */
 async function runHello(): Promise<Context> {
-  await goTo(page, "settings-diagnostics");
-  await page.getByTestId("hello-start").click();
-  const status = page.getByTestId("hello-status");
-  const runId = await expect
-    .poll(async () => {
-      const id = (await status.count()) ? await status.getAttribute("data-run-id") : null;
-      return id !== null && id !== lastRun ? id : null;
-    })
-    .not.toBeNull()
-    .then(() => status.getAttribute("data-run-id"));
+  const runId = await startHello(page);
+  expect(runId).not.toBe(lastRun);
   lastRun = runId;
-  await expect(status).toHaveText("succeeded");
+  await expect.poll(() => runStatus(page, runId)).toBe("succeeded");
   const events = await page.evaluate(async (id) => (await window.nivra.runEvents(id, 0)).events, runId!);
   return events.find((e) => e.stepId === "context" && e.type === "step.output")!.data as Context;
 }
@@ -127,7 +120,7 @@ test("a preference confirmed in the window reaches the project's run, every valu
   const received = await runHello();
   expect([received.count, received.revision, received.records.map((r) => r.id), received.digest]).toEqual([2, 2, expected.ids, expected.digest]);
   expect(received.records.map((r) => r.intent)).toEqual(["default", "override"]);
-  await expect(page.getByTestId("hello-timeline")).toContainText(`2 confirmed preferences from the app (revision 2), fingerprint ${expected.digest.slice(0, 12)}`);
+  expect((await page.evaluate((id) => window.nivra.runEvents(id, 0), lastRun!)).events.find((event) => event.stepId === "context" && event.type === "step.output")?.message).toContain(`2 confirmed preferences from the app (revision 2), fingerprint ${expected.digest.slice(0, 12)}`);
 });
 
 test("another project's runs get the personal preference, never the first project's own", async () => {
@@ -175,7 +168,7 @@ test("a deleted preference is gone from the next run", async () => {
   await expect(page.getByTestId("preferences-summary")).toContainText("Runs on beta get 0 confirmed preferences");
   const received = await runHello();
   expect([received.count, received.revision]).toEqual([0, 4]);
-  await expect(page.getByTestId("hello-timeline")).toContainText("No confirmed preferences from the app (revision 4)");
+  expect((await page.evaluate((id) => window.nivra.runEvents(id, 0), lastRun!)).events.find((event) => event.stepId === "context" && event.type === "step.output")?.message).toContain("No confirmed preferences from the app (revision 4)");
 });
 
 test("a replaced preference stays as history, and the next run gets only its replacement (D23)", async () => {
