@@ -413,11 +413,15 @@ describe("a task run through a real engine (NIV-7)", () => {
       const run = await start(engine, repo, fingerprint, { preferences, choices: field === "choice" ? [value] : [] });
       const page = await ended(engine, run.id);
       assert.equal(page.status, "failed");
+      const final = await report(engine, run.id);
+      assert.deepEqual([final.outcome, final.stopped?.code, final.stopped?.step, final.finishedAt !== null], ["refused", "context-credentials", "check", true]);
       assert.equal(JSON.stringify(page).includes(value), false);
       assert.equal(engine.stderr().includes(value), false);
     }
     const mismatch = await start(engine, repo, fingerprint, { choices: ["Use pnpm"], contextDigests: { preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]) } });
     assert.equal((await ended(engine, mismatch.id)).status, "failed");
+    const final = await report(engine, mismatch.id);
+    assert.deepEqual([final.outcome, final.stopped?.code, final.stopped?.step, final.finishedAt !== null], ["refused", "context-mismatch", "check", true]);
     assert.equal(model.chats().length, 0); assert.equal(sandbox.requests.length, 0);
   });
 

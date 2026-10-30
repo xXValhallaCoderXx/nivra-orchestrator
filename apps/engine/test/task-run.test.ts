@@ -308,7 +308,7 @@ describe("a task run's workflow, in process (D39)", () => {
   const MODEL = TASK_MODEL;
   type Call = [string, Record<string, unknown>];
 
-  async function workflow(options: { platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string>; keep?: (proposal: Proposal) => void } = {}) {
+  async function workflow(options: { platform?: NodeJS.Platform; vaultValues?: string[]; calls?: Call[]; files?: Record<string, string>; keep?: (proposal: Proposal) => void; context?: Partial<Pick<TaskContext, "preferences" | "choices">>; knownValues?: () => string[]; afterCheck?: (context: TaskContext) => void; afterListing?: (context: TaskContext) => void } = {}) {
     const root = repoWith(options.files ?? FILES);
     const guest = new RealGuest();
     guest.busybox = true;
@@ -316,8 +316,8 @@ describe("a task run's workflow, in process (D39)", () => {
     const brief = TASK_BRIEF;
     const runId = randomUUID();
     const requestId = randomUUID();
-    const input = { repoPath: root, project: randomUUID(), target: "local", preview: (await snap(root)).fingerprint, taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest([]), choicesDigest: await choicesDigest([]), briefDigest: await taskBriefDigest(brief) };
-    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief, preferences: { revision: 0, records: [] }, choices: [] };
+    const context: TaskContext = { sharing: { modelContext: true, cloudExecution: true }, brief, preferences: { revision: 0, records: [] }, choices: [], ...options.context };
+    const input = { repoPath: root, project: randomUUID(), target: "local", preview: (await snap(root)).fingerprint, taskId: randomUUID(), briefVersion: 1, preferencesDigest: await preferencesDigest(context.preferences.records), choicesDigest: await choicesDigest(context.choices), briefDigest: await taskBriefDigest(brief) };
     const calls = options.calls ?? [["edit_file", TASK_FIX], ["submit", { summary: "Defaulted the name to world." }]];
     let requests = 0;
     const model = new MastraLanguageModelV2Mock({
@@ -326,14 +326,17 @@ describe("a task run's workflow, in process (D39)", () => {
         return { content: [{ type: "tool-call", toolCallId: `call-${requests++}`, toolName: tool, input: JSON.stringify(args) }], finishReason: "tool-calls", usage: { inputTokens: 100, outputTokens: 10, totalTokens: 110 }, warnings: [] };
       }) as never,
     });
-    const listing = (async () => new Response(JSON.stringify({ object: "list", data: [{ id: MODEL }] }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+    const listing = (async () => {
+      options.afterListing?.(context);
+      return new Response(JSON.stringify({ object: "list", data: [{ id: MODEL }] }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
     const reports: TaskReport[] = [];
     const proposals: Proposal[] = [];
     // What was saved, in order: each report by its outcome, and the proposal.
     const saves: string[] = [];
     let opened = 0;
     const deps: TaskDeps = {
-      recorder: { output: () => undefined, event: () => undefined },
+      recorder: { output: (_runId, step) => { if (step === "check") options.afterCheck?.(context); }, event: () => undefined },
       context: () => context,
       task: () => input,
       requestId: () => requestId,
@@ -347,7 +350,7 @@ describe("a task run's workflow, in process (D39)", () => {
       findGit: () => GIT,
       platform: options.platform ?? "linux",
       exclude: [],
-      knownValues: () => [KEY],
+      knownValues: options.knownValues ?? (() => [KEY]),
       vaultValues: () => options.vaultValues ?? [KEY, PROJECT],
       shutdown: new AbortController().signal,
       endpoint: { url: "http://127.0.0.1:9/v1", kind: "loopback-test" },
@@ -400,6 +403,35 @@ describe("a task run's workflow, in process (D39)", () => {
     const done = await workflow({ platform: "win32" });
     assert.deepEqual([done.result.status, done.result.error?.message, done.opened, done.requests(), done.reports.map((report) => [report.outcome, report.stopped?.code, report.stopped?.step])], ["failed", TASK_STOP_MESSAGES["native-windows"], 0, 0, [["refused", "native-windows", "check"]]]);
   });
+
+  for (const step of ["prepare", "start"] as const) {
+    it(`saves a finished context-credential refusal at ${step} when a newly saved key matches accepted preferences or choices`, async () => {
+      for (const field of ["preference", "choice"] as const) {
+        const value = `accepted-private-context-${randomUUID()}`;
+        let saved = false;
+        const changed = () => { saved = true; };
+        const done = await workflow({
+          context: { preferences: { revision: 1, records: field === "preference" ? [{ id: randomUUID(), statement: value, scope: "personal", intent: "default", revision: 1 }] : [] }, choices: field === "choice" ? [value] : [] },
+          knownValues: () => saved ? [KEY, value] : [KEY],
+          ...(step === "prepare" ? { afterCheck: changed } : { afterListing: changed }),
+        });
+        const final = done.reports.at(-1)!;
+        assert.deepEqual([done.result.status, done.saves, final.outcome, final.stopped?.code, final.stopped?.step, final.finishedAt !== null], ["failed", ["report in-progress", "report refused"], "refused", "context-credentials", step, true]);
+        assert.equal(final.stopped?.message, TASK_STOP_MESSAGES["context-credentials"]);
+        assert.deepEqual([done.opened, done.requests(), done.guest.service.uploads.length, done.guest.service.spawns, done.proposals.length], [0, 0, 0, 0, 0]);
+        assert.equal(JSON.stringify({ result: done.result, reports: done.reports }).includes(value), false);
+      }
+    });
+
+    it(`saves a finished context-mismatch refusal at ${step} rather than leaving the in-progress report`, async () => {
+      const changed = (context: TaskContext) => { context.choices = ["A mismatched choice"]; };
+      const done = await workflow(step === "prepare" ? { afterCheck: changed } : { afterListing: changed });
+      const final = done.reports.at(-1)!;
+      assert.deepEqual([done.result.status, done.saves, final.outcome, final.stopped?.code, final.stopped?.step, final.finishedAt !== null], ["failed", ["report in-progress", "report refused"], "refused", "context-mismatch", step, true]);
+      assert.equal(final.stopped?.message, TASK_STOP_MESSAGES["context-mismatch"]);
+      assert.deepEqual([done.opened, done.requests(), done.guest.service.uploads.length, done.guest.service.spawns, done.proposals.length], [0, 0, 0, 0, 0]);
+    });
+  }
 
   it("keeps no proposal that holds a value the vault keeps, even one the change's own rules missed", async () => {
     // A value only the vault knows, in the fix's new text: nothing before the store catches it, and the store refuses it.

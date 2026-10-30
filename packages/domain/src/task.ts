@@ -376,7 +376,7 @@ export const TaskWorker = z.strictObject({
 export type TaskWorker = z.infer<typeof TaskWorker>;
 
 /** What stopped a run, by kind: a sandbox check's codes (D36), and a task's own. The words are chosen by the code. */
-export const TaskStopCode = z.enum([...SandboxStopCode.options, "toolchain", "time", "model-sharing", "brief", "model", "native-windows", "baseline", "environment", "frozen", "environment-missing"]);
+export const TaskStopCode = z.enum([...SandboxStopCode.options, "toolchain", "time", "model-sharing", "brief", "model", "native-windows", "baseline", "environment", "frozen", "environment-missing", "context-mismatch", "context-credentials"]);
 export type TaskStopCode = z.infer<typeof TaskStopCode>;
 
 /**

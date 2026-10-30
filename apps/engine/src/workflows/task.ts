@@ -113,11 +113,11 @@ export function createTaskWorkflow(deps: TaskDeps) {
     if (!credentials) throw refuse("credentials");
     if ((await taskBriefDigest(context.brief)) !== task.briefDigest) throw refuse("brief");
     if (!task.preferencesDigest || !task.choicesDigest || await preferencesDigest(context.preferences.records) !== task.preferencesDigest || await choicesDigest(context.choices) !== task.choicesDigest) {
-      throw new Refusal("context-mismatch", "The run's preferences or choices do not match its approved context. Preview it again, then start a new run.");
+      throw refuse("context-mismatch");
     }
     const privateTexts = [...context.preferences.records.map((record) => record.statement), ...context.choices];
     if (privateTexts.some((text) => deps.mask(text) !== text || deps.knownValues().some((value) => value.length > 0 && text.includes(value)))) {
-      throw new Refusal("context-credentials", "A preference or choice holds a credential, so nothing was sent. Remove it, preview the run again, then start.");
+      throw refuse("context-credentials");
     }
     // An environment's image is reachable only from the Nebius project it was prepared in (D41), and a recipe's
     // environment serves only the target it was prepared on (NIV-55).

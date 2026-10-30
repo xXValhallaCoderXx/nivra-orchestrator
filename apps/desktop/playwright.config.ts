@@ -17,6 +17,7 @@ export default defineConfig({
   reporter: "line",
   projects: [
     { name: "built", metadata: {}, testIgnore: /windows\.spec\.ts/ },
+    { name: "development", testMatch: /task-preferences\.spec\.ts/ },
     { name: "packaged", metadata: { executable: PACKAGED[process.platform] ?? PACKAGED.linux }, testIgnore: /windows\.spec\.ts/ },
     // From WSL: the Windows build that `pnpm dev:win --no-launch` copied to %LOCALAPPDATA%\nivra-dev\app (D14).
     { name: "windows", testMatch: /windows\.spec\.ts/ },

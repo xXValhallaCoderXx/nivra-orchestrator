@@ -367,7 +367,6 @@ export function RunLauncher({
   const [choices, setChoices] = useState<string[]>(matches ? choicesDraft?.choices ?? [] : []);
   const [changed, setChanged] = useState(false);
   const request = useRef(0);
-  const resumed = useRef(false);
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<TaskRunPreview | null>(null);
   const [allowed, setAllowed] = useState<{ sharing: boolean; uploads: boolean }>({ sharing: false, uploads: false });
@@ -391,8 +390,7 @@ export function RunLauncher({
   }, [asked]);
 
   useEffect(() => {
-    if (resumed.current) return;
-    resumed.current = true;
+    // StrictMode cleans up and restarts this effect: each setup must replace the invalidated request.
     if (choicesDraft && matches) void previewIt();
     else if (choicesDraft) { setError("The task, brief or repository changed while Preferences was open. Preview it again with new choices."); onClearChoicesDraft?.(); }
   }, []);
@@ -488,13 +486,26 @@ export function RunLauncher({
         {preview ? (
           <RunPreview choices={choices} changed={changed} onChoices={changeChoices} onRefresh={() => void refresh()} onPreferences={onPreferences ? () => { request.current++; onPreferences({ revision: view.revision, briefVersion: view.brief.version, projectId, choices: [...choices] }); } : undefined} preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={cancel} />
         ) : (
-          <Text size="sm" c="var(--nivra-text-3)" p="md">
-            {error ?? "Working out what a run would send, on the repository’s own engine. Nothing is sent."}{error && <Button variant="default" onClick={() => void refresh()}>Retry preview</Button>}
-          </Text>
+          <Stack p="md" data-testid="task-run-preview-body" style={{ overflowY: "auto" }}>
+            {error ? <Alert color="red" data-testid="task-run-preview-error">{error}</Alert> : <Text size="sm" c="var(--nivra-text-3)">{busy ? "Working out what a run would send, on the repository’s own engine. Nothing is sent." : "Refresh the preview to review these choices and what the run would send. Nothing is sent."}</Text>}
+            <RunChoicesEditor choices={choices} changed={changed} busy={busy} onChoices={changeChoices} onRefresh={() => void refresh()} />
+            <Group justify="flex-end"><Button variant="default" onClick={cancel}>Cancel</Button></Group>
+          </Stack>
         )}
       </Modal>
     </Stack>
   );
+}
+
+function RunChoicesEditor({ choices, changed, busy, onChoices, onRefresh }: {
+  choices: string[]; changed: boolean; busy: boolean; onChoices(choices: string[]): void; onRefresh(): void;
+}) {
+  return <Stack gap="xs">
+    <Text fw={600} size="sm">Choices for this run</Text>
+    {choices.map((choice, index) => <Group key={index} align="flex-start"><Textarea style={{ flex: 1 }} label={`Run choice ${index + 1}`} value={choice} maxLength={300} disabled={busy} onChange={(event) => onChoices(choices.map((current, at) => at === index ? event.currentTarget.value : current))} /><Button size="xs" variant="subtle" disabled={busy} onClick={() => onChoices(choices.filter((_, at) => at !== index))}>Remove choice {index + 1}</Button></Group>)}
+    <Group><Button size="xs" variant="default" disabled={busy || choices.length >= 5} onClick={() => onChoices([...choices, ""])}>Add run choice</Button><Button size="xs" variant="default" disabled={busy} onClick={onRefresh}>Refresh preview</Button></Group>
+    {changed && <Text size="sm" c="var(--nivra-warning)">Choices changed. Refresh the preview before starting.</Text>}
+  </Stack>;
 }
 
 /**
@@ -538,10 +549,7 @@ function RunPreview({
         {preview.preferences.records.length === 0 && <Text size="sm">No confirmed preferences apply to this run.</Text>}
         {preview.preferences.records.map((record) => <Group key={record.id} gap="xs"><Badge>{record.scope === "personal" ? "Personal default" : record.intent === "override" ? "Explicit project decision" : "Project default"}</Badge><Text size="sm">{record.statement}</Text></Group>)}
         <Text size="xs">Run choices take precedence, then explicit project decisions, evidenced repository conventions, project defaults and personal defaults. None changes the brief, required checks, consent or execution limits.</Text>
-        <Text fw={600} size="sm">Choices for this run</Text>
-        {choices.map((choice, index) => <Group key={index} align="flex-start"><Textarea style={{ flex: 1 }} label={`Run choice ${index + 1}`} value={choice} maxLength={300} disabled={busy} onChange={(event) => onChoices(choices.map((current, at) => at === index ? event.currentTarget.value : current))} /><Button size="xs" variant="subtle" disabled={busy} onClick={() => onChoices(choices.filter((_, at) => at !== index))}>Remove choice {index + 1}</Button></Group>)}
-        <Group><Button size="xs" variant="default" disabled={busy || choices.length >= 5} onClick={() => onChoices([...choices, ""])}>Add run choice</Button><Button size="xs" variant="default" disabled={busy} onClick={onRefresh}>Refresh preview</Button></Group>
-        {changed && <Text size="sm" c="var(--nivra-warning)">Choices changed. Refresh the preview before starting.</Text>}
+        <RunChoicesEditor choices={choices} changed={changed} busy={busy} onChoices={onChoices} onRefresh={onRefresh} />
       </Stack></Paper>
       {preview.blocked && !asking && (
         <Alert color="yellow" variant="light" data-testid="task-run-preview-blocked">
