@@ -3675,3 +3675,36 @@ Desktop E2E, packaged and Windows checks were not run because this change is scr
 real provider call, credential provisioning or real release-home operation was performed. Existing candidate builds and
 evidence remain untouched. This implements the cancellation cleanup independently of NIV-71 / PR 49; merging remains
 with Nate.
+
+### PR #50 integration with current main (30 October 2026)
+
+Merged main `60c121667db3ee22912ee3717db1d871d48ee83b` into the reviewed NIV-48 head
+`f825f827391e6399987d8d0890599de292b941f1`, producing combined revision
+`00f875f5b0bf70900f1158d99a14491c1688e28f`. Only `acceptance.md` and `development.md` conflicted. Each resolution
+contains current main's complete document followed by the complete NIV-48 additions from the reviewed head, with
+neither ticket's documentation removed or rewritten. This receipt is appended after verification.
+
+The council script and its test remain byte-for-byte identical to `f825f82`. Relative to current main, the only
+non-document changes are still `apps/engine/scripts/council-eval/batch.ts` and `apps/engine/test/council-eval.test.ts`.
+Engine-runtime, desktop, preload, domain, dependency, staging and packaging files match main. The combined revision
+uses protocol 22 from NIV-71; the preceding protocol-21 receipt describes the earlier standalone NIV-48 revision.
+
+Verification of the combined revision on Node 24.21.0 and pnpm 10.4.1:
+
+- Focused `test/council-eval.test.ts`: **36/36 passed**, zero failures/skips, including the late-cancellation,
+  partial-evidence and unresolved/no-resend cases. It ran before the full suite.
+- `env TMPDIR=/var/tmp taskset --cpu-list 0-1 pnpm verify`: all typechecks and **1,939 tests passed**
+  (141 domain, 724 desktop, 1,074 engine), zero failures, cancellations or skips.
+- The real engine through `apps/engine/scripts/rpc.ts`: keyless `doctor` and `hello` passed in a disposable home,
+  using a disposable repository and no sharing consent. Provider credential variables were removed from the child
+  environment, and the disposable home/repository were removed afterwards.
+- All 545 tracked non-document files retained their frozen hashes throughout verification. Manifest fingerprint:
+  `852dd8138179795dc66ec498de0330421d8ddb8aa00ae0bbbd11b8dd3610920c`.
+
+Ignored receipts are under `.artifacts/niv48-integration/`: `focused.log`, `verify.log`, `rpc-smoke.json`,
+`rpc-doctor.log`, `rpc-hello.log`, `source-manifest.json` and `documentation-resolution.json`. The final diff and
+untracked files were inspected; no generated output, dependencies or credential material were added.
+
+Desktop UI, packaged and Windows checks were not repeated for this script/test/documentation integration: their
+runtime sources are identical to current main. No paid provider/cloud calls ran and no checks were weakened or
+skipped to obtain a passing result. PR #50 remains unmerged for the person to review this combined revision.
