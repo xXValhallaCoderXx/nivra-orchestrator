@@ -177,12 +177,23 @@ export const TaskContext = z.strictObject({
 });
 export type TaskContext = z.infer<typeof TaskContext>;
 
+/** Productive capacity, separate from the reserved hand-in. No grant or monthly balance is persisted here. */
+export const TaskWork = z.strictObject({ workingRequests: z.number().int().min(1).max(1_000_000) });
+export type TaskWork = z.infer<typeof TaskWork>;
+export const DEFAULT_WORKING_REQUESTS = 64;
+export const CODING_PORTION = { requests: 16, toolCalls: 64, writes: 16, runs: 8 } as const;
+export function taskWorkLimits(work: TaskWork) {
+  const requests = work.workingRequests;
+  return { requests: requests + 1, toolCalls: requests * 4, writes: requests, runs: Math.ceil(requests / 2), readBytes: requests * 4 * 16_384, inputTokens: (requests + 1) * 60_000 };
+}
+
 /**
  * A task run's input. `project` and `target` bind what comes back to where it may go (D34); `preview` is the
  * fingerprint of the snapshot the person was shown, and a commit that no longer matches it is refused before the upload.
  * The attempt is the run's request id: the host saves it before it sends the request (D26).
  */
 export const TaskInput = z.strictObject({
+  work: TaskWork.optional(),
   repoPath: z.string().min(1).max(4096),
   project: z.uuid(),
   target: TargetName,
@@ -204,6 +215,7 @@ export type TaskInput = z.infer<typeof TaskInput>;
 
 /** A task run's input as the engine reads it back from its store: masked, so only its shape is checked. */
 export const StoredTaskInput = z.object({
+  work: TaskWork.optional(),
   repoPath: z.string().min(1),
   project: z.string().min(1),
   target: z.string().min(1),
@@ -368,9 +380,10 @@ export const TaskWorker = z.strictObject({
   /** The worker's own words, masked. */
   summary: z.string().max(2_000).nullable(),
   /** `output-cap`: an answer reached the output cap before its tool call was made, which ends the loop (NIV-35). */
-  ended: z.enum(["submitted", "time", "requests", "input", "tool-calls", "model-failed", "output-cap", "no-time", "not-started"]),
+  ended: z.enum(["submitted", "time", "requests", "input", "tool-calls", "model-failed", "output-cap", "no-time", "not-started", "model-ended", "no-progress"]),
   /** Why it was first left only handing in: its last request, its tool calls used, or no time for another operation. */
-  handInDue: z.enum(["last-request", "tool-calls", "time"]).nullable(),
+  handInDue: z.enum(["last-request", "tool-calls", "time", "no-progress", "allowance"]).nullable(),
+  stopDetail: z.string().max(600).nullable().optional(),
   failure: ModelFailureKind.nullable(),
   model: z.string().max(200),
   usage: RunUsage,

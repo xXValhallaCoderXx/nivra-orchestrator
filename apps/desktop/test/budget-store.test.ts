@@ -41,6 +41,7 @@ import {
   startNewHistory,
   sharedRequestLimitDraft,
   writeAdaptivePlanningGrant,
+  writeAdaptiveCodingGrant,
   writeGrant,
   writeOff,
 } from "../src/main/budget-store.ts";
@@ -1397,5 +1398,86 @@ describe("Companion and planning shared allowance", () => {
     assert.equal(view.historyComplete, false);
     assert.equal(view.inputTokens, null);
     assert.ok("refused" in writeGrant(db, companion(), context(db, OCT, TOKEN_FACTORY_PRICES)));
+  });
+});
+
+
+describe("NIV-60 coding coverage and portions", () => {
+  const policy = (monthlyRequests: number, coding = true): BudgetPolicyDraft => ({ preset: "counts", currency: null, monthlyMicros: null, timezone: "UTC", thresholds: [], sublimits: NO_SUBLIMITS, allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, researchCreditMicros: null, modelRequestLimits: [{ pool: coding ? "companion-planning-and-coding" : "companion-and-planning", monthlyRequests }] });
+  const coding = (over: Partial<GrantRequest> = {}) => request({ productive: { requests: 16, outputTokens: 8000 }, ...over });
+
+  it("preserves old coverage and counts existing coding reservations when expanded explicitly", () => {
+    const db = workspace(); setPolicy(db, policy(20, false), OCT, ESTABLISHED);
+    const first = writeAdaptiveCodingGrant(db, coding(), context(db));
+    assert.equal("grant" in first, true);
+    assert.equal(companionRequestUsage(db).reserved, 0);
+    assert.equal(companionRequestUsage(db).coding.reserved, 17);
+    setPolicy(db, policy(20), OCT, ESTABLISHED);
+    assert.equal(companionRequestUsage(db).reserved, 17);
+    assert.equal(companionRequestUsage(db).remaining, 3);
+    const second = writeAdaptiveCodingGrant(db, coding({ targetId: "wsl:Other" }), context(db));
+    assert.equal("grant" in second, true);
+    if (!("grant" in second)) throw new Error(second.refused.message);
+    assert.equal(second.grant.productive.requests, 2);
+    assert.equal(companionRequestUsage(db).reserved, 20);
+    assert.equal(companionRequestUsage(db).remaining, 0);
+    assert.equal("refused" in writeAdaptiveCodingGrant(db, coding(), context(db)), true);
+  });
+
+  it("returns the same partial root and extension for a repeated need without a second reservation", () => {
+    const db = workspace(); setPolicy(db, policy(40), OCT, ESTABLISHED);
+    const initial = coding(); const root = writeAdaptiveCodingGrant(db, initial, context(db));
+    if (!("grant" in root)) throw new Error(root.refused.message);
+    markDispatching(db, root.grant.id, HOME, OCT, ledgerState(db));
+    const extension = coding({ requestId: initial.requestId, extends: root.grant.id, need: "coding-1", finalisation: { requests: 0, outputTokens: 0 } });
+    const next = writeAdaptiveCodingGrant(db, extension, context(db));
+    if (!("grant" in next)) throw new Error(next.refused.message);
+    const before = companionRequestUsage(db).reserved;
+    const repeated = writeAdaptiveCodingGrant(db, extension, context(db));
+    assert.equal("grant" in repeated && repeated.grant.id, next.grant.id);
+    assert.equal(companionRequestUsage(db).reserved, before);
+    const rootAgain = writeAdaptiveCodingGrant(db, initial, context(db));
+    assert.equal("grant" in rootAgain && rootAgain.grant.id, root.grant.id);
+    assert.equal("refused" in writeAdaptiveCodingGrant(db, { ...extension, productive: { requests: 8, outputTokens: 8000 } }, context(db)), true);
+  });
+
+  it("never broadens a saved recovery statement without its own explicit acknowledgement", () => {
+    const db = workspace(); setPolicy(db, policy(100, false), OCT, ESTABLISHED);
+    startNewHistory(db, { recovery: lost(db), remaining: { micros: 0, mode: "counts", allowances: { sandboxOperations: 0, sandboxSeconds: 0, researchCredits: 0 }, modelRequestLimits: [{ pool: "companion-and-planning", monthlyRequests: 5 }] }, now: OCT, timezone: "UTC" });
+    setPolicy(db, policy(100), OCT, ESTABLISHED);
+    const refused = writeAdaptiveCodingGrant(db, coding(), context(db));
+    assert.equal("refused" in refused, true);
+    if (!("refused" in refused)) throw new Error("The old recovery coverage admitted coding.");
+    assert.match(refused.refused.message, /does not cover coding/);
+    const revision = companionRequestUsage(db).recoveryCoverageRevision!;
+    setPolicy(db, { ...policy(100), requestRecoveryRevision: revision }, OCT, ESTABLISHED);
+    const admitted = writeAdaptiveCodingGrant(db, coding(), context(db));
+    if (!("grant" in admitted)) throw new Error(admitted.refused.message);
+    assert.equal(admitted.grant.productive.requests, 4);
+    assert.equal(admitted.grant.finalisation.requests, 1);
+    assert.equal(companionRequestUsage(db).remaining, 0);
+  });
+
+  it("enforces the accepted task total in the ledger and preserves partial-portion idempotency", () => {
+    const db = workspace(); const initial = coding();
+    const root = writeAdaptiveCodingGrant(db, initial, { ...context(db), workingRequests: 20 });
+    if (!("grant" in root)) throw new Error(root.refused.message);
+    markDispatching(db, root.grant.id, HOME, OCT, ledgerState(db));
+    const extension = coding({ requestId: initial.requestId, extends: root.grant.id, need: "coding-1", finalisation: { requests: 0, outputTokens: 0 } });
+    const second = writeAdaptiveCodingGrant(db, extension, { ...context(db), workingRequests: 20 });
+    if (!("grant" in second)) throw new Error(second.refused.message);
+    assert.equal(second.grant.productive.requests, 4);
+    const repeated = writeAdaptiveCodingGrant(db, extension, { ...context(db), workingRequests: 20 });
+    assert.equal("grant" in repeated && repeated.grant.id, second.grant.id);
+    const refused = writeAdaptiveCodingGrant(db, { ...extension, need: "coding-2" }, { ...context(db), workingRequests: 20 });
+    assert.equal("refused" in refused, true);
+    assert.equal(companionRequestUsage(db).coding.reserved, 21);
+  });
+
+  it("refuses stale guard authority before writing another portion", () => {
+    const db = workspace(); const stale = context(db);
+    writeAdaptiveCodingGrant(db, coding(), stale);
+    assert.throws(() => writeAdaptiveCodingGrant(db, coding(), stale), /guard|verified|history/i);
+    assert.equal(companionRequestUsage(db).coding.reserved, 17);
   });
 });

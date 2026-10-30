@@ -3,7 +3,7 @@
 // run's preview compared field by field with what the recipe approved, and a preparation's ending against the stop a
 // recipe expects (NIV-55).
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TASK_MODEL, type EnvironmentStopCode, type PreparedEnvironmentV2 } from "@nivra/domain";
 import { ENVIRONMENT_STOP_MESSAGES } from "../../engine/src/environment/report.ts";
@@ -64,6 +64,7 @@ export function buildChanges(frozen: BuildHashes, now: BuildHashes): string[] {
 
 /** What a recipe approved that a run's preview must show. */
 export interface ApprovedRun {
+  work?: { workingRequests: number };
   baseline: string;
   snapshotFingerprint: string;
   briefDigest: string;
@@ -86,15 +87,17 @@ export function previewProblems(input: {
   /** The recipe's environment just prepared, as the app's view holds it; null for a run with none. */
   prepared: PreparedEnvironmentV2 | null;
   shownExpected: string;
-  structured: Pick<TaskRunPreview, "expected" | "snapshotFingerprint" | "snapshot" | "frozen" | "environment" | "sends"> & Partial<Pick<TaskRunPreview, "preferencesDigest" | "choicesDigest" | "cases" | "checks" | "baseline">>;
+  structured: Pick<TaskRunPreview, "expected" | "snapshotFingerprint" | "snapshot" | "frozen" | "environment" | "sends"> & Partial<Pick<TaskRunPreview, "preferencesDigest" | "choicesDigest" | "referencesDigest" | "references" | "work" | "cases" | "checks" | "baseline">>;
 }): string[] {
   const { approved, ids, prepared, structured } = input;
   // What the host binds a run from it to (fingerprint v3): its own ref for this target, worked out here again.
   const environment = prepared ? environmentRefOf(prepared, null, ids.targetId) : null;
   const context = structured.preferencesDigest && structured.choicesDigest ? { preferencesDigest: structured.preferencesDigest, choicesDigest: structured.choicesDigest } : {};
   const requiredChecks = structured.cases && structured.checks && structured.baseline ? { finalChecks: structured.cases.length + structured.checks.length, baselineChecks: structured.baseline.length, comparisonChecks: structured.checks.length } : undefined;
-  const expected = taskRunFingerprint({ ...ids, ...context, requiredChecks, briefDigest: approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: approved.snapshotFingerprint, environment });
+  const expected = taskRunFingerprint({ ...ids, ...context, work: approved.work, policyVersion: null, referencesDigest: structured.referencesDigest, requiredChecks, briefDigest: approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: approved.snapshotFingerprint, environment });
   const problems: string[] = [];
+  if (approved.work && structured.work?.workingRequests !== approved.work.workingRequests) problems.push("the working request maximum differs from the approved allowance");
+  if (structured.references && (structured.references.comments.length || structured.references.attachments.length || structured.references.summaries.length)) problems.push("the run includes task context absent from the approved recipe");
   if (input.shownExpected !== expected) problems.push("the window's preview isn't bound to the approved brief, commit and environment");
   if (structured.expected !== expected) problems.push("the app's preview isn't bound to the approved brief, commit and environment");
   if (structured.snapshotFingerprint !== approved.snapshotFingerprint) problems.push(`the snapshot is ${String(structured.snapshotFingerprint)}, not the approved ${approved.snapshotFingerprint}`);
@@ -187,4 +190,26 @@ export async function closedThen<A, T>(app: A, close: (app: A) => Promise<void>,
     await close(app);
   }
   return after();
+}
+
+/** A private file can supply Settings' existing named calls; its values never enter a recipe or a log. */
+export function readLiveCredentials(path: string, repository: string): { key: string; project: string } {
+  const file = realpathSync.native(path);
+  const location = relative(realpathSync.native(repository), file);
+  if (location === "" || (!isAbsolute(location) && location !== ".." && !location.startsWith(`..${sep}`))) throw new Error("Keep live credentials outside the repository.");
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || info.size > 16_384 || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())) throw new Error("Use a regular credential file owned by you with mode 0600, at most 16 KiB.");
+    const values = new Map<string, string>();
+    for (const line of readFileSync(descriptor, "utf8").split(/\r?\n/)) {
+      const match = /^(?:export\s+)?(NEBIUS_API_KEY|NEBIUS_PROJECT_ID)=(.*)$/.exec(line.trim());
+      if (!match) continue;
+      const raw = match[2]!.trim();
+      values.set(match[1]!, /^(["']).*\1$/.test(raw) ? raw.slice(1, -1) : raw);
+    }
+    const key = values.get("NEBIUS_API_KEY"), project = values.get("NEBIUS_PROJECT_ID");
+    if (!key || !project || key.includes("\0") || project.includes("\0")) throw new Error("The private file needs NEBIUS_API_KEY and NEBIUS_PROJECT_ID. No values were printed.");
+    return { key, project };
+  } finally { closeSync(descriptor); }
 }

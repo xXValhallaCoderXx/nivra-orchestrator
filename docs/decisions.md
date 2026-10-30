@@ -4074,3 +4074,52 @@ binding. These are recovery and accepted-context transitions rather than new per
 database or background deletion worker is required. An optional attachment cleanup flag remains compatible with
 historical metadata. Protocol 23, database schema 15, dependency pins and model/budget policies are unchanged. Accepted
 Planning reference bytes remain frozen, while stale results require a new review before saving or reuse.
+
+## D62. Precise edits and finite coding capacity within one attempt (2026-10-30, NIV-60)
+
+**Decision.** Extend the existing exact-text editor and D49/D60 coding grants. The engine computes the unique
+match's UTF-8 byte offsets from its verified copy, validates the complete result, then sends a fixed splice with
+source/result hashes and a replacement of at most 16 KiB. The boundary verifies the source, constructs and hashes a
+temporary result, preserves mode and replaces its working file. The existing download/hash check remains required
+before the engine updates its copy. Existing files may reach the existing 2 MiB policy limit; creation stays at
+32 KiB. Reject private values before encoding the replacement, and refuse no-op edits without a write. Submission
+ends work tools immediately. Three identical failed work operations on unchanged files leave only hand-in; reads
+and searches do not count, and a verified write clears the repetition history. Report an early model completion as
+such, rather than request exhaustion. Independent collection and final checks still decide verification.
+
+Outside the explicitly saved shared monthly coding coverage, new app attempts default to a maximum of 64 working
+requests plus one reserved hand-in. The preview permits a different finite maximum and binds it, the policy version
+and accepted context to Start. With expanded coverage, an optional task maximum can further restrict the monthly
+allowance. A maximum is not promised runtime: the unchanged time and context boundaries can end work sooner.
+Keep legacy inputs/reports readable; callers omitting the new work profile retain their old finite limits.
+
+The host admits portions of at most 16 working requests, corresponding to 64 tools, 16 writes and eight worker
+checks. It guards each written and dispatching ledger revision before replying. Renewal happens between settled
+responses, operations and write read-backs. Cumulative boundary operation capacity increases without resetting its
+counter or deadline. Grants share one immutable run-membership journal, select the admitted productive grant at
+send time and seal together at the run's terminal transition. Only the root reserves hand-in. Pending needs are
+monotonic and idempotent; cancellation, submission, finalisation or a host timeout fences later replies permanently.
+Missing acceptance/seals retain conservative holds. Nothing resumes after a restart or retries an uncertain send.
+
+The accepted work profile scales finite cumulative input/read admission alongside request/tool capacity, preserving
+each request's context bound and cumulative reporting. Keep the 45-minute session, 58-minute run, 830-second
+productive request, 180-second hand-in and 900-second transport ordering, and reserve collection, final checks and
+cleanup for the whole attempt. More count capacity extends none of those deadlines.
+
+Expand monthly coverage only on an explicit save of Companion, Planning and Coding. Preserve saved amounts, off
+state, history and recovery restrictions. Previously recorded coding usage in the established month counts under
+expanded coverage; show it before saving. Expanding an older recovery statement needs a separate acknowledgement
+bound to that loss revision. All engines use the host's one ledger. This request pool is neither a token/dollar
+ceiling nor sandbox cost coverage; sandbox resources retain their existing accounting and per-run bounds.
+
+**Why.** Whole-file transport stopped tiny edits to larger files, while the old unconditional request/write limits
+stopped useful work even when its execution time and shared allowance remained. Existing targeted tools, guarded
+grants and proposal verification provide the necessary foundations; duplicating them would create competing
+authorities. Late capacity replies must never turn a completed or cancelled attempt back into work.
+
+**Consequences.** Protocol 24 adds coding-capacity RPC and accurate stop reasons. Engine migration 7 appends immutable
+run/grant membership while preserving historical root bindings. Preview fingerprint v7 binds work and policy choices.
+No dependency, provider, queue, checkpoint, compaction, restart continuation or automatic proposal application is
+added. This supersedes D39/D60's fixed coding allowances and coding request-pool exclusion for explicitly expanded
+policies. [NIV-60's evidence record](niv-60-verification.md) keeps deterministic enforcement separate from useful
+real-task results; the ticket stays open until the representative and larger-task acceptance evidence exists.

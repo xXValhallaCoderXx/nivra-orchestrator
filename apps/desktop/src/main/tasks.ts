@@ -192,6 +192,8 @@ export function taskBriefOf(content: BriefContent): { brief: TaskBrief } | { blo
  * target (NIV-55): the v3 form. A run with none keeps the v1 form exactly, and one from D41's the v2 form.
  */
 export function taskRunFingerprint(parts: {
+  work?: { workingRequests: number };
+  policyVersion?: number | null;
   preferencesDigest?: string;
   referencesDigest?: string;
   choicesDigest?: string;
@@ -218,7 +220,8 @@ export function taskRunFingerprint(parts: {
     3 + TASK_RUN_BOUNDS.writes + TASK_RUN_BOUNDS.runs + checks.finalChecks + checks.baselineChecks + checks.comparisonChecks,
     TASK_RUN_BOUNDS] : canonical;
   const context = parts.preferencesDigest && parts.choicesDigest ? ["nivra.task-run-preview.v5", approved, parts.preferencesDigest, parts.choicesDigest] : approved;
-  return createHash("sha256").update(JSON.stringify(parts.referencesDigest ? ["nivra.task-run-preview.v6", context, parts.referencesDigest] : context)).digest("hex");
+  const references = parts.referencesDigest ? ["nivra.task-run-preview.v6", context, parts.referencesDigest] : context;
+  return createHash("sha256").update(JSON.stringify(parts.work ? ["nivra.task-run-preview.v7", references, parts.work, parts.policyVersion ?? null] : references)).digest("hex");
 }
 
 /** What a run sends to each service, in plain words (D39). */

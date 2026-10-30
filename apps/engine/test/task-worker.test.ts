@@ -251,6 +251,7 @@ describe("a task's worker (NIV-7, D39)", () => {
 
   it("stops writing after its writes are used, and running after its runs are used", async () => {
     const writes: Call[] = Array.from({ length: 9 }, (_, index) => ["create_file", { path: `n${index}.txt`, content: `${index}\n` }]);
+    writes[0] = ["edit_file", FIX];
     const runs: Call[] = Array.from({ length: 5 }, () => ["run_case", { number: 1 }]);
     const run = await attempt({ calls: [writes, runs] });
     assert.deepEqual([run.core!.worker.tools.writes, run.core!.worker.tools.runs, run.core!.worker.tools.refused], [8, 4, 2]);

@@ -74,6 +74,7 @@ export class BudgetJournal {
         input.providerDate,
         this.#now().toISOString(),
       );
+      if (input.runId !== null) db.prepare("INSERT INTO budget_run_grants (run_id, grant_id) VALUES (?, ?)").run(input.runId, grant.id);
     });
   }
 
@@ -87,6 +88,29 @@ export class BudgetJournal {
   grantForRun(runId: string): string | null {
     const row = this.#database.open().prepare("SELECT grant_id FROM budget_accepted WHERE run_id = ?").get(runId);
     return row ? str(row["grant_id"]) : null;
+  }
+
+  grant(id: string): BudgetGrant | null { return acceptedIn(this.#database.open(), id)?.grant ?? null; }
+
+  acceptExtension(grant: BudgetGrant, runId: string, root: string): void {
+    this.#database.tx((db) => {
+      const initial = acceptedIn(db, root);
+      if (this.grantForRun(runId) !== root || !initial || initial.sealed || initial.instanceId !== this.#instanceId || initial.grant.requestId !== grant.requestId || grant.finalisation.requests !== 0 || grant.finalisation.outputTokens !== 0 || JSON.stringify(grant.models) !== JSON.stringify(initial.grant.models)) throw new Error("This extension does not belong to an active attempt.");
+      this.accept(grant, { runId: null, providerDate: null });
+      const member = db.prepare("SELECT run_id FROM budget_run_grants WHERE grant_id = ?").get(grant.id);
+      if (member && member["run_id"] !== runId) throw new Error("The extension is already bound to another attempt.");
+      if (!member) db.prepare("INSERT INTO budget_run_grants (run_id, grant_id) VALUES (?, ?)").run(runId, grant.id);
+    });
+  }
+
+  productiveGrant(runId: string): string | null {
+    const db = this.#database.open();
+    for (const row of db.prepare("SELECT grant_id FROM budget_run_grants WHERE run_id = ? ORDER BY rowid").all(runId)) {
+      const id = str(row["grant_id"]); const accepted = acceptedIn(db, id);
+      const used = rowsIn(db, id).filter((operation) => operation.kind === "model-request" && operation.part === "productive" && operation.state !== "unsent").length;
+      if (accepted && !accepted.sealed && used < accepted.grant.productive.requests) return id;
+    }
+    return null;
   }
 
   /**
@@ -235,10 +259,14 @@ export class BudgetJournal {
     return this.#database.tx((db) => {
       const moved = transition();
       if (!moved) return false;
-      const accepted = acceptedIn(db, grantId);
-      if (!accepted || sealIn(db, grantId)) return true;
-      const whole = accepted.instanceId === this.#instanceId && !rowsIn(db, grantId).some((row) => OPEN.includes(row.state));
-      this.seal(grantId, whole ? "complete" : "interrupted");
+      const run = db.prepare("SELECT run_id FROM budget_run_grants WHERE grant_id = ?").get(grantId);
+      const ids = run ? db.prepare("SELECT grant_id FROM budget_run_grants WHERE run_id = ?").all(str(run["run_id"])).map((row) => str(row["grant_id"])) : [grantId];
+      for (const id of ids) {
+        const accepted = acceptedIn(db, id);
+        if (!accepted || sealIn(db, id)) continue;
+        const whole = accepted.instanceId === this.#instanceId && !rowsIn(db, id).some((row) => OPEN.includes(row.state));
+        this.seal(id, whole ? "complete" : "interrupted");
+      }
       return true;
     });
   }

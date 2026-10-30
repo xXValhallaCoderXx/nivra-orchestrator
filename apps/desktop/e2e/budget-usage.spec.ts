@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
-import { CURRENT_PRICES, NO_SUBLIMITS, requestMsFor, TASK_RUN_BOUNDS } from "@nivra/domain";
+import { CURRENT_PRICES, NO_SUBLIMITS, requestMsFor, TASK_RUN_BOUNDS, taskWorkLimits, DEFAULT_WORKING_REQUESTS } from "@nivra/domain";
 import { BudgetGuard } from "../src/main/budget-guard.ts";
 import { establishedMonth, ledgerState, markDispatching, recordJournal, setPolicy, writeGrant } from "../src/main/budget-store.ts";
 import { openWorkspace } from "../src/main/workspace-db.ts";
@@ -16,7 +16,7 @@ import { goTo } from "./places.ts";
  * them, the section says so and shows no figure. A fresh profile, no project needed.
  */
 const desktop = join(dirname(fileURLToPath(import.meta.url)), "..");
-const WORDS = "Coding model requests are recorded in the shared budget ledger with their existing per-run limits. They do not use the Companion and planning monthly request allowance. Research, sandbox operations and other agents retain their existing accounting and limits.";
+const WORDS = "Coding model requests are recorded in the shared budget ledger. You can explicitly include coding in the shared monthly request allowance. Outside that pool, each attempt has a finite working request maximum, editable in its preview, with a hand-in reserved separately. Time or context can stop work sooner. Research, sandbox operations and other agents retain their existing accounting and limits.";
 
 let root: string;
 let app: ElectronApplication;
@@ -41,15 +41,16 @@ test("shows precise Companion and planning coverage and the engine's separate pe
   await expect(page.getByTestId("settings-tab-budget")).toHaveAttribute("aria-current", "page");
   await expect(section.getByTestId("budget-usage-note")).toHaveText(WORDS);
 
+  const defaults = taskWorkLimits({ workingRequests: DEFAULT_WORKING_REQUESTS });
   const n = (value: number) => value.toLocaleString("en-GB");
   const limit = (key: string) => section.locator(`[data-testid="budget-usage-limit"][data-key="${key}"]`);
   await expect(limit("requests")).toContainText(
-    `At most ${n(TASK_RUN_BOUNDS.modelRequests)} model requests in a run, each of up to ${n(requestMsFor(TASK_RUN_BOUNDS.outputTokensPerRequest) / 1000)} s and ${n(TASK_RUN_BOUNDS.outputTokensPerRequest)} output tokens.`,
+    `At most ${n(defaults.requests)} model requests in a run, each of up to ${n(requestMsFor(TASK_RUN_BOUNDS.outputTokensPerRequest) / 1000)} s and ${n(TASK_RUN_BOUNDS.outputTokensPerRequest)} output tokens.`,
   );
   await expect(limit("requests")).toContainText("it isn't how long one takes. The output cap counts the model's reasoning tokens too.");
-  await expect(limit("input")).toContainText(`an estimated ${n(TASK_RUN_BOUNDS.estimatedInputTokens)} input tokens: an estimated admission budget, not a cap.`);
+  await expect(limit("input")).toContainText(`an estimated ${n(defaults.inputTokens)} input tokens: an estimated admission budget, not a cap.`);
   await expect(limit("tools")).toContainText(
-    `${n(TASK_RUN_BOUNDS.toolCalls)} tool calls, of which ${n(TASK_RUN_BOUNDS.writes)} writes and ${n(TASK_RUN_BOUNDS.runs)} runs of a case or check, each command up to ${n(TASK_RUN_BOUNDS.checkSeconds)} s.`,
+    `${n(defaults.toolCalls)} tool calls, of which ${n(defaults.writes)} writes and ${n(defaults.runs)} runs of a case or check, each command up to ${n(TASK_RUN_BOUNDS.checkSeconds)} s.`,
   );
   await expect(limit("time")).toContainText(`The sandbox for ${n(TASK_RUN_BOUNDS.sessionMinutes)} minutes, and the whole run for ${n(TASK_RUN_BOUNDS.runMinutes)} minutes.`);
   await expect(section.getByTestId("budget-usage-brief")).toContainText("Nebius operations, and the baseline checks it runs first, also depend on its brief's checks");
@@ -58,6 +59,22 @@ test("shows precise Companion and planning coverage and the engine's separate pe
   await expect(section.locator("input, textarea, select, button, [role=button], [role=switch], [role=checkbox], [role=radio]")).toHaveCount(0);
   const text = (await section.textContent()) ?? "";
   expect([/\$|US\$|cost|price/i.test(text), /(^|[^\d,.])0([^\d,.]|$)/.test(text)]).toEqual([false, false]);
+});
+
+test("coding coverage expands only on Save and names previously recorded coding usage", async () => {
+  await goTo(page, "settings-budget");
+  await page.getByTestId("companion-limit-enabled").check();
+  await page.getByTestId("companion-limit").fill("100");
+  await page.getByTestId("coding-coverage").check();
+  await expect(page.getByTestId("coding-coverage-preview")).toContainText("Already recorded coding this month");
+  expect((await page.evaluate(() => window.nivra.getBudgetPolicy()))?.modelRequestLimits ?? []).toEqual([]);
+  await page.getByTestId("companion-limit-save").click();
+  await expect.poll(() => page.evaluate(async () => (await window.nivra.getCompanionUsage()).coverage)).toBe("companion-planning-and-coding");
+  const policy = await page.evaluate(() => window.nivra.getBudgetPolicy());
+  expect(policy?.modelRequestLimits).toEqual([{ pool: "companion-planning-and-coding", monthlyRequests: 100 }]);
+  await page.getByTestId("coding-coverage").uncheck();
+  await page.getByTestId("companion-limit-save").click();
+  await expect.poll(() => page.evaluate(async () => (await window.nivra.getCompanionUsage()).coverage)).toBe("companion-and-planning");
 });
 
 test("when main can't give the limits, the section says so and shows no figure", async () => {
@@ -81,7 +98,8 @@ test("when main can't give the limits, the section says so and shows no figure",
 test("sets one Companion and planning monthly request allowance and shows separate feature usage", async () => {
   await goTo(page, "settings-budget");
   const view = page.getByTestId("companion-usage");
-  await expect(view).toContainText("Coding runs, research and other agents are outside this allowance");
+  await expect(view).toContainText("Coding is included only when you explicitly save expanded coverage");
+  await expect(view.getByTestId("coding-coverage")).not.toBeChecked();
   await expect(view.getByRole("heading", { name: "Companion and planning", exact: true })).toBeVisible();
   await view.getByTestId("companion-limit-enabled").check();
   await view.getByTestId("companion-limit").fill("12");

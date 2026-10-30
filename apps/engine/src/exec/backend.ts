@@ -122,6 +122,8 @@ export interface CloseReport {
 }
 
 export interface ExecutionSession {
+  /** Engine-admitted extra operations; never extends the session deadline or resets usage. */
+  addOperationCapacity?(operations: number): void;
   readonly capabilities: ExecutionCapabilities;
   /**
    * The folder names this session's listings leave out at any depth (NIV-55): a prepared environment's dependency

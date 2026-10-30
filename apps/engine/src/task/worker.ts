@@ -2,7 +2,7 @@ import { checkReferences, referenceImageEstimate, referenceText, type FrozenRefe
 import { referencePrompt } from "../providers/reference-content.ts";
 import { createHash } from "node:crypto";
 import { createTool } from "@mastra/core/tools";
-import { evaluateTaskVerification, isEnvironmentRef, taskVerificationManifest, type PreferenceSnapshot, type BaselineSelection, type EnvironmentRef, type JsonObject, type Mask, type TaskBaselineCheck, type TaskEnvironment, type TaskSetupCheck, type TaskVerificationManifest } from "@nivra/domain";
+import { evaluateTaskVerification, isEnvironmentRef, taskVerificationManifest, type PreferenceSnapshot, type BaselineSelection, type EnvironmentRef, type JsonObject, type Mask, type TaskBaselineCheck, type TaskEnvironment, type TaskSetupCheck, type TaskVerificationManifest, type TaskWork } from "@nivra/domain";
 import { z } from "zod";
 import { ExecRefusedError, ExecUncertainError, type ExecResult, type ExecutionBackend, type ExecutionSession } from "../exec/backend.ts";
 import { WorkspaceRefusal } from "../exec/git-tool.ts";
@@ -19,9 +19,10 @@ import { EnvironmentRefusal, environmentInputs, leftOutFor, setupCheck, setupCon
 import { isNodeSetupPath } from "../environment/node-files.ts";
 import { SEARCH_COUNT_MAX, WorkspaceCopy } from "./copy.ts";
 import { checkRequest, commandFiles, couldntRun, failedToSend, judgeBaseline, judgeCase, judgeCheck, notRun, programsOf, refusalWords, type AcceptanceCase, type CheckResult, type NamedFiles } from "./harness.ts";
-import { AFTER_SESSION_MS, operationsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
+import { AFTER_SESSION_MS, operationsFor, runLimitsFor, reserveMs, runNeedsMs, TASK_LIMITS, writeNeedsMs } from "./limits.ts";
 import { frozenIn, kept } from "./report.ts";
-import { firstWord, toolchainFindings, toolchainRequest, writeContentProblem, writeRequest } from "./scripts.ts";
+import type { CodingCapacity } from "./capacity.ts";
+import { firstWord, MAX_EDIT_FILE_BYTES, MAX_REPLACEMENT_BYTES, spliceRequest, toolchainFindings, toolchainRequest, writeContentProblem, writeRequest } from "./scripts.ts";
 
 /**
  * A task's worker (NIV-7, D39): one model, through `ModelClient`, editing a copy of one commit in a Nebius sandbox
@@ -57,7 +58,7 @@ export interface TaskBrief {
 }
 
 /** Why the worker's loop ended. */
-export type WorkerEnd = "submitted" | "time" | "requests" | "input" | "tool-calls" | "model-failed" | "output-cap" | "no-time" | "not-started";
+export type WorkerEnd = "submitted" | "time" | "requests" | "input" | "tool-calls" | "model-failed" | "output-cap" | "no-time" | "not-started" | "model-ended" | "no-progress";
 
 export interface WorkerSummary {
   handedIn: boolean;
@@ -65,7 +66,8 @@ export interface WorkerSummary {
   summary: string | null;
   ended: WorkerEnd;
   /** Why the worker was first left only `submit`: its last request, its tool calls used, or no time for another operation. */
-  handInDue: "last-request" | "tool-calls" | "time" | null;
+  handInDue: "last-request" | "tool-calls" | "time" | "no-progress" | "allowance" | null;
+  stopDetail?: string | null;
   /** The model's failure, by kind, when one ended the loop. */
   failure: string | null;
   model: string;
@@ -102,6 +104,8 @@ export interface TaskReportCore {
 }
 
 export interface WorkerRun {
+  work?: TaskWork;
+  capacity?: CodingCapacity;
   binding: { project: string; target: string; taskId: string; attemptId: string; runId: string; briefVersion: number; briefSha256: string; homeId: string };
   folder: string;
   /** The fingerprint of the snapshot the person was shown. */
@@ -192,7 +196,8 @@ export const WORKER_INSTRUCTIONS = [
 ].join("\n");
 
 /** The task as the model reads it: the brief, numbered cases and checks, and the files there are. */
-export function workerPrompt(brief: TaskBrief, paths: readonly string[], preferences: PreferenceSnapshot = { revision: 0, records: [] }, choices: readonly string[] = []): string {
+export function workerPrompt(brief: TaskBrief, paths: readonly string[], preferences: PreferenceSnapshot = { revision: 0, records: [] }, choices: readonly string[] = [], work?: TaskWork): string {
+  const capacity = runLimitsFor(brief.acceptanceCases.length + brief.checks.length, 0, 0, work);
   const list = (items: readonly string[]) => (items.length ? items.map((item) => `- ${item}`).join("\n") : "(none)");
   const shown = paths.slice(0, 200);
   return [
@@ -208,7 +213,7 @@ export function workerPrompt(brief: TaskBrief, paths: readonly string[], prefere
     `Acceptance cases (run_case by number; judged by Nivra):\n${brief.acceptanceCases.map((given, index) => `${index + 1}. ${given.name}\n   command: ${given.command}\n   expected exit code: ${given.expectedExitCode}\n   expected output: ${JSON.stringify(given.expectedOutput)}`).join("\n") || "(none)"}`,
     `Required repository checks (run_check by number; every final check must pass):\n${brief.checks.map((check, index) => `${index + 1}. ${check}`).join("\n") || "(none)"}`,
     brief.frozen?.length ? `Frozen files (the task is judged by them, so edit_file and create_file refuse them):\n${list(brief.frozen)}` : "",
-    `This attempt may make ${TASK_LIMITS.model.requests} model requests, the last of which can only hand in, and ${TASK_LIMITS.tools.calls} tool calls, of which ${TASK_LIMITS.tools.writes} writes and ${TASK_LIMITS.tools.runs} runs of cases and checks. An answer may be at most ${TASK_LIMITS.model.outputTokensPerRequest.toLocaleString("en-US")} tokens long, and the hand-in's ${TASK_LIMITS.model.handIn.outputTokens.toLocaleString("en-US")}: a longer one is cut off before its tool call is made, and the attempt ends there, so make a large change as several smaller edit_file calls.`,
+    `This attempt may make ${capacity.modelRequests} model requests, the last of which can only hand in, and ${capacity.toolCalls} tool calls, of which ${capacity.writes} writes and ${capacity.runs} runs of cases and checks. An answer may be at most ${TASK_LIMITS.model.outputTokensPerRequest.toLocaleString("en-US")} tokens long, and the hand-in's ${TASK_LIMITS.model.handIn.outputTokens.toLocaleString("en-US")}: a longer one is cut off before its tool call is made, and the attempt ends there, so make a large change as several smaller edit_file calls.`,
     `Files (${paths.length}${paths.length > shown.length ? `, the first ${shown.length} shown; list_files shows more and search_files finds them` : ""}):\n${shown.join("\n")}`,
   ]
     .filter(Boolean)
@@ -236,23 +241,23 @@ export const WORKER_TOOL_SPECS = {
     inputSchema: z.object({ path: Path, startLine: z.number().int().min(1).optional().describe("The first line to return, 1-based; 1 when left out") }),
   },
   edit_file: {
-    description: `Replace exactly one occurrence of old_text with new_text in an existing file. old_text must appear exactly once, character for character, so copy it from read_file. The whole new file may be at most ${TASK_LIMITS.write.maxBytes} bytes. At most ${TASK_LIMITS.tools.writes} writes in all.`,
+    description: `Replace exactly one occurrence of old_text with new_text in an existing file. Copy the exact unique span from read_file. The replacement may be at most ${MAX_REPLACEMENT_BYTES} UTF-8 bytes; the resulting file may be at most ${MAX_EDIT_FILE_BYTES} bytes. Identical old and new text is refused without a write.`,
     inputSchema: z.object({
       path: Path,
       old_text: z.string().min(1).max(TASK_LIMITS.write.maxBytes).describe("The exact text to replace, appearing exactly once in the file"),
-      new_text: z.string().max(TASK_LIMITS.write.maxBytes).describe("The text to put in its place; empty to delete it"),
+      new_text: z.string().max(MAX_REPLACEMENT_BYTES).describe("The text to put in its place; empty to delete it"),
     }),
   },
   create_file: {
-    description: `Create a new text file with the given content. The path must not exist yet; its folders are made. At most ${TASK_LIMITS.write.maxBytes} bytes. Counts as one of the ${TASK_LIMITS.tools.writes} writes.`,
+    description: `Create a new text file with the given content. The path must not exist yet; its folders are made. At most ${TASK_LIMITS.write.maxBytes} bytes. Counts against the accepted write allowance.`,
     inputSchema: z.object({ path: Path, content: z.string().max(TASK_LIMITS.write.maxBytes).describe("The file's whole content, exactly as it should be") }),
   },
   run_case: {
-    description: `Run one of the brief's acceptance cases on the workspace as it is now, and see Nivra's verdict: passed only when the output and the exit code are exactly the expected ones. At most ${TASK_LIMITS.tools.runs} runs of cases and checks in all.`,
+    description: `Run one of the brief's acceptance cases on the workspace as it is now, and see Nivra's verdict: passed only when the output and the exit code are exactly the expected ones. Counts against the accepted allowance for running cases and checks.`,
     inputSchema: z.object({ number: z.number().int().min(1).max(TASK_LIMITS.checks.max).describe("The case's number, as the brief lists it") }),
   },
   run_check: {
-    description: `Run one of the brief's repository checks on the workspace as it is now: exit 0 reads as passed. At most ${TASK_LIMITS.tools.runs} runs of cases and checks in all.`,
+    description: `Run one of the brief's repository checks on the workspace as it is now: exit 0 reads as passed. Counts against the accepted allowance for running cases and checks.`,
     inputSchema: z.object({ number: z.number().int().min(1).max(TASK_LIMITS.checks.max).describe("The check's number, as the brief lists it") }),
   },
   submit: {
@@ -268,6 +273,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
   const workspace = run.workspace ?? WORKSPACE;
   const { brief, mask } = run;
   const finalChecks = brief.acceptanceCases.length + brief.checks.length;
+  const limits = runLimitsFor(finalChecks, brief.baseline?.length ?? 0, brief.checks.length, run.work);
   const commands = [...brief.acceptanceCases.map((given) => given.command), ...brief.checks];
   const programs = programsOf(commands);
   const manifest = await taskVerificationManifest(brief, Boolean(run.environment));
@@ -444,6 +450,10 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     let readBytes = 0;
     /** The model's requests answered so far: a tool runs inside request number `requestsDone`, counting from 0. */
     let requestsDone = 0;
+    let finalisationStep: number | null = null;
+    const admitted = () => run.capacity?.limits() ?? { requests: limits.modelRequests - 1, toolCalls: limits.toolCalls, writes: limits.writes, runs: limits.runs };
+    let noProgress = false;
+    const failures = new Map<string, number>();
     const halt = (result: WorkResult & { going: false }) => {
       stop ??= result;
       internal.fail(new ModelFailure("internal", "The worker stopped: the sandbox's state isn't known."));
@@ -465,10 +475,10 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
      * with tools can still start before only handing in is, and the run's estimated input.
      */
     const left = () => ({
-      modelRequests: Math.max(0, TASK_LIMITS.model.requests - requestsDone - 1),
-      toolCalls: Math.max(0, TASK_LIMITS.tools.calls - worker.tools.calls - worker.tools.rejected),
-      writes: Math.max(0, TASK_LIMITS.tools.writes - worker.tools.writes),
-      runs: Math.max(0, TASK_LIMITS.tools.runs - worker.tools.runs),
+      modelRequests: Math.max(0, limits.modelRequests - requestsDone - 1),
+      toolCalls: Math.max(0, limits.toolCalls - worker.tools.calls - worker.tools.rejected),
+      writes: Math.max(0, limits.writes - worker.tools.writes),
+      runs: Math.max(0, limits.runs - worker.tools.runs),
       seconds: Math.max(0, Math.floor((windowLeft() - WITH_TOOLS_MS) / 1000)),
       estimatedInputTokens: runBudget.remainingInput(),
     });
@@ -513,18 +523,26 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       return items.slice(0, count);
     };
     /** Each call, counted, one at a time; the operation it starts is waited for whatever the model's deadline does. */
-    const call = <T>(tool: string, body: () => Promise<T>) => async (): Promise<T | { refused: string }> => {
+    const call = <T>(tool: string, body: () => Promise<T>, input?: unknown) => async (): Promise<T | { refused: string }> => {
       worker.tools.calls++;
       if (stop) return { refused: "The run has stopped." };
-      if (tool !== "submit" && worker.tools.calls + worker.tools.rejected > TASK_LIMITS.tools.calls) {
-        const refused = withLeft(tool, refuse(tool, `this attempt has made the ${TASK_LIMITS.tools.calls} tool calls it may; call submit now`));
+      if (tool !== "submit" && (worker.handedIn || worker.handInDue !== null || noProgress || run.signal?.aborted)) return refuse(tool, "Work has ended; no further work tools can run.");
+      if (tool !== "submit" && worker.tools.calls + worker.tools.rejected > admitted().toolCalls) {
+        const refused = withLeft(tool, refuse(tool, admitted().toolCalls < limits.toolCalls ? "The admitted tool capacity is used. End this response so Nivra can ask for more within the accepted task allowance." : `this attempt has made the ${limits.toolCalls} tool calls it may; call submit now`));
         budget.charge(JSON.stringify(refused).length);
         return refused;
       }
       const running = body();
       inFlight = running.catch(() => undefined);
       try {
-        const answer = withLeft(tool, await running);
+        const result = await running;
+        if (!["submit", "list_files", "search_files", "read_file"].includes(tool) && result && typeof result === "object" && ("refused" in result || ("verdict" in result && result.verdict !== "passed"))) {
+          const signature = sha256(JSON.stringify([tool, input, result, copy.entries().map((entry) => entry.kind === "file" ? [entry.path, entry.sha256] : [entry.path, entry.target])]));
+          const count = (failures.get(signature) ?? 0) + 1;
+          failures.set(signature, count);
+          if (count >= 3) { noProgress = true; worker.handInDue = "no-progress"; worker.stopDetail = "The same work operation failed three times against unchanged files. No further productive work was sent."; progress("The same operation failed three times without a workspace change. Only handing in is left.", { reason: "no-progress" }); }
+        }
+        const answer = withLeft(tool, result);
         // What the model is given is charged to the request's budget before it goes (D22).
         budget.charge(JSON.stringify(answer ?? null).length);
         return answer;
@@ -534,11 +552,12 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       }
     };
 
-    const write = async (tool: string, path: string, content: string, created: boolean) => {
+    const write = async (tool: string, path: string, content: string, created: boolean, splice?: { before: string; start: number; end: number; replacement: string }) => {
       const bytes = encoder.encode(content);
-      const problem = held.get(path) ?? setupProblem(path) ?? writeContentProblem(content, run.knownValues) ?? copy.writeProblem(path, bytes, run.knownValues);
+      // The splice encodes its replacement, so reject private values before the command boundary sees its arguments.
+      const problem = held.get(path) ?? setupProblem(path) ?? writeContentProblem(content, run.knownValues, created ? TASK_LIMITS.write.maxBytes : MAX_EDIT_FILE_BYTES) ?? (run.mask(content) !== content ? "the content holds a private value, so it was never sent" : null) ?? copy.writeProblem(path, bytes, run.knownValues);
       if (problem) return refuse(tool, problem);
-      if (worker.tools.writes >= TASK_LIMITS.tools.writes) return refuse(tool, `this attempt has made its ${TASK_LIMITS.tools.writes} writes; call submit now`);
+      if (worker.tools.writes >= admitted().writes) return refuse(tool, admitted().writes < limits.writes ? "The admitted write capacity is used. End this response so Nivra can ask for more within the accepted task allowance." : `this attempt has made its ${limits.writes} writes; call submit now`);
       if (windowLeft() - HAND_IN_KEPT_MS < writeNeedsMs()) return refuse(tool, "there isn't time left in this attempt for another write; call submit now");
       const previous = copy.text(path);
       const before = "text" in previous ? encoder.encode(previous.text) : null;
@@ -546,7 +565,9 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       context.stage = "write";
       let ran: ExecResult;
       try {
-        ran = await recorded(session, context, "write", () => session.exec({ ...writeRequest({ workspace, path, content, created, timeoutMs: TASK_LIMITS.write.timeoutMs, ...(run.applets !== undefined ? { applets: run.applets } : {}) }) }));
+        const options = { workspace, path, content, created, timeoutMs: TASK_LIMITS.write.timeoutMs, ...(run.applets !== undefined ? { applets: run.applets } : {}) };
+        const request = splice ? spliceRequest({ ...options, ...splice, result: content }) : writeRequest(options);
+        ran = await recorded(session, context, "write", () => session.exec(request));
       } catch (error) {
         if (error instanceof ExecRefusedError) return refuse(tool, `the write wasn't sent: ${refusalWords(error)}`);
         haltFor("write", error);
@@ -573,6 +594,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       }
       if (back?.sha256 === sha256(bytes)) {
         copy.record(path, bytes);
+        failures.clear();
         progress(`${tool} ${path}: ${bytes.byteLength} bytes, kept`, { tool, bytes: bytes.byteLength, created });
         return { written: path, bytes: bytes.byteLength };
       }
@@ -587,7 +609,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       const name = kind === "case" ? brief.acceptanceCases[number - 1]!.name : command;
       const missing = missingFor(command);
       if (missing) return { number, ...publicResult(couldntRun(kind, number, name, missing)) };
-      if (worker.tools.runs >= TASK_LIMITS.tools.runs) return refuse(tool, `this attempt has made its ${TASK_LIMITS.tools.runs} runs of cases and checks`);
+      if (worker.tools.runs >= admitted().runs) return refuse(tool, admitted().runs < limits.runs ? "The admitted check capacity is used. End this response so Nivra can ask for more within the accepted task allowance." : `this attempt has made its ${limits.runs} runs of cases and checks`);
       if (windowLeft() - HAND_IN_KEPT_MS < runNeedsMs()) return refuse(tool, "there isn't time left in this attempt for another run; call submit now");
       worker.tools.runs++;
       context.stage = "run";
@@ -656,12 +678,12 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
           call("read_file", async () => {
             const read = copy.text(input.path);
             if ("refused" in read) return refuse("read_file", read.refused);
-            if (readBytes >= TASK_LIMITS.tools.readTotalBytes) return refuse("read_file", `this attempt has read the ${TASK_LIMITS.tools.readTotalBytes} bytes it may; work from what you have read`);
+            if (readBytes >= (run.work ? limits.toolCalls * TASK_LIMITS.tools.readBytes : TASK_LIMITS.tools.readTotalBytes)) return refuse("read_file", `this attempt has read the ${(run.work ? limits.toolCalls * TASK_LIMITS.tools.readBytes : TASK_LIMITS.tools.readTotalBytes)} bytes it may; work from what you have read`);
             const lines = read.text.split("\n");
             const start = Math.min(input.startLine ?? 1, Math.max(1, lines.length));
             let end = start - 1;
             let size = 0;
-            const room = Math.min(TASK_LIMITS.tools.readBytes, TASK_LIMITS.tools.readTotalBytes - readBytes, answerRoom());
+            const room = Math.min(TASK_LIMITS.tools.readBytes, (run.work ? limits.toolCalls * TASK_LIMITS.tools.readBytes : TASK_LIMITS.tools.readTotalBytes) - readBytes, answerRoom());
             if (room < MIN_RESULT_CHARS) return refuse("read_file", "this request's context is nearly full, so nothing more is shown: work from what you have read, or hand in");
             while (end < lines.length && size + Buffer.byteLength(lines[end]!) + 1 <= room) size += Buffer.byteLength(lines[end++]!) + 1;
             // One line longer than a read gives is cut: the rest of it is never shown.
@@ -677,13 +699,15 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
         ...WORKER_TOOL_SPECS.edit_file,
         execute: async (input) =>
           call("edit_file", async () => {
+            if (input.old_text === input.new_text) return refuse("edit_file", "old_text and new_text are identical; no write was used");
+            if (encoder.encode(input.new_text).byteLength > MAX_REPLACEMENT_BYTES) return refuse("edit_file", `the replacement exceeds ${MAX_REPLACEMENT_BYTES} UTF-8 bytes; make smaller edits`);
             const read = copy.text(input.path);
             if ("refused" in read) return refuse("edit_file", read.refused);
             const first = read.text.indexOf(input.old_text);
             if (first < 0) return refuse("edit_file", "old_text doesn't appear in the file; copy it exactly from read_file");
             if (read.text.indexOf(input.old_text, first + 1) >= 0) return refuse("edit_file", "old_text appears more than once; include more of the lines around it");
-            return write("edit_file", input.path, read.text.slice(0, first) + input.new_text + read.text.slice(first + input.old_text.length), false);
-          })(),
+            return write("edit_file", input.path, read.text.slice(0, first) + input.new_text + read.text.slice(first + input.old_text.length), false, { before: read.text, start: encoder.encode(read.text.slice(0, first)).byteLength, end: encoder.encode(read.text.slice(0, first + input.old_text.length)).byteLength, replacement: input.new_text });
+          }, input)(),
       }),
       create_file: createTool({
         id: "create_file",
@@ -692,10 +716,10 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
           call("create_file", async () => {
             if (copy.has(input.path)) return refuse("create_file", `${JSON.stringify(input.path)} exists already; use edit_file`);
             return write("create_file", input.path, input.content, true);
-          })(),
+          }, input)(),
       }),
-      run_case: createTool({ id: "run_case", ...WORKER_TOOL_SPECS.run_case, execute: async (input) => call("run_case", () => runOne("run_case", "case", input.number))() }),
-      run_check: createTool({ id: "run_check", ...WORKER_TOOL_SPECS.run_check, execute: async (input) => call("run_check", () => runOne("run_check", "check", input.number))() }),
+      run_case: createTool({ id: "run_case", ...WORKER_TOOL_SPECS.run_case, execute: async (input) => call("run_case", () => runOne("run_case", "case", input.number), input)() }),
+      run_check: createTool({ id: "run_check", ...WORKER_TOOL_SPECS.run_check, execute: async (input) => call("run_check", () => runOne("run_check", "check", input.number), input)() }),
       submit: createTool({
         id: "submit",
         ...WORKER_TOOL_SPECS.submit,
@@ -703,6 +727,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
           call("submit", async () => {
             if (worker.handedIn) return refuse("submit", "you have handed in already");
             worker.handedIn = true;
+            run.capacity?.finish("submitted");
             worker.summary = mask(input.summary.slice(0, 2_000));
             progress("The worker handed in.", { tool: "submit" });
             return { accepted: true };
@@ -711,12 +736,12 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
     };
 
     // The context budget for each request (D22), and the run's shared limits (D30), the window its whole time.
-    const prompt = workerPrompt(brief, copy.paths(), run.preferences, run.choices);
+    const prompt = workerPrompt(brief, copy.paths(), run.preferences, run.choices, run.work);
     const supporting = referenceText(run.references);
     if (run.references && !await checkReferences(run.references)) throw new Error("The frozen reference context changed.");
     const modelMs = Math.min(windowMs, run.maxModelMs ?? Number.POSITIVE_INFINITY);
     const budget = new Budget(requestBudget(run.contextLength), WORKER_INSTRUCTIONS.length + prompt.length + supporting.length + referenceImageEstimate(run.references) * 3 + toolDefinitionChars(WORKER_TOOL_SPECS));
-    const runBudget = new RunBudget({ requests: TASK_LIMITS.model.requests, totalMs: modelMs, outputTokensPerRequest: TASK_LIMITS.model.outputTokensPerRequest, estimatedInputTokens: TASK_LIMITS.model.estimatedInputTokens }, { ...(run.signal ? { signal: run.signal } : {}), now });
+    const runBudget = new RunBudget({ requests: limits.modelRequests, totalMs: modelMs, outputTokensPerRequest: TASK_LIMITS.model.outputTokensPerRequest, estimatedInputTokens: limits.estimatedInputTokens }, { ...(run.signal ? { signal: run.signal } : {}), now });
     const steps: ModelStep[] = [];
     const flight: { next: Hold | null; low: boolean; inFlight: Hold | null; refused: Refusal | null } = { next: null, low: false, inFlight: null, refused: null };
     const holdNext = (): Refusal | null => {
@@ -746,12 +771,28 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
       const agent = run.client.agent({ id: "nivra-worker", name: "Nivra worker", modelId: run.model, instructions: WORKER_INSTRUCTIONS, tools });
       try {
         await run.client.call(agent, referencePrompt(prompt, run.references), {
-          maxSteps: TASK_LIMITS.model.requests,
+          maxSteps: limits.modelRequests,
           deadlines: { stepMs: TASK_LIMITS.model.stepMs, totalMs: modelMs },
           maxOutputTokens: TASK_LIMITS.model.outputTokensPerRequest,
           toolChoice: run.policy.explore,
-          stopWhen: () => worker.handedIn || stop !== null || holdNext() !== null,
-          prepareStep: ({ stepNumber }) => {
+          stopWhen: () => worker.handedIn || stop !== null || finalisationStep !== null || holdNext() !== null,
+          prepareStep: async ({ stepNumber }) => {
+            if (inFlight) { await inFlight; inFlight = null; }
+            let capacityRefused = false;
+            if (run.capacity && !stop && !noProgress && !worker.handedIn && stepNumber < limits.modelRequests - 1 && !budget.exhausted() && windowLeft() >= WITH_TOOLS_MS && worker.tools.calls + worker.tools.rejected < limits.toolCalls) {
+              const before = run.capacity.limits();
+              const accepted = await run.capacity.ensure({ requests: requestsDone, toolCalls: worker.tools.calls + worker.tools.rejected, writes: worker.tools.writes, runs: worker.tools.runs }, run.signal, Math.min(30_000, windowLeft() - WITH_TOOLS_MS));
+              if (accepted) {
+                const after = run.capacity.limits();
+                const extra = after.writes + after.runs - before.writes - before.runs;
+                if (extra > 0) {
+                  if (!session.addOperationCapacity) { run.capacity.finish("finalising", "The execution boundary cannot enforce additional operations."); capacityRefused = true; }
+                  else session.addOperationCapacity(extra);
+                }
+              } else capacityRefused = true;
+            }
+            if (run.signal?.aborted || worker.handedIn) { internal.fail(failure_("cancelled")); return undefined; }
+            if (capacityRefused) worker.stopDetail = run.capacity?.reason ?? "No more work was admitted.";
             // The vault may change during a run. Recheck the frozen private text before every request, including hand-in.
             const privateTexts = [supporting,...run.preferences.records.map((record) => record.statement), ...run.choices];
             if (privateTexts.some((text) => mask(text) !== text || run.knownValues.some((value) => value.length > 0 && text.includes(value)))) {
@@ -773,12 +814,14 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
             // calls used up; or no time for this request and then the hand-in, each of its whole time: only handing in is
             // left. A hand-in for room reads as its last request, which it is, and the progress line says why.
             const roomOnly = flight.low || budget.exhausted();
-            const due = stepNumber >= TASK_LIMITS.model.requests - 1 || roomOnly ? "last-request" : worker.tools.calls + worker.tools.rejected >= TASK_LIMITS.tools.calls ? "tool-calls" : windowLeft() < WITH_TOOLS_MS ? "time" : null;
+            const due = capacityRefused ? "allowance" : noProgress ? "no-progress" : stepNumber >= limits.modelRequests - 1 || roomOnly ? "last-request" : worker.tools.calls + worker.tools.rejected >= limits.toolCalls ? "tool-calls" : windowLeft() < WITH_TOOLS_MS ? "time" : null;
             if (!due) return { toolChoice: run.policy.explore };
-            if (worker.handInDue === null && roomOnly && stepNumber < TASK_LIMITS.model.requests - 1) {
+            if (worker.handInDue === null && roomOnly && stepNumber < limits.modelRequests - 1) {
               progress("Only handing in is left: the run's input budget, or this request's context, has room for the hand-in and no more.", { estimatedInputLeft: runBudget.remainingInput(), requestTokens: budget.used() });
             }
+            finalisationStep = stepNumber;
             worker.handInDue ??= due;
+            run.capacity?.finish("finalising");
             return { activeTools: ["submit"], toolChoice: run.policy.forceAnswer ? { type: "tool", toolName: "submit" } : "auto", maxOutputTokens: TASK_LIMITS.model.handIn.outputTokens, stepMs: HAND_IN_KEPT_MS, budgetPart: "finalisation" };
           },
           internal,
@@ -806,6 +849,7 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
         flight.next = null;
       }
     }
+    run.capacity?.finish(run.signal?.aborted ? "cancelled" : "finalising");
     // An operation a tool started is followed to its end, whatever the model's deadline did: its result is the copy's.
     while (inFlight) {
       const waiting: Promise<unknown> = inFlight;
@@ -829,9 +873,9 @@ export async function runWorker(run: WorkerRun): Promise<WorkerOutcome> {
             : // An answer cut off at its cap ends Mastra's loop with nothing more to run (NIV-35): said as that.
               steps.at(-1)?.finishReason === "length"
               ? "output-cap"
-              : worker.tools.calls + worker.tools.rejected >= TASK_LIMITS.tools.calls
+              : worker.tools.calls + worker.tools.rejected >= limits.toolCalls
                 ? "tool-calls"
-                : "requests";
+                : noProgress ? "no-progress" : usage.calls >= limits.modelRequests ? "requests" : "model-ended";
     worker.failure = failure && worker.ended === "model-failed" ? failure.kind : null;
     progress(`The worker ${worker.handedIn ? "handed in" : `stopped without handing in (${worker.ended})`}: ${copy.written.length} ${copy.written.length === 1 ? "file" : "files"} written.`, { ended: worker.ended, written: copy.written.length, requests: usage.calls });
     return { going: true };

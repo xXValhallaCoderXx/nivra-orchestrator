@@ -1,4 +1,4 @@
-import { minutesMs, requestMsFor, TASK_BRIEF_LIMITS, TASK_RUN_BOUNDS, type TaskRunLimits } from "@nivra/domain";
+import { minutesMs, requestMsFor, TASK_BRIEF_LIMITS, TASK_RUN_BOUNDS, taskWorkLimits, type TaskWork, type TaskRunLimits } from "@nivra/domain";
 import { MAX_WRITE_BYTES } from "./scripts.ts";
 
 /**
@@ -86,19 +86,20 @@ export const runNeedsMs = (): number => operationMs(TASK_LIMITS.checks.timeoutMs
 export const AFTER_SESSION_MS = TASK_LIMITS.closeMs + TASK_LIMITS.patchMs + TASK_LIMITS.reportMs;
 
 /** A run's bounds, including observed comparison checks before the worker, as its preview shows them. */
-export function runLimitsFor(finalChecks: number, baselineChecks = 0, comparisonChecks = 0): TaskRunLimits {
+export function runLimitsFor(finalChecks: number, baselineChecks = 0, comparisonChecks = 0, work?: TaskWork): TaskRunLimits {
+  const capacity = work ? taskWorkLimits(work) : null;
   return {
-    modelRequests: TASK_LIMITS.model.requests,
+    modelRequests: capacity?.requests ?? TASK_LIMITS.model.requests,
     requestSeconds: TASK_LIMITS.model.stepMs / 1000,
     outputTokensPerRequest: TASK_LIMITS.model.outputTokensPerRequest,
-    estimatedInputTokens: TASK_LIMITS.model.estimatedInputTokens,
-    toolCalls: TASK_LIMITS.tools.calls,
-    writes: TASK_LIMITS.tools.writes,
+    estimatedInputTokens: capacity?.inputTokens ?? TASK_LIMITS.model.estimatedInputTokens,
+    toolCalls: capacity?.toolCalls ?? TASK_LIMITS.tools.calls,
+    writes: capacity?.writes ?? TASK_LIMITS.tools.writes,
     writeBytes: TASK_LIMITS.write.maxBytes,
-    runs: TASK_LIMITS.tools.runs,
+    runs: capacity?.runs ?? TASK_LIMITS.tools.runs,
     baselineChecks,
     comparisonChecks,
-    operations: operationsFor(finalChecks, baselineChecks, comparisonChecks),
+    operations: capacity ? 3 + baselineChecks + comparisonChecks + capacity.writes + capacity.runs + finalChecks : operationsFor(finalChecks, baselineChecks, comparisonChecks),
     checkSeconds: TASK_LIMITS.checks.timeoutMs / 1000,
     sessionMinutes: TASK_LIMITS.sessionMs / 60_000,
     runMinutes: TASK_LIMITS.runMs / 60_000,

@@ -380,6 +380,7 @@ class NebiusSession implements ExecutionSession {
   #state: { kind: "open" } | { kind: "stale" | "lost" | "unsettled"; why: string } = { kind: "open" };
   #busy = false;
   #operations = 0;
+  #addedOperations = 0;
   #active: Promise<unknown> = Promise.resolve();
   #closing: Promise<CloseReport> | null = null;
   /** Closing's own deadline and signal, once it has begun: the command under way stops within them. */
@@ -487,6 +488,11 @@ class NebiusSession implements ExecutionSession {
     return environmentGone ? new EnvironmentMissingError(message, report) : new SessionOpenError(message, report);
   }
 
+  addOperationCapacity(operations: number): void {
+    if (this.#closing || this.#busy || this.#state.kind !== "open" || this.#work.signal.aborted || !Number.isSafeInteger(operations) || operations < 0 || operations > 1_500_000) throw new ExecRefusedError("Operation capacity can change only between settled operations.");
+    this.#addedOperations += operations;
+  }
+
   exec(request: ExecRequest): Promise<ExecResult> {
     let refusal: string | null;
     try {
@@ -511,7 +517,7 @@ class NebiusSession implements ExecutionSession {
     if (this.#state.kind === "lost") return `The sandbox no longer has this workspace's saved state (${this.#state.why}), so nothing more can run in this session. Start again from the commit.`;
     if (this.#state.kind === "unsettled") return `An earlier command in this session wasn't settled (${this.#state.why}), so nothing more runs here until the session is closed.`;
     if (this.#busy) return "One command at a time: another is still running in this session.";
-    if (this.#operations >= this.#limits.maxOperations) return `This session has started ${this.#operations} operations, the most one session may, so ${program} wasn't run.`;
+    if (this.#operations >= this.#limits.maxOperations + this.#addedOperations) return `This session has started ${this.#operations} operations, the most one session may, so ${program} wasn't run.`;
     if (!guestPath(program)) return `Give the program's full path on the sandbox's machine (for example /bin/sh); "${program}" wasn't run.`;
     if (request.argv.some((arg) => arg.includes("\0"))) return `An argument to ${program} holds a NUL character, so it wasn't run.`;
     if (!insideWorkspace(this.#workspace, request.cwd)) return `The command's folder, ${request.cwd}, is outside the session's workspace (${this.#workspace}), so it wasn't run.`;

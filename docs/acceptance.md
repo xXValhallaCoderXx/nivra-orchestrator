@@ -3799,3 +3799,15 @@ finished with zero failures or skips. The keyless real-engine RPC check passed a
 [The review-fix receipt](niv-70-verification.md#pr-52-review-fixes-and-current-main-integration--30-october-2026) records
 the frozen source manifest, failure/retry evidence, commands and limits. No paid calls or live visual probe ran; PR 52
 remains unmerged for re-review.
+
+## Reliable coding on larger tasks (NIV-60, D62) — 30 October 2026
+
+The implementation extends targeted edits, guarded coding grants and the shared host request ledger. New previews
+default to a maximum of 64 working requests plus one reserved hand-in; time/context may stop work sooner. Monthly
+coding coverage is explicitly saved, with separate recovery acknowledgement where required. Boundary counters and
+deadlines remain cumulative, and late capacity replies cannot restart cancelled, submitted or finalising work.
+
+[The NIV-60 verification record](niv-60-verification.md) separates deterministic enforcement, desktop checks and the
+prepared A1/B1/C1 real-task evaluation. Deterministic stand-ins pass 65 requests, 33 required writes and the old input
+allowance, while separate exhausted-pool/failed-guard cases retain final checks. These do not establish model quality
+or a useful larger-task result. NIV-60 remains open pending the independent real-task acceptance evidence.

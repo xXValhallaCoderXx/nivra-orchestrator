@@ -1071,3 +1071,38 @@ PDF extraction. All Windows checks keep their own test homes and compare the rel
 New coding `runs.start` requests require a real host-ledger grant: a CLI caller must not invent a grant or bypass the
 host budget authority. Historical run reads need no replacement grant. Provider image understanding requires a
 harmless, separately approved live check; transport/fixture checks alone establish no such claim.
+
+### Larger coding attempts (NIV-60, D62)
+
+New app previews default to at most 64 working requests and one separately reserved hand-in. Edit the maximum and
+refresh before Start. Time/context may stop the worker sooner. Settings can explicitly include coding in the shared
+monthly request allowance; existing Companion/Planning policies retain their coverage until saved. A historical
+recovery restriction needs its own explicit coverage acknowledgement. Sandbox cost remains outside this request pool.
+
+The worker still uses exact single-span edits. Existing files may reach 2 MiB with a replacement up to 16 KiB;
+creation remains 32 KiB. Validate full results and private values before transport encoding. Every successful write
+requires the existing download/hash check. Do not replace the fixed splice with model-authored shell or replay an
+uncertain operation. `CodingCapacity` accepts host-guarded portions only between settled operations; its phase/need
+fence and the execution session's cumulative operation counter both matter.
+
+Focused checks use provider stand-ins, with no paid inference:
+
+```bash
+node --test apps/engine/test/task-editing.test.ts apps/engine/test/coding-capacity.test.ts apps/engine/test/task-operation-capacity.test.ts
+node --test --test-name-pattern=NIV-60 apps/desktop/test/host.test.ts apps/desktop/test/budget-store.test.ts
+node --test apps/desktop/test/task-live-checks.test.ts
+xvfb-run -a pnpm --filter @nivra/desktop test:e2e budget-usage.spec.ts task-run.spec.ts task-preferences.spec.ts
+```
+
+Use the prepared A1/B1/C1 fixtures for real evidence, solely inside Nivra's execution boundary. The acceptance
+commits must not contain validation/reference material. Their pinned pnpm 11.5.3 is not in the checked range for
+package-only installs: the NIV-60 evaluation copies choose whole-project preparation without altering their pins,
+checks or source. The preflight does not prove that preparation or the checks will succeed within worker deadlines.
+
+`task-live.ts --check --task <file>` is unpaid. Live validation requires a final clean committed revision, concrete
+recipes and the existing claimed-approval flow; preserve prior release candidates before rebuilding. An optional
+`--credentials <file>` supplies the existing named Settings calls from a private, owned file outside this repository
+with mode 0600 and only the required Nebius values; values never enter recipes or logs. Interactive Settings entry
+remains available. Remove keys and check isolated homes after the run; never apply the proposals automatically.
+Record every actual attempt and independently inspect successful proposals. If all useful tasks finish below old
+limits, their success does not close the larger-task evidence gap. See [the acceptance record](niv-60-verification.md).

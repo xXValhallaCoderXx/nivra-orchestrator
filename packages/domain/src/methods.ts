@@ -14,7 +14,7 @@ import { ResearchContext, ResearchInput, ResearchReport } from "./research.ts";
 import { ReviewContext, ReviewInput, ReviewReport } from "./review.ts";
 import { ExplainInput, HelloInput, RunEventsPage, RunId, RunList, RunStatus, RunSummary } from "./runs.ts";
 import { SandboxContext, SandboxInput, SandboxPreview, SandboxReport, SandboxStatus } from "./sandbox.ts";
-import { TaskBrief, TaskContext, TaskInput, TaskPreview, TaskProposal, TaskReport } from "./task.ts";
+import { TaskBrief, TaskContext, TaskInput, TaskPreview, TaskProposal, TaskReport, TaskWork } from "./task.ts";
 
 /**
  * Every request the host may send the engine, with its parameters and result as zod schemas. The engine validates
@@ -243,7 +243,9 @@ export const Methods = {
    * What a task run of this checkout would send to Nebius, with no network, and the bounds it runs under (D39). With an
    * environment, the commit's manifests are checked against the one it was prepared from (D41).
    */
-  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief, environment: z.union([TaskEnvironment.extend({ preparedAt: z.iso.datetime() }), EnvironmentRef]).optional() }), result: TaskPreview },
+  "task.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), brief: TaskBrief, work: TaskWork.optional(), environment: z.union([TaskEnvironment.extend({ preparedAt: z.iso.datetime() }), EnvironmentRef]).optional() }), result: TaskPreview },
+  "task.capacityPending": { params: z.strictObject({ runId: RunId }), result: z.strictObject({ need: z.number().int().positive(), requests: z.number().int().min(0).max(16), rootGrantId: z.uuid() }).nullable() },
+  "task.capacityReply": { params: z.strictObject({ runId: RunId, need: z.number().int().positive(), grant: BudgetGrant.nullable(), reason: z.string().max(600).nullable() }), result: z.strictObject({ accepted: z.boolean() }) },
   /** What preparing this checkout's environment would send and run, with no network (D41). */
   "environment.preview": { params: z.strictObject({ repoPath: z.string().min(1).max(4096), spec: EnvironmentSpec }), result: EnvironmentPreview },
   /**

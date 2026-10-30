@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ErrorCode, isTerminal, manifestPayload, referenceHash, RpcCallError, VISUAL_MODEL, type BudgetGrant } from "@nivra/domain";
+import { ErrorCode, isTerminal, manifestPayload, PROTOCOL_VERSION, referenceHash, RpcCallError, VISUAL_MODEL, type BudgetGrant } from "@nivra/domain";
 import { referenceFixture } from "../../engine/test/reference-fixture.ts";
 import type { EngineSupervisor } from "../src/main/supervisor.ts";
 
@@ -27,5 +27,5 @@ export async function referenceTransfer(supervisor: EngineSupervisor): Promise<s
   }
   const journal = await supervisor.call("budget.journal", { grantId: budget.id, after: 0, limit: 200 });
   if (journal.rows.length !== 0 || journal.seal?.kind !== "complete") throw new Error("The transport check didn't finish without model requests.");
-  return `protocol 23 admitted ${Buffer.byteLength(JSON.stringify(request))} bytes, rejected a changed image hash, and sent no provider requests`;
+  return `protocol ${PROTOCOL_VERSION} admitted ${Buffer.byteLength(JSON.stringify(request))} bytes, rejected a changed image hash, and sent no provider requests`;
 }

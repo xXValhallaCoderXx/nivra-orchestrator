@@ -129,8 +129,17 @@ test("writes an acceptance case into a brief, previews what a run sends where, r
   await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Required check 1:");
   await expect(preview.getByTestId("task-run-preview-judged")).toContainText("Every repository check listed here is required");
   await expect(preview.getByTestId("task-run-preview-limits")).toContainText("(an estimate, not a cap)");
+  await expect(page.getByTestId("task-working-requests")).toHaveValue("64");
+  await expect(page.getByTestId("task-work-allowance")).toContainText("64 working requests, plus one reserved hand-in");
+  await expect(page.getByTestId("task-work-allowance")).toContainText("Time or context limits may stop work sooner");
+  await page.getByTestId("task-working-requests").fill("32");
+  await expect(page.getByTestId("task-run-start")).toBeDisabled();
+  await page.getByRole("button", { name: "Refresh preview", exact: true }).click();
+  await expect(preview.getByTestId("task-run-preview-limits")).toContainText("at most 33 model requests");
+  await page.getByTestId("task-working-requests").fill("64");
+  await page.getByRole("button", { name: "Refresh preview", exact: true }).click();
   // The allowances a real repository needs room for (NIV-35), shown before Start.
-  await expect(preview.getByTestId("task-run-preview-limits")).toContainText("Bounds: at most 24 model requests of up to 830 s and 8,000 output tokens each, admitted against an estimated 480,000 input tokens (an estimate, not a cap); 48 tool calls, of which 8 writes");
+  await expect(preview.getByTestId("task-run-preview-limits")).toContainText("Bounds: at most 65 model requests of up to 830 s and 8,000 output tokens each, admitted against an estimated 3,900,000 input tokens (an estimate, not a cap); 256 tool calls, of which 64 writes");
   await expect(preview.getByTestId("task-run-preview-limits")).toContainText("the sandbox for 45 minutes, and the whole run for 58 minutes.");
   await expect(preview).toContainText("the lines its searches find");
   // The case sources greet.sh, which the worker may change: the preview says the case judges only what it prints.

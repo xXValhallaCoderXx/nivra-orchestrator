@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ import { hashRuntime } from "../scripts/runtime-files.ts";
 import { claimApproval, claimOn } from "../../engine/scripts/research-check/claim.ts";
 import { ENVIRONMENT_STOP_MESSAGES } from "../../engine/src/environment/report.ts";
 import type { EnvironmentView } from "../src/shared/ipc.ts";
-import { buildChanges, buildHashes, closedThen, liveFolders, previewProblems, stopProblems, type ApprovedRun, type ExpectedStop } from "../scripts/task-live-checks.ts";
+import { buildChanges, buildHashes, closedThen, liveFolders, previewProblems, readLiveCredentials, stopProblems, type ApprovedRun, type ExpectedStop } from "../scripts/task-live-checks.ts";
 
 /**
  * What the live run's script checks before it trusts a frozen build or presses Start (NIV-35): every file of the build
@@ -88,6 +88,17 @@ describe("the live run's preview, before Start (NIV-35)", () => {
     sends: change.sends ?? SENDS,
   });
   const problems = (shownExpected: string, given: ReturnType<typeof structured>, environment: typeof prepared | null = prepared) => previewProblems({ approved, ids, prepared: environment, shownExpected, structured: given });
+
+  it("binds the approved working maximum and frozen reference digest before Start", () => {
+    const approvedWork = { ...approved, work: { workingRequests: 64 } };
+    const referencesDigest = "f".repeat(64);
+    const expected = taskRunFingerprint({ ...ids, work: approvedWork.work, policyVersion: null, referencesDigest, briefDigest: approved.briefDigest, sharing: { modelContext: true, cloudExecution: true }, snapshot: approved.snapshotFingerprint, environment: ref });
+    const preview = { ...structured({ expected }), work: approvedWork.work, referencesDigest };
+    const check = (given: typeof preview) => previewProblems({ approved: approvedWork, ids, prepared, shownExpected: expected, structured: given });
+    assert.deepEqual(check(preview), []);
+    assert.equal(check({ ...preview, work: { workingRequests: 65 } }).some((problem) => problem.includes("allowance")), true);
+    assert.equal(check({ ...preview, referencesDigest: "e".repeat(64) }).length > 0, true);
+  });
 
   it("takes the approved run: this brief, this commit's snapshot, the environment just prepared and the frozen files", () => {
     assert.deepEqual(problems(hostExpected({}), structured()), []);
@@ -297,5 +308,26 @@ describe("the packages a live run's recipe installs (NIV-55)", () => {
     const data = checked("data", { scope: { kind: "packages", packages: ["packages/data"], root: true } });
     assert.equal(data.install, "pnpm install --frozen-lockfile --fail-if-no-match --filter @live/data");
     assert.deepEqual([new Set([whole.recipe, web.recipe, data.recipe]).size, new Set([whole.preview, web.preview, data.preview]).size], [3, 3]);
+  });
+});
+
+
+describe("private credentials for the existing live journey", () => {
+  it("reads a private file outside the repository and refuses public permissions, links and repository-local files", () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra live private credentials ")); dirs.push(root);
+    const repository = join(root, "repository"); mkdirSync(repository);
+    const path = join(root, "probe.env");
+    const fixture = "NEBIUS_API_KEY=test-private-live-key-0123456789\nNEBIUS_PROJECT_ID=project-e00privatefixture\n";
+    writeFileSync(path, fixture, { mode: 0o600 });
+    assert.equal(readLiveCredentials(path, repository).project, "project-e00privatefixture");
+    chmodSync(path, 0o644);
+    assert.throws(() => readLiveCredentials(path, repository), /0600/);
+    chmodSync(path, 0o600);
+    const link = join(root, "link.env"); symlinkSync(path, link);
+    assert.throws(() => readLiveCredentials(link, repository));
+    const inside = join(repository, "secret.env"); writeFileSync(inside, fixture, { mode: 0o600 });
+    assert.throws(() => readLiveCredentials(inside, repository), /outside the repository/);
+    writeFileSync(path, "NEBIUS_API_KEY=\n");
+    assert.throws(() => readLiveCredentials(path, repository), /needs NEBIUS_API_KEY and NEBIUS_PROJECT_ID/);
   });
 });

@@ -1,3 +1,4 @@
+import type { CodingCapacity } from "../task/capacity.ts";
 import { checkReferences, referenceText } from "@nivra/domain";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { choicesDigest, preferencesDigest, isEnvironmentRef, projectFingerprint, TASK_MODEL, TaskOutcome, taskBriefDigest, type EnvironmentRef, type Mask, type RunRoute, type RunUsage, type StoredTaskInput, type TaskContext, type TaskEnvironment, type TaskReport, type TaskStopCode } from "@nivra/domain";
@@ -56,6 +57,7 @@ export interface TaskDeps {
   saveReport: (runId: string, report: TaskReport) => void;
   saveProposal: (runId: string, proposal: Proposal) => void;
   budget?: (runId: string) => BudgetBinding | null;
+  capacity?: (runId: string) => CodingCapacity | null;
   now?: () => Date;
   /** Tests only, in process: a client over a mock model. */
   modelClient?: (apiKey: string, endpoint: Endpoint) => ModelClient;
@@ -83,11 +85,12 @@ export function createTaskWorkflow(deps: TaskDeps) {
   /** The bounds a run of its brief runs under, as its preview showed them; null when its context is gone. */
   const limitsOf = (runId: string) => {
     const brief = deps.context(runId)?.brief;
-    return brief ? runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0, brief.checks.length) : null;
+    return brief ? runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0, brief.checks.length, deps.task(runId)?.work) : null;
   };
   const early = (runId: string, task: StoredTaskInput, outcome: TaskReport["outcome"], code: TaskStopCode | null, step: string | null, finished: boolean) =>
     deps.saveReport(runId, earlyTaskReport({ outcome, code, step, task: boundOf(runId, task), request: requestOf(runId), route: routes.get(runId) ?? null, limits: limitsOf(runId), now: now(), finished }));
   const forget = (runId: string) => {
+    deps.capacity?.(runId)?.finish("finalising");
     startedAt.delete(runId);
     routes.delete(runId);
   };
@@ -248,12 +251,14 @@ export function createTaskWorkflow(deps: TaskDeps) {
           try {
             outcome = await runWorker({
               binding: { project: task.project, target: task.target, taskId: task.taskId, attemptId: boundOf(runId, task).attemptId, runId, briefVersion: task.briefVersion, briefSha256: task.briefDigest, homeId: deps.homeId },
+              work: task.work,
+              ...(deps.capacity?.(runId) ? { capacity: deps.capacity(runId)! } : {}),
               folder: task.repoPath,
               preview: task.preview,
               brief,
               preferences: context.preferences,
               choices: context.choices,
-              backend: deps.sandbox(operationsForBrief(brief), environment),
+              backend: deps.sandbox(task.work ? runLimitsFor(brief.acceptanceCases.length + brief.checks.length, brief.baseline?.length ?? 0, brief.checks.length, { workingRequests: deps.capacity?.(runId)?.limits().requests ?? Math.min(16, task.work.workingRequests) }).operations : operationsForBrief(brief), environment),
               environment,
               local,
               git,

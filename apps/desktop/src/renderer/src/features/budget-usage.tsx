@@ -4,7 +4,7 @@ import type { RunLimitsView } from "../../../shared/ipc";
 import { runLimitLines } from "../shell/run-limits";
 
 /** Coverage outside the shared monthly inference-request allowance. */
-export const BUDGET_NOT_AVAILABLE = "Coding model requests are recorded in the shared budget ledger with their existing per-run limits. They do not use the Companion and planning monthly request allowance. Research, sandbox operations and other agents retain their existing accounting and limits.";
+export const BUDGET_NOT_AVAILABLE = "Coding model requests are recorded in the shared budget ledger. You can explicitly include coding in the shared monthly request allowance. Outside that pool, each attempt has a finite working request maximum, editable in its preview, with a hand-in reserved separately. Time or context can stop work sooner. Research, sandbox operations and other agents retain their existing accounting and limits.";
 
 /**
  * Settings › Budget and usage: the coverage outside the Companion and planning allowance and the existing per-run
@@ -44,7 +44,7 @@ export function BudgetAndUsage() {
       ) : (
         <>
           <Text size="sm" c="var(--nivra-text-2)">
-            Every task run has these bounds, whatever its brief:
+            The default task allowance is up to {limits.modelRequests - 1} working requests plus one reserved hand-in. The run preview shows the effective limits and lets you edit working requests. Time or context can stop work sooner:
           </Text>
           <Stack gap={10} data-testid="budget-usage-limits">
             {runLimitLines(limits).map((line) => (
