@@ -1072,7 +1072,7 @@ New coding `runs.start` requests require a real host-ledger grant: a CLI caller 
 host budget authority. Historical run reads need no replacement grant. Provider image understanding requires a
 harmless, separately approved live check; transport/fixture checks alone establish no such claim.
 
-### Larger coding attempts (NIV-60, D62)
+### Larger coding attempts (NIV-60, D63)
 
 New app previews default to at most 64 working requests and one separately reserved hand-in. Edit the maximum and
 refresh before Start. Time/context may stop the worker sooner. Settings can explicitly include coding in the shared

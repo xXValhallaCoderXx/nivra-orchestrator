@@ -37,6 +37,7 @@ import { insertTask } from "../src/main/workspace.ts";
 import { openWorkspace } from "../src/main/workspace-db.ts";
 import { seedMission, seedMissionReview } from "../e2e/seed-workspace.ts";
 import type { BriefFields, TaskAttemptView } from "../src/shared/ipc.ts";
+import type { KnownSecrets } from "../src/main/protect.ts";
 
 /**
  * The host's engine pool (D17) against real engines run from source. A "WSL" target here is a stand-in: a target that
@@ -129,6 +130,7 @@ type HostOptions = {
   beforeWslPrepare?: () => Promise<void>;
   testHooks?: { beforeProjection?(turnId: string): Promise<void> };
   credentials?: () => Promise<Partial<Record<SecretName, string>>>;
+  preferenceSecrets?: () => Promise<KnownSecrets>;
 };
 
 function makeHost(options: HostOptions & { projects?: Array<{ targetId: string; path: string }> } = {}) {
@@ -162,6 +164,7 @@ function hostAt(root: string, options: HostOptions = {}) {
     logsDir: join(root, "logs"),
     client: { name: "host-test", version: "0" },
     credentials: options.credentials ?? (async () => keys.current),
+    ...(options.preferenceSecrets ? { preferenceSecrets: options.preferenceSecrets } : {}),
     platform: "win32",
     realpath: (path) => path,
     supervisor: { heartbeatMs: 0, shutdownGraceMs: 300, eofGraceMs: 300 },
@@ -383,6 +386,76 @@ describe("Host: one engine per target, chosen by each project's folder (D17)", (
     await host.shutdown();
     for (const home of ["local home", "wsl home"]) assert.deepEqual(filesHolding(join(hostRoot, home), canary), [], `no preference text in ${home}`);
     assert.deepEqual(filesHolding(hostRoot, canary), ["nivra.json"], "only the host's own store keeps it");
+  });
+
+  it("promotes once under concurrent submissions, preserves the source, and hands the portable record to each engine after restart (NIV-10)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nivra promotion "));
+    dirs.push(root);
+    const { host, ids, root: hostRoot } = makeHost({ projects: [{ targetId: "local", path: makeRepo(join(root, "native")) }, { targetId: "wsl:Test", path: makeRepo(join(root, "linux")) }] });
+    const source = host.addPreference({ statement: "Native-only code in /private/project/src", scope: "project", projectId: ids[0]!, intent: "override" });
+    const revision = host.preferences().revision;
+    const [first, again] = await Promise.all([host.promotePreference(source.id, source.revision, " Prefer named exports ü%# "), host.promotePreference(source.id, source.revision, "Prefer named exports ü%#")]);
+    assert.deepEqual([first.created, again.created, first.record.id === again.record.id], [true, false, true]);
+    assert.equal(host.preferences().revision, revision + 1);
+    assert.equal(host.preferences().records.length, 2);
+    assert.deepEqual(host.preferences().records.find((r) => r.id === source.id), source);
+    await Promise.all(ids.map((id) => host.open(id)));
+    await Promise.all([online(host, "local"), online(host, "wsl:Test")]);
+    const onNative = await received(host, (await host.startHello(ids[0]!, 0)).id);
+    const onLinux = await received(host, (await host.startHello(ids[1]!, 0)).id);
+    assert.deepEqual([onNative.digest, onLinux.digest], [digestOf([source, first.record]), digestOf([first.record])]);
+    assert.deepEqual(onLinux.records.map((r) => [r.id, r.scope, r.intent]), [[first.record.id, "personal", "default"]]);
+
+    await host.shutdown();
+    const { host: restarted } = hostAt(hostRoot);
+    assert.deepEqual(restarted.preferences().records.find((r) => r.id === source.id), source);
+    await restarted.open(ids[1]!);
+    await online(restarted, "wsl:Test");
+    assert.equal((await received(restarted, (await restarted.startHello(ids[1]!, 0)).id)).digest, onLinux.digest);
+    const edited = restarted.editPreference(first.record.id, { statement: "Prefer small explicit exports" });
+    assert.equal((await received(restarted, (await restarted.startHello(ids[1]!, 0)).id)).digest, digestOf([edited]));
+    restarted.deletePreference(first.record.id);
+    assert.equal((await received(restarted, (await restarted.startHello(ids[1]!, 0)).id)).count, 0);
+    assert.deepEqual(restarted.preferences().records.find((r) => r.id === source.id), source);
+  });
+
+  it("rechecks the source after the secret read, refusing intervening edits, replacement, deletion and project removal (NIV-10)", async () => {
+    for (const change of ["edit", "replace", "delete", "remove project"] as const) {
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const reading = new Promise<void>((resolve) => { entered = resolve; });
+      const { host, ids, root } = makeHost({ projects: [{ targetId: "local", path: "/unused/promotion-project" }], preferenceSecrets: async () => { entered(); await gate; return []; } });
+      const source = host.addPreference({ statement: "A project default", scope: "project", projectId: ids[0]! });
+      const saving = host.promotePreference(source.id, source.revision, "A personal default");
+      await reading;
+      if (change === "edit") host.editPreference(source.id, { statement: "A revised project default" });
+      if (change === "replace") host.supersedePreference(source.id, { statement: "A new project default", intent: "default" });
+      if (change === "delete") host.deletePreference(source.id);
+      if (change === "remove project") await host.removeProject(ids[0]!);
+      const before = readFileSync(join(root, "nivra.json"), "utf8");
+      release();
+      await assert.rejects(saving, /source preference changed or is no longer available/);
+      assert.equal(readFileSync(join(root, "nivra.json"), "utf8"), before, change);
+      assert.equal(host.preferences().records.some((r) => r.scope === "personal"), false);
+    }
+  });
+
+  it("refuses credentials and failed strict key reads without saving or echoing a value (NIV-10)", async () => {
+    const saved = "private-saved-key-0123456789";
+    let failed = false;
+    const { host, ids, root } = makeHost({ projects: [{ targetId: "local", path: "/unused/promotion-project" }], preferenceSecrets: async () => {
+      if (failed) throw new Error(`unreadable ${saved}`);
+      return [["NEBIUS_API_KEY", saved]];
+    } });
+    const source = host.addPreference({ statement: "Use a small API client", scope: "project", projectId: ids[0]! });
+    const before = readFileSync(join(root, "nivra.json"), "utf8");
+    for (const credential of [saved, "ghp_" + "q".repeat(36)]) {
+      await assert.rejects(host.promotePreference(source.id, 1, `Prefer this ${credential}`), (error: unknown) => error instanceof Error && /nothing was saved/.test(error.message) && !error.message.includes(credential));
+    }
+    failed = true;
+    await assert.rejects(host.promotePreference(source.id, 1, "Prefer small API clients"), (error: unknown) => error instanceof Error && /couldn't read your saved keys/.test(error.message) && !error.message.includes(saved));
+    assert.equal(readFileSync(join(root, "nivra.json"), "utf8"), before);
   });
 
   it("sends the edited preference to the next run and none once deleted, and keeps them across a restart (D21)", async () => {
@@ -815,6 +888,40 @@ describe("Host: explaining needs the project's consent, and withdrawing it stops
     await assert.rejects(host.keepSuggestion(projectA, run.id, 0, statement), /being removed, so nothing can be kept/);
     await removing;
     await assert.rejects(host.keepSuggestion(projectA, run.id, 0, statement), /no longer in the list/);
+  });
+
+  it("sends promoted wording to another project's model requests without source text, citations, path, run or HEAD (NIV-10)", async () => {
+    const privatePath = "private-alpha-observation.md";
+    const privateText = `alpha-private-${randomUUID()}`;
+    let sourceRun = true;
+    const stub = await stubWith((request) => {
+      const path = sourceRun ? privatePath : "README.md";
+      return request.raw.includes('"role":"tool"')
+        ? toolCall("submit_answer", { ...ANSWER, findings: [{ statement: "A source file exists.", citations: [{ path, startLine: 1, endLine: 1 }] }], suggestions: sourceRun ? [{ statement: "Prefer named exports", citations: [{ path, startLine: 1, endLine: 1 }] }] : [] }, { id: "p1" })
+        : toolCall("read_file", { path }, { id: "p0" });
+    });
+    const root = reposRoot();
+    const a = makeRepo(join(root, "a"), { [privatePath]: `# ${privateText}\n` });
+    const b = makeRepo(join(root, "b"), { "README.md": "# B\n" });
+    const { host, ids, keys } = makeHost({ tokenFactoryUrl: stub.url, projects: [{ targetId: "local", path: a }, { targetId: "wsl:Test", path: b }] });
+    keys.current = { NEBIUS_API_KEY: KEY };
+    for (const id of ids) await host.setSharing(id, true);
+    await Promise.all(ids.map((id) => host.open(id)));
+    await Promise.all([online(host, "local"), online(host, "wsl:Test")]);
+    const observation = await host.startExplain(ids[0]!, "", []);
+    assert.equal((await ended(host, observation.id)).status, "succeeded");
+    const source = await host.keepSuggestion(ids[0]!, observation.id, 0, `In ${a}, ${privateText} prefers named exports`);
+    assert.deepEqual(source.evidence?.citations.map((c) => c.path), [privatePath]);
+    const { record: personal } = await host.promotePreference(source.id, source.revision, "Prefer named exports for new modules");
+    sourceRun = false;
+    const before = stub.chats().length;
+    const other = await host.startExplain(ids[1]!, "", []);
+    assert.equal((await ended(host, other.id)).status, "succeeded");
+    const sent = stub.chats().slice(before).map((chat) => chat.raw).join("\n");
+    assert.equal(sent.includes(personal.statement), true);
+    assert.deepEqual([privateText, privatePath, a, source.id, observation.id, headOf(a)].map((value) => sent.includes(value)), [false, false, false, false, false, false]);
+    assert.equal((await received(host, other.id)).digest, digestOf([personal]));
+    assert.deepEqual(host.preferences().records.find((r) => r.id === source.id), source);
   });
 
   it("sends a task's choices with that run only, and leaves the host's store byte-identical (D23)", async () => {

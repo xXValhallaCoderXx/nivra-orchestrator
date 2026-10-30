@@ -130,7 +130,7 @@ export function SettingsPage({
       <Box display={shown("preferences")} data-testid="settings-preferences">
         <Grid gap="md" align="flex-start">
           <Grid.Col span={{ base: 12, md: 8 }}>
-            <Preferences key={`preferences:${project?.id ?? "none"}`} project={project} projects={projects} view={preferences} onChanged={onPreferencesChanged} />
+            <Preferences key={`preferences:${project?.id ?? "none"}`} active={visible && section === "preferences"} project={project} projects={projects} view={preferences} onChanged={onPreferencesChanged} />
           </Grid.Col>
           <Grid.Col span={{ base: 12, md: 4 }}>
             <SettingsCard title="Appearance" testId="settings-appearance">

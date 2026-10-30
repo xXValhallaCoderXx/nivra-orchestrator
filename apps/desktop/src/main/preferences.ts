@@ -85,6 +85,22 @@ export function addPreference(data: HostData, input: NewPreference, now: Date): 
 }
 
 /**
+ * Confirms independently written personal wording from a reviewed project preference (NIV-10). Its original and
+ * evidence stay as they were. Only the new wording is portable; it is an entered default with no source metadata.
+ * Check the source before deduplication, so an old review never authorises even an otherwise identical save.
+ */
+export function promotePreference(data: HostData, sourceId: string, expectedRevision: number, wording: string, now: Date): { data: HostData; record: PreferenceRecord; created: boolean } {
+  const source = data.preferences.find((record) => record.id === sourceId);
+  if (!source || source.scope !== "project" || source.status !== "confirmed" || source.revision !== expectedRevision || !data.projects.some((project) => project.id === source.projectId)) {
+    throw new Error("The source preference changed or is no longer available, so nothing was saved. Reopen Use in every project and review the current preference.");
+  }
+  const statement = cleanStatement(wording);
+  const existing = data.preferences.find((record) => record.status === "confirmed" && record.scope === "personal" && record.intent === "default" && record.statement === statement);
+  if (existing) return { data, record: existing, created: false };
+  return { ...addPreference(data, { statement, scope: "personal", projectId: null, intent: "default" }, now), created: true };
+}
+
+/**
  * Replaces a preference with a new decision (D23): a new record, in the person's wording and intent, with the same scope
  * and project, naming what it replaced. The old one stays as history, `superseded`, and no run gets it again. Only a
  * preference in use can be replaced; the store's revision rises once.
@@ -133,8 +149,8 @@ export interface KeptSuggestion {
 
 /**
  * Saves the wording the person confirmed for a run's suggestion as that project's own default (D23), with where it came
- * from: never a decision, and never personal (promotion is deferred). A suggestion already kept, and still in use, is
- * returned as it is, so a second click saves nothing.
+ * from: never a decision, and never personal. Promotion needs a separate explicit confirmation. A suggestion already
+ * kept, and still in use, is returned as it is, so a second click saves nothing.
  */
 export function keepSuggestion(data: HostData, kept: KeptSuggestion, now: Date): { data: HostData; record: PreferenceRecord; created: boolean } {
   // Kept once and still in use: saved once. Kept, then replaced or deleted: keeping it again is a new choice.
@@ -166,7 +182,7 @@ export function keepSuggestion(data: HostData, kept: KeptSuggestion, now: Date):
 
 /**
  * Fixes a preference's wording, or whether a project's own preference is a default or a decision (D23). Its scope and
- * project stay as they were: a project's own preference becomes personal only by being added again as one. Only a
+ * project stay as they were: personal wording needs a separate confirmation through promotion or a new entry. Only a
  * confirmed preference can be edited, and it stays confirmed, since the person wrote the change.
  */
 export function editPreference(data: HostData, id: string, change: PreferenceChange, now: Date): { data: HostData; record: PreferenceRecord } {

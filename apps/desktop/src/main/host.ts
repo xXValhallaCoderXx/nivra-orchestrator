@@ -183,6 +183,7 @@ import {
   keepSuggestion,
   parseImport,
   previewImport,
+  promotePreference,
   removeProjectPreferences,
   snapshotFor,
   supersedePreference,
@@ -312,6 +313,8 @@ export interface HostOptions {
   logsDir: string;
   client: { name: string; version: string };
   credentials: () => Promise<Partial<Record<SecretName, string>>>;
+  /** Strict saved-secret read for promotion; an unreadable key prevents confirming portable wording (NIV-10). */
+  preferenceSecrets?: () => Promise<KnownSecrets>;
   /** The host's own OS, which decides how a picked folder is read. */
   platform: NodeJS.Platform;
   /** The Linux app running inside a WSL distribution (WSLg), where `/mnt/<drive>` folders are slow. */
@@ -2631,6 +2634,30 @@ export class Host {
 
   deletePreference(id: string): void {
     this.#options.store.update((data) => deletePreference(data, id));
+  }
+
+  /** Independent personal wording, checked after the asynchronous secret read against the source revision reviewed. */
+  async promotePreference(sourceId: string, expectedRevision: number, statement: string): Promise<{ record: PreferenceView; created: boolean }> {
+    let known: KnownSecrets;
+    try {
+      known = await (this.#options.preferenceSecrets?.() ?? this.#knownSecrets());
+    } catch {
+      throw new Error("Nivra couldn't read your saved keys to check the personal default, so nothing was saved. Check your keys in Settings, then try again.");
+    }
+    refuseCredentials("The personal default", statement, known);
+    let saved: PreferenceRecord | undefined;
+    let created = false;
+    this.#options.store.update((data) => {
+      const source = data.preferences.find((record) => record.id === sourceId);
+      if (source?.projectId && this.#removing.has(source.projectId)) {
+        throw new Error("The source project is being removed, so nothing was saved. Choose another project preference and review it again.");
+      }
+      const result = promotePreference(data, sourceId, expectedRevision, statement, new Date());
+      saved = result.record;
+      created = result.created;
+      return result.data;
+    });
+    return { record: this.#preferenceView(saved!), created };
   }
 
   /**
