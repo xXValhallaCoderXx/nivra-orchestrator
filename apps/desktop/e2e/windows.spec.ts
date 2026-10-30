@@ -187,6 +187,30 @@ test("a run held on WSL keeps going on its own engine while a Windows folder sta
   expect(await helloContext()).toEqual(forWsl);
 });
 
+test("a reviewed Windows preference becomes an independent personal default on native and WSL engines (NIV-10)", async () => {
+  await choose("Windows · Local");
+  await goTo(page, "settings-preferences");
+  const source = (await page.evaluate(() => window.nivra.listPreferences())).records.find((r) => r.statement === "Windows checkouts keep CRLF line endings")!;
+  const row = page.locator(`[data-preference-id="${source.id}"]`);
+  await row.getByTestId("preference-promote").click();
+  await expect(page.getByTestId("preference-promotion-input")).toHaveValue("");
+  await page.getByTestId("preference-promotion-input").fill("Prefer consistent line endings in new projects ü 日本語");
+  await page.getByTestId("preference-promotion-confirm").click();
+  await expect(page.getByTestId("preference-promotion-note")).toContainText("Personal default confirmed");
+  const personal = (await page.evaluate(() => window.nivra.listPreferences())).records.find((r) => r.statement === "Prefer consistent line endings in new projects ü 日本語")!;
+  expect([personal.scope, personal.intent, personal.projectId, personal.evidence]).toEqual(["personal", "default", null, null]);
+  expect((await page.evaluate(() => window.nivra.listPreferences())).records.find((r) => r.id === source.id)).toEqual(source);
+  expect(await helloContext()).toEqual(await expectedFor("local"));
+  await choose(`${distro} · WSL`);
+  const expected = await expectedFor(`wsl:${distro}`);
+  expect([expected.ids.includes(personal.id), expected.ids.includes(source.id)]).toEqual([true, false]);
+  expect(await helloContext()).toEqual(expected);
+  await goTo(page, "settings-preferences");
+  await page.locator(`[data-preference-id="${personal.id}"]`).getByTestId("preference-delete").click();
+  await expect(page.locator(`[data-preference-id="${personal.id}"]`)).toHaveCount(0);
+  expect(await helloContext()).toEqual(await expectedFor(`wsl:${distro}`));
+});
+
 test("explaining on either engine asks for the project's consent, then fails before any request without a key", async () => {
   // A fresh profile holds no key, so neither engine can send anything; the run says so, and no model was chosen.
   expect((await page.evaluate(() => window.nivra.getSettings())).nebiusKey).toBe("none");

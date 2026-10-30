@@ -3799,3 +3799,42 @@ finished with zero failures or skips. The keyless real-engine RPC check passed a
 [The review-fix receipt](niv-70-verification.md#pr-52-review-fixes-and-current-main-integration--30-october-2026) records
 the frozen source manifest, failure/retry evidence, commands and limits. No paid calls or live visual probe ran; PR 52
 remains unmerged for re-review.
+
+## NIV-10: explicitly confirmed personal defaults (30 October 2026)
+
+Implemented on `feature/niv-10`, in a separate worktree created from main `f1eaf47`.
+D62 supersedes the promotion deferral in D23; the delivered management/export/import and coding-context work is
+reused. The original NIV-60 worktree is not changed by this implementation.
+
+| Behaviour | Evidence |
+| --- | --- |
+| A confirmed entered, imported or suggestion-derived project preference can supply a separately confirmed personal default; even a project decision becomes a default, with its original preserved | `preferences.test.ts` checks the complete original record and independent personal fields; the built and packaged UI reviews both entered and retained suggestion records |
+| The source must still be confirmed, at the reviewed revision, and belong to an available project | Pure tests cover stale, replaced, deleted, unconfirmed and personal sources. Host tests hold the secret read while an edit, replacement, deletion or project removal lands; every save is refused without a further store change |
+| Concurrent submissions and identical trimmed personal wording save once, including at capacity | Pure and host tests check the returned record, creation flag, count and preference revision. The UI reports an existing default without another revision |
+| Only independently confirmed personal wording reaches another project | Real-engine host checks cover both targets and restart/edit/delete freshness. Captured loopback model requests exclude the source's text, citation path, repository path, preference id, run id and HEAD. The Windows UI checks a native source and actual native/WSL engine receipts |
+| Review starts blank, shows historical evidence, and requires confirmation of the personal wording | Built and packaged UI tests inspect origin, project intent, evidence and the blank field. Cancel, Escape, leaving the mounted Settings section and reload discard the draft without saving |
+| Credentials and unreadable saved-key checks prevent saving | Host tests and both Linux UI builds check refusals, unchanged records and errors that never echo a key; the packaged UI exercises the strict secret-store read |
+
+Verification, using Node 24.21.0 and pnpm 10.4.1:
+
+- `pnpm verify`: **1,986 passed**, zero skipped (144 domain, 761 desktop, 1,081 engine); all typechecks passed.
+- `xvfb-run -a pnpm --filter @nivra/desktop test:e2e e2e/preferences.spec.ts e2e/app.spec.ts`: **19 passed**, zero skipped.
+- `pnpm stage:runtime all`: passed. Linux runtime `e8d44378d308555b` passed self-check and stdio initialise/shutdown;
+  Windows runtime `bb435c7b18f3f686` was cross-staged and then used by the Windows app checks.
+- `pnpm --filter @nivra/desktop package:dir`, followed by `xvfb-run -a pnpm --filter @nivra/desktop test:packaged`:
+  **91 passed, 72 skipped**. These are the existing harness skips for cases unavailable in a packaged app; all four
+  new promotion UI scenarios ran and passed.
+- `pnpm dev:win --no-launch --skip-stage` (using those freshly staged runtimes), followed by
+  `pnpm --filter @nivra/desktop test:windows`: **17 passed**, zero skipped. The release WSL home was unchanged and
+  the test's own engine home was removed.
+
+The first full verification attempt exceeded the existing five-second refusal deadline in two unchanged engine
+database-privacy tests (hard link and directory at `nivra.db-wal`) while other validation was running. Their separate
+file passed **47/47**, followed by the complete passing `pnpm verify` above, with no test or engine change. An initial
+UI attempt was stopped after a test setup failed to reselect its project after reload; the corrected setup and final
+UI runs are recorded above. No skips or relaxed assertions were added.
+
+Logs, a source manifest and the inspected dialog screenshot are kept locally under `.artifacts/niv10/`. Verification
+used no live provider calls. No persistence migration, engine protocol, target/supervisor/staging source, dependency,
+worker or budget policy changed. Personal wording is manually reviewed; these checks do not claim semantic removal
+of private details that a person independently chooses to type into that wording.

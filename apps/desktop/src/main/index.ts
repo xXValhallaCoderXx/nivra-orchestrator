@@ -57,6 +57,7 @@ function start(): void {
     logsDir: app.getPath("logs"),
     client: { name: "Nivra", version: app.getVersion() },
     credentials: () => secrets.all(),
+    preferenceSecrets: async () => (await secrets.draftCheckValues(["NEBIUS_API_KEY", "NEBIUS_PROJECT_ID", "TAVILY_API_KEY"])).map((value) => ["saved-key", value] as const),
     platform: process.platform,
     // The Linux app under WSLg, where a /mnt/<drive> folder is slow (as the engine's own insideWsl reads it).
     insideWsl: process.platform === "linux" && (Boolean(process.env["WSL_DISTRO_NAME"] || process.env["WSL_INTEROP"]) || /microsoft/i.test(release())),
@@ -162,6 +163,7 @@ function start(): void {
   handle(IPC.editPreference, z.tuple([z.uuid(), z.string().max(2_000), PreferenceIntent]), (_event, id, statement, intent) => host.editPreference(id, { statement, intent }));
   handle(IPC.deletePreference, z.tuple([z.uuid()]), (_event, id) => host.deletePreference(id));
   handle(IPC.supersedePreference, z.tuple([z.uuid(), z.string().max(2_000), PreferenceIntent]), (_event, id, statement, intent) => host.supersedePreference(id, { statement, intent }));
+  handle(IPC.promotePreference, z.tuple([z.uuid(), z.number().int().positive(), z.string().max(2_000)]), (_event, sourceId, expectedRevision, statement) => host.promotePreference(sourceId, expectedRevision, statement));
   handle(IPC.keepSuggestion, z.tuple([z.uuid(), RunId, z.number().int().nonnegative().max(100), z.string().max(2_000)]), (_event, projectId, runId, index, statement) =>
     host.keepSuggestion(projectId, runId, index, statement),
   );

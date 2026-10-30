@@ -88,6 +88,7 @@ export const IPC = {
   editPreference: "preferences:edit",
   deletePreference: "preferences:delete",
   supersedePreference: "preferences:supersede",
+  promotePreference: "preferences:promote",
   keepSuggestion: "preferences:keep",
   exportPreferences: "preferences:export",
   previewImport: "preferences:import-preview",
@@ -924,6 +925,8 @@ export interface NivraApi {
   deletePreference(id: string): Promise<void>;
   /** Replaces a preference with a new decision; the old one is kept as history, and no run gets it again (D23). */
   supersedePreference(id: string, statement: string, intent: PreferenceIntent): Promise<PreferenceView>;
+  /** Confirms independent personal wording from the reviewed revision of a project preference, preserving its original. */
+  promotePreference(sourceId: string, expectedRevision: number, statement: string): Promise<{ record: PreferenceView; created: boolean }>;
   /** Keeps a suggestion from one of the project's explanations this session as its own default, in the person's wording (D23). */
   keepSuggestion(projectId: string, runId: string, index: number, statement: string): Promise<PreferenceView>;
   /**

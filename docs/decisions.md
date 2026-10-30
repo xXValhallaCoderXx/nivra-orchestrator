@@ -4074,3 +4074,31 @@ binding. These are recovery and accepted-context transitions rather than new per
 database or background deletion worker is required. An optional attachment cleanup flag remains compatible with
 historical metadata. Protocol 23, database schema 15, dependency pins and model/budget policies are unchanged. Accepted
 Planning reference bytes remain frozen, while stale results require a new review before saving or reuse.
+
+## D62. Explicitly confirm portable wording from a project preference (NIV-10, 2026-10-30)
+
+**Decision.** Supersedes D23's promotion deferral. Use in every project opens a review of a confirmed project's own
+preference: its wording, intent, revision, origin and recorded evidence, labelled historical. The personal wording
+starts blank. The person's review and confirmation establish that the wording is their personal default; another
+repository's evidence and a model's generalisation are not required. Entered and imported project preferences can
+also be reviewed, including project decisions. A personal preference is always a default.
+
+- The host checks the source's id, revision, confirmed state and project after reading saved secrets and inside the
+  store update. A changed, replaced, deleted or removing source refuses the save and asks for a fresh review.
+- Confirmation creates an independent entered personal record with no project, evidence or supersession links.
+  The project original is preserved. Existing snapshots carry only the newly confirmed portable wording to other
+  projects; source paths, citations, run ids and HEAD are not copied. The person remains responsible for choosing
+  wording suitable beyond the source project: Nivra does not infer or semantically scrub a personal preference.
+- The existing 500-character and 50-record limits apply. Identical trimmed wording already confirmed as a personal
+  default returns the existing record without increasing the revision, including concurrent submissions and a full
+  store. This is exact matching, not semantic deduplication. A later explicit confirmation can recreate a deleted default.
+- The named, validated bridge call uses the existing credential refusal policy with a strict saved-secret read. An
+  unreadable check prevents saving. Review drafts stay in window memory and are discarded on Cancel, Escape, leaving
+  Preferences, a project switch or reload; Settings remaining mounted does not retain the promotion draft.
+
+**Why.** A repository observation establishes what that project does, not what its engineer prefers everywhere.
+Explicitly reviewing and independently writing the portable wording makes the scope change the person's decision.
+
+**Consequences.** No persistence migration, export-format change, engine protocol change, provider call, dependency,
+automatic learning or worker/budget change. Ordinary personal edit/delete and context freshness apply afterwards.
+Implementation and validation use a separate NIV-10 worktree branched from main; NIV-60's working copy is untouched.

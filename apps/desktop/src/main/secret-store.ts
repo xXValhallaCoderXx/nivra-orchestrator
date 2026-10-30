@@ -143,10 +143,10 @@ export class SecretStore {
   }
 
   /**
-   * The saved values of `names`, for the draft check only (NIV-56; Nate: an unreadable key or a failed check never
+   * The saved values of `names`, for draft and preference-promotion checks (NIV-56, NIV-10: an unreadable key or a failed check never
    * counts as safe). Unlike every other read here, it is strict: a missing file means no keys, but a file that can't be
    * read or isn't the store's JSON, or a key that can't be decrypted, throws. It reads the file once and decrypts each key
-   * once, and never re-encrypts or writes: it runs on every change to a draft. Its error is fixed words, never the file's
+   * once, and never re-encrypts or writes. Its error is fixed words, never the file's
    * text or a value.
    */
   async draftCheckValues(names: readonly SecretName[]): Promise<string[]> {
