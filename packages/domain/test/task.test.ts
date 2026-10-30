@@ -169,7 +169,10 @@ describe("what a task run gives back (NIV-7)", () => {
     assert.equal(TaskReport.safeParse({ ...report, stopped: { code: "something-else", step: null, message: "x" } }).success, false);
     assert.equal(TaskReport.safeParse({ ...report, checks: Array.from({ length: 5 }, () => report.checks[0]) }).success, false, "four cases and checks at most");
     assert.equal(TaskReport.safeParse({ ...report, checks: [{ ...report.checks[0], verdict: "skipped" }] }).success, false);
-    assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 10, true]);
+    for (const code of ["context-mismatch", "context-credentials"]) {
+      assert.equal(TaskReport.safeParse({ ...report, outcome: "refused", stopped: { code, step: "prepare", message: "x" }, worker: null, checks: [], verified: false, proposal: null, reportSha256: null }).success, true);
+    }
+    assert.deepEqual([TaskStopCode.options.length, SandboxStopCode.options.every((code) => TaskStopCode.options.includes(code))], [SandboxStopCode.options.length + 12, true]);
   });
 });
 
