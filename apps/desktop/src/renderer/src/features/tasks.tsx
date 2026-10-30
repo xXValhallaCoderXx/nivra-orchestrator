@@ -645,6 +645,7 @@ export function TaskDetail({
   renderStrip,
   onOpenEnvironment,
   onOpenPlanning,
+  runChoicesDraft, onRunPreferences, onClearRunChoices,
 }: {
   taskId: string;
   projects: ProjectView[];
@@ -658,6 +659,9 @@ export function TaskDetail({
   /** Opens the project's environment where readiness points to it; without it, readiness only says what it needs. */
   onOpenEnvironment?(projectId: string): void;
   onOpenPlanning?(planningId: string): void;
+  runChoicesDraft?: import("./task-run").RunChoicesDraft;
+  onRunPreferences?(draft: import("./task-run").RunChoicesDraft): void;
+  onClearRunChoices?(): void;
 }) {
   const [readCount, setReadCount] = useState(0);
   const task = usePoll<TaskView>(() => window.nivra.getTask(taskId), () => null, [taskId, readCount]);
@@ -907,6 +911,7 @@ export function TaskDetail({
           {!going && tab !== "coach" && (
             <RunLauncher
               view={view}
+              choicesDraft={runChoicesDraft} onPreferences={onRunPreferences} onClearChoicesDraft={onClearRunChoices}
               asked={previewAsked}
               primary={readiness.needed.every((row) => row.action === null)}
               onStarted={(attemptId) => {

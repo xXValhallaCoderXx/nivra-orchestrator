@@ -66,3 +66,16 @@ export async function preferencesDigest(records: readonly SnapshotPreference[]):
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(canonical)));
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
+
+/** Bounded temporary decisions shared by Explain and coding runs (D23). */
+export const MAX_CHOICES = 5;
+export const MAX_CHOICE_CHARS = 300;
+export const RunChoices = z.array(z.string().trim().min(1).max(MAX_CHOICE_CHARS)).max(MAX_CHOICES)
+  .refine((choices) => new Set(choices).size === choices.length, "Each choice appears once.");
+
+/** Order is meaningful; the digest contains no raw choice text. */
+export async function choicesDigest(choices: readonly string[]): Promise<string> {
+  const canonical = JSON.stringify(["nivra.run-choices.v1", RunChoices.parse(choices)]);
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}

@@ -192,6 +192,8 @@ export function taskBriefOf(content: BriefContent): { brief: TaskBrief } | { blo
  * target (NIV-55): the v3 form. A run with none keeps the v1 form exactly, and one from D41's the v2 form.
  */
 export function taskRunFingerprint(parts: {
+  preferencesDigest?: string;
+  choicesDigest?: string;
   taskId: string;
   briefId: string;
   briefVersion: number;
@@ -214,7 +216,8 @@ export function taskRunFingerprint(parts: {
   const approved = checks ? ["nivra.task-run-preview.v4", canonical, "required-checks-v1", checks,
     3 + TASK_RUN_BOUNDS.writes + TASK_RUN_BOUNDS.runs + checks.finalChecks + checks.baselineChecks + checks.comparisonChecks,
     TASK_RUN_BOUNDS] : canonical;
-  return createHash("sha256").update(JSON.stringify(approved)).digest("hex");
+  const context = parts.preferencesDigest && parts.choicesDigest ? ["nivra.task-run-preview.v5", approved, parts.preferencesDigest, parts.choicesDigest] : approved;
+  return createHash("sha256").update(JSON.stringify(context)).digest("hex");
 }
 
 /** What a run sends to each service, in plain words (D39). */
@@ -222,6 +225,7 @@ export const TASK_SENDS = {
   tokenFactory: [
     "The brief: its goal, acceptance criteria, scope, exclusions and context, with its acceptance cases and checks, and any baseline checks and frozen files.",
     "The names of the commit's files, the files the worker reads, the lines its searches find, and what the cases and checks it runs print.",
+    "The confirmed personal and project preferences shown for this run, and its temporary choices.",
     "Nivra's instructions to the worker, and the tools it may use.",
     `All of it to one model, ${TASK_MODEL}. If Token Factory doesn't offer your key that model, the run stops before any request to a model; no other model stands in.`,
   ],

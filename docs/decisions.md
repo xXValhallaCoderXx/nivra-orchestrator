@@ -3970,3 +3970,44 @@ real release/development homes to demonstrate repair. Regression fixtures exerci
 recovery, unsafe entries, concurrent ownership and startup cleanup. A driver update must re-establish creation-time
 sidecar privacy. Protocol 21, schemas, dependencies, execution boundaries and stored-content restrictions are unchanged;
 NIV-62 checkpoint features remain separate.
+
+## D59. Frozen confirmed preferences and temporary choices reach the coding worker (2026-10-30)
+
+**Decision.** NIV-71 extends D21/D23's existing canonical personal/project preferences to coding runs. The host selects
+confirmed personal records and the task's own project's confirmed records, excluding superseded records. The preview
+shows their scope and intent, plus up to five temporary choices of at most 300 characters each. Choices are trimmed,
+nonblank and unique. A renderer never supplies a preference snapshot or repository path.
+
+- Preview fingerprint v5 includes canonical preference and ordered-choice digests alongside the approved brief,
+  commit, environment, required checks and consents. Relevant changes require another preview. The global preference
+  revision alone is not identity, so another project's edit does not invalidate this project's preview.
+- After asynchronous start prerequisites, the host rechecks current task/brief/project identity, consent epochs and
+  the exact effective records before accepting the attempt. It passes that accepted copy unchanged to the engine;
+  the scheduler deep-copies/freezes its task context. Later preference changes affect future attempts only.
+- Every new task request requires both context digests and explicit preference/choice context, including empty
+  snapshots. The workflow verifies the digests before external work. Historical stored-input readers alone permit
+  their absence. Duplicate request IDs keep the original run/context; a changed identity is refused, never resent.
+- The actual worker receives the snapshot throughout its request loop and hand-in. Precedence remains choices,
+  explicit project overrides, evidenced repository conventions, project defaults, personal defaults. Scope alone
+  does not make an override. Material unresolved conflicts are reported rather than silently rewriting the brief.
+- Existing credential screening applies to preferences and choices in the host and before every worker model request, including hand-in: recognised
+  credentials and exact saved-key values are refused without echoing them. The new input text stays in memory and
+  never becomes workflow input, step output, requestContext, run events, traces or logs. Stored run input gains only
+  digests. D22's existing treatment of model-authored text remains; no exact-string/paraphrase guarantee is added.
+- Choices survive the Preferences detour in window memory, with task/brief/project identity checked on return and
+  a fresh preview. Leaving Preferences is not Cancel. Accepted Start, explicit preview cancellation or switching
+  tasks clears them; a refusal/failure before acceptance retains them. A brief revision invalidates the preview while
+  retaining choices; repository reassignment cannot inherit the former project’s choices. They never enter saved drafts
+  or the profile.
+- Task acceptance, required checks, consent, allowed writes, execution boundaries and spending/request limits remain
+  authoritative. A preference grants none of them and cannot waive a failed final check.
+
+**Why.** The store and Explain precedence existed, but coding previews were not bound to them and the actual worker
+received neither preferences nor temporary choices. A visible preview alone could not establish that coding followed
+its accepted context, or prevent an edited profile from replacing an active run's instructions.
+
+**Consequences.** Protocol 22 is the next version after refreshed main `f0de67b` (protocol 21). TaskContext gains the
+snapshot and choices; new TaskInput requires both digests, while historical stored input remains readable. The
+existing scheduler owns context lifetime and restart still interrupts without replay. No database migration,
+dependency, model, memory store, automatic learning, continuation, preference promotion or new budget authority is
+introduced. NIV-46's database-permission work remains separate.

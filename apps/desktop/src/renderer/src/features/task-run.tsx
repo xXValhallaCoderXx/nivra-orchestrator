@@ -343,11 +343,14 @@ function checkFilesText(check: TaskCheck): string {
  * in visible words; the preview of what a run would send and where, from the repository's own engine; and the start
  * bound to it. A consent the run needs is asked for in the preview, and its answer stays there as it was given.
  */
+export interface RunChoicesDraft { revision: number; briefVersion: number; projectId: string | null; choices: string[] }
+
 export function RunLauncher({
   view,
   primary,
   asked = 0,
   onStarted,
+  choicesDraft, onPreferences, onClearChoicesDraft,
 }: {
   view: TaskView;
   /** Whether it is the page's next useful step, and so its one primary. */
@@ -355,8 +358,15 @@ export function RunLauncher({
   /** Raised when the page asks for the preview from elsewhere, such as a run's next step. */
   asked?: number;
   onStarted(attemptId: string): void;
+  choicesDraft?: RunChoicesDraft;
+  onPreferences?(draft: RunChoicesDraft): void;
+  onClearChoicesDraft?(): void;
 }) {
   const taskId = view.summary.id;
+  const matches = !choicesDraft || (choicesDraft.revision === view.revision && choicesDraft.briefVersion === view.brief.version && choicesDraft.projectId === view.summary.projectId);
+  const [choices, setChoices] = useState<string[]>(matches ? choicesDraft?.choices ?? [] : []);
+  const [changed, setChanged] = useState(false);
+  const request = useRef(0);
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<TaskRunPreview | null>(null);
   const [allowed, setAllowed] = useState<{ sharing: boolean; uploads: boolean }>({ sharing: false, uploads: false });
@@ -379,45 +389,64 @@ export function RunLauncher({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asked]);
 
+  useEffect(() => {
+    // StrictMode cleans up and restarts this effect: each setup must replace the invalidated request.
+    if (choicesDraft && matches) void previewIt();
+    else if (choicesDraft) { setError("The task, brief or repository changed while Preferences was open. Preview it again with new choices."); onClearChoicesDraft?.(); }
+  }, []);
+  useEffect(() => () => { request.current++; }, []);
+  const identity = `${taskId}:${view.revision}:${view.brief.version}:${view.summary.projectId}`;
+  const previousIdentity = useRef(identity);
+  const previousProject = useRef(projectId);
+  useEffect(() => {
+    if (previousIdentity.current === identity) return;
+    previousIdentity.current = identity;
+    // A changed brief invalidates its preview, but does not discard this task's temporary choices.
+    // A reassigned repository is a different context and cannot inherit the former project's choices.
+    if (previousProject.current !== projectId) { setChoices([]); previousProject.current = projectId; }
+    request.current++; setChanged(true); setPreview(null); setPreviewing(false); onClearChoicesDraft?.();
+  }, [identity]);
+
+  async function refresh() {
+    const current = ++request.current;
+    setBusy(true); setError(null);
+    try {
+      const next = await window.nivra.previewTaskRun(taskId, choices);
+      if (current === request.current) { setPreview(next); setChanged(false); }
+    } catch (reason) { if (current === request.current) setError(errorMessage(reason)); }
+    finally { if (current === request.current) setBusy(false); }
+  }
   async function previewIt() {
     if (blocked !== null) return;
-    setPreviewing(true);
-    setPreview(null);
-    setError(null);
-    setAllowed({ sharing: false, uploads: false });
-    try {
-      setPreview(await window.nivra.previewTaskRun(taskId));
-    } catch (reason) {
-      setError(errorMessage(reason));
-      setPreviewing(false);
-    }
+    setPreviewing(true); setPreview(null); setAllowed({ sharing: false, uploads: false });
+    await refresh();
   }
-
-  /** A consent the run needs, given for the project as Explain and the sandbox check ask for it; then the preview again. */
+  function cancel() {
+    request.current++; setBusy(false); setPreviewing(false); setChoices([]); setChanged(false); onClearChoicesDraft?.();
+  }
+  function changeChoices(next: string[]) {
+    request.current++; setChoices(next); setChanged(true); setError(null);
+  }
   async function allow(kind: "sharing" | "uploads") {
     if (!projectId) return;
-    setBusy(true);
-    setError(null);
+    setBusy(true); setError(null);
     try {
       if (kind === "sharing") await window.nivra.setSharing(projectId, true);
       else await window.nivra.setCloudExecution(projectId, true);
       setAllowed((was) => ({ ...was, [kind]: true }));
-      setPreview(await window.nivra.previewTaskRun(taskId));
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setBusy(false);
-    }
+      await refresh();
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
   }
 
   async function start() {
-    if (!preview || preview.blocked || !preview.snapshotFingerprint || starting.current) return;
+    if (!preview || preview.blocked || !preview.snapshotFingerprint || changed || starting.current) return;
     starting.current = true;
     setBusy(true);
     setError(null);
     try {
-      const attempt = await window.nivra.startTaskRun(taskId, preview.expected, preview.snapshotFingerprint);
-      setPreviewing(false);
+      const attempt = await window.nivra.startTaskRun(taskId, preview.expected, preview.snapshotFingerprint, choices);
+      setPreviewing(false); setChoices([]); setChanged(false); onClearChoicesDraft?.();
       onStarted(attempt.id);
     } catch (reason) {
       setError(errorMessage(reason));
@@ -447,7 +476,7 @@ export function RunLauncher({
       )}
       <Modal
         opened={previewing}
-        onClose={() => setPreviewing(false)}
+        onClose={cancel}
         title="Preview the run"
         size={narrow ? "100%" : "min(1080px, 94vw)"}
         fullScreen={narrow}
@@ -455,15 +484,28 @@ export function RunLauncher({
         data-testid="task-run-preview"
       >
         {preview ? (
-          <RunPreview preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={() => setPreviewing(false)} />
+          <RunPreview choices={choices} changed={changed} onChoices={changeChoices} onRefresh={() => void refresh()} onPreferences={onPreferences ? () => { request.current++; onPreferences({ revision: view.revision, briefVersion: view.brief.version, projectId, choices: [...choices] }); } : undefined} preview={preview} allowed={allowed} busy={busy} error={error} onAllow={(kind) => void allow(kind)} onStart={() => void start()} onCancel={cancel} />
         ) : (
-          <Text size="sm" c="var(--nivra-text-3)" p="md">
-            Working out what a run would send, on the repository's own engine. Nothing is sent.
-          </Text>
+          <Stack p="md" data-testid="task-run-preview-draft" style={{ overflowY: "auto" }}>
+            {error ? <Alert color="red" data-testid="task-run-preview-error">{error}</Alert> : <Text size="sm" c="var(--nivra-text-3)">{busy ? "Working out what a run would send, on the repository’s own engine. Nothing is sent." : "Refresh the preview to review these choices and what the run would send. Nothing is sent."}</Text>}
+            <RunChoicesEditor choices={choices} changed={changed} busy={busy} onChoices={changeChoices} onRefresh={() => void refresh()} />
+            <Group justify="flex-end"><Button variant="default" onClick={cancel}>Cancel</Button></Group>
+          </Stack>
         )}
       </Modal>
     </Stack>
   );
+}
+
+function RunChoicesEditor({ choices, changed, busy, onChoices, onRefresh }: {
+  choices: string[]; changed: boolean; busy: boolean; onChoices(choices: string[]): void; onRefresh(): void;
+}) {
+  return <Stack gap="xs">
+    <Text fw={600} size="sm">Choices for this run</Text>
+    {choices.map((choice, index) => <Group key={index} align="flex-start"><Textarea style={{ flex: 1 }} label={`Run choice ${index + 1}`} value={choice} maxLength={300} disabled={busy} onChange={(event) => onChoices(choices.map((current, at) => at === index ? event.currentTarget.value : current))} /><Button size="xs" variant="subtle" disabled={busy} onClick={() => onChoices(choices.filter((_, at) => at !== index))}>Remove choice {index + 1}</Button></Group>)}
+    <Group><Button size="xs" variant="default" disabled={busy || choices.length >= 5} onClick={() => onChoices([...choices, ""])}>Add run choice</Button><Button size="xs" variant="default" disabled={busy} onClick={onRefresh}>Refresh preview</Button></Group>
+    {changed && <Text size="sm" c="var(--nivra-warning)">Choices changed. Refresh the preview before starting.</Text>}
+  </Stack>;
 }
 
 /**
@@ -471,6 +513,7 @@ export function RunLauncher({
  * consent the run needs and the project hasn't given is asked for here, in the words its own dialog uses.
  */
 function RunPreview({
+  choices, changed, onChoices, onRefresh, onPreferences,
   preview,
   allowed,
   busy,
@@ -479,6 +522,7 @@ function RunPreview({
   onStart,
   onCancel,
 }: {
+  choices: string[]; changed: boolean; onChoices(choices: string[]): void; onRefresh(): void; onPreferences: (() => void) | undefined;
   preview: TaskRunPreview;
   allowed: { sharing: boolean; uploads: boolean };
   busy: boolean;
@@ -490,7 +534,7 @@ function RunPreview({
   const { snapshot, limits } = preview;
   const leftOut = snapshot ? Object.values(snapshot.leftOut).reduce((sum, counted) => sum + counted.count, 0) : 0;
   const asking = snapshot !== null && (!preview.consents.modelContext || !preview.consents.cloudExecution);
-  const startable = preview.blocked === null && preview.snapshotFingerprint !== null;
+  const startable = !changed && preview.blocked === null && preview.snapshotFingerprint !== null;
   return (
     <Stack gap={0} style={{ flex: 1, minHeight: 0 }} data-testid="task-run-preview-body" data-expected={preview.expected} data-snapshot={preview.snapshotFingerprint ?? ""}>
     <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--mantine-spacing-md)" }}>
@@ -500,6 +544,13 @@ function RunPreview({
         {preview.project.targetLabel ? ` · ${preview.project.targetLabel}` : ""}. A worker changes a copy of the commit in a Nebius sandbox, with networking off. It can read and
         write files there and run the cases and checks below, and nothing else. Nothing comes back to your checkout unless you approve the change afterwards.
       </Text>
+      <Paper withBorder p="sm" data-testid="task-run-preferences"><Stack gap="xs">
+        <Group justify="space-between"><Text fw={600}>Preferences for this run</Text><Button variant="subtle" size="xs" disabled={busy || !onPreferences} onClick={onPreferences}>Edit preferences</Button></Group>
+        {preview.preferences.records.length === 0 && <Text size="sm">No confirmed preferences apply to this run.</Text>}
+        {preview.preferences.records.map((record) => <Group key={record.id} gap="xs"><Badge>{record.scope === "personal" ? "Personal default" : record.intent === "override" ? "Explicit project decision" : "Project default"}</Badge><Text size="sm">{record.statement}</Text></Group>)}
+        <Text size="xs">Run choices take precedence, then explicit project decisions, evidenced repository conventions, project defaults and personal defaults. None changes the brief, required checks, consent or execution limits.</Text>
+        <RunChoicesEditor choices={choices} changed={changed} busy={busy} onChoices={onChoices} onRefresh={onRefresh} />
+      </Stack></Paper>
       {preview.blocked && !asking && (
         <Alert color="yellow" variant="light" data-testid="task-run-preview-blocked">
           <Text size="sm">{preview.blocked}</Text>

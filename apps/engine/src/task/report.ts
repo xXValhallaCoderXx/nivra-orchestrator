@@ -50,6 +50,8 @@ export const TASK_STOP_MESSAGES: Readonly<Record<TaskStopCode, string>> = {
   consent: "This project doesn't allow uploading its commit to Nebius Sandboxes, so nothing was sent. Allow uploads for it, then run the task again.",
   credentials: "A task run needs your Nebius key and project id, and they aren't both set, so nothing was sent. Add them in Settings, then run the task again.",
   preview: "What would be sent changed since you previewed the run, so nothing was sent. Preview it again.",
+  "context-mismatch": "The run's preferences or choices do not match its approved context, so nothing was sent. Preview it again, then start a new run.",
+  "context-credentials": "A preference or choice holds a credential, so nothing was sent. Remove it, preview the run again, then start.",
   toolchain:
     "The sandbox image doesn't have a program the brief's cases or checks need, so the run stopped before the worker started: your commit was uploaded to Nebius, and nothing from your repository went to Token Factory. Nothing was installed, and nothing ran on your computer. The checks below say which program is missing.",
   time: "The run's time ran out before a sandbox could be opened, so nothing was sent. Run the task again.",
